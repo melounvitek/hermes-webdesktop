@@ -62,31 +62,32 @@ def _is_dict(value: Any) -> bool:
     return isinstance(value, dict)
 
 
+def _dm_behavior_choice(value: Any, default: str = "pair") -> str:
+    return _normalize_choice(value, {"pair", "ignore"}, default)
+
+
+def _presence(*keys: str) -> tuple:
+    return tuple((k, k, "presence", None, None) for k in keys)
+
+
 # (yaml key, gw_data key, mode, accept(value) -> bool, transform(value))
 _TOPLEVEL_BRIDGE: tuple = (
     ("session_reset", "default_reset_policy", "presence", lambda v: bool(v) and isinstance(v, dict), None),
     ("quick_commands", "quick_commands", "none", _quick_commands_ok, None),
     ("stt", "stt", "presence", _is_dict, None),
-    ("stt_echo_transcripts", "stt_echo_transcripts", "presence", None, None),
-    ("group_sessions_per_user", "group_sessions_per_user", "presence", None, None),
-    ("thread_sessions_per_user", "thread_sessions_per_user", "presence", None, None),
+    *_presence("stt_echo_transcripts", "group_sessions_per_user", "thread_sessions_per_user"),
     ("multiplex_profiles", "multiplex_profiles", "gwdata", None, None),
-    ("multiplex_profile_allowlist", "multiplex_profile_allowlist", "presence", None, None),
-    ("room_link_url", "room_link_url", "presence", None, None),
+    *_presence("multiplex_profile_allowlist", "room_link_url"),
     ("profile_routes", "profile_routes", "none", lambda v: isinstance(v, list), None),
-    ("max_concurrent_sessions", "max_concurrent_sessions", "presence", None, None),
+    *_presence("max_concurrent_sessions"),
     ("systemd_watchdog_seconds", "systemd_watchdog_seconds", "nested", None, None),
     ("streaming", "streaming", "dict", None, None),
-    ("reset_triggers", "reset_triggers", "presence", None, None),
-    ("always_log_local", "always_log_local", "presence", None, None),
-    ("write_sessions_json", "write_sessions_json", "presence", None, None),
-    ("loop_watchdog", "loop_watchdog", "presence", None, None),
-    ("loop_watchdog_probe_interval_s", "loop_watchdog_probe_interval_s", "presence", None, None),
-    ("loop_watchdog_probe_timeout_s", "loop_watchdog_probe_timeout_s", "presence", None, None),
-    ("loop_watchdog_max_strikes", "loop_watchdog_max_strikes", "presence", None, None),
-    ("filter_silence_narration", "filter_silence_narration", "presence", None, None),
-    ("unauthorized_dm_behavior", "unauthorized_dm_behavior", "presence", None,
-     lambda v: _normalize_choice(v, {"pair", "ignore"}, "pair")),
+    *_presence(
+        "reset_triggers", "always_log_local", "write_sessions_json", "loop_watchdog",
+        "loop_watchdog_probe_interval_s", "loop_watchdog_probe_timeout_s", "loop_watchdog_max_strikes",
+        "filter_silence_narration",
+    ),
+    ("unauthorized_dm_behavior", "unauthorized_dm_behavior", "presence", None, _dm_behavior_choice),
 )
 
 
@@ -153,21 +154,10 @@ def merge_platform_sections(yaml_cfg: dict, gateway_cfg: Any, gw_data: dict) -> 
                 merged["extra"] = merged_extra
             platforms_data[plat_name] = merged
 
-    gateway_platforms = gateway_cfg.get("platforms") if isinstance(gateway_cfg, dict) else None
-    merge(gateway_platforms)
+    nested_gateway = gateway_cfg if isinstance(gateway_cfg, dict) else {}
+    merge(nested_gateway.get("platforms"))
     merge(yaml_cfg.get("platforms"))
-    if isinstance(gateway_cfg, dict):
-        nested: dict = {}
-        for key, value in gateway_cfg.items():
-            if key == "platforms":
-                continue
-            try:
-                Platform(key)
-            except (ValueError, AttributeError):
-                continue
-            if isinstance(value, dict):
-                nested[key] = value
-        merge(nested)
+    merge({k: v for k, v in nested_gateway.items() if k != "platforms" and isinstance(v, dict) and _is_platform_name(k)})
 
     api_plat = platforms_data.get("api_server")
     if isinstance(api_plat, dict):
@@ -176,6 +166,14 @@ def merge_platform_sections(yaml_cfg: dict, gateway_cfg: Any, gw_data: dict) -> 
             if key in api_plat and key not in api_extra:
                 api_extra[key] = api_plat.pop(key)
     return platforms_data
+
+
+def _is_platform_name(key: Any) -> bool:
+    try:
+        Platform(key)
+    except (ValueError, AttributeError):
+        return False
+    return True
 
 
 def platform_section(yaml_cfg: dict, name: str, gateway_platforms: Any) -> tuple:
@@ -199,43 +197,32 @@ def _str_keyed(value: Any) -> Any:
     return {str(k): v for k, v in value.items()} if isinstance(value, dict) else value
 
 
-def _dm_behavior(gw_data: dict):
-    return lambda v: _normalize_choice(v, {"pair", "ignore"}, gw_data.get("unauthorized_dm_behavior", "pair"))
-
-
 _TELEGRAM = frozenset({Platform.TELEGRAM})
 _DISCORD_SLACK = frozenset({Platform.DISCORD, Platform.SLACK})
 
-# Keys copied from a platform's YAML section into ``extra`` (``None`` = every platform);
-# third element transforms the value.
+def _plain(*keys: str) -> tuple:
+    """Keys copied verbatim into ``extra`` for every platform."""
+    return tuple((k, None, None) for k in keys)
+
+
+# (key, platforms-or-None, transform-or-None), in ``extra`` insertion order.
+# ``"dm"`` defers to the global unauthorized_dm_behavior.
 _SHARED_KEYS: tuple = (
     ("unauthorized_dm_behavior", None, "dm"),
     ("notice_delivery", None, lambda v: _normalize_choice(v, {"public", "private"}, "public")),
-    ("reply_prefix", None, None),
-    ("reply_in_thread", None, None),
-    ("cron_continuable_surface", None, None),
-    ("require_mention", None, None),
-    ("send_read_receipts", None, None),
+    *_plain("reply_prefix", "reply_in_thread", "cron_continuable_surface", "require_mention", "send_read_receipts"),
     ("allowed_chats", _TELEGRAM, None),
     ("group_allowed_chats", _TELEGRAM, None),
     ("allowed_topics", _TELEGRAM, None),
-    ("free_response_channels", None, None),
-    ("mention_patterns", None, None),
-    ("exclusive_bot_mentions", None, None),
+    *_plain("free_response_channels", "mention_patterns", "exclusive_bot_mentions"),
     ("observe_unmentioned_group_messages", _TELEGRAM, None),
-    ("dm_policy", None, None),
-    ("allow_from", None, None),
-    ("allow_admin_from", None, None),
-    ("user_allowed_commands", None, None),
-    ("group_policy", None, None),
-    ("group_allow_from", None, None),
-    ("group_allow_admin_from", None, None),
-    ("group_user_allowed_commands", None, None),
+    *_plain(
+        "dm_policy", "allow_from", "allow_admin_from", "user_allowed_commands",
+        "group_policy", "group_allow_from", "group_allow_admin_from", "group_user_allowed_commands",
+    ),
     ("channel_skill_bindings", _DISCORD_SLACK, None),
     ("channel_prompts", None, _str_keyed),
-    ("gateway_restart_notification", None, None),
-    ("typing_indicator", None, None),
-    ("typing_status_text", None, None),
+    *_plain("gateway_restart_notification", "typing_indicator", "typing_status_text"),
 )
 
 # Top-level port/host/secret bridged into ``extra`` for adapters that read them from config.extra.
@@ -254,8 +241,9 @@ def _bridged_keys(plat: Platform, platform_cfg: dict, gw_data: dict) -> dict:
         if key not in platform_cfg or (only is not None and plat not in only):
             continue
         if transform == "dm":
-            transform = _dm_behavior(gw_data)
-        bridged[key] = transform(platform_cfg[key]) if transform else platform_cfg[key]
+            bridged[key] = _dm_behavior_choice(platform_cfg[key], gw_data.get("unauthorized_dm_behavior", "pair"))
+        else:
+            bridged[key] = transform(platform_cfg[key]) if transform else platform_cfg[key]
     for key in _PORT_BRIDGE_KEYS.get(plat, ()):
         if key in platform_cfg and key not in platform_cfg.get("extra", {}):
             bridged[key] = platform_cfg[key]
@@ -285,7 +273,7 @@ def bridge_platform_shared_keys(
     ``merge_platform_sections`` already merged it with the correct precedence, and re-applying it here
     would overwrite that. An explicit top-level enable/disable sets ``_enabled_explicit`` so the env
     pass honors ``enabled: false`` for migrated plugin platforms instead of re-enabling them on
-    token/SDK presence (#41112).
+    token/SDK presence.
     """
     for plat in targets:
         if plat == Platform.LOCAL:
@@ -315,7 +303,7 @@ def bridge_platform_shared_keys(
 
 
 def apply_plugin_yaml_hooks(yaml_cfg: dict, gateway_platforms: Any, platforms_data: dict, registry) -> None:
-    """Plugin-owned YAML→env config bridges (``PlatformEntry.apply_yaml_config_fn``, #24836).
+    """Plugin-owned YAML→env config bridges (``PlatformEntry.apply_yaml_config_fn``).
 
     Order: shared-key loop → this dispatch → core-only bridges (require_mention/signal) →
     ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
@@ -333,20 +321,16 @@ def apply_plugin_yaml_hooks(yaml_cfg: dict, gateway_platforms: Any, platforms_da
         except Exception as e:
             logger.debug("apply_yaml_config_fn for %s raised: %s", entry.name, e)
             continue
-        if not isinstance(seeded, dict) or not seeded:
-            continue
-        _dict_slot(_dict_slot(platforms_data, entry.name), "extra").update(seeded)
+        if isinstance(seeded, dict) and seeded:
+            _dict_slot(_dict_slot(platforms_data, entry.name), "extra").update(seeded)
 
 
 def bridge_core_env_settings(yaml_cfg: dict, platforms_data: dict) -> None:
-    """The two YAML→env bridges that stay in core.
-
-    Slack/Telegram/WhatsApp/DingTalk/Mattermost/Matrix/Feishu settings→env bridges migrated to
-    each plugin's ``apply_yaml_config_fn`` hook (#41112 / #3823 / #25443).
+    """The two YAML→env bridges that stay in core (the per-platform ones live in plugin hooks).
 
     Top-level ``require_mention`` → Telegram when the ``telegram:`` section has none: users write it
-    alongside ``group_sessions_per_user`` expecting it to work (#3979). It keys off the TOP-LEVEL key,
-    so the telegram plugin's hook (which only runs when a telegram block exists) can't cover it.
+    alongside ``group_sessions_per_user`` expecting it to work. It keys off the TOP-LEVEL key, so
+    the telegram plugin's hook (which only runs when a telegram block exists) can't cover it.
     Signal ``require_mention`` → ``SIGNAL_REQUIRE_MENTION`` (env wins when already set).
     """
     tl_require_mention = yaml_cfg.get("require_mention")

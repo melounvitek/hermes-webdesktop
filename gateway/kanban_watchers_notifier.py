@@ -21,34 +21,21 @@ from gateway.kanban_watchers_common import _list_boards, _to_thread_process_serv
 TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = (
-    "completed", "gave_up", "crashed", "timed_out",
-    "blocked", "review_requested", "changes_requested",
-    "block_loop_detected",
-)
-# Consecutive send failures (adapter raised OR reported
-# SendResult(success=False)) before a sub is dropped as a dead chat.
-# 12 ≈ 60s at the 5s cadence: a transient API outage must not
-# permanently unsubscribe a live review-gate channel.
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+# Consecutive send failures (adapter raised OR reported SendResult(success=False))
+# before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
+# API outage must not permanently unsubscribe a live review-gate channel.
 MAX_SEND_FAILURES = 12
 
-_LOCAL_PATH_RE = re.compile(
-    r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|"
-    r"[A-Za-z]:\\[^\s,;]+)"
-)
+_LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
 
 def _safe_review_reason(value: Any, limit: int = 160) -> str:
     """Return a mobile-friendly review reason safe for external delivery."""
     from agent.redact import redact_sensitive_text
 
-    reason = redact_sensitive_text(
-        "" if value is None else str(value),
-        force=True,
-        redact_url_credentials=True,
-    )
-    reason = _LOCAL_PATH_RE.sub("[local path]", reason)
-    reason = " ".join(reason.split())
+    reason = redact_sensitive_text("" if value is None else str(value), force=True, redact_url_credentials=True)
+    reason = " ".join(_LOCAL_PATH_RE.sub("[local path]", reason).split())
     if len(reason) > limit:
         reason = reason[: limit - 1].rstrip() + "…"
     return reason
@@ -70,21 +57,15 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
             if value:
                 return str(value)
     resolver = getattr(adapter, "scope_id_for_chat", None)
-    if callable(resolver):
-        try:
-            resolved = resolver(str(sub.get("chat_id") or ""))
-        except Exception as exc:
-            # An adapter-side lookup failure yields no scope, never an error.
-            logger.debug(
-                "kanban notifier: scope lookup failed for chat %s: %s",
-                sub.get("chat_id"),
-                exc,
-                exc_info=True,
-            )
-            return None
-        if resolved:
-            return str(resolved)
-    return None
+    if not callable(resolver):
+        return None
+    try:
+        resolved = resolver(str(sub.get("chat_id") or ""))
+    except Exception as exc:
+        # An adapter-side lookup failure yields no scope, never an error.
+        logger.debug("kanban notifier: scope lookup failed for chat %s: %s", sub.get("chat_id"), exc, exc_info=True)
+        return None
+    return str(resolved) if resolved else None
 
 
 def _platform_names(mapping: Any) -> set[str]:
@@ -92,196 +73,160 @@ def _platform_names(mapping: Any) -> set[str]:
     return {getattr(platform, "value", str(platform)).lower() for platform in mapping}
 
 
-# ---------------------------------------------------------------------------
-# Collection (runs in a worker thread)
-# ---------------------------------------------------------------------------
+# --- Collection (runs in a worker thread) ---
 
 
-def _notifier_collect(
-    runner: Any,
-    kb: Any,
-    *,
-    notifier_profile: Optional[str],
-    gc_due: bool,
-    gc_retention_days: int,
-) -> list[dict]:
+class _Collector:
+    """One tick's claim state: which profiles/platforms this gateway serves and the GC gate."""
+
+    def __init__(self, runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool, gc_retention_days: int) -> None:
+        self.kb = kb
+        self.notifier_profile = notifier_profile
+        self.gc_due = gc_due
+        self.gc_retention_days = gc_retention_days
+        self.deliveries: list[dict] = []
+        self.include_unowned = runner._owns_kanban_dispatcher_lock()
+        self.profile_adapters = getattr(runner, "_profile_adapters", {})
+        self.notifier_profiles = {notifier_profile}
+        self.notifier_profiles.update(str(p).strip() for p in self.profile_adapters if str(p).strip())
+        # Include every platform any secondary profile has live. This is only a
+        # coarse pre-filter; the precise per-profile check (_authorization_adapter,
+        # no default fallback) runs at delivery and rewinds the claim if it
+        # resolves to None. An unclaimed event never retries, so dropping a
+        # secondary-profile sub here would lose it.
+        self.active_platforms = _platform_names(runner.adapters).union(
+            *(_platform_names(m) for m in self.profile_adapters.values()))
+
+    def collect(self) -> list[dict]:
+        if not self.active_platforms:
+            logger.debug("kanban notifier: no connected adapters; skipping tick")
+            return self.deliveries
+        # Poll each resolved DB path once: several slugs can map to one DB when
+        # HERMES_KANBAN_DB pins the board path.
+        kb = self.kb
+        seen_db_paths: set[str] = set()
+        for board_meta in _list_boards(kb):
+            slug = board_meta.get("slug") or kb.DEFAULT_BOARD
+            db_path = board_meta.get("db_path")
+            try:
+                resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(kb.kanban_db_path(slug).resolve())
+            except Exception:
+                resolved_db_path = f"slug:{slug}"
+            if resolved_db_path in seen_db_paths:
+                logger.debug("kanban notifier: skipping duplicate board slug %s for DB %s", slug, resolved_db_path)
+                continue
+            seen_db_paths.add(resolved_db_path)
+            self.collect_board(slug)
+        return self.deliveries
+
+    def _board_has_subs(self, slug: str) -> bool:
+        """Cheap read-only probe before the writable connect() (schema init, WAL
+        sidecars, checkpoints); a probe failure falls back to the writable open."""
+        try:
+            count = self.kb.count_notify_subs(
+                board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
+        except Exception as exc:
+            logger.debug("kanban notifier: read-only subscription probe failed "
+                         "for board %s (%s); falling back to writable open", slug, exc)
+            return True
+        if count == 0:
+            logger.debug("kanban notifier: board %s has no subscriptions owned by %s; skipping open",
+                         slug, sorted(self.notifier_profiles))
+        return count != 0
+
+    def _gc_stale_subs(self, conn: Any, slug: str) -> None:
+        """Best-effort stale-sub sweep: a failed sweep never blocks delivery; the next hourly gate retries."""
+        try:
+            _purged = self.kb.purge_stale_done_notify_subs(conn, max_age_days=self.gc_retention_days)
+            if _purged:
+                logger.info("kanban notifier: purged %d stale done/blocked-task subscription(s) on board %s (retention %dd)",
+                            _purged, slug, self.gc_retention_days)
+        except Exception as _gc_exc:
+            logger.debug("kanban notifier: stale-sub GC failed for board %s: %s", slug, _gc_exc)
+
+    def _claim_for_sub(self, conn: Any, slug: str, sub: dict) -> Optional[dict]:
+        """Claim one subscription's unseen events; None when skipped or nothing new."""
+        owner_profile = sub.get("notifier_profile") or None
+        if owner_profile and owner_profile != self.notifier_profile and not self.profile_adapters.get(owner_profile):
+            logger.debug("kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
+                         sub.get("task_id"), owner_profile, self.notifier_profile)
+            return None
+        platform = (sub.get("platform") or "").lower()
+        if platform not in self.active_platforms:
+            logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
+                         sub.get("task_id"), platform or "<missing>")
+            return None
+        old_cursor, cursor, events = self.kb.claim_unseen_events_for_sub(
+            conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+        )
+        if not events:
+            return None
+        task = self.kb.get_task(conn, sub["task_id"])
+        logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
+                     len(events), sub["task_id"], slug, old_cursor, cursor)
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+
+    def collect_board(self, slug: str) -> None:
+        """Claim events on one board, appending delivery dicts to ``deliveries``."""
+        if not self._board_has_subs(slug):
+            return
+        kb = self.kb
+        try:
+            conn = kb.connect(board=slug)
+        except Exception as exc:
+            logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
+            return
+        try:
+            if self.gc_due:
+                self._gc_stale_subs(conn, slug)
+            # No explicit init_db(): connect() already runs the migration once per
+            # process, and init_db() would re-run it on a second connection racing
+            # the first.
+            subs = kb.list_notify_subs(conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
+            if not subs:
+                logger.debug("kanban notifier: board %s has no subscriptions", slug)
+            for sub in subs:
+                try:
+                    claimed = self._claim_for_sub(conn, slug, sub)
+                    if claimed is not None:
+                        self.deliveries.append(claimed)
+                except Exception as sub_exc:
+                    # One bad subscription must not block the rest of the tick.
+                    logger.warning("kanban notifier: subscription for %s on board %s failed: %s",
+                                   sub.get("task_id"), slug, sub_exc)
+        finally:
+            conn.close()
+
+
+def _notifier_collect(runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool, gc_retention_days: int) -> list[dict]:
     """Claim unseen terminal events for every owned subscription on every board.
 
     Each gateway polls only subscriptions owned by profiles whose adapters it
     hosts; legacy rows without a profile stamp are visible only to the process
     holding the singleton dispatcher lock.
     """
-    deliveries: list[dict] = []
-    include_unowned = runner._owns_kanban_dispatcher_lock()
-    profile_adapters = getattr(runner, "_profile_adapters", {})
-    notifier_profiles = {notifier_profile}
-    notifier_profiles.update(
-        str(profile).strip() for profile in profile_adapters if str(profile).strip()
-    )
-    active_platforms = _platform_names(runner.adapters)
-    # Include every platform any secondary profile has live. This is only a
-    # coarse pre-filter; the precise per-profile check (_authorization_adapter,
-    # no default fallback) runs at delivery and rewinds the claim if it
-    # resolves to None. An unclaimed event never retries, so dropping a
-    # secondary-profile sub here would lose it.
-    for _profile_adapter_map in profile_adapters.values():
-        active_platforms.update(_platform_names(_profile_adapter_map))
-    if not active_platforms:
-        logger.debug("kanban notifier: no connected adapters; skipping tick")
-        return deliveries
-
-    # Poll each resolved DB path once: several slugs can map to one DB when
-    # HERMES_KANBAN_DB pins the board path.
-    seen_db_paths: set[str] = set()
-    for board_meta in _list_boards(kb):
-        slug = board_meta.get("slug") or kb.DEFAULT_BOARD
-        db_path = board_meta.get("db_path")
-        try:
-            resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(kb.kanban_db_path(slug).resolve())
-        except Exception:
-            resolved_db_path = f"slug:{slug}"
-        if resolved_db_path in seen_db_paths:
-            logger.debug(
-                "kanban notifier: skipping duplicate board slug %s for DB %s",
-                slug, resolved_db_path,
-            )
-            continue
-        seen_db_paths.add(resolved_db_path)
-        _notifier_collect_board(
-            kb, slug, deliveries,
-            notifier_profile=notifier_profile,
-            notifier_profiles=notifier_profiles,
-            include_unowned=include_unowned,
-            profile_adapters=profile_adapters,
-            active_platforms=active_platforms,
-            gc_due=gc_due,
-            gc_retention_days=gc_retention_days,
-        )
-    return deliveries
+    return _Collector(
+        runner, kb, notifier_profile=notifier_profile, gc_due=gc_due, gc_retention_days=gc_retention_days,
+    ).collect()
 
 
-def _notifier_collect_board(
-    kb: Any,
-    slug: str,
-    deliveries: list[dict],
-    *,
-    notifier_profile: Optional[str],
-    notifier_profiles: set,
-    include_unowned: bool,
-    profile_adapters: dict,
-    active_platforms: set[str],
-    gc_due: bool,
-    gc_retention_days: int,
-) -> None:
-    """Claim events on one board, appending delivery dicts to *deliveries*."""
-    # Cheap read-only probe before the writable connect() (schema init, WAL
-    # sidecars, checkpoints) — a board with no subscriptions has nothing to notify.
-    try:
-        if kb.count_notify_subs(
-            board=slug,
-            notifier_profiles=notifier_profiles,
-            include_unowned=include_unowned,
-        ) == 0:
-            logger.debug(
-                "kanban notifier: board %s has no subscriptions owned by %s; skipping open",
-                slug, sorted(notifier_profiles),
-            )
-            return
-    except Exception as exc:
-        logger.debug(
-            "kanban notifier: read-only subscription probe failed "
-            "for board %s (%s); falling back to writable open",
-            slug, exc,
-        )
-    try:
-        conn = kb.connect(board=slug)
-    except Exception as exc:
-        logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
-        return
-    try:
-        if gc_due:
-            # Best-effort: a failed sweep never blocks delivery; the next
-            # hourly gate retries.
-            try:
-                _purged = kb.purge_stale_done_notify_subs(conn, max_age_days=gc_retention_days)
-                if _purged:
-                    logger.info(
-                        "kanban notifier: purged %d stale done/blocked-task subscription(s) on board %s (retention %dd)",
-                        _purged, slug, gc_retention_days,
-                    )
-            except Exception as _gc_exc:
-                logger.debug(
-                    "kanban notifier: stale-sub GC failed for board %s: %s",
-                    slug, _gc_exc,
-                )
-        # No explicit init_db(): connect() already runs the migration once per
-        # process, and init_db() would re-run it on a second connection racing
-        # the first.
-        subs = kb.list_notify_subs(
-            conn,
-            notifier_profiles=notifier_profiles,
-            include_unowned=include_unowned,
-        )
-        if not subs:
-            logger.debug("kanban notifier: board %s has no subscriptions", slug)
-        for sub in subs:
-            try:
-                owner_profile = sub.get("notifier_profile") or None
-                if owner_profile and owner_profile != notifier_profile and not profile_adapters.get(owner_profile):
-                    logger.debug(
-                        "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
-                        sub.get("task_id"), owner_profile, notifier_profile,
-                    )
-                    continue
-                platform = (sub.get("platform") or "").lower()
-                if platform not in active_platforms:
-                    logger.debug(
-                        "kanban notifier: subscription for %s on %s skipped; adapter not connected",
-                        sub.get("task_id"), platform or "<missing>",
-                    )
-                    continue
-                old_cursor, cursor, events = kb.claim_unseen_events_for_sub(
-                    conn,
-                    task_id=sub["task_id"],
-                    platform=sub["platform"],
-                    chat_id=sub["chat_id"],
-                    thread_id=sub.get("thread_id") or "",
-                    kinds=TERMINAL_KINDS,
-                )
-                if not events:
-                    continue
-                task = kb.get_task(conn, sub["task_id"])
-                logger.debug(
-                    "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
-                    len(events), sub["task_id"], slug, old_cursor, cursor,
-                )
-                deliveries.append({
-                    "sub": sub,
-                    "old_cursor": old_cursor,
-                    "cursor": cursor,
-                    "events": events,
-                    "task": task,
-                    "board": slug,
-                })
-            except Exception as sub_exc:
-                # One bad subscription must not block the rest of the tick.
-                logger.warning(
-                    "kanban notifier: subscription for %s on board %s failed: %s",
-                    sub.get("task_id"), slug, sub_exc,
-                )
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Per-event message formatting: kind -> (msg, wake_handoff, wake_review_detail)
-# ---------------------------------------------------------------------------
-# ``None`` for handoff / review_detail leaves the accumulated wake value
-# untouched. ``_payload(ev, key)`` is the shared "payload present and truthy" read.
+# --- Per-event message formatting: kind -> (msg, wake_handoff, wake_review_detail) ---
+# ``None`` for handoff / review_detail leaves the accumulated wake value untouched.
 
 
 def _payload(ev: Any, key: str) -> Any:
+    """Shared "payload present and truthy" read."""
     return ev.payload.get(key) if ev.payload and ev.payload.get(key) else None
+
+
+def _clip(ev: Any, key: str, fmt: str, limit: int) -> str:
+    """``fmt`` applied to the truncated payload value, or ``""`` when absent."""
+    value = _payload(ev, key)
+    return fmt.format(str(value)[:limit]) if value else ""
+
+
+_NL = "\n{}"
 
 
 def _first_line(text: str, limit: int) -> str:
@@ -290,62 +235,15 @@ def _first_line(text: str, limit: int) -> str:
 
 
 def _fmt_completed(ev, n) -> tuple:
-    # Prefer the run summary from the event payload; fall back to
-    # task.result for legacy rows.
-    handoff = ""
+    # Prefer the run summary from the event payload; fall back to task.result for legacy rows.
     wake_handoff = None
     payload_summary = _payload(ev, "summary")
     if payload_summary:
         wake_handoff = _first_line(str(payload_summary), 200)
-        handoff = f"\n{wake_handoff}"
     elif n.task and n.task.result:
         wake_handoff = _first_line(n.task.result, 160)
-        handoff = f"\n{wake_handoff}"
-    msg = (
-        f"✔ {n.board_tag}{n.tag}Kanban {n.task_id} done"
-        f" — {n.title}{handoff}"
-    )
-    return msg, wake_handoff, None
-
-
-def _fmt_blocked(ev, n) -> tuple:
-    reason = _payload(ev, "reason")
-    reason = f": {str(reason)[:160]}" if reason else ""
-    return f"⏸ {n.board_tag}{n.tag}Kanban {n.task_id} blocked{reason}", None, None
-
-
-def _fmt_gave_up(ev, n) -> tuple:
-    err = _payload(ev, "error")
-    err = f"\n{str(err)[:200]}" if err else ""
-    msg = (
-        f"✖ {n.board_tag}{n.tag}Kanban {n.task_id} gave up "
-        f"after repeated spawn failures{err}"
-    )
-    return msg, None, None
-
-
-def _fmt_crashed(ev, n) -> tuple:
-    msg = (
-        f"✖ {n.board_tag}{n.tag}Kanban {n.task_id} worker crashed "
-        f"(pid gone); dispatcher will retry"
-    )
-    return msg, None, None
-
-
-def _fmt_timed_out(ev, n) -> tuple:
-    limit = _payload(ev, "limit_seconds")
-    limit = int(limit) if limit else 0
-    msg = (
-        f"⏱ {n.board_tag}{n.tag}Kanban {n.task_id} timed out "
-        f"(max_runtime={limit}s); will retry"
-    )
-    return msg, None, None
-
-
-def _fmt_status(ev, n) -> tuple:
-    new_status = _payload(ev, "status")
-    new_status = str(new_status) if new_status else ""
-    return f"🔄 {n.board_tag}{n.tag}Kanban {n.task_id} → {new_status}", None, None
+    handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
+    return f"✔ {n.head} done — {n.title}{handoff}", wake_handoff, None
 
 
 def _fmt_review_requested(ev, n) -> tuple:
@@ -358,11 +256,7 @@ def _fmt_review_requested(ev, n) -> tuple:
         summary = str(summary)
         handoff = f"\n{summary[:200]}"
         wake_handoff = _first_line(summary, 200)
-    msg = (
-        f"👀 {n.board_tag}{n.tag}Kanban {n.task_id} ready for review"
-        f" — {n.title}{handoff}"
-    )
-    return msg, wake_handoff, None
+    return f"👀 {n.head} ready for review — {n.title}{handoff}", wake_handoff, None
 
 
 def _fmt_changes_requested(ev, n) -> tuple:
@@ -371,30 +265,11 @@ def _fmt_changes_requested(ev, n) -> tuple:
     reviewer = _safe_review_reason(payload.get("reviewer"), 48)
     implementer = _safe_review_reason(payload.get("implementer"), 48)
     reason_text = reason or "reviewer feedback requires changes"
-    provenance = ""
-    if reviewer:
-        provenance += f" — reviewer @{reviewer}"
+    provenance = f" — reviewer @{reviewer}" if reviewer else ""
     if implementer:
         provenance += f" → implementer @{implementer}"
-    msg = (
-        f"🛑 {n.board_tag}Kanban {n.task_id} review requested "
-        f"changes/BLOCK: {reason_text}{provenance}"
-    )
+    msg = f"🛑 {n.board_tag}Kanban {n.task_id} review requested changes/BLOCK: {reason_text}{provenance}"
     return msg, None, reason_text
-
-
-def _fmt_block_loop_detected(ev, n) -> tuple:
-    # Re-blocked for the same cause past the limit and routed to `triage`
-    # for a human. It emits no blocked/status event, so ping loudly here.
-    reason = _payload(ev, "reason")
-    reason = f": {str(reason)[:160]}" if reason else ""
-    recurrences = ev.payload.get("recurrences") if ev.payload else None
-    rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
-    msg = (
-        f"🛑 {n.board_tag}{n.tag}Kanban {n.task_id} routed to TRIAGE"
-        f" — needs a human decision{rc}{reason}"
-    )
-    return msg, None, None
 
 
 # archived / unblocked are claimed (so the cursor advances past them) but
@@ -402,20 +277,28 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "completed": _fmt_completed,
-    "blocked": _fmt_blocked,
-    "gave_up": _fmt_gave_up,
-    "crashed": _fmt_crashed,
-    "timed_out": _fmt_timed_out,
-    "status": _fmt_status,
+    "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None),
+    "gave_up": lambda ev, n: (
+        f"✖ {n.head} gave up after repeated spawn failures{_clip(ev, 'error', _NL, 200)}", None, None,
+    ),
+    "crashed": lambda ev, n: (f"✖ {n.head} worker crashed (pid gone); dispatcher will retry", None, None),
+    "timed_out": lambda ev, n: (
+        f"⏱ {n.head} timed out (max_runtime={int(_payload(ev, 'limit_seconds') or 0)}s); will retry", None, None,
+    ),
+    "status": lambda ev, n: (f"🔄 {n.head} → {_payload(ev, 'status') or ''}", None, None),
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
-    "block_loop_detected": _fmt_block_loop_detected,
+    # Re-blocked for the same cause past the limit and routed to `triage` for a
+    # human. It emits no blocked/status event, so ping loudly here.
+    "block_loop_detected": lambda ev, n: (
+        f"🛑 {n.head} routed to TRIAGE — needs a human decision"
+        f"{_clip(ev, 'recurrences', ' (blocked {}x for the same cause)', 200)}{_clip(ev, 'reason', ': {}', 160)}",
+        None, None,
+    ),
 }
 
 
-# ---------------------------------------------------------------------------
-# Delivery of one claimed batch (one subscription, N events)
-# ---------------------------------------------------------------------------
+# --- Delivery of one claimed batch (one subscription, N events) ---
 
 
 class _KanbanNotification:
@@ -443,8 +326,8 @@ class _KanbanNotification:
         self.title = (task.title if task else sub["task_id"])[:120]
         self.board_tag = f"[{self.board_slug}] " if self.board_slug else ""
         # Attribute the ping to the worker that did the work.
-        who = task.assignee if task and task.assignee else None
-        self.tag = f"@{who} " if who else ""
+        tag = f"@{task.assignee} " if task and task.assignee else ""
+        self.head = f"{self.board_tag}{tag}Kanban {self.task_id}"
         # The wake self-post path needs the key even when every event was skipped.
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
@@ -452,14 +335,11 @@ class _KanbanNotification:
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
         # creator doesn't re-decompose work already on the board.
-        self.wake_handoff = ""
-        self.wake_review_detail = ""
+        self.wake_handoff = self.wake_review_detail = self.session_key = self.synth = ""
         self.plat: Any = None
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
-        self.session_key = ""
-        self.synth = ""
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -490,11 +370,8 @@ class _KanbanNotification:
             await self.rewind()
 
     async def _wake_failed(self, fmt: str, exc: Exception) -> None:
-        await self.delivery_failed(
-            fmt, (self.task_id,),
-            "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures",
-            exc, True,
-        )
+        drop_fmt = "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures"
+        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True)
 
     # -- formatting --
 
@@ -513,11 +390,7 @@ class _KanbanNotification:
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = (
-            {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS}
-            if self.wake_agent
-            else set()
-        )
+        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
         if not self.wake_kinds:
             return
         if self.is_push_adapter:
@@ -532,11 +405,8 @@ class _KanbanNotification:
         _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
         synth = t(
             "gateway.kanban.wake.message",
-            task_id=sub["task_id"],
-            status=_status,
-            title=self.title,
-            assignee=task.assignee if task else "",
-            board=self.board_slug,
+            task_id=sub["task_id"], status=_status, title=self.title,
+            assignee=task.assignee if task else "", board=self.board_slug,
         )
         # Label as an automatic notification and carry the handoff so the
         # creator inspects the board instead of re-decomposing.
@@ -547,36 +417,32 @@ class _KanbanNotification:
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
     def _log_woke(self) -> None:
-        logger.info(
-            "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
-            self.task_id, self.platform_str, self.sub["chat_id"], self.sub_profile or "default", self.wake_kinds,
-        )
+        logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
+                    self.task_id, self.platform_str, self.sub["chat_id"], self.sub_profile or "default", self.wake_kinds)
 
-    async def push_wake(self) -> None:
-        """Wake the creator session behind a push adapter; raises on failure."""
-        from gateway.session import SessionSource
+    async def wake(self) -> None:
+        """Wake the creator session (raises on failure): push adapters get a full SessionSource, non-push a raw self-post."""
         from gateway.wake import deliver_wake
         sub = self.sub
-        # Rebuild the creator's real session scope from the persisted
-        # chat_type: build_session_key() keys DMs differently from
-        # group/thread, so a hardcoded "group" mis-routed DM/thread creators
-        # into a fresh session. Legacy rows may carry chat_type in
-        # delivery_metadata; last resort is "group". A mismatch only degrades
-        # to a fresh session.
+        if not self.is_push_adapter:
+            await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key)
+            self._log_woke()
+            return
+        from gateway.session import SessionSource
+        # Rebuild the creator's real session scope from the persisted chat_type:
+        # build_session_key() keys DMs differently from group/thread, so a
+        # hardcoded "group" mis-routed DM/thread creators into a fresh session.
+        # Legacy rows may carry chat_type in delivery_metadata; last resort is
+        # "group". A mismatch only degrades to a fresh session.
         _chat_type = str(sub.get("chat_type") or "").strip()
         if not _chat_type:
             _delivery_meta = sub.get("delivery_metadata")
             if isinstance(_delivery_meta, dict):
                 _chat_type = str(_delivery_meta.get("chat_type") or "").strip()
         _source = SessionSource(
-            platform=self.plat,
-            chat_id=sub["chat_id"],
-            chat_type=_chat_type or "group",
-            thread_id=sub.get("thread_id") or None,
-            user_id=sub.get("user_id"),
-            user_id_alt=sub.get("user_id_alt"),
-            profile=self.sub_profile or None,
-            scope_id=_wake_scope_id(self.adapter, sub),
+            platform=self.plat, chat_id=sub["chat_id"], chat_type=_chat_type or "group",
+            thread_id=sub.get("thread_id") or None, user_id=sub.get("user_id"), user_id_alt=sub.get("user_id_alt"),
+            profile=self.sub_profile or None, scope_id=_wake_scope_id(self.adapter, sub),
         )
         await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source)
         self._log_woke()
@@ -593,30 +459,19 @@ class _KanbanNotification:
         # (else the event is lost); None / non-SendResult keeps the
         # "no exception == delivered" contract.
         if getattr(_send_res, "success", True) is False:
-            raise RuntimeError(
-                "adapter send() reported failure: "
-                f"{getattr(_send_res, 'error', None) or 'unknown error'}"
-            )
-        logger.debug(
-            "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-            ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug,
-        )
+            raise RuntimeError(f"adapter send() reported failure: {getattr(_send_res, 'error', None) or 'unknown error'}")
+        logger.debug("kanban notifier: delivered %s event for %s to %s/%s on board %s",
+                     ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug)
         # Upload artifact paths from the completion payload / legacy result as
         # native files. Only on ``completed`` so retries never spam attachments.
         if ev.kind == "completed":
             try:
                 await self.runner._deliver_kanban_artifacts(
-                    adapter=adapter,
-                    chat_id=sub["chat_id"],
-                    metadata=metadata,
-                    event_payload=getattr(ev, "payload", None),
-                    task=self.task,
+                    adapter=adapter, chat_id=sub["chat_id"], metadata=metadata,
+                    event_payload=getattr(ev, "payload", None), task=self.task,
                 )
             except Exception as art_exc:
-                logger.debug(
-                    "kanban notifier: artifact delivery for %s failed: %s",
-                    self.task_id, art_exc,
-                )
+                logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
 
     async def _send_pings(self) -> bool:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
@@ -630,10 +485,8 @@ class _KanbanNotification:
             # IS the delivery and resolves the failure counter.
             if not self.is_push_adapter and self.wake_agent:
                 logger.debug(
-                    "kanban notifier: adapter %s has no push "
-                    "channel; skipping text ping for %s, relying "
-                    "on wake self-post instead",
-                    self.platform_str, self.task_id,
+                    "kanban notifier: adapter %s has no push channel; skipping text ping for %s, relying "
+                    "on wake self-post instead", self.platform_str, self.task_id,
                 )
                 continue
             if not self.send_passive:
@@ -644,10 +497,8 @@ class _KanbanNotification:
                 self.clear_failures()
             except Exception as exc:
                 await self.delivery_failed(
-                    "kanban notifier: send failed for %s on %s (attempt %d/%d): %s",
-                    (self.task_id, self.platform_str),
-                    "kanban notifier: dropping subscription %s on %s after %d consecutive send failures",
-                    exc, False,
+                    "kanban notifier: send failed for %s on %s (attempt %d/%d): %s", (self.task_id, self.platform_str),
+                    "kanban notifier: dropping subscription %s on %s after %d consecutive send failures", exc, False,
                 )
                 return False
         return True
@@ -664,10 +515,8 @@ class _KanbanNotification:
         # default) has no adapter.
         adapter = self.runner._authorization_adapter(self.plat, self.sub_profile or None)
         if adapter is None:
-            logger.debug(
-                "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
-                self.platform_str, self.task_id,
-            )
+            logger.debug("kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
+                         self.platform_str, self.task_id)
             await self.rewind()
             return
         self.adapter = adapter
@@ -677,29 +526,21 @@ class _KanbanNotification:
         if not await self._send_pings():
             return
         # All text pings delivered (or skipped for non-push / wake-only).
-        task_terminal = self.task and self.task.status == "archived"
         self.build_wake_text()
         wake_kinds, is_push = self.wake_kinds, self.is_push_adapter
 
-        if not is_push and wake_kinds and self.session_key:
-            # Self-post IS the delivery: must succeed BEFORE the cursor advances.
-            from gateway.wake import deliver_wake
+        # Non-push self-post, or wake-only push sub: the wake IS the delivery
+        # and must succeed BEFORE the cursor advances.
+        if wake_kinds and (not self.send_passive if is_push else bool(self.session_key)):
             try:
-                await deliver_wake(adapter, text=self.synth, session_id=self.session_key)
-                self._log_woke()
+                await self.wake()
                 self.clear_failures()
             except Exception as _wk_err:
-                await self._wake_failed("kanban notifier: wake self-post failed for %s (attempt %d/%d): %s", _wk_err)
-                return
-
-        if is_push and not self.send_passive and wake_kinds:
-            # Wake-only push sub: the wake is the sole delivery and must
-            # succeed BEFORE the cursor advances.
-            try:
-                await self.push_wake()
-                self.clear_failures()
-            except Exception as _wk_err:
-                await self._wake_failed("kanban notifier: wake-only delivery failed for %s (attempt %d/%d): %s", _wk_err)
+                await self._wake_failed(
+                    "kanban notifier: wake-only delivery failed for %s (attempt %d/%d): %s" if is_push
+                    else "kanban notifier: wake self-post failed for %s (attempt %d/%d): %s",
+                    _wk_err,
+                )
                 return
 
         # Delivery complete: advance the cursor (the dedup mechanism).
@@ -711,12 +552,9 @@ class _KanbanNotification:
             # advanced; the wake stays best-effort, but log at WARNING so a
             # persistently failing wake is visible.
             try:
-                await self.push_wake()
+                await self.wake()
             except Exception as _wk_err:
-                logger.warning(
-                    "kanban notifier: wakeup injection failed for %s: %s",
-                    self.task_id, _wk_err, exc_info=True,
-                )
+                logger.warning("kanban notifier: wakeup injection failed for %s: %s", self.task_id, _wk_err, exc_info=True)
         # Unsubscribe only on archive; ``done`` is reversible.
-        if task_terminal:
+        if self.task and self.task.status == "archived":
             await self.unsub()

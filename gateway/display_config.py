@@ -1,63 +1,42 @@
-"""Per-platform display/verbosity configuration resolver.
+"""Per-platform display/verbosity resolver (``resolve_display_setting``).
 
-``resolve_display_setting()`` is the single entry-point.  Resolution order
-(first non-None wins):
-    1. ``display.platforms.<platform>.<key>``  — explicit per-platform override
-    2. ``display.<key>``                       — global user setting
-    3. ``_PLATFORM_DEFAULTS[<platform>][<key>]``  — built-in platform default
-    4. ``_GLOBAL_DEFAULTS[<key>]``              — built-in global default
-
-Exception: ``display.streaming`` is CLI-only.  Gateway streaming follows the
-top-level ``streaming`` config unless ``display.platforms.<platform>.streaming``
-sets an explicit per-platform override.
-
-Backward compatibility: ``display.tool_progress_overrides`` is still read as a
-fallback for ``tool_progress`` when no ``display.platforms`` entry exists (a
-config migration moves the old format into ``display.platforms``).
+Resolution order, first non-None wins: ``display.platforms.<platform>.<key>`` →
+``display.<key>`` → ``_PLATFORM_DEFAULTS[platform][key]`` → ``_GLOBAL_DEFAULTS[key]``.
+Exception: ``display.streaming`` is CLI-only; gateway streaming follows the top-level
+``streaming`` config unless a per-platform override sets it. Legacy
+``display.tool_progress_overrides`` is still read as a ``tool_progress`` fallback.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Settings configurable per-platform, with global defaults.  Other display
-# settings (compact, personality, skin, ...) are CLI-only.
+# Settings configurable per-platform; other display settings are CLI-only.
 _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "tool_progress_grouping": "accumulate",  # "accumulate" = edit one bubble; "separate" = one msg per tool
     "show_reasoning": False,
-    # Reasoning summary rendering: "code" (💭 **Reasoning:** + fenced block),
-    # "blockquote" ("> " lines), "subtext" ("-# " Discord small grey text).
+    # "code" (💭 **Reasoning:** + fenced block), "blockquote" ("> "), "subtext" ("-# " Discord).
     "reasoning_style": "code",
     "tool_preview_length": 0,
     "streaming": None,  # None = follow top-level streaming config
-    # Gateway-only assistant/status chatter; default on for back-compat, mobile
-    # platforms opt down to final-answer-first.
+    # Gateway-only assistant/status chatter; mobile platforms opt down to final-answer-first.
     "interim_assistant_messages": True,
     "long_running_notifications": True,
     "busy_ack_detail": True,
-    # busy_input_mode=steer confirmation echo ("Steered into current run").
-    # Disabling only suppresses the echo; the text still lands in the run.
+    # busy_input_mode=steer echo ("Steered into current run"); the text still lands in the run.
     "busy_steer_ack_enabled": True,
-    # Delete tool-progress / "⏳ Working" / status bubbles after the final
-    # response on platforms that support deletion (e.g. Telegram).  Off by
-    # default; progress is still shown live, only cleaned up after success so
-    # the chat doesn't fill with stale breadcrumbs.  Failed runs leave bubbles
-    # in place as breadcrumbs.
+    # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response on
+    # platforms that support deletion (Telegram); failed runs keep them as breadcrumbs.
     "cleanup_progress": False,
-    # Live working-state text on platforms whose typing indicator renders text
-    # (Slack assistant status): "full"/true = verb + argument preview,
-    # "verb" = verb only (keeps paths/commands out of shared channels),
-    # "off"/false = static text.  Independent of tool_progress and free: the
-    # existing typing refresh cadence just renders different text.
+    # Working-state text on text-rendering indicators (Slack assistant status):
+    # "full"/true = verb + argument preview, "verb" = verb only (keeps paths out of
+    # shared channels), "off"/false = static text.
     "live_status": "full",
 }
 
-# Per-platform defaults tiered by capability:
-#   HIGH    — message editing, personal/team use
-#   MEDIUM  — editing, but often workspace/customer-facing
-#   LOW     — no edit support: each progress message is permanent
-#   MINIMAL — batch / non-interactive delivery
+# Tiers: HIGH = editing, personal/team use; MEDIUM = editing but customer-facing;
+# LOW = no edit support (progress messages are permanent); MINIMAL = batch delivery.
 _TIER_HIGH = {
     "tool_progress": "all",
     "show_reasoning": False,
@@ -79,8 +58,7 @@ _TIER_LOW = {
 _TIER_MINIMAL = {**_TIER_LOW, "tool_preview_length": 0}
 
 _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
-    # Telegram is usually a mobile inbox: quiet tool_progress and no busy-ack
-    # iteration counter, but DO surface interim assistant commentary and
+    # Mobile inbox: quiet tool_progress / busy-ack, but keep interim commentary and
     # heartbeats so it doesn't look like "typing..." for 30 minutes.
     "telegram": {**_TIER_HIGH, "tool_progress": "off", "busy_ack_detail": False},
     # Discord's "-# " subtext reads as metadata, so reasoning defaults to it.
@@ -96,25 +74,18 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "mattermost": _TIER_MEDIUM,
     "matrix": _TIER_MEDIUM,
     "feishu": _TIER_MEDIUM,
-    # Buzz (Nostr via buzz-cli) can edit in place but channels are shared
-    # community spaces; without an entry it inherited the verbose globals.
+    # Buzz (Nostr) can edit in place but channels are shared community spaces.
     "buzz": _TIER_MEDIUM,
 
     "signal": _TIER_LOW,
     "whatsapp": _TIER_MEDIUM,  # Baileys bridge supports /edit
-    # Cloud API supports editing but our adapter lacks edit_message; promote
-    # to MEDIUM once it lands.
-    "whatsapp_cloud": _TIER_LOW,
-    # Photon and BlueBubbles are permanent-message iMessage inboxes (no edit);
-    # without an entry Photon inherited the noisy "all" globals and narrated
-    # on nearly every turn.
+    "whatsapp_cloud": _TIER_LOW,  # adapter lacks edit_message; promote once it lands
+    # Permanent-message iMessage inboxes (no edit).
     "photon": _TIER_LOW,
     "bluebubbles": _TIER_LOW,
     "weixin": _TIER_LOW,
-    # WeCom is non-editable but has a native streaming transport (msgtype
-    # "stream") the consumer routes mid-stream content through; streaming on
-    # gives the client a typing animation + cumulative updates instead of a
-    # single one-shot markdown drop.
+    # Non-editable, but its native "stream" msgtype gives a typing animation +
+    # cumulative updates instead of a one-shot markdown drop.
     "wecom": {**_TIER_LOW, "streaming": True},
     "wecom_callback": _TIER_LOW,
     "dingtalk": _TIER_LOW,
@@ -155,8 +126,7 @@ def resolve_display_setting(
         if isinstance(legacy, dict) and legacy.get(platform_key) is not None:
             return _normalise(setting, legacy[platform_key])
 
-    # 2. Global user setting.  display.streaming controls only CLI terminal
-    # streaming; gateway streaming follows the top-level config + platform overrides.
+    # 2. Global user setting (display.streaming is CLI-only, see module docstring).
     if setting != "streaming" and display_cfg.get(setting) is not None:
         return _normalise(setting, display_cfg[setting])
 
@@ -167,9 +137,7 @@ def resolve_display_setting(
     return fallback if val is None else val
 
 
-# ---------------------------------------------------------------------------
-# Normalisation of YAML quirks (bare ``off`` → False in YAML 1.1, etc.)
-# ---------------------------------------------------------------------------
+# --- Normalisation of YAML quirks (bare ``off`` → False in YAML 1.1, etc.) ---
 
 _TRUTHY = {"true", "1", "yes", "on"}
 _FALSY = {"false", "0", "no"}

@@ -1,20 +1,15 @@
 """Deterministic policy for same-gateway hosted-room Discussions.
 
-Translates a frozen local member roster plus the complete typed room log into
-one next driver task. Pure: no I/O, no workers, no transport or model
-knowledge. Callers persist the task with :mod:`gateway.hosted_room_driver`
-and append publication plans with :mod:`gateway.hosted_rooms`.
-
-The driver payload is deliberately not widened: Discussion coordinates live
-in deterministic ``TaskIdentity`` values and typed terminal events, so a
-restart can reconstruct a task from durable state. Callers must reconcile
-terminal driver rows into publication plans before asking for the next task.
+Pure (no I/O, transport or model knowledge): a frozen local roster plus the complete
+typed room log yields at most one next driver task. Discussion coordinates live in
+deterministic ``TaskIdentity`` values and typed terminal events rather than a widened
+driver payload, so a restart reconstructs tasks from durable state. Callers must
+reconcile terminal driver rows into publication plans before asking for the next task.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +19,7 @@ from typing import Any, Literal
 from gateway import hosted_room_driver as driver
 from gateway import hosted_rooms
 from gateway import hosted_rooms_common as common
+from gateway.hosted_rooms_common import compact_json
 
 
 MAX_DISCUSSION_MEMBERS = 6
@@ -42,29 +38,22 @@ _MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9._:-]*)", re.IGNORECASE)
 _TURN_ID_RE = re.compile(
     r"^d(?P<source>[1-9][0-9]*)\.r(?P<round>[0-2])\."
     r"p(?P<position>[0-5])\.s(?P<seen>[1-9][0-9]*)\."
-    r"m(?P<member>[0-9a-f]{24})$"
-)
+    r"m(?P<member>[0-9a-f]{24})$")
 
 _LOCAL_TARGET_FIELDS = frozenset({"kind", "profile"})
 _PEER_TARGET_FIELDS = frozenset({"kind", "peer_id", "installation_id", "profile", "capability_digest"})
 _REMOTE_MEMBER_FIELDS = frozenset({
-    "connectionId", "connectionKind", "connectionLabel", "connection_id",
-    "connection_kind", "connection_label", "remoteSource", "route",
-    "sourceMissing", "sourceReachable", "sourceScoped", "targetProfile",
-    "target_profile",
+    "connectionId", "connectionKind", "connectionLabel", "connection_id", "connection_kind", "connection_label",
+    "remoteSource", "route", "sourceMissing", "sourceReachable", "sourceScoped", "targetProfile", "target_profile",
 })
 _USER_PAYLOAD_FIELDS = frozenset({"text", "thread_id"})
-_TURN_COORDINATE_FIELDS = frozenset({
-    "discussion_event_id", "member_id", "member_index", "round_index",
-    "task_id", "thread_id", "turn_id",
-})
+_TURN_COORDINATE_FIELDS = frozenset(
+    {"discussion_event_id", "member_id", "member_index", "round_index", "task_id", "thread_id", "turn_id", })
 _MEMBER_MESSAGE_FIELDS = _TURN_COORDINATE_FIELDS | {"text"}
 _TERMINAL_COMMON_FIELDS = _TURN_COORDINATE_FIELDS | {"seen_through_seq"}
 _TERMINAL_EXTRA_FIELDS = {
-    "turn.settled": frozenset({"message_event_id", "passed"}),
-    "turn.failed": frozenset({"error"}),
-    "turn.cancelled": frozenset({"reason"}),
-    "turn.deferred": frozenset({"execution_generation", "reason"}),
+    "turn.settled": frozenset({"message_event_id", "passed"}), "turn.failed": frozenset({"error"}),
+    "turn.cancelled": frozenset({"reason"}), "turn.deferred": frozenset({"execution_generation", "reason"}),
 }
 _TERMINAL_OPTIONAL_FIELDS = {"turn.failed": frozenset({"reason_code"})}
 _TERMINAL_EVENT_KINDS = frozenset(_TERMINAL_EXTRA_FIELDS)
@@ -72,15 +61,12 @@ _TERMINAL_EVENT_KINDS = frozenset(_TERMINAL_EXTRA_FIELDS)
 _GATEWAY_EVENT_FIELDS = {
     "room.activity": (
         frozenset({"status", "reason_code", "thread_id", "discussion_event_id"}),
-        ("reason_code", "thread_id", "discussion_event_id"),
-    ),
-    "room.stop_requested": (frozenset({"cancel_id"}), ("cancel_id",)),
-}
+        ("reason_code", "thread_id", "discussion_event_id")),
+    "room.stop_requested": (frozenset({"cancel_id"}), ("cancel_id",))}
 _EPOCH_STAMPED_KINDS = _TERMINAL_EVENT_KINDS | {"message.member", *_GATEWAY_EVENT_FIELDS}
 
 
-class DiscussionPolicyError(ValueError):
-    """Base class for invalid policy input or unreconstructable state."""
+class DiscussionPolicyError(ValueError): """Base class for invalid policy input or unreconstructable state."""
 
 
 class DiscussionValidationError(DiscussionPolicyError):
@@ -155,8 +141,7 @@ class EventPlan:
             "room_id": room_id, "event_id": self.event_id, "kind": self.kind,
             "actor": dict(self.actor), "payload": dict(self.payload),
             "authority_gateway_id": self.authority_gateway_id,
-            "authority_epoch": self.authority_epoch,
-        }
+            "authority_epoch": self.authority_epoch}
 
 
 @dataclass(frozen=True)
@@ -178,22 +163,20 @@ class _ValidatedEvent:
     payload: Mapping[str, Any]
 
 
-_identifier = partial(
-    common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS
-)
+_identifier = partial(common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS)
 _exact_fields = partial(common.exact_fields, error=DiscussionValidationError)
+_bounded_int = partial(common.bounded_int, error=DiscussionValidationError)
 
 
 def _positive_int(value: Any, *, label: str) -> int:
-    return common.positive_int(
-        value, error=DiscussionValidationError, message=f"{label} must be a positive integer"
-    )
+    return _bounded_int(value, message=f"{label} must be a positive integer", low=1)
 
 
 def _zero_based_int(value: Any, *, label: str, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
-        raise DiscussionValidationError(f"{label} must be an integer between 0 and {maximum}")
-    return value
+    message = f"{label} must be an integer between 0 and {maximum}"
+    return _bounded_int(value, message=message, high=maximum)
+
+_text = partial(common.text, error=DiscussionValidationError)
 
 
 def _peer_target(member: DiscussionMember) -> Mapping[str, Any] | None:
@@ -204,25 +187,15 @@ def _peer_target(member: DiscussionMember) -> Mapping[str, Any] | None:
 def validate_user_payload(value: Any) -> dict[str, Any]:
     """Validate and normalize the exact ``message.user`` Discussion payload."""
     payload = _exact_fields(value, label="user payload", required=_USER_PAYLOAD_FIELDS)
-    text = payload["text"]
-    if not isinstance(text, str):
-        raise DiscussionValidationError("user payload text must be a string")
-    text = text.strip()
-    if not text:
-        raise DiscussionValidationError("user payload text must not be empty")
-    if len(text.encode("utf-8")) > MAX_USER_TEXT_BYTES:
-        raise DiscussionValidationError("user payload text is too large")
+    text = _text(payload["text"], label="user payload text", max_bytes=MAX_USER_TEXT_BYTES)
     return {"text": text, "thread_id": _identifier(payload["thread_id"], label="thread_id")}
 
 
-def _validate_member_target(
-    value: Any, *, profile: str, known_profiles: set[str], index: int
-) -> dict[str, Any]:
+def _validate_member_target(value: Any, *, profile: str, known_profiles: set[str], index: int) -> dict[str, Any]:
     if value is None:
         if profile not in known_profiles:
             raise DiscussionValidationError(
-                f"member {index} profile '{profile}' is not local to this gateway"
-            )
+                f"member {index} profile '{profile}' is not local to this gateway")
         return {"kind": "local", "profile": profile}
     if not isinstance(value, Mapping):
         raise DiscussionValidationError(f"member {index} target must be an object")
@@ -231,19 +204,16 @@ def _validate_member_target(
         raise DiscussionValidationError(f"member {index} target kind must be local or peer")
     target = _exact_fields(
         value, label=f"member {index} {kind} target",
-        required=_LOCAL_TARGET_FIELDS if kind == "local" else _PEER_TARGET_FIELDS,
-    )
+        required=_LOCAL_TARGET_FIELDS if kind == "local" else _PEER_TARGET_FIELDS)
     target_profile = _identifier(target["profile"], label=f"member {index} target profile")
     if kind == "local":
         if target_profile != profile or profile not in known_profiles:
             raise DiscussionValidationError(
-                f"member {index} local target does not match a local profile"
-            )
+                f"member {index} local target does not match a local profile")
         return {"kind": "local", "profile": profile}
     if target_profile != profile:
         raise DiscussionValidationError(
-            f"member {index} peer target profile does not match member profile"
-        )
+            f"member {index} peer target profile does not match member profile")
     capability_digest = target["capability_digest"]
     if not isinstance(capability_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", capability_digest):
         raise DiscussionValidationError(f"member {index} capability_digest must be a sha256 digest")
@@ -252,8 +222,7 @@ def _validate_member_target(
         "peer_id": _identifier(target["peer_id"], label=f"member {index} peer_id"),
         "installation_id": _identifier(target["installation_id"], label=f"member {index} installation_id"),
         "profile": target_profile,
-        "capability_digest": capability_digest,
-    }
+        "capability_digest": capability_digest}
 
 
 def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[DiscussionMember, ...]:
@@ -263,8 +232,7 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
     if not MIN_DISCUSSION_MEMBERS <= len(value) <= MAX_DISCUSSION_MEMBERS:
         raise DiscussionValidationError(
             f"members must contain between {MIN_DISCUSSION_MEMBERS} and "
-            f"{MAX_DISCUSSION_MEMBERS} entries"
-        )
+            f"{MAX_DISCUSSION_MEMBERS} entries")
 
     known_profiles = {_identifier(profile, label="local profile") for profile in local_profiles}
     members: list[DiscussionMember] = []
@@ -278,19 +246,16 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
         remote_fields = frozenset(raw) & _REMOTE_MEMBER_FIELDS
         if remote_fields:
             raise DiscussionValidationError(
-                f"member {index} contains cross-gateway fields: {', '.join(sorted(remote_fields))}"
-            )
+                f"member {index} contains cross-gateway fields: {', '.join(sorted(remote_fields))}")
         member = _exact_fields(
             raw, label=f"member {index}",
             required=frozenset({"member_id", "profile", "handle"}),
-            optional=frozenset({"display_name", "target"}),
-        )
+            optional=frozenset({"display_name", "target"}))
         member_id = _identifier(member["member_id"], label=f"member {index} id")
         profile = _identifier(member["profile"], label=f"member {index} profile")
         handle = _identifier(member["handle"], label=f"member {index} handle")
         target = _validate_member_target(
-            member.get("target"), profile=profile, known_profiles=known_profiles, index=index
-        )
+            member.get("target"), profile=profile, known_profiles=known_profiles, index=index)
         display_name = member.get("display_name", "")
         if not isinstance(display_name, str):
             raise DiscussionValidationError(f"member {index} display_name must be a string")
@@ -298,24 +263,20 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
         if len(display_name) > hosted_rooms.MAX_ACTOR_LABEL_CHARS:
             raise DiscussionValidationError(f"member {index} display_name is too long")
 
-        target_key = json.dumps(target, sort_keys=True, separators=(",", ":")).casefold()
+        target_key = compact_json(target, ensure_ascii=False).casefold()
         target_message = (
             "member profiles must be unique" if target.get("kind") == "local"
-            else "member targets must be unique"
-        )
+            else "member targets must be unique")
         for key, seen, message in (
             (target_key, targets, target_message),
-            (handle.casefold(), handles,
-             "member handles must be unique and cannot reserve @all or @everyone"),
-            (member_id.casefold(), member_ids, "member ids must be unique"),
-        ):
+            (handle.casefold(), handles, "member handles must be unique and cannot reserve @all or @everyone"),
+            (member_id.casefold(), member_ids, "member ids must be unique")):
             if key in seen:
                 raise DiscussionValidationError(message)
             seen.add(key)
         members.append(DiscussionMember(
             member_id=member_id, profile=profile, handle=handle,
-            display_name=display_name, target=target,
-        ))
+            display_name=display_name, target=target))
     return tuple(members)
 
 
@@ -336,9 +297,7 @@ def validate_room(value: Any, *, local_profiles: Iterable[str]) -> DiscussionRoo
     authority_epoch = _positive_int(value.get("authority_epoch"), label="authority_epoch")
     members = validate_roster(value.get("members"), local_profiles=local_profiles)
     return DiscussionRoom(
-        room_id=room_id, name=name, members=members,
-        gateway_id=gateway_id, authority_epoch=authority_epoch,
-    )
+        room_id=room_id, name=name, members=members, gateway_id=gateway_id, authority_epoch=authority_epoch)
 
 
 def is_pass_text(value: Any) -> bool:
@@ -367,8 +326,7 @@ def resolve_mentions(
 
 
 def _unaddressed_member_mentions(
-    messages: Sequence[_ValidatedEvent], room: DiscussionRoom
-) -> tuple[DiscussionMember, ...]:
+    messages: Sequence[_ValidatedEvent], room: DiscussionRoom) -> tuple[DiscussionMember, ...]:
     """Return peers explicitly cited by a Bot and not heard from afterward."""
     cited_at: dict[str, int] = {}
     last_post_at: dict[str, int] = {}
@@ -384,8 +342,7 @@ def _unaddressed_member_mentions(
     return tuple(
         member for member in room.members
         if member.member_id in cited_at
-        and last_post_at.get(member.member_id, 0) <= cited_at[member.member_id]
-    )
+        and last_post_at.get(member.member_id, 0) <= cited_at[member.member_id])
 
 
 def _require_gateway_actor(actor: Mapping[str, Any], room: DiscussionRoom, message: str) -> None:
@@ -395,10 +352,10 @@ def _require_gateway_actor(actor: Mapping[str, Any], room: DiscussionRoom, messa
 
 def _member_by_id(room: DiscussionRoom, member_id: Any) -> DiscussionMember:
     normalized = _identifier(member_id, label="member_id")
-    for member in room.members:
-        if member.member_id == normalized:
-            return member
-    raise DiscussionValidationError(f"unknown Discussion member '{normalized}'")
+    member = next((m for m in room.members if m.member_id == normalized), None)
+    if member is None:
+        raise DiscussionValidationError(f"unknown Discussion member '{normalized}'")
+    return member
 
 
 def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom) -> None:
@@ -414,8 +371,7 @@ def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom)
 
 
 def _validate_user_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     payload = validate_user_payload(payload)
     if actor.get("kind") != "user":
         raise DiscussionValidationError("message.user requires a user actor")
@@ -423,8 +379,7 @@ def _validate_user_event(
 
 
 def _validate_member_message(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     _exact_fields(payload, label="message.member payload", required=_MEMBER_MESSAGE_FIELDS)
     _validate_turn_coordinates(payload, room)
     text = payload.get("text")
@@ -433,9 +388,7 @@ def _validate_member_message(
     member = _member_by_id(room, payload.get("member_id"))
     peer = _peer_target(member)
     expected = {
-        "kind": "member",
-        "id": member.member_id,
-        "profile": member.profile,
+        "kind": "member", "id": member.member_id, "profile": member.profile,
         "connection_id": peer.get("peer_id") if peer else None,
     }
     if any(actor.get(key) != value for key, value in expected.items()):
@@ -444,13 +397,11 @@ def _validate_member_message(
 
 
 def _validate_terminal_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     _exact_fields(
         payload, label=f"{kind} payload",
         required=_TERMINAL_COMMON_FIELDS | _TERMINAL_EXTRA_FIELDS[kind],
-        optional=_TERMINAL_OPTIONAL_FIELDS.get(kind, frozenset()),
-    )
+        optional=_TERMINAL_OPTIONAL_FIELDS.get(kind, frozenset()))
     _validate_turn_coordinates(payload, room)
     _positive_int(payload.get("seen_through_seq"), label="seen_through_seq")
     if actor.get("connection_id") is not None:
@@ -474,15 +425,12 @@ def _validate_terminal_event(
         from tools.bot_failure_reasons import ALL_REASONS
 
         if payload["reason_code"] not in ALL_REASONS:
-            raise DiscussionValidationError(
-                "turn.failed reason_code must use the shared failure vocabulary"
-            )
+            raise DiscussionValidationError("turn.failed reason_code must use the shared failure vocabulary")
     return payload
 
 
 def _validate_gateway_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     fields, identifier_fields = _GATEWAY_EVENT_FIELDS[kind]
     _exact_fields(payload, label=f"{kind} payload", required=fields)
     if kind == "room.activity" and payload.get("status") not in {"settled", "bounded"}:
@@ -497,8 +445,7 @@ _EVENT_VALIDATORS = {
     "message.user": _validate_user_event,
     "message.member": _validate_member_message,
     **dict.fromkeys(_TERMINAL_EVENT_KINDS, _validate_terminal_event),
-    **dict.fromkeys(_GATEWAY_EVENT_FIELDS, _validate_gateway_event),
-}
+    **dict.fromkeys(_GATEWAY_EVENT_FIELDS, _validate_gateway_event)}
 
 
 def _validate_event(raw: Any, *, room: DiscussionRoom, previous_seq: int) -> _ValidatedEvent:
@@ -514,8 +461,7 @@ def _validate_event(raw: Any, *, room: DiscussionRoom, previous_seq: int) -> _Va
     for value, expected, message in (
         (kind, str, "event kind must be a string"),
         (actor, Mapping, "event actor must be an object"),
-        (payload, Mapping, "event payload must be an object"),
-    ):
+        (payload, Mapping, "event payload must be an object")):
         if not isinstance(value, expected):
             raise DiscussionValidationError(message)
     if kind in _EPOCH_STAMPED_KINDS and raw.get("authority_epoch") != room.authority_epoch:
@@ -526,9 +472,7 @@ def _validate_event(raw: Any, *, room: DiscussionRoom, previous_seq: int) -> _Va
     return _ValidatedEvent(raw=raw, seq=seq, event_id=event_id, kind=kind, actor=actor, payload=payload)
 
 
-def _validated_events(
-    events: Sequence[Mapping[str, Any]], *, room: DiscussionRoom
-) -> tuple[_ValidatedEvent, ...]:
+def _validated_events(events: Sequence[Mapping[str, Any]], *, room: DiscussionRoom) -> tuple[_ValidatedEvent, ...]:
     validated: list[_ValidatedEvent] = []
     previous_seq = 0
     event_ids: set[str] = set()
@@ -562,14 +506,12 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
         if previous is not None:
             if previous.kind != "turn.deferred":
                 raise DiscussionValidationError(
-                    f"task '{task_id}' has more than one terminal room event"
-                )
+                    f"task '{task_id}' has more than one terminal room event")
             if event.kind == "turn.deferred" and int(
                 event.payload["execution_generation"]
             ) <= int(previous.payload["execution_generation"]):
                 raise DiscussionValidationError(
-                    f"task '{task_id}' deferral generation did not advance"
-                )
+                    f"task '{task_id}' deferral generation did not advance")
         terminal_by_task[task_id] = event
         key = (str(event.payload["thread_id"]), str(event.payload["member_id"]))
         watermark = int(event.payload["seen_through_seq"])
@@ -577,8 +519,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
             message = messages_by_id.get(str(event.payload["message_event_id"]))
             if message is None or any(
                 message.payload.get(field) != event.payload.get(field)
-                for field in ("task_id", "member_id", "thread_id")
-            ):
+                for field in ("task_id", "member_id", "thread_id")):
                 raise DiscussionValidationError("turn.settled references no matching member message")
             watermark = max(watermark, message.seq)
         watermarks[key] = max(watermarks.get(key, 0), watermark)
@@ -586,10 +527,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
 
 
 def _member_digest(member: DiscussionMember) -> str:
-    target = json.dumps(
-        member.target or {"kind": "local", "profile": member.profile},
-        sort_keys=True, separators=(",", ":"),
-    )
+    target = compact_json(member.target or {"kind": "local", "profile": member.profile}, ensure_ascii=False)
     seed = f"{member.member_id}\0{member.profile}\0{member.handle}\0{target}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
@@ -626,28 +564,22 @@ def _truncate_utf8_text(value: Any, *, max_bytes: int, suffix: str = "") -> str:
 
 def _build_prompt(
     *, room: DiscussionRoom, member: DiscussionMember, messages: Sequence[_ValidatedEvent],
-    watermark: int, seen_through_seq: int,
-) -> str:
-    delta = [event for event in messages if watermark < event.seq <= seen_through_seq][
-        -MAX_DISCUSSION_DELTA_LINES:
-    ]
+    watermark: int, seen_through_seq: int) -> str:
+    delta = [event for event in messages if watermark < event.seq <= seen_through_seq][- MAX_DISCUSSION_DELTA_LINES:]
     peers = ", ".join(
-        f"@{candidate.handle}" for candidate in room.members if candidate.member_id != member.member_id
-    )
+        f"@{candidate.handle}" for candidate in room.members if candidate.member_id != member.member_id)
     opening = [
         f'[Discussion: "{room.name}"] You are @{member.handle}, one participant '
         f"with {peers or 'no other members'} and the user.",
         "",
-        "New messages in this thread since your last turn (oldest first):",
-    ]
+        "New messages in this thread since your last turn (oldest first):"]
     rules = [
         "",
         "Rules for this Discussion:",
         "- Reply with one conversational message only when you have something new worth adding.",
         '- If you have nothing new to add, reply with exactly "(pass)".',
         "- Mention a teammate by handle to pull them into the next round; do not repeat points already made.",
-        "- Never reveal content from private conversations. Your reply is published verbatim.",
-    ]
+        "- Never reveal content from private conversations. Your reply is published verbatim."]
     fixed_bytes = len("\n".join([*opening, *rules]).encode("utf-8"))
     available = max(0, driver.MAX_PROMPT_BYTES - fixed_bytes - 1)
     selected: list[str] = []
@@ -674,54 +606,36 @@ def _build_prompt(
 
 def _make_task_plan(
     *, room: DiscussionRoom, discussion_event: _ValidatedEvent, member: DiscussionMember,
-    member_index: int, round_index: int, seen_through_seq: int, prompt: str,
-) -> DiscussionTaskPlan:
+    member_index: int, round_index: int, seen_through_seq: int, prompt: str) -> DiscussionTaskPlan:
     turn_id = (
         f"d{discussion_event.seq}.r{round_index}.p{member_index}."
-        f"s{seen_through_seq}.m{_member_digest(member)}"
-    )
-    seed = json.dumps(
-        {
-            "discussion_event_id": discussion_event.event_id,
-            "member_id": member.member_id,
-            "member_index": member_index,
-            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "room_id": room.room_id,
-            "round_index": round_index,
-            "seen_through_seq": seen_through_seq,
-            "source_event_seq": discussion_event.seq,
-            "thread_id": discussion_event.payload["thread_id"],
-        },
-        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
-    )
+        f"s{seen_through_seq}.m{_member_digest(member)}")
+    seed = compact_json({
+        "discussion_event_id": discussion_event.event_id, "member_id": member.member_id, "member_index": member_index,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "room_id": room.room_id,
+        "round_index": round_index, "seen_through_seq": seen_through_seq, "source_event_seq": discussion_event.seq,
+        "thread_id": discussion_event.payload["thread_id"],
+    })
     task_id = f"dtask:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:48]}"
     identity = driver.TaskIdentity(
         room_id=room.room_id, task_id=task_id,
-        thread_id=str(discussion_event.payload["thread_id"]), turn_id=turn_id,
-    )
+        thread_id=str(discussion_event.payload["thread_id"]), turn_id=turn_id)
     payload = {
-        "target_member_id": member.member_id,
-        "target_profile": member.profile,
-        "prompt": prompt,
+        "target_member_id": member.member_id, "target_profile": member.profile, "prompt": prompt,
         "source_event_seq": discussion_event.seq,
     }
     return DiscussionTaskPlan(
-        identity=identity, payload=payload, discussion_event_id=discussion_event.event_id,
-        member=member, member_index=member_index, round_index=round_index,
-        seen_through_seq=seen_through_seq,
-    )
+        identity=identity, payload=payload, discussion_event_id=discussion_event.event_id, member=member,
+        member_index=member_index, round_index=round_index, seen_through_seq=seen_through_seq)
 
 
 def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent | None:
     """Oldest latest-per-thread user message not stopped and not yet completed."""
-    stopped_through_seq = max(
-        (event.seq for event in validated if event.kind == "room.stop_requested"), default=0
-    )
+    stopped_through_seq = max((event.seq for event in validated if event.kind == "room.stop_requested"), default=0)
     completed_discussion_ids = {
         str(event.payload["discussion_event_id"])
         for event in validated
-        if event.kind == "room.activity" and event.payload.get("status") in {"settled", "bounded"}
-    }
+        if event.kind == "room.activity" and event.payload.get("status") in {"settled", "bounded"}}
     latest_by_thread: dict[str, _ValidatedEvent] = {}
     for event in validated:
         if event.kind == "message.user":
@@ -729,8 +643,7 @@ def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent
     pending = [
         event
         for event in sorted(latest_by_thread.values(), key=lambda item: item.seq)
-        if event.seq > stopped_through_seq and event.event_id not in completed_discussion_ids
-    ]
+        if event.seq > stopped_through_seq and event.event_id not in completed_discussion_ids]
     return pending[0] if pending else None
 
 
@@ -742,8 +655,7 @@ def _thread_messages(
     committed_member_message_ids = {
         str(event.payload["message_event_id"])
         for event in validated
-        if event.kind == "turn.settled" and event.payload.get("message_event_id") is not None
-    }
+        if event.kind == "turn.settled" and event.payload.get("message_event_id") is not None}
     # Publication writes the visible member message before the terminal event.
     # A crash in that gap leaves the message in the log, but it is not committed
     # policy input yet: ignoring it reproduces the original task coordinates so
@@ -754,15 +666,12 @@ def _thread_messages(
         if event.payload.get("thread_id") == thread_id
         and (
             event.kind == "message.user"
-            or (event.kind == "message.member" and event.event_id in committed_member_message_ids)
-        )
-    )
+            or (event.kind == "message.member" and event.event_id in committed_member_message_ids)))
     discussion_messages = tuple(event for event in thread_messages if event.seq >= discussion.seq)
     member_messages = tuple(
         event for event in thread_messages
         if event.kind == "message.member"
-        and event.payload.get("discussion_event_id") == discussion.event_id
-    )
+        and event.payload.get("discussion_event_id") == discussion.event_id)
     return thread_messages, discussion_messages, member_messages
 
 
@@ -772,20 +681,15 @@ def _effective_watermarks(
     watermarks = {
         (str(thread_id), str(member_id)): int(value)
         for (thread_id, member_id), value in (initial_watermarks or {}).items()
-        if int(value) >= 0
-    }
+        if int(value) >= 0}
     for key, value in _derive_member_watermarks(validated).items():
         watermarks[key] = max(watermarks.get(key, 0), value)
     return watermarks
 
 
 def plan_next_task(
-    room_value: Any,
-    events: Sequence[Mapping[str, Any]],
-    *,
-    local_profiles: Iterable[str],
-    initial_watermarks: Mapping[tuple[str, str], int] | None = None,
-) -> DiscussionDecision:
+    room_value: Any, events: Sequence[Mapping[str, Any]], *, local_profiles: Iterable[str],
+    initial_watermarks: Mapping[tuple[str, str], int] | None = None) -> DiscussionDecision:
     """Replay the complete room log and return at most one next member task."""
     room = validate_room(room_value, local_profiles=local_profiles)
     validated = _validated_events(events, room=room)
@@ -795,8 +699,7 @@ def plan_next_task(
     thread_id = str(discussion.payload["thread_id"])
     decide = partial(
         DiscussionDecision, discussion_event_id=discussion.event_id,
-        source_event_seq=discussion.seq, thread_id=thread_id,
-    )
+        source_event_seq=discussion.seq, thread_id=thread_id)
 
     thread_messages, discussion_messages, member_messages = _thread_messages(validated, discussion)
     if len(member_messages) >= MAX_DISCUSSION_MESSAGES:
@@ -806,8 +709,7 @@ def plan_next_task(
         (int(event.payload["round_index"]), str(event.payload["member_id"])): event
         for event in validated
         if event.kind in _TERMINAL_EVENT_KINDS
-        and event.payload.get("discussion_event_id") == discussion.event_id
-    }
+        and event.payload.get("discussion_event_id") == discussion.event_id}
     watermarks = _effective_watermarks(validated, initial_watermarks)
     seen_through_seq = max(event.seq for event in thread_messages)
 
@@ -820,8 +722,7 @@ def plan_next_task(
         responders = (
             resolve_mentions((str(discussion.payload["text"]),), room.members)
             if round_index == 0
-            else _unaddressed_member_mentions(discussion_messages, room)
-        )
+            else _unaddressed_member_mentions(discussion_messages, room))
         for member_index, member in enumerate(_rotate(responders, round_index)):
             if (round_index, member.member_id) in terminals:
                 continue
@@ -830,12 +731,10 @@ def plan_next_task(
                 continue
             prompt = _build_prompt(
                 room=room, member=member, messages=thread_messages,
-                watermark=watermark, seen_through_seq=seen_through_seq,
-            )
+                watermark=watermark, seen_through_seq=seen_through_seq)
             task = _make_task_plan(
                 room=room, discussion_event=discussion, member=member, member_index=member_index,
-                round_index=round_index, seen_through_seq=seen_through_seq, prompt=prompt,
-            )
+                round_index=round_index, seen_through_seq=seen_through_seq, prompt=prompt)
             return decide("task", "member_turn", task=task)
 
         if not any(int(event.payload["round_index"]) == round_index for event in member_messages):
@@ -848,8 +747,7 @@ def plan_next_task(
 
 def reconstruct_task_plan(
     room_value: Any, events: Sequence[Mapping[str, Any]], task: Mapping[str, Any],
-    *, local_profiles: Iterable[str],
-) -> DiscussionTaskPlan:
+    *, local_profiles: Iterable[str]) -> DiscussionTaskPlan:
     """Reconstruct and verify one persisted driver task after a restart."""
     room = validate_room(room_value, local_profiles=local_profiles)
     validated = _validated_events(events, room=room)
@@ -858,9 +756,7 @@ def reconstruct_task_plan(
     if not isinstance(identity, driver.TaskIdentity) or not isinstance(payload, Mapping):
         raise DiscussionReconstructionError("driver task has no valid identity or payload")
     required_payload = frozenset({"target_profile", "prompt", "source_event_seq"})
-    if not required_payload <= frozenset(payload) or (
-        frozenset(payload) - required_payload - {"target_member_id"}
-    ):
+    if not required_payload <= frozenset(payload) or (frozenset(payload) - required_payload - {"target_member_id"}):
         raise DiscussionReconstructionError("driver task payload shape changed")
     match = _TURN_ID_RE.fullmatch(identity.turn_id)
     if match is None:
@@ -868,9 +764,7 @@ def reconstruct_task_plan(
     source_event_seq = int(match.group("source"))
     if payload.get("source_event_seq") != source_event_seq:
         raise DiscussionReconstructionError("task source event does not match turn_id")
-    discussion = next(
-        (e for e in validated if e.seq == source_event_seq and e.kind == "message.user"), None
-    )
+    discussion = next((e for e in validated if e.seq == source_event_seq and e.kind == "message.user"), None)
     if discussion is None:
         raise DiscussionReconstructionError("task source user event is missing")
     if identity.room_id != room.room_id or identity.thread_id != discussion.payload["thread_id"]:
@@ -880,16 +774,9 @@ def reconstruct_task_plan(
     member = next(
         (
             candidate for candidate in room.members
-            if (
-                candidate.member_id == target_member_id
-                if target_member_id is not None
-                else candidate.profile == profile
-            )
-        ),
-        None,
-    )
-    if member is not None and member.profile != profile:
-        member = None
+            if candidate.profile == profile
+            and (target_member_id is None or candidate.member_id == target_member_id)),
+        None)
     if member is None or _member_digest(member) != match.group("member"):
         raise DiscussionReconstructionError("task target member does not match turn_id")
     prompt = payload.get("prompt")
@@ -898,13 +785,20 @@ def reconstruct_task_plan(
     if len(prompt.encode("utf-8")) > driver.MAX_PROMPT_BYTES:
         raise DiscussionReconstructionError("task prompt exceeds the driver limit")
     reconstructed = _make_task_plan(
-        room=room, discussion_event=discussion, member=member,
-        member_index=int(match.group("position")), round_index=int(match.group("round")),
-        seen_through_seq=int(match.group("seen")), prompt=prompt,
-    )
+        room=room, discussion_event=discussion, member=member, member_index=int(match.group("position")),
+        round_index=int(match.group("round")), seen_through_seq=int(match.group("seen")), prompt=prompt)
     if reconstructed.identity != identity or dict(reconstructed.payload) != dict(payload):
         raise DiscussionReconstructionError("driver task failed deterministic reconstruction")
     return reconstructed
+
+
+def _turn_coordinates(task: DiscussionTaskPlan) -> dict[str, Any]:
+    """The coordinate fields every member message and terminal event carries."""
+    return {
+        "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
+        "member_index": task.member_index, "round_index": task.round_index, "task_id": task.identity.task_id,
+        "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
+    }
 
 
 def _terminal_text(result: Any, *, field: str, fallback: str) -> str:
@@ -927,8 +821,7 @@ def _settled_effects(
 ) -> tuple[dict[str, Any], list[EventPlan]]:
     text = _truncate_utf8_text(
         _terminal_text(result, field="text", fallback=""),
-        max_bytes=MAX_MEMBER_TEXT_BYTES, suffix=_TRUNCATED_REPLY_NOTICE,
-    )
+        max_bytes=MAX_MEMBER_TEXT_BYTES, suffix=_TRUNCATED_REPLY_NOTICE)
     passed = is_pass_text(text)
     effects: list[EventPlan] = []
     if not passed:
@@ -940,18 +833,8 @@ def _settled_effects(
             member_actor["display_name"] = task.member.display_name
         effects.append(EventPlan(
             event_id=message_event_id, kind="message.member", actor=member_actor,
-            payload={
-                "discussion_event_id": task.discussion_event_id,
-                "member_id": task.member.member_id,
-                "member_index": task.member_index,
-                "round_index": task.round_index,
-                "task_id": task.identity.task_id,
-                "text": text,
-                "thread_id": task.identity.thread_id,
-                "turn_id": task.identity.turn_id,
-            },
-            authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch,
-        ))
+            payload={**_turn_coordinates(task), "text": text},
+            authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch))
     return {"message_event_id": None if passed else message_event_id, "passed": passed}, effects
 
 
@@ -961,25 +844,20 @@ def _failed_effects(result: Any, **_: Any) -> tuple[dict[str, Any], list[EventPl
 
     supplied_reason = (
         str(result.get("reason_code") or result.get("reason") or "").strip()
-        if isinstance(result, Mapping) else ""
-    )
+        if isinstance(result, Mapping) else "")
     reason_code = supplied_reason if supplied_reason in ALL_REASONS else classify_agent_error(error_text)
     return {"error": error_text, "reason_code": reason_code}, []
 
 
-def _cancelled_effects(
-    result: Any, *, newer_same_thread: bool, **_: Any
-) -> tuple[dict[str, Any], list[EventPlan]]:
+def _cancelled_effects(result: Any, *, newer_same_thread: bool, ** _: Any) -> tuple[dict[str, Any], list[EventPlan]]:
     reason = (
         "superseded_by_newer_user_event" if newer_same_thread
-        else _terminal_text(result, field="reason", fallback="member turn cancelled")
-    )
+        else _terminal_text(result, field="reason", fallback="member turn cancelled"))
     return {"reason": reason}, []
 
 
 def _deferred_effects(
-    result: Any, *, execution_generation: int | None, **_: Any
-) -> tuple[dict[str, Any], list[EventPlan]]:
+    result: Any, *, execution_generation: int | None, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
     return {
         "execution_generation": execution_generation,
         "reason": _terminal_text(result, field="reason", fallback="member_unavailable"),
@@ -987,23 +865,14 @@ def _deferred_effects(
 
 
 _TERMINAL_EFFECTS = {
-    "settled": _settled_effects,
-    "failed": _failed_effects,
-    "cancelled": _cancelled_effects,
+    "settled": _settled_effects, "failed": _failed_effects, "cancelled": _cancelled_effects,
     "deferred": _deferred_effects,
 }
 
 
 def plan_publication(
-    room_value: Any,
-    events: Sequence[Mapping[str, Any]],
-    task: DiscussionTaskPlan,
-    *,
-    status: TerminalKind,
-    result: Any = None,
-    execution_generation: int | None = None,
-    local_profiles: Iterable[str],
-) -> PublicationPlan:
+    room_value: Any, events: Sequence[Mapping[str, Any]], task: DiscussionTaskPlan, *, status: TerminalKind,
+    result: Any = None, execution_generation: int | None = None, local_profiles: Iterable[str]) -> PublicationPlan:
     """Plan idempotent room effects for one terminal driver task.
 
     A newer user event in the same thread supersedes a late result: the task
@@ -1020,43 +889,26 @@ def plan_publication(
         raise DiscussionValidationError("invalid terminal publication status")
     if status == "deferred":
         message = "deferred publication requires an execution generation"
-        common.positive_int(execution_generation, error=DiscussionValidationError, message=message)
+        _bounded_int(execution_generation, message=message, low=1)
 
     newer_same_thread = any(
         event.kind == "message.user"
         and event.seq > task.seen_through_seq
         and event.payload.get("thread_id") == task.identity.thread_id
-        for event in validated
-    )
-    effective_status: TerminalKind = (
-        "cancelled" if newer_same_thread and status != "deferred" else status
-    )
+        for event in validated)
+    effective_status: TerminalKind = ("cancelled" if newer_same_thread and status != "deferred" else status)
     digest = task.identity.task_id.removeprefix("dtask:")
     terminal_event_id = (
         f"ddeferred:{digest}:g{execution_generation}"
-        if effective_status == "deferred" else f"dterminal:{digest}"
-    )
-    common_payload = {
-        "discussion_event_id": task.discussion_event_id,
-        "member_id": task.member.member_id,
-        "member_index": task.member_index,
-        "round_index": task.round_index,
-        "seen_through_seq": task.seen_through_seq,
-        "task_id": task.identity.task_id,
-        "thread_id": task.identity.thread_id,
-        "turn_id": task.identity.turn_id,
-    }
+        if effective_status == "deferred" else f"dterminal:{digest}")
+    common_payload = {**_turn_coordinates(task), "seen_through_seq": task.seen_through_seq}
     extra, effects = _TERMINAL_EFFECTS[effective_status](
         result, task=task, room=room, message_event_id=f"dmessage:{digest}",
-        newer_same_thread=newer_same_thread, execution_generation=execution_generation,
-    )
+        newer_same_thread=newer_same_thread, execution_generation=execution_generation)
     terminal_kind = f"turn.{effective_status}"
     effects.append(EventPlan(
         event_id=terminal_event_id, kind=terminal_kind,
         actor={"kind": "gateway", "id": room.gateway_id},
         payload={**common_payload, **extra},
-        authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch,
-    ))
-    return PublicationPlan(
-        task_id=task.identity.task_id, terminal_kind=terminal_kind, events=tuple(effects)
-    )
+        authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch))
+    return PublicationPlan(task_id=task.identity.task_id, terminal_kind=terminal_kind, events=tuple(effects))

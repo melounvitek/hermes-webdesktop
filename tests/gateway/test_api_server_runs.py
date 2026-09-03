@@ -1874,8 +1874,7 @@ class TestHostedRoomRuns:
 
         for target in (
             "gateway.platforms.api_server.time.time",
-            "gateway.hosted_room_peer.time.time",
-            "gateway.hosted_rooms.time.time",
+            "gateway.hosted_rooms_common.time.time",
         ):
             monkeypatch.setattr(target, lambda: 200)
         claims = {

@@ -3,15 +3,14 @@
 Runs as ``ExecStopPost=`` after the gateway's main process has exited: the
 safety net for long-lived helpers the gateway doesn't track (``adb``, platform
 bridges) that would otherwise be orphaned in the cgroup and block
-``Restart=always``.
-
-Per-PID SIGKILLs over ``cgroup.procs`` are used deliberately instead of writing
-``1`` to ``cgroup.kill``: the kernel has returned ``EINVAL`` on the cgroup-wide
-kill while per-PID signal delivery still works.
+``Restart=always``.  Per-PID SIGKILLs over ``cgroup.procs`` are used instead of
+writing ``1`` to ``cgroup.kill``: the kernel has returned ``EINVAL`` on the
+cgroup-wide kill while per-PID signal delivery still works.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -36,23 +35,19 @@ def _read_cgroup_pids(cgroup_path: str) -> list[int]:
         return []
     pids: list[int] = []
     for line in raw.splitlines():
-        try:
+        with contextlib.suppress(ValueError):
             pids.append(int(line.strip()))
-        except ValueError:
-            continue
     return pids
 
 
 def reap_cgroup(cgroup_path: str | None = None) -> int:
     """SIGKILL every PID in the cgroup other than the caller. Returns the count killed."""
-    if cgroup_path is None:
-        cgroup_path = _own_cgroup_path()
+    cgroup_path = _own_cgroup_path() if cgroup_path is None else cgroup_path
     if not cgroup_path:
         return 0
-    own = os.getpid()
     killed = 0
     for pid in _read_cgroup_pids(cgroup_path):
-        if pid == own:
+        if pid == os.getpid():
             continue
         try:
             os.kill(pid, signal.SIGKILL)  # windows-footgun: ok — Linux-only (reads /proc, /sys/fs/cgroup; runs from a systemd unit)

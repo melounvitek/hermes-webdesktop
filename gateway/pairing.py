@@ -1,8 +1,6 @@
-"""
-DM Pairing System
+"""DM pairing: code-based approval of new users on messaging platforms.
 
-Code-based approval flow for authorizing new users on messaging platforms:
-unknown users receive a one-time pairing code that the bot owner approves via
+Unknown users receive a one-time pairing code that the bot owner approves via
 the CLI, instead of maintaining static user-ID allowlists.
 
 Security properties (OWASP + NIST SP 800-63-4): 8-char codes from a 32-char
@@ -47,30 +45,23 @@ LOCKOUT_SECONDS = 3600              # Lockout duration after too many failures
 MAX_PENDING_PER_PLATFORM = 3        # Max pending codes per platform
 MAX_FAILED_ATTEMPTS = 5             # Failed approvals before lockout
 
-# Default (non-profile-scoped) pairing directory. Deliberately ``None``: the
-# long-lived gateway imports this module at boot, and an eagerly computed path
-# would freeze whatever HERMES_HOME/profile context existed then, ignoring later
-# context-local overrides (hermes_constants.set_hermes_home_override) -- so the
-# gateway and the short-lived ``hermes pairing`` CLI ended up writing different
-# directories. ``_default_pairing_dir()`` resolves fresh on every call; tests
-# patch this attribute to a concrete path (``patch("gateway.pairing.PAIRING_DIR", tmp)``)
-# and a non-``None`` value takes precedence.
+# Default pairing directory override. Deliberately ``None``: an eagerly computed
+# path would freeze the HERMES_HOME/profile context at gateway boot, ignoring later
+# context-local overrides, so the gateway and ``hermes pairing`` CLI wrote different
+# directories. ``_default_pairing_dir()`` resolves fresh per call; tests patch this.
 PAIRING_DIR = None
 
 
 def _default_pairing_dir() -> Path:
-    """Resolve the default pairing directory fresh (see ``PAIRING_DIR``)."""
     if PAIRING_DIR is not None:
         return PAIRING_DIR
     return get_hermes_dir("platforms/pairing", "pairing")
 
 
-# Platform value -> per-platform allowlist env var. When an operator already
-# runs an allowlist for a platform, approving a pairing code also writes the
-# user into it (and revoking removes them), so the operator's list stays the
-# single visible source of truth instead of drifting from an opaque
-# approved.json. Platforms absent here (or with no allowlist configured) keep
-# the pairing store as the sole grant record, honored by the authz union.
+# Platform value -> allowlist env var. Approving a code also writes the user into
+# an already-configured allowlist (revoke removes them) so the operator's list stays
+# the visible source of truth. Platforms absent here (or with no allowlist
+# configured) keep the pairing store as the sole grant record (authz union).
 _PLATFORM_ALLOWLIST_ENV = {
     "telegram": "TELEGRAM_ALLOWED_USERS",
     "discord": "DISCORD_ALLOWED_USERS",
@@ -99,14 +90,10 @@ def _allowlist_env_for_platform(platform: str) -> Optional[str]:
     env_var = _PLATFORM_ALLOWLIST_ENV.get(platform)
     if env_var:
         return env_var
-    try:
+    with contextlib.suppress(Exception):
         from gateway.platform_registry import platform_registry
 
-        entry = platform_registry.get(platform)
-        if entry and entry.allowed_users_env:
-            return entry.allowed_users_env
-    except Exception:
-        pass
+        return platform_registry.get(platform).allowed_users_env or None
     return None
 
 
@@ -128,11 +115,10 @@ def _normalize_user_id(platform: str, user_id: str) -> str:
 
 
 def _user_id_aliases(platform: str, user_id: str) -> set[str]:
-    """Return all known equivalent user IDs for auth / allowlist matching."""
+    """All known equivalent user IDs for auth / allowlist matching."""
     raw_user_id = str(user_id or "").strip()
     if not raw_user_id:
         return set()
-
     aliases = {raw_user_id, _normalize_user_id(platform, raw_user_id)}
     if _platform_uses_whatsapp_identity(platform):
         aliases.update(expand_whatsapp_aliases(raw_user_id))
@@ -141,48 +127,50 @@ def _user_id_aliases(platform: str, user_id: str) -> set[str]:
 
 
 def _user_ids_match(platform: str, left: str, right: str) -> bool:
-    """Return True when two user IDs represent the same principal."""
+    """True when two user IDs represent the same principal."""
     left_aliases = _user_id_aliases(platform, left)
-    right_aliases = _user_id_aliases(platform, right)
-    return bool(left_aliases and right_aliases and (left_aliases & right_aliases))
+    return bool(left_aliases and left_aliases & _user_id_aliases(platform, right))
+
+
+def _matching_ids(platform: str, approved: dict, user_id: str) -> list:
+    return [uid for uid in approved if _user_ids_match(platform, uid, user_id)]
 
 
 def _read_allowlist_env(env_var: str) -> str:
     """Read a platform allowlist env var through the profile secret scope.
 
-    Under multiplexing the process env may hold ANOTHER profile's allowlist
-    (first-writer-wins YAML→env bridges), so a scoped miss must return empty
-    rather than borrow the process value. Unscoped callers (single-profile
-    CLI / admin endpoints) keep the legacy ``os.getenv`` read. Writes go
-    through ``hermes_cli.config.save_env_value`` / ``remove_env_value``, which
-    target the active profile's ``.env`` and, under multiplexing, publish into
-    the installed scope mapping rather than the shared ``os.environ``.
+    Under multiplexing the process env may hold ANOTHER profile's allowlist, so a
+    scoped miss must return empty rather than borrow it. Unscoped callers keep the
+    legacy ``os.getenv`` read. Writes go through ``save_env_value``/``remove_env_value``,
+    which target the active profile's ``.env`` / installed scope, not ``os.environ``.
     """
-    try:
+    with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
 
         try:
             return (get_secret(env_var) or "").strip()
         except UnscopedSecretError:
             pass
-    except Exception:
-        pass
     return (os.getenv(env_var) or "").strip()
 
 
 def _configured_allowlist(platform: str):
-    """Return ``(env_var, ids)`` for a platform whose allowlist is configured, else None.
+    """``(env_var, ids)`` for a platform whose allowlist is configured, else None.
 
     An unconfigured allowlist means an open gateway: the pairing store stays the
     sole grant record and we must never lock the gateway by materializing one.
     """
     env_var = _allowlist_env_for_platform(platform)
-    if not env_var:
-        return None
-    current = _read_allowlist_env(env_var)
-    if not current:
-        return None
-    return env_var, _split_allowlist(current)
+    current = _read_allowlist_env(env_var) if env_var else ""
+    return (env_var, _split_allowlist(current)) if current else None
+
+
+def _write_allowlist_env(env_var: str, ids: list) -> None:
+    """Best-effort persist (empty list removes the key); the pairing store grant still authorizes via the union."""
+    with contextlib.suppress(Exception):
+        from hermes_cli.config import save_env_value, remove_env_value
+
+        save_env_value(env_var, ",".join(ids)) if ids else remove_env_value(env_var)
 
 
 def _sync_allowlist_add(platform: str, user_id: str) -> None:
@@ -192,31 +180,22 @@ def _sync_allowlist_add(platform: str, user_id: str) -> None:
         return
     env_var, ids = configured
     if "*" in ids or str(user_id) in ids:
-        return  # Already covered.
-    ids.append(str(user_id))
-    try:
-        from hermes_cli.config import save_env_value
-
-        save_env_value(env_var, ",".join(ids))
-    except Exception:
-        # Best-effort: the pairing store grant still authorizes via the union.
-        pass
+        return
+    _write_allowlist_env(env_var, [*ids, str(user_id)])
 
 
 def _iter_live_gateway_adapters():
     """Yield adapters from the in-process GatewayRunner, if one is running."""
-    try:
+    runner = None
+    with contextlib.suppress(Exception):
         from gateway.run import _gateway_runner_ref
 
         runner = _gateway_runner_ref()
-    except Exception:
-        return
     if runner is None:
         return
-    for adapter in (getattr(runner, "adapters", None) or {}).values():
-        if adapter is not None:
-            yield adapter
-    for mapping in (getattr(runner, "_profile_adapters", None) or {}).values():
+    mappings = [getattr(runner, "adapters", None) or {}]
+    mappings.extend((getattr(runner, "_profile_adapters", None) or {}).values())
+    for mapping in mappings:
         for adapter in (mapping or {}).values():
             if adapter is not None:
                 yield adapter
@@ -232,25 +211,20 @@ def _adapter_platform_name(adapter) -> str:
 def _purge_allowlist_entries(entries, platform: str, user_id: str):
     """Drop alias-equivalent allowlist entries while preserving ``*``."""
     def keep(entry) -> bool:
-        entry = str(entry)
-        return entry.strip() == "*" or not _user_ids_match(platform, entry, str(user_id))
+        return str(entry).strip() == "*" or not _user_ids_match(platform, str(entry), str(user_id))
 
     if isinstance(entries, str):
-        return ",".join(part for part in _split_allowlist(entries) if keep(part))
+        return ",".join(filter(keep, _split_allowlist(entries)))
     if isinstance(entries, (set, frozenset)):
-        return {entry for entry in entries if keep(entry)}
+        return set(filter(keep, entries))
     if isinstance(entries, (list, tuple)):
-        return [entry for entry in entries if keep(entry)]
+        return list(filter(keep, entries))
     return entries
 
 
 def _sync_live_adapter_allowlist_remove(platform: str, user_id: str) -> None:
-    """Clear revoked principals from in-process adapter allowlist snapshots.
-
-    Adapters snapshot ``_allow_from`` at construction; when the revoked
-    principal was the sole entry the env key is removed entirely, so intake
-    must not keep authorizing from the stale snapshot until restart.
-    """
+    """Clear revoked principals from in-process adapter ``_allow_from`` snapshots,
+    so intake does not keep authorizing from a stale snapshot until restart."""
     platform_name = (platform or "").strip().lower()
     if not platform_name or not str(user_id or "").strip():
         return
@@ -273,10 +247,8 @@ def _sync_live_adapter_allowlist_remove(platform: str, user_id: str) -> None:
 def _sync_allowlist_remove(platform: str, user_id: str) -> None:
     """Remove ``user_id`` (and WhatsApp alias equivalents) from the allowlist.
 
-    Approve mirrors a normalized phone while revoke is often given a JID or
-    device-suffix form, so matching uses alias rules -- exact-string delete
-    would leave the sender authorized. Also clears in-process adapter
-    snapshots so sole-entry revocation works without a gateway restart.
+    Approve mirrors a normalized phone while revoke is often given a JID/device
+    form, so matching uses alias rules -- exact delete would leave the sender authorized.
     """
     configured = _configured_allowlist(platform)
     if configured is None:
@@ -285,63 +257,67 @@ def _sync_allowlist_remove(platform: str, user_id: str) -> None:
     remaining = _purge_allowlist_entries(ids, platform, user_id)
     if len(remaining) == len(ids):
         return  # Not present.
-    try:
-        from hermes_cli.config import save_env_value, remove_env_value
-
-        if remaining:
-            save_env_value(env_var, ",".join(remaining))
-        else:
-            remove_env_value(env_var)
-    except Exception:
-        pass
+    _write_allowlist_env(env_var, remaining)
     _sync_live_adapter_allowlist_remove(platform, user_id)
 
 
 def _load_json_file(path: Path) -> dict:
-    if path.exists():
+    """Read a JSON object; {} when missing, malformed, unreadable, or not a dict.
+
+    PermissionError is logged loudly: a 0600 file owned by another uid (Docker:
+    ``docker exec`` as root wrote it, the gosu-dropped gateway can't read it)
+    would otherwise silently leave the user unauthorized.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except PermissionError as e:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+            st = path.stat()
+            owner_info = f"owner_uid={st.st_uid} mode={oct(st.st_mode)[-4:]}"
+        except OSError:
+            owner_info = "<stat failed>"
+        euid = os.geteuid() if hasattr(os, "geteuid") else "n/a"  # no geteuid on Windows
+        logger.warning(
+            "Pairing file %s exists but is not readable as uid=%s (%s; %s). "
+            "If you ran `docker exec <container> hermes pairing approve ...` as root, "
+            "re-run with `docker exec -u hermes <container> ...` and "
+            "chown the existing file to the hermes user, or restart the "
+            "container so the entrypoint can fix ownership.",
+            path, euid, owner_info, e,
+        )
+        return {}
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
-def _merge_pairing_dir(active_dir: Path, alternate_dir: Path) -> None:
+def _save_json_file(path: Path, data: dict) -> None:
+    _secure_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _migrate_split_pairing_dirs(*, home: Optional[Path] = None, active: Optional[Path] = None) -> None:
     """Merge split legacy (``pairing``) / new (``platforms/pairing``) data into the active dir.
 
-    If both exist, approved users in the inactive location must not be
-    silently ignored (they would be asked for a fresh code).
+    If both exist, approved users in the inactive location must not be silently
+    ignored (they would be asked for a fresh code). Active data wins on key conflict.
     """
-    if not alternate_dir.exists() or active_dir.resolve() == alternate_dir.resolve():
-        return
-    active_dir.mkdir(parents=True, exist_ok=True)
-    for src in alternate_dir.glob("*.json"):
-        if not src.is_file():
-            continue
-        dest = active_dir / src.name
-        merged = _load_json_file(src)
-        if not merged:
-            continue
-        current = _load_json_file(dest)
-        before = dict(current)
-        # Active data wins on key conflict; otherwise union the inactive data.
-        merged.update(current)
-        if merged != before:
-            _secure_write(dest, json.dumps(merged, indent=2, ensure_ascii=False))
-
-
-def _migrate_split_pairing_dirs(
-    *,
-    home: Optional[Path] = None,
-    active: Optional[Path] = None,
-) -> None:
     home = home or get_hermes_home()
     old_dir = home / "pairing"
-    new_dir = home / "platforms" / "pairing"
     active = active if active is not None else _default_pairing_dir()
-    alternate = new_dir if active.resolve() == old_dir.resolve() else old_dir
-    _merge_pairing_dir(active, alternate)
+    alternate = home / "platforms" / "pairing" if active.resolve() == old_dir.resolve() else old_dir
+    if not alternate.exists() or active.resolve() == alternate.resolve():
+        return
+    active.mkdir(parents=True, exist_ok=True)
+    for src in alternate.glob("*.json"):
+        merged = _load_json_file(src) if src.is_file() else {}
+        if not merged:
+            continue
+        current = _load_json_file(active / src.name)
+        merged.update(current)
+        if merged != current:
+            _save_json_file(active / src.name, merged)
 
 
 def _secure_write(path: Path, data: str) -> None:
@@ -362,23 +338,20 @@ def _secure_write(path: Path, data: str) -> None:
         raise
 
 
+def _is_hashed_entry(entry) -> bool:
+    return isinstance(entry, dict) and "salt" in entry and "hash" in entry
+
+
 class PairingStore:
-    """
-    Manages pairing codes and approved user lists.
+    """Pairing codes and approved user lists.
 
-    Data files per platform: ``{platform}-pending.json``,
-    ``{platform}-approved.json``, plus shared ``_rate_limits.json``.
-
-    With ``profile="<name>"`` storage resolves from that profile's own
-    HERMES_HOME with the same legacy/consolidated layout rules as
-    ``hermes -p <name> pairing ...``, so multiplex gateways and profile-scoped
-    CLI approvals share one whitelist. Without a profile, storage is the global
-    pairing directory for the current HERMES_HOME.
+    Files per platform: ``{platform}-pending.json``, ``{platform}-approved.json``,
+    plus shared ``_rate_limits.json``. With ``profile="<name>"`` storage resolves from
+    that profile's HERMES_HOME exactly as ``hermes -p <name> pairing ...`` does, so
+    multiplex gateways and profile-scoped CLI approvals share one whitelist.
     """
 
     def __init__(self, profile: Optional[str] = None):
-        # Resolved lazily: tests use a temp HERMES_HOME and may construct the
-        # store before the env is set.
         if profile:
             root = get_default_hermes_root()
             profile_home = root if profile == "default" else root / "profiles" / profile
@@ -387,11 +360,9 @@ class PairingStore:
             profile_home = None
             self._dir = _default_pairing_dir()
         self._dir.mkdir(parents=True, exist_ok=True)
-        # Merge the alternate old/new layout so upgrades cannot split approvals;
-        # a profile store must resolve exactly as ``hermes -p <profile>`` does.
+        # Merge the alternate old/new layout so upgrades cannot split approvals.
         _migrate_split_pairing_dirs(home=profile_home, active=self._dir)
-        # Protects all read-modify-write cycles: platform adapters run
-        # concurrently in threads sharing one PairingStore.
+        # Adapters run concurrently in threads sharing one store.
         self._lock = threading.RLock()
         self._profile = profile  # for diagnostics / log lines
 
@@ -409,51 +380,20 @@ class PairingStore:
     def _rate_limit_path(self) -> Path:
         return self._dir / "_rate_limits.json"
 
-    def _load_json(self, path: Path) -> dict:
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except PermissionError as e:
-                # Loud warning: a 0600 file owned by another uid (Docker:
-                # `docker exec` as root writes it, the gosu-dropped gateway
-                # can't read it) would otherwise be swallowed by the OSError
-                # branch and silently leave the user unauthorized.
-                try:
-                    st = path.stat()
-                    owner_info = f"owner_uid={st.st_uid} mode={oct(st.st_mode)[-4:]}"
-                except OSError:
-                    owner_info = "<stat failed>"
-                euid = os.geteuid() if hasattr(os, "geteuid") else "n/a"  # no geteuid on Windows
-                logger.warning(
-                    "Pairing file %s exists but is not readable as uid=%s (%s; %s). "
-                    "If you ran `docker exec <container> hermes pairing approve ...` as root, "
-                    "re-run with `docker exec -u hermes <container> ...` and "
-                    "chown the existing file to the hermes user, or restart the "
-                    "container so the entrypoint can fix ownership.",
-                    path, euid, owner_info, e,
-                )
-                return {}
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
-
-    def _save_json(self, path: Path, data: dict) -> None:
-        _secure_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+    _load_json = staticmethod(_load_json_file)
+    _save_json = staticmethod(_save_json_file)
 
     # ----- Approved users -----
 
     def is_approved(self, platform: str, user_id: str) -> bool:
         """Check if a user is approved (paired) on a platform."""
-        approved = self._load_json(self._approved_path(platform))
-        return any(_user_ids_match(platform, uid, user_id) for uid in approved)
+        return bool(_matching_ids(platform, self._load_json(self._approved_path(platform)), user_id))
 
     def list_approved(self, platform: str = None) -> list:
         """List approved users, optionally filtered by platform."""
         results = []
-        platforms = [platform] if platform else self._all_platforms("approved")
-        for p in platforms:
-            approved = self._load_json(self._approved_path(p))
-            for uid, info in approved.items():
+        for p in [platform] if platform else self._all_platforms("approved"):
+            for uid, info in self._load_json(self._approved_path(p)).items():
                 results.append({"platform": p, "user_id": uid, **info})
         return results
 
@@ -461,11 +401,8 @@ class PairingStore:
         """Add a user to the approved list. Must be called under self._lock."""
         approved = self._load_json(self._approved_path(platform))
         normalized_user_id = _normalize_user_id(platform, user_id)
-        for approved_user_id in [
-            uid for uid in approved if _user_ids_match(platform, uid, normalized_user_id)
-        ]:
+        for approved_user_id in _matching_ids(platform, approved, normalized_user_id):
             del approved[approved_user_id]
-
         approved[normalized_user_id] = {
             "user_name": user_name,
             "approved_at": time.time(),
@@ -479,9 +416,7 @@ class PairingStore:
         path = self._approved_path(platform)
         with self._lock:
             approved = self._load_json(path)
-            matching_ids = [
-                uid for uid in approved if _user_ids_match(platform, uid, user_id)
-            ]
+            matching_ids = _matching_ids(platform, approved, user_id)
             if not matching_ids:
                 return False
             for approved_user_id in matching_ids:
@@ -495,34 +430,22 @@ class PairingStore:
 
     @staticmethod
     def _hash_code(code: str, salt: bytes) -> str:
-        """Hash a pairing code with the given salt using SHA-256."""
         return hashlib.sha256(salt + code.encode("utf-8")).hexdigest()
 
-    def _finish_approval(
-        self, platform: str, pending: dict, matched_key: str, matched_entry: dict
-    ) -> dict:
+    def _finish_approval(self, platform: str, pending: dict, matched_key: str, matched_entry: dict) -> dict:
         """Remove a pending request and approve its user. Must hold self._lock."""
         del pending[matched_key]
         self._save_json(self._pending_path(platform), pending)
 
-        # A successful approval proves the requester is legitimate, so the
-        # brute-force streak must not carry over: the counter persists in
-        # _rate_limits.json and would otherwise accumulate isolated typos
-        # until a single fresh typo trips a spurious lockout.
+        # A successful approval proves legitimacy, so the persisted brute-force streak
+        # must not carry over (isolated typos would accumulate into a spurious lockout).
         self._reset_failed_attempts(platform)
 
-        self._approve_user(
-            platform, matched_entry["user_id"], matched_entry.get("user_name", "")
-        )
+        result = {"user_id": matched_entry["user_id"], "user_name": matched_entry.get("user_name", "")}
+        self._approve_user(platform, result["user_id"], result["user_name"])
+        return result
 
-        return {
-            "user_id": matched_entry["user_id"],
-            "user_name": matched_entry.get("user_name", ""),
-        }
-
-    def generate_code(
-        self, platform: str, user_id: str, user_name: str = ""
-    ) -> Optional[str]:
+    def generate_code(self, platform: str, user_id: str, user_name: str = "") -> Optional[str]:
         """Generate a pairing code for a new user.
 
         Returns None if the user is rate-limited, the platform hit
@@ -533,9 +456,7 @@ class PairingStore:
             self._cleanup_expired(platform)
             normalized_user_id = _normalize_user_id(platform, user_id)
 
-            if self._is_locked_out(platform):
-                return None
-            if self._is_rate_limited(platform, user_id):
+            if self._is_locked_out(platform) or self._is_rate_limited(platform, user_id):
                 return None
             pending = self._load_json(self._pending_path(platform))
             if len(pending) >= MAX_PENDING_PER_PLATFORM:
@@ -556,30 +477,24 @@ class PairingStore:
             return code
 
     def approve_code(self, platform: str, code: str) -> Optional[dict]:
-        """Approve a pairing code. Adds the user to the approved list.
+        """Approve a pairing code and add its user to the approved list.
 
-        Returns ``{user_id, user_name}`` on success, ``None`` if the code is
-        invalid/expired OR the platform is locked out after
-        ``MAX_FAILED_ATTEMPTS`` failed approvals (disambiguate with
-        ``_is_locked_out``). The code is hashed with each entry's salt and
-        compared in constant time; legacy plaintext-key entries are ignored
-        and pruned at TTL by ``_cleanup_expired``.
+        Returns ``{user_id, user_name}``, or ``None`` if the code is invalid/expired OR
+        the platform is locked out (disambiguate with ``_is_locked_out``). Constant-time
+        salted-hash compare; legacy plaintext entries are ignored and pruned at TTL.
         """
         with self._lock:
             self._cleanup_expired(platform)
             code = code.upper().strip()
 
-            # Must run before the pending lookup, or an already-issued valid
-            # code would still be accepted during lockout, nullifying the
-            # brute-force protection.
+            # Before the lookup, or an already-issued valid code would bypass lockout.
             if self._is_locked_out(platform):
                 return None
 
             pending = self._load_json(self._pending_path(platform))
-            # Skip legacy/malformed entries rather than KeyError so an in-place
-            # upgrade over an existing pending.json doesn't crash.
+            # Skip legacy/malformed entries so an in-place upgrade doesn't crash.
             for entry_id, entry in pending.items():
-                if not isinstance(entry, dict) or "salt" not in entry or "hash" not in entry:
+                if not _is_hashed_entry(entry):
                     continue
                 try:
                     salt = bytes.fromhex(entry["salt"])
@@ -593,27 +508,18 @@ class PairingStore:
 
     @staticmethod
     def looks_like_request_id(value: str) -> bool:
-        """True when ``value`` has the shape of a ``list_pending`` request id.
-
-        Request ids are ``secrets.token_hex(8)`` (16 hex chars); pairing codes
-        are 8 chars from an uppercase alphabet, so the shapes cannot collide
-        and callers accepting either can dispatch on this.
-        """
+        """True when ``value`` is shaped like a ``list_pending`` request id (16 hex chars);
+        pairing codes are 8 uppercase chars, so callers accepting either can dispatch on this."""
         value = str(value or "").strip()
         return len(value) == 16 and all(c in "0123456789abcdefABCDEF" for c in value)
 
     def approve_request(self, platform: str, request_id: str) -> Optional[dict]:
-        """Approve a pending request by its server-side request id.
+        """Approve a pending request by its server-side request id (admin surfaces that
+        must never reveal the DM'd code). Returns ``{user_id, user_name}`` or ``None``.
 
-        Grant path for authenticated admin surfaces (``hermes pairing list``,
-        dashboard/desktop buttons) that must never reveal the DM'd code.
-        Returns ``{user_id, user_name}`` or ``None`` for an unknown/expired id.
-
-        Unlike :meth:`approve_code` this neither counts toward nor is gated by
-        the brute-force lockout: a request id is only obtainable by an admin
-        already authenticated to this store, so a stale id means "the row you
-        clicked expired", not an attack -- and counting it would let a few GUI
-        clicks lock the operator out of the CLI's code path.
+        Neither counts toward nor is gated by the brute-force lockout: a request id is only
+        obtainable by an authenticated admin, so a stale id is "the row expired", not an
+        attack -- counting it would let a few GUI clicks lock the operator out.
         """
         with self._lock:
             self._cleanup_expired(platform)
@@ -623,35 +529,24 @@ class PairingStore:
 
             pending = self._load_json(self._pending_path(platform))
             for entry_id, entry in pending.items():
-                if not isinstance(entry, dict) or "salt" not in entry or "hash" not in entry:
-                    continue
-                if secrets.compare_digest(str(entry_id).lower(), request_id):
+                if _is_hashed_entry(entry) and secrets.compare_digest(str(entry_id).lower(), request_id):
                     return self._finish_approval(platform, pending, entry_id, entry)
-
             return None
 
     def list_pending(self, platform: str = None) -> list:
-        """List pending pairing requests, optionally filtered by platform.
-
-        Codes are hashed and never returned; each entry exposes a server-side
-        ``request_id`` for :meth:`approve_request`. Legacy pre-hash entries
-        report an empty ``request_id`` and age out at TTL.
-        """
+        """List pending requests (codes are never returned; each exposes a ``request_id``
+        for :meth:`approve_request`; legacy pre-hash entries report an empty id)."""
         results = []
         with self._lock:
-            platforms = [platform] if platform else self._all_platforms("pending")
-            for p in platforms:
+            for p in [platform] if platform else self._all_platforms("pending"):
                 self._cleanup_expired(p)
-                pending = self._load_json(self._pending_path(p))
-                for entry_id, info in pending.items():
+                for entry_id, info in self._load_json(self._pending_path(p)).items():
                     if not isinstance(info, dict):
                         continue
                     created_at = info.get("created_at")
                     if not isinstance(created_at, (int, float)):
                         continue
-                    is_modern = isinstance(info.get("hash"), str) and isinstance(
-                        info.get("salt"), str
-                    )
+                    is_modern = isinstance(info.get("hash"), str) and isinstance(info.get("salt"), str)
                     results.append({
                         "platform": p,
                         "request_id": str(entry_id) if is_modern else "",
@@ -665,17 +560,15 @@ class PairingStore:
         """Clear all pending requests. Returns count removed."""
         with self._lock:
             count = 0
-            platforms = [platform] if platform else self._all_platforms("pending")
-            for p in platforms:
-                pending = self._load_json(self._pending_path(p))
-                count += len(pending)
+            for p in [platform] if platform else self._all_platforms("pending"):
+                count += len(self._load_json(self._pending_path(p)))
                 self._save_json(self._pending_path(p), {})
         return count
 
     # ----- Rate limiting and lockout -----
 
     def _is_rate_limited(self, platform: str, user_id: str) -> bool:
-        """Check if a user (under any alias) has requested a code too recently."""
+        """Whether a user (under any alias) has requested a code too recently."""
         limits = self._load_json(self._rate_limit_path())
         return any(
             (time.time() - limits.get(f"{platform}:{alias}", 0)) < RATE_LIMIT_SECONDS
@@ -683,7 +576,6 @@ class PairingStore:
         )
 
     def _record_rate_limit(self, platform: str, user_id: str) -> None:
-        """Record the time of a pairing request for rate limiting."""
         limits = self._load_json(self._rate_limit_path())
         now = time.time()
         for alias in _user_id_aliases(platform, user_id):
@@ -691,19 +583,18 @@ class PairingStore:
         self._save_json(self._rate_limit_path(), limits)
 
     def _is_locked_out(self, platform: str) -> bool:
-        """Check if a platform is in lockout due to failed approval attempts."""
         limits = self._load_json(self._rate_limit_path())
         return time.time() < limits.get(f"_lockout:{platform}", 0)
 
     def _record_failed_attempt(self, platform: str) -> None:
-        """Record a failed approval attempt. Triggers lockout after MAX_FAILED_ATTEMPTS."""
+        """Record a failed approval attempt; triggers lockout after MAX_FAILED_ATTEMPTS."""
         limits = self._load_json(self._rate_limit_path())
         fail_key = f"_failures:{platform}"
         fails = limits.get(fail_key, 0) + 1
         limits[fail_key] = fails
         if fails >= MAX_FAILED_ATTEMPTS:
             limits[f"_lockout:{platform}"] = time.time() + LOCKOUT_SECONDS
-            limits[fail_key] = 0  # Reset counter
+            limits[fail_key] = 0
             print(f"[pairing] Platform {platform} locked out for {LOCKOUT_SECONDS}s "
                   f"after {MAX_FAILED_ATTEMPTS} failed attempts", flush=True)
         self._save_json(self._rate_limit_path(), limits)
@@ -730,12 +621,10 @@ class PairingStore:
             or (now - info["created_at"]) > CODE_TTL_SECONDS
         ]
         if expired:
-            for entry_id in expired:
-                del pending[entry_id]
-            self._save_json(path, pending)
+            self._save_json(path, {k: v for k, v in pending.items() if k not in expired})
 
     def _all_platforms(self, suffix: str) -> list:
-        """List all platforms that have data files of a given suffix."""
+        """Platforms that have a ``-<suffix>.json`` data file (``_``-prefixed files are shared state)."""
         tail = f"-{suffix}.json"
         platforms = [f.name.replace(tail, "") for f in self._dir.iterdir() if f.name.endswith(tail)]
         return [p for p in platforms if not p.startswith("_")]

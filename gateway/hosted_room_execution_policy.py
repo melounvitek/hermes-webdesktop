@@ -14,13 +14,10 @@ POLICY_VERSION = 1
 MAX_POLICY_TOOLSETS = 128
 MAX_POLICY_ITERATIONS = (1 << 53) - 1
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-_POLICY_FIELDS = {
-    "version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest",
-}
+_POLICY_FIELDS = {"version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
 
 
-class RoomExecutionPolicyError(ValueError):
-    """A RoomLink execution policy is malformed or no longer current."""
+class RoomExecutionPolicyError(ValueError): """A RoomLink execution policy is malformed or no longer current."""
 
 
 def _policy_digest(unsigned: Mapping[str, Any]) -> str:
@@ -67,15 +64,11 @@ class RoomExecutionPolicy:
         if (
             isinstance(max_iterations, bool)
             or not isinstance(max_iterations, int)
-            or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS
-        ):
+            or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS):
             raise RoomExecutionPolicyError("max_iterations is invalid")
         unsigned = {
-            "version": POLICY_VERSION,
-            "target_profile": target_profile,
-            "enabled_toolsets": list(toolsets),
-            "approval_mode": approval_mode,
-            "max_iterations": max_iterations,
+            "version": POLICY_VERSION, "target_profile": target_profile, "enabled_toolsets": list(toolsets),
+            "approval_mode": approval_mode, "max_iterations": max_iterations,
         }
         supplied = str(value["policy_digest"] or "").strip().lower()
         if supplied != _policy_digest(unsigned):
@@ -103,12 +96,9 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
     agent = config.get("agent") if isinstance(config.get("agent"), Mapping) else {}
     approvals = config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
     unsigned = {
-        "version": POLICY_VERSION,
-        "target_profile": _identifier(target_profile, field="target_profile"),
+        "version": POLICY_VERSION, "target_profile": _identifier(target_profile, field="target_profile"),
         "enabled_toolsets": toolsets,
-        "approval_mode": (
-            "off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))
-        ),
+        "approval_mode": ("off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))),
         "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS),
     }
     value = {**unsigned, "policy_digest": _policy_digest(unsigned)}
@@ -131,12 +121,7 @@ def current_room_execution_policy() -> RoomExecutionPolicy | None:
 
 
 __all__ = [
-    "MAX_POLICY_ITERATIONS",
-    "POLICY_VERSION",
-    "RoomExecutionPolicy",
-    "RoomExecutionPolicyError",
-    "bind_room_execution_policy",
-    "current_room_execution_policy",
-    "execution_policy_mapping",
+    "MAX_POLICY_ITERATIONS", "POLICY_VERSION", "RoomExecutionPolicy", "RoomExecutionPolicyError",
+    "bind_room_execution_policy", "current_room_execution_policy", "execution_policy_mapping",
     "reset_room_execution_policy",
 ]
