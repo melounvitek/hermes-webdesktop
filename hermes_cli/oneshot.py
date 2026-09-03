@@ -452,7 +452,4 @@ def _oneshot_clarify_callback(question: str, choices=None, multi_select=False) -
             f"[oneshot mode: no user available. Pick the best {what} from "
             f"{choices} using your own judgment and continue.]"
         )
-    return (
-        "[oneshot mode: no user available. Make the most reasonable "
-        "assumption you can and continue.]"
-    )
+    return "[oneshot mode: no user available. Make the most reasonable assumption you can and continue.]"

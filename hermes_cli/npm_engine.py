@@ -129,13 +129,7 @@ def _upgrade_env() -> dict[str, str]:
     return env
 
 
-def upgrade_managed_npm(
-    npm: str,
-    npm_range: str,
-    *,
-    prefix: Path,
-    quiet: bool = False,
-) -> bool:
+def upgrade_managed_npm(npm: str, npm_range: str, *, prefix: Path, quiet: bool = False) -> bool:
     """Upgrade the managed npm at *npm* in place to satisfy *npm_range*.
 
     ``--prefix`` targets the managed tree explicitly: a managed install writes ``prefix=~/.local``
@@ -235,12 +229,7 @@ def _provision_managed_npm(npm_range: str | None, *, quiet: bool = False) -> str
     return managed_npm
 
 
-def maybe_repair_npm_engine(
-    npm: str | None,
-    output: str,
-    *,
-    quiet: bool = False,
-) -> str | None:
+def maybe_repair_npm_engine(npm: str | None, output: str, *, quiet: bool = False) -> str | None:
     """Repair an ``EBADENGINE`` failure, never touching a foreign toolchain.
 
     Truthy exactly when the caller should retry once (with the returned npm path).

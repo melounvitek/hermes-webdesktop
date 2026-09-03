@@ -278,9 +278,7 @@ def _update_pet_config(when_slug: str | None = None, **values) -> bool:
 
     cfg = load_config()
     pet = cfg.setdefault("display", {}).setdefault("pet", {})
-    if when_slug is not None and (
-        not isinstance(pet, dict) or str(pet.get("slug", "") or "") != when_slug
-    ):
+    if when_slug is not None and (not isinstance(pet, dict) or str(pet.get("slug", "") or "") != when_slug):
         return False
     pet.update(values)
     save_config(cfg)

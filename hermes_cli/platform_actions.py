@@ -177,18 +177,14 @@ class PlatformActions:
 
     # -- v1 verbs -----------------------------------------------------------
 
-    async def add_reaction(
-        self, platform: str, chat_id: str, message_id: str, emoji: str
-    ) -> Dict[str, Any]:
+    async def add_reaction(self, platform: str, chat_id: str, message_id: str, emoji: str) -> Dict[str, Any]:
         """Add/set an emoji reaction on a platform message."""
         return await self._run(
             "add_reaction", platform, chat_id, message_id, emoji,
             chat_id=chat_id, message_id=message_id, emoji=emoji,
         )
 
-    async def set_thread_title(
-        self, platform: str, chat_id: str, thread_id: str, title: str
-    ) -> Dict[str, Any]:
+    async def set_thread_title(self, platform: str, chat_id: str, thread_id: str, title: str) -> Dict[str, Any]:
         """Rename a thread / forum topic."""
         return await self._run(
             "set_thread_title", platform, chat_id, thread_id, title,

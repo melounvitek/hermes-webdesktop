@@ -18,9 +18,7 @@ DEFAULT_KEEP_LAST = 2
 MAX_KEEP_LAST = 100
 
 
-def parse_partial_compress_args(
-    raw_args: str,
-) -> Tuple[bool, int, Optional[str]]:
+def parse_partial_compress_args(raw_args: str) -> Tuple[bool, int, Optional[str]]:
     """Parse the argument string after ``/compress`` into ``(partial, keep_last, focus_topic)``.
 
     ``here [N]`` / ``up to here [N]`` / ``--keep N`` / ``-k N`` / ``--keep=N`` select the
