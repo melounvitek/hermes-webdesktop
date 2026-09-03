@@ -124,9 +124,7 @@ def recorded_gateway_home_conflicts(
     ``hermes_home`` return False (they prove nothing; callers pair this with PID + start-time
     guards). A comparison failure returns True: destructive + unprovable ownership => fail closed.
     """
-    if not isinstance(record, dict):
-        return False
-    recorded_home = record.get("hermes_home")
+    recorded_home = record.get("hermes_home") if isinstance(record, dict) else None
     if not isinstance(recorded_home, str) or not recorded_home.strip():
         return False
     try:
@@ -207,13 +205,11 @@ _EPOCH_MIN_PLAUSIBLE = 946684800.0  # 2000-01-01T00:00:00Z
 def normalize_updated_at(value: Any) -> Optional[str]:
     """Coerce a persisted ``updated_at`` value to an RFC3339 string or ``None``.
 
-    ``/api/status`` and ``/health/detailed`` promise ``string | null``, but the file
-    may hold legacy epoch floats, hand edits, or corruption. ``str``: iff fromisoformat
-    parses (trailing ``Z`` tolerated; naive -> UTC). ``int``/``float``: epoch seconds;
-    before 2000-01-01, > 1 day ahead, or non-finite -> None. ``bool`` / other -> None.
+    ``/api/status`` and ``/health/detailed`` promise ``string | null``, but the file may hold
+    legacy epoch floats, hand edits, or corruption. ``str``: iff fromisoformat parses (trailing
+    ``Z`` tolerated; naive -> UTC). ``int``/``float``: epoch seconds; before 2000-01-01, > 1 day
+    ahead, or non-finite -> None. ``bool`` / other -> None.
     """
-    if isinstance(value, bool):
-        return None
     if isinstance(value, str):
         raw = value.strip()
         # Python < 3.11 fromisoformat rejects a trailing 'Z'; tolerate it.
@@ -223,10 +219,8 @@ def normalize_updated_at(value: Any) -> Optional[str]:
             parsed = datetime.fromisoformat(raw)
         except ValueError:
             return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.isoformat()
-    if isinstance(value, (int, float)):
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         seconds = float(value)
         now = datetime.now(timezone.utc).timestamp()
         if not math.isfinite(seconds) or seconds < _EPOCH_MIN_PLAUSIBLE or seconds > now + 86400:
