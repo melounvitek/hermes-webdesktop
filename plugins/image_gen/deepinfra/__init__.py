@@ -19,12 +19,10 @@ from typing import Any, Dict, List, Optional
 
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response
-)
+    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
 from plugins.image_gen._common import (
     StaticImageGenProvider, error_factory, import_openai, load_image_gen_config,
-    prompt_required_error, size_for,
-)
+    prompt_required_error, size_for)
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +105,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
             return fail(
                 "DeepInfra image generation is text-to-image only in this "
                 "backend; image_url and reference_image_urls are unsupported.",
-                "modality_unsupported", prompt=prompt,
-            )
+                "modality_unsupported", prompt=prompt)
         if not prompt:
             return prompt_required_error("deepinfra", aspect)
         api_key = (get_secret("DEEPINFRA_API_KEY", "") or "").strip()
@@ -117,8 +114,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
                 "DEEPINFRA_API_KEY not set. Run `hermes tools` → Image "
                 "Generation → DeepInfra to configure, or `hermes setup` "
                 "to add the key.",
-                "auth_required",
-            )
+                "auth_required")
         di_cfg = load_image_gen_config("deepinfra")
         model_id = _resolve_model(_live_models() or [], di_cfg)
         if not model_id:
@@ -127,8 +123,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
                 "config.yaml under image_gen.deepinfra.model, set "
                 "DEEPINFRA_IMAGE_MODEL, or check connectivity to "
                 "api.deepinfra.com so the live catalog can be fetched.",
-                "no_model_available", prompt=prompt,
-            )
+                "no_model_available", prompt=prompt)
         size = size_for(aspect)
         from hermes_cli.models import deepinfra_base_url
 
@@ -173,8 +168,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
             return fail("DeepInfra response contained neither b64_json nor URL", "empty_response")
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="deepinfra",
-            extra={"size": size},
-        )
+            extra={"size": size})
 
 
 def register(ctx) -> None:

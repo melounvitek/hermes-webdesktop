@@ -20,20 +20,16 @@ import requests
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, success_response
 from plugins.image_gen._common import (
     StaticImageGenProvider, catalog_rows, collect_source_images, error_factory,
-    load_image_gen_config, materialize_image, post_json,
-)
+    load_image_gen_config, materialize_image, post_json)
 from tools.xai_http import (
     build_xai_storage_options, hermes_xai_user_agent, maybe_mark_xai_storage_notice_seen,
-    read_xai_imagine_storage_config, resolve_xai_http_credentials, xai_storage_notice_text,
-)
+    read_xai_imagine_storage_config, resolve_xai_http_credentials, xai_storage_notice_text)
 
 logger = logging.getLogger(__name__)
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "grok-imagine-image": {
-        "display": "Grok Imagine Image",
-        "speed": "~5-10s",
-        "strengths": "Fast, high-quality",
+        "display": "Grok Imagine Image", "speed": "~5-10s", "strengths": "Fast, high-quality"
     },
     "grok-imagine-image-2.0": {
         "display": "Grok Imagine Image 2.0",
@@ -89,8 +85,7 @@ def _fetch_live_models() -> Dict[str, Dict[str, Any]]:
     response = requests.get(
         f"{_base_url(creds)}/image-generation-models",
         headers={"Authorization": f"Bearer {api_key}", "User-Agent": hermes_xai_user_agent()},
-        timeout=_LIVE_TIMEOUT,
-    )
+        timeout=_LIVE_TIMEOUT)
     response.raise_for_status()
     payload = response.json()
     out: Dict[str, Dict[str, Any]] = {}
@@ -246,8 +241,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
         if not api_key:
             return error_factory(provider_name, aspect_ratio)(
                 "No xAI credentials found. Configure xAI OAuth in `hermes model` or set XAI_API_KEY.",
-                "missing_api_key",
-            )
+                "missing_api_key")
 
         model_id, meta = _resolve_model(kwargs.get("model"))
         aspect = resolve_aspect_ratio(aspect_ratio)
@@ -266,8 +260,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
             return edit_fail(
                 f"{field} must be a public HTTPS URL or data URI "
                 "(e.g. the `image`/`public_url` from a prior Imagine result)",
-                "invalid_image_url",
-            )
+                "invalid_image_url")
         is_edit = bool(source_images)
 
         headers = {
@@ -277,8 +270,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
         }
         base_url = _base_url(creds)
         storage_options = build_xai_storage_options(
-            "image_gen", filename_prefix="hermes-xai-image", extension="png",
-        )
+            "image_gen", filename_prefix="hermes-xai-image", extension="png")
         storage_notice = maybe_mark_xai_storage_notice_seen("image_gen")
         storage_cfg = read_xai_imagine_storage_config("image_gen")
 
@@ -290,8 +282,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
                 return edit_fail(f"Could not load source image for editing: {exc}", "io_error", model=model_id)
             payload: Dict[str, Any] = {"model": model_id, "prompt": prompt}
             payload["image" if len(image_fields) == 1 else "images"] = (
-                image_fields[0] if len(image_fields) == 1 else image_fields
-            )
+                image_fields[0] if len(image_fields) == 1 else image_fields)
             endpoint_url = f"{base_url}/images/edits"
         else:
             payload = {
@@ -306,8 +297,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
 
         fail = error_factory(provider_name, aspect, model=model_id, prompt=prompt)
         result, failure = post_json(
-            endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI",
-        )
+            endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI")
         if failure:
             if failure.kind == "http":
                 logger.error("xAI image gen failed (%d): %s", failure.status, failure.message)
@@ -328,8 +318,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
             # materialise locally so downstream consumers get a stable path.
             image_ref, err = materialize_image(
                 first.get("b64_json"), first.get("url"), prefix=f"xai_{model_id}", label="xAI", provider="xai",
-                model=model_id, prompt=prompt, aspect=aspect, log=logger,
-            )
+                model=model_id, prompt=prompt, aspect=aspect, log=logger)
             if err:
                 return err
 
@@ -345,8 +334,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
             extra["usage"] = result["usage"]
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="xai",
-            modality="image" if is_edit else "text", extra=extra,
-        )
+            modality="image" if is_edit else "text", extra=extra)
 
 
 def register(ctx: Any) -> None:

@@ -86,8 +86,7 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
         def _managed_config() -> Optional[Dict[str, Any]]:
             # Keep availability scans off the synchronous OAuth refresh path.
             managed = resolve_managed_tool_gateway(
-                "browser-use", token_reader=None if refresh_token else peek_nous_access_token
-            )
+                "browser-use", token_reader=None if refresh_token else peek_nous_access_token)
             if managed is None:
                 return None
             return {
@@ -111,8 +110,7 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
 
     def _get_config(self) -> Dict[str, Any]:
         from tools.tool_backend_helpers import (
-            NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, selection_error,
-        )
+            NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, selection_error)
 
         config = self._get_config_or_none()
         if config is not None:
@@ -121,15 +119,13 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
         if selected == NOUS_MANAGED_PROVIDER:
             raise ValueError(selection_error(
                 "browser", NOUS_MANAGED_PROVIDER,
-                "the Nous Tool Gateway is not available (not entitled or unreachable)",
-            ))
+                "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         if selected is not None:
             raise ValueError(selection_error("browser", selected, "BROWSER_USE_API_KEY is not set"))
         if managed_nous_tools_enabled():
             raise ValueError(
                 "Browser Use requires either a direct BROWSER_USE_API_KEY "
-                "credential or a managed Browser Use gateway configuration."
-            )
+                "credential or a managed Browser Use gateway configuration.")
         raise ValueError("Browser Use requires a direct BROWSER_USE_API_KEY credential.")
 
     def _headers(self, config: Dict[str, Any]) -> Dict[str, str]:
@@ -149,13 +145,11 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
         # default to a long Browser-Use timeout for a task-scoped browser.
         payload = (
             {"timeout": _DEFAULT_MANAGED_TIMEOUT_MINUTES, "proxyCountryCode": _DEFAULT_MANAGED_PROXY_COUNTRY_CODE}
-            if managed_mode else {}
-        )
+            if managed_mode else {})
         # Managed mode propagates network errors raw so callers can retry with
         # the preserved idempotency key; direct mode wraps them.
         response = self._post_create(
-            f"{config['base_url']}/browsers", headers, payload, wrap_errors=not managed_mode
-        )
+            f"{config['base_url']}/browsers", headers, payload, wrap_errors=not managed_mode)
         if not response.ok and managed_mode and not _should_preserve_pending_create_key(response):
             _clear_pending_create_key(task_id)
         self._check_created(response)

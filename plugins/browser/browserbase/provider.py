@@ -28,8 +28,7 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
     release_path = "/v1/sessions/{session_id}"
     missing_credentials_error = (
         "Browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID "
-        "environment variables."
-    )
+        "environment variables.")
     close_fail_fmt = "Failed to close session %s: HTTP %s - %s"
     setup_tag = "Cloud browser with stealth and proxies"
     setup_env_vars = [
@@ -89,8 +88,7 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
             keepalive_fallback = True
             logger.warning(
                 "keepAlive may require paid plan (402), retrying without it. "
-                "Sessions may timeout during long operations."
-            )
+                "Sessions may timeout during long operations.")
             session_config.pop("keepAlive", None)
             response = self._post_create(url, headers, session_config)
         if response.status_code == 402 and enable_proxies:

@@ -18,8 +18,7 @@ from plugins.image_gen._common import StaticImageGenProvider, catalog_rows
 logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KWARGS = (
-    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale",
-)
+    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale")
 
 
 class FalImageGenProvider(StaticImageGenProvider):
@@ -30,8 +29,7 @@ class FalImageGenProvider(StaticImageGenProvider):
     setup = dict(
         name="FAL.ai", badge="paid",
         tag="Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
-        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
-    )
+        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys")
 
     def is_available(self) -> bool:
         # Direct FAL_KEY or a managed Nous fal-queue origin, per the legacy module.

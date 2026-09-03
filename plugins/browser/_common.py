@@ -103,8 +103,7 @@ class CloudBrowserProvider(BrowserProvider):
         if not response.ok:
             raise RuntimeError(
                 f"Failed to create {self.label}{self.create_label_suffix} session: "
-                f"{response.status_code} {response.text}"
-            )
+                f"{response.status_code} {response.text}")
 
     def close_session(self, session_id: str) -> bool:
         try:
@@ -119,8 +118,7 @@ class CloudBrowserProvider(BrowserProvider):
                 return True
             self._log.warning(
                 self.close_fail_fmt or f"Failed to close {self.label} session %s: HTTP %s - %s",
-                session_id, response.status_code, response.text[:200],
-            )
+                session_id, response.status_code, response.text[:200])
             return False
         except Exception as e:
             self._log.error("Exception closing %s session %s: %s", self.label, session_id, e)

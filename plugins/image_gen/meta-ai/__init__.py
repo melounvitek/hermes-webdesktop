@@ -15,12 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response
-)
+    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
 from plugins.image_gen._common import (
     StaticImageGenProvider, error_factory, import_openai, openai_importable, prompt_required_error,
-    resolve_static_model, size_for,
-)
+    resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +68,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
     default_model_id = DEFAULT_MODEL
     setup = dict(
         name="Meta Model API", badge="paid", tag="Muse Image via Meta Model API (api.meta.ai)",
-        key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai",
-    )
+        key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai")
 
     def is_available(self) -> bool:
         return bool(_resolve_api_key()) and openai_importable()
@@ -94,8 +91,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
             return error_factory("meta-ai", aspect)(
                 f"{API_KEY_ENV} not set. Run `hermes tools` -> Image "
                 "Generation -> Meta Model API to configure.",
-                "auth_required",
-            )
+                "auth_required")
 
         openai, err = import_openai("meta-ai", aspect)
         if err:
@@ -131,8 +127,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
             extra["revised_prompt"] = first.revised_prompt
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="meta-ai",
-            modality="text", extra=extra,
-        )
+            modality="text", extra=extra)
 
 
 def register(ctx) -> None:

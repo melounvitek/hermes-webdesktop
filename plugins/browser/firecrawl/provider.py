@@ -50,8 +50,7 @@ class FirecrawlBrowserProvider(CloudBrowserProvider):
         if not api_key:
             raise ValueError(
                 "FIRECRAWL_API_KEY environment variable is required. "
-                "Get your key at https://firecrawl.dev"
-            )
+                "Get your key at https://firecrawl.dev")
         return {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
     def create_session(self, task_id: str) -> Dict[str, object]:

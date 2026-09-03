@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from agent.image_gen_provider import (
-    ImageGenProvider, error_response, normalize_reference_images, save_b64_image, save_url_image
-)
+    ImageGenProvider, error_response, normalize_reference_images, save_b64_image, save_url_image)
 
 logger = logging.getLogger(__name__)
 
@@ -278,12 +277,10 @@ def post_json(
         message = error_message(resp, exc)
         return None, HttpFailure(
             "http", f"{label} image generation failed ({status}): {message}", "api_error",
-            status=status, message=message, response=resp,
-        )
+            status=status, message=message, response=resp)
     except requests.Timeout:
         return None, HttpFailure(
-            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout"
-        )
+            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout")
     except requests.ConnectionError as exc:
         return None, HttpFailure("connection", f"{label} connection error: {exc}", "connection_error")
     except requests.RequestException as exc:

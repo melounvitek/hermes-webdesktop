@@ -15,8 +15,7 @@ from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio,
 from plugins.image_gen._common import (
     GPT_IMAGE_2_API_MODEL as API_MODEL, GPT_IMAGE_2_DEFAULT as DEFAULT_MODEL, GPT_IMAGE_2_TIERS,
     StaticImageGenProvider, collect_source_images, error_factory, import_openai, materialize_image,
-    openai_importable, prompt_required_error, resolve_static_model, size_for,
-)
+    openai_importable, prompt_required_error, resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +63,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
     setup = dict(
         name="OpenAI", badge="paid",
         tag="gpt-image-2 at low/medium/high quality tiers — text-to-image & image editing",
-        key="OPENAI_API_KEY", prompt="OpenAI API key", url="https://platform.openai.com/api-keys",
-    )
+        key="OPENAI_API_KEY", prompt="OpenAI API key", url="https://platform.openai.com/api-keys")
 
     def is_available(self) -> bool:
         return bool(get_secret("OPENAI_API_KEY")) and openai_importable()
@@ -89,8 +87,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
                 "OPENAI_API_KEY not set. Run `hermes tools` → Image "
                 "Generation → OpenAI to configure, or `hermes setup` "
                 "to add the key.",
-                "auth_required",
-            )
+                "auth_required")
 
         openai, err = import_openai("openai", aspect)
         if err:
@@ -119,8 +116,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
                 response = client.images.edit(
                     model=API_MODEL, image=files if len(files) > 1 else files[0], prompt=prompt,
                     size=size,  # type: ignore[arg-type]  # OPENAI_SIZES values are valid gpt-image sizes
-                    quality=meta["quality"], n=1,
-                )
+                    quality=meta["quality"], n=1)
             except Exception as exc:
                 logger.debug("OpenAI image edit failed", exc_info=True)
                 return fail(f"OpenAI image editing failed: {exc}", "api_error")
@@ -129,8 +125,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
             # ``response_format`` as an unknown parameter. Don't send it.
             try:
                 response = client.images.generate(
-                    model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"],
-                )
+                    model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
             except Exception as exc:
                 logger.debug("OpenAI image generation failed", exc_info=True)
                 return fail(f"OpenAI image generation failed: {exc}", "api_error")
@@ -142,8 +137,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         image_ref, err = materialize_image(
             getattr(first, "b64_json", None), getattr(first, "url", None),
             prefix=f"openai_{tier_id}", label="OpenAI", provider="openai",
-            model=tier_id, prompt=prompt, aspect=aspect, log=logger,
-        )
+            model=tier_id, prompt=prompt, aspect=aspect, log=logger)
         if err:
             return err
         extra: Dict[str, Any] = {"size": size, "quality": meta["quality"]}
@@ -151,8 +145,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
             extra["revised_prompt"] = first.revised_prompt
         return success_response(
             image=image_ref, model=tier_id, prompt=prompt, aspect_ratio=aspect, provider="openai",
-            modality="image" if is_edit else "text", extra=extra,
-        )
+            modality="image" if is_edit else "text", extra=extra)
 
 
 def register(ctx) -> None:

@@ -21,8 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response, resolve_aspect_ratio, save_b64_image,
-    save_url_image, success_response,
-)
+    save_url_image, success_response)
 from plugins.image_gen._common import error_factory, load_image_gen_config, post_json
 
 logger = logging.getLogger(__name__)
@@ -96,13 +95,11 @@ _IMAGE_API_MODELS: Dict[str, Dict[str, Any]] = {
     "google/gemini-3.1-flash-lite-image": _image_api_model(
         "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
         "Cheap and fast; 14 exact aspect ratios; 14 reference images",
-        aspect_ratios=_GEMINI_RATIOS, resolutions=("1K",), max_n=1, max_refs=14,
-    ),
+        aspect_ratios=_GEMINI_RATIOS, resolutions=("1K",), max_n=1, max_refs=14),
     "google/gemini-3.1-flash-image": _image_api_model(
         "Nano Banana 2 (Gemini 3.1 Flash Image)",
         "Same ratios as Lite plus resolution control (512/1K/2K/4K)",
-        aspect_ratios=_GEMINI_RATIOS, resolutions=("512", "1K", "2K", "4K"), max_n=1, max_refs=14,
-    ),
+        aspect_ratios=_GEMINI_RATIOS, resolutions=("512", "1K", "2K", "4K"), max_n=1, max_refs=14),
     "openai/gpt-image-2": _image_api_model(
         "OpenAI GPT Image 2",
         "Best editing fidelity; up to 16 references; strongest prompt adherence",
@@ -114,38 +111,30 @@ _IMAGE_API_MODELS: Dict[str, Dict[str, Any]] = {
         "The only model here with background=transparent (cut-out PNG)",
         aspect_ratios=("1:1", "3:2", "2:3", "auto"),
         quality=_OPENAI_QUALITY, background=("auto", "transparent", "opaque"), compression=True,
-        max_n=10, max_refs=16,
-    ),
+        max_n=10, max_refs=16),
     "microsoft/mai-image-2.5": _image_api_model(
         "Microsoft MAI-Image-2.5", "Standard ratios; a good second opinion next to Gemini",
-        aspect_ratios=_MAI_RATIOS, max_n=1, max_refs=1,
-    ),
+        aspect_ratios=_MAI_RATIOS, max_n=1, max_refs=1),
     "microsoft/mai-image-2.5-pro": _image_api_model(
         "Microsoft MAI-Image-2.5 Pro", "Reach for it when gpt-image-2 misses the brief",
-        aspect_ratios=_MAI_RATIOS, max_n=1, max_refs=1,
-    ),
+        aspect_ratios=_MAI_RATIOS, max_n=1, max_refs=1),
     "x-ai/grok-imagine-image-quality": _image_api_model(
         "Grok Imagine (Image Quality)",
         "Photoreal; widest exotic-ratio set (9:19.5, 20:9, 2:1 …); 1K/2K",
         aspect_ratios=(
             "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1",
-            "auto",
-        ),
-        resolutions=("1K", "2K"), max_n=1, max_refs=3,
-    ),
+            "auto"),
+        resolutions=("1K", "2K"), max_n=1, max_refs=3),
     "krea/krea-2-medium": _image_api_model(
         "Krea 2 Medium", "Realistic, expressive styles; deterministic via seed",
-        aspect_ratios=_KREA_RATIOS, resolutions=("1K",), seed=True, max_n=1, max_refs=1,
-    ),
+        aspect_ratios=_KREA_RATIOS, resolutions=("1K",), seed=True, max_n=1, max_refs=1),
     "krea/krea-2-medium-turbo": _image_api_model(
         "Krea 2 Medium Turbo", "Cheapest here — bulk content, cards, thumbnails; seed support",
-        aspect_ratios=_KREA_RATIOS, resolutions=("1K",), seed=True, max_n=1, max_refs=1,
-    ),
+        aspect_ratios=_KREA_RATIOS, resolutions=("1K",), seed=True, max_n=1, max_refs=1),
     "qwen/qwen-image-3-pro": _image_api_model(
         "Qwen Image 3 Pro", "Precise small text and detail rendering; n up to 6; 1K/2K; seed",
         aspect_ratios=("1:1", "1:2", "1:4", "2:1", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "9:16", "16:9"),
-        resolutions=("1K", "2K"), seed=True, max_n=6, max_refs=4,
-    ),
+        resolutions=("1K", "2K"), seed=True, max_n=6, max_refs=4),
 }
 
 # Applied to a catalog model the table doesn't describe. Empty ``aspect_ratios``
@@ -187,8 +176,7 @@ _IMAGE_API_EXTRA_KEYS = ("resolution", "quality", "background", "output_format",
 
 # Enum knobs: payload field → catalog key holding the allowed values.
 _IMAGE_API_ENUMS = (
-    ("resolution", "resolutions"), ("quality", None), ("background", None), ("output_format", None),
-)
+    ("resolution", "resolutions"), ("quality", None), ("background", None), ("output_format", None))
 # Integer knobs: payload field → (catalog gate flag, clamp).
 _IMAGE_API_INTS = (
     ("output_compression", "compression", lambda v: max(0, min(100, v))), ("seed", "seed", lambda v: v),
@@ -253,14 +241,12 @@ def _access_error_hint(display: str, model_id: str, env_var: str, status: int, e
         return None
     low = (err_msg or "").lower()
     gated = status in (402, 403, 404) or any(
-        s in low for s in ("no endpoints", "no allowed", "not a valid model", "data policy")
-    )
+        s in low for s in ("no endpoints", "no allowed", "not a valid model", "data policy"))
     if not gated:
         return None
     return (
         f"{display} can't reach image model '{model_id}' ({status}) — enable OpenAI "
-        f"image access in your {display} account, or set {env_var}={_FALLBACK_MODEL}."
-    )
+        f"image access in your {display} account, or set {env_var}={_FALLBACK_MODEL}.")
 
 
 def _get_catalog(base_url: str, path: str, api_key: str, timeout: Any) -> List[Tuple[str, Dict[str, Any]]]:
@@ -390,15 +376,13 @@ def _pick_exact_aspect_ratio(
             return value
         notes.append(
             f"requested aspect_ratio '{value}' is unsupported by this model; "
-            f"used the '{semantic}' mapping instead"
-        )
+            f"used the '{semantic}' mapping instead")
     if not supported:
         # Unknown enum: an out-of-enum aspect_ratio is a hard 400 (unlike an
         # unknown *parameter*, which the endpoint ignores), so omit the field.
         notes.append(
             "model is not in this backend's catalog, so its aspect_ratio enum is "
-            f"unknown; the field was omitted and '{semantic}' was not applied"
-        )
+            f"unknown; the field was omitted and '{semantic}' was not applied")
         return None
     for candidate in _ASPECT_PREFERENCES.get(semantic, ()):
         if candidate in supported:
@@ -467,8 +451,7 @@ def _build_image_api_payload(
         if len(references) > len(usable):
             notes.append(
                 f"{len(references)} reference image(s) supplied but this model "
-                f"accepts {max_refs}; extras dropped"
-            )
+                f"accepts {max_refs}; extras dropped")
         if usable:
             payload["input_references"] = [{"type": "image_url", "image_url": {"url": url}} for url in usable]
     return payload, notes
@@ -625,8 +608,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         if self._supports_image_api:
             models.extend(
                 {"id": model_id, "display": meta["display"], "strengths": f"{meta['strengths']} (Image API)"}
-                for model_id, meta in _IMAGE_API_MODELS.items()
-            )
+                for model_id, meta in _IMAGE_API_MODELS.items())
         return models
 
     def _cached_catalog(self, attr: str, label: str, **fetch: Any) -> List[Dict[str, Any]]:
@@ -648,14 +630,12 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
     def _image_api_live_models(self) -> List[Dict[str, Any]]:
         return self._cached_catalog(
             "_image_api_models_cache", "Image API catalog", path="/images/models", meta=_IMAGE_API_MODELS,
-            generic="Image API model (from live OpenRouter catalog)", image_output_only=False,
-        )
+            generic="Image API model (from live OpenRouter catalog)", image_output_only=False)
 
     def _live_models(self) -> List[Dict[str, Any]]:
         return self._cached_catalog(
             "_live_models_cache", "image model catalog", path="/models", meta=_KNOWN_MODEL_META,
-            generic="Image-output model (from live OpenRouter catalog)", image_output_only=True,
-        )
+            generic="Image-output model (from live OpenRouter catalog)", image_output_only=True)
 
     def default_model(self) -> Optional[str]:
         # The catalog default, not the effective runtime model (_resolve_model_chain).
@@ -714,12 +694,10 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             return _fail(
                 "Could not read the reference image(s) requested for editing: "
                 + ", ".join(unreadable) + ". Refusing to silently fall back to text-to-image.",
-                "io_error",
-            )
+                "io_error")
         payload, notes = _build_image_api_payload(
             model_id=model_id, prompt=prompt, semantic_aspect=semantic_aspect,
-            references=usable_refs, config_key=self._config_key, kwargs=kwargs,
-        )
+            references=usable_refs, config_key=self._config_key, kwargs=kwargs)
         if unreadable:
             notes.insert(0, f"dropped unreadable reference image(s): {', '.join(unreadable)}")
 
@@ -736,8 +714,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             f"{base_url}/images/generations", headers=headers, payload=payload,
             timeout=(min(_IMAGE_API_CONNECT_TIMEOUT, timeout), timeout), label=self._display,
             error_message=lambda resp, exc: _extract_image_api_error(resp, str(exc)),
-            catch_request_exception=True,
-        )
+            catch_request_exception=True)
         if failure is not None:
             if failure.kind != "http":
                 return _fail(failure.error, failure.error_type, retryable=failure.kind == "timeout")
@@ -752,8 +729,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                     f"Model '{model_id}' does not exist on the OpenRouter Image API "
                     f"(its catalog is separate from chat-completions — check "
                     f"GET {base_url}/images/models).",
-                    "model_access", retryable=True,
-                )
+                    "model_access", retryable=True)
             return _fail(failure.error, "api_error", retryable=status in _IMAGE_API_FALLBACK_STATUSES)
 
         entries = [e for e in _list_at(body, "data") if isinstance(e, dict)]
@@ -771,8 +747,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         return success_response(
             image=saved[0], model=model_id, prompt=prompt, aspect_ratio=semantic_aspect, provider=self._name,
             modality="image" if usable_refs else "text",
-            extra=_image_api_extra(payload, saved, usable_refs, notes, body),
-        )
+            extra=_image_api_extra(payload, saved, usable_refs, notes, body))
 
     def _generate_via_chat(
         self, *, model_id: str, prompt: str, aspect: str, content: List[Dict[str, Any]],
@@ -789,8 +764,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         }
         result, failure = post_json(
             f"{base_url}/chat/completions", headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT,
-            label=self._display,
-        )
+            label=self._display)
         if failure is not None:
             if failure.kind != "http":
                 reason = "timed out" if failure.kind == "timeout" else None
@@ -836,8 +810,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             return fail(
                 f"No {self._display} credentials found. "
                 f"Configure {self._display} in `hermes tools` → Image Generation.",
-                "missing_api_key",
-            )
+                "missing_api_key")
 
         model_chain = self._resolve_model_chain(kwargs.get("model"))
         aspect = resolve_aspect_ratio(aspect_ratio)
@@ -864,14 +837,12 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             if surface == "images":
                 outcome = self._generate_via_image_api(
                     model_id=model_id, prompt=prompt, semantic_aspect=aspect,
-                    references=references, base_url=base_url, headers=headers, kwargs=kwargs,
-                )
+                    references=references, base_url=base_url, headers=headers, kwargs=kwargs)
                 reason = "failed on the image API" if outcome.pop("_retryable", False) else None
             else:
                 outcome, reason = self._generate_via_chat(
                     model_id=model_id, prompt=prompt, aspect=aspect, content=content,
-                    base_url=base_url, headers=headers,
-                )
+                    base_url=base_url, headers=headers)
             if outcome.get("success") or reason is None or i == len(model_chain) - 1:
                 return outcome
             logger.info(
@@ -882,8 +853,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         return last_error or error_response(
             error=f"{self._display} image generation failed after trying all candidate models.",
             error_type="api_error", provider=self._name,
-            model=model_chain[-1] if model_chain else "", prompt=prompt, aspect_ratio=aspect,
-        )
+            model=model_chain[-1] if model_chain else "", prompt=prompt, aspect_ratio=aspect)
 
 
 def _build_providers() -> List[OpenRouterCompatImageProvider]:
@@ -898,8 +868,7 @@ def _build_providers() -> List[OpenRouterCompatImageProvider]:
                 "env_vars": [{
                     "key": "OPENROUTER_API_KEY", "prompt": "OpenRouter API key", "url": "https://openrouter.ai/keys",
                 }],
-            },
-        ),
+            }),
         OpenRouterCompatImageProvider(
             provider_name="nous", display_name="Nous Portal", runtime_name="nous", config_key="nous",
             model_env_var="NOUS_IMAGE_MODEL",
@@ -909,8 +878,7 @@ def _build_providers() -> List[OpenRouterCompatImageProvider]:
                 "tag": "Reference-grounded image generation via Nous Portal (OpenRouter-backed)",
                 "env_vars": [],
                 "requires_nous_auth": True,
-            },
-        ),
+            }),
     ]
 
 
