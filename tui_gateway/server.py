@@ -70,12 +70,9 @@ def _panic_hook(exc_type, exc_value, exc_tb):
     sys.__excepthook__(exc_type, exc_value, exc_tb)  # chain so the process still terminates normally
 
 
-def _thread_panic_hook(args):
-    _record_crash("thread exception", args.exc_type, args.exc_value, args.exc_traceback, thread_name=args.thread.name)
-
-
 sys.excepthook = _panic_hook
-threading.excepthook = _thread_panic_hook
+threading.excepthook = lambda args: _record_crash(
+    "thread exception", args.exc_type, args.exc_value, args.exc_traceback, thread_name=args.thread.name)
 
 with contextlib.suppress(Exception):
     from hermes_cli.banner import prefetch_update_check
@@ -384,21 +381,6 @@ def _get_db():
     return _db
 
 
-def _db_for_profile(profile: str | None = None):
-    """(db, owns_handle) for ``params.profile`` (app-global remote mode): launch/own profile → the
-    shared ``_get_db()`` handle (left open); another profile → a dedicated handle the caller must
-    ``close()`` (see :func:`_profile_db`). ``db`` is None when unavailable."""
-    profile_home = _profile_home(profile)
-    if profile_home is None:
-        return _get_db(), False
-    try:
-        from hermes_state import get_shared_session_db
-        return get_shared_session_db(Path(profile_home) / "state.db"), True
-    except Exception as exc:
-        logger.warning("TUI profile session store unavailable for %s: %s", profile, exc)
-        return None, False
-
-
 def _transfer_db_to_agent(agent, db) -> bool:
     """Hand a DEDICATED profile ``state.db`` handle to *agent* (``AIAgent.close()`` then releases it).
     True only when the transfer happened; False (agent not holding *this* handle — build failed
@@ -438,7 +420,17 @@ def _profile_db(params: dict | None = None):
     """Yield the SessionDB for ``params['profile']`` (None when unavailable); closes dedicated
     profile handles, leaves the launch-profile shared handle open."""
     profile = (params.get("profile") or "").strip() or None if isinstance(params, dict) else None
-    db, owns = _db_for_profile(profile)
+    # Launch/own profile → the shared _get_db() handle (left open); another profile → a dedicated
+    # handle closed below (app-global remote mode). db is None when unavailable.
+    if (profile_home := _profile_home(profile)) is None:
+        db, owns = _get_db(), False
+    else:
+        try:
+            from hermes_state import get_shared_session_db
+            db, owns = get_shared_session_db(Path(profile_home) / "state.db"), True
+        except Exception as exc:
+            logger.warning("TUI profile session store unavailable for %s: %s", profile, exc)
+            db, owns = None, False
     try:
         yield db
     finally:
@@ -681,18 +673,15 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     _emit("status.update", sid, {"kind": out_kind, "text": body})
 
 
-def _estimate_image_tokens(width: int, height: int) -> int:
-    """Rough attachment-display estimate: 512px tiles at ~85 tokens/tile (cross-provider hint)."""
-    return max(1, (width + 511) // 512) * max(1, (height + 511) // 512) * 85 if width > 0 and height > 0 else 0
-
-
 def _image_meta(path: Path) -> dict:
     meta = {"name": path.name}
     with contextlib.suppress(Exception):
         from PIL import Image
         with Image.open(path) as img:
-            width, height = img.size
-        meta.update(width=int(width), height=int(height), token_estimate=_estimate_image_tokens(int(width), int(height)))
+            width, height = (int(v) for v in img.size)
+        # Rough attachment-display token estimate: 512px tiles at ~85 tokens/tile (cross-provider hint).
+        tiles = max(1, (width + 511) // 512) * max(1, (height + 511) // 512) if width > 0 and height > 0 else 0
+        meta.update(width=width, height=height, token_estimate=tiles * 85)
     return meta
 
 
@@ -1210,18 +1199,13 @@ def _session_for_key(session_key: str) -> dict | None:
         return next((s for s in list(_sessions.values()) if s.get("session_key") == session_key), None)
 
 
-def _cwd_for_session_key(session_key: str) -> str:
-    """Reverse-map session_key to the session's logical cwd ("" when unknown)."""
-    sess = _session_for_key(session_key) if session_key else None
-    return str(sess.get("cwd") or "") if sess is not None else ""
-
-
 def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session_id: str = "") -> list:
     try:
         from gateway.session_context import set_session_vars
+        sess = _session_for_key(session_key) if session_key else None
         # Ephemeral task ids aren't in `_sessions` (reverse-map → "" would clear the cwd override);
         # callers that know the workspace pass it.
-        resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
+        resolved = cwd if cwd is not None else (str(sess.get("cwd") or "") if sess is not None else "")
         source = _resolve_session_platform()
         browser_control_principal = ""
         browser_control_transport_family = ""
@@ -1229,7 +1213,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
         # authoritative for the subprocess-env bridge (no os.environ fallback), so never leave it "".
         # Prefer the agent's durable session_id, then session_key (same derivation as session-finalize).
         session_id = session_key
-        if (sess := _session_for_key(session_key)) is not None:
+        if sess is not None:
             source = _session_source(sess)
             session_id = getattr(sess.get("agent"), "session_id", None) or session_key
             identity = getattr(sess.get("transport"), "auth_identity", None)
@@ -1840,23 +1824,6 @@ def _gui_surface_toolsets(platform: str) -> set[str]:
     return {"project", "desktop_ui"} if platform == "desktop" else {"project"}
 
 
-def _enabled_mcp_server_names() -> tuple[set[str], set[str]]:
-    """(enabled, disabled) MCP server names from raw config; empty on any failure."""
-    try:
-        from hermes_cli.config import read_raw_config
-        from hermes_cli.tools_config import _parse_enabled_flag
-        raw_cfg = read_raw_config()
-        mcp_servers = raw_cfg.get("mcp_servers") if isinstance(raw_cfg.get("mcp_servers"), dict) else {}
-        enabled, disabled = set(), set()
-        for name, server_cfg in mcp_servers.items():
-            if isinstance(server_cfg, dict):
-                on = _parse_enabled_flag(server_cfg.get("enabled", True), default=True)
-                (enabled if on else disabled).add(str(name))
-        return enabled, disabled
-    except Exception:
-        return set(), set()
-
-
 def _tui_notice(text: str) -> None:
     print(text, file=sys.stderr, flush=True)
 
@@ -1883,7 +1850,18 @@ def _resolve_explicit_toolsets(explicit: list[str], validate_toolset) -> list[st
         return None
     if not unresolved:
         return built_in
-    mcp_names, mcp_disabled = _enabled_mcp_server_names()
+    try:  # (enabled, disabled) MCP server names from raw config; both empty on any failure
+        from hermes_cli.config import read_raw_config
+        from hermes_cli.tools_config import _parse_enabled_flag
+        raw_cfg = read_raw_config()
+        mcp_servers = raw_cfg.get("mcp_servers") if isinstance(raw_cfg.get("mcp_servers"), dict) else {}
+        mcp_names, mcp_disabled = set(), set()
+        for name, server_cfg in mcp_servers.items():
+            if isinstance(server_cfg, dict):
+                on = _parse_enabled_flag(server_cfg.get("enabled", True), default=True)
+                (mcp_names if on else mcp_disabled).add(str(name))
+    except Exception:
+        mcp_names, mcp_disabled = set(), set()
     mcp_valid = [name for name in unresolved if name in mcp_names]
     disabled = [name for name in unresolved if name in mcp_disabled]
     unknown = [name for name in unresolved if name not in mcp_names and name not in mcp_disabled]
@@ -2117,19 +2095,6 @@ def _turn_started_at(session: dict | None) -> float | None:
     return float(inflight["started_at"]) if isinstance(inflight, dict) and inflight.get("started_at") else None
 
 
-def _effective_approval_state(session_key: str) -> tuple[bool, str]:
-    """(yolo, approval_mode): the same three sources check_all_command_guards() ORs — approvals.mode=off,
-    the process --yolo env, the per-session flag. The session flag alone would show YOLO "off" while
-    config silently auto-approves every dangerous command."""
-    try:
-        from tools.approval import _YOLO_MODE_FROZEN, is_session_yolo_enabled
-        session_yolo = bool(is_session_yolo_enabled(session_key)) if session_key else False
-        approval_mode = _load_approval_mode()
-        return bool(_YOLO_MODE_FROZEN) or session_yolo or approval_mode == "off", approval_mode
-    except Exception:
-        return False, "manual"
-
-
 def _session_info(agent, session: dict | None = None) -> dict:
     if session is None:
         session = next((c for c in _sessions.values() if c.get("agent") is agent), None)
@@ -2145,7 +2110,15 @@ def _session_info(agent, session: dict | None = None) -> dict:
         # the first turn and loses "thinking off".
         reasoning_effort = "none" if reasoning_config.get("enabled") is False else str(reasoning_config.get("effort", "") or "")
     service_tier = getattr(agent, "service_tier", None) or mirror.get("service_tier") or ""
-    yolo, approval_mode = _effective_approval_state(session_key)
+    # yolo ORs the same three sources check_all_command_guards() does (approvals.mode=off, the process
+    # --yolo env, the per-session flag): the session flag alone would show "off" while config auto-approves.
+    try:
+        from tools.approval import _YOLO_MODE_FROZEN, is_session_yolo_enabled
+        session_yolo = bool(is_session_yolo_enabled(session_key)) if session_key else False
+        approval_mode = _load_approval_mode()
+        yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or approval_mode == "off"
+    except Exception:
+        yolo, approval_mode = False, "manual"
     # A switch queued mid-turn applies at the next turn start, so agent.model still reads the OLD
     # model; report the pending pick so the end-of-turn settle doesn't blip the UI back first.
     pending_switch = sess.get("pending_model_switch") or {}
@@ -2154,32 +2127,20 @@ def _session_info(agent, session: dict | None = None) -> dict:
     info: dict = {
         "model": pending_model or mirror.get("model", getattr(agent, "model", "")),
         "provider": pending_provider or mirror.get("provider", getattr(agent, "provider", "")),
-        "reasoning_effort": reasoning_effort,
-        "service_tier": service_tier,
-        "fast": service_tier == "priority",
-        "yolo": yolo,
-        "approval_mode": approval_mode,
+        "reasoning_effort": reasoning_effort, "service_tier": service_tier, "fast": service_tier == "priority",
+        "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},
-        "cwd": cwd,
-        "branch": _git_branch_for_cwd(cwd),
-        "project": _project_info_for_cwd(cwd),
-        "terminal_backend": _effective_terminal_backend(),
-        "personality": str(personality or ""),
-        "running": bool(sess.get("running")),
-        "turn_started_at": _turn_started_at(session),
+        "cwd": cwd, "branch": _git_branch_for_cwd(cwd), "project": _project_info_for_cwd(cwd),
+        "terminal_backend": _effective_terminal_backend(), "personality": str(personality or ""),
+        "running": bool(sess.get("running")), "turn_started_at": _turn_started_at(session),
         "title": _session_live_title(sess, session_key) if session_key else "",
-        "stored_session_id": session_key or "",
-        "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-        "version": "",
-        "release_date": "",
-        "update_behind": None,
-        "update_command": "",
+        "stored_session_id": session_key or "", "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+        "version": "", "release_date": "", "update_behind": None, "update_command": "",
         "usage": _session_usage_snapshot(session),
         "profile_name": (
             _response_profile_name(Path(session["profile_home"]).name)
-            if isinstance(session, dict) and session.get("profile_home")
-            else _current_profile_name()),
+            if isinstance(session, dict) and session.get("profile_home") else _current_profile_name()),
     }
     with contextlib.suppress(Exception):
         from hermes_cli import __version__, __release_date__
@@ -2405,38 +2366,23 @@ def _make_agent(
     platform = _resolve_agent_platform(platform_override)
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     agent = AIAgent(
-        model=model,
-        max_iterations=_cfg_max_turns(cfg, 500),
-        provider=runtime.get("provider"),
-        base_url=runtime.get("base_url"),
-        api_key=runtime.get("api_key"),
-        api_mode=runtime.get("api_mode"),
-        acp_command=runtime.get("command"),
-        acp_args=runtime.get("args"),
-        credential_pool=runtime.get("credential_pool"),
-        quiet_mode=True,
+        model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
+        base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
+        acp_command=runtime.get("command"), acp_args=runtime.get("args"),
+        credential_pool=runtime.get("credential_pool"), quiet_mode=True,
         verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
         reasoning_config=(
-            reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))
-        ),
+            reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
         service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
         enabled_toolsets=_load_enabled_toolsets(platform),
         # OpenRouter provider_routing prefs (gateway + CLI parity).
-        providers_allowed=_pr.get("only"),
-        providers_ignored=_pr.get("ignore"),
-        providers_order=_pr.get("order"),
-        provider_sort=_pr.get("sort"),
-        provider_require_parameters=_pr.get("require_parameters", False),
-        provider_data_collection=_pr.get("data_collection"),
-        platform=platform,
-        session_id=session_id or key,
-        session_db=session_db if session_db is not None else _get_db(),
-        ephemeral_system_prompt=system_prompt or None,
+        providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
+        provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
+        provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
+        session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules,
-        skip_memory=ignore_rules,
-        fallback_model=_load_fallback_model(),
+        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
         **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         with _sessions_lock:
@@ -2743,13 +2689,6 @@ def _session_live_status(sid: str, session: dict) -> str:
     return "working" if session.get("running") else "idle"
 
 
-def _message_preview(history: list) -> str:
-    for msg in reversed(history or []):
-        if text := _content_display_text(msg.get("content", msg.get("text", ""))).strip():
-            return " ".join(text.split())[:160]
-    return ""
-
-
 def _session_live_title(session: dict, key: str) -> str:
     title = str(session.get("pending_title") or "").strip()
     with contextlib.suppress(Exception), _session_db(session) as db:
@@ -2765,7 +2704,8 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     status = _session_live_status(sid, session)
     inflight = _inflight_snapshot(session)
     queued = _queued_prompt_snapshot(session)
-    preview = _message_preview(history)
+    preview = next((" ".join(text.split())[:160] for msg in reversed(history)
+                    if (text := _content_display_text(msg.get("content", msg.get("text", ""))).strip())), "")
     if queued:
         preview = " ".join(str(queued.get("user") or preview).split())[:160]
     elif inflight:
@@ -2911,15 +2851,6 @@ def _main_runtime_from_agent(agent) -> dict | None:
 
 # Pet helpers are fail-open throughout: a decode hiccup degrades to a static fallback rather than
 # breaking the (cosmetic) pet surface.
-def _pet_frame_counts(spritesheet) -> dict:
-    """Real (padding-trimmed) frame count per state for the desktop canvas ({} → static ``framesPerState``)."""
-    try:
-        from agent.pet import render
-        return render.state_frame_counts(str(spritesheet))
-    except Exception:  # noqa: BLE001
-        return {}
-
-
 _pet_payload_cache_lock = threading.Lock()
 _pet_payload_cache: dict[tuple, dict] = {}
 
@@ -2931,15 +2862,6 @@ def _pet_sheet_revision(spritesheet) -> str:
         return f"{stat.st_mtime_ns}:{stat.st_size}"
     except Exception:  # noqa: BLE001
         return "0:0"
-
-
-def _pet_payload_cache_key(pet, *, scale: float) -> tuple | None:
-    """Cache key for the expensive sprite payload build."""
-    try:
-        stat = pet.spritesheet.stat()
-    except Exception:  # noqa: BLE001
-        return None
-    return (str(pet.spritesheet), stat.st_mtime_ns, stat.st_size, pet.slug, pet.display_name, round(scale, 4))
 
 
 def _clone_pet_payload(payload: dict) -> dict:
@@ -3001,12 +2923,21 @@ def _pet_sprite_payload(pet, *, scale: float) -> dict:
     mascot) and ``pet.hatch`` (unadopted preview)."""
     import base64
     from agent.pet import constants
-    cache_key = _pet_payload_cache_key(pet, scale=scale)
+    try:
+        stat = pet.spritesheet.stat()
+        cache_key = (str(pet.spritesheet), stat.st_mtime_ns, stat.st_size, pet.slug, pet.display_name, round(scale, 4))
+    except Exception:  # noqa: BLE001
+        cache_key = None
     if cache_key is not None:
         with _pet_payload_cache_lock:
             cached = _pet_payload_cache.get(cache_key)
         if cached is not None:
             return _clone_pet_payload(cached)
+    try:  # real (padding-trimmed) frame count per state; {} → the canvas uses the static framesPerState
+        from agent.pet import render
+        frames_by_state = render.state_frame_counts(str(pet.spritesheet))
+    except Exception:  # noqa: BLE001
+        frames_by_state = {}
     raw = pet.spritesheet.read_bytes()
     mime = "image/png" if pet.spritesheet.suffix.lower() == ".png" else "image/webp"
     payload = {
@@ -3014,7 +2945,7 @@ def _pet_sprite_payload(pet, *, scale: float) -> dict:
         "spritesheetBase64": base64.standard_b64encode(raw).decode("ascii"),
         "spritesheetRevision": _pet_sheet_revision(pet.spritesheet), "frameW": constants.FRAME_W,
         "frameH": constants.FRAME_H, "framesPerState": constants.FRAMES_PER_STATE,
-        "framesByState": _pet_frame_counts(pet.spritesheet),
+        "framesByState": frames_by_state,
         "framesByRow": _pet_row_frame_counts(pet.spritesheet), "loopMs": constants.LOOP_MS,
         "scale": scale, "stateRows": _pet_state_rows(pet.spritesheet),
     }
@@ -3408,35 +3339,19 @@ from .mcp_rpc_helpers import (  # noqa: E402, F401
 # ── Split @method handler modules (see method_ctx.py) ────────────────
 # Imported last so every global the handlers close over exists; register() rebinds them onto this namespace.
 from . import (  # noqa: E402
-    methods_voice as _methods_voice,
-    methods_browser as _methods_browser,
-    methods_slash as _methods_slash,
-    methods_complete_helpers as _methods_complete_helpers,
-    session_auto_continue as _session_auto_continue,
-    agent_callbacks as _agent_callbacks,
-    session_history as _session_history,
-    prompt_attachments as _prompt_attachments,
-    session_notifications as _session_notifications,
-    tool_progress as _tool_progress,
-    change_watcher as _change_watcher,
-    session_compression as _session_compression,
-    model_switch as _model_switch,
-    compute_host_bridge as _compute_host_bridge,
-    session_workdir as _session_workdir,
-    session_lifecycle as _session_lifecycle,
-    session_reaper as _session_reaper,
-    methods_browser_control as _methods_browser_control,
-    methods_bot_relay as _methods_bot_relay,
-    methods_complete as _methods_complete,
-    methods_config as _methods_config,
-    methods_config_set as _methods_config_set,
-    methods_images as _methods_images,
-    methods_profiles as _methods_profiles,
-    methods_prompt as _methods_prompt,
-    methods_session as _methods_session,
-    methods_tools as _methods_tools,
-    prompt_turn as _prompt_turn,
-    billing_view as _billing_view,
+    methods_voice as _methods_voice, methods_browser as _methods_browser, methods_slash as _methods_slash,
+    methods_complete_helpers as _methods_complete_helpers, session_auto_continue as _session_auto_continue,
+    agent_callbacks as _agent_callbacks, session_history as _session_history,
+    prompt_attachments as _prompt_attachments, session_notifications as _session_notifications,
+    tool_progress as _tool_progress, change_watcher as _change_watcher,
+    session_compression as _session_compression, model_switch as _model_switch,
+    compute_host_bridge as _compute_host_bridge, session_workdir as _session_workdir,
+    session_lifecycle as _session_lifecycle, session_reaper as _session_reaper,
+    methods_browser_control as _methods_browser_control, methods_bot_relay as _methods_bot_relay,
+    methods_complete as _methods_complete, methods_config as _methods_config,
+    methods_config_set as _methods_config_set, methods_images as _methods_images,
+    methods_profiles as _methods_profiles, methods_prompt as _methods_prompt, methods_session as _methods_session,
+    methods_tools as _methods_tools, prompt_turn as _prompt_turn, billing_view as _billing_view,
     methods_projects as _methods_projects)
 
 for _m in (
