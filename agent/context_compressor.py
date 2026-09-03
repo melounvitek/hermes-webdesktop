@@ -5077,23 +5077,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             has_user_turn_before=_summary_has_user_turn_before_scan,
         )
 
-    def compress(
-        self,
-        messages: List[Dict[str, Any]],
-        current_tokens: Optional[int] = None,
-        focus_topic: Optional[str] = None,
-        force: bool = False,
-        memory_context: str = "",
-        bypass_cooldown: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """Compress conversation messages by summarizing middle turns.
-
-        Prunes tool results and blank echo rows (survives an abort), protects head and a
-        token-budget tail, summarizes the middle, then cleans orphaned tool pairs.
-        ``force`` clears the failure cooldown and bypasses the feasibility skip;
-        ``bypass_cooldown`` runs the summary LLM without clearing the cooldown (#100661).
-        """
-        # Per-call summary failure state; callers read these after compress() returns.
+    def _begin_compress_attempt(self, current_tokens: Optional[int], force: bool) -> Dict[str, Any]:
+        """Reset per-call result state (callers read it after compress()) and open telemetry."""
         self._last_summary_dropped_count = 0
         self._last_summary_fallback_used = False
         self._last_feasibility_skip = False
@@ -5107,219 +5092,130 @@ This compaction should PRIORITISE preserving all information related to the focu
         # reset would fall through to the destructive static fallback (#29559). Success clears them.
         telemetry = self._begin_compression_telemetry(current_tokens=current_tokens)
         telemetry["chunk_count"] = 0
-
-        # Manual /compress bypasses the failure cooldown.
+        # Manual /compress bypasses the failure cooldown and the structural no-op backoff (#93022).
         if force:
             self._clear_compression_failure_cooldown()
-            # Manual /compress also overrides the structural no-op backoff (#93022).
             self._structural_no_op_backoff_until = 0.0
-        n_messages = len(messages)
-        # Only need head + 3 tail messages minimum (token budget decides the real tail size)
-        _min_for_compress = self._protect_head_size(messages) + 3 + 1
-        if n_messages <= _min_for_compress:
-            # Structural no-op (#93022): transient backoff, not an ineffectiveness strike (which
-            # permanently disarmed auto-compaction on short sessions).
-            self._last_compression_savings_pct = 0.0
-            telemetry["failure_class"] = "insufficient_messages"
-            self._record_structural_no_op(
-                f"only {n_messages} messages (need > {_min_for_compress})"
-            )
-            return messages
+        return telemetry
 
-        display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+    def _structural_no_op_result(
+        self, telemetry: Dict[str, Any], failure_class: str, reason: str,
+    ) -> None:
+        """Nothing eligible to compress: transient backoff (#93022), never an ineffectiveness strike."""
+        telemetry["failure_class"] = failure_class
+        self._last_compression_savings_pct = 0.0
+        self._record_structural_no_op(reason)
 
-        # Phase 1: Prune old tool results (cheap, no LLM call)
-        messages, pruned_count = self._prune_old_tool_results(
-            messages, protect_tail_count=self.protect_last_n,
-            protect_tail_tokens=self.tail_token_budget,
-        )
-        if pruned_count and not self.quiet_mode:
-            logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
-
+    def _drop_blank_echoes(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove blank platform echoes trailing the latest actionable user turn."""
         latest_actionable_idx = self._find_last_user_message_idx(messages, 0)
-        blank_echo_indices = self._blank_echo_indices_after(
-            messages, latest_actionable_idx
-        )
+        blank_echo_indices = self._blank_echo_indices_after(messages, latest_actionable_idx)
         if blank_echo_indices:
-            messages = [
-                message
-                for idx, message in enumerate(messages)
-                if idx not in blank_echo_indices
-            ]
-            n_messages = len(messages)
-        latest_actionable_idx = self._find_last_user_message_idx(messages, 0)
+            messages = [m for idx, m in enumerate(messages) if idx not in blank_echo_indices]
+        return messages
 
-        # Phase 2: Determine boundaries
-        compress_start = self._protect_head_size(messages)
-        compress_start = self._align_boundary_forward(messages, compress_start)
-
+    def _compress_window(self, messages: List[Dict[str, Any]]) -> tuple[int, int]:
+        """Return ``(compress_start, compress_end)`` for the summarizable middle."""
+        compress_start = self._align_boundary_forward(messages, self._protect_head_size(messages))
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
-
         # A role collision can merge the summary into the first tail row; keep an actionable user
         # event out of that slot by retaining an older assistant/tool bridge.
+        latest_actionable_idx = self._find_last_user_message_idx(messages, 0)
         if compress_end == latest_actionable_idx:
             bridge_idx = latest_actionable_idx - 1
             if bridge_idx >= 0 and messages[bridge_idx].get("role") == "tool":
-                bridge_idx = self._align_boundary_backward(
-                    messages, latest_actionable_idx
-                )
+                bridge_idx = self._align_boundary_backward(messages, latest_actionable_idx)
             elif bridge_idx < 0 or messages[bridge_idx].get("role") != "assistant":
                 bridge_idx = -1
             if bridge_idx > compress_start:
                 compress_end = bridge_idx
+        return compress_start, compress_end
 
-        if compress_start >= compress_end:
-            self._record_compression_regions(
-                head_messages=messages[:compress_start],
-                middle_messages=[],
-                tail_messages=messages[compress_end:],
-            )
-            telemetry["failure_class"] = "no_compressible_window"
-            # Nothing eligible to compress: structural no-op (#93022) -> transient backoff, not an
-            # ineffectiveness strike.
-            self._last_compression_savings_pct = 0.0
-            self._record_structural_no_op(
-                f"compress_start ({compress_start}) >= compress_end "
-                f"({compress_end}) - transcript fits within tail budget"
-            )
-            return messages
-
-        turns_to_summarize = messages[compress_start:compress_end]
-        # Lean mode demotes stale tail tool results before summary generation so stubs exist even if
-        # it aborts.
-        if getattr(self, "tail_mode", "lean") == "lean":
-            messages = self._demote_stale_tail_tools(messages, compress_end)
-        scan = self._scan_window_handoffs(
-            messages, compress_start, compress_end, turns_to_summarize
+    def _log_compression_start(
+        self, display_tokens: int, compress_start: int, compress_end: int,
+        n_turns: int, tail_msgs: int,
+    ) -> None:
+        logger.info(
+            "Context compression triggered (%d tokens >= %d threshold)",
+            display_tokens, self.threshold_tokens,
         )
-        turns_to_summarize = scan.turns_to_summarize
-        summary_indices = scan.summary_indices
-        tail_start = scan.tail_start
-        _previous_summary_before_scan = scan.previous_summary_before
-        _summary_has_user_turn_before_scan = scan.has_user_turn_before
-
-        self._record_compression_regions(
-            head_messages=messages[:compress_start],
-            middle_messages=turns_to_summarize,
-            tail_messages=messages[compress_end:],
+        logger.info(
+            "Model context limit: %d tokens (%.0f%% = %d)",
+            self.context_length, self.threshold_percent * 100, self.threshold_tokens,
         )
-        telemetry["chunk_count"] = 1 if turns_to_summarize else 0
+        logger.info(
+            "Summarizing turns %d-%d (%d turns), protecting %d head + %d tail messages",
+            compress_start + 1, compress_end, n_turns, compress_start, tail_msgs,
+        )
 
-        if not turns_to_summarize:
-            # Window is only handoff rows: structural no-op, skip the aux call (#59496), transient
-            # backoff. _previous_summary is KEPT — it came from this transcript.
-            telemetry["failure_class"] = "empty_post_handoff_window"
-            self._last_compression_savings_pct = 0.0
-            self._record_structural_no_op(
-                f"window {compress_start}-{compress_end} holds only "
-                "already-summarized handoffs"
-            )
-            return messages
-
+    def _feasibility_skip(
+        self, telemetry: Dict[str, Any], turns_to_summarize: List[Dict[str, Any]],
+        compress_start: int, compress_end: int,
+    ) -> bool:
+        """Pre-LLM skip after a real-usage ineffectiveness strike (reads the counter, never writes)."""
+        if self._ineffective_compression_count < 1:
+            return False
+        # Reuse the telemetry estimate so log and telemetry agree; None means the regions helper
+        # no-op'd (0 is valid).
+        middle_tokens = telemetry.get("middle_window_tokens")
+        if middle_tokens is None:
+            middle_tokens = estimate_messages_tokens_rough(turns_to_summarize)
+        if middle_tokens >= int(self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION):
+            return False
+        self._last_feasibility_skip = True
+        self._prellm_skip_count += 1
+        telemetry["prellm_skip_count"] = self._prellm_skip_count
         if not self.quiet_mode:
-            logger.info(
-                "Context compression triggered (%d tokens >= %d threshold)",
-                display_tokens,
-                self.threshold_tokens,
+            logger.warning(
+                "Compression: middle section (%d tokens at indices "
+                "%d-%d) is below %.0f%% of threshold (%d tokens) — "
+                "skipping LLM summarization, proceeding with "
+                "deterministic message dropping. prellm_skip_count=%d",
+                middle_tokens, compress_start, compress_end,
+                _FEASIBILITY_SKIP_MIDDLE_FRACTION * 100,
+                self.threshold_tokens, self._prellm_skip_count,
             )
-            logger.info(
-                "Model context limit: %d tokens (%.0f%% = %d)",
-                self.context_length,
-                self.threshold_percent * 100,
-                self.threshold_tokens,
-            )
-            tail_msgs = n_messages - tail_start
-            logger.info(
-                "Summarizing turns %d-%d (%d turns), protecting %d head + %d tail messages",
-                compress_start + 1,
-                compress_end,
-                len(turns_to_summarize),
-                compress_start,
-                tail_msgs,
-            )
+        return True
 
-        # Phase 3: Generate structured summary
+    def _abort_on_summary_failure(
+        self, telemetry: Dict[str, Any], n_skipped: int, previous_summary_before_scan: Optional[str],
+    ) -> bool:
+        """Abort (messages unchanged) on a terminal failure or when configured to; True when aborted.
 
-        # Pre-LLM feasibility skip after a real-usage ineffectiveness strike: READS the strike
-        # counter, never writes it (skips tracked in _prellm_skip_count). Bypassed by force=True.
-        feasibility_skip = False
-        if not force and self._ineffective_compression_count >= 1:
-            # Reuse the telemetry estimate so log and telemetry agree; None means the regions helper
-            # no-op'd (0 is valid).
-            middle_tokens = telemetry.get("middle_window_tokens")
-            if middle_tokens is None:
-                middle_tokens = estimate_messages_tokens_rough(turns_to_summarize)
-            if middle_tokens < int(
-                self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION
-            ):
-                feasibility_skip = True
-                self._last_feasibility_skip = True
-                self._prellm_skip_count += 1
-                telemetry["prellm_skip_count"] = self._prellm_skip_count
-                if not self.quiet_mode:
-                    logger.warning(
-                        "Compression: middle section (%d tokens at indices "
-                        "%d-%d) is below %.0f%% of threshold (%d tokens) — "
-                        "skipping LLM summarization, proceeding with "
-                        "deterministic message dropping. prellm_skip_count=%d",
-                        middle_tokens, compress_start, compress_end,
-                        _FEASIBILITY_SKIP_MIDDLE_FRACTION * 100,
-                        self.threshold_tokens, self._prellm_skip_count,
-                    )
+        Access/quota, network, truncated and empty-content failures ALWAYS abort (#29559);
+        otherwise ``abort_on_summary_failure`` decides between abort and the static fallback.
+        """
+        terminal_failure = next(
+            (
+                (failure_class, message)
+                for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES
+                if getattr(self, flag)
+            ),
+            None,
+        )
+        if terminal_failure is None and not self.abort_on_summary_failure:
+            return False
+        self._last_summary_dropped_count = 0  # nothing actually dropped
+        self._last_summary_fallback_used = False
+        self._last_compress_aborted = True
+        failure_class, message = terminal_failure or (
+            "summary_generation_aborted",
+            "Summary generation failed — aborting compression "
+            "(compression.abort_on_summary_failure=true). "
+            "%d message(s) preserved unchanged. Conversation is "
+            "frozen until the next /compress or /new.",
+        )
+        telemetry["failure_class"] = failure_class
+        # Roll back the self-heal rehydration so the aborted attempt is a true no-op (#57835).
+        self._previous_summary = previous_summary_before_scan
+        if not self.quiet_mode:
+            logger.warning(message, n_skipped)
+        return True
 
-        if feasibility_skip:
-            summary = None  # No LLM call; Phase 4 inserts the deterministic fallback
-        else:
-            # Focus-topic derivation scans user turns; only pay when a summary is generated.
-            summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
-            try:
-                summary = self._generate_summary(
-                    turns_to_summarize,
-                    focus_topic=summary_focus_topic,
-                    memory_context=memory_context,
-                    bypass_cooldown=bypass_cooldown,
-                )
-            except AuxiliaryExplicitCancellation:
-                # Cancellation is a true no-op: restore the self-heal scan's mutation before the
-                # exception escapes.
-                self._previous_summary = _previous_summary_before_scan
-                self._summary_has_user_turn = _summary_has_user_turn_before_scan
-                raise
+    _COMPRESSION_NOTE = "[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work. Your persistent memory (MEMORY.md, USER.md) remains fully authoritative regardless of compaction.]"
 
-        # abort_on_summary_failure: True aborts unchanged (_last_compress_aborted), False uses the
-        # static fallback. Access/quota, network, empty-content failures ALWAYS abort (#29559).
-        terminal_failure = None
-        if not summary and not feasibility_skip:
-            terminal_failure = next(
-                (
-                    (failure_class, message)
-                    for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES
-                    if getattr(self, flag)
-                ),
-                None,
-            )
-        if terminal_failure is not None or (
-            not summary and not feasibility_skip and self.abort_on_summary_failure
-        ):
-            n_skipped = compress_end - compress_start
-            self._last_summary_dropped_count = 0  # nothing actually dropped
-            self._last_summary_fallback_used = False
-            self._last_compress_aborted = True
-            failure_class, message = terminal_failure or (
-                "summary_generation_aborted",
-                "Summary generation failed — aborting compression "
-                "(compression.abort_on_summary_failure=true). "
-                "%d message(s) preserved unchanged. Conversation is "
-                "frozen until the next /compress or /new.",
-            )
-            telemetry["failure_class"] = failure_class
-            # Roll back the self-heal rehydration so the aborted attempt is a true no-op (#57835).
-            self._previous_summary = _previous_summary_before_scan
-            if not self.quiet_mode:
-                logger.warning(message, n_skipped)
-            return messages
-
-        # Phase 4: Assemble compressed message list
+    def _assemble_head(self, messages: List[Dict[str, Any]], compress_start: int) -> List[Dict[str, Any]]:
+        """Protected head with the compaction note on the system prompt and stale handoffs stripped."""
         compressed = []
         for i in range(compress_start):
             # Head handoff already lives in _previous_summary: strip it (standalone dropped, merged
@@ -5327,66 +5223,71 @@ This compaction should PRIORITISE preserving all information related to the focu
             msg = _fresh_compaction_message_copy(messages[i])
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
-                _compression_note = "[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work. Your persistent memory (MEMORY.md, USER.md) remains fully authoritative regardless of compaction.]"
-                if _compression_note not in _content_text_for_contains(existing):
+                if self._COMPRESSION_NOTE not in _content_text_for_contains(existing):
                     msg["content"] = _append_text_to_content(
                         existing,
-                        "\n\n" + _compression_note if isinstance(existing, str) and existing else _compression_note,
+                        "\n\n" + self._COMPRESSION_NOTE if isinstance(existing, str) and existing else self._COMPRESSION_NOTE,
                     )
             stripped = self._strip_context_summary_handoff_message(msg)
             if stripped is not None:
                 compressed.append(stripped)
+        return compressed
 
-        # Deterministic fallback so the model gets recoverable continuity anchors.
-        if not summary:
-            if not self.quiet_mode:
-                if feasibility_skip:
-                    logger.info("Feasibility skip — inserting deterministic fallback context summary")
-                else:
-                    logger.warning("Summary generation failed — inserting deterministic fallback context summary")
-            n_dropped = compress_end - compress_start
-            self._last_summary_dropped_count = n_dropped
-            self._last_summary_fallback_used = True
-            telemetry["fallback_used"] = True
+    def _fallback_summary_for_window(
+        self, telemetry: Dict[str, Any], turns_to_summarize: List[Dict[str, Any]],
+        n_dropped: int, feasibility_skip: bool,
+    ) -> str:
+        """Deterministic fallback so the model gets recoverable continuity anchors."""
+        if not self.quiet_mode:
             if feasibility_skip:
-                # Feasibility skip is deliberate, not aux-model breakage — keep the telemetry class
-                # distinct.
-                telemetry["failure_class"] = telemetry.get("failure_class") or "feasibility_skip"
+                logger.info("Feasibility skip — inserting deterministic fallback context summary")
             else:
-                telemetry["failure_class"] = telemetry.get("failure_class") or "summary_generation_failed"
-            summary = self._build_static_fallback_summary(
-                turns_to_summarize,
-                # A stale error from an earlier failure must not be embedded in a feasibility-skip
-                # fallback.
-                reason=None if feasibility_skip else self._last_summary_error,
-            )
+                logger.warning("Summary generation failed — inserting deterministic fallback context summary")
+        self._last_summary_dropped_count = n_dropped
+        self._last_summary_fallback_used = True
+        telemetry["fallback_used"] = True
+        # Feasibility skip is deliberate, not aux-model breakage — keep the telemetry class distinct.
+        telemetry["failure_class"] = telemetry.get("failure_class") or (
+            "feasibility_skip" if feasibility_skip else "summary_generation_failed"
+        )
+        return self._build_static_fallback_summary(
+            turns_to_summarize,
+            # A stale error from an earlier failure must not be embedded in a feasibility-skip fallback.
+            reason=None if feasibility_skip else self._last_summary_error,
+        )
 
+    def _assemble_tail(
+        self, messages: List[Dict[str, Any]], compress_end: int, tail_start: int,
+        summary_indices: set,
+    ) -> List[Dict[str, Any]]:
+        """Protected tail with already-folded handoff rows dropped and merged handoffs unwrapped."""
         tail_messages: List[Dict[str, Any]] = []
         # Start at tail_start, not compress_end: the rehydration scan may have advanced it (#57835).
-        for i in range(max(compress_end, tail_start), n_messages):
+        for i in range(max(compress_end, tail_start), len(messages)):
             if i in summary_indices and i >= tail_start:
-                # Already folded into _previous_summary; don't re-emit.
-                continue
-            msg = _fresh_compaction_message_copy(messages[i])
-            stripped = self._strip_context_summary_handoff_message(msg)
+                continue  # already folded into _previous_summary; don't re-emit
+            stripped = self._strip_context_summary_handoff_message(
+                _fresh_compaction_message_copy(messages[i])
+            )
             if stripped is not None:
                 tail_messages.append(stripped)
+        return tail_messages
 
-        _merge_summary_into_tail = False
-        # Roles read the assembled (post-strip) head/tail and are TEMPLATE-VISIBLE: Mistral-strict
-        # templates skip tool rows for alternation, so alternate against what the template counts.
+    @staticmethod
+    def _summary_placement(
+        compressed: List[Dict[str, Any]], tail_messages: List[Dict[str, Any]], compress_start: int,
+    ) -> tuple[str, bool, bool, Optional[int]]:
+        """Pick the summary row's role so template-visible alternation holds.
+
+        Returns ``(summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx)``.
+        Roles read the assembled (post-strip) head/tail and are TEMPLATE-VISIBLE: Mistral-strict
+        templates skip tool rows for alternation, so alternate against what the template counts.
+        """
         last_head_role: Optional[str] = "user"
         if compressed:
+            # None = all-exempt head: the summary opens the visible sequence and must be "user".
             last_head_role = next(
-                (
-                    role
-                    for role in (
-                        _template_visible_role(m) for m in reversed(compressed)
-                    )
-                    if role is not None
-                ),
-                # All-exempt head: the summary opens the visible sequence and must be "user"
-                # (handled below).
+                (r for r in (_template_visible_role(m) for m in reversed(compressed)) if r is not None),
                 None,
             )
         first_tail_role = None
@@ -5395,144 +5296,84 @@ This compaction should PRIORITISE preserving all information related to the focu
             first_tail_visible_idx, first_tail_role = next(
                 (
                     (idx, role)
-                    for idx, role in (
-                        (idx, _template_visible_role(m))
-                        for idx, m in enumerate(tail_messages)
-                    )
+                    for idx, role in ((idx, _template_visible_role(m)) for idx, m in enumerate(tail_messages))
                     if role is not None
                 ),
                 (None, None),
             )
         # System-only head: the summary is the first visible message and Anthropic requires
-        # role=user (#52160).
-        _force_user_leading = compress_start == 0 or last_head_role == "system"
-        # Zero-user-turn guard (#58753): if no user row with non-empty TEXT survives, the summary
-        # must be role="user" or OpenAI-compatible backends reject. Image-only rows don't count.
-        if not _force_user_leading:
-            def _is_nonempty_user_turn(message: Dict[str, Any]) -> bool:
-                return message.get("role") == "user" and bool(
-                    _content_text_for_contains(message.get("content")).strip()
-                )
-
-            _user_survives = any(
-                _is_nonempty_user_turn(message) for message in compressed
-            ) or any(
-                _is_nonempty_user_turn(message) for message in tail_messages
-            )
-            if not _user_survives:
-                _force_user_leading = True
-        # Alternate against head first, then tail; None (all-exempt head) means the summary must be
-        # "user".
-        if (
-            last_head_role is None
-            or last_head_role in {"assistant", "tool"}
-            or _force_user_leading
-        ):
+        # role=user (#52160). Zero-user-turn guard (#58753): if no user row with non-empty TEXT
+        # survives, the summary must be role="user" or OpenAI-compatible backends reject.
+        # Image-only rows don't count.
+        force_user_leading = compress_start == 0 or last_head_role == "system" or not any(
+            m.get("role") == "user" and bool(_content_text_for_contains(m.get("content")).strip())
+            for m in (*compressed, *tail_messages)
+        )
+        # Alternate against head first, then tail; None (all-exempt head) means "user".
+        if last_head_role is None or last_head_role in {"assistant", "tool"} or force_user_leading:
             summary_role = "user"
         else:
             summary_role = "assistant"
+        merge_into_tail = False
         # Flip on a tail collision only if that doesn't collide with the head.
         if first_tail_role is not None and summary_role == first_tail_role:
             flipped = "assistant" if summary_role == "user" else "user"
-            # All-exempt head pins "user"; flipping would open the visible sequence with
-            # "assistant".
-            if (
-                flipped != last_head_role
-                and last_head_role is not None
-                and not _force_user_leading
-            ):
+            # All-exempt head pins "user"; flipping would open the visible sequence with "assistant".
+            if flipped != last_head_role and last_head_role is not None and not force_user_leading:
                 summary_role = flipped
             else:
                 # Neither role alternates: merge the summary into the first tail message instead.
-                _merge_summary_into_tail = bool(tail_messages)
+                merge_into_tail = bool(tail_messages)
+        return summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx
 
-        # End marker stops weak models treating the quoted summary as fresh input (#11475) or
-        # regurgitating it (#33256).
-        if not _merge_summary_into_tail:
-            summary = summary + "\n\n" + _SUMMARY_END_MARKER
+    def _merge_summary_into_tail_row(
+        self, msg: Dict[str, Any], summary: str, summary_role: str, force_user_leading: bool,
+    ) -> None:
+        """Fold the summary into a carried tail row (in place) when no standalone role alternates."""
+        old_content = msg.get("content", "")
+        if force_user_leading and summary_role == "user":
+            # Anthropic/Bedrock: summary must lead the first visible message; the real request
+            # follows the end marker.
+            msg["content"] = _append_text_to_content(
+                old_content, summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n", prepend=True,
+            )
+        else:
+            # Old tail content is kept as delimited reference BEFORE the summary; the end marker
+            # goes last.
+            suffix = "\n\n" + _MERGED_SUMMARY_DELIMITER + "\n\n" + summary + "\n\n" + _SUMMARY_END_MARKER
+            msg["content"] = _append_text_to_content(
+                _append_text_to_content(old_content, suffix, prepend=False),
+                _MERGED_PRIOR_CONTEXT_HEADER + "\n",
+                prepend=True,
+            )
+        # Frontends use this to detect a summary-prefixed message.
+        msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
+        msg[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = bool(self._summary_has_user_turn)
+        # Rewritten content: drop the stale api_content sidecar so replay can't resend pre-merge bytes.
+        drop_stale_api_content(msg)
 
-        if not _merge_summary_into_tail:
-            compressed.append({
-                "role": summary_role,
-                "content": summary,
-                COMPRESSED_SUMMARY_METADATA_KEY: True,
-                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(
-                    self._summary_has_user_turn
-                ),
-            })
-
-        # Default carrier is tail[0]: an exempt row absorbs the summary invisibly. The forced repair
-        # path needs a non-empty role=user row, so it targets the template-visible row.
-        _merge_target_idx = 0
-        if _force_user_leading and first_tail_visible_idx is not None:
-            _merge_target_idx = first_tail_visible_idx
-        for tail_idx, msg in enumerate(tail_messages):
-            # Tag carried-forward tail rows so archive_and_compact treats their originals as
-            # superseded duplicates (#86366).
-            if isinstance(msg, dict):
-                msg[_COMPACTION_TAIL_MARKER] = True
-            if _merge_summary_into_tail and tail_idx == _merge_target_idx:
-                old_content = msg.get("content", "")
-                if _force_user_leading and summary_role == "user":
-                    # Anthropic/Bedrock: summary must lead the first visible message; the real
-                    # request follows the end marker.
-                    prefix = summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n"
-                    msg["content"] = _append_text_to_content(
-                        old_content,
-                        prefix,
-                        prepend=True,
-                    )
-                else:
-                    # Old tail content is kept as delimited reference BEFORE the summary; the end
-                    # marker goes last.
-                    suffix = (
-                        "\n\n" + _MERGED_SUMMARY_DELIMITER + "\n\n"
-                        + summary + "\n\n"
-                        + _SUMMARY_END_MARKER
-                    )
-                    msg["content"] = _append_text_to_content(
-                        _append_text_to_content(old_content, suffix, prepend=False),
-                        _MERGED_PRIOR_CONTEXT_HEADER + "\n",
-                        prepend=True,
-                    )
-                # Frontends use this to detect a summary-prefixed message.
-                msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
-                msg[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = bool(
-                    self._summary_has_user_turn
-                )
-                # Rewritten content: drop the stale api_content sidecar so replay can't resend pre-
-                # merge bytes.
-                drop_stale_api_content(msg)
-                _merge_summary_into_tail = False
-            compressed.append(msg)
-
+    def _finalize_compressed(
+        self, compressed: List[Dict[str, Any]], messages: List[Dict[str, Any]], n_messages: int,
+    ) -> List[Dict[str, Any]]:
+        """Post-assembly cleanup: orphan pairs, media, savings, markers, replay prune, mem trim."""
         self.compression_count += 1
-
         compressed = self._sanitize_tool_pairs(compressed)
-
         # Replace historical image payloads with placeholders; multi-MB base64 blobs otherwise
         # exceed body limits.
         compressed = _strip_historical_media(compressed)
 
-        new_estimate = estimate_messages_tokens_rough(compressed)
-
         # Like-for-like savings: current_tokens includes system prompt/tool schemas, new_estimate is
         # messages-only; comparing them fakes ~96% savings and kills the anti-thrashing guard.
+        # Message-only savings are diagnostic; the verdict belongs to the next provider prompt count.
+        new_estimate = estimate_messages_tokens_rough(compressed)
         pre_estimate = estimate_messages_tokens_rough(messages)
         saved_estimate = pre_estimate - new_estimate
         savings_pct = (saved_estimate / pre_estimate * 100) if pre_estimate > 0 else 0
         self._last_compression_savings_pct = savings_pct
-
-        # Message-only savings are diagnostic; the anti-thrashing verdict belongs to the next
-        # provider prompt count.
-
         if not self.quiet_mode:
             logger.info(
                 "Compressed: %d -> %d messages (~%d tokens saved, %.0f%%)",
-                n_messages,
-                len(compressed),
-                saved_estimate,
-                savings_pct,
+                n_messages, len(compressed), saved_estimate, savings_pct,
             )
             logger.info("Compression #%d complete", self.compression_count)
 
@@ -5549,18 +5390,13 @@ This compaction should PRIORITISE preserving all information related to the focu
         self._last_compression_made_progress = True
 
         # Compaction frees the biggest allocation: hand pages back to the OS (glibc/config-gated,
-        # rate-limited, #70782).
+        # rate-limited, #70782). debug, not warning: compression must never fail because of a trim.
         try:
             from hermes_cli.mem_trim import trim_memory
 
             trim_memory(reason="post-compression")
         except Exception as exc:
-            # debug, not warning: compression must never fail because of a trim.
-            logger.debug(
-                "post-compression memory trim failed: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
+            logger.debug("post-compression memory trim failed: %s: %s", type(exc).__name__, exc)
 
         # Batch marker holds MORE history than the rolling summary: reset micro state so it can't
         # supersede/defrag content it lacks; the next micro pass rehydrates from the batch marker.
@@ -5569,9 +5405,147 @@ This compaction should PRIORITISE preserving all information related to the focu
         self._micro_compact_consecutive_failures = 0
         self._micro_compact_last_failure_cursor = -1
         self._proactive_prune_rearm_tokens = 0
-
         return compressed
 
+    def compress(
+        self,
+        messages: List[Dict[str, Any]],
+        current_tokens: Optional[int] = None,
+        focus_topic: Optional[str] = None,
+        force: bool = False,
+        memory_context: str = "",
+        bypass_cooldown: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Compress conversation messages by summarizing middle turns.
+
+        Prunes tool results and blank echo rows (survives an abort), protects head and a
+        token-budget tail, summarizes the middle, then cleans orphaned tool pairs.
+        ``force`` clears the failure cooldown and bypasses the feasibility skip;
+        ``bypass_cooldown`` runs the summary LLM without clearing the cooldown (#100661).
+        """
+        telemetry = self._begin_compress_attempt(current_tokens, force)
+        n_messages = len(messages)
+        # Only need head + 3 tail messages minimum (token budget decides the real tail size)
+        _min_for_compress = self._protect_head_size(messages) + 3 + 1
+        if n_messages <= _min_for_compress:
+            self._structural_no_op_result(
+                telemetry, "insufficient_messages",
+                f"only {n_messages} messages (need > {_min_for_compress})",
+            )
+            return messages
+
+        display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+
+        # Phase 1: Prune old tool results (cheap, no LLM call)
+        messages, pruned_count = self._prune_old_tool_results(
+            messages, protect_tail_count=self.protect_last_n,
+            protect_tail_tokens=self.tail_token_budget,
+        )
+        if pruned_count and not self.quiet_mode:
+            logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
+        messages = self._drop_blank_echoes(messages)
+        n_messages = len(messages)
+
+        # Phase 2: Determine boundaries
+        compress_start, compress_end = self._compress_window(messages)
+        if compress_start >= compress_end:
+            self._record_compression_regions(
+                head_messages=messages[:compress_start],
+                middle_messages=[],
+                tail_messages=messages[compress_end:],
+            )
+            self._structural_no_op_result(
+                telemetry, "no_compressible_window",
+                f"compress_start ({compress_start}) >= compress_end "
+                f"({compress_end}) - transcript fits within tail budget",
+            )
+            return messages
+
+        turns_to_summarize = messages[compress_start:compress_end]
+        # Lean mode demotes stale tail tool results before summary generation so stubs exist even if
+        # it aborts.
+        if getattr(self, "tail_mode", "lean") == "lean":
+            messages = self._demote_stale_tail_tools(messages, compress_end)
+        scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
+        turns_to_summarize = scan.turns_to_summarize
+
+        self._record_compression_regions(
+            head_messages=messages[:compress_start],
+            middle_messages=turns_to_summarize,
+            tail_messages=messages[compress_end:],
+        )
+        telemetry["chunk_count"] = 1 if turns_to_summarize else 0
+        if not turns_to_summarize:
+            # Window is only handoff rows (#59496): skip the aux call; _previous_summary is KEPT —
+            # it came from this transcript.
+            self._structural_no_op_result(
+                telemetry, "empty_post_handoff_window",
+                f"window {compress_start}-{compress_end} holds only already-summarized handoffs",
+            )
+            return messages
+        if not self.quiet_mode:
+            self._log_compression_start(
+                display_tokens, compress_start, compress_end,
+                len(turns_to_summarize), n_messages - scan.tail_start,
+            )
+
+        # Phase 3: Generate structured summary (or skip the LLM when the middle is too small to matter)
+        feasibility_skip = not force and self._feasibility_skip(
+            telemetry, turns_to_summarize, compress_start, compress_end,
+        )
+        if feasibility_skip:
+            summary = None  # No LLM call; Phase 4 inserts the deterministic fallback
+        else:
+            # Focus-topic derivation scans user turns; only pay when a summary is generated.
+            try:
+                summary = self._generate_summary(
+                    turns_to_summarize,
+                    focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
+                    memory_context=memory_context,
+                    bypass_cooldown=bypass_cooldown,
+                )
+            except AuxiliaryExplicitCancellation:
+                # Cancellation is a true no-op: restore the self-heal scan's mutation before the
+                # exception escapes.
+                self._previous_summary = scan.previous_summary_before
+                self._summary_has_user_turn = scan.has_user_turn_before
+                raise
+            if not summary and self._abort_on_summary_failure(
+                telemetry, compress_end - compress_start, scan.previous_summary_before,
+            ):
+                return messages
+
+        # Phase 4: Assemble compressed message list
+        compressed = self._assemble_head(messages, compress_start)
+        if not summary:
+            summary = self._fallback_summary_for_window(
+                telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
+            )
+        tail_messages = self._assemble_tail(messages, compress_end, scan.tail_start, scan.summary_indices)
+        summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx = (
+            self._summary_placement(compressed, tail_messages, compress_start)
+        )
+        if not merge_into_tail:
+            # End marker stops weak models treating the quoted summary as fresh input (#11475) or
+            # regurgitating it (#33256).
+            compressed.append({
+                "role": summary_role,
+                "content": summary + "\n\n" + _SUMMARY_END_MARKER,
+                COMPRESSED_SUMMARY_METADATA_KEY: True,
+                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(self._summary_has_user_turn),
+            })
+        # Default carrier is tail[0]: an exempt row absorbs the summary invisibly. The forced repair
+        # path needs a non-empty role=user row, so it targets the template-visible row.
+        merge_target_idx = first_tail_visible_idx if force_user_leading and first_tail_visible_idx is not None else 0
+        for tail_idx, msg in enumerate(tail_messages):
+            # Tag carried-forward tail rows so archive_and_compact treats their originals as
+            # superseded duplicates (#86366).
+            if isinstance(msg, dict):
+                msg[_COMPACTION_TAIL_MARKER] = True
+            if merge_into_tail and tail_idx == merge_target_idx:
+                self._merge_summary_into_tail_row(msg, summary, summary_role, force_user_leading)
+            compressed.append(msg)
+        return self._finalize_compressed(compressed, messages, n_messages)
 
 def is_compaction_summary_message(message: Any) -> bool:
     """Return True when *message* is a context-compaction handoff summary.
