@@ -75,10 +75,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "stt.silk": ("pilk==0.2.4",),
 
     # ─── Wake word ("Hey Hermes") engines (sync with the `wake` extra) ──────
-    # openWakeWord's ONNX model scores ~0 on macOS ARM64, so macOS uses the tflite
-    # backend (ai-edge-litert, bridged in tools/wake_word.py). Separate feature
-    # because specs cannot carry PEP 508 markers (";" is rejected) — the caller
-    # applies the platform gate.
+    # openWakeWord's ONNX model scores ~0 on macOS ARM64, so macOS uses the tflite backend
+    # (ai-edge-litert, bridged in tools/wake_word.py). Separate feature because specs cannot
+    # carry PEP 508 markers (";" is rejected) — the caller applies the platform gate.
     "wake.openwakeword.tflite": (
         "ai-edge-litert==2.1.6",
     ),
@@ -108,17 +107,16 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Memory providers ──────────────────────────────────────────────────
     "memory.honcho": ("honcho-ai==2.2.0",),
     "memory.hindsight": ("hindsight-client==0.6.1",),
-    # Cloud memory SDKs MUST be allowlisted + ensure()'d at the import site, or
-    # they never install on the sealed Docker image (durable-target only).
+    # Cloud memory SDKs MUST be allowlisted + ensure()'d at the import site, or they never
+    # install on the sealed Docker image (durable-target only).
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai==2.0.10",),
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.8",),
-    # brotlicffi: aiohttp needs its 2-arg Decompressor for Discord CDN's
-    # Brotli attachments; google's `Brotli` (1-arg) fails "Can not decode br".
-    # aiohttp is only capped transitively by these adapters, so a vulnerable
-    # already-installed copy would satisfy them — pin the patched floor explicitly.
+    # brotlicffi: aiohttp needs its 2-arg Decompressor for Discord CDN Brotli attachments
+    # (google's 1-arg `Brotli` fails "Can not decode br"). aiohttp is only capped transitively
+    # by these adapters, so pin the patched floor explicitly.
     "platform.discord": (
         "discord.py[voice]==2.7.1",
         "brotlicffi==1.2.0.1",
@@ -176,23 +174,19 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "starlette==1.3.1",
         "python-multipart==0.0.32",  # FastAPI UploadFile/Form streaming uploads
     ),
-    # Pillow and firecrawl-anydoc are CORE deps; these entries are the self-heal
-    # path for lean/partial installs. Call sites use prompt=False so read_file /
-    # vision can never block on an input() prompt mid-session.
+    # Pillow and firecrawl-anydoc are CORE deps; these entries self-heal lean/partial installs.
+    # Call sites use prompt=False so read_file / vision never block on input() mid-session.
     "tool.vision": ("Pillow==12.3.0",),
     "tool.doc_extract": ("firecrawl-anydoc==0.2.4",),  # imports as `anydoc`; lockstep with pyproject
-    # MCP client SDK for the cua-driver; covers lean/broken-extra installs so
-    # computer_use never dead-ends on `No module named 'mcp'`.
+    # MCP client SDK for the cua-driver, so computer_use never dead-ends on `No module named 'mcp'`.
     "tool.computer_use": (
         "mcp==2.0.0",
         "httpx2==2.7.0",  # mcp 2.x HTTP stack — sync with pyproject [computer-use]
         "starlette==1.3.1",
     ),
-    # huggingface-hub is SHARED with transformers (>=1.5.0,<2 via Hindsight) and
-    # active_features() marks it active on mere presence, so `hermes update`
-    # re-asserts this pin everywhere hub exists. It MUST stay inside transformers'
-    # window and match uv.lock (tests/test_project_metadata.py enforces both);
-    # bump with `uv lock --upgrade-package huggingface-hub` in lockstep.
+    # huggingface-hub is SHARED with transformers (>=1.5.0,<2 via Hindsight) and marked active
+    # on mere presence, so `hermes update` re-asserts this pin everywhere hub exists. MUST stay
+    # inside transformers' window and match uv.lock (tests/test_project_metadata.py enforces).
     "tool.trace_upload": ("huggingface-hub==1.24.0",),
 }
 
@@ -495,8 +489,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
     constraints: Optional[Path] = None
     extra_args: list[str] = []
     if target is not None:
-        err = _ensure_target_ready(target)
-        if err:
+        if err := _ensure_target_ready(target):
             return _InstallResult(False, "", err)
         constraints = _core_constraints_file()
         extra_args += ["--target", str(target)]
