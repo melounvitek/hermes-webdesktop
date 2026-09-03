@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 from hermes_cli.colors import Colors, color
 from hermes_cli.config import is_nix_install_method, recommended_update_command_for_method
-from hermes_cli.doctor_report import Finding, _fail_and_issue, _section, check_fail, check_info, check_ok, check_warn
+from hermes_cli.doctor_report import (
+    Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
+)
 from hermes_constants import is_termux as _is_termux
 
 
@@ -23,9 +25,7 @@ def _python_install_cmd() -> str:
 def _system_package_install_cmd(pkg: str) -> str:
     if _is_termux():
         return f"pkg install {pkg}"
-    if sys.platform == "darwin":
-        return f"brew install {pkg}"
-    return f"sudo apt install {pkg}"
+    return f"brew install {pkg}" if sys.platform == "darwin" else f"sudo apt install {pkg}"
 
 
 def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
@@ -40,10 +40,7 @@ def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
         action = f"run `{recommended_update_command_for_method(method)}`"
     else:
         action = "run `hermes update`"
-    return (
-        f"({action}; fixed versions: 3.51.3+ / 3.50.7 / 3.44.6 — "
-        "see https://sqlite.org/wal.html#walresetbug)"
-    )
+    return f"({action}; fixed versions: 3.51.3+ / 3.50.7 / 3.44.6 — see https://sqlite.org/wal.html#walresetbug)"
 
 
 def _hermes_database_paths(hermes_home: Path) -> list[tuple[str, Path]]:
@@ -62,18 +59,15 @@ _SQLITE_HEADER_MAGIC = b"SQLite format 3\x00"
 def _unreadable_reason(db_path: Path) -> str:
     """Explain why a database file could not be read, without opening it.
 
-    ``read_header_bytes_preopen`` collapses every ``OSError`` into ``None``, but
-    doctor must say *which* problem it hit. ``stat()`` and ``access()`` answer
-    that from directory metadata alone — neither takes a file descriptor, so
-    neither can cancel the file's POSIX advisory locks.
+    ``read_header_bytes_preopen`` collapses every ``OSError`` into ``None``, but doctor must say *which*
+    problem it hit. ``stat()`` and ``access()`` answer that from directory metadata alone — neither takes
+    a file descriptor, so neither can cancel the file's POSIX advisory locks.
     """
     try:
         db_path.stat()
     except OSError as exc:
         return str(exc)
-    if not os.access(db_path, os.R_OK):
-        return f"permission denied: {db_path}"
-    return "file could not be read"
+    return "file could not be read" if os.access(db_path, os.R_OK) else f"permission denied: {db_path}"
 
 
 def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
@@ -89,17 +83,13 @@ def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
 
     header = read_header_bytes_preopen(db_path, length=20)
     if header is None:
-        if has_live_connection(db_path):
-            return None, "database is open in this process"
-        return None, _unreadable_reason(db_path)
+        return None, "database is open in this process" if has_live_connection(db_path) else _unreadable_reason(db_path)
     if len(header) == 0:
         return None, "file is empty"
     if len(header) < 20 or not header.startswith(_SQLITE_HEADER_MAGIC):
         return None, "file is not a database"
     mode = {2: "wal", 1: "rollback"}.get(header[18])
-    if mode:
-        return mode, None
-    return None, f"unrecognized file-format version {header[18]}"
+    return (mode, None) if mode else (None, f"unrecognized file-format version {header[18]}")
 
 
 def _format_db_size(db_path: Path) -> str:
@@ -111,18 +101,14 @@ def _format_db_size(db_path: Path) -> str:
         return "size unknown"
 
 
-def _report_database_journal_modes(
-    hermes_home: Path | None = None,
-    version_info: tuple[int, ...] | None = None,
-) -> None:
+def _report_database_journal_modes(hermes_home: Path | None = None, version_info: tuple[int, ...] | None = None) -> None:
     """List each database's journal mode; warn on WAL under a vulnerable SQLite."""
     from hermes_cli.doctor import HERMES_HOME
     from hermes_state import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
 
     vulnerable = is_sqlite_wal_reset_vulnerable(version_info)
-    home = hermes_home if hermes_home is not None else HERMES_HOME
     try:
-        databases = _hermes_database_paths(home)
+        databases = _hermes_database_paths(hermes_home if hermes_home is not None else HERMES_HOME)
     except Exception as exc:
         check_warn(f"Could not list Hermes databases: {exc}")
         return
@@ -143,10 +129,8 @@ def _report_database_journal_modes(
                 check_warn(f"{name} is in WAL mode ({size})", "(exposed to the WAL-reset bug until SQLite is upgraded)")
             else:
                 check_info(f"{name}: WAL journal mode ({size})")
-        elif vulnerable:
-            check_info(f"{name}: rollback journal mode ({size}, not exposed)")
         else:
-            check_info(f"{name}: rollback journal mode ({size})")
+            check_info(f"{name}: rollback journal mode ({size}, not exposed)" if vulnerable else f"{name}: rollback journal mode ({size})")
     if exposed:
         check_info(f"To clear the exposure: {_wal_reset_repair_hint()}")
 
@@ -165,8 +149,7 @@ def _read_pyproject_version() -> str | None:
             in_project = line == "[project]"
             continue
         if in_project and line.startswith("version") and "=" in line:
-            value = line.split("=", 1)[1].split("#", 1)[0].strip().strip("\"'")
-            return value or None
+            return line.split("=", 1)[1].split("#", 1)[0].strip().strip("\"'") or None
     return None
 
 
@@ -219,10 +202,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
         check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
         return
     up_count = sum(1 for p in profiles if mgr.is_running(f"gateway-{p}"))
-    check_ok(
-        f"Per-profile gateways: {up_count}/{len(profiles)} supervised up"
-        + (f" ({', '.join(sorted(profiles))})" if len(profiles) <= 8 else "")
-    )
+    check_ok(f"Per-profile gateways: {up_count}/{len(profiles)} supervised up"
+             + (f" ({', '.join(sorted(profiles))})" if len(profiles) <= 8 else ""))
 
 
 def check_certificates(should_fix: bool = False, issues: "list | None" = None) -> None:
@@ -260,10 +241,8 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
 
     print("    → Repairing: force-reinstalling certifi...")
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--force-reinstall", "certifi"],
-            capture_output=True, text=True, timeout=300,
-        )
+        result = subprocess.run([sys.executable, "-m", "pip", "install", "--force-reinstall", "certifi"],
+                                capture_output=True, text=True, timeout=300)
     except Exception as exc:
         check_fail("certifi repair could not run pip", str(exc))
         add_issue(f"Reinstall certifi manually: {pip_cmd}")
@@ -369,9 +348,7 @@ def _desktop_app_bundle() -> Path | None:
     """
     release_dir = Path(__file__).resolve().parents[1] / "apps" / "desktop" / "release"
     candidates = [p for p in release_dir.glob("mac*/Hermes.app") if p.is_dir()]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
 
 def _macos_desktop_dr(app: Path) -> str | None:
@@ -383,9 +360,7 @@ def _macos_desktop_dr(app: Path) -> str | None:
         proc = subprocess.run([codesign, "-d", "--requirements", "-", str(app)], capture_output=True, text=True, timeout=15)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0:
-        return None
-    return (proc.stdout or "") + (proc.stderr or "")
+    return None if proc.returncode != 0 else (proc.stdout or "") + (proc.stderr or "")
 
 
 def check_macos_tcc_anchor(should_fix: bool = False) -> None:
@@ -442,34 +417,30 @@ def check_macos_full_disk_access() -> None:
         check_ok("macOS Full Disk Access granted", "(no per-folder permission prompts will occur)")
 
 
-def _check_security_advisories(should_fix: bool) -> Finding:
+@doctor_check("Security advisory check failed: {e}")
+def _check_security_advisories(should_fix: bool, f: Finding) -> None:
     """Compromised-package advisories, funnelled into manual issues; a bug here must never block the rest of doctor."""
-    f = Finding()
-    try:
-        from hermes_cli.security_advisories import detect_compromised, filter_unacked, full_remediation_text, get_acked_ids
-        all_hits = detect_compromised()
-        fresh_hits = filter_unacked(all_hits)
-        if not fresh_hits:
-            check_ok("No active security advisories")
-            return f
-        for hit in fresh_hits:
-            check_fail(f"{hit.advisory.title}", f"({hit.package}=={hit.installed_version})")
-            for line in full_remediation_text(hit):  # indented under the header as one section
-                print(f"    {color(line, Colors.YELLOW)}" if line else "")
-            # Also into the action list so the summary block surfaces it.
-            f.manual_issues.append(
-                f"Resolve security advisory {hit.advisory.id}: "
-                f"uninstall {hit.package}=={hit.installed_version} and "
-                f"rotate credentials, then run "
-                f"`hermes doctor --ack {hit.advisory.id}`."
-            )
-        acked_ids = get_acked_ids()  # acked-but-still-installed stays visible
-        for h in all_hits:
-            if h.advisory.id in acked_ids:
-                check_warn(f"{h.package}=={h.installed_version} still installed (advisory {h.advisory.id} acknowledged)")
-    except Exception as e:
-        check_warn(f"Security advisory check failed: {e}")
-    return f
+    from hermes_cli.security_advisories import detect_compromised, filter_unacked, full_remediation_text, get_acked_ids
+    all_hits = detect_compromised()
+    fresh_hits = filter_unacked(all_hits)
+    if not fresh_hits:
+        check_ok("No active security advisories")
+        return
+    for hit in fresh_hits:
+        check_fail(f"{hit.advisory.title}", f"({hit.package}=={hit.installed_version})")
+        for line in full_remediation_text(hit):  # indented under the header as one section
+            print(f"    {color(line, Colors.YELLOW)}" if line else "")
+        # Also into the action list so the summary block surfaces it.
+        f.manual_issues.append(
+            f"Resolve security advisory {hit.advisory.id}: "
+            f"uninstall {hit.package}=={hit.installed_version} and "
+            f"rotate credentials, then run "
+            f"`hermes doctor --ack {hit.advisory.id}`."
+        )
+    acked_ids = get_acked_ids()  # acked-but-still-installed stays visible
+    for h in all_hits:
+        if h.advisory.id in acked_ids:
+            check_warn(f"{h.package}=={h.installed_version} still installed (advisory {h.advisory.id} acknowledged)")
 
 
 def _check_python_environment(should_fix: bool) -> Finding:
@@ -506,11 +477,7 @@ def _check_python_environment(should_fix: bool) -> Finding:
     except Exception as e:
         check_warn(f"SQLite version probe failed: {e}")
 
-    if sys.prefix != sys.base_prefix:
-        check_ok("Virtual environment active")
-    else:
-        check_warn("Not in virtual environment", "(recommended)")
-
+    check_bool(sys.prefix != sys.base_prefix, "Virtual environment active", ("Not in virtual environment", "(recommended)"))
     check_macos_tcc_anchor(should_fix=should_fix)
     check_macos_full_disk_access()
     _check_version_consistency(f.issues)

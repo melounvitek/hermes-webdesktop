@@ -31,11 +31,8 @@ _GLYPH = {"ok": ("✓", Colors.GREEN), "warn": ("⚠", Colors.YELLOW), "fail": (
 
 def _row(name: str, status: str, detail: str = "", issues: list | None = None, label: str | None = None) -> ProbeResult:
     glyph, col = _GLYPH[status]
-    return ProbeResult(
-        name,
-        [(color(glyph, col), label if label is not None else name, color(detail, Colors.DIM) if detail else "")],
-        list(issues or []),
-    )
+    return ProbeResult(name, [(color(glyph, col), name if label is None else label, color(detail, Colors.DIM) if detail else "")],
+                       list(issues or []))
 
 
 def _skip(name: str) -> ProbeResult:
@@ -61,9 +58,9 @@ def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool
 def _build_apikey_providers_list() -> list:
     """Build the API-key provider health-check list once and cache it.
 
-    Tuple format: (name, env_vars, default_url, base_env, supports_models_endpoint)
-    Base list augmented with any ProviderProfile with auth_type="api_key" not
-    already present — adding plugins/model-providers/<name>/ is sufficient to get into doctor.
+    Tuple format: (name, env_vars, default_url, base_env, supports_models_endpoint). Base list augmented
+    with any ProviderProfile with auth_type="api_key" not already present — adding
+    plugins/model-providers/<name>/ is sufficient to get into doctor.
     """
     _static = [
         ("Z.AI / GLM",      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "https://api.z.ai/api/paas/v4/models", "GLM_BASE_URL", True),
@@ -113,30 +110,17 @@ def _build_apikey_providers_list() -> list:
             _label = _pp.display_name or _pp.name
             if _label in _known_names or _pp.name in _known_canonical:
                 continue
-            _candidates = {_normalize_provider(_pp.name)}
-            for _alias in (_pp.aliases or ()):
-                _candidates.add(_normalize_provider(_alias))
-            if _candidates & _dedicated_canonical:
+            if {_normalize_provider(a) for a in (_pp.name, *(_pp.aliases or ()))} & _dedicated_canonical:
                 continue
-            # Separate API-key vars from base-URL override vars — the health-check
-            # loop sends the first found value as Authorization: Bearer, so a URL
-            # string must never be picked.
-            _key_vars = tuple(
-                v for v in _pp.env_vars
-                if not v.endswith("_BASE_URL") and not v.endswith("_URL")
-            )
-            _base_var = next(
-                (v for v in _pp.env_vars if v.endswith("_BASE_URL") or v.endswith("_URL")),
-                None,
-            )
+            # Separate API-key vars from base-URL override vars — the health-check loop sends the
+            # first found value as Authorization: Bearer, so a URL string must never be picked.
+            _is_url = lambda v: v.endswith("_BASE_URL") or v.endswith("_URL")  # noqa: E731
+            _key_vars = tuple(v for v in _pp.env_vars if not _is_url(v))
             if not _key_vars:
                 continue
-            _models_url = (
-                (_pp.models_url or (_pp.base_url.rstrip("/") + "/models"))
-                if _pp.base_url else None
-            )
-            _hc = getattr(_pp, "supports_health_check", True)
-            _static.append((_label, _key_vars, _models_url, _base_var, _hc))
+            _base_var = next((v for v in _pp.env_vars if _is_url(v)), None)
+            _models_url = (_pp.models_url or (_pp.base_url.rstrip("/") + "/models")) if _pp.base_url else None
+            _static.append((_label, _key_vars, _models_url, _base_var, getattr(_pp, "supports_health_check", True)))
     except Exception:
         pass
     return _static
@@ -176,12 +160,7 @@ def _probe_anthropic() -> ProbeResult:
         return _skip(name)
     try:
         import httpx
-        from agent.anthropic_adapter import (
-            _is_oauth_token,
-            _COMMON_BETAS,
-            _OAUTH_ONLY_BETAS,
-            _CONTEXT_1M_BETA,
-        )
+        from agent.anthropic_adapter import _is_oauth_token, _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
         headers = {"anthropic-version": "2023-06-01"}
         is_oauth = _is_oauth_token(key)
         if is_oauth:
@@ -191,19 +170,11 @@ def _probe_anthropic() -> ProbeResult:
             headers["x-api-key"] = key
         url = "https://api.anthropic.com/v1/models"
         r = httpx.get(url, headers=headers, timeout=10)
-        # Reactive recovery: OAuth subscriptions without 1M context reject the
-        # request with 400 "long context beta is not yet available for this
-        # subscription". Retry once with that beta stripped so the doctor
-        # check doesn't falsely report Anthropic as unreachable.
-        if (
-            is_oauth
-            and r.status_code == 400
-            and "long context beta" in r.text.lower()
-            and "not yet available" in r.text.lower()
-        ):
-            headers["anthropic-beta"] = ",".join(
-                [b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS)
-            )
+        # Reactive recovery: OAuth subscriptions without 1M context reject with 400 "long context beta
+        # is not yet available for this subscription". Retry once with that beta stripped so doctor
+        # doesn't falsely report Anthropic as unreachable.
+        if is_oauth and r.status_code == 400 and "long context beta" in r.text.lower() and "not yet available" in r.text.lower():
+            headers["anthropic-beta"] = ",".join([b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS))
             r = httpx.get(url, headers=headers, timeout=10)
     except Exception as e:
         return _row(name, "warn", f"({e})")
@@ -215,11 +186,7 @@ def _probe_anthropic() -> ProbeResult:
 
 
 def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_health_check) -> ProbeResult:
-    key = ""
-    for ev in env_vars:
-        key = os.getenv(ev, "")
-        if key:
-            break
+    key = next((k for k in (os.getenv(ev, "") for ev in env_vars) if k), "")
     if not key:
         return _skip(pname)
     label = pname.ljust(20)
@@ -241,10 +208,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
         if base_url_host_matches(base, "api.kimi.com") and base.rstrip("/").endswith("/coding"):
             base = base.rstrip("/") + "/v1"
         url = (base.rstrip("/") + "/models") if base else default_url
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "User-Agent": _HERMES_USER_AGENT,
-        }
+        headers = {"Authorization": f"Bearer {key}", "User-Agent": _HERMES_USER_AGENT}
         if base_url_host_matches(base, "api.kimi.com"):
             headers["User-Agent"] = "claude-code/0.1.0"
         # Google's Generative Language API rejects ``Authorization: Bearer
@@ -268,11 +232,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
 def _probe_bedrock() -> ProbeResult:
     name = "AWS Bedrock"
     try:
-        from agent.bedrock_adapter import (
-            has_aws_credentials,
-            resolve_aws_auth_env_var,
-            resolve_bedrock_region,
-        )
+        from agent.bedrock_adapter import has_aws_credentials, resolve_aws_auth_env_var, resolve_bedrock_region
     except ImportError:
         return _skip(name)
     if not has_aws_credentials():
@@ -283,8 +243,7 @@ def _probe_bedrock() -> ProbeResult:
     try:
         import boto3
         from botocore.config import Config as _BotoConfig
-        # Trim retries on the actual Bedrock API call so a transient
-        # failure doesn't pad the doctor run by 30+ seconds.
+        # Trim retries so a transient failure doesn't pad the doctor run by 30+ seconds.
         cfg = _BotoConfig(connect_timeout=5, read_timeout=10, retries={"max_attempts": 1})
         client = boto3.client("bedrock", region_name=region, config=cfg)
         resp = client.list_foundation_models()
@@ -302,10 +261,8 @@ def _probe_bedrock() -> ProbeResult:
 def _probe_azure_entra() -> ProbeResult:
     """Probe Azure Foundry Entra ID auth, parallel to ``_probe_bedrock``.
 
-    Skipped unless the active config has ``model.provider: azure-foundry`` AND
-    ``model.auth_mode: entra_id`` — we don't probe the token-service / CLI
-    chain for users on plain API-key Azure. Bounded by a 10s timeout (via
-    :func:`agent.azure_identity_adapter.describe_active_credential`).
+    Skipped unless the active config has ``model.provider: azure-foundry`` AND ``model.auth_mode: entra_id``
+    — we don't probe the token-service / CLI chain for plain API-key Azure. Bounded by a 10s timeout.
     """
     name = "Azure Foundry (Entra ID)"
     label = name.ljust(28)
@@ -337,9 +294,7 @@ def _probe_azure_entra() -> ProbeResult:
                     [f"Install azure-identity: {sys.executable} -m pip install azure-identity"], label=label)
 
     entra_cfg = model_cfg.get("entra") or {}
-    if not isinstance(entra_cfg, dict):
-        entra_cfg = {}
-    scope = str(entra_cfg.get("scope") or "").strip() or SCOPE_AI_AZURE_DEFAULT
+    scope = (str(entra_cfg.get("scope") or "").strip() if isinstance(entra_cfg, dict) else "") or SCOPE_AI_AZURE_DEFAULT
     info = describe_active_credential(config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0)
     if info.get("ok"):
         env_sources = info.get("env_sources") or []
@@ -371,15 +326,12 @@ def build_probes() -> list:
 def run_probes(probes: list) -> list:
     """Run every probe in a thread pool; results in submission order.
 
-    Probes are independent HTTP calls, so running them in series cost ~5s wall
-    (2s of it boto3's IMDS lookup). Parallel collapses the section to roughly
-    the slowest single probe without changing the output.
+    Probes are independent HTTP calls (series cost ~5s wall, 2s of it boto3's IMDS lookup);
+    parallel collapses the section to roughly the slowest single probe without changing the output.
     """
-    # Disable boto3's EC2 instance-metadata probe for the parallel block: the
-    # default credential chain tries 169.254.169.254 with a multi-second
-    # timeout off-EC2. Set on the parent thread before submitting so the env
-    # mutation never races a worker; has_aws_credentials() already gates on
-    # real env creds, so IMDS is never the legitimate source for doctor.
+    # Disable boto3's EC2 instance-metadata probe (169.254.169.254, multi-second timeout off-EC2).
+    # Set on the parent thread before submitting so the env mutation never races a worker;
+    # has_aws_credentials() already gates on real env creds, so IMDS is never legitimate for doctor.
     _imds_prev = os.environ.get("AWS_EC2_METADATA_DISABLED")
     os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
     try:

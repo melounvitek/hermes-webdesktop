@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from hermes_cli.doctor_platform import _system_package_install_cmd
-from hermes_cli.doctor_report import Finding, _fail_and_issue, check_info, check_ok, check_warn
+from hermes_cli.doctor_report import CHECK_ROW, Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_constants import agent_browser_runnable, is_termux as _is_termux
 
@@ -38,13 +38,12 @@ def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
     return steps + [f"{n}) npm install -g agent-browser", f"{n + 1}) agent-browser install"]
 
 
-def _termux_install_all_fallback_notes() -> list[str]:
-    return [
-        "Termux install profile: use .[termux-all] for broad compatibility (installer default on Termux).",
-        "Matrix E2EE extra is excluded on Termux (python-olm currently fails to build).",
-        "Local faster-whisper extra is excluded on Termux (ctranslate2/av build path unavailable).",
-        "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY).",
-    ]
+_TERMUX_INSTALL_ALL_FALLBACK_NOTES = (
+    "Termux install profile: use .[termux-all] for broad compatibility (installer default on Termux).",
+    "Matrix E2EE extra is excluded on Termux (python-olm currently fails to build).",
+    "Local faster-whisper extra is excluded on Termux (ctranslate2/av build path unavailable).",
+    "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY).",
+)
 
 
 def _is_kanban_worker_env_gate(item: dict) -> bool:
@@ -136,14 +135,9 @@ def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]
 
 def _check_git_and_rg(should_fix: bool) -> Finding:
     f = Finding()
-    if _safe_which("git"):
-        check_ok("git")
-    else:
-        check_warn("git not found", "(optional)")
-    if _safe_which("rg"):
-        check_ok("ripgrep (rg)", "(faster file search)")
-    else:
-        check_warn("ripgrep (rg) not found", "(file search uses grep fallback)")
+    check_bool(_safe_which("git"), "git", ("git not found", "(optional)"))
+    if not check_bool(_safe_which("rg"), ("ripgrep (rg)", "(faster file search)"),
+                      ("ripgrep (rg) not found", "(file search uses grep fallback)")):
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
     return f
 
@@ -256,6 +250,9 @@ def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
             _fail_and_issue(label, detail, detail.strip("()"), issues)
 
 
+_BACKEND_CHECKS = {"ssh": _check_ssh_backend, "daytona": _check_daytona_backend, "vercel_sandbox": _check_vercel_backend}
+
+
 def _check_terminal_backend(should_fix: bool) -> Finding:
     """Docker/SSH/Daytona/Vercel/plugin terminal backends, gated on TERMINAL_ENV."""
     f = Finding()
@@ -273,12 +270,8 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
         check_info("Running inside a container — using local terminal backend (docker-in-docker is not configured by default)")
         terminal_env = "local"
     _check_docker_backend(terminal_env, running_in_container, f.issues)
-    if terminal_env == "ssh":
-        _check_ssh_backend(f.issues)
-    elif terminal_env == "daytona":
-        _check_daytona_backend(f.issues)
-    elif terminal_env == "vercel_sandbox":
-        _check_vercel_backend(f.issues)
+    if terminal_env in _BACKEND_CHECKS:
+        _BACKEND_CHECKS[terminal_env](f.issues)
     elif terminal_env not in _BUILTIN_TERMINAL_BACKENDS:
         _check_plugin_backend(terminal_env, f.issues)
     return f
@@ -316,14 +309,22 @@ def _check_agent_browser(should_fix: bool) -> bool:
         # postinstall after `hermes update` wiped node_modules.
         check_warn("agent-browser found but not runnable", f"(broken symlink at {resolved}? run: npx agent-browser --version)")
     elif _is_termux():
-        check_info("agent-browser is not installed (expected in the tested Termux path)")
-        check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
-        check_info("Termux browser setup:")
-        for step in _termux_browser_setup_steps(node_installed=True):
-            check_info(step)
+        _termux_browser_hints(
+            "agent-browser is not installed (expected in the tested Termux path)",
+            "Install it manually later with: npm install -g agent-browser && agent-browser install",
+            node_installed=True,
+        )
     else:
         check_warn("agent-browser not installed", "(requires npm/npx on PATH)")
     return False
+
+
+def _termux_browser_hints(*lines: str, node_installed: bool) -> None:
+    for line in lines:
+        check_info(line)
+    check_info("Termux browser setup:")
+    for step in _termux_browser_setup_steps(node_installed=node_installed):
+        check_info(step)
 
 
 def _check_chromium() -> None:
@@ -381,11 +382,11 @@ def _check_node_and_browser(should_fix: bool) -> Finding:
         if _check_agent_browser(should_fix) and not _is_termux():  # Chromium check is not a tested Termux path
             _check_chromium()
     elif _is_termux():
-        check_info("Node.js not found (browser tools are optional in the tested Termux path)")
-        check_info("Install Node.js on Termux with: pkg install nodejs")
-        check_info("Termux browser setup:")
-        for step in _termux_browser_setup_steps(node_installed=False):
-            check_info(step)
+        _termux_browser_hints(
+            "Node.js not found (browser tools are optional in the tested Termux path)",
+            "Install Node.js on Termux with: pkg install nodejs",
+            node_installed=False,
+        )
     else:
         check_warn("Node.js not found", "(optional, needed for browser tools)")
     _check_lightpanda()
@@ -464,43 +465,38 @@ def _check_npm_audit(should_fix: bool) -> Finding:
 
     if _is_termux():
         check_info("Termux compatibility fallbacks:")
-        for note in _termux_install_all_fallback_notes():
+        for note in _TERMUX_INSTALL_ALL_FALLBACK_NOTES:
             check_info(note)
     return f
 
 
-def _check_tool_availability(should_fix: bool) -> Finding:
+@doctor_check("Could not check tool availability", "({e})")
+def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import PROJECT_ROOT, _doctor_web_capability_rows
-    f = Finding()
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
 
-        available, unavailable = check_tool_availability()
-        available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
+    available, unavailable = _apply_doctor_tool_availability_overrides(*check_tool_availability())
 
-        # Web is split into search/extract readiness rows so an explicitly
-        # selected but unconfigured backend cannot look healthy.
-        web_rows = []
-        if "web" in available or any(item.get("name") == "web" for item in unavailable):
-            web_rows = _doctor_web_capability_rows()
-            if web_rows:
-                available = [tid for tid in available if tid != "web"]
-                unavailable = [item for item in unavailable if item.get("name") != "web"]
+    # Web is split into search/extract readiness rows so an explicitly
+    # selected but unconfigured backend cannot look healthy.
+    web_rows = []
+    if "web" in available or any(item.get("name") == "web" for item in unavailable):
+        web_rows = _doctor_web_capability_rows()
+        if web_rows:
+            available = [tid for tid in available if tid != "web"]
+            unavailable = [item for item in unavailable if item.get("name") != "web"]
 
-        for tid in available:
-            check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
-        for status, label, detail in web_rows:
-            (check_ok if status == "ok" else check_warn)(label, detail)
-        for item in unavailable:
-            env_vars = item.get("missing_vars") or item.get("env_vars") or []
-            check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")
+    for tid in available:
+        check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
+    for status, label, detail in web_rows:
+        CHECK_ROW[status](label, detail)
+    for item in unavailable:
+        env_vars = item.get("missing_vars") or item.get("env_vars") or []
+        check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")
 
-        # Only toolsets enabled for the CLI count toward the summary; default-off or
-        # disabled toolsets may warn above but must not pollute it.
-        api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
-        if api_disabled or any(status != "ok" for status, _, _ in web_rows):
-            f.issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
-    except Exception as e:
-        check_warn("Could not check tool availability", f"({e})")
-    return f
+    # Only toolsets enabled for the CLI count toward the summary; default-off or
+    # disabled toolsets may warn above but must not pollute it.
+    api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
+    if api_disabled or any(status != "ok" for status, _, _ in web_rows):
+        f.issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
