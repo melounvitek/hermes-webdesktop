@@ -528,8 +528,7 @@ def _resume_live_unpersisted(ctx: _Resume, live_sid: str, live: dict) -> dict:
     return _ok(ctx.rid, _attach_todo_state({
         "session_id": live_sid, "stored_session_id": str(live.get("session_key") or ""),
         "message_count": len(history), "messages": ctx.messages(history),
-        "info": {"model": _resolve_model(), "lazy": True, "profile_name": ctx.profile or ""},
-    }, live))
+        "info": {"model": _resolve_model(), "lazy": True, "profile_name": ctx.profile or ""}}, live))
 
 
 def _resume_adopt_stranded(ctx: _Resume) -> None:
@@ -543,11 +542,10 @@ def _resume_adopt_stranded(ctx: _Resume) -> None:
             return
         adoption = ctx.db.adopt_session_lineage_from(default_db, donor_row["id"])
         if adoption.get("adopted"):
-            logger.info(
-                "adopted stranded session %s (lineage of %s segment(s)) from default store into profile %s",
-                donor_row["id"],
-                len(adoption.get("imported_ids") or []) + len(adoption.get("skipped_ids") or []),
-                ctx.profile or "?")
+            logger.info("adopted stranded session %s (lineage of %s segment(s)) from default store into profile %s",
+                        donor_row["id"],
+                        len(adoption.get("imported_ids") or []) + len(adoption.get("skipped_ids") or []),
+                        ctx.profile or "?")
             ctx.found = ctx.db.get_session(donor_row["id"])
             if ctx.found:
                 ctx.target = ctx.found["id"]
@@ -608,11 +606,8 @@ def _resume_guard(ctx: _Resume) -> dict | None:
     try:
         if callable(safety_check):
             safety_check(ctx.target, **({"tip_only": True} if guard_tip_only else {}))
-        else:
-            resume_limit = resolved_max_resume_messages()
-            stored_message_count = int(ctx.found.get("message_count") or 0)
-            if resume_limit and stored_message_count > resume_limit:
-                raise SessionResumeTooLargeError(stored_message_count, resume_limit)
+        elif (limit := resolved_max_resume_messages()) and (n := int(ctx.found.get("message_count") or 0)) > limit:
+            raise SessionResumeTooLargeError(n, limit)
     except SessionResumeTooLargeError as exc:
         return _err(ctx.rid, 4130, str(exc))
     except Exception as exc:
@@ -635,13 +630,11 @@ def _resume_reuse_live(ctx: _Resume, sid: str, session: dict) -> dict:
                                         omit_messages=ctx.omit_messages)
         payload["resumed"] = ctx.target
         if ctx.defer_history:
-            payload["messages"] = []
-            payload["message_count"] = int(session.get("resume_message_count") or payload["message_count"])
-            payload["hydrating"] = bool(session.get("resume_hydrating"))
+            payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
+                           message_count=int(session.get("resume_message_count") or payload["message_count"]))
         # A lazy watch session never owns a run loop — overlay the child-run registry.
         if session.get("agent") is None and _child_run_active(ctx.target):
-            payload["running"] = True
-            payload["status"] = "streaming"
+            payload.update(running=True, status="streaming")
         return _ok(ctx.rid, payload)
 
 
@@ -656,14 +649,10 @@ def _resume_response(
         messages = ctx.messages(display)
     if message_count is None:
         message_count = len(count_source) if ctx.omit_messages else len(messages)
-    payload = {"session_id": sid, "resumed": ctx.target, "message_count": message_count, "messages": messages}
-    if hydrating is None:
-        payload["messages_omitted"] = ctx.omit_messages
-    else:
-        payload["hydrating"] = hydrating
-    payload.update({
-        "info": info, "inflight": None, "running": running, "session_key": ctx.target,
-        "started_at": record["created_at"] if started_at is None else started_at, "status": status})
+    payload = {"session_id": sid, "resumed": ctx.target, "message_count": message_count, "messages": messages,
+               **({"messages_omitted": ctx.omit_messages} if hydrating is None else {"hydrating": hydrating}),
+               "info": info, "inflight": None, "running": running, "session_key": ctx.target,
+               "started_at": record["created_at"] if started_at is None else started_at, "status": status}
     if auto_continue is not None:
         payload["auto_continue"] = auto_continue
     return _ok(ctx.rid, _attach_todo_state(payload, record))
@@ -687,13 +676,13 @@ def _resume_lazy(ctx: _Resume) -> dict:
     # Display uses the VERBATIM child-only projection so model-invisible rows survive;
     # the repaired ``history`` still feeds live replay.
     try:
-        display_history = ctx.child_history(repair=False)
+        display = ctx.child_history(repair=False)
     except Exception:
         logger.debug("child-watch display projection read failed", exc_info=True)
-        display_history = history
-    return _resume_response(
-        ctx, sid, record, info=_lazy_resume_info(cwd, profile=ctx.profile), display=display_history,
-        count_source=display_history, running=child_running, status="streaming" if child_running else "idle")
+        display = history
+    return _resume_response(ctx, sid, record, info=_lazy_resume_info(cwd, profile=ctx.profile), display=display,
+                            count_source=display, running=child_running,
+                            status="streaming" if child_running else "idle")
 
 
 def _resume_deferred(ctx: _Resume) -> dict:
@@ -703,9 +692,8 @@ def _resume_deferred(ctx: _Resume) -> dict:
     _enable_gateway_prompts()
     overrides = _stored_session_runtime_overrides(ctx.found) or {}
     record = ctx.record(source, cwd, [], overrides)
-    record["resume_history_ready"] = threading.Event()
-    record["resume_hydrating"] = True
-    record["resume_message_count"] = int(ctx.found.get("message_count") or 0)
+    record.update(resume_history_ready=threading.Event(), resume_hydrating=True,
+                  resume_message_count=int(ctx.found.get("message_count") or 0))
     if (reused := ctx.claim(sid, record)) is not None:
         return reused
     _schedule_resume_hydration(sid, ctx.target, ctx.db, close_db=ctx.owns_db)
@@ -822,9 +810,9 @@ def _(rid, params: dict) -> dict:
             return _resume_reuse_live(ctx, *live)
         if ctx.lazy:
             return _resume_lazy(ctx)
-        if ctx.defer_history and not ctx.eager_build:
-            return _resume_deferred(ctx)
-        return _resume_eager(ctx) if ctx.eager_build else _resume_cold(ctx)
+        if ctx.eager_build:
+            return _resume_eager(ctx)
+        return _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
     finally:
         # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF once its background
         # token writer starts (atexit.register); only close() unregisters.
@@ -944,16 +932,12 @@ def _title_read(rid, params: dict, session: dict, db) -> dict:
         if not fallback:
             if resolved_title:
                 session["pending_title"] = None
-        elif db.set_session_title(key, fallback):
+        elif (db.set_session_title(key, fallback)
+              or ((db.get_session(key) or {}).get("title") or "").strip() == fallback):
             session["pending_title"] = None
             resolved_title = fallback
-        else:
-            existing_title = ((db.get_session(key) or {}).get("title") or "").strip()
-            if existing_title == fallback:
-                session["pending_title"] = None
-                resolved_title = fallback
-            elif not resolved_title:
-                resolved_title = fallback
+        elif not resolved_title:
+            resolved_title = fallback
     except Exception:
         resolved_title = fallback
     _emit_session_info_for_session(params.get("session_id", ""), session)
@@ -1108,18 +1092,17 @@ def _(rid, params: dict, session: dict) -> dict:
                     "/sethome on the destination chat first")
     # The watcher transfers a persisted row, so make sure one exists for an empty chat.
     _ensure_session_db_row(session)
+    key = session["session_key"]
     with _session_db(session) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
-        key = session["session_key"]
         try:
             if not db.get_session(key):
                 db.set_session_title(key, f"handoff-{key[:8]}")
-            ok = db.request_handoff(key, platform_name)
+            if not db.request_handoff(key, platform_name):
+                return _err(rid, 4027, "session is already in flight for handoff — wait for it to settle, then retry")
         except Exception as e:
             return _err(rid, 5007, str(e))
-    if not ok:
-        return _err(rid, 4027, "session is already in flight for handoff — wait for it to settle, then retry")
     return _ok(rid, {"queued": True, "session_key": key, "platform": platform_name, "home_name": home.name})
 
 
@@ -1152,10 +1135,8 @@ def _(rid, params: dict) -> dict:
             failed = (record.get("state") or "") == "pending"
             if failed:
                 db.fail_handoff(key, reason)
-        if failed:
-            return _ok(rid, {"failed": True, "state": "failed"})
-        record = db.get_handoff_state(key) or {}
-    return _ok(rid, {"failed": False, "state": record.get("state") or ""})
+        state = "failed" if failed else (db.get_handoff_state(key) or {}).get("state") or ""
+    return _ok(rid, {"failed": bool(failed), "state": state})
 
 
 # ── usage ────────────────────────────────────────────────────────────
@@ -1174,8 +1155,7 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @_session_method("session.context_breakdown")
 def _(rid, params: dict, session: dict) -> dict:
-    agent = session.get("agent")
-    if agent is None:
+    if (agent := session.get("agent")) is None:
         usage = _session_usage_snapshot(session) or _get_usage(None)
         return _ok(rid, {
             "categories": [], "context_max": usage.get("context_max", 0) or 0,
@@ -1888,9 +1868,9 @@ def _(rid, params: dict, session: dict) -> dict:
                        "session_start": started.isoformat() if started else "",
                        "system_prompt": getattr(agent, "_cached_system_prompt", "") or "",
                        "messages": messages}, f, indent=2, ensure_ascii=False)
-        return _ok(rid, {"file": str(path)})
     except Exception as e:
         return _err(rid, 5011, str(e))
+    return _ok(rid, {"file": str(path)})
 
 
 @method("session.close")
@@ -2152,10 +2132,9 @@ def _legacy_spawn_tree_entry(p, session_dir_name: str) -> dict | None:
         stat = p.stat()
     except OSError:
         return None
-    try:
+    raw = {}
+    with contextlib.suppress(Exception):
         raw = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        raw = {}
     subagents = raw.get("subagents") or []
     return {"path": str(p), "session_id": raw.get("session_id") or session_dir_name,
             "finished_at": raw.get("finished_at") or stat.st_mtime, "started_at": raw.get("started_at"),
@@ -2174,11 +2153,10 @@ def _(rid, params: dict) -> dict:
         if indexed := _read_spawn_tree_index(d):
             # Skip index entries whose snapshot file was manually deleted.
             entries.extend(e for e in indexed if (p := e.get("path")) and Path(p).exists())
-            continue
-        # Legacy (pre-index) sessions: full scan, once per session until the next save.
-        for p in d.glob("*.json"):
-            if p.name != _SPAWN_TREE_INDEX and (entry := _legacy_spawn_tree_entry(p, d.name)) is not None:
-                entries.append(entry)
+        else:  # Legacy (pre-index) sessions: full scan, once per session until the next save.
+            entries.extend(
+                entry for p in d.glob("*.json")
+                if p.name != _SPAWN_TREE_INDEX and (entry := _legacy_spawn_tree_entry(p, d.name)) is not None)
     entries.sort(key=lambda e: e.get("finished_at") or 0, reverse=True)
     return _ok(rid, {"entries": entries[:int(params.get("limit") or 50)]})
 
