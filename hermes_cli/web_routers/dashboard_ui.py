@@ -14,11 +14,7 @@ from fastapi.responses import FileResponse
 
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_models import (
-    FontSetBody,
-    ThemeSetBody,
-    _AgentPluginInstallBody,
-    _PluginProvidersPutBody,
-    _PluginVisibilityBody,
+    FontSetBody, ThemeSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody,
 )
 
 _log = logging.getLogger("hermes_cli.web_server")
@@ -206,32 +202,26 @@ def _named_plugin_action(request: Request, name: str, action: Callable[[str], di
 @router.post("/api/dashboard/agent-plugins/{name:path}/enable")
 async def post_agent_plugin_enable(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    return _named_plugin_action(
-        request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=True), "Enable failed.", rescan=False
-    )
+    return _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=True),
+                                "Enable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/disable")
 async def post_agent_plugin_disable(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    return _named_plugin_action(
-        request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=False), "Disable failed.", rescan=False
-    )
+    return _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=False),
+                                "Disable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/update")
 async def post_agent_plugin_update(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
-
     return _named_plugin_action(request, name, dashboard_update_user_plugin, "Update failed.", rescan=True)
 
 
 @router.delete("/api/dashboard/agent-plugins/{name:path}")
 async def delete_agent_plugin(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
-
     return _named_plugin_action(request, name, dashboard_remove_user_plugin, "Remove failed.", rescan=True)
 
 
@@ -269,12 +259,10 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
             hidden_list: list = config["dashboard"].get("hidden_plugins") or []
             if not isinstance(hidden_list, list):
                 hidden_list = []
-
             if body.hidden and name not in hidden_list:
                 hidden_list.append(name)
             elif not body.hidden and name in hidden_list:
                 hidden_list.remove(name)
-
             config["dashboard"]["hidden_plugins"] = hidden_list
             save_config(config)
         _invalidate_plugins_hub_cache()
@@ -287,23 +275,11 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
 # never leak ``.py`` backend sources, READMEs, ``.env.example`` templates, etc.
 # Add to it deliberately when a new asset type comes up; do NOT add a fallback.
 _PLUGIN_ASSET_CONTENT_TYPES = {
-    ".js": "application/javascript",
-    ".mjs": "application/javascript",
-    ".css": "text/css",
-    ".json": "application/json",
-    ".html": "text/html",
-    ".svg": "image/svg+xml",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".ico": "image/x-icon",
-    ".woff2": "font/woff2",
-    ".woff": "font/woff",
-    ".ttf": "font/ttf",
-    ".otf": "font/otf",
-    ".map": "application/json",
+    ".js": "application/javascript", ".mjs": "application/javascript", ".css": "text/css",
+    ".json": "application/json", ".html": "text/html", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".ico": "image/x-icon", ".woff2": "font/woff2", ".woff": "font/woff",
+    ".ttf": "font/ttf", ".otf": "font/otf", ".map": "application/json",
 }
 
 
@@ -335,8 +311,4 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     media_type = _PLUGIN_ASSET_CONTENT_TYPES.get(target.suffix.lower())
     if media_type is None:
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(
-        target,
-        media_type=media_type,
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-    )
+    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})

@@ -29,13 +29,11 @@ _AUX_TASK_SLOTS = LateState("_AUX_TASK_SLOTS")
 
 
 _EMPTY_MODEL_INFO: dict = {
-    "model": "",
-    "provider": "",
-    "auto_context_length": 0,
-    "config_context_length": 0,
-    "effective_context_length": 0,
-    "capabilities": {},
+    "model": "", "provider": "", "auto_context_length": 0, "config_context_length": 0,
+    "effective_context_length": 0, "capabilities": {},
 }
+_CAPABILITY_FIELDS = ("supports_tools", "supports_vision", "supports_reasoning", "context_window",
+                      "max_output_tokens", "model_family")
 
 
 def _main_model_fields(model_cfg) -> tuple[str, str]:
@@ -82,21 +80,12 @@ def get_model_info(profile: Optional[str] = None):
             from agent.models_dev import get_model_capabilities
             mc = get_model_capabilities(provider=provider, model=model_name)
             if mc is not None:
-                caps = {
-                    "supports_tools": mc.supports_tools,
-                    "supports_vision": mc.supports_vision,
-                    "supports_reasoning": mc.supports_reasoning,
-                    "context_window": mc.context_window,
-                    "max_output_tokens": mc.max_output_tokens,
-                    "model_family": mc.model_family,
-                }
+                caps = {name: getattr(mc, name) for name in _CAPABILITY_FIELDS}
         except Exception:
             pass
 
         return {
-            "model": model_name,
-            "provider": provider,
-            "auto_context_length": auto_ctx,
+            "model": model_name, "provider": provider, "auto_context_length": auto_ctx,
             "config_context_length": config_ctx_int,
             "effective_context_length": config_ctx_int or auto_ctx,  # what the agent actually uses
             "capabilities": caps,
@@ -151,22 +140,12 @@ async def get_model_options(
 
 
 def _nous_recommended_default() -> dict:
-    from hermes_cli.models import (
-        get_curated_nous_model_ids,
-        get_pricing_for_provider,
-        check_nous_free_tier,
-        nous_policy_allowed_ids,
-        partition_nous_models_by_tier,
-        pick_silent_default_model,
-        restrict_to_nous_policy,
-        union_with_portal_free_recommendations,
-        union_with_portal_paid_recommendations,
-    )
+    from hermes_cli import models as m
     from hermes_cli.auth import get_provider_auth_state
 
-    model_ids = get_curated_nous_model_ids()
-    pricing = get_pricing_for_provider("nous") or {}
-    free_tier = check_nous_free_tier(force_fresh=True)
+    model_ids = m.get_curated_nous_model_ids()
+    pricing = m.get_pricing_for_provider("nous") or {}
+    free_tier = m.check_nous_free_tier(force_fresh=True)
 
     try:
         portal_url = (get_provider_auth_state("nous") or {}).get("portal_base_url", "") or ""
@@ -176,14 +155,14 @@ def _nous_recommended_default() -> dict:
     # This endpoint picks the model a user lands on without choosing it, so an
     # unreachable one here is worse than in a picker. Narrow to policy before
     # the tier split, so a rescued id still has to pass the free/paid predicate.
-    policy_allowed = nous_policy_allowed_ids()
-    union = union_with_portal_free_recommendations if free_tier else union_with_portal_paid_recommendations
+    policy_allowed = m.nous_policy_allowed_ids()
+    union = m.union_with_portal_free_recommendations if free_tier else m.union_with_portal_paid_recommendations
     model_ids, pricing = union(model_ids, pricing, portal_url)
-    model_ids = restrict_to_nous_policy(model_ids, policy_allowed, rescue_empty=True)
+    model_ids = m.restrict_to_nous_policy(model_ids, policy_allowed, rescue_empty=True)
     if free_tier:
-        model_ids, _unavailable = partition_nous_models_by_tier(model_ids, pricing, free_tier=True)
+        model_ids, _unavailable = m.partition_nous_models_by_tier(model_ids, pricing, free_tier=True)
 
-    model = pick_silent_default_model(model_ids, provider="nous")
+    model = m.pick_silent_default_model(model_ids, provider="nous")
     return {"provider": "nous", "model": model, "free_tier": bool(free_tier)}
 
 
@@ -242,10 +221,8 @@ def get_auxiliary_models(profile: Optional[str] = None):
         for slot in _AUX_TASK_SLOTS:
             slot_cfg = aux_cfg.get(slot, {}) if isinstance(aux_cfg.get(slot), dict) else {}
             tasks.append({
-                "task": slot,
-                "provider": str(slot_cfg.get("provider", "auto") or "auto"),
-                "model": str(slot_cfg.get("model", "") or ""),
-                "base_url": str(slot_cfg.get("base_url", "") or ""),
+                "task": slot, "provider": str(slot_cfg.get("provider", "auto") or "auto"),
+                "model": str(slot_cfg.get("model", "") or ""), "base_url": str(slot_cfg.get("base_url", "") or ""),
             })
 
         model, provider = _main_model_fields(cfg.get("model", {}))
@@ -323,12 +300,9 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
     Writes ``~/.hermes/config.yaml`` — applies to **new** sessions only; a
     running chat PTY hot-swaps via the ``/model`` slash command instead.
     """
-    scope = (body.scope or "").strip().lower()
-    provider = (body.provider or "").strip()
-    model = (body.model or "").strip()
-    task = (body.task or "").strip().lower()
-    base_url = (body.base_url or "").strip()
-    api_key = (body.api_key or "").strip()
+    scope, task = (body.scope or "").strip().lower(), (body.task or "").strip().lower()
+    provider, model = (body.provider or "").strip(), (body.model or "").strip()
+    base_url, api_key = (body.base_url or "").strip(), (body.api_key or "").strip()
 
     if scope not in {"main", "auxiliary"}:
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
@@ -350,14 +324,8 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
             except Exception:
                 warning = None
             if warning is not None:
-                return {
-                    "ok": False,
-                    "scope": scope,
-                    "provider": provider,
-                    "model": model,
-                    "confirm_required": True,
-                    "confirm_message": warning.message,
-                }
+                return {"ok": False, "scope": scope, "provider": provider, "model": model,
+                        "confirm_required": True, "confirm_message": warning.message}
 
         def _apply_assignment():
             with _profile_scope(body.profile or profile):
