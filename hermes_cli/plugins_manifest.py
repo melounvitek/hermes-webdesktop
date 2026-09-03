@@ -23,22 +23,38 @@ except ImportError:  # pragma: no cover – yaml is optional at import time
 
 logger = logging.getLogger("hermes_cli.plugins")
 
+_VALID_PLUGIN_KINDS: Set[str] = {"standalone", "backend", "exclusive", "platform", "model-provider"}
+
+# Unknown plugin.yaml fields are forward-compat surface: warn (debug for v1 files, warning for v2+)
+# and continue loading. ``capabilities``/``emits``/``listens``/``hermes``/``depends`` are reserved.
+_KNOWN_MANIFEST_FIELDS: Set[str] = {
+    "name", "version", "description", "author", "requires_env", "provides_tools", "provides_hooks",
+    "kind", "hooks", "label", "optional_env", "platforms", "external_dependencies",
+    "pip_dependencies", "provides_browser_providers", "provides_web_providers",
+    "manifest_version", "api_version", "requires_plugins", "python_dependencies", "config_schema",
+    "license", "homepage", "tags", "capabilities", "emits", "listens", "hermes", "depends",
+}
+
+# Highest manifest schema version this Hermes understands.
+SUPPORTED_MANIFEST_VERSION = 2
+
+_CONFIG_SCHEMA_TYPES: Dict[str, tuple] = {
+    "str": (str,), "string": (str,), "int": (int,), "integer": (int,), "float": (int, float),
+    "number": (int, float), "bool": (bool,), "boolean": (bool,), "list": (list,), "array": (list,),
+    "dict": (dict,), "object": (dict,),
+}
+
 
 def _plugins_debug() -> bool:
     from hermes_cli import plugins as _origin
     return _origin._PLUGINS_DEBUG
 
 
-_VALID_PLUGIN_KINDS: Set[str] = {"standalone", "backend", "exclusive", "platform", "model-provider"}
-
-
 def _portable_skill_namespace(key: str) -> str:
     """Return a readable, collision-resistant namespace for a portable plugin."""
-
     slug = "".join(
         ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-" for ch in key.lower()
-    )
-    slug = slug.strip("-_") or "plugin"
+    ).strip("-_") or "plugin"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
     return f"agent-plugin-{slug}-{digest}"
 
@@ -46,37 +62,8 @@ def _portable_skill_namespace(key: str) -> str:
 def _display_author(value: object) -> str:
     """Normalize a manifest author value for the string PluginManifest field."""
     if isinstance(value, Mapping):
-        return ", ".join(
-            str(value[field]) for field in ("name", "email", "url") if value.get(field)
-        )
+        return ", ".join(str(value[f]) for f in ("name", "email", "url") if value.get(f))
     return "" if value is None else str(value)
-
-
-# Manifest v2 parsing. Unknown plugin.yaml fields are forward-compat surface: warn (debug for v1
-# files, warning for v2+) and continue loading.
-_KNOWN_MANIFEST_FIELDS: Set[str] = {
-    # v1
-    "name", "version", "description", "author", "requires_env",
-    "provides_tools", "provides_hooks", "kind", "hooks", "label",
-    "optional_env", "platforms", "external_dependencies", "pip_dependencies",
-    "provides_browser_providers", "provides_web_providers",
-    # v2
-    "manifest_version", "api_version", "requires_plugins",
-    "python_dependencies", "config_schema", "license", "homepage", "tags",
-    # owned by sibling sub-issues but reserved so their manifests don't warn
-    "capabilities", "emits", "listens", "hermes", "depends",
-}
-
-
-# Highest manifest schema version this Hermes understands.
-SUPPORTED_MANIFEST_VERSION = 2
-
-
-_CONFIG_SCHEMA_TYPES: Dict[str, tuple] = {
-    "str": (str,), "string": (str,), "int": (int,), "integer": (int,), "float": (int, float),
-    "number": (int, float), "bool": (bool,), "boolean": (bool,), "list": (list,), "array": (list,),
-    "dict": (dict,), "object": (dict,),
-}
 
 
 def _manifest_field_of_type(data: Mapping, key: str, field_name: str, typ, what: str):
@@ -91,7 +78,6 @@ def _manifest_field_of_type(data: Mapping, key: str, field_name: str, typ, what:
 def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
     """Validate/normalize manifest v2 fields into PluginManifest kwargs (warnings, never failures)."""
     out: Dict[str, Any] = {}
-
     # manifest_version — absent means v1 (supported forever).
     raw_mv = data.get("manifest_version", 1)
     try:
@@ -108,7 +94,6 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
             key, mv, SUPPORTED_MANIFEST_VERSION,
         )
     out["manifest_version"] = mv
-
     # api_version — plugin API generation (independent of manifest_version).
     raw_api = data.get("api_version")
     out["api_version"] = None
@@ -117,7 +102,6 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
             out["api_version"] = int(raw_api)
         except (TypeError, ValueError):
             logger.warning("Plugin %s: api_version %r is not an integer; ignoring", key, raw_api)
-
     # requires_plugins — list of {id, version_range?} (str shorthand ok).
     deps: List[Dict[str, Any]] = []
     for item in _manifest_field_of_type(data, key, "requires_plugins", list, "a list") or []:
@@ -132,7 +116,6 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
                 "string or a {id, version_range} mapping; skipping", key, item,
             )
     out["requires_plugins"] = deps
-
     # python_dependencies — validated and surfaced ONLY; never auto-installed.
     pydeps: List[str] = []
     raw_pydeps = _manifest_field_of_type(
@@ -147,7 +130,6 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
                 "requirement string; skipping", key, item,
             )
     out["python_dependencies"] = pydeps
-
     # config_schema — mapping of key -> {type?, default?, description?, required?}.
     schema: Dict[str, Any] = {}
     raw_schema = _manifest_field_of_type(data, key, "config_schema", Mapping, "a mapping")
@@ -167,13 +149,10 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
             )
         schema[str(skey)] = dict(spec)
     out["config_schema"] = schema
-
-    # Standard metadata.
     out["license"] = str(data.get("license") or "")
     out["homepage"] = str(data.get("homepage") or "")
     raw_tags = _manifest_field_of_type(data, key, "tags", list, "a list")
     out["tags"] = [str(t) for t in (raw_tags or [])]
-
     # Forward compat: unknown fields warn (never fail); v1 manifests only at debug.
     unknown = sorted(set(data.keys()) - _KNOWN_MANIFEST_FIELDS)
     if unknown:
@@ -182,7 +161,6 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
             "Plugin %s: unknown manifest field(s) ignored: %s "
             "(newer manifest schema or typo; plugin still loads)", key, ", ".join(unknown),
         )
-
     return out
 
 
@@ -194,8 +172,7 @@ def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -
     for skey, spec in schema.items():
         if not isinstance(spec, Mapping):
             continue
-        present = skey in settings
-        if not present:
+        if skey not in settings:
             if spec.get("required") and "default" not in spec:
                 warnings.append(
                     f"plugins.entries.{plugin_id}.settings.{skey} is required "
@@ -204,17 +181,15 @@ def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -
             continue
         stype = spec.get("type")
         expected = _CONFIG_SCHEMA_TYPES.get(str(stype).lower()) if stype else None
-        if expected is not None:
-            value = settings[skey]
-            # bool is an int subclass — don't let True satisfy int/float.
-            ok = isinstance(value, expected) and not (
-                isinstance(value, bool) and bool not in expected
+        if expected is None:
+            continue
+        value = settings[skey]
+        # bool is an int subclass — don't let True satisfy int/float.
+        if not isinstance(value, expected) or (isinstance(value, bool) and bool not in expected):
+            warnings.append(
+                f"plugins.entries.{plugin_id}.settings.{skey} should be "
+                f"{stype} (got {type(value).__name__})"
             )
-            if not ok:
-                warnings.append(
-                    f"plugins.entries.{plugin_id}.settings.{skey} should be "
-                    f"{stype} (got {type(value).__name__})"
-                )
     return warnings
 
 
@@ -228,22 +203,15 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
     keys = sorted(manifests.keys())
     by_name: Dict[str, str] = {}
     for k in keys:
-        name = manifests[k].name
-        if name and name not in by_name:
-            by_name[name] = k
-
-    def _resolve_dep(dep_id: str) -> Optional[str]:
-        if dep_id in manifests:
-            return dep_id
-        return by_name.get(dep_id)
-
+        if manifests[k].name:
+            by_name.setdefault(manifests[k].name, k)
     edges: Dict[str, Set[str]] = {k: set() for k in keys}
     for k in keys:
         for dep in manifests[k].requires_plugins:
             dep_id = dep.get("id") if isinstance(dep, Mapping) else None
             if not dep_id:
                 continue
-            resolved = _resolve_dep(dep_id)
+            resolved = dep_id if dep_id in manifests else by_name.get(dep_id)
             if resolved is None:
                 logger.warning(
                     "Plugin %s requires plugin '%s' which is not enabled/"
@@ -251,12 +219,10 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
                     "via ctx.has_plugin). Run `hermes plugins enable %s` if it is installed.",
                     k, dep_id, dep_id,
                 )
-                continue
-            if resolved == k:
+            elif resolved == k:
                 logger.warning("Plugin %s declares a dependency on itself; ignoring", k)
-                continue
-            edges[k].add(resolved)
-
+            else:
+                edges[k].add(resolved)
     sorter = graphlib.TopologicalSorter(edges)
     try:
         sorter.prepare()
@@ -267,7 +233,6 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
             "alphabetical load order for all plugins", " -> ".join(str(c) for c in cycle),
         )
         return keys
-
     ordered: List[str] = []
     while sorter.is_active():
         ready = sorted(sorter.get_ready())
@@ -277,11 +242,9 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
 
 
 def _detect_kind_from_source(source_text: str) -> Optional[str]:
-    """Return the kind implied by source markers (mirrors plugins/memory ``_is_memory_provider_dir``).
-
-    Memory-provider markers -> ``exclusive``; ``register_provider`` + ``ProviderProfile`` ->
-    ``model-provider``; else ``None``. Keeps both kinds out of the general manager's eager import.
-    """
+    """Kind implied by source markers (mirrors plugins/memory ``_is_memory_provider_dir``):
+    memory-provider markers -> ``exclusive``; ``register_provider`` + ``ProviderProfile`` ->
+    ``model-provider``; else ``None``. Keeps both kinds out of the general manager's eager import."""
     if "register_memory_provider" in source_text or "MemoryProvider" in source_text:
         return "exclusive"
     if "register_provider" in source_text and "ProviderProfile" in source_text:
@@ -293,14 +256,11 @@ def _read_source_from_origin(origin: Optional[str], limit: int = 8192) -> str:
     """First ``limit`` chars of a module's source (``.pyc`` mapped back to ``.py``); "" on failure."""
     if not origin:
         return ""
-    if origin.endswith((".pyc", ".pyo")):
-        try:
-            origin = importlib.util.source_from_cache(origin)
-        except Exception:
-            return ""
-    if not origin.endswith(".py"):
-        return ""
     try:
+        if origin.endswith((".pyc", ".pyo")):
+            origin = importlib.util.source_from_cache(origin)
+        if not origin.endswith(".py"):
+            return ""
         return Path(origin).read_text(encoding="utf-8", errors="replace")[:limit]
     except Exception:
         return ""
@@ -322,7 +282,6 @@ def resolve_module_origin(module_name: str) -> Optional[str]:
             return None
         if len(parts) == 1:
             return spec.origin
-
         search_paths = spec.submodule_search_locations
         if not search_paths:
             return None
