@@ -28,15 +28,9 @@ logger = logging.getLogger(__name__)
 
 # args list -> INI keys. Flags the policy owns; everything else stays out of the preset.
 _FLAG_TO_KEY = {
-    "-c": "ctx-size",
-    "-b": "batch-size",
-    "-ub": "ubatch-size",
-    "-ctk": "cache-type-k",
-    "-ctv": "cache-type-v",
-    "-fa": "flash-attn",
-    "-ot": "override-tensor",
-    "--spec-type": "spec-type",
-    "--spec-draft-n-max": "spec-draft-n-max",
+    "-c": "ctx-size", "-b": "batch-size", "-ub": "ubatch-size",
+    "-ctk": "cache-type-k", "-ctv": "cache-type-v", "-fa": "flash-attn",
+    "-ot": "override-tensor", "--spec-type": "spec-type", "--spec-draft-n-max": "spec-draft-n-max",
 }
 
 

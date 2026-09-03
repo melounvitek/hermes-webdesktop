@@ -67,12 +67,19 @@ class GGUFHeader:
     def _arch_key(self, suffix: str):
         return self.metadata.get(f"{self.architecture}.{suffix}")
 
-    def _arch_int(self, suffix: str) -> int:
-        return int(self._arch_key(suffix) or 0)
+    def _arch_int(suffix: str, doc: str = ""):  # noqa: N805 — property factory, deleted below
+        return property(lambda self: int(self._arch_key(suffix) or 0), doc=doc)
 
-    @property
-    def n_layer(self) -> int:
-        return self._arch_int("block_count")
+    n_layer = _arch_int("block_count")
+    n_ctx_train = _arch_int("context_length")
+    n_embd = _arch_int("embedding_length")
+    sliding_window = _arch_int("attention.sliding_window")
+    expert_count = _arch_int("expert_count")
+    full_attention_interval = _arch_int(
+        "full_attention_interval",
+        "GDN-hybrid discriminator (qwen35 family): every Nth layer is full attention, the rest "
+        "are linear/recurrent. 0 = not present.")
+    del _arch_int
 
     @property
     def n_vocab(self) -> int:
@@ -83,10 +90,6 @@ class GGUFHeader:
             return int(v)
         toks = self.metadata.get("tokenizer.ggml.tokens")
         return len(toks) if isinstance(toks, list) else 0
-
-    @property
-    def n_ctx_train(self) -> int:
-        return self._arch_int("context_length")
 
     @property
     def sampling_defaults(self) -> dict:
@@ -107,21 +110,11 @@ class GGUFHeader:
         return out
 
     @property
-    def n_embd(self) -> int:
-        return self._arch_int("embedding_length")
-
-    @property
     def n_head(self) -> int:
         v = self._arch_key("attention.head_count")
         if isinstance(v, list):
             return int(max(v))
         return int(v or 0)
-
-    @property
-    def full_attention_interval(self) -> int:
-        """GDN-hybrid discriminator (qwen35 family): every Nth layer is full attention, the rest
-        are linear/recurrent. 0 = not present."""
-        return self._arch_int("full_attention_interval")
 
     def head_counts_kv(self) -> list[int]:
         """Per-layer KV head counts; 0 marks a recurrent/linear layer (n_head_kv == 0).
@@ -154,14 +147,6 @@ class GGUFHeader:
         if v:
             return int(v)
         return self.head_dim_k
-
-    @property
-    def sliding_window(self) -> int:
-        return self._arch_int("attention.sliding_window")
-
-    @property
-    def expert_count(self) -> int:
-        return self._arch_int("expert_count")
 
 
 def read_gguf_header(path: str | Path) -> GGUFHeader:

@@ -43,6 +43,14 @@ def state_path() -> Path:
     return runtimes_root() / "server.json"
 
 
+def _quiet(fn) -> None:
+    """Best-effort call; a child that vanished mid-walk is not an error."""
+    try:
+        fn()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -272,20 +280,13 @@ class LlamaServerSupervisor:
             children = []
         proc.terminate()
         for child in children:
-            try:
-                child.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+            _quiet(child.terminate)
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
         for child in children:
-            try:
-                if child.is_running():
-                    child.kill()
-            except Exception:  # noqa: BLE001
-                pass
+            _quiet(lambda: child.is_running() and child.kill())
 
     def _reap_orphaned_children(self) -> None:
         """Kill model children orphaned by a router crash, before respawn.
