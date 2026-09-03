@@ -521,10 +521,10 @@ class RelayRuntime:
         """Return an active Hermes Relay session without creating one."""
         with self._sessions_lock:
             session = None if self._closing else self._sessions.get(str(session_id or ""))
-        if session is not None:
-            with session.lock:
-                return None if session.closing else session
-        return None
+        if session is None:
+            return None
+        with session.lock:
+            return None if session.closing else session
 
     def _session_context(self, session: RelaySession, *, allow_closing: bool) -> contextvars.Context:
         """Copy the current context and overlay the session's saved Relay vars."""
@@ -1106,15 +1106,14 @@ class RelaySessionCoordinator:
             if active is not None:
                 active.discard(id(turn))
                 if not active:
-                    self._active_turns.pop(key, None)
+                    del self._active_turns[key]
             turn._active_registered = False
 
     def finish_logical_calls(self, turn: RelayTurnContext, *, outcome: str) -> None:
         """Close logical LLM children before sibling task aggregation scopes."""
         with turn.finalize_lock:
-            if turn.closed:
-                return
-            self._finish_logical_calls(turn, outcome=outcome)
+            if not turn.closed:
+                self._finish_logical_calls(turn, outcome=outcome)
 
     @staticmethod
     def _finish_logical_calls(turn: RelayTurnContext, *, outcome: str) -> None:
@@ -1186,9 +1185,7 @@ def active_turn(session_id: str | None = None) -> RelayTurnContext | None:
     if turn is None or not turn.relay_enabled or turn.closed or turn.lease.released:
         return None
     lease = turn.lease
-    if lease.profile_key != current_profile_key():
-        return None
-    if session_id is not None and lease.session_id != session_id:
+    if lease.profile_key != current_profile_key() or (session_id is not None and lease.session_id != session_id):
         return None
     if isinstance(lease.host, RelayRuntime) and (
         lease.session is None or lease.host.get_session(lease.session_id) is not lease.session
