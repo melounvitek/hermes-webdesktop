@@ -128,7 +128,7 @@ class DoctorReport:
 
     @property
     def ok(self) -> bool:
-        return not any(finding.level == "error" for finding in self.findings)
+        return all(finding.level != "error" for finding in self.findings)
 
     def error(self, message: str) -> None:
         self.findings.append(DoctorFinding("error", message))

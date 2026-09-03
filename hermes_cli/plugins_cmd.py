@@ -20,6 +20,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import cfg_get
+from hermes_cli.plugin_capabilities import _child_dict
 from hermes_cli.secret_prompt import masked_secret_prompt
 from utils import atomic_write_text
 
@@ -81,15 +82,6 @@ def _ask_yes(prompt: str, reader=input) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer in {"y", "yes"}
-
-
-def _sub_dict(parent: dict, key: str) -> dict:
-    """``parent[key]`` as a dict, replacing a missing or non-dict value with ``{}``."""
-    child = parent.get(key)
-    if not isinstance(child, dict):
-        child = {}
-        parent[key] = child
-    return child
 
 
 def _config_value(*keys: str, default: Any) -> Any:
@@ -326,21 +318,15 @@ def _copy_example_files(plugin_dir: Path, console) -> None:
             console.print(f"[yellow]Warning:[/yellow] Failed to copy {example_file.name}: {e}")
 
 
-def _requires_env_specs(manifest: dict) -> list[dict]:
-    """Normalise ``requires_env`` (plain names or ``{name, description, url, secret}`` dicts)
-    to a list of dicts; entries without a name are dropped."""
+def _missing_env_specs(manifest: dict) -> list[dict]:
+    """``requires_env`` entries (plain names or ``{name, description, url, secret}`` dicts,
+    normalised to dicts; nameless entries dropped) whose variable is unset in ``~/.hermes/.env``."""
     env_specs: list[dict] = []
     for entry in manifest.get("requires_env") or []:
         if isinstance(entry, str):
             env_specs.append({"name": entry})
         elif isinstance(entry, dict) and entry.get("name"):
             env_specs.append(entry)
-    return env_specs
-
-
-def _missing_env_specs(manifest: dict) -> list[dict]:
-    """Declared ``requires_env`` specs whose variable is unset in ``~/.hermes/.env``."""
-    env_specs = _requires_env_specs(manifest)
     if not env_specs:
         return []
     from hermes_cli.config import get_env_value
@@ -1011,7 +997,7 @@ def _set_plugin_entry_flag(plugin_id: str, key: str, value: bool) -> None:
     """Write ``plugins.entries.<plugin_id>.<key> = value`` into config.yaml."""
     from hermes_cli.config import load_config, save_config
     config = load_config()
-    entry = _sub_dict(_sub_dict(_sub_dict(config, "plugins"), "entries"), plugin_id)
+    entry = _child_dict(_child_dict(_child_dict(config, "plugins"), "entries"), plugin_id)
     entry[key] = bool(value)
     save_config(config)
 
@@ -1806,20 +1792,18 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
     def _from_manifest_on_disk() -> Optional[str]:
         from hermes_cli.plugins import get_bundled_plugins_dir
         for base in (get_bundled_plugins_dir(), _plugins_dir()):
-            candidate = base / name
-            if base.is_dir() and candidate.is_dir():
-                toolset = _first_toolset(_read_manifest(candidate).get("provides_tools") or [])
+            if base.is_dir() and (base / name).is_dir():
+                toolset = _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
                 if toolset:
                     return toolset
         return None
 
     for lookup in (_from_loaded_plugin, _from_manifest_on_disk):
         try:
-            toolset = lookup()
+            if toolset := lookup():
+                return toolset
         except Exception:
             continue
-        if toolset:
-            return toolset
     return None
 
 
@@ -1831,7 +1815,7 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
         return
     from hermes_cli.config import load_config, save_config
     config = load_config()
-    platform_toolsets = _sub_dict(config, "platform_toolsets")
+    platform_toolsets = _child_dict(config, "platform_toolsets")
     changed = False
     for ts_list in platform_toolsets.values():
         if not isinstance(ts_list, list):
