@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Any, Literal
 
@@ -31,6 +31,7 @@ MAX_USER_TEXT_BYTES = 64 * 1024
 MAX_MEMBER_TEXT_BYTES = 64 * 1024
 _TRUNCATED_REPLY_NOTICE = "\n\n[Reply truncated. Ask the Bot to share the full result as a file.]"
 
+Payload = Mapping[str, Any]
 DecisionStatus = Literal["idle", "task", "settled", "bounded"]
 TerminalKind = Literal["settled", "failed", "cancelled", "deferred"]
 
@@ -50,12 +51,12 @@ _USER_PAYLOAD_FIELDS = frozenset({"text", "thread_id"})
 _TURN_COORDINATE_FIELDS = frozenset(
     {"discussion_event_id", "member_id", "member_index", "round_index", "task_id", "thread_id", "turn_id", })
 _MEMBER_MESSAGE_FIELDS = _TURN_COORDINATE_FIELDS | {"text"}
-_TERMINAL_COMMON_FIELDS = _TURN_COORDINATE_FIELDS | {"seen_through_seq"}
-_TERMINAL_EXTRA_FIELDS = {
-    "turn.settled": frozenset({"message_event_id", "passed"}), "turn.failed": frozenset({"error"}),
-    "turn.cancelled": frozenset({"reason"}), "turn.deferred": frozenset({"execution_generation", "reason"})}
+_TERMINAL_FIELDS = {  # kind -> exact payload fields (coordinates + seen_through_seq + per-kind extras)
+    kind: _TURN_COORDINATE_FIELDS | {"seen_through_seq", *extra} for kind, extra in (
+        ("turn.settled", ("message_event_id", "passed")), ("turn.failed", ("error",)),
+        ("turn.cancelled", ("reason",)), ("turn.deferred", ("execution_generation", "reason")))}
 _TERMINAL_OPTIONAL_FIELDS = {"turn.failed": frozenset({"reason_code"})}
-_TERMINAL_EVENT_KINDS = frozenset(_TERMINAL_EXTRA_FIELDS)
+_TERMINAL_EVENT_KINDS = frozenset(_TERMINAL_FIELDS)
 # Gateway-authored control events: kind -> (exact payload fields, identifier fields).
 _GATEWAY_EVENT_FIELDS = {
     "room.activity": (
@@ -133,11 +134,8 @@ class EventPlan:
     authority_epoch: int
 
     def append_kwargs(self, room_id: str) -> dict[str, Any]:
-        """Return keyword arguments accepted by ``append_event``."""
-        return {
-            "room_id": room_id, "event_id": self.event_id, "kind": self.kind, "actor": dict(self.actor),
-            "payload": dict(self.payload), "authority_gateway_id": self.authority_gateway_id,
-            "authority_epoch": self.authority_epoch}
+        """Return keyword arguments accepted by ``append_event`` (field order matches the dataclass)."""
+        return {"room_id": room_id, **asdict(self)}
 
 
 @dataclass(frozen=True)
@@ -151,12 +149,12 @@ class PublicationPlan:
 
 @dataclass(frozen=True)
 class _ValidatedEvent:
-    raw: Mapping[str, Any]
+    raw: Payload
     seq: int
     event_id: str
     kind: str
-    actor: Mapping[str, Any]
-    payload: Mapping[str, Any]
+    actor: Payload
+    payload: Payload
 
 
 _identifier = partial(common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS)
@@ -169,8 +167,8 @@ def _positive_int(value: Any, *, label: str) -> int:
 
 
 def _zero_based_int(value: Any, *, label: str, maximum: int) -> int:
-    message = f"{label} must be an integer between 0 and {maximum}"
-    return _bounded_int(value, message=message, high=maximum)
+    return _bounded_int(value, message=f"{label} must be an integer between 0 and {maximum}", high=maximum)
+
 
 _text = partial(common.text, error=DiscussionValidationError)
 
@@ -363,16 +361,14 @@ def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom)
 # Each takes (kind, payload, actor, room) and returns the payload to record.
 
 
-def _validate_user_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
+def _validate_user_event(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     payload = validate_user_payload(payload)
     if actor.get("kind") != "user":
         raise DiscussionValidationError("message.user requires a user actor")
     return payload
 
 
-def _validate_member_message(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
+def _validate_member_message(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     _exact_fields(payload, label="message.member payload", required=_MEMBER_MESSAGE_FIELDS)
     _validate_turn_coordinates(payload, room)
     text = payload.get("text")
@@ -385,10 +381,9 @@ def _validate_member_message(
     return payload
 
 
-def _validate_terminal_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
+def _validate_terminal_event(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     _exact_fields(
-        payload, label=f"{kind} payload", required=_TERMINAL_COMMON_FIELDS | _TERMINAL_EXTRA_FIELDS[kind],
+        payload, label=f"{kind} payload", required=_TERMINAL_FIELDS[kind],
         optional=_TERMINAL_OPTIONAL_FIELDS.get(kind, frozenset()))
     _validate_turn_coordinates(payload, room)
     _positive_int(payload.get("seen_through_seq"), label="seen_through_seq")
@@ -414,8 +409,7 @@ def _validate_terminal_event(
     return payload
 
 
-def _validate_gateway_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
+def _validate_gateway_event(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     fields, identifier_fields = _GATEWAY_EVENT_FIELDS[kind]
     _exact_fields(payload, label=f"{kind} payload", required=fields)
     if kind == "room.activity" and payload.get("status") not in {"settled", "bounded"}:
@@ -504,8 +498,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
 
 def _member_digest(member: DiscussionMember) -> str:
     target = compact_json(member.target or {"kind": "local", "profile": member.profile}, ensure_ascii=False)
-    seed = f"{member.member_id}\0{member.profile}\0{member.handle}\0{target}"
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    return hashlib.sha256(f"{member.member_id}\0{member.profile}\0{member.handle}\0{target}".encode()).hexdigest()[:24]
 
 
 def _rotate(members: Sequence[DiscussionMember], round_index: int) -> tuple[DiscussionMember, ...]:
@@ -523,13 +516,9 @@ def _truncate_utf8_text(value: Any, *, max_bytes: int, suffix: str = "") -> str:
     text = str(value or "")
     if len(encoded := text.encode("utf-8")) <= max_bytes:
         return text
-    prefix = encoded[: max(0, max_bytes - len(suffix.encode("utf-8")))]
-    while prefix:
-        try:
-            return prefix.decode("utf-8") + suffix
-        except UnicodeDecodeError:
-            prefix = prefix[:-1]
-    return suffix.strip()
+    # ``ignore`` drops only the incomplete trailing sequence of a cut valid-UTF-8 prefix.
+    prefix = encoded[: max(0, max_bytes - len(suffix.encode("utf-8")))].decode("utf-8", "ignore")
+    return prefix + suffix if prefix else suffix.strip()
 
 
 def _build_prompt(
@@ -553,8 +542,7 @@ def _build_prompt(
     omitted = False
     for event in reversed(delta):
         line = f"  {_format_message(event, room)}"
-        line_bytes = len(line.encode("utf-8")) + 1
-        if line_bytes <= available:
+        if (line_bytes := len(line.encode("utf-8")) + 1) <= available:
             selected.append(line)
             available -= line_bytes
             continue
@@ -565,8 +553,7 @@ def _build_prompt(
     selected.reverse()
     if omitted:
         selected.insert(0, "  [Earlier content omitted to fit this turn.]")
-    prompt = "\n".join([*opening, *selected, *rules])
-    if len(prompt.encode("utf-8")) > driver.MAX_PROMPT_BYTES:
+    if len((prompt := "\n".join([*opening, *selected, *rules])).encode("utf-8")) > driver.MAX_PROMPT_BYTES:
         raise DiscussionValidationError("Discussion prompt exceeds the driver limit")
     return prompt
 
@@ -574,23 +561,20 @@ def _build_prompt(
 def _make_task_plan(
     *, room: DiscussionRoom, discussion_event: _ValidatedEvent, member: DiscussionMember, member_index: int,
     round_index: int, seen_through_seq: int, prompt: str) -> DiscussionTaskPlan:
-    turn_id = (
-        f"d{discussion_event.seq}.r{round_index}.p{member_index}."
-        f"s{seen_through_seq}.m{_member_digest(member)}")
+    turn_id = f"d{discussion_event.seq}.r{round_index}.p{member_index}.s{seen_through_seq}.m{_member_digest(member)}"
     seed = compact_json({
         "discussion_event_id": discussion_event.event_id, "member_id": member.member_id, "member_index": member_index,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "room_id": room.room_id,
         "round_index": round_index, "seen_through_seq": seen_through_seq, "source_event_seq": discussion_event.seq,
         "thread_id": discussion_event.payload["thread_id"]})
-    task_id = f"dtask:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:48]}"
     identity = driver.TaskIdentity(
-        room_id=room.room_id, task_id=task_id, thread_id=str(discussion_event.payload["thread_id"]), turn_id=turn_id)
+        room_id=room.room_id, task_id=f"dtask:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:48]}",
+        thread_id=str(discussion_event.payload["thread_id"]), turn_id=turn_id)
     payload = {
         "target_member_id": member.member_id, "target_profile": member.profile, "prompt": prompt,
         "source_event_seq": discussion_event.seq}
     return DiscussionTaskPlan(
-        identity=identity, payload=payload, discussion_event_id=discussion_event.event_id, member=member,
-        member_index=member_index, round_index=round_index, seen_through_seq=seen_through_seq)
+        identity, payload, discussion_event.event_id, member, member_index, round_index, seen_through_seq)
 
 
 def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent | None:
