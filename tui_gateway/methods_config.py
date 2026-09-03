@@ -24,8 +24,8 @@ def _projects_handler(name: str):
 
 
 def _reconcile_repo_discovery(pdb, conn, policy, policy_key):
-    pdb.reconcile_discovered_repos_policy(
-        conn, policy_key, preserve_unversioned=_repo_discovery_policy_is_default(policy))
+    pdb.reconcile_discovered_repos_policy(conn, policy_key,
+                                          preserve_unversioned=_repo_discovery_policy_is_default(policy))
 
 
 @_projects_handler("projects.discover_repos")
@@ -52,19 +52,15 @@ def _(rid, params: dict) -> dict:
     from hermes_cli import projects_db as pdb
     policy = _repo_discovery_policy()
     policy_key = _repo_discovery_policy_key(policy)
-    incoming_raw = params.get("discovery_policy")
-    incoming_policy = _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None
-    if incoming_policy is not None:
-        accepted = _repo_discovery_policy_key(incoming_policy) == policy_key
+    incoming = params.get("discovery_policy")
+    if isinstance(incoming, dict):
+        accepted = _repo_discovery_policy_key(_repo_discovery_policy(incoming)) == policy_key
     else:
         accepted = _repo_discovery_policy_is_default(policy)  # legacy client without a policy
     accepted = bool(policy["enabled"] and accepted)
-    pairs: list[tuple[str, str | None]] = []
-    for item in params.get("repos") or []:
-        if isinstance(item, str):
-            pairs.append((item, None))
-        elif isinstance(item, dict) and item.get("root"):
-            pairs.append((str(item["root"]), item.get("label")))
+    pairs = [(item, None) if isinstance(item, str) else (str(item["root"]), item.get("label"))
+             for item in params.get("repos") or []
+             if isinstance(item, str) or (isinstance(item, dict) and item.get("root"))]
     with pdb.connect_closing() as conn:
         _reconcile_repo_discovery(pdb, conn, policy, policy_key)
         if accepted:

@@ -124,10 +124,10 @@ def _tts_stream_stop(user_barge: bool = True) -> None:
     if state is None:
         return
     if user_barge and not state["done"].is_set():
-        import traceback as _tb
-        logger.debug("TTS CUT: _tts_stream_stop(user_barge=True) — new turn or "
-                     "interrupt cutting in-flight TTS\n%s", "".join(_tb.format_stack()))
+        import traceback
         from tools.tts_streaming import mark_speech_interrupted
+        logger.debug("TTS CUT: _tts_stream_stop(user_barge=True) — new turn or "
+                     "interrupt cutting in-flight TTS\n%s", "".join(traceback.format_stack()))
         mark_speech_interrupted()
     state["stop"].set()
     with contextlib.suppress(Exception):
@@ -761,10 +761,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4020, "text required")
     try:
         import hermes_cli.voice  # noqa: F401  (a missing module must answer 5026, not die in a thread)
-    except ImportError:
-        return _err(rid, 5026, "voice module not available")
     except Exception as e:
-        return _err(rid, 5026, str(e))
+        return _err(rid, 5026, "voice module not available" if isinstance(e, ImportError) else str(e))
     threading.Thread(target=_speak_text_with_barge, args=(text,), daemon=True).start()
     return _ok(rid, {"status": "speaking"})
 
