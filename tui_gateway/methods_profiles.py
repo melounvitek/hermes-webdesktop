@@ -1,8 +1,7 @@
 """Profile JSON-RPC handlers — the ws twin of the dashboard's /api/profiles (desktop plugins
-only have the ws door), on the same `hermes_cli.profiles` primitives.
-
-Bodies are rebound onto server.py's globals (method_ctx.bind_module) and use them bare;
-module-level names are published onto server.py, so they must not collide with its globals.
+only have the ws door), on the same `hermes_cli.profiles` primitives. Bodies are rebound onto
+server.py's globals (method_ctx.bind_module) and use them bare; module-level names are published
+onto server.py, so they must not collide with its globals.
 """
 
 import contextlib
@@ -21,7 +20,6 @@ _ASSET_MAGIC = {"png": [(0, 8, b"\x89PNG\r\n\x1a\n")], "jpg": [(0, 3, b"\xff\xd8
 
 def _profile_handler(name: str, code: int):
     """``@method(name)`` whose body's uncaught exception becomes ``_err(rid, code, str(e))``."""
-
     def deco(fn):
         def handler(rid, params: dict) -> dict:
             try:
@@ -47,7 +45,7 @@ def _model_provider_params(params) -> tuple:
 
 
 def _try(fn, default):
-    """``fn()`` or ``default`` on any exception — best-effort sections must never fail each other."""
+    """``fn()`` or ``default`` on any exception (best-effort sections must never fail each other)."""
     try:
         return fn()
     except Exception:
@@ -55,7 +53,6 @@ def _try(fn, default):
 
 
 def _best_effort(fn) -> bool:
-    """Run ``fn``; True on success, False on any exception."""
     return _try(lambda: (fn(), True)[1], False)
 
 
@@ -70,7 +67,7 @@ def _hermes_home_scope(path):
 
 
 def _resolve_profile(rid, params):
-    """``(name, profile_dir, err)`` — err is the 4063 (name required) / 4064 (not found) response."""
+    """``(name, profile_dir, err)``; err = 4063 (name required) / 4064 (not found) response."""
     name = str(params.get("name") or "").strip()
     if not name:
         return name, None, _err(rid, 4063, "name required")
@@ -98,7 +95,7 @@ def _clean_revisions(raw: dict) -> dict:
 
 def _latest_message_preview(db, session_id):
     """≤80-char excerpt of the NEWEST active user/assistant message, or "" (roster semantics).
-    Same query shape as ``SessionDB.latest_message_row_id`` — keep them in step."""
+    Same query shape as ``SessionDB.latest_message_row_id``; keep them in step."""
     try:
         with db._lock:
             row = db._conn.execute(
@@ -117,7 +114,7 @@ def _latest_message_preview(db, session_id):
 
 def _resurrect_recoverable_canonical(db, profile_path, session_id):
     """Un-archive an accidentally archived canonical row (judged read-only, written via a
-    short-lived writable handle), or False."""
+    short-lived writable handle); False otherwise."""
     try:
         row = db.get_session(session_id)
         if not row or not row.get("archived"):
@@ -162,8 +159,8 @@ def _canonical_session_row(db, profile_path):
 
 
 def _latest_profile_session_rows(db):
-    """(newest human-facing session, newest worker session). The worker row lets rosters show
-    a profile as working (workers heartbeat ``last_activity_at`` every ≤60s)."""
+    """(newest human-facing session, newest worker session); the worker row lets rosters show a
+    profile as working (workers heartbeat ``last_activity_at`` every ≤60s)."""
     try:
         human = worker = None
         for s in db.list_sessions_rich(source=None, limit=20, order_by_last_active=True, compact_rows=True):
@@ -206,8 +203,7 @@ def _profile_session_fields(row, profile_path):
 
 def _profile_ui_meta_fields(row: dict, profile_dir) -> None:
     """Attach ``ui_meta`` / ``ui_meta_revisions`` / ``has_avatar`` from profile.yaml + assets.
-    ``ui_meta_revisions`` is always present: it feature-detects gateway-owned CAS even for a
-    brand-new profile."""
+    ``ui_meta_revisions`` is always present: it feature-detects gateway-owned CAS for a new profile."""
     row["ui_meta_revisions"] = {}
     raw_meta = _read_profile_yaml(profile_dir)
     ui_meta = raw_meta.get("ui_meta")
@@ -228,17 +224,15 @@ def _(rid, params: dict) -> dict:
     include_sessions = is_truthy_value(params.get("include_sessions", True))
     out = []
     for p in list_profiles():
-        row = {
-            "name": p.name, "path": str(p.path), "is_default": bool(p.is_default),
-            "model": p.model, "provider": p.provider,
-            "description": p.description or "", "display_name": p.display_name or "",
-            "skill_count": p.skill_count or 0}
+        row = {"name": p.name, "path": str(p.path), "is_default": bool(p.is_default), "model": p.model,
+               "provider": p.provider, "description": p.description or "",
+               "display_name": p.display_name or "", "skill_count": p.skill_count or 0}
         if include_sessions:
             _profile_session_fields(row, p.path)
         _profile_ui_meta_fields(row, Path(str(p.path)))
         out.append(row)
-    # Capability flag: this backend injects the Bot Mode teammate-messaging
-    # protocol into every session, so clients must not append it to SOUL.md.
+    # bot_mode_protocol: this backend injects the Bot Mode teammate-messaging protocol into every
+    # session, so clients must not append it to SOUL.md.
     return _ok(rid, {"profiles": out, "bot_mode_protocol": True})
 
 
@@ -276,7 +270,7 @@ def _mirror_auth(path, launch_home) -> bool:
 
 def _mirror_voice_sections(path) -> bool:
     """Copy stt/tts/voice sections from the launch profile (a fresh profile has only ``model``,
-    so voice fell back to defaults); True if written. Canonical loaders under the home override."""
+    so voice fell back to defaults); True if written."""
     try:
         from hermes_cli.config import load_config_readonly, read_user_config_raw, save_config
         src_cfg = load_config_readonly() or {}
@@ -288,8 +282,7 @@ def _mirror_voice_sections(path) -> bool:
             dst_cfg = read_user_config_raw() or {}
             missing = {k: v for k, v in sections.items() if k not in dst_cfg}
             if missing:
-                dst_cfg.update(missing)
-                save_config(dst_cfg)
+                save_config({**dst_cfg, **missing})
         return bool(missing)
     except Exception:
         return False
@@ -314,10 +307,9 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
     """Copy launch .env / auth.json / voice sections into a new profile (best-effort per item).
     ``share_auth`` reports ``auth: "shared"`` and skips the auth copy; ``mirror_credentials``
     false skips everything. ``model_inherited`` is filled in by the caller."""
-    mirrored = {"env": False, "auth": False, "model_inherited": False, "voice": False}
     share_auth = is_truthy_value(params.get("share_auth", False))
-    if share_auth:
-        mirrored["auth"] = "shared"
+    mirrored = {"env": False, "auth": "shared" if share_auth else False, "model_inherited": False,
+                "voice": False}
     if not is_truthy_value(params.get("mirror_credentials", True)):
         return mirrored
     launch_home = get_hermes_home()
@@ -332,9 +324,8 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Create a profile (ws twin of POST /api/profiles). Params: ``name``, ``description``,
     ``clone_from`` (omitted = fresh + bundled skills), ``clone_all``, ``no_skills``, ``soul``,
-    ``model`` + ``provider``, ``share_auth``, ``mirror_credentials`` (default true — a
-    ``create_profile()`` seeds a comment-only .env and no auth.json, so a headless profile had
-    NO provider)."""
+    ``model`` + ``provider``, ``share_auth``, ``mirror_credentials`` (default true: a bare
+    ``create_profile()`` seeds a comment-only .env and no auth.json = NO provider headless)."""
     name = str(params.get("name") or "").strip()
     if not name:
         return _err(rid, 4061, "name required")
@@ -371,7 +362,7 @@ def _(rid, params: dict) -> dict:
 
 def _describe_toolsets(cfg):
     """``(toolsets, pinned_set)`` as the `hermes tools` checklist presents them (the raw registry
-    leaks platform composites and reports everything "enabled" without a pin)."""
+    leaks platform composites and reports everything enabled without a pin)."""
     from hermes_cli.tools_config import (
         _get_effective_configurable_toolsets, _get_platform_tools, _toolset_allowed_for_platform)
     from toolsets import resolve_toolset
@@ -478,7 +469,7 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
 
 def _configure_model(profile_dir, params, applied):
     """Apply a ``model`` + ``provider`` pin, or return a confirm message and write NOTHING (client
-    resends with ``confirm_expensive_model``). A failing guard = "no warning" (as _apply_model_switch)."""
+    resends with ``confirm_expensive_model``). A failing guard = no warning (as _apply_model_switch)."""
     model, provider = _model_provider_params(params)
     confirm_message = None
     if not (model and provider):
@@ -531,7 +522,8 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
     # Launch catalog read BEFORE the home override flips config resolution.
     launch_mcp = {}
     if want_mcp:
-        launch_mcp = _try(lambda: (_lazy("hermes_cli.config", "load_config_readonly")() or {}).get("mcp_servers"), {})
+        load_launch = _lazy("hermes_cli.config", "load_config_readonly")
+        launch_mcp = _try(lambda: (load_launch() or {}).get("mcp_servers"), {})
         launch_mcp = launch_mcp if isinstance(launch_mcp, dict) else {}
     with _hermes_home_scope(profile_dir):
         from hermes_cli.config import load_config, save_config
@@ -555,7 +547,7 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
 def _(rid, params: dict) -> dict:
     """Editor Save: ``name`` plus any of ``ui_meta`` (+ ``ui_meta_expected_revisions``), ``soul``,
     ``description``, ``model`` + ``provider`` (+ ``confirm_expensive_model``), ``disabled_skills``,
-    ``enabled_toolsets``, ``enabled_mcp_servers``. Sections are independent; ``applied`` reports each."""
+    ``enabled_toolsets``, ``enabled_mcp_servers``; sections are independent, ``applied`` reports each."""
     _name, profile_dir, err = _resolve_profile(rid, params)
     if err is not None:
         return err
@@ -590,8 +582,7 @@ def _unlink_asset_files(assets_dir, asset) -> int:
 @_profile_handler("profiles.set_asset", 5065)
 def _(rid, params: dict) -> dict:
     """Store ``assets/<asset>.<ext>`` atomically. Params: ``name``, ``asset`` (``"avatar"`` only),
-    ``data`` (data URL or base64; PNG/JPEG/WebP ≤2MB, sniffed by magic bytes — never the declared
-    mime) or ``clear: true``."""
+    ``data`` (data URL or base64; PNG/JPEG/WebP ≤2MB, format sniffed) or ``clear: true``."""
     asset = str(params.get("asset") or "avatar").strip().lower()
     if not str(params.get("name") or "").strip():
         return _err(rid, 4063, "name required")

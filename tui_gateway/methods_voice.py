@@ -478,7 +478,8 @@ def _(rid, params: dict) -> dict:
     if not reqs["available"]:
         logger.warning("wake.start(%s): not available — %s", surface, reqs.get("hint"))
         return refused("unavailable", hint=reqs.get("hint") or "", capture=capture_mode)
-    enabled_persisted = bool(params.get("persist") and not cfg.get("enabled") and _persist_wake_enabled(True))
+    persist = bool(params.get("persist"))
+    enabled_persisted = bool(persist and not cfg.get("enabled") and _persist_wake_enabled(True))
     if enabled_persisted:
         cfg = {**cfg, "enabled": True}
     if not wake_surface_enabled(surface, cfg):
@@ -489,15 +490,18 @@ def _(rid, params: dict) -> dict:
                     surface, reason, cfg.get("enabled"), cfg.get("surface"))
         return refused(reason)
     existing_owner, existing_surface = _wake_owner_snapshot()
-    if existing_owner is not None and (_transport_is_dead(existing_owner) or not owns_listener(existing_owner)):
+    if existing_owner is not None and (
+        _transport_is_dead(existing_owner) or not owns_listener(existing_owner)
+    ):
         _release_wake_for_transport(existing_owner)
         existing_owner, existing_surface = None, ""
     if existing_owner is not None and existing_owner is not transport:
         return refused("owned", owner_surface=existing_surface)
     try:
-        on_detect = _wake_detect_handler(transport, str(params.get("session_id") or ""), wake_phrase(cfg),
-                                         bool(cfg.get("start_new_session", True)))
-        start_listening(on_detect, owner=transport, config=cfg, external_audio=capture_mode == "client")
+        on_detect = _wake_detect_handler(transport, str(params.get("session_id") or ""),
+                                         wake_phrase(cfg), bool(cfg.get("start_new_session", True)))
+        start_listening(on_detect, owner=transport, config=cfg,
+                        external_audio=capture_mode == "client")
     except WakeWordInUse:
         return refused("owned", owner_surface=existing_surface or None)
     except Exception as e:

@@ -1,5 +1,5 @@
-"""``config.set`` — one JSON-RPC method, dispatched on ``key`` through a table. Bodies are
-rebound onto server.py's globals (method_ctx.bind_module) and reference them bare. Each
+"""``config.set`` — one JSON-RPC method, dispatched on ``key`` through ``_CONFIG_SETTERS``. Bodies
+are rebound onto server.py's globals (method_ctx.bind_module) and reference them bare. Each
 ``_set_*`` takes ``(rid, params, key, value, session)`` and returns the JSON-RPC envelope.
 Keys match exactly except ``details_mode.<section>`` (prefix) and ``_DISPLAY_TOGGLE_KEYS``.
 """
@@ -98,19 +98,17 @@ def _set_model(rid, params, key, value, session):
             except Exception:
                 pending_model = str(value)
             pending_provider = (getattr(parsed, "explicit_provider", "") or "").strip()
-            # Selection guards run HERE (the only moment a confirm round-trip is possible);
-            # otherwise an unconfirmed stashed pick is dropped at turn start. On a warning
-            # nothing is stashed; the client re-sends with confirm_expensive_model.
+            # Selection guards run HERE (the only moment a confirm round-trip is possible; an
+            # unconfirmed stashed pick is dropped at turn start). On a warning nothing is stashed.
             # `confirm_message` is canonical, `warning` its legacy alias.
             if not confirmed:
                 pending_warning = _pending_switch_selection_warning(pending_model, pending_provider)
                 if pending_warning is not None:
                     return _cfgset_model_ok(rid, key, pending_model, pending_warning, True,
                                             pending_warning, "session", deferred=False)
+            # display_*: _session_info shows the user's pick while pending, not the live old model.
             session["pending_model_switch"] = {
                 "raw": value, "confirm_expensive_model": confirmed,
-                # _session_info reports these while pending so the end-of-turn settle keeps
-                # showing the user's pick, not the still-live old model.
                 "display_model": pending_model, "display_provider": pending_provider}
             return _cfgset_model_ok(rid, key, pending_model, "", False, "", "session", deferred=True)
         parsed_flags = parse_model_switch_args(value)
@@ -179,9 +177,9 @@ def _set_fast(rid, params, key, value, session):
         if overrides is None:
             return _err(rid, 4002, "fast mode is not available for this model")
     if session is not None:
-        # Session-scoped like `reasoning` (global persistence is `--global` / Settings → Model):
-        # writing config.yaml here flipped fast mode for every other surface. The create
-        # override keeps the choice across lazy builds and rebuilds; "" pins normal.
+        # Session-scoped like `reasoning` (global = `--global` / Settings → Model): writing
+        # config.yaml here flipped fast mode for every surface. The create override survives lazy
+        # builds and rebuilds; "" pins normal.
         session["create_service_tier_override"] = {"fast": "priority", "normal": ""}.get(nv, nv)
     else:
         _write_config_key("agent.service_tier", nv)
@@ -223,8 +221,7 @@ def _set_verbose(rid, params, key, value, session):
 
 
 def _set_focus(rid, params, key, value, session):
-    # Focus view (/focus): enabling stashes the configured tool_progress mode and pins it
-    # "off"; disabling restores the stash.
+    # /focus: enabling stashes the configured tool_progress mode and pins it "off"; disabling restores.
     from hermes_cli.focus_view import FOCUS_TOOL_PROGRESS_MODE, normalize_tool_progress_mode, resolve_focus_arg
     d_f = _display_cfg()
     cur_focus = bool(d_f.get("focus_view", False))
@@ -261,7 +258,7 @@ def _set_approval_mode(rid, params, key, value, session):
 
 @_cfgset_guarded
 def _set_yolo(rid, params, key, value, session):
-    # scope="session" (default; Shift+Tab) toggles ONLY this session's flag. scope="global"
+    # scope="session" (default; Shift+Tab) toggles ONLY this session's flag; scope="global"
     # (Shift+click the zap) flips persistent approvals.mode between "off" and "manual".
     scope = _word(params.get("scope") or "session")
     from tools.approval import disable_session_yolo, enable_session_yolo, is_session_yolo_enabled
@@ -274,8 +271,7 @@ def _set_yolo(rid, params, key, value, session):
         appr = _load_cfg().get("approvals")
         appr = appr if isinstance(appr, dict) else {}
         enable = _resolve_toggle(_normalize_approval_mode(appr.get("mode", "manual")) == "off")
-        # Binary affordance: no restore of a prior "smart"/custom mode (those live in config.yaml).
-        _write_config_key("approvals.mode", "off" if enable else "manual")
+        _write_config_key("approvals.mode", "off" if enable else "manual")  # binary: no "smart" restore
         _emit_all_session_info()  # reflect the flip in every live indicator
     elif session:
         skey = session["session_key"]
@@ -318,9 +314,7 @@ def _set_reasoning(rid, params, key, value, session):
         _write_config_key("agent.reasoning_effort", arg)
         if session is not None:
             session.pop("create_reasoning_override", None)
-    else:
-        # Session-scoped like the gateway's `/reasoning <level>`; otherwise every desktop
-        # model-menu pick rewrote the global default.
+    else:  # session-scoped like the gateway's `/reasoning <level>`; a menu pick must not rewrite the global
         session["create_reasoning_override"] = parsed
     if session and session.get("agent") is not None:
         session["agent"].reasoning_config = parsed
@@ -338,8 +332,8 @@ def _set_details_mode(rid, params, key, value, session):
 
 
 def _set_details_section(rid, params, key, value, session):
-    # `details_mode.<section>` -> `display.sections.<section>`; empty clears the override so the
-    # frontend applies built-in section defaults before the global details_mode.
+    # `details_mode.<section>` -> `display.sections.<section>`; empty clears the override (frontend
+    # then applies built-in section defaults before the global details_mode).
     section = key.split(".", 1)[1]
     if section not in _DETAIL_SECTION_NAMES:
         return _err(rid, 4002, f"unknown section: {section}")
@@ -355,8 +349,7 @@ def _set_thinking_mode(rid, params, key, value, session):
     if nv not in {"collapsed", "truncated", "full"}:
         return _err(rid, 4002, f"unknown thinking_mode: {value}")
     _write_config_key("display.thinking_mode", nv)
-    # Backward compatibility bridge: keep details_mode aligned.
-    _write_config_key("display.details_mode", "expanded" if nv == "full" else "collapsed")
+    _write_config_key("display.details_mode", "expanded" if nv == "full" else "collapsed")  # compat bridge
     return _kv(rid, key, nv)
 
 
@@ -372,7 +365,8 @@ def _toggle_setter(rid, key, value, raw, aliases: dict, flipped, cfg_key: str, r
 # on/off/toggle display booleans: key -> (display field, accepted word -> bool).
 _DISPLAY_BOOLS = {
     "density": ("tui_compact", {"on": True, "off": False}),
-    "battery": ("battery", {"on": True, "true": True, "yes": True, "off": False, "false": False, "no": False})}
+    "battery": ("battery", {"on": True, "true": True, "yes": True, "off": False, "false": False,
+                            "no": False})}
 
 
 def _set_display_bool(rid, params, key, value, session):
@@ -437,8 +431,7 @@ def _set_prompt_like(rid, params, key, value, session):
         _save_cfg(cfg)
     elif key == "personality":
         pname, new_prompt = _validate_personality(str(value or ""), cfg)
-        # Personality persists through hermes_cli.personality (single owner), never the
-        # user-owned global system prompt.
+        # Persists via hermes_cli.personality (single owner), never the user-owned system prompt.
         from hermes_cli.personality import persist_personality
         persist_personality(pname)
         resp["value"] = str(value or "none")
@@ -448,9 +441,7 @@ def _set_prompt_like(rid, params, key, value, session):
             resp["info"] = info
     else:
         _write_config_key(f"display.{key}", value)
-        if key == "skin":
-            # Every surface repaints; sync the watcher baseline so the poll loop doesn't
-            # re-broadcast the skin this RPC just applied.
+        if key == "skin":  # every surface repaints; sync the watcher baseline (no re-broadcast)
             _broadcast_global_event("skin.changed", resolve_skin())
             _note_skin_broadcast()
     return _ok(rid, resp)
