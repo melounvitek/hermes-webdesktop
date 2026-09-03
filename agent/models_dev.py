@@ -1,18 +1,13 @@
 """Models.dev registry integration — primary database for providers and models.
 
-Fetches https://models.dev/api.json (provider + model metadata). Resolution
-order: in-memory cache (fresh, or stale served immediately while one background
-daemon thread refreshes) → disk cache (~/.hermes/models_dev_cache.json, any
-age) → network, only when no cache exists at all. Failed refreshes back off for
-5 minutes process-wide. Refreshes use ETag conditional GET whenever a servable
-registry is held (a 304 re-confirms the cache without re-downloading ~2 MB);
-the sidecar is persisted with the cache body. Hot paths (resolution, picker,
-resume) pass ``allow_network=False`` and never do network I/O. A disk cache
-that fails to parse, is not a dict, or is empty is quarantined with a warning
-rather than served as ``{}``. ``models_dev.url`` in config.yaml overrides the
-URL (mirrors). Other modules should use the dataclasses and query functions
-here rather than parsing the raw JSON.
-"""
+Fetches https://models.dev/api.json. Resolution order: in-memory cache (fresh, or
+stale served immediately while one background daemon thread refreshes) → disk
+cache (~/.hermes/models_dev_cache.json, any age) → network, only when no cache
+exists at all. Failed refreshes back off 5 min process-wide. Refreshes use ETag
+conditional GET whenever a servable registry is held (a 304 re-confirms without
+re-downloading ~2 MB). Hot paths pass ``allow_network=False`` and never do I/O.
+A corrupt/empty disk cache is quarantined, never served as ``{}``. The URL can
+be overridden via ``models_dev.url`` in config.yaml (mirrors)."""
 
 import json
 import logging
@@ -42,9 +37,7 @@ _models_dev_refresh_lock = threading.Lock()
 _models_dev_refresh_in_flight = False
 
 
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
+# --- Dataclasses -----------------------------------------------------------
 
 @dataclass
 class ModelInfo:
@@ -54,7 +47,6 @@ class ModelInfo:
     name: str
     family: str
     provider_id: str        # models.dev provider ID (e.g. "anthropic")
-
     # Capabilities
     reasoning: bool = False
     tool_call: bool = False
@@ -62,22 +54,18 @@ class ModelInfo:
     temperature: bool = False
     structured_output: bool = False
     open_weights: bool = False
-
     # Modalities
     input_modalities: Tuple[str, ...] = ()    # ("text", "image", "pdf", ...)
     output_modalities: Tuple[str, ...] = ()
-
     # Limits
     context_window: int = 0
     max_output: int = 0
     max_input: Optional[int] = None
-
     # Cost (per million tokens, USD)
     cost_input: float = 0.0
     cost_output: float = 0.0
     cost_cache_read: Optional[float] = None
     cost_cache_write: Optional[float] = None
-
     # Metadata
     knowledge_cutoff: str = ""
     release_date: str = ""
@@ -99,13 +87,10 @@ class ModelInfo:
     def format_capabilities(self) -> str:
         """Human-readable capabilities, e.g. 'reasoning, tools, vision, PDF'."""
         flags = (
-            (self.reasoning, "reasoning"),
-            (self.tool_call, "tools"),
-            (self.supports_vision(), "vision"),
-            (self.supports_pdf(), "PDF"),
+            (self.reasoning, "reasoning"), (self.tool_call, "tools"),
+            (self.supports_vision(), "vision"), (self.supports_pdf(), "PDF"),
             (self.supports_audio_input(), "audio"),
-            (self.structured_output, "structured output"),
-            (self.open_weights, "open weights"),
+            (self.structured_output, "structured output"), (self.open_weights, "open weights"),
         )
         caps = [label for on, label in flags if on]
         return ", ".join(caps) if caps else "basic"
@@ -135,9 +120,7 @@ class ModelCapabilities:
     model_family: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Provider ID mapping: Hermes ↔ models.dev
-# ---------------------------------------------------------------------------
+# --- Provider ID mapping: Hermes ↔ models.dev ------------------------------
 
 # Hermes provider names → models.dev provider IDs
 PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
@@ -212,9 +195,7 @@ def _cfg_get(*keys: str, default: Any) -> Any:
         return default
 
 
-# ---------------------------------------------------------------------------
-# Disk cache + ETag sidecar
-# ---------------------------------------------------------------------------
+# --- Disk cache + ETag sidecar ---------------------------------------------
 
 def _hermes_path(name: str) -> Path:
     from hermes_constants import get_hermes_home
@@ -250,11 +231,9 @@ def _save_etag(etag: str) -> None:
 
 
 def _clear_etag() -> None:
-    """Delete the ETag sidecar so the next fetch is unconditional.
-
-    An If-None-Match without a servable cache invites a 304 that leaves the
-    process with no data at all.
-    """
+    """Delete the ETag sidecar so the next fetch is unconditional: an
+    If-None-Match without a servable cache invites a 304 that leaves the
+    process with no data at all."""
     try:
         _get_etag_path().unlink(missing_ok=True)
     except Exception as e:
@@ -291,9 +270,7 @@ def _load_disk_cache() -> Dict[str, Any]:
             )
             _quarantine_corrupt_cache(cache_path)
     except Exception as e:
-        logger.warning(
-            "Failed to load models.dev disk cache; quarantining: %s", e
-        )
+        logger.warning("Failed to load models.dev disk cache; quarantining: %s", e)
         try:
             _quarantine_corrupt_cache(_get_cache_path())
         except Exception:
@@ -343,17 +320,13 @@ def _save_disk_cache(data: Dict[str, Any], etag: str = "") -> None:
         _save_etag(etag)
 
 
-# ---------------------------------------------------------------------------
-# Network refresh (all state mutation happens under _models_dev_fetch_lock)
-# ---------------------------------------------------------------------------
+# --- Network refresh (all state mutation happens under _models_dev_fetch_lock)
 
 class _NotModified(Exception):
     """Server returned 304 Not Modified — existing cache is still valid."""
 
 
-def _fetch_models_dev_from_network(
-    *, conditional: bool = False
-) -> Tuple[Dict[str, Any], str]:
+def _fetch_models_dev_from_network(*, conditional: bool = False) -> Tuple[Dict[str, Any], str]:
     """Fetch the live registry; returns ``(registry, etag)`` (etag "" if none).
 
     ``conditional`` sends ``If-None-Match`` with the sidecar's ETag and raises
@@ -363,11 +336,8 @@ def _fetch_models_dev_from_network(
     Raises on network errors and on an empty/invalid payload.
     """
     headers: Dict[str, str] = {}
-    if conditional:
-        etag = _load_etag()
-        if etag:
-            headers["If-None-Match"] = etag
-
+    if conditional and (etag := _load_etag()):
+        headers["If-None-Match"] = etag
     # (connect, read): 5 s connect fails fast on blackholed hosts instead of
     # stalling the first turn; 10 s read tolerates a slow registry.
     response = requests.get(_get_models_dev_url(), headers=headers, timeout=(5, 10))
@@ -413,9 +383,7 @@ def _commit_registry(data: Dict[str, Any], *, etag: str = "", where: str) -> Non
     _models_dev_cache_time = time.time()
     _models_dev_retry_after = 0
     logger.debug(
-        "Refreshed models.dev registry (%s): %d providers, %d total models",
-        where,
-        len(data),
+        "Refreshed models.dev registry (%s): %d providers, %d total models", where, len(data),
         sum(len(p.get("models", {})) for p in data.values() if isinstance(p, dict)),
     )
 
@@ -432,17 +400,12 @@ def _confirm_cache_not_modified(*, where: str) -> None:
         _models_dev_retry_after = time.time() + _MODELS_DEV_RETRY_DELAY
         logger.warning(
             "models.dev returned 304 but no cached registry is held (%s); "
-            "cleared ETag sidecar, will refetch unconditionally",
-            where,
+            "cleared ETag sidecar, will refetch unconditionally", where,
         )
         return
     _models_dev_cache_time = time.time()
     _models_dev_retry_after = 0
-    logger.debug(
-        "models.dev registry unchanged (304 Not Modified, %s); "
-        "cache re-confirmed fresh",
-        where,
-    )
+    logger.debug("models.dev registry unchanged (304 Not Modified, %s); cache re-confirmed fresh", where)
 
 
 def _note_refresh_failure(exc: Exception, *, where: str) -> None:
@@ -450,10 +413,7 @@ def _note_refresh_failure(exc: Exception, *, where: str) -> None:
     global _models_dev_retry_after
     _models_dev_retry_after = time.time() + _MODELS_DEV_RETRY_DELAY
     logger.debug(
-        "models.dev refresh failed (%s); retry suppressed for %ds: %s",
-        where,
-        _MODELS_DEV_RETRY_DELAY,
-        exc,
+        "models.dev refresh failed (%s); retry suppressed for %ds: %s", where, _MODELS_DEV_RETRY_DELAY, exc,
     )
 
 
@@ -466,9 +426,7 @@ def _background_refresh_models_dev() -> None:
         # mid-fetch by a concurrent force_refresh and the two paths can't
         # double-download. Hot-path callers never touch this lock.
         with _models_dev_fetch_lock:
-            data, etag = _fetch_models_dev_from_network(
-                conditional=bool(_models_dev_cache)
-            )
+            data, etag = _fetch_models_dev_from_network(conditional=bool(_models_dev_cache))
             _commit_registry(data, etag=etag, where="background")
     except _NotModified:
         with _models_dev_fetch_lock:
@@ -491,11 +449,7 @@ def _start_background_refresh_models_dev() -> None:
         if _models_dev_refresh_in_flight:
             return
         _models_dev_refresh_in_flight = True
-    thread = threading.Thread(
-        target=_background_refresh_models_dev,
-        name="models-dev-refresh",
-        daemon=True,
-    )
+    thread = threading.Thread(target=_background_refresh_models_dev, name="models-dev-refresh", daemon=True)
     try:
         thread.start()
     except Exception as e:
@@ -506,9 +460,7 @@ def _start_background_refresh_models_dev() -> None:
         logger.debug("Failed to start models.dev refresh thread: %s", e)
 
 
-def fetch_models_dev(
-    force_refresh: bool = False, *, allow_network: bool = True
-) -> Dict[str, Any]:
+def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True) -> Dict[str, Any]:
     """Fetch the models.dev registry (dict keyed by provider ID; {} on failure).
 
     Cache hierarchy when ``force_refresh=False``: fresh in-memory → stale
@@ -526,14 +478,10 @@ def fetch_models_dev(
     global _models_dev_cache, _models_dev_cache_time, _models_dev_retry_after
 
     if not allow_network:
-        if not _models_dev_cache:
-            disk_data = _load_disk_cache()
-            if disk_data:
-                _models_dev_cache = disk_data
-                disk_age = _disk_cache_age_seconds()
-                _models_dev_cache_time = (
-                    time.time() - disk_age if disk_age is not None else 0
-                )
+        if not _models_dev_cache and (disk_data := _load_disk_cache()):
+            _models_dev_cache = disk_data
+            disk_age = _disk_cache_age_seconds()
+            _models_dev_cache_time = time.time() - disk_age if disk_age is not None else 0
         return _models_dev_cache
 
     if not force_refresh:
@@ -542,9 +490,7 @@ def fetch_models_dev(
             return _models_dev_cache
         # Stage 2: stale in-memory cache beats blocking on the network.
         if _models_dev_cache:
-            return _serve_stale(
-                "Using stale in-memory models.dev cache; refreshing in background"
-            )
+            return _serve_stale("Using stale in-memory models.dev cache; refreshing in background")
         # Stage 3: disk cache (cold-start only). A stale disk cache is
         # deliberately usable so resolution doesn't hang when models.dev is
         # unreachable.
@@ -553,16 +499,13 @@ def fetch_models_dev(
             _models_dev_cache = disk_data
             if disk_age >= _MODELS_DEV_CACHE_TTL:
                 return _serve_stale(
-                    "Using stale models.dev disk cache (age=%.0fs); "
-                    "refreshing in background",
-                    disk_age,
+                    "Using stale models.dev disk cache (age=%.0fs); refreshing in background", disk_age,
                 )
             # Anchor the in-mem TTL to the file's age so an aging cache isn't
             # extended by another full TTL.
             _models_dev_cache_time = time.time() - disk_age
             logger.debug(
-                "Loaded models.dev from fresh disk cache "
-                "(%d providers, age=%.0fs)", len(disk_data), disk_age,
+                "Loaded models.dev from fresh disk cache (%d providers, age=%.0fs)", len(disk_data), disk_age,
             )
             return _models_dev_cache
         # Process-wide backoff: don't make every caller retry an unreachable
@@ -575,19 +518,13 @@ def fetch_models_dev(
     with _models_dev_fetch_lock:
         if not force_refresh and (_models_dev_cache or time.time() < _models_dev_retry_after):
             return _models_dev_cache
-
         # Cold force_refresh: stages 1-3 were skipped, so hydrate memory from
         # disk first so the conditional GET fires and a 304 can re-confirm it.
-        if force_refresh and not _models_dev_cache:
-            disk = _load_disk_cache()
-            if disk:
-                _models_dev_cache = disk
-                _models_dev_cache_time = 0  # servable but not fresh
-
+        if force_refresh and not _models_dev_cache and (disk := _load_disk_cache()):
+            _models_dev_cache = disk
+            _models_dev_cache_time = 0  # servable but not fresh
         try:
-            data, etag = _fetch_models_dev_from_network(
-                conditional=bool(_models_dev_cache)
-            )
+            data, etag = _fetch_models_dev_from_network(conditional=bool(_models_dev_cache))
             _commit_registry(data, etag=etag, where="foreground")
             return data
         except _NotModified:
@@ -595,23 +532,17 @@ def fetch_models_dev(
             return _models_dev_cache
         except Exception as e:
             _note_refresh_failure(e, where="foreground")
-
         # Stage 5: network failed — serve any stale memory/disk cache. Freshness
         # stays expired; the retry-after timestamp gates the next attempt.
         if not _models_dev_cache:
             _models_dev_cache = _load_disk_cache()
             _models_dev_cache_time = 0
             if _models_dev_cache:
-                logger.debug(
-                    "Loaded stale models.dev disk cache (%d providers)",
-                    len(_models_dev_cache),
-                )
+                logger.debug("Loaded stale models.dev disk cache (%d providers)", len(_models_dev_cache))
         return _models_dev_cache
 
 
-# ---------------------------------------------------------------------------
-# Catalog access helpers
-# ---------------------------------------------------------------------------
+# --- Catalog access helpers ------------------------------------------------
 
 def _fetch_registry(allow_network: bool) -> Dict[str, Any]:
     # Keep the zero-argument call on the allow_network path: dozens of test
@@ -634,13 +565,9 @@ def _registry_models(mdev_id: str, *, allow_network: bool) -> Optional[Dict[str,
     return models if isinstance(models, dict) else None
 
 
-def _get_provider_models(
-    provider: str, *, allow_network: bool = False
-) -> Optional[Dict[str, Any]]:
+def _get_provider_models(provider: str, *, allow_network: bool = False) -> Optional[Dict[str, Any]]:
     """Resolve a Hermes provider ID to its models dict, or None if unknown.
-
-    ``allow_network`` defaults to False — hot-path callers must never block.
-    """
+    ``allow_network`` defaults to False — hot-path callers must never block."""
     mdev_provider_id = PROVIDER_TO_MODELS_DEV.get(provider)
     if not mdev_provider_id:
         return None
@@ -679,9 +606,7 @@ def _find_model_entry(models: Dict[str, Any], model: str) -> Optional[Dict[str, 
 def _extract_limit(entry: Any, key: str) -> Optional[int]:
     """Positive int ``entry.limit[key]`` or None (audio/image models have context=0)."""
     value = _dict_or_empty(_dict_or_empty(entry).get("limit")).get(key)
-    if isinstance(value, (int, float)) and value > 0:
-        return int(value)
-    return None
+    return int(value) if isinstance(value, (int, float)) and value > 0 else None
 
 
 def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
@@ -689,9 +614,7 @@ def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
     return _extract_limit(entry, "context")
 
 
-def lookup_models_dev_context(
-    provider: str, model: str, *, allow_network: bool = False
-) -> Optional[int]:
+def lookup_models_dev_context(provider: str, model: str, *, allow_network: bool = False) -> Optional[int]:
     """Context window in tokens for provider+model, or None if not found.
 
     An EXPLICIT ``model_overrides`` entry wins over the catalog; ``_default``
@@ -704,7 +627,6 @@ def lookup_models_dev_context(
     override_ctx = _override_context_window(provider, model)
     if override_ctx is not None:
         return override_ctx
-
     models = _get_provider_models(provider, allow_network=allow_network)
     if models is not None:
         for _mid, entry in _iter_model_entries(models, model):
@@ -714,9 +636,7 @@ def lookup_models_dev_context(
     return _default_override_context(provider)
 
 
-# ---------------------------------------------------------------------------
-# Per-model metadata overrides (config.yaml → model_overrides)
-# ---------------------------------------------------------------------------
+# --- Per-model metadata overrides (config.yaml → model_overrides) ----------
 #
 # Canonical override schema (the ONLY key space consumers accept):
 #   context_window, max_output_tokens, supports_tools, supports_vision,
@@ -796,9 +716,7 @@ def _default_model_override(provider: str) -> Optional[Dict[str, Any]]:
     return global_default if isinstance(global_default, dict) else None
 
 
-def _override_for(
-    provider: str, model: str, *, catalog_hit: bool
-) -> Optional[Dict[str, Any]]:
+def _override_for(provider: str, model: str, *, catalog_hit: bool) -> Optional[Dict[str, Any]]:
     """Explicit override if any; else the ``_default`` only on a catalog miss."""
     explicit = _explicit_model_override(provider, model)
     if explicit is not None or catalog_hit:
@@ -821,8 +739,7 @@ def _override_int(override: Dict[str, Any], key: str) -> Optional[int]:
     if warn_key not in _OVERRIDE_WARNED_KEYS:
         _OVERRIDE_WARNED_KEYS.add(warn_key)
         logger.warning(
-            "model_overrides: ignoring invalid %s value %r "
-            "(expected a positive integer)", key, raw,
+            "model_overrides: ignoring invalid %s value %r (expected a positive integer)", key, raw,
         )
     return None
 
@@ -845,14 +762,10 @@ def _default_override_context(provider: str) -> Optional[int]:
     return _override_int(default, "context_window") if default is not None else None
 
 
-def _override_to_catalog_shape(
-    override: Dict[str, Any],
-) -> Tuple[Dict[str, Any], Optional[bool]]:
+def _override_to_catalog_shape(override: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[bool]]:
     """Translate canonical override keys into a models.dev-shaped patch.
-
     Returns ``(patch, vision)`` — vision is out-of-band because it maps onto the
-    ``modalities.input`` list rather than a scalar field.
-    """
+    ``modalities.input`` list rather than a scalar field."""
     patch: Dict[str, Any] = {}
     limit = {
         catalog_key: value
@@ -872,9 +785,7 @@ def _override_to_catalog_shape(
     return patch, vision
 
 
-def _merge_catalog_entry_with_override(
-    raw: Dict[str, Any], override: Dict[str, Any]
-) -> Dict[str, Any]:
+def _merge_catalog_entry_with_override(raw: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Patch a catalog entry with a canonical-schema override. Sub-dicts
     (``limit``, ``modalities``) are merged, not clobbered — setting only
     ``context_window`` must not wipe the catalog's ``limit.output``."""
@@ -897,25 +808,17 @@ def _merge_catalog_entry_with_override(
     return merged
 
 
-def _apply_overrides(
-    provider: str, model: str, entry: Optional[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
+def _apply_overrides(provider: str, model: str, entry: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Catalog *entry* patched by its override; ``_UNKNOWN_MODEL_BASE`` patched
     by a fill-gap override on a catalog miss; None when neither exists.
-
-    The override is selected AFTER the catalog lookup: _default only fills misses.
-    """
+    The override is selected AFTER the catalog lookup: _default only fills misses."""
     override = _override_for(provider, model, catalog_hit=entry is not None)
     if override is None:
         return entry
-    return _merge_catalog_entry_with_override(
-        entry if entry is not None else _UNKNOWN_MODEL_BASE, override
-    )
+    return _merge_catalog_entry_with_override(entry if entry is not None else _UNKNOWN_MODEL_BASE, override)
 
 
-# ---------------------------------------------------------------------------
-# Model capability metadata
-# ---------------------------------------------------------------------------
+# --- Model capability metadata ---------------------------------------------
 
 def _entry_supports_vision(entry: Dict[str, Any]) -> bool:
     """Prefer explicit ``modalities.input`` (the older ``attachment`` flag can be
@@ -927,9 +830,7 @@ def _entry_supports_vision(entry: Dict[str, Any]) -> bool:
     return bool(entry.get("attachment", False))
 
 
-def get_model_capabilities(
-    provider: str, model: str, *, allow_network: bool = False
-) -> Optional[ModelCapabilities]:
+def get_model_capabilities(provider: str, model: str, *, allow_network: bool = False) -> Optional[ModelCapabilities]:
     """Capability metadata from the models.dev cache, or None if unresolvable.
 
     EXPLICIT ``model_overrides`` entries patch catalog values for the fields
@@ -953,22 +854,16 @@ def get_model_capabilities(
     )
 
 
-def list_provider_models(
-    provider: str, *, allow_network: bool = True
-) -> List[str]:
+def list_provider_models(provider: str, *, allow_network: bool = True) -> List[str]:
     """All model IDs for a provider ([] if unknown). ``allow_network`` defaults
     to True: the model picker is interactive and a fresh catalog is worth a
     short wait."""
     from hermes_cli.models import normalize_provider
     provider = normalize_provider(provider) or provider
-
     models = _get_provider_models(provider, allow_network=allow_network)
     if models is None:
         return []
-    return [
-        mid for mid in models.keys()
-        if not _should_hide_from_provider_catalog(provider, mid)
-    ]
+    return [mid for mid in models if not _should_hide_from_provider_catalog(provider, mid)]
 
 
 # Non-agentic or noise models (TTS, embedding, dated preview snapshots,
@@ -984,25 +879,13 @@ _NOISE_PATTERNS: re.Pattern = re.compile(
 _GOOGLE_HIDDEN_MODELS = frozenset({
     # Low-TPM Gemma models that trip Google input-token quota walls under
     # agent-style traffic despite advertising large context windows.
-    "gemma-4-31b-it",
-    "gemma-4-26b-it",
-    "gemma-4-26b-a4b-it",
-    "gemma-3-1b",
-    "gemma-3-1b-it",
-    "gemma-3-2b",
-    "gemma-3-2b-it",
-    "gemma-3-4b",
-    "gemma-3-4b-it",
-    "gemma-3-12b",
-    "gemma-3-12b-it",
-    "gemma-3-27b",
-    "gemma-3-27b-it",
+    "gemma-4-31b-it", "gemma-4-26b-it", "gemma-4-26b-a4b-it",
+    "gemma-3-1b", "gemma-3-1b-it", "gemma-3-2b", "gemma-3-2b-it",
+    "gemma-3-4b", "gemma-3-4b-it", "gemma-3-12b", "gemma-3-12b-it",
+    "gemma-3-27b", "gemma-3-27b-it",
     # Stale/retired Google slugs that 404 on the current endpoints.
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash-8b",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b",
+    "gemini-2.0-flash", "gemini-2.0-flash-lite",
 })
 
 
@@ -1012,9 +895,7 @@ def _should_hide_from_provider_catalog(provider: str, model_id: str) -> bool:
     return provider_lower in {"gemini", "google"} and model_lower in _GOOGLE_HIDDEN_MODELS
 
 
-def list_agentic_models(
-    provider: str, *, allow_network: bool = True
-) -> List[str]:
+def list_agentic_models(provider: str, *, allow_network: bool = True) -> List[str]:
     """Model IDs suitable for agentic use: tool_call=True, minus hidden and
     noise models. [] on any failure. ``allow_network`` defaults to True (called
     from interactive model selection)."""
@@ -1030,9 +911,7 @@ def list_agentic_models(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Rich dataclass constructors + queries
-# ---------------------------------------------------------------------------
+# --- Rich dataclass constructors + queries ---------------------------------
 
 def _parse_model_info(model_id: str, raw: Dict[str, Any], provider_id: str) -> ModelInfo:
     """Convert a raw models.dev model entry dict into a ModelInfo dataclass."""
@@ -1085,22 +964,16 @@ def _parse_provider_info(provider_id: str, raw: Dict[str, Any]) -> ProviderInfo:
     )
 
 
-def get_provider_info(
-    provider_id: str, *, allow_network: bool = True
-) -> Optional[ProviderInfo]:
+def get_provider_info(provider_id: str, *, allow_network: bool = True) -> Optional[ProviderInfo]:
     """Provider metadata by Hermes or models.dev ID, or None if not cataloged.
-
     ``allow_network`` defaults to True — the primary caller is interactive
-    setup (``resolve_provider_full``). Hot-path callers pass False.
-    """
+    setup (``resolve_provider_full``). Hot-path callers pass False."""
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
     raw = _registry_provider(mdev_id, allow_network)
     return _parse_provider_info(mdev_id, raw) if raw is not None else None
 
 
-def get_model_info(
-    provider_id: str, model_id: str, *, allow_network: bool = False
-) -> Optional[ModelInfo]:
+def get_model_info(provider_id: str, model_id: str, *, allow_network: bool = False) -> Optional[ModelInfo]:
     """Full model metadata by Hermes or models.dev provider ID (exact match,
     then case-insensitive), or None if not found.
 
