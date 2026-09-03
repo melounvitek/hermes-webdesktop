@@ -4,6 +4,7 @@ Helpers that STAY in ``hermes_cli.main`` are reached through the lazy ``_m()`` r
 monkeypatches on ``hermes_cli.main.<name>`` keep working and imports stay one-way.
 """
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -111,13 +112,10 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
 
 def _hermes_home_for_pid(pid: int) -> str | None:
     """Best-effort ``HERMES_HOME`` from *pid*'s environment (psutil, then /proc)."""
-    try:
+    with contextlib.suppress(Exception):
         import psutil
-        home = psutil.Process(pid).environ().get("HERMES_HOME")
-        if home:
+        if home := psutil.Process(pid).environ().get("HERMES_HOME"):
             return home
-    except Exception:
-        pass
     try:
         raw = Path(f"/proc/{pid}/environ").read_bytes()
     except OSError:
@@ -372,14 +370,11 @@ def _kill_stale_dashboard_processes(
         for pid in pids:
             pid_cgroup[pid] = _m()._get_pid_cgroup_path(pid)
             pid_service[pid] = _m()._get_systemd_service_for_pid(pid)
-            if not pid_service[pid]:
+            if not pid_service[pid] and (cmdline := _m()._dashboard_cmdline_for_pid(pid)):
                 # Manual process: keep exact argv + HERMES_HOME for the post-update respawn
                 # and its per-profile cap.
-                cmdline = _m()._dashboard_cmdline_for_pid(pid)
-                if cmdline:
-                    pid_cmdline[pid] = cmdline
-                    pid_home[pid] = _hermes_home_for_pid(pid)
-
+                pid_cmdline[pid] = cmdline
+                pid_home[pid] = _hermes_home_for_pid(pid)
         if already_restarted_units:
             pids = [
                 pid for pid in pids
@@ -443,10 +438,9 @@ def _restart_killed_backends(
         print(f"    ⚠ {svc}: {err}")
 
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
-    if respawn_cmds:
-        failed_cmds = _m()._respawn_dashboard_processes(respawn_cmds)
-        if failed_cmds:
-            unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
+    failed_cmds = _m()._respawn_dashboard_processes(respawn_cmds) if respawn_cmds else None
+    if failed_cmds:
+        unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
 
     if failed_restarts or unrecovered:
         print("  Restart anything not auto-restarted when you're ready:\n    hermes dashboard --port <port>")
@@ -489,23 +483,18 @@ def _detect_concurrent_hermes_instances(
     seed = int(exclude_pid) if exclude_pid is not None else os.getpid()
     exclude_pids: set[int] = {seed}
     # Broad ``except Exception``: psutil may be partially stubbed in tests.
-    try:
+    with contextlib.suppress(Exception):
         for ancestor in psutil.Process(seed).parents():
-            try:
+            with contextlib.suppress(Exception):
                 anc_exe = ancestor.exe()
                 if anc_exe and _norm_exe(anc_exe) in shim_paths:
                     exclude_pids.add(int(ancestor.pid))
-            except Exception:
-                continue
-    except Exception:
-        pass
 
     matches: list[tuple[int, str]] = []
     try:
         proc_iter = psutil.process_iter(["pid", "exe", "name"])
     except Exception:
         return []
-
     for proc in proc_iter:
         try:
             info = proc.info
@@ -692,26 +681,22 @@ def _reap_orphaned_desktop_local_serves(
     # Re-read ownership: a lock may have been written between scan and now.
     owned_now = _owned_pids()
 
-    targets: list[tuple[int, str]] = []
-    for pid, cmd in scanned:
-        if not _is_desktop_local_serve_cmdline(cmd) or pid in owned_now:
-            continue
-        if _process_ppid(pid) not in (0, 1):
-            continue
-        try:
-            if process_age_seconds_fn(pid) < _REAP_MIN_AGE_SECONDS:
-                continue
+    def _is_stale_orphan(pid: int) -> bool:
+        try:  # never let a liveness probe failure widen the reap
+            return process_age_seconds_fn(pid) >= _REAP_MIN_AGE_SECONDS
         except Exception:
-            continue  # never let a liveness probe failure widen the reap
-        targets.append((pid, cmd))
+            return False
 
-    if not targets:
+    matched = [
+        pid for pid, cmd in scanned
+        if _is_desktop_local_serve_cmdline(cmd) and pid not in owned_now
+        and _process_ppid(pid) in (0, 1) and _is_stale_orphan(pid)
+    ]
+    if not matched:
         return _empty_result()
 
-    matched = [pid for pid, _ in targets]
     killed: list[int] = []
     failed: list[int] = []
-
     for pid in matched:
         try:
             os.kill(pid, signal_term)
@@ -736,9 +721,6 @@ def _reap_orphaned_desktop_local_serves(
         except OSError:
             failed.append(pid)
 
-    try:
+    with contextlib.suppress(Exception):
         print(f"⟲ Reaped {len(killed)} orphaned desktop-local serve backend(s) ({reason}): {killed or matched}")
-    except Exception:
-        pass
-
     return {"matched": matched, "killed": killed, "failed": failed}
