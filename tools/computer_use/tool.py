@@ -237,8 +237,14 @@ def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cac
     _shutdown_backend_atexit()
     _AUX_VISION_ROUTE_CACHE.clear()
 
+def _noop_input(name: str, first: Optional[str] = None):
+    # Recording stub for a keyword-only input method; a leading positional arg is folded in under *first*.
+    def method(self, *pos, **kw):
+        return self._record(name, {**dict(zip((first,) if first else (), pos)), **kw})
+    return method
+
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
-    """Test/CI stub (HERMES_COMPUTER_USE_BACKEND=noop). Records calls; returns trivial results."""
+    """Test/CI stub (HERMES_COMPUTER_USE_BACKEND=noop). Records ``(name, kwargs)`` calls; returns trivial results."""
 
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
@@ -256,18 +262,14 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
                             CaptureResult(mode=mode, width=1024, height=768, png_b64=None, elements=[],
                                           app=app or "", window_title=""))
 
-    def click(self, **kw) -> ActionResult: return self._record("click", kw)
-    def drag(self, **kw) -> ActionResult: return self._record("drag", kw)
-    def scroll(self, **kw) -> ActionResult: return self._record("scroll", kw)
-    def type_text(self, text: str, **kw) -> ActionResult: return self._record("type", {"text": text, **kw})
-    def key(self, keys: str, **kw) -> ActionResult: return self._record("key", {"keys": keys, **kw})
+    click, drag, scroll = _noop_input("click"), _noop_input("drag"), _noop_input("scroll")
+    type_text, key = _noop_input("type", "text"), _noop_input("key", "keys")
     def list_apps(self) -> List[Dict[str, Any]]: return self._record("list_apps", {}, [])
     def list_windows(self) -> List[Dict[str, Any]]: return self._record("list_windows", {}, [])
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         return self._record("focus_app", {"app": app, "raise": raise_window})
     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
         return self._record("set_value", {"value": value, "element": element})
-
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
@@ -729,36 +731,36 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
                 stale.unlink(missing_ok=True)
     return cache_dir / name
 
-def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
-    """Bounded copy of the capture in Hermes' media cache so attachment surfaces can deliver it; returns the path.
-    Best-effort: an unwritable cache must never break control."""
-    if not cap.png_b64:
-        return None
+def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int,
+                      write: Callable[[Any], None]) -> Optional[str]:
+    """Bounded cache write via ``write(path)``; the path, or None on any failure. Best-effort: an unwritable cache
+    must never break control (a capture keeps working without its spill/screenshot copy)."""
     try:
-        raw = base64.b64decode(cap.png_b64, validate=False)
-        path = _cache_file("cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}",
-                           "computer_use_*.*", _MAX_CAPTURE_FILES)
-        path.write_bytes(raw)
+        path = _cache_file(subdir, legacy, name, pattern, cap)
+        write(path)
         return str(path)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("computer_use: screenshot persistence failed: %s", exc)
+        logger.debug("computer_use: %s failed: %s", what, exc)
         return None
+
+def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
+    """Copy of the capture in Hermes' media cache so attachment surfaces can deliver it."""
+    if not cap.png_b64:
+        return None
+    return _write_cache_file("screenshot persistence", "cache/images", "image_cache",
+                             f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}", "computer_use_*.*",
+                             _MAX_CAPTURE_FILES, lambda p: p.write_bytes(base64.b64decode(cap.png_b64, validate=False)))
 
 def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
     """Write the FULL element tree (untruncated labels) to a cache file — the read_file/search_files escape
-    hatch for capped text. Path, or None on any failure (a capture must never fail on an unwritable cache)."""
-    try:
-        path = _cache_file("cache/computer_use", "computer_use_cache", f"elements_{uuid.uuid4().hex}.json",
-                           "elements_*.json", _MAX_SPILL_FILES)
+    hatch for capped text."""
+    def write(path) -> None:
         payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
                    "elements": [{"index": e.index, "role": e.role, "label": e.label,
                                  "bounds": list(e.bounds), "app": e.app} for e in cap.elements]}
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-        return str(path)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("computer_use: element spill failed: %s", exc)
-        return None
-
+    return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache",
+                             f"elements_{uuid.uuid4().hex}.json", "elements_*.json", _MAX_SPILL_FILES, write)
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
 
