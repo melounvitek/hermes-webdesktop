@@ -438,9 +438,9 @@ class _Runtime:
         if session is None:
             return
         with session.lock:
-            if session.closing:
-                return
-            finished = self._finish_task(session, _text(event, "task_id"), event)
+            finished = not session.closing and self._finish_task(
+                session, _text(event, "task_id"), event
+            )
         if finished:
             self._flush_and_export("Hermes shared-metrics task flush failed")
 
