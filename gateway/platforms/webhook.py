@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from typing import Any, Deque, Dict, List, Optional
 
 try:
@@ -140,11 +140,12 @@ class WebhookAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEBHOOK)
+        extra = config.extra
         # Empty string / null host normalises to None ("bind all families").
-        self._host: Optional[str] = config.extra.get("host", DEFAULT_HOST) or None
-        self._port: int = int(config.extra.get("port", DEFAULT_PORT))
-        self._global_secret: str = config.extra.get("secret", "")
-        self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
+        self._host: Optional[str] = extra.get("host", DEFAULT_HOST) or None
+        self._port: int = int(extra.get("port", DEFAULT_PORT))
+        self._global_secret: str = extra.get("secret", "")
+        self._static_routes: Dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: Dict[str, dict] = {}
         self._dynamic_routes_mtime: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
@@ -164,15 +165,12 @@ class WebhookAdapter(BasePlatformAdapter):
         self._seen_deliveries_next_prune_at: float = 0.0
         # Rate limiting: per-route timestamps in a fixed window.
         self._rate_counts: Dict[str, Deque[float]] = {}
-        self._rate_limit: int = int(config.extra.get("rate_limit", 30))  # per minute
-        self._max_body_bytes: int = int(config.extra.get("max_body_bytes", 1_048_576))  # 1MB
-        self._script_timeout_seconds: int = int(
-            config.extra.get("script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_SECONDS))
+        self._rate_limit: int = int(extra.get("rate_limit", 30))  # per minute
+        self._max_body_bytes: int = int(extra.get("max_body_bytes", 1_048_576))  # 1MB
+        self._script_timeout_seconds: int = int(extra.get("script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_SECONDS))
         self._route_processor = WebhookRouteProcessor(script_timeout_seconds=self._script_timeout_seconds)
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    # --- Lifecycle ---
 
     def _validate_route(self, name: str, route: dict) -> None:
         """Startup validation: secret is required; INSECURE_NO_AUTH only on loopback
@@ -263,11 +261,9 @@ class WebhookAdapter(BasePlatformAdapter):
         # Cross-platform delivery: built-in names or plugin-registered platforms.
         _is_known_platform = deliver_type in _BUILTIN_DELIVER_PLATFORMS
         if not _is_known_platform:
-            try:
+            with suppress(Exception):
                 from gateway.platform_registry import platform_registry
                 _is_known_platform = platform_registry.is_registered(deliver_type)
-            except Exception:
-                pass
         if self.gateway_runner and _is_known_platform:
             return await self._deliver_cross_platform(deliver_type, content, delivery)
         logger.warning("[webhook] Unknown deliver type: %s", deliver_type)
@@ -341,9 +337,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return None
         return [str(t).strip() for t in toolsets if str(t).strip()] or None
 
-    # ------------------------------------------------------------------
-    # HTTP handlers
-    # ------------------------------------------------------------------
+    # --- HTTP handlers ---
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
@@ -410,19 +404,15 @@ class WebhookAdapter(BasePlatformAdapter):
             # Only a self-referential prefix may fall through to the bare route;
             # anything else fails closed (silently ignoring the prefix served the
             # owner's routes under another profile's URL).
-            try:
+            with suppress(Exception):
                 from hermes_cli.profiles import profile_matches_home
                 if profile_matches_home(profile):
                     return None
-            except Exception:
-                pass
             return _PROFILE_REJECTED
         try:
             from hermes_cli.profiles import profiles_to_serve
-            served = {
-                name for name, _ in profiles_to_serve(
-                    multiplex=True, profile_allowlist=getattr(cfg, "multiplex_profile_allowlist", None),
-                )}
+            allowlist = getattr(cfg, "multiplex_profile_allowlist", None)
+            served = {name for name, _ in profiles_to_serve(multiplex=True, profile_allowlist=allowlist)}
         except Exception:
             return _PROFILE_REJECTED
         return profile if profile in served else _PROFILE_REJECTED
@@ -665,10 +655,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 session_id = peek(session_key)
             else:
                 if hasattr(store, "_ensure_loaded"):
-                    try:
+                    with suppress(Exception):
                         store._ensure_loaded()
-                    except Exception:
-                        pass
                 entry = (getattr(store, "_entries", {}) or {}).get(session_key)
                 session_id = getattr(entry, "session_id", None) if entry else None
             if not session_id:
@@ -682,9 +670,7 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.debug("[webhook] Failed to close session for %s: %s", session_chat_id, e)
 
-    # ------------------------------------------------------------------
-    # Signature validation
-    # ------------------------------------------------------------------
+    # --- Signature validation ---
 
     def _validate_signature(self, request: "web.Request", body: bytes, secret: str) -> bool:
         """Validate webhook signature (GitHub, GitLab, Svix, Linear, generic HMAC-SHA256)."""
@@ -746,9 +732,7 @@ class WebhookAdapter(BasePlatformAdapter):
         logger.debug("[webhook] Secret configured but no signature header found")
         return False
 
-    # ------------------------------------------------------------------
-    # Prompt rendering
-    # ------------------------------------------------------------------
+    # --- Prompt rendering ---
 
     def _render_prompt(self, template: str, payload: dict, event_type: str, route_name: str) -> str:
         """Render a prompt template with dot-notation payload access (``{pull_request.title}``).
@@ -781,9 +765,7 @@ class WebhookAdapter(BasePlatformAdapter):
             key: self._render_prompt(value, payload, "", "") if isinstance(value, str) else value
             for key, value in extra.items()}
 
-    # ------------------------------------------------------------------
-    # Response delivery
-    # ------------------------------------------------------------------
+    # --- Response delivery ---
 
     async def _direct_deliver(self, content: str, delivery: dict) -> SendResult:
         """deliver_only: dispatch *content* to the same delivery helpers agent-mode ``send()`` uses."""
