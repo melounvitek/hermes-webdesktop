@@ -631,7 +631,7 @@ def _voice_toggle_mode(rid, params: dict) -> dict:
     if enabled:
         # Spoken-stop hint for the client; sourced from voice.stop_phrases, empty when disabled.
         with contextlib.suppress(Exception):
-            from tools.voice_mode import voice_stop_hint
+            from tools.voice_mode_transcript import voice_stop_hint
             stop_hint = voice_stop_hint()
         # Speech output already on → warm the engine now, not on the first reply.
         if _voice_tts_enabled():

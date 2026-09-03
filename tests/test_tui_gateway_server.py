@@ -1802,10 +1802,12 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: 'Say "halt" to end the voice chat.',
-        ),
+        types.SimpleNamespace(check_voice_requirements=lambda: {"available": True, "details": ""}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: 'Say "halt" to end the voice chat.'),
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
@@ -1817,11 +1819,8 @@ def test_voice_toggle_on_carries_stop_hint(monkeypatch):
     # Disabled stop phrases → empty hint, clients show nothing.
     monkeypatch.setitem(
         sys.modules,
-        "tools.voice_mode",
-        types.SimpleNamespace(
-            check_voice_requirements=lambda: {"available": True, "details": ""},
-            voice_stop_hint=lambda: "",
-        ),
+        "tools.voice_mode_transcript",
+        types.SimpleNamespace(voice_stop_hint=lambda: ""),
     )
     on_resp = _dispatch_sync(
         {"id": "voice-on2", "method": "voice.toggle", "params": {"action": "on"}}

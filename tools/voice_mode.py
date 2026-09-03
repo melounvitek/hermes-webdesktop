@@ -23,12 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from tools.voice_mode_transcript import (  # noqa: F401 - re-exported; tests patch tools.voice_mode.<name>
-    _voice_config, WHISPER_HALLUCINATIONS, _HALLUCINATION_REPEAT_RE, is_whisper_hallucination,
-    DEFAULT_VOICE_STOP_PHRASES, _load_voice_stop_phrases, is_voice_stop_phrase,
-    DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD, MIN_FRAGMENT_LENGTH_FOR_ECHO, _normalize_for_echo_compare,
-    is_tts_echo, voice_stop_hint,
-)
+from tools.voice_mode_transcript import _voice_config, is_voice_stop_phrase, is_whisper_hallucination
 from hermes_constants import is_termux as _is_termux_environment
 
 # ── Recording parameters ──

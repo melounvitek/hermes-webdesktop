@@ -630,7 +630,7 @@ class TestTypedVoiceStop:
         # Hermetic: don't let a dev machine's voice.stop_phrases config
         # change which utterances count as a stop phrase.
         monkeypatch.setattr(
-            "tools.voice_mode._load_voice_stop_phrases", lambda: ("stop",)
+            "tools.voice_mode_transcript._load_voice_stop_phrases", lambda: ("stop",)
         )
 
     def test_typed_stop_ends_voice_chat_when_voice_on(self):

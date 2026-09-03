@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess  # noqa: F401  (type annotation only)
+import subprocess
 from typing import Any, Dict
 
 from tools.tts_command_provider import _get_provider_section as _get_stt_section

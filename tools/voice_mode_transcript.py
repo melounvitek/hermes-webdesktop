@@ -56,19 +56,12 @@ def _load_voice_stop_phrases() -> tuple:
     return DEFAULT_VOICE_STOP_PHRASES
 
 
-def _configured_stop_phrases() -> tuple:
-    """Resolve ``_load_voice_stop_phrases`` through ``tools.voice_mode`` so
-    ``patch("tools.voice_mode._load_voice_stop_phrases")`` still takes effect."""
-    from tools import voice_mode as _vm
-    return _vm._load_voice_stop_phrases()
-
-
 def is_voice_stop_phrase(transcript: str, stop_phrases: Optional[tuple] = None) -> bool:
     """True when *transcript* is EXACTLY a configured stop phrase. Deliberately strict: the whole
     utterance — lowercased, surrounding punctuation stripped — must equal a phrase, so "stop doing
     that and try again" still reaches the agent. ``voice.stop_phrases: []`` disables."""
     cleaned = transcript.strip().lower().strip(".,!?;: \t\n\"'") if transcript else ""
-    return bool(cleaned) and cleaned in (_configured_stop_phrases() if stop_phrases is None else stop_phrases)
+    return bool(cleaned) and cleaned in (_load_voice_stop_phrases() if stop_phrases is None else stop_phrases)
 
 
 # Similarity ratio (difflib.SequenceMatcher) above which a playback-phase barge transcript
@@ -113,5 +106,5 @@ def voice_stop_hint() -> str:
     """One-line 'Say "stop" to end the voice chat.' hint for voice-mode start, using the first
     ``voice.stop_phrases`` entry ("" when disabled). Every surface announcing voice-mode start
     (CLI, TUI, desktop) uses this one owner instead of hardcoding the wording."""
-    phrases = _configured_stop_phrases()
+    phrases = _load_voice_stop_phrases()
     return f'Say "{phrases[0]}" to end the voice chat.' if phrases else ""

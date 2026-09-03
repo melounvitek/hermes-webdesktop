@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tools.voice_mode import (
+from tools.voice_mode_transcript import (
     DEFAULT_VOICE_STOP_PHRASES,
     _load_voice_stop_phrases,
     is_voice_stop_phrase,
@@ -25,12 +25,12 @@ class TestVoiceStopHint:
     """The 'Say "stop" to end the voice chat.' hint shown on voice-mode start."""
 
     def test_default_phrase(self):
-        with patch("tools.voice_mode._load_voice_stop_phrases", return_value=("stop",)):
+        with patch("tools.voice_mode_transcript._load_voice_stop_phrases", return_value=("stop",)):
             assert voice_stop_hint() == 'Say "stop" to end the voice chat.'
 
 
     def test_disabled_phrases_show_no_hint(self):
-        with patch("tools.voice_mode._load_voice_stop_phrases", return_value=()):
+        with patch("tools.voice_mode_transcript._load_voice_stop_phrases", return_value=()):
             assert voice_stop_hint() == ""
 
 
@@ -43,7 +43,7 @@ class TestIsVoiceStopPhrase:
 
 
     def test_uses_config_when_phrases_omitted(self):
-        with patch("tools.voice_mode._load_voice_stop_phrases", return_value=("halt",)):
+        with patch("tools.voice_mode_transcript._load_voice_stop_phrases", return_value=("halt",)):
             assert is_voice_stop_phrase("halt") is True
             assert is_voice_stop_phrase("stop") is False
 
@@ -185,9 +185,10 @@ class TestStopPhraseSurvivesHallucinationFilter:
 
     def _transcribe(self, text, phrases):
         import tools.voice_mode as vm
+        import tools.voice_mode_transcript as vmt
 
         with patch.object(
-            vm, "_load_voice_stop_phrases", return_value=tuple(phrases)
+            vmt, "_load_voice_stop_phrases", return_value=tuple(phrases)
         ), patch(
             "tools.transcription_tools.transcribe_audio",
             return_value={"success": True, "transcript": text},

@@ -454,7 +454,7 @@ class CLIVoiceMixin:
                 # Fail-closed echo guard: playback-phase capture has no echo cancellation, so
                 # a close match for what Hermes just spoke is speaker bleed, not a user turn.
                 if getattr(self, "_voice_barge_phase", None) == "playback":
-                    from tools.voice_mode import is_tts_echo
+                    from tools.voice_mode_transcript import is_tts_echo
                     if is_tts_echo(transcript, getattr(self, "_voice_last_tts_text", "")):
                         logger.debug(
                             "Dropping playback-phase barge transcript as TTS echo: %r", transcript)
@@ -529,7 +529,7 @@ class CLIVoiceMixin:
         _cprint(f"  {_DIM}{self._voice_record_key_label()} to start/stop recording{_RST}")
         # Spoken-stop hint from voice.stop_phrases (first entry); "" when disabled.
         try:
-            from tools.voice_mode import voice_stop_hint
+            from tools.voice_mode_transcript import voice_stop_hint
             _stop_hint = voice_stop_hint()
         except Exception:
             _stop_hint = ""
