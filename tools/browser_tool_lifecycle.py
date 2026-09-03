@@ -53,6 +53,19 @@ def _session_has_expired(
     return (time.time() if now is None else now) >= expires_at
 
 
+def _best_effort(label: str, fn) -> None:
+    """Run ``fn()``; log (debug) and swallow any exception — teardown must never abort."""
+    try:
+        fn()
+    except Exception as e:
+        _bt.logger.debug("%s failed: %s", label, e)
+
+
+def _stop_all_lightpanda() -> None:
+    from tools.browser_lightpanda import stop_all_lightpanda
+    stop_all_lightpanda()
+
+
 def _emergency_cleanup_all_sessions():
     """atexit: close this process's sessions, then sweep orphans left by crashed
     hermes processes — every clean exit reaps accumulated orphans, not only
@@ -64,10 +77,7 @@ def _emergency_cleanup_all_sessions():
     # Own sessions first so their owner_pid files are gone before the reaper scans.
     # Real-profile Chrome is launched directly (not by agent-browser), so the
     # session cleanup never reaps it.
-    try:
-        _bt._terminate_real_profile_chrome()
-    except Exception as e:
-        _bt.logger.debug("Real-profile chrome cleanup on exit failed: %s", e)
+    _best_effort("Real-profile chrome cleanup on exit", _bt._terminate_real_profile_chrome)
     if _bt._active_sessions:
         _bt.logger.info("Emergency cleanup: closing %s active session(s)...", len(_bt._active_sessions))
         try:
@@ -81,21 +91,11 @@ def _emergency_cleanup_all_sessions():
                 _bt._session_owner_homes.clear()
                 _bt._cleanup_failures.clear()
                 _bt._recording_sessions.clear()
-
     # Lightpanda servers we spawned that fell out of ``_active_sessions``.
-    try:
-        from tools.browser_lightpanda import stop_all_lightpanda
-
-        stop_all_lightpanda()
-    except Exception as e:
-        _bt.logger.debug("Lightpanda cleanup on exit failed: %s", e)
-
-    # Safe even if we never used the browser — owner_pid liveness protects
-    # daemons owned by other live hermes processes.
-    try:
-        _bt._reap_orphaned_browser_sessions()
-    except Exception as e:
-        _bt.logger.debug("Orphan reap on exit failed: %s", e)
+    _best_effort("Lightpanda cleanup on exit", _stop_all_lightpanda)
+    # Safe even if we never used the browser — owner_pid liveness protects daemons
+    # owned by other live hermes processes.
+    _best_effort("Orphan reap on exit", _bt._reap_orphaned_browser_sessions)
 
 
 @contextlib.contextmanager
@@ -147,10 +147,8 @@ def _cleanup_inactive_browser_sessions():
     current_time = time.time()
 
     with _bt._cleanup_lock:
-        sessions_to_cleanup = [
-            task_id for task_id, last_time in list(_bt._session_last_activity.items())
-            if current_time - last_time > _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT
-        ]
+        sessions_to_cleanup = [task_id for task_id, last_time in list(_bt._session_last_activity.items())
+                               if current_time - last_time > _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT]
 
     for task_id in sessions_to_cleanup:
         elapsed = int(current_time - _bt._session_last_activity.get(task_id, current_time))
@@ -200,14 +198,15 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
     (2) binding — the socket dir in the cmdline or ``AGENT_BROWSER_SOCKET_DIR`` in
     its environ (the real spoof defense). Fail-closed on any ambiguity.
     """
+    def refuse(reason: str, *args) -> bool:
+        _bt.logger.warning("Refusing to reap browser daemon PID %d (session %s): " + reason,
+                           daemon_pid, session_name, *args)
+        return False
+
     try:
         import psutil
     except ImportError:  # psutil is a hard dep; defensive only
-        _bt.logger.warning(
-            "Refusing to reap browser daemon PID %d (session %s): "
-            "psutil unavailable for identity verification",
-            daemon_pid, session_name)
-        return False
+        return refuse("psutil unavailable for identity verification")
 
     try:
         proc = psutil.Process(daemon_pid)
@@ -216,17 +215,10 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
     except psutil.NoSuchProcess:
         return False  # vanished between the liveness check and now
     except (psutil.AccessDenied, OSError) as exc:
-        _bt.logger.warning(
-            "Refusing to reap browser daemon PID %d (session %s): "
-            "could not read process identity (%s)",
-            daemon_pid, session_name, exc)
-        return False
+        return refuse("could not read process identity (%s)", exc)
 
     if "agent-browser" not in name and "agent-browser" not in cmdline:
-        _bt.logger.warning(
-            "Refusing to reap PID %d (session %s): not an agent-browser "
-            "process (name=%r)", daemon_pid, session_name, name)
-        return False
+        return refuse("not an agent-browser process (name=%r)", name)
 
     socket_dir_l = socket_dir.lower()
     socket_base_l = os.path.basename(socket_dir).lower()
@@ -237,14 +229,8 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
             bound = bool(env_dir) and os.path.normpath(env_dir) == os.path.normpath(socket_dir)
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             bound = False  # environ() can be denied even same-user; cmdline already failed — fail closed
-
     if not bound:
-        _bt.logger.warning(
-            "Refusing to reap agent-browser PID %d: not bound to session "
-            "socket dir %s (possible recycled PID or planted pid file)",
-            daemon_pid, socket_dir)
-        return False
-
+        return refuse("not bound to session socket dir %s (possible recycled PID or planted pid file)", socket_dir)
     return True
 
 
@@ -374,12 +360,10 @@ def _reap_orphaned_browser_sessions():
 
     # Lightpanda servers keep their own records (no socket dir); sweep them with the
     # same owner-liveness rule BEFORE the daemon scan, which may return early.
-    try:
+    def _reap_lp():
         from tools.browser_lightpanda import reap_orphaned_lightpanda
-
         reap_orphaned_lightpanda()
-    except Exception as e:
-        _bt.logger.debug("Lightpanda orphan reap failed: %s", e)
+    _best_effort("Lightpanda orphan reap", _reap_lp)
 
     tmpdir = _bt._socket_safe_tmpdir()
     socket_dirs = []
@@ -389,11 +373,7 @@ def _reap_orphaned_browser_sessions():
         return
 
     with _bt._cleanup_lock:
-        tracked_names = {
-            info.get("session_name")
-            for info in _bt._active_sessions.values()
-            if info.get("session_name")
-        }
+        tracked_names = {info.get("session_name") for info in _bt._active_sessions.values() if info.get("session_name")}
 
     reaped = 0
     for socket_dir in socket_dirs:
@@ -477,15 +457,13 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
 
 
 def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
-    """Local tree-kill — fallback when agent.deadline is unavailable."""
+    """Local tree-kill (SIGTERM then SIGKILL to the process group) — fallback when
+    agent.deadline is unavailable. Differs from hermes_cli._subprocess_compat's
+    group-leader-only variant, and tests pin this sequence."""
     if os.name == "nt":
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                check=False,
-                capture_output=True,
-                stdin=subprocess.DEVNULL,
-            )
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           check=False, capture_output=True, stdin=subprocess.DEVNULL)
         except Exception:
             pass
         return
@@ -502,8 +480,7 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, OSError):
         return
-    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    for sig in (signal.SIGTERM, sigkill):
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         try:
             killpg(pgid, sig)
         except (ProcessLookupError, PermissionError, OSError):
@@ -658,12 +635,11 @@ def _cleanup_single_browser_session(task_id: str) -> None:
     # Camofox: skip the full close when managed persistence is on — the profile
     # (session cookies) must survive across tasks; the inactivity reaper still frees idle resources.
     if _bt._is_camofox_mode():
-        try:
+        def _camofox_cleanup():
             from tools.browser_camofox import camofox_close, camofox_soft_cleanup
             if not camofox_soft_cleanup(task_id):
                 camofox_close(task_id)
-        except Exception as e:
-            _bt.logger.debug("Camofox cleanup for task %s: %s", task_id, e)
+        _best_effort(f"Camofox cleanup for task {task_id}", _camofox_cleanup)
 
     _bt.logger.debug("cleanup_browser called for task_id: %s", task_id)
     _bt.logger.debug("Active sessions: %s", list(_bt._active_sessions.keys()))
@@ -686,7 +662,6 @@ def _cleanup_single_browser_session(task_id: str) -> None:
     if (session_info.get("features") or {}).get("lightpanda"):
         try:
             from tools.browser_lightpanda import stop_lightpanda
-
             stop_lightpanda(session_info.get("session_name", ""))
         except Exception as e:
             _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
@@ -717,16 +692,15 @@ def cleanup_all_browsers() -> None:
     except Exception:
         pass
 
-    _bt._cached_agent_browser = None
-    _bt._agent_browser_resolved = False
     _bt._discover_homebrew_node_dirs.cache_clear()
-    # Flip the resolved flag BEFORE nulling the cache so a concurrent reader never
+    # Each resolved flag flips BEFORE its cache is nulled so a concurrent reader never
     # sees ``resolved=True`` with ``cache=None``.
-    _bt._command_timeout_resolved = False
-    _bt._cached_command_timeout = None
-    _bt._snapshot_threshold_resolved = False
-    _bt._cached_snapshot_threshold = None
-    _bt._cached_chromium_installed = None
-    _bt._chromium_autoinstall_attempted = False
-    _bt._cached_browser_engine = None
-    _bt._browser_engine_resolved = False
+    for flag, cache in (
+        ("_agent_browser_resolved", "_cached_agent_browser"),
+        ("_command_timeout_resolved", "_cached_command_timeout"),
+        ("_snapshot_threshold_resolved", "_cached_snapshot_threshold"),
+        ("_chromium_autoinstall_attempted", "_cached_chromium_installed"),
+        ("_browser_engine_resolved", "_cached_browser_engine"),
+    ):
+        setattr(_bt, flag, False)
+        setattr(_bt, cache, None)

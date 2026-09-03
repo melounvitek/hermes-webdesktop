@@ -19,16 +19,12 @@ from typing import Any, Dict, List, Optional
 
 from tools.browser_tool_origin import origin as _bt
 
+_DOCKER_PULL = "docker pull ghcr.io/nousresearch/hermes-agent:latest"
+_CHROMIUM_INSTALL = "npx agent-browser install --with-deps (or: npx playwright install --with-deps chromium)"
 _CHROMIUM_MISSING_DOCKER_HINT = (
-    "Chromium browser is missing. You're running in Docker — pull "
-    "the latest image to get the bundled Chromium: "
-    "docker pull ghcr.io/nousresearch/hermes-agent:latest"
+    f"Chromium browser is missing. You're running in Docker — pull the latest image to get the bundled Chromium: {_DOCKER_PULL}"
 )
-_CHROMIUM_MISSING_HINT = (
-    "Chromium browser is missing. Install it with: "
-    "npx agent-browser install --with-deps "
-    "(or: npx playwright install --with-deps chromium)"
-)
+_CHROMIUM_MISSING_HINT = f"Chromium browser is missing. Install it with: {_CHROMIUM_INSTALL}"
 
 
 def _needs_chromium_sandbox_bypass() -> bool:
@@ -51,10 +47,7 @@ def _apply_chromium_sandbox_args(browser_env: Dict[str, str]) -> None:
         and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env
         and _bt._needs_chromium_sandbox_bypass()
     ):
-        _bt.logger.debug(
-            "browser: sandbox bypass needed (root/docker/AppArmor userns) — "
-            "injecting --no-sandbox"
-        )
+        _bt.logger.debug("browser: sandbox bypass needed (root/docker/AppArmor userns) — injecting --no-sandbox")
         browser_env["AGENT_BROWSER_ARGS"] = "--no-sandbox,--disable-dev-shm-usage"
 
 
@@ -87,27 +80,17 @@ def _format_browser_timeout_error(
     if detail:
         parts.append(detail[:1500])
 
-    combined = f"{stderr}\n{stdout}".lower()
-    if "sandbox" in combined:
-        parts.append(
-            "Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
-            "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
-            "or run: npx agent-browser install --with-deps"
-        )
+    if "sandbox" in f"{stderr}\n{stdout}".lower():
+        parts.append("Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
+                     "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
+                     "or run: npx agent-browser install --with-deps")
     elif command == "open" and _bt._is_local_mode():
         if _bt._running_in_docker():
-            parts.append(
-                "The browser daemon may still be starting or Chromium may be "
-                "missing. Pull the latest image: "
-                "docker pull ghcr.io/nousresearch/hermes-agent:latest"
-            )
+            parts.append("The browser daemon may still be starting or Chromium may be "
+                         f"missing. Pull the latest image: {_DOCKER_PULL}")
         else:
-            parts.append(
-                "The browser daemon may still be starting, or Chromium may be "
-                "missing system libraries. Install/repair with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
-            )
+            parts.append("The browser daemon may still be starting, or Chromium may be "
+                         f"missing system libraries. Install/repair with: {_CHROMIUM_INSTALL}")
     return "\n".join(parts)
 
 
@@ -163,25 +146,18 @@ def _popen_agent_browser(argv: List[str], env: Dict[str, str], socket_dir: str, 
     so the child gets ONLY our three handles (leaked console handles make the Rust
     daemon grandchild die silently), close_fds=True for the rest.
     """
-    stdout_path = os.path.join(socket_dir, f"_stdout_{tag}")
-    stderr_path = os.path.join(socket_dir, f"_stderr_{tag}")
-    stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fds = [os.open(os.path.join(socket_dir, f"_{slot}_{tag}"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+           for slot in ("stdout", "stderr")]
     try:
         _popen_extra: dict = {}
         if os.name == "nt":
-            _popen_extra["creationflags"] = _bt.windows_hide_flags()
-            _popen_extra["close_fds"] = True
             _si = subprocess.STARTUPINFO()
             _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
-            _popen_extra["startupinfo"] = _si
-        return subprocess.Popen(
-            argv, stdout=stdout_fd, stderr=stderr_fd,
-            stdin=subprocess.DEVNULL, env=env, **_popen_extra,
-        )
+            _popen_extra = {"creationflags": _bt.windows_hide_flags(), "close_fds": True, "startupinfo": _si}
+        return subprocess.Popen(argv, stdout=fds[0], stderr=fds[1], stdin=subprocess.DEVNULL, env=env, **_popen_extra)
     finally:
-        os.close(stdout_fd)
-        os.close(stderr_fd)
+        for fd in fds:
+            os.close(fd)
 
 
 def _session_record(prefix: str, cdp_url: Optional[str], features: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,9 +184,7 @@ def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict
             raise RuntimeError(err)
         if cdp_url:
             info = _session_record("rp", _bt._resolve_cdp_override(cdp_url), {"local": True, "real_profile": True})
-            _bt.logger.info(
-                "Created real-profile local session %s for task %s", info["session_name"], task_id
-            )
+            _bt.logger.info("Created real-profile local session %s for task %s", info["session_name"], task_id)
             return info
 
     # Browser Use mode drives whatever CDP endpoint it is handed; with
@@ -228,17 +202,13 @@ def _create_lightpanda_session(task_id: str) -> Dict[str, Any]:
     """Spawn ``lightpanda serve`` for this session key (Browser Use mode)."""
     from tools.browser_lightpanda import launch_lightpanda
 
-    session_name = f"lp_{uuid.uuid4().hex[:10]}"
-    server, err = launch_lightpanda(session_name, block_private_networks=not _bt._is_local_backend())
+    info = _session_record("lp", None, {"local": True, "lightpanda": True})
+    server, err = launch_lightpanda(info["session_name"], block_private_networks=not _bt._is_local_backend())
     if err:
         raise RuntimeError(err)
-    _bt.logger.info("Created Lightpanda session %s (port %s) for task %s", session_name, server.port, task_id)
-    return {
-        "session_name": session_name,
-        "bb_session_id": None,
-        "cdp_url": server.cdp_url,
-        "features": {"local": True, "lightpanda": True},
-    }
+    info["cdp_url"] = server.cdp_url
+    _bt.logger.info("Created Lightpanda session %s (port %s) for task %s", info["session_name"], server.port, task_id)
+    return info
 
 
 def _local_backend_process_dead(session_info: Dict[str, Any]) -> bool:
@@ -350,10 +320,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
             if replacement is not None:
                 return replacement
             existing_session = None
-        elif (
-            not _bt._session_has_expired(existing_session)
-            and not _bt._local_backend_process_dead(existing_session)
-        ):
+        elif not _bt._session_has_expired(existing_session) and not _bt._local_backend_process_dead(existing_session):
             return existing_session
         else:
             _bt.logger.info("Replacing expired or dead browser session for task %s", task_id)
@@ -538,16 +505,13 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
         parsed = json.loads(stdout_text)
     except json.JSONDecodeError:
         raw = stdout_text[:2000]
-        _bt.logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                       command, returncode, raw[:500])
+        _bt.logger.warning("browser '%s' returned non-JSON output (rc=%s): %s", command, returncode, raw[:500])
         if command == "screenshot":
             stderr_text = (stderr or "").strip()
             combined_text = "\n".join(part for part in [stdout_text, stderr_text] if part)
             recovered_path = _bt._extract_screenshot_path_from_text(combined_text)
             if recovered_path and Path(recovered_path).exists():
-                _bt.logger.info(
-                    "browser 'screenshot' recovered file from non-JSON output: %s", recovered_path
-                )
+                _bt.logger.info("browser 'screenshot' recovered file from non-JSON output: %s", recovered_path)
                 return {"success": True, "data": {"path": recovered_path, "raw": raw}}
         return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}"}
 
@@ -606,15 +570,11 @@ def _spawn_and_collect(
     # Lightpanda rejects Chromium-only launch flags: strip current and legacy vars;
     # Chrome commands and fallback use the shared Chromium policy.
     if engine == "lightpanda":
-        _stripped_args = browser_env.pop("AGENT_BROWSER_ARGS", None)
-        _stripped_flags = browser_env.pop("AGENT_BROWSER_CHROME_FLAGS", None)
-        if _stripped_args is not None or _stripped_flags is not None:
-            _bt.logger.debug(
-                "browser: stripped Chromium-only AGENT_BROWSER_ARGS/"
-                "AGENT_BROWSER_CHROME_FLAGS for Lightpanda command %s "
-                "(agent-browser rejects them with --engine lightpanda)",
-                command,
-            )
+        stripped = [browser_env.pop(k, None) for k in ("AGENT_BROWSER_ARGS", "AGENT_BROWSER_CHROME_FLAGS")]
+        if any(v is not None for v in stripped):
+            _bt.logger.debug("browser: stripped Chromium-only AGENT_BROWSER_ARGS/AGENT_BROWSER_CHROME_FLAGS "
+                             "for Lightpanda command %s (agent-browser rejects them with --engine lightpanda)",
+                             command)
     else:
         _bt._apply_chromium_sandbox_args(browser_env)
 
@@ -634,10 +594,7 @@ def _spawn_and_collect(
             _bt.logger.warning("browser '%s' stderr after timeout: %s", command, stderr.strip()[:500])
         _bt.logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                        command, timeout, task_id, task_socket_dir)
-        return {
-            "success": False,
-            "error": _bt._format_browser_timeout_error(command, timeout, stdout, stderr),
-        }
+        return {"success": False, "error": _bt._format_browser_timeout_error(command, timeout, stdout, stderr)}
     with open(stdout_path, "r", encoding="utf-8") as f:
         stdout = f.read()
     with open(stderr_path, "r", encoding="utf-8") as f:
@@ -704,12 +661,7 @@ def _run_browser_command(
     # empty, non-JSON, nonzero rc, parsed).
     fallback_reason = _bt._lightpanda_fallback_reason(engine, command, result)
     if fallback_reason:
-        _bt.logger.info(
-            "Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s",
-            command,
-            task_id,
-            fallback_reason,
-        )
+        _bt.logger.info("Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s", command, task_id, fallback_reason)
         if command == "screenshot":  # separate Chrome session to the same URL
             fallback_result = _bt._chrome_fallback_screenshot(task_id, args or [], timeout)
         else:

@@ -66,28 +66,18 @@ def _native_vision_result(
         _resize_image_for_vision,
     )
 
-    data_url = _resize_image_for_vision(
-        screenshot_path,
-        mime_type="image/png",
-        max_base64_bytes=_EMBED_TARGET_BYTES,
-        max_dimension=_EMBED_MAX_DIMENSION,
-        force_jpeg=True,
-    )
-    native_result = _build_native_vision_tool_result(
-        image_url=str(screenshot_path),
-        question=question,
-        image_data_url=data_url,
-        image_size_bytes=screenshot_path.stat().st_size,
-    )
+    data_url = _resize_image_for_vision(screenshot_path, mime_type="image/png", max_base64_bytes=_EMBED_TARGET_BYTES,
+                                        max_dimension=_EMBED_MAX_DIMENSION, force_jpeg=True)
+    native_result = _build_native_vision_tool_result(image_url=str(screenshot_path), question=question,
+                                                     image_data_url=data_url,
+                                                     image_size_bytes=screenshot_path.stat().st_size)
     meta = native_result.setdefault("meta", {})
     meta["screenshot_path"] = str(screenshot_path)
     if lp_fallback_warning:
         meta["fallback_warning"] = lp_fallback_warning
     if annotate and result.get("data", {}).get("annotations"):
         meta["annotations"] = result["data"]["annotations"]
-    native_result["text_summary"] = (
-        f"{native_result.get('text_summary', '')} " f"Screenshot path: {screenshot_path}"
-    ).strip()
+    native_result["text_summary"] = f"{native_result.get('text_summary', '')} Screenshot path: {screenshot_path}".strip()
     return native_result
 
 
@@ -127,18 +117,11 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
         pass
 
     call_kwargs = {
-        "task": "vision",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": vision_prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }
-        ],
-        "temperature": vision_temperature,
-        "timeout": vision_timeout,
+        "task": "vision", "temperature": vision_temperature, "timeout": vision_timeout,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": vision_prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]}],
     }
     if vision_model:
         call_kwargs["model"] = vision_model
@@ -148,12 +131,8 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
         from tools.vision_tools import _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES
         if not (_is_image_size_error(_api_err) and len(data_url) > _RESIZE_TARGET_BYTES):
             raise
-        _bt.logger.info(
-            "Vision API rejected screenshot (%.1f MB); "
-            "auto-resizing to ~%.0f MB and retrying...",
-            len(data_url) / (1024 * 1024),
-            _RESIZE_TARGET_BYTES / (1024 * 1024),
-        )
+        _bt.logger.info("Vision API rejected screenshot (%.1f MB); auto-resizing to ~%.0f MB and retrying...",
+                        len(data_url) / (1024 * 1024), _RESIZE_TARGET_BYTES / (1024 * 1024))
         data_url = _resize_image_for_vision(screenshot_path, mime_type="image/png")
         call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
         response = _bt.call_llm(**call_kwargs)
