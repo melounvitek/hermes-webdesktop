@@ -291,8 +291,7 @@ def _restore_compressor_attempt_state(
         logger.warning(
             "Skipping stale compressor attempt-state restore: attempt "
             "generation %s no longer owns the compressor (current: %s). A newer (stall-fallback) attempt's state is preserved.",
-            attempt_generation,
-            getattr(compressor, "_compression_attempt_generation", None),
+            attempt_generation, getattr(compressor, "_compression_attempt_generation", None),
         )
         return
     # Success clears the durable cooldown pre-commit; recreate/clear that row BEFORE
@@ -312,8 +311,7 @@ def _restore_compressor_attempt_state(
         if attempt_generation and int(getattr(compressor, "_compression_attempt_generation", 0) or 0) != attempt_generation:
             logger.warning(
                 "Skipping stale compressor attempt-state restore at write "
-                "time: attempt generation %s lost the compressor mid-restore.",
-                attempt_generation,
+                "time: attempt generation %s lost the compressor mid-restore.", attempt_generation,
             )
             return
         for name, value in restored.items():
@@ -858,9 +856,7 @@ def _retry_compression_on_fallback_chain(
     ceiling = max(float(total_ceiling_seconds), idle)
     logger.warning(
         "Context compression stalled on the configured summary route — "
-        "retrying once on %s (%s) before continuing without compression",
-        route["label"],
-        route["model"],
+        "retrying once on %s (%s) before continuing without compression", route["label"], route["model"],
     )
     try:
         from agent.context_compressor import pin_summary_route
@@ -933,9 +929,7 @@ def _await_in_flight_commit(
             log(
                 "Context compression SessionDB commit still running "
                 "%.1fs past the total ceiling (waited %.1fs, ceiling %.1fs); commit cannot be abandoned mid-flight — "
-                "continuing to wait (check SessionDB health if this persists)",
-                waited - ceiling,
-                waited,
+                "continuing to wait (check SessionDB health if this persists)", waited - ceiling, waited,
                 ceiling,
             )
             if not overrun_surfaced and on_commit_overrun is not None:
@@ -983,8 +977,7 @@ def _release_cancelled_worker(
             logger.warning(
                 "Cancelled compression worker did not exit within %.1fs "
                 "grace — orphaning it behind the poison fence (late result will be discarded); retaining the session "
-                "compression lease until it exits so no new attempt overlaps it",
-                grace,
+                "compression lease until it exits so no new attempt overlaps it", grace,
             )
     fence.release_cancelled_compression_lock()
 
@@ -1111,10 +1104,7 @@ def run_compress_context_with_progress_timeout(
         else:
             logger.warning(
                 "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing without "
-                "compression",
-                since_progress,
-                waited,
-                ceiling,
+                "compression", since_progress, waited, ceiling,
             )
         # Leave the future on the shared pool: fence cancel won, so a late
         # commit cannot land (same detachment model as gateway hygiene).
@@ -1351,8 +1341,7 @@ def _mark_compression_blocked_transient(agent: Any, compressor: Any) -> None:
         logger.info(
             "Skipping automatic compression re-entry: transient guard "
             "active (%s, session=%s, last failure: %s) — will retry after "
-            "the backoff lapses; /compress forces an immediate retry",
-            reason,
+            "the backoff lapses; /compress forces an immediate retry", reason,
             getattr(agent, "session_id", None) or "none",
             getattr(compressor, "_last_summary_error", None) or "unknown",
         )
@@ -1732,11 +1721,8 @@ def _lower_threshold_to_aux_context(
     agent._emit_status(msg)
     logger.warning(
         "Auxiliary compression model %s has %d token context, below the main model's compression threshold of %d "
-        "tokens — auto-lowered session threshold to %d to keep compression working.",
-        aux_model,
-        aux_context,
-        old_threshold,
-        new_threshold,
+        "tokens — auto-lowered session threshold to %d to keep compression working.", aux_model, aux_context,
+        old_threshold, new_threshold,
     )
 
 
@@ -2375,9 +2361,7 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
             except Exception as _wm_err:
                 logger.warning(
                     "compression watermark capture failed for session=%s (%s) — concurrent appends this cycle "
-                    "will be archived with the snapshot",
-                    lease.sid,
-                    _wm_err,
+                    "will be archived with the snapshot", lease.sid, _wm_err,
                 )
                 lease.watermark = None
         return acquired
@@ -2403,9 +2387,7 @@ def _sit_out_lock_contention(
         existing = None
     logger.warning(
         "compression skipped: another path is compressing session=%s "
-        "(holder=%s) — returning messages unchanged to avoid session fork",
-        lease.sid,
-        existing,
+        "(holder=%s) — returning messages unchanged to avoid session fork", lease.sid, existing,
     )
     lease.holder = None  # don't release a lock we don't own
     # Distinguish lock-contention no-op from "nothing to compress" so manual
@@ -2533,8 +2515,7 @@ def _adopt_if_parent_rotated(
         return recovered_messages, _existing_sp
     logger.warning(
         "compression skipped: session=%s was already rotated by "
-        "another compression path, but no unique live child could be adopted",
-        lease.sid,
+        "another compression path, but no unique live child could be adopted", lease.sid,
     )
     return messages, _existing_sp
 
@@ -2570,9 +2551,7 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
         logger.warning(
             "compression: session=%s grew before lease (%d → %d msgs) but the pre-adoption flush of the "
             "live tail failed; skipping durable-snapshot adoption so un-persisted user input is kept",
-            lease.sid,
-            len(messages),
-            len(durable_parent),
+            lease.sid, len(messages), len(durable_parent),
         )
         return None
     # Re-read after the flush so the adopted snapshot carries the just-persisted tail.
@@ -2793,9 +2772,7 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
             logger.info(
                 "Compaction rebuilt a drifted system prompt (session=%s, %d -> %d chars): builder output changed "
                 "since the stored snapshot (update, config change, or memory/skills growth)",
-                agent.session_id or "none",
-                len(cached_system_prompt),
-                len(new_system_prompt),
+                agent.session_id or "none", len(cached_system_prompt), len(new_system_prompt),
             )
     return new_system_prompt
 
@@ -2828,8 +2805,7 @@ def _salvage_or_refuse_grown_transcript(
     if _rough_out > _rough_in:
         logger.warning(
             "Compression refused: compressed transcript would be larger than the original (session=%s, ~%s -> ~%s "
-            "tokens); keeping the original transcript unchanged",
-            agent.session_id or "none",
+            "tokens); keeping the original transcript unchanged", agent.session_id or "none",
             f"{_rough_in:,}",
             f"{_rough_out:,}",
         )
@@ -3172,8 +3148,7 @@ def _candidate_rejected(
     if not _compressor_attempt_is_current(agent.context_compressor, attempt_generation):
         logger.warning(
             "Discarding late compression candidate: attempt generation "
-            "%s was superseded by a newer attempt (current: %s) (session=%s).",
-            attempt_generation,
+            "%s was superseded by a newer attempt (current: %s) (session=%s).", attempt_generation,
             getattr(agent.context_compressor, "_compression_attempt_generation", None),
             agent.session_id or "none",
         )
@@ -3977,8 +3952,7 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
         # if others shrank so the caller surfaces the original error.
         logger.warning(
             "image-shrink recovery: %d oversized image part(s) could not be "
-            "shrunk under %.0f MB — not retrying (would re-send rejected payload)",
-            unshrinkable_oversized,
+            "shrunk under %.0f MB — not retrying (would re-send rejected payload)", unshrinkable_oversized,
             target_mb,
         )
         return False
