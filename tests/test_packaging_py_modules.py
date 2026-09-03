@@ -1,95 +1,74 @@
-"""Invariant: every root-level module the packaged code imports ships in the wheel.
+"""Packaging invariant: every root-level module that packaged code imports ships in the wheel.
 
-The repo keeps a handful of single-file modules at the repository root
-(``hermes_state.py``, ``run_agent.py``, ``cli.py``, ...). setuptools'
-``packages.find`` never picks those up, so ``[tool.setuptools] py-modules``
-in pyproject.toml has to name each one explicitly. When a root module is
-split into siblings (``hermes_state_*``) and the list is not updated, the
-source tree still works (cwd is on ``sys.path``) but the built wheel/sdist
-and the uv2nix sealed venv raise ``ModuleNotFoundError`` on the very first
-``import hermes_state``.
-
-This test derives the required set from the code rather than freezing a
-list: parse pyproject, walk every import (top-level *and* lazy/function-
-scoped) in the packaged root modules and packaged packages, and require
-that any import resolving to a root-level ``*.py`` file is declared.
+``packages.find`` only sees directories with ``__init__.py``; root single-file modules
+(``run_agent``, ``hermes_state``, ``toolsets``...) reach the wheel through
+``setup.py::_root_py_modules()``, which derives the list from the tree at build time. A
+static list drifted every time the root layout changed and broke installed wheels with
+``ModuleNotFoundError`` on ``import hermes_state``. This test pins the two halves of that
+contract: the derived list covers every root module packaged code can import, and the
+helper stays the single source (no static ``py-modules`` creeping back into pyproject).
 """
-
 from __future__ import annotations
 
 import ast
+import importlib.util
+import sys
 import tomllib
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PACKAGES = ("agent", "tools", "hermes_cli", "gateway", "tui_gateway", "cron", "acp_adapter", "plugins", "providers")
 
 
-def _pyproject() -> dict:
-    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+def _root_py_modules() -> set[str]:
+    spec = importlib.util.spec_from_file_location("_hermes_setup_py", REPO_ROOT / "setup.py")
+    mod = importlib.util.module_from_spec(spec)
+    saved = sys.argv
+    sys.argv = ["setup.py", "--name"]  # setup() must not try to build anything on import
+    try:
+        try:
+            spec.loader.exec_module(mod)
+        except SystemExit:
+            pass
+    finally:
+        sys.argv = saved
+    return set(mod._root_py_modules())
 
 
-def _declared_py_modules() -> set[str]:
-    return set(_pyproject()["tool"]["setuptools"]["py-modules"])
-
-
-def _packaged_package_roots() -> list[Path]:
-    include = _pyproject()["tool"]["setuptools"]["packages"]["find"]["include"]
-    roots = []
-    for pattern in include:
-        top = pattern.split(".", 1)[0]
-        if "*" in top:
+def _imported_root_names(paths) -> dict[str, set[str]]:
+    root_files = {p.stem for p in REPO_ROOT.glob("*.py")}
+    hits: dict[str, set[str]] = {}
+    for path in paths:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError:
             continue
-        path = REPO_ROOT / top
-        if path.is_dir() and path not in roots:
-            roots.append(path)
-    return roots
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module.split(".")[0]]
+            for n in names:
+                if n in root_files:
+                    hits.setdefault(str(path.relative_to(REPO_ROOT)), set()).add(n)
+    return hits
 
 
-def _root_module_names() -> set[str]:
-    return {p.stem for p in REPO_ROOT.glob("*.py")}
-
-
-def _imported_top_names(path: Path) -> set[str]:
-    """All top-level names imported anywhere in ``path`` (absolute imports only)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.add(alias.name.split(".", 1)[0])
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.split(".", 1)[0])
-    return names
-
-
-def _packaged_source_files() -> list[Path]:
-    files = [REPO_ROOT / f"{name}.py" for name in _declared_py_modules()]
-    for root in _packaged_package_roots():
-        files.extend(root.rglob("*.py"))
-    return [f for f in files if f.is_file()]
-
-
-def test_declared_py_modules_exist_at_repo_root():
-    missing = sorted(n for n in _declared_py_modules() if not (REPO_ROOT / f"{n}.py").is_file())
-    assert not missing, f"py-modules names files that do not exist at the repo root: {missing}"
-
-
-def test_every_root_module_imported_by_packaged_code_is_in_py_modules():
-    declared = _declared_py_modules()
-    root_modules = _root_module_names()
-
-    # importer -> set of undeclared root modules it imports
-    offenders: dict[str, set[str]] = {}
-    for src in _packaged_source_files():
-        needed = _imported_top_names(src) & root_modules
-        undeclared = needed - declared
-        if undeclared:
-            offenders[str(src.relative_to(REPO_ROOT))] = undeclared
-
-    assert not offenders, (
-        "Root-level modules are imported by packaged code but missing from "
-        "[tool.setuptools] py-modules in pyproject.toml. The source tree hides "
-        "this (cwd is on sys.path); the built wheel / uv2nix sealed venv will "
-        "fail with ModuleNotFoundError. Add them to py-modules:\n"
-        + "\n".join(f"  {importer}: {sorted(mods)}" for importer, mods in sorted(offenders.items()))
+def test_pyproject_has_no_static_py_modules_list():
+    cfg = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "py-modules" not in cfg["tool"]["setuptools"], (
+        "root modules are derived in setup.py::_root_py_modules(); a static py-modules list drifts "
+        "from the tree and breaks installed wheels. Do not add it back."
     )
+
+
+def test_every_root_module_imported_by_packaged_code_is_shipped():
+    shipped = _root_py_modules()
+    paths = [REPO_ROOT / f"{n}.py" for n in shipped]
+    for pkg in PACKAGES:
+        paths.extend((REPO_ROOT / pkg).rglob("*.py"))
+    missing = {f: sorted(n for n in names if n not in shipped) for f, names in _imported_root_names(paths).items()}
+    missing = {f: v for f, v in missing.items() if v}
+    assert not missing, f"packaged code imports root modules the wheel would not ship: {missing}"
+    assert "hermes_state" in shipped and "setup" not in shipped

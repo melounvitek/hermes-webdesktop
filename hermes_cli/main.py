@@ -9,9 +9,9 @@ Usage:
 """
 
 # hermes_bootstrap must be the very first import — it sets up UTF-8 stdio on
-# Windows (no-op on POSIX). Guarded: it is a pyproject ``py-modules`` entry, so
-# after a ``git pull`` / interrupted ``hermes update`` the editable install's
-# ``.pth`` may not list it yet; crashing here would block ``hermes update``.
+# Windows (no-op on POSIX). Guarded: after a ``git pull`` / interrupted
+# ``hermes update`` the editable install's ``.pth`` may not list it yet; crashing
+# here would block ``hermes update``.
 try:
     import hermes_bootstrap  # noqa: F401
 except ModuleNotFoundError:
