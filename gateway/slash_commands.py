@@ -48,10 +48,8 @@ _ROLLBACK_SKIP_LINES = (
 # /busy input modes -> (status-card behavior, set-confirmation behavior).
 _BUSY_MODE_BEHAVIOR = {
     "queue": ("queues for next turn", "Messages will be queued for the next turn while Hermes is busy."),
-    "steer": (
-        "steers into current run (after next tool call)",
-        "Messages will be steered into the current run (after the next tool call).",
-    ),
+    "steer": ("steers into current run (after next tool call)",
+              "Messages will be steered into the current run (after the next tool call)."),
     "interrupt": ("interrupts current run", "Messages will interrupt the current run while Hermes is busy."),
 }
 
@@ -64,10 +62,8 @@ _DIFF_MODE_BY_ARG = {
 
 # /voice subcommand -> stored mode (None = auto-TTS disabled), confirmation i18n key.
 _VOICE_MODE_BY_ARG = {
-    "on": ("voice_only", "gateway.voice.enabled_voice_only"),
-    "enable": ("voice_only", "gateway.voice.enabled_voice_only"),
-    "off": ("off", "gateway.voice.disabled_text"),
-    "disable": ("off", "gateway.voice.disabled_text"),
+    **dict.fromkeys(("on", "enable"), ("voice_only", "gateway.voice.enabled_voice_only")),
+    **dict.fromkeys(("off", "disable"), ("off", "gateway.voice.disabled_text")),
     "tts": ("all", "gateway.voice.tts_enabled"),
 }
 
@@ -103,12 +99,11 @@ with open(exit_code_path, "w", encoding="utf-8") as f:
 
 def _nested_dict(root: dict, *keys: str) -> dict:
     """Walk/create ``root[k1][k2]...`` as dicts, replacing any non-dict value on the path."""
-    current = root
     for k in keys:
-        if not isinstance(current.get(k), dict):
-            current[k] = {}
-        current = current[k]
-    return current
+        if not isinstance(root.get(k), dict):
+            root[k] = {}
+        root = root[k]
+    return root
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -453,13 +448,11 @@ class GatewaySlashCommandsMixin(
                 key, source, interrupt_reason=_INTERRUPT_REASON_STOP, invalidation_reason=invalidation_reason,
             )
         agent = self._running_agents.get(session_key)
-        if agent is _AGENT_PENDING_SENTINEL:
-            # Force-clean the sentinel so the session is unlocked.
+        if agent is _AGENT_PENDING_SENTINEL:  # force-clean the sentinel so the session is unlocked
             await _stop(session_key, "stop_command_pending")
             logger.info("STOP (pending) for session %s — sentinel cleared", session_key)
             return EphemeralReply(t("gateway.stop.stopped_pending"))
-        if agent:
-            # Force-clean the session lock so a truly hung agent doesn't keep it locked forever.
+        if agent:  # force-clean the session lock so a truly hung agent doesn't keep it forever
             await _stop(session_key, "stop_command_handler")
             return EphemeralReply(t("gateway.stop.stopped"))
 
@@ -490,9 +483,8 @@ class GatewaySlashCommandsMixin(
     async def _handle_platform_command(self, event: MessageEvent) -> str:
         """Handle ``/platform list|pause|resume [name]`` — inspect and manually control failed/paused
         adapters (pause stops the reconnect watcher; resume re-queues for retry)."""
-        text = (getattr(event, "content", "") or "").strip()
         # Strip the leading "/platform" (or "/PLATFORM") token if present
-        parts = text.split(maxsplit=2)
+        parts = (getattr(event, "content", "") or "").strip().split(maxsplit=2)
         if parts and parts[0].lower().lstrip("/").startswith("platform"):
             parts = parts[1:]
         action = (parts[0] if parts else "list").lower()
@@ -549,9 +541,7 @@ class GatewaySlashCommandsMixin(
             return ""
         if self._restart_requested or self._draining:
             count = self._running_agent_count()
-            if count:
-                return t("gateway.draining", count=count)
-            return EphemeralReply(t("gateway.restart.in_progress"))
+            return t("gateway.draining", count=count) if count else EphemeralReply(t("gateway.restart.in_progress"))
 
         async def _write_marker(name: str, build, label: str) -> None:
             try:

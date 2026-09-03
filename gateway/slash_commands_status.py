@@ -300,14 +300,12 @@ class GatewayStatusCommandsMixin:
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
         expanded = event.get_command_args().strip().lower() in {"all", "full", "details"}
-
         # Running agent first (mid-turn), then cached agent (between turns).
         agent = self._resident_agent_for(self._session_key_for_source(source)) or None
         ctx = getattr(agent, "context_compressor", None) if agent else None
         used, context_length, model_name = await self._resolve_context_figures(
             agent, ctx, session_entry, source
         )
-
         # Gauge path: real current-context figure
         if used > 0 and context_length > 0:
             pct = _pct(used, context_length)
@@ -322,19 +320,13 @@ class GatewayStatusCommandsMixin:
                 "",
             ]
             # Full view — compression / throughput need the live agent.
-            if ctx is not None:
-                lines.extend(_context_compressor_lines(agent, ctx, used))
-            else:
-                lines.append(t("gateway.context.detail_after_first"))
+            lines += _context_compressor_lines(agent, ctx, used) if ctx is not None else [
+                t("gateway.context.detail_after_first")]
             # Per-category estimated breakdown (+ optional expanded listings). Same chars/4 engine
             # the desktop popover and /usage use; plain text (monospace isn't guaranteed on
             # messaging platforms). Fail-open: rendering errors never break /context.
-            if agent:
-                breakdown = await asyncio.to_thread(self._context_breakdown_block, agent, source, expanded)
-                if breakdown:
-                    lines += [""] + breakdown
-            return "\n".join(lines)
-
+            breakdown = await asyncio.to_thread(self._context_breakdown_block, agent, source, expanded) if agent else []
+            return "\n".join(lines + ([""] + breakdown if breakdown else []))
         # Last resort: rough estimate from transcript
         history = await self.async_session_store.load_transcript(session_entry.session_id)
         if not history:
@@ -434,10 +426,8 @@ class GatewayStatusCommandsMixin:
         view = await _quiet(lambda: asyncio.to_thread(build_credits_view, markdown=True))
         if view is None or not view.logged_in:
             return t("gateway.credits.not_logged_in")
-
         # Drop the helper's 📈 header; we print our own.
-        lines = ["💳 **Nous balance**"]
-        lines += [ln for ln in view.balance_lines if not ln.lstrip().startswith("📈")]
+        lines = ["💳 **Nous balance**"] + [ln for ln in view.balance_lines if not ln.lstrip().startswith("📈")]
         if view.identity_line:
             lines += ["", view.identity_line]
         if view.topup_url:
@@ -572,15 +562,14 @@ class GatewayStatusCommandsMixin:
             persisted = await self._session_db.get_session(entry.session_id) or {}
             route = await self._session_db.get_dominant_session_model_route(entry.session_id)
             return persisted, route if isinstance(route, dict) else {}
-        persisted, persisted_route = await _quiet(_rows, ({}, {}))
-        row = persisted_route if persisted_route.get("billing_provider") else persisted
+        persisted, dominant = await _quiet(_rows, ({}, {}))
+        row = dominant if dominant.get("billing_provider") else persisted
         return row.get("billing_provider"), row.get("billing_base_url")
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights [N | --days N] [--source S] -- usage insights and analytics."""
         # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
         args = re.sub(r'[\u2012\u2013\u2014\u2015](days|source)', r'--\1', event.get_command_args().strip())
-
         days, source = 30, None
         parts = args.split()
         i = 0
@@ -595,10 +584,8 @@ class GatewayStatusCommandsMixin:
             elif flag == "--source" and value is not None:
                 source, i = value, i + 2
             else:
-                if flag.isdigit():
-                    days = int(flag)
+                days = int(flag) if flag.isdigit() else days
                 i += 1
-
         try:
             from hermes_state import get_shared_session_db
             from agent.insights import InsightsEngine
