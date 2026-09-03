@@ -105,7 +105,6 @@ class HostedRoomPolicyCheckpoint:
 
     def _connect(self) -> sqlite3.Connection:
         from hermes_state import apply_wal_with_fallback
-
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -287,7 +286,6 @@ class HostedRoomPolicyCheckpoint:
             cursor = self._ensure_cursor_and_transcript(conn, room_id)
         if cursor > latest_seq:
             raise RuntimeError("room policy cursor is ahead of the durable log")
-
         while cursor < latest_seq:
             page = hosted_rooms.read_events(
                 self.db_path, room_id=room_id, since_seq=cursor, limit=hosted_rooms.MAX_LOG_LIMIT)

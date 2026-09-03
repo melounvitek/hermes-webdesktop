@@ -66,10 +66,8 @@ _EPOCH_STAMPED_KINDS = _TERMINAL_EVENT_KINDS | {"message.member", *_GATEWAY_EVEN
 
 class DiscussionPolicyError(ValueError): """Base class for invalid policy input or unreconstructable state."""
 
-
 class DiscussionValidationError(DiscussionPolicyError):
     """Raised when a room, roster, payload, or typed event is malformed."""
-
 
 class DiscussionReconstructionError(DiscussionPolicyError):
     """Raised when a persisted task cannot be reproduced from durable state."""
@@ -225,13 +223,11 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
         raise DiscussionValidationError(
             f"members must contain between {MIN_DISCUSSION_MEMBERS} and "
             f"{MAX_DISCUSSION_MEMBERS} entries")
-
     known_profiles = {_identifier(profile, label="local profile") for profile in local_profiles}
     members: list[DiscussionMember] = []
     targets: set[str] = set()
     handles: set[str] = {"all", "everyone"}  # reserved mention handles
     member_ids: set[str] = set()
-
     for index, raw in enumerate(value):
         if not isinstance(raw, Mapping):
             raise DiscussionValidationError(f"member {index} must be an object")
@@ -253,7 +249,6 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
         display_name = display_name.strip()
         if len(display_name) > hosted_rooms.MAX_ACTOR_LABEL_CHARS:
             raise DiscussionValidationError(f"member {index} display_name is too long")
-
         target_key = compact_json(target, ensure_ascii=False).casefold()
         target_message = (
             "member profiles must be unique" if target.get("kind") == "local"
@@ -411,7 +406,6 @@ def _validate_terminal_event(
         _positive_int(payload.get("execution_generation"), label="execution_generation")
     if kind == "turn.failed" and "reason_code" in payload:
         from tools.bot_failure_reasons import ALL_REASONS
-
         if payload["reason_code"] not in ALL_REASONS:
             raise DiscussionValidationError("turn.failed reason_code must use the shared failure vocabulary")
     return payload
@@ -678,11 +672,9 @@ def plan_next_task(
     decide = partial(
         DiscussionDecision, discussion_event_id=discussion.event_id, source_event_seq=discussion.seq,
         thread_id=thread_id)
-
     thread_messages, discussion_messages, member_messages = _thread_messages(validated, discussion)
     if len(member_messages) >= MAX_DISCUSSION_MESSAGES:
         return decide("bounded", "max_messages")
-
     terminals = {
         (int(event.payload["round_index"]), str(event.payload["member_id"])): event
         for event in validated
@@ -690,7 +682,6 @@ def plan_next_task(
         and event.payload.get("discussion_event_id") == discussion.event_id}
     watermarks = _effective_watermarks(validated, initial_watermarks)
     seen_through_seq = max(event.seq for event in thread_messages)
-
     for round_index in range(MAX_DISCUSSION_ROUNDS):
         # The user's message selects the first round, with no mention meaning
         # everyone. Later rounds are opt-in: only a peer explicitly cited by a
@@ -714,12 +705,10 @@ def plan_next_task(
                 room=room, discussion_event=discussion, member=member, member_index=member_index,
                 round_index=round_index, seen_through_seq=seen_through_seq, prompt=prompt)
             return decide("task", "member_turn", task=task)
-
         if not any(int(event.payload["round_index"]) == round_index for event in member_messages):
             return decide("settled", "silent_round")
         if round_index == MAX_DISCUSSION_ROUNDS - 1:
             return decide("bounded", "max_rounds")
-
     raise AssertionError("bounded Discussion loop exhausted unexpectedly")
 
 
@@ -817,7 +806,6 @@ def _settled_effects(
 def _failed_effects(result: Any, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
     error_text = _terminal_text(result, field="error", fallback="member turn failed")
     from tools.bot_failure_reasons import ALL_REASONS, classify_agent_error
-
     supplied_reason = (
         str(result.get("reason_code") or result.get("reason") or "").strip()
         if isinstance(result, Mapping) else "")
@@ -864,7 +852,6 @@ def plan_publication(
     if status == "deferred":
         message = "deferred publication requires an execution generation"
         _bounded_int(execution_generation, message=message, low=1)
-
     newer_same_thread = any(
         event.kind == "message.user"
         and event.seq > task.seen_through_seq

@@ -118,7 +118,6 @@ def connect(
     first opener initializes the DB, especially on Windows).
     """
     from hermes_state import apply_wal_with_fallback
-
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)

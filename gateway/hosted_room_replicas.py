@@ -32,9 +32,7 @@ _SELECT_REPLICA = "SELECT * FROM hosted_room_replicas WHERE room_id=?"
 
 class ReplicaError(HostedRoomError): """Base class for invalid or conflicting replica operations."""
 
-
 class ReplicaGapError(ReplicaError): """A page does not start at the replica's next expected sequence."""
-
 
 class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries an older authority epoch than stored."""
 
@@ -157,12 +155,10 @@ def ingest_page(
     _, members_json = _validate_members(members)
     events, authority = _validate_page(page)
     now = clock(now)
-
     with _replica_transaction(db_path) as conn:
         row, stored_epoch, last_seq, stored_bytes = _replica_row_state(conn, room_id)
         if authority["epoch"] < stored_epoch:
             raise ReplicaEpochRegressionError("page authority epoch is older than the stored replica epoch")
-
         new_events = [e for e in events if int(e["seq"]) > last_seq]
         if new_events and int(new_events[0]["seq"]) != last_seq + 1:
             raise ReplicaGapError("page skips sequences the replica has not stored")
@@ -219,7 +215,6 @@ def promote_replica(
         raise ReplicaError("reason must be a non-empty string of at most 200 chars")
     now = clock(now)
     local_gateway = local_authority_gateway_id()
-
     with _replica_transaction(db_path) as conn:
         replica = conn.execute(_SELECT_REPLICA, (room_id,)).fetchone()
         if replica is None:
@@ -230,7 +225,6 @@ def promote_replica(
             raise RoomConflictError("room_id already exists in the local authoritative store")
         if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
             raise RoomConflictError("room_id belongs to a disbanded room")
-
         previous_gateway = str(replica["authority_gateway_id"])
         previous_epoch = int(replica["authority_epoch"])
         target_epoch = previous_epoch + 1
@@ -240,7 +234,6 @@ def promote_replica(
             "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
             "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason})
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
-
         conn.execute("""INSERT INTO hosted_rooms
                (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, event_bytes,
                 revision, created_at, updated_at, disbanded_at)
@@ -280,7 +273,6 @@ def demote_room(
     observed_epoch = _positive_int(observed_epoch, message="observed_epoch must be a positive integer")
     now = clock(now)
     local_gateway = local_authority_gateway_id()
-
     with _transaction(db_path, immediate=True) as conn:
         row = conn.execute("""SELECT authority_gateway_id, authority_epoch, next_seq
                  FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()

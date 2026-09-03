@@ -185,31 +185,22 @@ _SELECT_LIVE_RESERVATION = (f"SELECT 1 FROM hosted_room_peer_reservations {_LIVE
 
 class HostedRoomError(ValueError): """Base class for invalid or conflicting hosted-room operations."""
 
-
 class RoomNotFoundError(HostedRoomError): """Raised when a room does not exist or has been disbanded."""
-
 
 class RoomHistoryExpiredError(RoomNotFoundError):
     """Raised when a retired room remains reserved after history compaction."""
-
     reason = "room_history_expired"
 
-
 class RoomConflictError(HostedRoomError): """Raised when an idempotency key is reused for different room state."""
-
 
 class RoomProbeUnavailableError(HostedRoomError):
     """Raised when a non-blocking ownership probe cannot read the room store."""
 
-
 class EventConflictError(HostedRoomError): """Raised when an event id is reused with different immutable content."""
-
 
 class AuthorityConflictError(HostedRoomError):
     """Raised when a stale room authority attempts to mutate hosted state."""
-
     reason = "authority_conflict"
-
 
 class AuthoritySupersededError(AuthorityConflictError):
     """Raised when a successful authority claim was later superseded."""
@@ -440,7 +431,6 @@ def _schema_is_current(conn: sqlite3.Connection) -> bool:
 def default_db_path() -> Path:
     """Return the gateway-wide state database for the active install."""
     from hermes_constants import get_hermes_home
-
     home = get_hermes_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
     return root / "state.db"
@@ -449,7 +439,6 @@ def default_db_path() -> Path:
 def local_authority_gateway_id() -> str:
     """Return the stable server-owned identity for hosted-room authority."""
     from hermes_cli.install_identity import get_install_id
-
     install_id = get_install_id()
     if not install_id:
         raise HostedRoomError("stable gateway install identity is unavailable")
@@ -915,7 +904,6 @@ def create_room(
     normalized_members, members_json = _validate_members(members)
     authority_gateway_id = _actor_id(authority_gateway_id, "authority_gateway_id")
     now = _now(now)
-
     with _transaction(db_path, immediate=True) as conn:
         if _is_retired(conn, room_id):
             raise RoomConflictError("room_id belongs to a disbanded room")
@@ -936,7 +924,6 @@ def create_room(
             if existing["authority_gateway_id"] != authority_gateway_id:
                 raise RoomConflictError("room_id already belongs to a different authority")
             return _room_from_row(existing, idempotent=True)
-
         active_rooms = int(conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0])
         if active_rooms >= MAX_ACTIVE_ROOMS:
             raise HostedRoomError("This host has too many active Group Chats. Delete one and try again.")
@@ -1026,7 +1013,6 @@ def append_event(
         raise HostedRoomError("payload must be an object")
     payload_json = _payload_json(payload)
     now = _now(now)
-
     with _transaction(db_path, immediate=True) as conn:
         existing = _load_event(conn, room_id, event_id)
         if existing is not None:
@@ -1157,7 +1143,6 @@ def claim_authority(
     target_epoch = expected_epoch + 1
     claim_actor_json = _system_actor_json("authority-control")
     claim_payload_json = _claim_payload_json(expected_gateway_id, new_gateway_id, target_epoch)
-
     with _transaction(db_path, immediate=True) as conn:
         row = _room_row(
             conn,
@@ -1218,7 +1203,6 @@ def disband_room(
     expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")
     _require_positive_int(expected_epoch, "expected_epoch")
     now = _now(now)
-
     with _transaction(db_path, immediate=True) as conn:
         room = conn.execute("""SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes, disbanded_at
                 FROM hosted_rooms WHERE room_id=?""", (room_id,)).fetchone()
@@ -1252,7 +1236,6 @@ def read_events(
     room_id = _room_id(room_id)
     since_seq = _non_negative(since_seq, "since_seq")
     limit = _bounded_limit(limit, MAX_LOG_LIMIT)
-
     with _transaction(db_path) as conn:
         room = _room_row(
             conn,
@@ -1280,16 +1263,13 @@ def read_events(
                 WHERE cumulative_bytes<=?
                 ORDER BY seq ASC""", (room_id, since_seq, limit, MAX_LOG_PAGE_BYTES)).fetchall()
     events = [_event_from_row(row) for row in rows]
-
     def build_page(page_events: list[dict[str, Any]]) -> dict[str, Any]:
         cursor = page_events[-1]["seq"] if page_events else since_seq
         return {
             "events": page_events, "cursor": cursor, "latest_seq": latest_seq, "has_more": cursor < latest_seq,
             "authority": authority}
-
     def page_bytes(page: dict[str, Any]) -> int:
         return len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-
     page = build_page(events)
     if events and page_bytes(page) > MAX_LOG_PAGE_BYTES:
         # Binary-search the largest prefix whose serialized page fits the budget.

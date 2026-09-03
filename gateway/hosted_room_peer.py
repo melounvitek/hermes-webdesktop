@@ -41,7 +41,6 @@ TransportSecurity = Literal["tls", "loopback"]
 
 class HostedRoomPeerError(ValueError): """Base error for malformed or unauthorized peer-room input."""
 
-
 class HostedRoomGrantError(HostedRoomPeerError): """Raised when a room-scoped grant is invalid or expired."""
 
 
@@ -65,7 +64,6 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
     home = Path(home_value)
     home.mkdir(parents=True, exist_ok=True)
     path = home / _ROOM_GRANT_SECRET_FILE
-
     def _read() -> bytes:
         data = path.read_bytes()
         if len(data) != 32:
@@ -73,7 +71,6 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             path.chmod(0o600)
         return data
-
     try:
         material = _read()
     except FileNotFoundError:
@@ -107,7 +104,6 @@ def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
     """
     if root is None:
         from hermes_constants import get_hermes_home
-
         # Profile routing uses a context-local HERMES_HOME override. The process
         # environment retains the installation root and is the authority here.
         root = os.environ.get("HERMES_HOME") or get_hermes_home()
@@ -315,7 +311,6 @@ def _room_link_url_from_config(home: str) -> str | None:
     """Read the restart-scoped user setting without polling config on probes."""
     from gateway.config import load_gateway_config
     from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
-
     if str(get_hermes_home()) == home:
         value = load_gateway_config().room_link_url
     else:
@@ -333,7 +328,6 @@ def _configured_room_link_url() -> str | None:
     if override is not None:
         return override
     from hermes_constants import get_default_hermes_root, get_hermes_home
-
     home = get_hermes_home()
     configured = _room_link_url_from_config(str(home))
     if configured:
@@ -363,7 +357,6 @@ def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
         return raw, "tls"
     if parsed.scheme.lower() != "http":
         raise HostedRoomPeerError("target_url must use https")
-
     loopback = hostname == "localhost" or hostname.endswith(".localhost")
     if not loopback:
         try:

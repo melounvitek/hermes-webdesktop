@@ -76,15 +76,12 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
     """Resolve the effective API-server policy from the target's own config."""
     if config is None:
         from gateway.run import _load_gateway_config
-
         config = _load_gateway_config()
     if not isinstance(config, Mapping):
         raise RoomExecutionPolicyError("gateway config is invalid")
-
     from hermes_cli.config import resolve_turn_limit
     from hermes_cli.tools_config import _get_platform_tools
     from tools.approval import _YOLO_MODE_FROZEN, _normalize_approval_mode
-
     toolsets = sorted({*_get_platform_tools(dict(config), "api_server"), "bot_room"})
     agent = config.get("agent") if isinstance(config.get("agent"), Mapping) else {}
     approvals = config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
