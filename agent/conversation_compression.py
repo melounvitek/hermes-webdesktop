@@ -448,10 +448,9 @@ class CompressionCommitFence:
         if not self._lock.acquire(blocking=False):
             return None
         try:
-            if self._commit_started:
-                return False
-            self._cancelled = True
-            return True
+            if not self._commit_started:
+                self._cancelled = True
+            return not self._commit_started
         finally:
             self._lock.release()
 
@@ -612,10 +611,9 @@ def _join_cancelled_worker(future: Any, grace_seconds: float) -> bool:
 
     Returns True when the future settled within ``grace_seconds`` (thread provably exited); False for a
     still-running worker, which the caller must treat as an orphan behind the poison fence."""
-    try:
+    grace = 0.0
+    with contextlib.suppress(TypeError, ValueError):
         grace = max(float(grace_seconds), 0.0)
-    except (TypeError, ValueError):
-        grace = 0.0
     try:
         future.result(timeout=grace)
         return True
@@ -683,13 +681,12 @@ def resolve_context_compression_timeouts(compression_cfg: Optional[dict] = None)
     ceiling = DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS
     cfg = compression_cfg
     if cfg is None:
-        try:
+        cfg = {}
+        with contextlib.suppress(Exception):
             from hermes_cli.config import load_config
             raw = load_config()
             maybe = raw.get("compression", {}) if isinstance(raw, dict) else {}
             cfg = maybe if isinstance(maybe, dict) else {}
-        except Exception:
-            cfg = {}
     if isinstance(cfg, dict):
         # Explicit 0/negative idle disables; a non-positive ceiling is ignored.
         with contextlib.suppress(TypeError, ValueError):
@@ -735,10 +732,9 @@ def _stall_source_fingerprint(agent: Any, messages: Any, approx_tokens: Optional
     compressor = getattr(agent, "context_compressor", None)
     model = getattr(compressor, "summary_model", None) or getattr(agent, "model", None) or ""
     n_messages = len(messages) if isinstance(messages, list) else 0
-    try:
+    tokens = 0
+    with contextlib.suppress(TypeError, ValueError):
         tokens = int(approx_tokens or 0)
-    except (TypeError, ValueError):
-        tokens = 0
     return f"msgs={n_messages}:tokens={tokens}:model={model}"
 
 
@@ -1305,10 +1301,8 @@ def _automatic_compression_gate_blocks(agent: Any, bypass_cooldown: bool, *, inc
         return False
     accepts = False
     if bypass_cooldown:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             accepts = "ignore_cooldown" in inspect.signature(blocked).parameters
-        except (TypeError, ValueError):
-            accepts = False
     result = bool(blocked(compressor, ignore_cooldown=True) if accepts else blocked(compressor))
     if result:
         _mark_compression_blocked_transient(agent, compressor)
@@ -1690,32 +1684,22 @@ def _lower_threshold_to_aux_context(
     _aux_label = f"{aux_model} ({_aux_provider_label})"
     msg = (
         f"⚠ Compression model {_aux_label} context is {aux_context:,} tokens, but the main model "
-        f"{_main_label}'s compression threshold was "
-        f"{old_threshold:,} tokens. "
-        f"Auto-lowered this session's threshold to "
-        f"{new_threshold:,} tokens so compression can run.\n"
+        f"{_main_label}'s compression threshold was {old_threshold:,} tokens. "
+        f"Auto-lowered this session's threshold to {new_threshold:,} tokens so compression can run.\n"
     )
     if threshold_suggestion_viable:
         msg += (
             f"  To make this permanent, edit config.yaml — either:\n  1. Use a larger compression model:\n"
-            f"       auxiliary:\n"
-            f"         compression:\n"
-            f"           model: <model-with-{old_threshold:,}+-context>\n"
-            f"  2. Lower the compression threshold:\n"
-            f"       compression:\n"
-            f"         threshold: 0.{safe_pct:02d}"
+            f"       auxiliary:\n         compression:\n           model: <model-with-{old_threshold:,}+-context>\n"
+            f"  2. Lower the compression threshold:\n       compression:\n         threshold: 0.{safe_pct:02d}"
         )
     else:
         msg += (
             f"  To make this permanent, use a larger compression model in config.yaml:\n       auxiliary:\n"
-            f"         compression:\n"
-            f"           model: <model-with-{old_threshold:,}+-context>\n"
-            f"  (Lowering compression.threshold cannot help here — "
-            f"with {_main_label}'s {main_ctx:,}-token window, "
-            f"Hermes's small-context floor and output reservation "
-            f"would recompute the trigger to "
-            f"{recomputed_threshold:,} tokens, still above the "
-            f"compression model's {aux_context:,}.)"
+            f"         compression:\n           model: <model-with-{old_threshold:,}+-context>\n"
+            f"  (Lowering compression.threshold cannot help here — with {_main_label}'s {main_ctx:,}-token window, "
+            f"Hermes's small-context floor and output reservation would recompute the trigger to "
+            f"{recomputed_threshold:,} tokens, still above the compression model's {aux_context:,}.)"
         )
     agent._compression_warning = msg
     agent._emit_status(msg)
@@ -2270,8 +2254,7 @@ class _CompressionLease:
         # start; serialize with the release path so no refresher starts on a freed lock.
         with self._release_guard:
             if not self._released:
-                self._refresher = candidate
-                self._refresher.start()
+                self._refresher = candidate.start()
 
     def release_holder_only(self) -> None:
         """Stop this holder's refresher and release only its durable lock.
@@ -2376,10 +2359,9 @@ def _sit_out_lock_contention(
     approx_tokens: Optional[int], attempt_started_at: float,
 ) -> Tuple[None, str]:
     """Another path holds the lock: publish the lock-skip signal, warn once, sit out."""
-    try:
+    existing = None
+    with contextlib.suppress(Exception):
         existing = lease.db.get_compression_lock_holder(lease.sid)
-    except Exception:
-        existing = None
     logger.warning(
         "compression skipped: another path is compressing session=%s "
         "(holder=%s) — returning messages unchanged to avoid session fork", lease.sid, existing,
@@ -2419,10 +2401,9 @@ def _acquire_compression_lease(
     # /compress after an auto lock-skip falsely reports "already in progress".
     agent._compression_skipped_due_to_lock = None
     _try_acquire_lock, _lock_lookup_error = _resolve_lock_api(_lock_db)
-    try:
+    _lock_ttl = 300.0
+    with contextlib.suppress(TypeError, ValueError):
         _lock_ttl = float(getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0)
-    except (TypeError, ValueError):
-        _lock_ttl = 300.0
     lease = _CompressionLease(
         agent, db=_lock_db, sid=_lock_sid, ttl=_lock_ttl,
         refresh_interval=getattr(agent, "_compression_lock_refresh_interval", None), commit_fence=commit_fence,
@@ -2535,10 +2516,9 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
     # No un-persisted tail means the transcript is fully durable: adopting the longer parent cannot drop input.
     _preflush_ok = True
     if isinstance(_preflush_idx, int) and 0 <= _preflush_idx < len(messages):
-        try:
+        _preflush_ok = False
+        with contextlib.suppress(Exception):
             _preflush_ok = agent._flush_messages_to_session_db(messages, conversation_history=messages[:_preflush_idx])
-        except Exception:
-            _preflush_ok = False
     if not _preflush_ok:
         logger.warning(
             "compression: session=%s grew before lease (%d → %d msgs) but the pre-adoption flush of the "
@@ -2675,12 +2655,11 @@ def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
     # Non-empty store (even all done) is authoritative: drop the old snapshot. A
     # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
     _todo_has_items = getattr(agent._todo_store, "has_items", None)
-    try:
+    # Store may implement only format_for_injection(); unknown authority must
+    # preserve the pending snapshot rather than risk deleting it.
+    _todo_store_is_authoritative = False
+    with contextlib.suppress(Exception):
         _todo_store_is_authoritative = bool(_todo_has_items()) if callable(_todo_has_items) else False
-    except Exception:
-        # Store may implement only format_for_injection(); unknown authority must
-        # preserve the pending snapshot rather than risk deleting it.
-        _todo_store_is_authoritative = False
     if _todo_store_is_authoritative:
         for _todo_idx in range(len(compressed) - 1, -1, -1):
             _todo_message = compressed[_todo_idx]
@@ -2884,11 +2863,10 @@ def _publish_rotated_compaction(
         raise RuntimeError(f"Compression parent already ended: {old_session_id}")
     # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
     # rows above the start watermark up to this MAX(id) are foreign appends.
-    try:
+    # No trustworthy ceiling means the clone could duplicate the handoff: skip tail preservation this rotation.
+    _foreign_tail_ceiling = None
+    with contextlib.suppress(Exception):
         _foreign_tail_ceiling = agent._session_db.get_active_message_watermark(agent.session_id)
-    except Exception:
-        # No trustworthy ceiling: the clone could duplicate the handoff, so skip tail preservation this rotation.
-        _foreign_tail_ceiling = None
     with contextlib.suppress(Exception):  # best-effort — don't block compression on a flush error
         agent._flush_messages_to_session_db(messages, conversation_history=persisted_history)
     # Publish closure + child + handoff in one transaction so no reader sees an
@@ -3696,13 +3674,11 @@ def _compress_context_via_codex_app_server(
     with contextlib.suppress(Exception):
         agent._emit_status(COMPACTION_STATUS)
 
-    _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
+    _activity_heartbeat = _CompressionActivityHeartbeat(agent).start()
     try:
-        _activity_heartbeat = _CompressionActivityHeartbeat(agent).start()
         result = codex_session.compact_thread()
     except BaseException:
-        if _activity_heartbeat is not None:
-            _activity_heartbeat.stop("context compression failed")
+        _activity_heartbeat.stop("context compression failed")
         raise
 
     failed = bool(getattr(result, "interrupted", False) or getattr(result, "error", None))
@@ -3784,9 +3760,8 @@ def _shrink_data_url(url: str, *, max_dimension: int, resize_fn: Any) -> tuple:
     target_bytes = _IMAGE_SHRINK_TARGET_BYTES
     if not isinstance(url, str) or not url.startswith("data:"):
         return None, False
-    needs_shrink = len(url) > target_bytes  # over byte budget
-    triggered_by = "bytes" if needs_shrink else None
-    if not needs_shrink:
+    triggered_by = "bytes" if len(url) > target_bytes else None  # over byte budget
+    if triggered_by is None:
         # Bytes fine; check pixels against the provider cap (tiny bytes, huge pixels).
         dims = _decode_pixels(url)
         if dims is None or max(dims) <= max_dimension:
@@ -3816,17 +3791,15 @@ def _shrink_data_url(url: str, *, max_dimension: int, resize_fn: Any) -> tuple:
         if triggered_by == "bytes":
             # Byte budget is binding — bytes must shrink; and the resizer may return an
             # over-cap blob (long side freezes at the 64px short-side floor) → still 400.
-            if len(resized) >= len(url) or (new_dims is not None and max(new_dims) > max_dimension):
-                return None, True
-            return resized, False
-        # Dimension cap is binding: accept a byte-larger re-encode if now within cap.
-        if new_dims is not None:
-            return (resized, False) if max(new_dims) <= max_dimension else (None, True)
-        # Can't verify dimensions: fall back to the bytes-must-shrink gate so we never
-        # accept an unverifiable byte-larger blob.
-        if len(resized) >= len(url):
-            return None, True
-        return resized, False
+            ok = len(resized) < len(url) and (new_dims is None or max(new_dims) <= max_dimension)
+        elif new_dims is not None:
+            # Dimension cap is binding: accept a byte-larger re-encode if now within cap.
+            ok = max(new_dims) <= max_dimension
+        else:
+            # Can't verify dimensions: fall back to the bytes-must-shrink gate so we never
+            # accept an unverifiable byte-larger blob.
+            ok = len(resized) < len(url)
+        return (resized, False) if ok else (None, True)
     except Exception as exc:
         logger.warning("image-shrink recovery: re-encode failed — %s", exc)
         return None, triggered_by is not None
@@ -3866,7 +3839,6 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
     except Exception as exc:
         logger.warning("image-shrink recovery: vision_tools unavailable — %s", exc)
         return False
-
     changed_count = 0
     # Track over-target parts that could not be shrunk: if any remain, a retry
     # re-sends the same payload and wastes the single retry budget.
