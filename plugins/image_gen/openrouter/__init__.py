@@ -20,19 +20,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    error_response,
-    resolve_aspect_ratio,
-    save_b64_image,
-    save_url_image,
-    success_response,
+    DEFAULT_ASPECT_RATIO, ImageGenProvider, error_response, resolve_aspect_ratio, save_b64_image,
+    save_url_image, success_response,
 )
 from plugins.image_gen._common import (
-    HttpFailure as HttpFailure,
-    error_factory,
-    load_image_gen_config,
-    post_json,
+    HttpFailure as HttpFailure, error_factory, load_image_gen_config, post_json
 )
 
 logger = logging.getLogger(__name__)
@@ -574,15 +566,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
     """
 
     def __init__(
-        self,
-        *,
-        provider_name: str,
-        display_name: str,
-        runtime_name: str,
-        config_key: str,
-        model_env_var: str,
-        setup_schema: Dict[str, Any],
-        supports_image_api: bool = False,
+        self, *, provider_name: str, display_name: str, runtime_name: str, config_key: str,
+        model_env_var: str, setup_schema: Dict[str, Any], supports_image_api: bool = False,
     ) -> None:
         self._name = provider_name
         self._display = display_name
@@ -861,12 +846,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         ), None
 
     def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
+        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         fail = error_factory(self._name, aspect_ratio)

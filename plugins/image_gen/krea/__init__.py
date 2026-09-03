@@ -22,14 +22,8 @@ import requests
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_url_image, success_response
 from plugins.image_gen._common import (
-    ErrorFn,
-    StaticImageGenProvider,
-    collect_source_images,
-    error_factory,
-    load_image_gen_config,
-    post_json,
-    prompt_required_error,
-    resolve_static_model,
+    ErrorFn, StaticImageGenProvider, collect_source_images, error_factory, load_image_gen_config,
+    post_json, prompt_required_error, resolve_static_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,11 +197,7 @@ def _is_terminal(job: Any) -> bool:
 
 
 def _poll_krea_job(
-    base_url: str,
-    auth_token: str,
-    job_id: str,
-    *,
-    timeout_seconds: float = _POLL_TIMEOUT_SECONDS,
+    base_url: str, auth_token: str, job_id: str, *, timeout_seconds: float = _POLL_TIMEOUT_SECONDS,
     on_error: Optional[Any] = None,
 ) -> Any:
     """Poll ``/jobs/{job_id}`` until terminal.
@@ -464,12 +454,8 @@ class KreaImageGenProvider(StaticImageGenProvider):
         }
 
     def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
+        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()

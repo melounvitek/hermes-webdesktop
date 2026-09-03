@@ -19,21 +19,12 @@ import requests
 
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, success_response
 from plugins.image_gen._common import (
-    StaticImageGenProvider,
-    catalog_rows,
-    collect_source_images,
-    error_factory,
-    load_image_gen_config,
-    materialize_image,
-    post_json,
+    StaticImageGenProvider, catalog_rows, collect_source_images, error_factory,
+    load_image_gen_config, materialize_image, post_json,
 )
 from tools.xai_http import (
-    build_xai_storage_options,
-    hermes_xai_user_agent,
-    maybe_mark_xai_storage_notice_seen,
-    read_xai_imagine_storage_config,
-    resolve_xai_http_credentials,
-    xai_storage_notice_text,
+    build_xai_storage_options, hermes_xai_user_agent, maybe_mark_xai_storage_notice_seen,
+    read_xai_imagine_storage_config, resolve_xai_http_credentials, xai_storage_notice_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,12 +233,8 @@ class XAIImageGenProvider(StaticImageGenProvider):
         }
 
     def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
+        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Text-to-image, or image editing via ``/v1/images/edits`` (JSON body —
