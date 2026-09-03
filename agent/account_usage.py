@@ -64,8 +64,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     if not isinstance(value, str) or not (text := value.strip()):
         return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
+    text = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
         dt = datetime.fromisoformat(text)
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -193,12 +192,9 @@ def _fetch_portal_account(timeout: float):
 
 
 def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list[str]:
-    """Rendered Nous-credits /usage lines, or [] when there's nothing to show.
-
-    Independent of any live agent (logged-in gate, then a bounded portal fetch); shared by CLI ``_show_usage``
-    and the TUI ``session.usage`` RPC. Fail-open: any hiccup or timeout → []. HERMES_DEV_CREDITS_FIXTURE
-    renders from the fixture instead of the portal.
-    """
+    """Rendered Nous-credits /usage lines, or [] when there's nothing to show. Independent of any live agent
+    (logged-in gate, then a bounded portal fetch); shared by CLI ``_show_usage`` and the TUI ``session.usage`` RPC.
+    Fail-open: any hiccup or timeout → []. HERMES_DEV_CREDITS_FIXTURE renders from the fixture instead of the portal."""
     try:
         from agent.credits_tracker import dev_fixture_credits_state
         fixture = dev_fixture_credits_state()
@@ -333,10 +329,8 @@ def _codex_banked_resets(payload: dict) -> int:
 
 
 def _codex_headers(token: str, account_id: Optional[str]) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "codex-cli"}
-    if account_id:
-        headers["ChatGPT-Account-Id"] = account_id
-    return headers
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "codex-cli",
+            **({"ChatGPT-Account-Id": account_id} if account_id else {})}
 
 
 def _get_json(url: str, headers: dict[str, str], *, timeout: float) -> dict:
@@ -541,15 +535,11 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     balance = float(credits.get("total_credits") or 0.0) - float(credits.get("total_usage") or 0.0)
     details = [f"Credits balance: ${max(0.0, balance):.2f}"]
     windows: list[AccountUsageWindow] = []
-    limit = key_data.get("limit")
-    limit_remaining = key_data.get("limit_remaining")
+    limit, limit_remaining, usage = key_data.get("limit"), key_data.get("limit_remaining"), key_data.get("usage")
     limit_reset = str(key_data.get("limit_reset") or "").strip()
-    usage = key_data.get("usage")
     if _is_num(limit) and float(limit) > 0 and _is_num(limit_remaining) and 0 <= float(limit_remaining) <= float(limit):
         limit_value, remaining_value = float(limit), float(limit_remaining)
-        detail_parts = [f"${remaining_value:.2f} of ${limit_value:.2f} remaining"]
-        if limit_reset:
-            detail_parts.append(f"resets {limit_reset}")
+        detail_parts = [f"${remaining_value:.2f} of ${limit_value:.2f} remaining", *([f"resets {limit_reset}"] if limit_reset else [])]
         windows.append(AccountUsageWindow(label="API key quota", used_percent=((limit_value - remaining_value) / limit_value) * 100,
                                           detail=" • ".join(detail_parts)))
     if _is_num(usage):

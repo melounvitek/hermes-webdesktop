@@ -64,11 +64,8 @@ def _is_oauth_token(key: str) -> bool:
 
 
 class CredentialPersistError(RuntimeError):
-    """A rotated single-use credential could not be durably committed.
-
-    The refresh POST already spent the old refresh token, so a swallowed write failure leaves a consumed
-    pair on disk that later replays as invalid_grant.
-    """
+    """A rotated single-use credential could not be durably committed. The refresh POST already spent the old
+    refresh token, so a swallowed write failure leaves a consumed pair on disk that later replays as invalid_grant."""
 
     def __init__(self, path: Any, cause: BaseException) -> None:
         super().__init__(f"failed to durably persist rotated Anthropic credentials to {path}: {cause}")
@@ -87,12 +84,9 @@ def _load_json_if_exists(path: Path, what: str) -> Optional[Any]:
 
 
 def _atomic_write_private_json(path: Path, payload: Any) -> None:
-    """Write *payload* via a 0o600 O_EXCL temp file + fsync + os.replace.
-
-    The token is never briefly umask-readable (write_text + chmod had a TOCTOU window); the random suffix
-    avoids collisions with concurrent writers and crashed leftovers. The parent dir's mode is left alone
-    (~/.claude/ is owned by Claude Code).
-    """
+    """Write *payload* via a 0o600 O_EXCL temp file + fsync + os.replace: the token is never briefly umask-readable
+    (write_text + chmod had a TOCTOU window); the random suffix avoids collisions with concurrent writers and
+    crashed leftovers. The parent dir's mode is left alone (~/.claude/ is owned by Claude Code)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
     try:
@@ -238,14 +232,11 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
         logger.debug("Keychain: no entry found for 'Claude Code-credentials'")
         return None
     raw = result.stdout.strip()
-    if not raw:
-        return None
     try:
-        data = json.loads(raw)
+        return _claude_oauth_record(json.loads(raw), "macos_keychain") if raw else None
     except json.JSONDecodeError:
         logger.debug("Keychain: credentials payload is not valid JSON")
         return None
-    return _claude_oauth_record(data, "macos_keychain")
 
 
 def claude_code_credentials_path() -> Path:
@@ -259,12 +250,9 @@ def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
 
 
 def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
-    """Read refreshable Claude Code OAuth credentials (Keychain and/or file).
-
-    When both exist: prefer the only non-expired one (Claude Code 2.1.x refreshes one source but not the
-    other), else the later ``expiresAt`` so a refresh uses the freshest refreshToken. ~/.claude.json
-    primaryApiKey is deliberately excluded.
-    """
+    """Read refreshable Claude Code OAuth credentials (Keychain and/or file). When both exist: prefer the only
+    non-expired one (Claude Code 2.1.x refreshes one source but not the other), else the later ``expiresAt`` so a
+    refresh uses the freshest refreshToken. ~/.claude.json primaryApiKey is deliberately excluded."""
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
     if not (kc_creds and file_creds):
@@ -278,9 +266,7 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
 def is_claude_code_token_valid(creds: Dict[str, Any]) -> bool:
     """Non-expired access token (60s buffer); no expiresAt means managed key → valid if present."""
     expires_at = creds.get("expiresAt", 0)
-    if not expires_at:
-        return bool(creds.get("accessToken"))
-    return int(time.time() * 1000) < (expires_at - 60_000)
+    return int(time.time() * 1000) < (expires_at - 60_000) if expires_at else bool(creds.get("accessToken"))
 
 
 # ── OAuth token endpoint ──
@@ -330,13 +316,10 @@ def refresh_anthropic_oauth_pure(refresh_token: str, *, use_json: bool = False) 
 
 
 def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
-    """Refresh an expired Claude Code OAuth token, returning the new access token.
-
-    Refresh tokens are single-use and Claude Code refreshes on its own schedule, so we first re-read the
-    live sources and adopt an already-rotated token instead of racing it into ``invalid_grant``. Read,
-    decision, POST and write-back share the pool's path-keyed cross-process lock (else two profiles can
-    spend one refresh token).
-    """
+    """Refresh an expired Claude Code OAuth token, returning the new access token. Refresh tokens are single-use and
+    Claude Code refreshes on its own schedule, so we first re-read the live sources and adopt an already-rotated
+    token instead of racing it into ``invalid_grant``. Read, decision, POST and write-back share the pool's
+    path-keyed cross-process lock (else two profiles can spend one refresh token)."""
     try:
         from hermes_cli.auth import AUTH_LOCK_TIMEOUT_SECONDS, _auth_store_lock, env_float
         refresh_timeout_seconds = env_float("HERMES_ANTHROPIC_REFRESH_TIMEOUT_SECONDS", 20)
@@ -392,11 +375,9 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
 def _write_claude_code_credentials(
     access_token: str, refresh_token: str, expires_at_ms: int, *, scopes: Optional[list] = None
 ) -> None:
-    """Commit refreshed credentials to ~/.claude/.credentials.json; ``CredentialPersistError`` on any failure.
-
-    *scopes* (or the previously stored scopes) are persisted because Claude Code >=2.1.81 gates on
-    ``"user:inference"`` being present. A corrupt existing file is a persist failure too.
-    """
+    """Commit refreshed credentials to ~/.claude/.credentials.json; ``CredentialPersistError`` on any failure (a
+    corrupt existing file included). *scopes* (or the previously stored scopes) are persisted because Claude Code
+    >=2.1.81 gates on ``"user:inference"`` being present."""
     cred_path = claude_code_credentials_path()
     try:
         existing = json.loads(cred_path.read_text(encoding="utf-8")) if cred_path.exists() else {}
@@ -429,18 +410,14 @@ def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] 
         return creds["accessToken"]
     logger.debug("Claude Code credentials expired — attempting refresh")
     refreshed = _refresh_oauth_token(creds)
-    if refreshed:
-        return refreshed
-    logger.debug("Token refresh failed — re-run 'claude setup-token' to reauthenticate")
-    return None
+    if not refreshed:
+        logger.debug("Token refresh failed — re-run 'claude setup-token' to reauthenticate")
+    return refreshed or None
 
 
 def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Prefer refreshable Claude Code creds over a static env OAuth token.
-
-    Hermes historically persisted setup tokens into ANTHROPIC_TOKEN; that static token would otherwise
-    win before the refreshable credential file is inspected, making refresh impossible.
-    """
+    """Prefer refreshable Claude Code creds over a static env OAuth token: Hermes historically persisted setup tokens
+    into ANTHROPIC_TOKEN, and that static token would otherwise win before the refreshable file is inspected."""
     if not (env_token and _is_oauth_token(env_token) and isinstance(creds, dict) and creds.get("refreshToken")):
         return None
     resolved = _resolve_claude_code_token_from_credentials(creds)
@@ -451,12 +428,9 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[s
 
 
 def _resolve_anthropic_pool_token() -> Optional[str]:
-    """First available Anthropic OAuth token from credential_pool, read-only.
-
-    Enumerates with ``clear_expired=False, refresh=False`` (never ``select()``) so diagnostic call sites
-    (account_usage, ``hermes models``) never mutate auth.json or hit the network; refresh-on-expiry
-    belongs to the API call path's pool recovery.
-    """
+    """First available Anthropic OAuth token from credential_pool, read-only: enumerates with ``clear_expired=False,
+    refresh=False`` (never ``select()``) so diagnostic call sites (account_usage, ``hermes models``) never mutate
+    auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery."""
     try:
         from agent.credential_pool import AUTH_TYPE_OAUTH, load_pool
         entries, _pending = load_pool("anthropic")._available_entries(clear_expired=False, refresh=False)
@@ -523,9 +497,7 @@ def _root_hermes_oauth_file() -> Optional[Path]:
     try:
         from hermes_constants import get_default_hermes_root
         root = get_default_hermes_root()
-        if root.resolve(strict=False) == get_hermes_home().resolve(strict=False):
-            return None
-        return root / ".anthropic_oauth.json"
+        return None if root.resolve(strict=False) == get_hermes_home().resolve(strict=False) else root / ".anthropic_oauth.json"
     except Exception:
         return None
 
@@ -602,11 +574,9 @@ def _write_hermes_oauth_credentials(
     access_token: str, refresh_token: Optional[str], expires_at_ms: Optional[int], *, target: Optional[Path] = None
 ) -> None:
     """Commit refreshed hermes_pkce tokens to ~/.hermes/.anthropic_oauth.json (``CredentialPersistError`` on failure).
-
-    ``target`` lets a named profile commit a grant it BORROWED from the global root back to the ROOT
-    singleton instead of forking a copy under its own HERMES_HOME; without this write-through the next
-    ``load_pool()`` re-seeds the stale (consumed) pair from the file over the rotated pool entry.
-    """
+    ``target`` lets a named profile commit a grant it BORROWED from the global root back to the ROOT singleton
+    instead of forking a copy under its own HERMES_HOME; without this write-through the next ``load_pool()``
+    re-seeds the stale (consumed) pair from the file over the rotated pool entry."""
     _commit_private_json(
         target if target is not None else _get_hermes_oauth_file(),
         {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms},

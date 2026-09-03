@@ -203,8 +203,8 @@ def describe_active_credential(config: Optional[EntraIdentityConfig] = None, *, 
         return info
     config = _resolve_config(config, scope, **overrides)
     info["scope"] = config.scope
-    if _env("AZURE_TENANT_ID"):
-        info["tenant_id_env"] = _env("AZURE_TENANT_ID")
+    if tenant := _env("AZURE_TENANT_ID"):
+        info["tenant_id_env"] = tenant
     info["env_sources"] = [label for label, present in _ENV_SOURCE_CHECKS if present()]
     result = _probe_token(config, timeout_seconds)
     if result is None:
