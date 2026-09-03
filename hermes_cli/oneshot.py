@@ -32,18 +32,12 @@ _USAGE_KEYS = (
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
+    """Split repeated/comma-separated toolset flags into a clean list (``None`` when empty)."""
     if not toolsets:
         return None
-    raw_items = [toolsets] if isinstance(toolsets, str) else toolsets
-    if not isinstance(raw_items, (list, tuple)):
-        raw_items = [raw_items]
-    normalized: list[str] = []
-    for item in raw_items:
-        if isinstance(item, str):
-            normalized.extend(part.strip() for part in item.split(","))
-        else:
-            normalized.append(str(item).strip())
-    return [item for item in normalized if item] or None
+    items = toolsets if isinstance(toolsets, (list, tuple)) else [toolsets]
+    parts = [str(item).split(",") if isinstance(item, str) else [str(item)] for item in items]
+    return [p.strip() for chunk in parts for p in chunk if p.strip()] or None
 
 
 def _normalize_skills(skills: object = None) -> list[str]:
@@ -419,6 +413,20 @@ def _run_agent(
         _close_agent(agent, session_db)
 
 
+def _quietly(what: str, fn) -> None:
+    """Run a cleanup step, logging (never raising) on failure."""
+    try:
+        fn()
+    except Exception:
+        logging.debug("oneshot %s failed", what, exc_info=True)
+
+
+def _linger_for_background_completions() -> None:
+    from tools.process_registry import process_registry
+
+    process_registry.wait_for_pending_completions(None)
+
+
 def _close_agent(agent, session_db) -> None:
     """Teardown mirroring gateway/run.py:_cleanup_agent_resources (NOT cli.py:_run_cleanup):
     oneshot has no _active_agent_ref and the hard-exit path skips finalizers."""
@@ -426,30 +434,14 @@ def _close_agent(agent, session_db) -> None:
         # Linger (bounded) for notify_on_complete background processes BEFORE agent.close():
         # close() kill_all()s the task and the dying parent owns the children's stdout pipes, so
         # exiting now destroys in-flight deliveries (e.g. Bot Mode handoff replies).
-        try:
-            from tools.process_registry import process_registry
-
-            process_registry.wait_for_pending_completions(None)
-        except Exception:
-            logging.debug("oneshot background completion wait failed", exc_info=True)
-        try:
-            session_messages = getattr(agent, "_session_messages", None)
-            if isinstance(session_messages, list):
-                agent.shutdown_memory_provider(session_messages)
-            else:
-                agent.shutdown_memory_provider()
-        except Exception:
-            logging.debug("oneshot memory/context cleanup failed", exc_info=True)
-        try:
-            agent.close()
-        except Exception:
-            logging.debug("oneshot agent cleanup failed", exc_info=True)
+        _quietly("background completion wait", _linger_for_background_completions)
+        session_messages = getattr(agent, "_session_messages", None)
+        memory_args = (session_messages,) if isinstance(session_messages, list) else ()
+        _quietly("memory/context cleanup", lambda: agent.shutdown_memory_provider(*memory_args))
+        _quietly("agent cleanup", lambda: agent.close())
     # agent.close() ends the session but leaves the connection open; close it to checkpoint the WAL.
     if session_db is not None:
-        try:
-            session_db.close()
-        except Exception:
-            logging.debug("oneshot session store cleanup failed", exc_info=True)
+        _quietly("session store cleanup", lambda: session_db.close())
 
 
 def _oneshot_clarify_callback(question: str, choices=None, multi_select=False) -> str:
