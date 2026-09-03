@@ -52,23 +52,19 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
     }
 
     def _entry_catalog(entry: dict) -> tuple[str, str, list[tuple[str, str]]] | None:
-        provider_key = str(entry.get("provider_key", "") or "").strip()
-        name = str(entry.get("name", "") or "").strip()
-        base_url = str(entry.get("base_url", "") or "").strip()
+        field = lambda key: str(entry.get(key) or "").strip()  # noqa: E731
+        provider_key, name, base_url = field("provider_key"), field("name"), field("base_url")
         if provider_key.lower() in disabled_keys or not name or not base_url:
             return None
         slug = custom_provider_slug(name, provider_key)
 
-        api_key = str(entry.get("api_key", "") or "").strip()
+        api_key = field("api_key")
         if not api_key:
             key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
             api_key = os.environ.get(key_env, "").strip() if key_env else ""
 
-        declared: list[str] = []
         models_cfg = entry.get("models")
-        for mid in [str(entry.get("model", "") or "").strip(), *_declared_model_ids(models_cfg)]:
-            if mid and mid not in declared:
-                declared.append(mid)
+        declared = [m for m in dict.fromkeys([field("model"), *_declared_model_ids(models_cfg)]) if m]
 
         native_headers = entry.get("extra_headers") or None
         is_ollama_key = provider_key.lower() in {"ollama", "custom:ollama"}
