@@ -363,7 +363,7 @@ def _mirror_manual_config_to_openviking_store(*, prompt, select, cancelled, valu
         name = _prompt_profile_name(prompt, select, cancelled)
         if name is _SETUP_CANCELLED:
             return _SETUP_CANCELLED
-        path = ov._ovcli_config_dir() / f"{ov._OVCLI_SAVED_PREFIX}{name}"
+        path = ov._default_ovcli_config_path().parent / f"{ov._OVCLI_SAVED_PREFIX}{name}"
         replace = _confirm_replace_existing_profile(path, values, select, cancelled)
         if replace is _SETUP_CANCELLED:
             return _SETUP_CANCELLED

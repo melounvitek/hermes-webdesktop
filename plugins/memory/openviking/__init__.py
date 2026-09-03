@@ -1,10 +1,9 @@
 """OpenViking memory plugin — full bidirectional MemoryProvider interface.
 
-OpenViking (Volcengine/ByteDance) organizes agent knowledge into a viking://
-filesystem hierarchy with tiered context (L0 abstract / L1 overview / L2 full),
-automatic memory extraction on session commit, and semantic search.
-Config comes from env vars (OPENVIKING_ENDPOINT / _API_KEY / _ACCOUNT / _USER /
-_AGENT, profile-scoped via .env) or a linked OpenViking CLI config (ovcli.conf).
+OpenViking (Volcengine/ByteDance) organizes agent knowledge into a viking:// hierarchy
+with tiered context (L0 abstract / L1 overview / L2 full), automatic memory extraction
+on session commit, and semantic search. Config comes from env vars (OPENVIKING_ENDPOINT
+/ _API_KEY / _ACCOUNT / _USER / _AGENT) or a linked OpenViking CLI config (ovcli.conf).
 The interactive setup wizard lives in ``_setup.py``.
 """
 
@@ -588,10 +587,6 @@ def _resolve_ovcli_config_path(config_path: str = "") -> Path:
     return Path(chosen).expanduser() if chosen else _default_ovcli_config_path()
 
 
-def _ovcli_config_dir() -> Path:
-    return _default_ovcli_config_path().parent
-
-
 def _load_ovcli_config(path: Optional[Path] = None) -> dict:
     config_path = path or _resolve_ovcli_config_path()
     if not config_path.exists():
@@ -689,36 +684,23 @@ def _normalize_openviking_url(url: str) -> str:
     return candidate
 
 
-def _is_openviking_health_payload(payload: Any) -> bool:
-    """Documented ``GET /health`` contract (status/healthy/version)."""
-    return (
-        isinstance(payload, dict) and payload.get("status") == "ok" and payload.get("healthy") is True
-        and isinstance(payload.get("version"), str) and bool(payload["version"].strip())
-    )
-
-
-def _is_legacy_openviking_health_payload(payload: Any) -> bool:
-    """Status-only health contract published through OpenViking 0.2.6."""
-    return isinstance(payload, dict) and payload.get("status") == "ok" and "healthy" not in payload and "version" not in payload
-
-
-def _is_openviking_openapi_payload(payload: Any) -> bool:
-    info = payload.get("info") if isinstance(payload, dict) else None
-    return isinstance(info, dict) and info.get("title") == "OpenViking API"
-
-
 def _probe_openviking_identity(client: _VikingClient) -> tuple[str, Any]:
     """Identify modern or legacy OpenViking before any authenticated request.
-    -> ("modern" | "legacy" | "legacy-unverified" | "unhealthy" | "invalid", health)."""
+    -> ("modern" | "legacy" | "legacy-unverified" | "unhealthy" | "invalid", health).
+    Modern = documented status/healthy/version contract; legacy = status-only (<= 0.2.6),
+    which must be confirmed via the anonymous OpenAPI title."""
     health = client.health_payload()
     if isinstance(health, dict) and health.get("healthy") is False:
         return "unhealthy", health
-    if _is_openviking_health_payload(health):
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        return "invalid", health
+    if health.get("healthy") is True and isinstance(health.get("version"), str) and health["version"].strip():
         return "modern", health
-    if not _is_legacy_openviking_health_payload(health):
+    if "healthy" in health or "version" in health:
         return "invalid", health
     try:
-        verified = _is_openviking_openapi_payload(client.openapi_payload())
+        info = client.openapi_payload().get("info")
+        verified = isinstance(info, dict) and info.get("title") == "OpenViking API"
     except Exception:
         logger.debug("Legacy OpenViking OpenAPI identity probe failed", exc_info=True)
         verified = False
@@ -767,7 +749,7 @@ def _discover_ovcli_profiles() -> list[_OvcliProfile]:
     active_path = _default_ovcli_config_path()
     active_profile = _load_profile(active_path, source="active", name="active") if active_path.exists() else None
 
-    config_dir = _ovcli_config_dir()
+    config_dir = _default_ovcli_config_path().parent
     saved_start = len(profiles)
     if config_dir.exists():
         for path in sorted(config_dir.iterdir(), key=lambda item: item.name):
@@ -848,22 +830,15 @@ def _env_writes_from_connection_values(values: dict) -> dict:
     return {key: value for key, value in writes.items() if value}
 
 
-def _restrict_secret_file_permissions(path: Path) -> None:
+def _secure_secret_file(path: Path, *, create: bool = False) -> None:
+    """chmod 0600 a secret-bearing file; with ``create`` also pre-create it BEFORE writing
+    (write-then-chmod leaves a window where the fresh file is world-readable under the umask)."""
     try:
+        if create and not path.exists():
+            os.close(os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600))
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError as e:
-        logger.debug("Could not restrict permissions on %s: %s", path, e)
-
-
-def _precreate_secret_file(path: Path) -> None:
-    """Create (or tighten) a secret-bearing file as 0600 BEFORE writing: write-then-chmod
-    leaves a window where the fresh file is world-readable under the default umask."""
-    try:
-        if not path.exists():
-            os.close(os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600))
-        _restrict_secret_file_permissions(path)
-    except OSError as e:
-        logger.debug("Could not pre-create secret file %s: %s", path, e)
+        logger.debug("Could not %s secret file %s: %s", "pre-create" if create else "restrict permissions on", path, e)
 
 
 def _env_line_safe(value: Any) -> str:
@@ -892,9 +867,9 @@ def _write_env_vars(env_path: Path, env_writes: dict, remove_keys: tuple[str, ..
         else:
             new_lines.append(line)
     new_lines += [f"{key}={_env_line_safe(val)}" for key, val in env_writes.items() if key not in updated_keys]
-    _precreate_secret_file(env_path)
+    _secure_secret_file(env_path, create=True)
     env_path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8", errors="surrogateescape")
-    _restrict_secret_file_permissions(env_path)
+    _secure_secret_file(env_path)
 
 
 def _remember_ovcli_path(provider_config: dict, ovcli_path: Path) -> None:
@@ -998,10 +973,6 @@ def _hermes_home_path() -> Path:
         return Path(env_home).expanduser() if env_home else Path.home() / ".hermes"
 
 
-def _openviking_server_log_path() -> Path:
-    return _hermes_home_path() / _OPENVIKING_SERVER_LOG_RELATIVE_PATH
-
-
 def _local_openviking_port_is_open(host: str, port: int) -> bool:
     """Pre-spawn guard: a successful connect proves a listener owns the port (so a
     second openviking-server would lose the data-dir lock); says nothing about health."""
@@ -1069,7 +1040,7 @@ def _start_local_openviking_server(endpoint: str) -> tuple[str, str]:
     server_cmd = shutil.which("openviking-server")
     if not server_cmd:
         return _LOCAL_SERVER_FAILED, "openviking-server was not found on PATH. Start it manually, then retry."
-    log_path = _openviking_server_log_path()
+    log_path = _hermes_home_path() / _OPENVIKING_SERVER_LOG_RELATIVE_PATH
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # Strip PYTHONPATH: the Desktop backend puts the Hermes venv on it, which
@@ -1098,21 +1069,14 @@ def _wait_for_openviking_health(endpoint: str, *, timeout_seconds: float = 15.0,
     return False
 
 
-def _emit_runtime(log, message: str, callback, kind: str) -> None:
-    log("%s", message)
+def _emit_runtime(message: str, callback=None, *, kind: str = "warning") -> None:
+    """Log (warning/info by ``kind``) and forward to the CLI callback when one is wired."""
+    (logger.warning if kind == "warning" else logger.info)("%s", message)
     if callback:
         try:
             callback(message)
         except Exception:
             logger.debug("OpenViking runtime %s callback failed", kind, exc_info=True)
-
-
-def _emit_runtime_warning(message: str, warning_callback=None) -> None:
-    _emit_runtime(logger.warning, message, warning_callback, "warning")
-
-
-def _emit_runtime_status(message: str, status_callback=None) -> None:
-    _emit_runtime(logger.info, message, status_callback, "status")
 
 
 def _runtime_openviking_timeout_message(endpoint: str) -> str:
@@ -1468,7 +1432,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         if not _wait_for_openviking_health(endpoint, timeout_seconds=_LOCAL_OPENVIKING_AUTOSTART_TIMEOUT, should_stop=stale):
             if not stale():
-                _emit_runtime_warning(_runtime_openviking_timeout_message(endpoint), warning_callback)
+                _emit_runtime(_runtime_openviking_timeout_message(endpoint), warning_callback)
             return
 
         with self._client_refresh_lock:
@@ -1491,17 +1455,17 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 warning_message = f"OpenViking server at {endpoint} could not be attached after auto-start: {e}. {_RETRY_LATER}"
 
         if warning_message:
-            _emit_runtime_warning(warning_message, warning_callback)
+            _emit_runtime(warning_message, warning_callback)
             return
         # Attached: recover orphaned sessions outside the refresh lock (network I/O), then announce.
         self._recover_pending_sessions()
-        _emit_runtime_status(f"Local OpenViking server at {endpoint} is reachable; OpenViking memory is active for later turns.", status_callback)
+        _emit_runtime(f"Local OpenViking server at {endpoint} is reachable; OpenViking memory is active for later turns.", status_callback, kind="status")
 
     def _handle_runtime_openviking_unreachable(self, *, status_callback=None, warning_callback=None) -> None:
         endpoint = self._endpoint
         self._client = None
         if not _is_local_openviking_url(endpoint):
-            _emit_runtime_warning(
+            _emit_runtime(
                 f"Remote OpenViking server at {endpoint} is not reachable. {_RETRY_LATER} "
                 "Check the configured endpoint and network connectivity.",
                 warning_callback,
@@ -1517,9 +1481,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 self._runtime_start_pending = False
 
         if start_state != _LOCAL_SERVER_STARTED:
-            _emit_runtime_warning(f"Local OpenViking server at {endpoint} is not reachable. {start_message} {_RETRY_LATER}", warning_callback)
+            _emit_runtime(f"Local OpenViking server at {endpoint} is not reachable. {start_message} {_RETRY_LATER}", warning_callback)
             return
-        _emit_runtime_status(f"{start_message} OpenViking memory is starting in the background and will attach when ready.", status_callback)
+        _emit_runtime(f"{start_message} OpenViking memory is starting in the background and will attach when ready.", status_callback, kind="status")
         with self._runtime_start_lock:
             self._runtime_start_pending = False
             if not self._shutting_down:
@@ -1549,7 +1513,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._client = None
         if connection_error:
             self._failed_refresh = (("invalid-endpoint", connection_error), time.monotonic())
-            _emit_runtime_warning(f"{connection_error} {_FIX_ENDPOINT}", warning_callback)
+            _emit_runtime(f"{connection_error} {_FIX_ENDPOINT}", warning_callback)
         else:
             try:
                 self._client = self._build_client()
@@ -1557,7 +1521,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 if health_state == "unreachable":
                     self._handle_runtime_openviking_unreachable(status_callback=status_callback, warning_callback=warning_callback)
                 elif health_state != "healthy":
-                    _emit_runtime_warning(f"{health_message} {_RETRY_LATER}", warning_callback)
+                    _emit_runtime(f"{health_message} {_RETRY_LATER}", warning_callback)
                     self._client = None
             except ImportError:
                 logger.warning(_HTTPX_MISSING)
