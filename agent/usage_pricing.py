@@ -128,6 +128,10 @@ class CostResult:
 
 
 _UTC_NOW = lambda: datetime.now(timezone.utc)
+_INCLUDED_ENTRY = PricingEntry(
+    input_cost_per_million=_ZERO, output_cost_per_million=_ZERO, cache_read_cost_per_million=_ZERO,
+    cache_write_cost_per_million=_ZERO, source="none", pricing_version="included-route",
+)
 
 
 def _snap(
@@ -143,153 +147,128 @@ def _snap(
     )
 
 
-# (source_url, pricing_version) shared by the entries of one snapshot.
-_OPENAI_56 = dict(url="https://openai.com/index/previewing-gpt-5-6-sol/", version="openai-gpt-5.6-2026-07")
-_ANTHROPIC = dict(url="https://platform.claude.com/docs/en/about-claude/pricing", version="anthropic-pricing-2026-05")
-_OPENAI = dict(url="https://openai.com/api/pricing/", version="openai-pricing-2026-03-16")
-_DEEPSEEK = dict(url="https://api-docs.deepseek.com/quick_start/pricing", version="deepseek-pricing-2026-07")
-_GOOGLE = dict(url="https://ai.google.dev/pricing", version="google-pricing-2026-07-07")
-_GOOGLE_NEW = dict(url="https://ai.google.dev/gemini-api/docs/pricing", version="google-pricing-2026-07-28")
+# Official docs snapshot: models whose published pricing and cache semantics are
+# stable enough to encode exactly. Each snapshot is (provider, source_url,
+# pricing_version, {model-or-models: per-1M rates (input, output[, cache_read[,
+# cache_write]])}); a tuple key shares one rate row across several model ids.
 _BEDROCK_URL = "https://aws.amazon.com/bedrock/pricing/"
-_BEDROCK_ANTHROPIC = dict(url=_BEDROCK_URL, version="anthropic-list-2026-07")
-_BEDROCK = dict(url=_BEDROCK_URL, version="bedrock-pricing-2026-04")
-_FIREWORKS = dict(url="https://docs.fireworks.ai/serverless/pricing", version="fireworks-pricing-2026-07")
-
-# Official docs snapshot: models whose published pricing and cache semantics
-# are stable enough to encode exactly. Positional rates are per 1M tokens:
-# (input, output[, cache_read[, cache_write]]).
-_OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
+_ANTHROPIC_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+_GOOGLE_URL = "https://ai.google.dev/pricing"
+_OPUS = ("5.00", "25.00", "0.50", "6.25")
+_SONNET = ("3.00", "15.00", "0.30", "3.75")
+_SNAPSHOTS: tuple[tuple[str, Optional[str], str, dict], ...] = (
     # OpenAI GPT-5.6 (Sol/Terra/Luna). Cache write = 1.25x input, cache read =
     # 0.10x input. "-pro" high-effort modes bill at the same per-token rates
-    # (aliased below the dict); "Sol Fast mode" is a separate tier, not covered.
-    ("openai", "gpt-5.6-sol"): _snap("5.00", "30.00", "0.50", "6.25", **_OPENAI_56),
-    ("openai", "gpt-5.6-terra"): _snap("2.50", "15.00", "0.25", "3.125", **_OPENAI_56),
-    ("openai", "gpt-5.6-luna"): _snap("1.00", "6.00", "0.10", "1.25", **_OPENAI_56),
-    # Anthropic Claude 4.8; fast mode is a separate model id at a 2x premium.
-    ("anthropic", "claude-opus-4-8"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-8-fast"): _snap(
-        "10.00", "50.00", "1.00", "12.50",
-        url="https://openrouter.ai/anthropic/claude-opus-4.8-fast", version="anthropic-pricing-2026-05",
-    ),
+    # (aliased below); "Sol Fast mode" is a separate tier, not covered.
+    ("openai", "https://openai.com/index/previewing-gpt-5-6-sol/", "openai-gpt-5.6-2026-07", {
+        "gpt-5.6-sol": ("5.00", "30.00", "0.50", "6.25"), "gpt-5.6-terra": ("2.50", "15.00", "0.25", "3.125"),
+        "gpt-5.6-luna": ("1.00", "6.00", "0.10", "1.25"),
+    }),
+    # Claude 4.5/4.6/4.7/4.8 Opus share $5/$25 (new tokenizer, up to 35% more tokens).
+    ("anthropic", _ANTHROPIC_URL, "anthropic-pricing-2026-05", {
+        ("claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-7-20250507", "claude-opus-4-6",
+         "claude-opus-4-6-20250414", "claude-opus-4-5"): _OPUS,
+        ("claude-sonnet-4-6", "claude-sonnet-4-6-20250414", "claude-sonnet-4-5", "claude-sonnet-4-20250514",
+         "claude-3-5-sonnet-20241022"): _SONNET,
+        "claude-haiku-4-5": ("1.00", "5.00", "0.10", "1.25"),
+        ("claude-opus-4-20250514", "claude-3-opus-20240229"): ("15.00", "75.00", "1.50", "18.75"),
+        "claude-3-5-haiku-20241022": ("0.80", "4.00", "0.08", "1.00"),
+        "claude-3-haiku-20240307": ("0.25", "1.25", "0.03", "0.30"),
+    }),
+    # Fast mode is a separate model id at a 2x premium.
+    ("anthropic", "https://openrouter.ai/anthropic/claude-opus-4.8-fast", "anthropic-pricing-2026-05", {
+        "claude-opus-4-8-fast": ("10.00", "50.00", "1.00", "12.50"),
+    }),
     # Claude Sonnet 5: introductory $2/$10 through 2026-08-31, then $3/$15
     # (matching Sonnet 4.6). Update this entry when the intro window closes.
-    ("anthropic", "claude-sonnet-5"): _snap(
-        "2.00", "10.00", "0.20", "2.50", url=_ANTHROPIC["url"], version="anthropic-pricing-2026-06-intro"
-    ),
-    # Claude 4.5/4.6/4.7 Opus share $5/$25 (new tokenizer, up to 35% more tokens).
-    ("anthropic", "claude-opus-4-7"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-7-20250507"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-6"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-6-20250414"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-sonnet-4-6"): _snap("3.00", "15.00", "0.30", "3.75", **_ANTHROPIC),
-    ("anthropic", "claude-sonnet-4-6-20250414"): _snap("3.00", "15.00", "0.30", "3.75", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-5"): _snap("5.00", "25.00", "0.50", "6.25", **_ANTHROPIC),
-    ("anthropic", "claude-sonnet-4-5"): _snap("3.00", "15.00", "0.30", "3.75", **_ANTHROPIC),
-    ("anthropic", "claude-haiku-4-5"): _snap("1.00", "5.00", "0.10", "1.25", **_ANTHROPIC),
-    ("anthropic", "claude-opus-4-20250514"): _snap("15.00", "75.00", "1.50", "18.75", **_ANTHROPIC),
-    ("anthropic", "claude-sonnet-4-20250514"): _snap("3.00", "15.00", "0.30", "3.75", **_ANTHROPIC),
-    # OpenAI
-    ("openai", "gpt-4o"): _snap("2.50", "10.00", "1.25", **_OPENAI),
-    ("openai", "gpt-4o-mini"): _snap("0.15", "0.60", "0.075", **_OPENAI),
-    ("openai", "gpt-4.1"): _snap("2.00", "8.00", "0.50", **_OPENAI),
-    ("openai", "gpt-4.1-mini"): _snap("0.40", "1.60", "0.10", **_OPENAI),
-    ("openai", "gpt-4.1-nano"): _snap("0.10", "0.40", "0.025", **_OPENAI),
-    ("openai", "o3"): _snap("10.00", "40.00", "2.50", **_OPENAI),
-    ("openai", "o3-mini"): _snap("1.10", "4.40", "0.55", **_OPENAI),
-    # Anthropic pre-4.5 generation
-    ("anthropic", "claude-3-5-sonnet-20241022"): _snap("3.00", "15.00", "0.30", "3.75", **_ANTHROPIC),
-    ("anthropic", "claude-3-5-haiku-20241022"): _snap("0.80", "4.00", "0.08", "1.00", **_ANTHROPIC),
-    ("anthropic", "claude-3-opus-20240229"): _snap("15.00", "75.00", "1.50", "18.75", **_ANTHROPIC),
-    ("anthropic", "claude-3-haiku-20240307"): _snap("0.25", "1.25", "0.03", "0.30", **_ANTHROPIC),
-    # DeepSeek. deepseek-chat / deepseek-reasoner are deprecated aliases of
+    ("anthropic", _ANTHROPIC_URL, "anthropic-pricing-2026-06-intro", {
+        "claude-sonnet-5": ("2.00", "10.00", "0.20", "2.50"),
+    }),
+    ("openai", "https://openai.com/api/pricing/", "openai-pricing-2026-03-16", {
+        "gpt-4o": ("2.50", "10.00", "1.25"), "gpt-4o-mini": ("0.15", "0.60", "0.075"),
+        "gpt-4.1": ("2.00", "8.00", "0.50"), "gpt-4.1-mini": ("0.40", "1.60", "0.10"),
+        "gpt-4.1-nano": ("0.10", "0.40", "0.025"), "o3": ("10.00", "40.00", "2.50"),
+        "o3-mini": ("1.10", "4.40", "0.55"),
+    }),
+    # deepseek-chat / deepseek-reasoner are deprecated aliases of
     # deepseek-v4-flash's non-thinking / thinking modes — same rates.
-    ("deepseek", "deepseek-chat"): _snap("0.14", "0.28", "0.0028", **_DEEPSEEK),
-    ("deepseek", "deepseek-reasoner"): _snap("0.14", "0.28", "0.0028", **_DEEPSEEK),
-    ("deepseek", "deepseek-v4-pro"): _snap("0.435", "0.87", "0.003625", **_DEEPSEEK),
-    ("deepseek", "deepseek-v4-flash"): _snap("0.14", "0.28", "0.0028", **_DEEPSEEK),
-    # Google Gemini
-    ("google", "gemini-3.6-flash"): _snap("1.50", "7.50", "0.15", **_GOOGLE_NEW),
-    ("google", "gemini-3.5-flash"): _snap("1.50", "9.00", "0.15", **_GOOGLE),
-    ("google", "gemini-3.5-flash-lite"): _snap("0.30", "2.50", "0.03", **_GOOGLE_NEW),
-    ("google", "gemini-3.1-pro"): _snap(
-        "2.00", "12.00", "0.20",
-        tier_threshold_tokens=200_000,
-        input_cost_per_million_above=Decimal("4.00"),
-        output_cost_per_million_above=Decimal("18.00"),
-        cache_read_cost_per_million_above=Decimal("0.40"),
-        **_GOOGLE,
-    ),
-    ("google", "gemini-3.1-flash-lite"): _snap("0.25", "1.50", "0.025", **_GOOGLE),
-    ("google", "gemini-3-pro-preview"): _snap("2.00", "12.00", "0.20", **_GOOGLE),
-    ("google", "gemini-3-flash-preview"): _snap("0.50", "3.00", "0.05", **_GOOGLE),
-    ("google", "gemini-2.5-pro"): _snap(
-        "1.25", "10.00", "0.125",
-        tier_threshold_tokens=200_000,
-        input_cost_per_million_above=Decimal("2.50"),
-        output_cost_per_million_above=Decimal("15.00"),
-        **_GOOGLE,
-    ),
-    ("google", "gemini-2.5-flash"): _snap("0.15", "0.60", "0.015", **_GOOGLE),
-    ("google", "gemini-2.0-flash"): _snap("0.10", "0.40", "0.01", **_GOOGLE),
+    ("deepseek", "https://api-docs.deepseek.com/quick_start/pricing", "deepseek-pricing-2026-07", {
+        ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"): ("0.14", "0.28", "0.0028"),
+        "deepseek-v4-pro": ("0.435", "0.87", "0.003625"),
+    }),
+    ("google", "https://ai.google.dev/gemini-api/docs/pricing", "google-pricing-2026-07-28", {
+        "gemini-3.6-flash": ("1.50", "7.50", "0.15"), "gemini-3.5-flash-lite": ("0.30", "2.50", "0.03"),
+    }),
+    ("google", _GOOGLE_URL, "google-pricing-2026-07-07", {
+        "gemini-3.5-flash": ("1.50", "9.00", "0.15"), "gemini-3.1-flash-lite": ("0.25", "1.50", "0.025"),
+        "gemini-3-pro-preview": ("2.00", "12.00", "0.20"), "gemini-3-flash-preview": ("0.50", "3.00", "0.05"),
+        "gemini-2.5-flash": ("0.15", "0.60", "0.015"), "gemini-2.0-flash": ("0.10", "0.40", "0.01"),
+    }),
     # AWS Bedrock on-demand: same per-token rates as the model provider, billed
     # through AWS. Current-gen Claude rows are commercial-list snapshots (the AWS
     # Price List API had not published these SKUs machine-readably).
-    ("bedrock", "anthropic.claude-opus-4-8"): _snap("5.00", "25.00", "0.50", "6.25", **_BEDROCK_ANTHROPIC),
-    ("bedrock", "anthropic.claude-opus-4-7"): _snap("5.00", "25.00", "0.50", "6.25", **_BEDROCK_ANTHROPIC),
-    ("bedrock", "anthropic.claude-opus-4-6"): _snap("5.00", "25.00", "0.50", "6.25", **_BEDROCK_ANTHROPIC),
-    ("bedrock", "anthropic.claude-sonnet-5"): _snap(
-        "3.00", "15.00", "0.30", "3.75", url=_BEDROCK_URL, version="bedrock-pricing-2026-06"
-    ),
-    ("bedrock", "anthropic.claude-sonnet-4-6"): _snap("3.00", "15.00", "0.30", "3.75", **_BEDROCK),
-    ("bedrock", "anthropic.claude-sonnet-4-5"): _snap("3.00", "15.00", "0.30", "3.75", **_BEDROCK),
-    ("bedrock", "anthropic.claude-haiku-4-5"): _snap("0.80", "4.00", "0.08", "1.00", **_BEDROCK),
-    ("bedrock", "amazon.nova-pro"): _snap("0.80", "3.20", **_BEDROCK),
-    ("bedrock", "amazon.nova-lite"): _snap("0.06", "0.24", **_BEDROCK),
-    ("bedrock", "amazon.nova-micro"): _snap("0.035", "0.14", **_BEDROCK),
-    # MiniMax
-    ("minimax", "minimax-m2.7"): _snap("0.30", "1.20", version="minimax-pricing-2026-04"),
-    ("minimax-cn", "minimax-m2.7"): _snap("0.30", "1.20", version="minimax-pricing-2026-04"),
-    # Fireworks AI serverless (Standard tier). Fireworks publishes a per-model
-    # cached_input rate (→ cache_read) but no separate cache_write rate.
-    ("fireworks", "kimi-k2p6"): _snap("0.95", "4.00", "0.16", **_FIREWORKS),
-    ("fireworks", "kimi-k2p7-code"): _snap("0.95", "4.00", "0.19", **_FIREWORKS),
-    ("fireworks", "glm-5p2"): _snap("1.40", "4.40", "0.14", **_FIREWORKS),
-    ("fireworks", "deepseek-v4-pro"): _snap("1.74", "3.48", "0.145", **_FIREWORKS),
-    ("fireworks", "deepseek-v4-flash"): _snap("0.14", "0.28", "0.028", **_FIREWORKS),
-    ("fireworks", "qwen3p7-plus"): _snap("0.40", "1.60", "0.08", **_FIREWORKS),
-    ("fireworks", "minimax-m3"): _snap("0.30", "1.20", "0.06", **_FIREWORKS),
-    ("fireworks", "gpt-oss-120b"): _snap("0.15", "0.60", "0.015", **_FIREWORKS),
-    ("fireworks", "gpt-oss-20b"): _snap("0.07", "0.30", "0.035", **_FIREWORKS),
-    ("fireworks", "glm-5p1"): _snap("1.40", "4.40", "0.26", **_FIREWORKS),
-    ("fireworks", "minimax-m2p7"): _snap("0.30", "1.20", "0.06", **_FIREWORKS),
-    # Fast/turbo tiers are exposed as accounts/fireworks/routers/<name>, so
-    # rsplit("/", 1) yields these distinct ids with their own (higher) rates.
-    ("fireworks", "kimi-k2p6-fast"): _snap("2.00", "8.00", "0.30", **_FIREWORKS),
-    ("fireworks", "kimi-k2p6-turbo"): _snap("2.00", "8.00", "0.30", **_FIREWORKS),
-    ("fireworks", "kimi-k2p7-code-fast"): _snap("1.90", "8.00", "0.38", **_FIREWORKS),
-    ("fireworks", "glm-5p2-fast"): _snap("2.10", "6.60", "0.21", **_FIREWORKS),
-    ("fireworks", "glm-5p1-fast"): _snap("2.80", "8.80", "0.52", **_FIREWORKS),
-}
-del _OPENAI_56, _ANTHROPIC, _OPENAI, _DEEPSEEK, _GOOGLE, _GOOGLE_NEW
-del _BEDROCK_URL, _BEDROCK_ANTHROPIC, _BEDROCK, _FIREWORKS
+    ("bedrock", _BEDROCK_URL, "anthropic-list-2026-07", {
+        ("anthropic.claude-opus-4-8", "anthropic.claude-opus-4-7", "anthropic.claude-opus-4-6"): _OPUS,
+    }),
+    ("bedrock", _BEDROCK_URL, "bedrock-pricing-2026-06", {"anthropic.claude-sonnet-5": _SONNET}),
+    ("bedrock", _BEDROCK_URL, "bedrock-pricing-2026-04", {
+        ("anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-5"): _SONNET,
+        "anthropic.claude-haiku-4-5": ("0.80", "4.00", "0.08", "1.00"),
+        "amazon.nova-pro": ("0.80", "3.20"), "amazon.nova-lite": ("0.06", "0.24"), "amazon.nova-micro": ("0.035", "0.14"),
+    }),
+    ("minimax", None, "minimax-pricing-2026-04", {"minimax-m2.7": ("0.30", "1.20")}),
+    ("minimax-cn", None, "minimax-pricing-2026-04", {"minimax-m2.7": ("0.30", "1.20")}),
+    # Fireworks AI serverless (Standard tier) publishes a per-model cached_input
+    # rate (→ cache_read) but no separate cache_write rate. Fast/turbo tiers are
+    # exposed as accounts/fireworks/routers/<name>, so rsplit("/", 1) yields
+    # these distinct ids with their own (higher) rates.
+    ("fireworks", "https://docs.fireworks.ai/serverless/pricing", "fireworks-pricing-2026-07", {
+        "kimi-k2p6": ("0.95", "4.00", "0.16"), "kimi-k2p7-code": ("0.95", "4.00", "0.19"),
+        "glm-5p2": ("1.40", "4.40", "0.14"), "deepseek-v4-pro": ("1.74", "3.48", "0.145"),
+        "deepseek-v4-flash": ("0.14", "0.28", "0.028"), "qwen3p7-plus": ("0.40", "1.60", "0.08"),
+        "minimax-m3": ("0.30", "1.20", "0.06"), "gpt-oss-120b": ("0.15", "0.60", "0.015"),
+        "gpt-oss-20b": ("0.07", "0.30", "0.035"), "glm-5p1": ("1.40", "4.40", "0.26"),
+        "minimax-m2p7": ("0.30", "1.20", "0.06"),
+        ("kimi-k2p6-fast", "kimi-k2p6-turbo"): ("2.00", "8.00", "0.30"),
+        "kimi-k2p7-code-fast": ("1.90", "8.00", "0.38"), "glm-5p2-fast": ("2.10", "6.60", "0.21"),
+        "glm-5p1-fast": ("2.80", "8.80", "0.52"),
+    }),
+)
+
+_OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {}
+for _provider, _url, _version, _rows in _SNAPSHOTS:
+    for _models, _rates in _rows.items():
+        _entry = _snap(*_rates, version=_version, url=_url)
+        for _model in ((_models,) if isinstance(_models, str) else _models):
+            _OFFICIAL_DOCS_PRICING[(_provider, _model)] = _entry
+del _SNAPSHOTS, _provider, _url, _version, _rows, _models, _rates, _entry, _model
+
+# Context-tiered Gemini Pro: above 200k prompt tokens the *_above rates apply to
+# the whole request (see PricingEntry).
+_OFFICIAL_DOCS_PRICING[("google", "gemini-3.1-pro")] = _snap(
+    "2.00", "12.00", "0.20", url=_GOOGLE_URL, version="google-pricing-2026-07-07",
+    tier_threshold_tokens=200_000, input_cost_per_million_above=Decimal("4.00"),
+    output_cost_per_million_above=Decimal("18.00"), cache_read_cost_per_million_above=Decimal("0.40"),
+)
+_OFFICIAL_DOCS_PRICING[("google", "gemini-2.5-pro")] = _snap(
+    "1.25", "10.00", "0.125", url=_GOOGLE_URL, version="google-pricing-2026-07-07",
+    tier_threshold_tokens=200_000, input_cost_per_million_above=Decimal("2.50"),
+    output_cost_per_million_above=Decimal("15.00"),
+)
+del _BEDROCK_URL, _ANTHROPIC_URL, _GOOGLE_URL, _OPUS, _SONNET
 
 # GPT-5.6 "-pro" high-effort variants bill at the base tier's per-token rates
 # (more tokens per task, not a higher rate); the Hermes-side "-900k" Codex
 # picker variants are the same model with the suffix stripped on the wire.
-# Alias both onto the base entries so the snapshot stays single-source.
-for _base_56 in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
-    _OFFICIAL_DOCS_PRICING[("openai", f"{_base_56}-pro")] = _OFFICIAL_DOCS_PRICING[("openai", _base_56)]
-    _OFFICIAL_DOCS_PRICING[("openai", f"{_base_56}-900k")] = _OFFICIAL_DOCS_PRICING[("openai", _base_56)]
-del _base_56
-
-# The direct Gemini provider emits preview IDs for these two models; key the
-# snapshot by both the documented stable name and the emitted ID.
-for _alias, _canonical in {
-    "gemini-3.1-pro-preview": "gemini-3.1-pro",
-    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
-}.items():
-    _OFFICIAL_DOCS_PRICING[("google", _alias)] = _OFFICIAL_DOCS_PRICING[("google", _canonical)]
-del _alias, _canonical
+# The direct Gemini provider emits preview IDs for two models; key the snapshot
+# by both the documented stable name and the emitted ID.
+for _provider, _alias, _canonical in (
+    *((("openai", f"{m}-{suffix}", m) for m in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna") for suffix in ("pro", "900k"))),
+    ("google", "gemini-3.1-pro-preview", "gemini-3.1-pro"),
+    ("google", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite"),
+):
+    _OFFICIAL_DOCS_PRICING[(_provider, _alias)] = _OFFICIAL_DOCS_PRICING[(_provider, _canonical)]
+del _provider, _alias, _canonical
 
 
 def _to_decimal(value: Any) -> Optional[Decimal]:
@@ -343,6 +322,16 @@ def _first_nonzero(obj: Any, *paths: tuple[str, ...]) -> int:
     return 0
 
 
+# Picker slugs → snapshot provider key ("openai-api" is the slug for direct
+# api.openai.com). Google and Fireworks are matched by name OR host below.
+_SNAPSHOT_PROVIDER_ALIASES = {
+    "anthropic": "anthropic", "openai": "openai", "openai-api": "openai", "minimax": "minimax", "minimax-cn": "minimax-cn",
+}
+# AI Studio and Vertex host the same Gemini models (the Vertex "google/" vendor
+# prefix is stripped with the rest of the path).
+_GOOGLE_PROVIDER_NAMES = {"google", "gemini", "vertex", "google-gemini", "google-ai-studio", "google-vertex", "vertex-ai"}
+
+
 def resolve_billing_route(
     model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None
 ) -> BillingRoute:
@@ -356,6 +345,8 @@ def resolve_billing_route(
             model = bare_model
 
     url = base_url or ""
+    # Fireworks ids look like accounts/fireworks/models/<name>; keys use <name>.
+    # Every other snapshot provider keys on the last path segment as well.
     bare = model.split("/")[-1]
 
     def host(name: str) -> bool:
@@ -367,25 +358,17 @@ def resolve_billing_route(
         return BillingRoute(provider="openrouter", model=model, base_url=url, billing_mode="official_models_api")
     if provider_name == "nous" or host("inference-api.nousresearch.com"):
         return BillingRoute(provider="nous", model=model, base_url=base_url or _NOUS_DEFAULT_BASE_URL, billing_mode="official_models_api")
-    if provider_name == "anthropic":
-        return BillingRoute(provider="anthropic", model=bare, base_url=url, billing_mode="official_docs_snapshot")
-    # "openai-api" is the picker slug for direct api.openai.com; it bills as
-    # bare "openai", whose keys the snapshot uses.
-    if provider_name in {"openai", "openai-api"}:
-        return BillingRoute(provider="openai", model=bare, base_url=url, billing_mode="official_docs_snapshot")
-    if provider_name in {"minimax", "minimax-cn"}:
-        return BillingRoute(provider=provider_name, model=bare, base_url=url, billing_mode="official_docs_snapshot")
-    # AI Studio and Vertex host the same Gemini models; the snapshot is keyed on
-    # provider='google', and the Vertex "google/" vendor prefix is stripped.
-    if (
-        provider_name in {"google", "gemini", "vertex", "google-gemini", "google-ai-studio", "google-vertex", "vertex-ai"}
-        or host("aiplatform.googleapis.com")
-        or host("generativelanguage.googleapis.com")
-    ):
-        return BillingRoute(provider="google", model=bare, base_url=url, billing_mode="official_docs_snapshot")
-    if provider_name == "fireworks" or host("api.fireworks.ai"):
-        # Fireworks ids look like accounts/fireworks/models/<name>; keys use <name>.
-        return BillingRoute(provider="fireworks", model=model.rsplit("/", 1)[-1], base_url=url, billing_mode="official_docs_snapshot")
+    snapshot_provider = _SNAPSHOT_PROVIDER_ALIASES.get(provider_name)
+    if snapshot_provider is None:
+        if (
+            provider_name in _GOOGLE_PROVIDER_NAMES
+            or host("aiplatform.googleapis.com") or host("generativelanguage.googleapis.com")
+        ):
+            snapshot_provider = "google"
+        elif provider_name == "fireworks" or host("api.fireworks.ai"):
+            snapshot_provider = "fireworks"
+    if snapshot_provider:
+        return BillingRoute(provider=snapshot_provider, model=bare, base_url=url, billing_mode="official_docs_snapshot")
     if provider_name in {"custom", "local"} or (base and base_url_hostname(base) in ("localhost", "127.0.0.1")):
         return BillingRoute(provider=provider_name or "custom", model=model, base_url=url, billing_mode="unknown")
     return BillingRoute(provider=provider_name or "unknown", model=bare if model else "", base_url=url, billing_mode="unknown")
@@ -473,11 +456,7 @@ def get_pricing_entry(
 ) -> Optional[PricingEntry]:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
-        return PricingEntry(
-            input_cost_per_million=_ZERO, output_cost_per_million=_ZERO,
-            cache_read_cost_per_million=_ZERO, cache_write_cost_per_million=_ZERO, source="none",
-            pricing_version="included-route",
-        )
+        return _INCLUDED_ENTRY
     if route.provider == "openrouter":
         return _openrouter_pricing_entry(route)
     if route.base_url:
@@ -666,10 +645,9 @@ def format_token_count_compact(value: int) -> str:
         return str(int(value))
 
     sign = "-" if value < 0 else ""
-    for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if abs_value >= threshold:
-            scaled = abs_value / threshold
-            text = f"{scaled:.2f}" if scaled < 10 else f"{scaled:.1f}" if scaled < 100 else f"{scaled:.0f}"
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return f"{sign}{text}{suffix}"
+    threshold, suffix = next((t, sfx) for t, sfx in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")) if abs_value >= t)
+    scaled = abs_value / threshold
+    text = f"{scaled:.2f}" if scaled < 10 else f"{scaled:.1f}" if scaled < 100 else f"{scaled:.0f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{sign}{text}{suffix}"
