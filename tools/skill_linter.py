@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from agent.skill_utils import SKILL_PROMPT_DESC_LIMIT, parse_frontmatter
 
@@ -64,166 +64,105 @@ def _warn(rule: str, message: str) -> LintFinding:
     return LintFinding(WARNING, rule, message)
 
 
-def _check_name_matches_dir(
-    frontmatter: Dict[str, Any], skill_dir: Optional[Path],
-) -> List[LintFinding]:
-    if skill_dir is None:
-        return []
-    name = str(frontmatter.get("name", "")).strip()
-    if name and name != skill_dir.name:
-        return [_err("name-dir-mismatch", f"frontmatter name '{name}' does not match directory "
-                     f"'{skill_dir.name}'; they must be identical.")]
-    return []
-
-
-def _check_name_format(frontmatter: Dict[str, Any]) -> List[LintFinding]:
-    name = str(frontmatter.get("name", "")).strip()
-    if name and not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
-        return [_err("name-format", f"name '{name}' must be lowercase letters, digits, hyphens, "
-                     f"and underscores only.")]
-    return []
-
-
-def _check_description(frontmatter: Dict[str, Any]) -> List[LintFinding]:
-    findings: List[LintFinding] = []
-    # Measure the raw authored value: extract_skill_description() already
-    # truncates to the prompt budget, so it can never exceed the limit.
-    desc = str(frontmatter.get("description", "")).strip().strip("'\"")
-    if not desc:
-        return findings
-    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
-        findings.append(_warn(
-            "description-length",
-            f"description is {len(desc)} chars; the skill index truncates past "
-            f"{SKILL_PROMPT_DESC_LIMIT} chars + '...', losing routing "
-            f"signal. Keep it to one sentence.",
-        ))
-    lower = desc.lower()
-    hits = [w for w in _MARKETING_WORDS if re.search(rf"\b{re.escape(w)}\b", lower)]
-    if hits:
-        findings.append(_warn(
-            "description-marketing",
-            f"description contains marketing words {hits}; state the capability, not adjectives."))
-    return findings
-
-
-def _check_metadata_block(frontmatter: Dict[str, Any]) -> List[LintFinding]:
-    findings: List[LintFinding] = []
-    for key in ("version", "author", "license"):
-        if key not in frontmatter:
-            findings.append(_warn(
-                "missing-metadata", f"frontmatter is missing '{key}'; every peer skill has it."))
-    meta = frontmatter.get("metadata")
-    hermes_meta = meta.get("hermes") if isinstance(meta, dict) else None
-    if not isinstance(hermes_meta, dict):
-        findings.append(_warn(
-            "missing-metadata", "frontmatter is missing metadata.hermes.{tags, related_skills}."))
-    elif "tags" not in hermes_meta:
-        findings.append(_warn("missing-metadata", "metadata.hermes.tags is missing."))
-    author = str(frontmatter.get("author", ""))
-    if author and author.strip().lower() in ("hermes", "agent", "hermes agent") and (
-        author != "Hermes Agent"):
-        findings.append(_warn(
-            "author-caps",
-            f"author '{author}' should be 'Hermes Agent' (proper caps) or a real contributor name.",
-        ))
-    return findings
-
-
-def _check_shell_utilities(body: str) -> List[LintFinding]:
-    """Flag banned shell utilities named in PROSE (not fenced code blocks)."""
-    prose = _strip_code_blocks(body)
-    # Only backtick-wrapped mentions: bare words in sentences are too noisy.
-    return [
-        _warn("shell-utility-reference",
-              f"prose references `{util}`; name the native tool `{tool}` instead.")
-        for util, tool in _SHELL_UTIL_TO_TOOL.items()
-        if re.search(rf"`{re.escape(util)}`", prose)]
-
-
-def _check_sections(body: str) -> List[LintFinding]:
-    if not any(re.search(rf"^#+\s+{re.escape(s)}", body, re.M) for s in _EXPECTED_SECTIONS):
-        return [_warn("missing-section", "no '## When to Use' section found; skills need explicit "
-                      "trigger conditions near the top.")]
-    return []
-
-
-def _check_reference_links(body: str, skill_dir: Optional[Path]) -> List[LintFinding]:
-    """Flag references/ links in the body that don't resolve on disk."""
-    if skill_dir is None:
-        return []
-    findings: List[LintFinding] = []
-    seen: set[str] = set()
-    # Only references/, templates/, assets/ are reliably skill-owned; `scripts/`
-    # is excluded because dev skills legitimately cite repo-root scripts.
-    for match in re.finditer(r"(references|templates|assets)/[\w./-]+", body):
-        rel = match.group(0)
-        if rel in seen:
-            continue
-        seen.add(rel)
-        if "*" in rel or rel.endswith("/"):  # placeholders / globs
-            continue
-        if not (skill_dir / rel).exists():
-            findings.append(_warn("dangling-reference", f"body references '{rel}' but that file "
-                                  f"does not exist in the skill directory."))
-    return findings
-
-
-def _check_platforms_gating(
-    frontmatter: Dict[str, Any], skill_dir: Optional[Path],
-) -> List[LintFinding]:
-    """If bundled scripts use POSIX-only primitives, require platforms:."""
-    if skill_dir is None or frontmatter.get("platforms"):
-        return []
-    scripts_dir = skill_dir / "scripts"
-    if not scripts_dir.is_dir():
-        return []
-    offenders: Dict[str, List[str]] = {}
-    for script in scripts_dir.rglob("*"):
-        if not script.is_file() or script.suffix not in (".py", ".sh", ".bash"):
-            continue
-        try:
-            text = script.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        hit = [p for p in _POSIX_PRIMITIVES if p in text]
-        if hit:
-            offenders[script.name] = hit
-    if offenders:
-        detail = "; ".join(f"{k}: {v}" for k, v in offenders.items())
-        return [_warn(
-            "platforms-gating",
-            f"scripts use POSIX-only primitives ({detail}) but no 'platforms:' frontmatter is "
-            f"declared. Fix cross-platform or gate with platforms: [linux, macos].")]
-    return []
-
-
-def _check_forbidden_files(skill_dir: Optional[Path]) -> List[LintFinding]:
-    if skill_dir is None:
-        return []
-    return [
-        _warn("forbidden-file",
-              f"skill ships '{fname}'; skills should not include scaffolding/config files.")
-        for fname in _FORBIDDEN_FILES
-        if (skill_dir / fname).exists()]
-
-
-def _check_platform_list_valid(frontmatter: Dict[str, Any]) -> List[LintFinding]:
-    platforms = frontmatter.get("platforms")
-    if not platforms:
-        return []
-    valid = {"linux", "macos", "windows", "darwin"}
-    items = platforms if isinstance(platforms, list) else [platforms]
-    bad = [p for p in items if str(p).lower() not in valid]
-    if bad:
-        return [_warn("platforms-value", f"platforms contains unrecognized value(s) {bad}; "
-                      f"expected a subset of {sorted(valid)}.")]
-    return []
-
-
 def _strip_code_blocks(body: str) -> str:
     """Remove fenced code blocks so prose-only checks don't fire on examples."""
     return re.sub(r"```.*?```", "", body, flags=re.S)
+
+
+def _check_frontmatter(frontmatter: Dict[str, Any], skill_dir: Optional[Path]) -> Iterator[LintFinding]:
+    name = str(frontmatter.get("name", "")).strip()
+    if name and not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+        yield _err("name-format", f"name '{name}' must be lowercase letters, digits, hyphens, "
+                   f"and underscores only.")
+    if skill_dir is not None and name and name != skill_dir.name:
+        yield _err("name-dir-mismatch", f"frontmatter name '{name}' does not match directory "
+                   f"'{skill_dir.name}'; they must be identical.")
+    # Measure the raw authored value: extract_skill_description() already
+    # truncates to the prompt budget, so it can never exceed the limit.
+    desc = str(frontmatter.get("description", "")).strip().strip("'\"")
+    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
+        yield _warn("description-length",
+                    f"description is {len(desc)} chars; the skill index truncates past "
+                    f"{SKILL_PROMPT_DESC_LIMIT} chars + '...', losing routing "
+                    f"signal. Keep it to one sentence.")
+    hits = [w for w in _MARKETING_WORDS if re.search(rf"\b{re.escape(w)}\b", desc.lower())]
+    if hits:
+        yield _warn("description-marketing",
+                    f"description contains marketing words {hits}; state the capability, not adjectives.")
+    for key in ("version", "author", "license"):
+        if key not in frontmatter:
+            yield _warn("missing-metadata", f"frontmatter is missing '{key}'; every peer skill has it.")
+    meta = frontmatter.get("metadata")
+    hermes_meta = meta.get("hermes") if isinstance(meta, dict) else None
+    if not isinstance(hermes_meta, dict):
+        yield _warn("missing-metadata", "frontmatter is missing metadata.hermes.{tags, related_skills}.")
+    elif "tags" not in hermes_meta:
+        yield _warn("missing-metadata", "metadata.hermes.tags is missing.")
+    author = str(frontmatter.get("author", ""))
+    if author and author.strip().lower() in ("hermes", "agent", "hermes agent") and (
+        author != "Hermes Agent"
+    ):
+        yield _warn("author-caps", f"author '{author}' should be 'Hermes Agent' (proper caps) "
+                    f"or a real contributor name.")
+    platforms = frontmatter.get("platforms")
+    if platforms:
+        valid = {"linux", "macos", "windows", "darwin"}
+        items = platforms if isinstance(platforms, list) else [platforms]
+        bad = [p for p in items if str(p).lower() not in valid]
+        if bad:
+            yield _warn("platforms-value", f"platforms contains unrecognized value(s) {bad}; "
+                        f"expected a subset of {sorted(valid)}.")
+
+
+def _check_body(body: str, skill_dir: Optional[Path]) -> Iterator[LintFinding]:
+    # Only backtick-wrapped mentions in PROSE (not fenced code): bare words are too noisy.
+    prose = _strip_code_blocks(body)
+    for util, tool in _SHELL_UTIL_TO_TOOL.items():
+        if re.search(rf"`{re.escape(util)}`", prose):
+            yield _warn("shell-utility-reference",
+                        f"prose references `{util}`; name the native tool `{tool}` instead.")
+    if not any(re.search(rf"^#+\s+{re.escape(s)}", body, re.M) for s in _EXPECTED_SECTIONS):
+        yield _warn("missing-section", "no '## When to Use' section found; skills need explicit "
+                    "trigger conditions near the top.")
+    if skill_dir is None:
+        return
+    # Dangling links. Only references/, templates/, assets/ are reliably skill-owned;
+    # `scripts/` is excluded because dev skills legitimately cite repo-root scripts.
+    seen: set[str] = set()
+    for match in re.finditer(r"(references|templates|assets)/[\w./-]+", body):
+        rel = match.group(0)
+        if rel in seen or "*" in rel or rel.endswith("/"):  # dupes, placeholders, globs
+            continue
+        seen.add(rel)
+        if not (skill_dir / rel).exists():
+            yield _warn("dangling-reference", f"body references '{rel}' but that file "
+                        f"does not exist in the skill directory.")
+
+
+def _check_files(frontmatter: Dict[str, Any], skill_dir: Path) -> Iterator[LintFinding]:
+    # Bundled scripts using POSIX-only primitives require a platforms: declaration.
+    scripts_dir = skill_dir / "scripts"
+    offenders: Dict[str, List[str]] = {}
+    if not frontmatter.get("platforms") and scripts_dir.is_dir():
+        for script in scripts_dir.rglob("*"):
+            if not script.is_file() or script.suffix not in (".py", ".sh", ".bash"):
+                continue
+            try:
+                text = script.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            hit = [p for p in _POSIX_PRIMITIVES if p in text]
+            if hit:
+                offenders[script.name] = hit
+    if offenders:
+        detail = "; ".join(f"{k}: {v}" for k, v in offenders.items())
+        yield _warn("platforms-gating",
+                    f"scripts use POSIX-only primitives ({detail}) but no 'platforms:' frontmatter is "
+                    f"declared. Fix cross-platform or gate with platforms: [linux, macos].")
+    for fname in _FORBIDDEN_FILES:
+        if (skill_dir / fname).exists():
+            yield _warn("forbidden-file",
+                        f"skill ships '{fname}'; skills should not include scaffolding/config files.")
 
 
 def lint_content(content: str, *, skill_dir: Optional[Path] = None) -> List[LintFinding]:
@@ -234,17 +173,10 @@ def lint_content(content: str, *, skill_dir: Optional[Path] = None) -> List[Lint
     the create path needs before the file exists.
     """
     frontmatter, body = parse_frontmatter(content)
-    return (
-        _check_name_format(frontmatter)
-        + _check_name_matches_dir(frontmatter, skill_dir)
-        + _check_description(frontmatter)
-        + _check_metadata_block(frontmatter)
-        + _check_platform_list_valid(frontmatter)
-        + _check_shell_utilities(body)
-        + _check_sections(body)
-        + _check_reference_links(body, skill_dir)
-        + _check_platforms_gating(frontmatter, skill_dir)
-        + _check_forbidden_files(skill_dir))
+    findings = list(_check_frontmatter(frontmatter, skill_dir)) + list(_check_body(body, skill_dir))
+    if skill_dir is not None:
+        findings += _check_files(frontmatter, skill_dir)
+    return findings
 
 
 def lint_skill(skill_md_path: Path) -> List[LintFinding]:

@@ -1,8 +1,6 @@
-"""Atomic multi-op batch path for ``skill_manage`` (extracted from skill_manager_tool).
-
-``skill_manage``/``_find_skill``/``_skill_gate_bypass`` are reached lazily
-through ``tools.skill_manager_tool`` so the origin module owns all state.
-"""
+"""Atomic multi-op batch path for ``skill_manage``. Origin state
+(``skill_manage``/``_find_skill``/``_skill_gate_bypass``) is reached lazily
+through ``tools.skill_manager_tool`` so that module owns it."""
 
 import json
 import logging
@@ -49,11 +47,9 @@ def _validate_batch_ops(operations, default_name, tool_error):
         if preflight is not None:
             return None, json.dumps(preflight, ensure_ascii=False)
 
-    # Intra-batch clobber guard: sequential last-wins would SILENTLY discard an
-    # earlier op's work. A DESTRUCTIVE op (create/write_file/remove_file/full
-    # SKILL.md rewrite) on a file an earlier op touched is rejected; additive
-    # patches are always legal, so patch chains and write-then-patch stay
-    # allowed. Paths are normalized so spelling variants can't slip past.
+    # Clobber guard: a DESTRUCTIVE op (create/write_file/remove_file/full rewrite) on
+    # a file an earlier op touched would SILENTLY discard its work — reject it.
+    # Additive patches are always legal. Paths are normalized against spelling variants.
     touched_files = set()
     for i, op in enumerate(operations):
         act = op["action"]
@@ -108,18 +104,15 @@ def _snapshot_skills(names, snap_root, find_skill):
 def _restore_snapshot(pre_dir, snap, post_dir) -> None:
     if snap is not None:
         if post_dir is not None and post_dir.is_dir():
-            # Never destroy the only other copy before the restore lands: move
-            # the broken state aside and delete it only after the snapshot is
-            # back, so a failed copytree (disk full, locked file) can't turn
-            # into total skill loss.
+            # Move the broken state aside and delete it only after the snapshot is
+            # back, so a failed copytree (disk full, locked file) can't mean total loss.
             aside = post_dir.with_name(post_dir.name + ".rollback-broken")
             shutil.rmtree(aside, ignore_errors=True)
             post_dir.rename(aside)
             try:
                 shutil.copytree(snap, pre_dir)
             except Exception:
-                # Restore failed: put the broken (half-applied) state back
-                # rather than leaving nothing.
+                # Restore failed: put the half-applied state back rather than nothing.
                 shutil.rmtree(pre_dir, ignore_errors=True)
                 aside.rename(pre_dir)
                 raise
@@ -147,15 +140,11 @@ def _rollback(snapshots, find_skill):
 
 def _skill_manage_batch(operations, default_name: str = None, task_id: str = None,
                         session_id: str = None) -> str:
-    """Apply a sequence of operations atomically (memory-tool pattern).
-
-    Every touched skill is snapshotted before any op runs; any failure rolls ALL
-    touched skills back (skills the batch created are removed). ``delete`` is
+    """Apply operations atomically: every touched skill is snapshotted first and any
+    failure rolls ALL of them back (batch-created skills are removed). ``delete`` is
     only legal as the SOLE op (its recoverable-archive path doesn't compose with
-    rollback) and is routed to the single-op handler, preserving
-    absorbed_into/archive semantics. ``default_name`` is the legacy top-level
-    ``name`` fallback (staged replay).
-    """
+    rollback) and routes to the single-op handler. ``default_name`` is the legacy
+    top-level ``name`` fallback (staged replay)."""
     from tools import skill_manager_tool as _smt
     from tools.registry import tool_error
 
@@ -192,8 +181,7 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         shutil.rmtree(snap_root, ignore_errors=True)
         return tool_error(snap_err, success=False)
 
-    # Execute through the single-op path with the gate bypassed (the batch
-    # already cleared/staged it); ledger + telemetry fire per-op.
+    # Single-op path with the gate bypassed (the batch already cleared/staged it).
     results = []
     rollback_failed = False
     token = _smt._skill_gate_bypass.set(True)

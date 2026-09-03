@@ -1,9 +1,8 @@
-"""Write/delete guards for ``skill_manage`` (extracted from skill_manager_tool).
+"""Write/delete guards for ``skill_manage``.
 
-Every guard returns ``None`` when the operation may proceed, otherwise a
-refusal (error dict or message). Origin-owned state (``_find_skill``,
-``_skills_dir``) is reached lazily through ``tools.skill_manager_tool`` so
-test patches on that module keep working.
+Every guard returns ``None`` when the operation may proceed, otherwise a refusal
+(error dict or message). Origin-owned state (``_find_skill``, ``_skills_dir``) is
+reached lazily through ``tools.skill_manager_tool`` so test patches keep working.
 """
 
 import contextvars as _ctxvars
@@ -84,8 +83,7 @@ def _reset_background_review_read_marks() -> None:
 # --- Delete-target safety -----------------------------------------------------
 
 def _containing_skills_root(skill_path: Path) -> Path:
-    """Skills root (local or external_dirs entry) containing ``skill_path``;
-    falls back to the local skills dir when no root matches."""
+    """Skills root (local or external_dirs) containing ``skill_path``; local dir if none match."""
     from agent.skill_utils import get_all_skills_dirs
     from tools import skill_manager_tool as _smt
 
@@ -103,8 +101,8 @@ def _containing_skills_root(skill_path: Path) -> Path:
 
 
 def _is_path_redirect(path: Path) -> bool:
-    """True when ``path`` is a symlink or (Windows 3.12+) a junction — either
-    lets a poisoned tree redirect ``shutil.rmtree`` outside the skills root."""
+    """Symlink or (Windows 3.12+) junction — either lets a poisoned tree redirect
+    ``shutil.rmtree`` outside the skills root."""
     try:
         return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
     except OSError:
@@ -217,12 +215,10 @@ def _background_review_write_guard(
             if predicate(name):
                 return _refusal(
                     f"Refusing background curator {action} for {label} " f"skill '{name}'.")
-        # Not curator-managed (no `created_by: "agent"` marker) => user-owned.
-        # A MISSING record and an explicit `created_by: null` must resolve
-        # IDENTICALLY: keying on record presence made the policy depend on the
-        # guard's own side effect (the first successful write created a null
-        # record and the next identical write was refused). Fail closed for
-        # both; `hermes curator adopt <name>` is the supported way in.
+        # Not curator-managed (no `created_by: "agent"`) => user-owned. A MISSING
+        # record and an explicit `created_by: null` must resolve IDENTICALLY (keying
+        # on presence made the policy depend on the guard's own side effect: the
+        # first write created a null record, the next identical write was refused).
         usage_rec = skill_usage.load_usage().get(name)
         if not skill_usage._is_curator_managed_record(usage_rec):
             _detail = (f"created_by={usage_rec.get('created_by')!r}" if isinstance(usage_rec, dict)
@@ -259,11 +255,8 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
     if action not in {"edit", "patch", "delete", "write_file", "remove_file"}:
         return None
     from tools import skill_manager_tool as _smt
-
     existing = _smt._find_skill(name)
-    if not existing:
-        return None
-    return _background_review_write_guard(name, existing["path"], action)
+    return _background_review_write_guard(name, existing["path"], action) if existing else None
 
 
 def _curator_consolidation_delete_guard(
