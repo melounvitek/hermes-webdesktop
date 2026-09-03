@@ -7,7 +7,7 @@ from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from gateway.hosted_rooms_common import compact_json, identifier
+from gateway.hosted_rooms_common import bounded_int, compact_json, identifier
 
 POLICY_VERSION = 1
 MAX_POLICY_TOOLSETS = 128
@@ -54,12 +54,9 @@ class RoomExecutionPolicy:
         approval_mode = str(value["approval_mode"] or "").strip().lower()
         if approval_mode not in {"manual", "smart", "off"}:
             raise RoomExecutionPolicyError("approval_mode is invalid")
-        max_iterations = value["max_iterations"]
-        if (
-            isinstance(max_iterations, bool)
-            or not isinstance(max_iterations, int)
-            or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS):
-            raise RoomExecutionPolicyError("max_iterations is invalid")
+        max_iterations = bounded_int(
+            value["max_iterations"], error=RoomExecutionPolicyError, message="max_iterations is invalid", low=1,
+            high=MAX_POLICY_ITERATIONS)
         unsigned = {
             "version": POLICY_VERSION, "target_profile": target_profile, "enabled_toolsets": list(toolsets),
             "approval_mode": approval_mode, "max_iterations": max_iterations}
