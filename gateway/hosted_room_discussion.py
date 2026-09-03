@@ -1,14 +1,10 @@
 """Deterministic policy for same-gateway hosted-room Discussions.
 
-Translates a frozen local member roster plus the complete typed room log into
-one next driver task. Pure: no I/O, no workers, no transport or model
-knowledge. Callers persist the task with :mod:`gateway.hosted_room_driver`
-and append publication plans with :mod:`gateway.hosted_rooms`.
-
-The driver payload is deliberately not widened: Discussion coordinates live
-in deterministic ``TaskIdentity`` values and typed terminal events, so a
-restart can reconstruct a task from durable state. Callers must reconcile
-terminal driver rows into publication plans before asking for the next task.
+Pure (no I/O, transport or model knowledge): a frozen local roster plus the complete
+typed room log yields at most one next driver task. Discussion coordinates live in
+deterministic ``TaskIdentity`` values and typed terminal events rather than a widened
+driver payload, so a restart reconstructs tasks from durable state. Callers must
+reconcile terminal driver rows into publication plans before asking for the next task.
 """
 
 from __future__ import annotations
@@ -797,6 +793,15 @@ def reconstruct_task_plan(
     return reconstructed
 
 
+def _turn_coordinates(task: DiscussionTaskPlan) -> dict[str, Any]:
+    """The coordinate fields every member message and terminal event carries."""
+    return {
+        "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
+        "member_index": task.member_index, "round_index": task.round_index, "task_id": task.identity.task_id,
+        "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
+    }
+
+
 def _terminal_text(result: Any, *, field: str, fallback: str) -> str:
     if isinstance(result, Mapping):
         value = result.get(field)
@@ -829,11 +834,7 @@ def _settled_effects(
             member_actor["display_name"] = task.member.display_name
         effects.append(EventPlan(
             event_id=message_event_id, kind="message.member", actor=member_actor,
-            payload={
-                "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
-                "member_index": task.member_index, "round_index": task.round_index, "task_id": task.identity.task_id,
-                "text": text, "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
-            },
+            payload={**_turn_coordinates(task), "text": text},
             authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch))
     return {"message_event_id": None if passed else message_event_id, "passed": passed}, effects
 
@@ -901,11 +902,7 @@ def plan_publication(
     terminal_event_id = (
         f"ddeferred:{digest}:g{execution_generation}"
         if effective_status == "deferred" else f"dterminal:{digest}")
-    common_payload = {
-        "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
-        "member_index": task.member_index, "round_index": task.round_index, "seen_through_seq": task.seen_through_seq,
-        "task_id": task.identity.task_id, "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
-    }
+    common_payload = {**_turn_coordinates(task), "seen_through_seq": task.seen_through_seq}
     extra, effects = _TERMINAL_EFFECTS[effective_status](
         result, task=task, room=room, message_event_id=f"dmessage:{digest}",
         newer_same_thread=newer_same_thread, execution_generation=execution_generation)

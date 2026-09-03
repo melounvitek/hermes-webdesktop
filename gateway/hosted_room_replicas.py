@@ -1,15 +1,11 @@
 """Replica store and takeover primitives for hosted Group Chat rooms.
 
-The authority gateway owns a room's ordered log in ``gateway/hosted_rooms.py``;
-this module gives every OTHER participant gateway a durable local copy plus the
-fenced primitives to continue the room when the authority host dies:
-``ingest_page()`` (idempotent, gap- and epoch-regression-safe replay),
-``promote_replica()`` (resume locally at ``epoch + 1`` with a lineage-proving
-``authority.claimed`` event) and ``demote_room()`` (a returning stale authority
-records ``authority.lost`` when shown proof of a newer epoch).
-
-Storage primitives only: none decide *when* takeover is safe. The caller must
-establish that the previous owner can no longer commit before promoting.
+Every non-authority participant gateway keeps a durable local copy of the room log
+(``ingest_page()``: idempotent, gap- and epoch-regression-safe) plus fenced primitives to
+continue the room when the authority host dies: ``promote_replica()`` resumes locally at
+``epoch + 1`` with a lineage-proving ``authority.claimed`` event; ``demote_room()`` records
+``authority.lost`` when a returning stale authority is shown a newer epoch. Storage
+primitives only: the caller decides *when* takeover is safe.
 """
 
 from __future__ import annotations

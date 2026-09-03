@@ -1,12 +1,9 @@
 """Durable state for gateway-hosted Bot Mode rooms.
 
-This module owns only hosted-room identity and its append-only event log. It
-does not deliver events, lease relay work, or run agent turns; those belong to
-the relay and the hosted-room driver, so the room log composes with a durable
-relay without creating a second transport queue.
-
-The caller supplies the database path so tests and alternate gateway layouts
-can isolate state. Production handlers use the gateway's root ``state.db``.
+Owns only hosted-room identity and its append-only event log; delivery, relay leasing
+and agent turns belong to the relay and the hosted-room driver, so the log composes with
+a durable relay without a second transport queue. Callers supply the database path
+(production handlers use the gateway's root ``state.db``).
 """
 
 from __future__ import annotations
