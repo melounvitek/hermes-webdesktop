@@ -605,20 +605,20 @@ def _cmd_queue(rid, params, session, name, arg):
     return _ok(rid, {"type": "send", "message": arg})
 
 
-def _cmd_learn(rid, params, session, name, arg):
-    # Normal turn: the live agent gathers sources and authors the skill via skill_manage.
-    from agent.learn_prompt import build_learn_prompt
-    return _ok(rid, {"type": "send", "message": build_learn_prompt(arg)})
+def _prompt_builtin(module: str, fn: str, kw: str = ""):
+    """/learn, /plan, /init: submit ``module.fn(arg)`` as a normal turn (the live agent does the
+    work — authors the skill via skill_manage, saves the plan, generates AGENTS.md)."""
+
+    def cmd(rid, params, session, name, arg):
+        import importlib
+        build = getattr(importlib.import_module(module), fn)
+        return _ok(rid, {"type": "send", "message": build(**{kw: arg}) if kw else build(arg)})
+    return cmd
 
 
-def _cmd_plan(rid, params, session, name, arg):
-    from agent.plan_prompt import build_plan_prompt
-    return _ok(rid, {"type": "send", "message": build_plan_prompt(arg)})
-
-
-def _cmd_init(rid, params, session, name, arg):
-    from hermes_cli.init_command import build_init_prompt_for_cwd
-    return _ok(rid, {"type": "send", "message": build_init_prompt_for_cwd(extra=arg)})
+_cmd_learn = _prompt_builtin("agent.learn_prompt", "build_learn_prompt")
+_cmd_plan = _prompt_builtin("agent.plan_prompt", "build_plan_prompt")
+_cmd_init = _prompt_builtin("hermes_cli.init_command", "build_init_prompt_for_cwd", kw="extra")
 
 
 def _cmd_moa(rid, params, session, name, arg):
@@ -1421,8 +1421,8 @@ def _(rid, params: dict) -> dict:
     details: dict = {}
 
     def failure(error: str, oauth_needed: bool, tokens_present) -> dict:
-        payload = {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed}
-        return _ok(rid, {**payload, "oauth_tokens_present": tokens_present})
+        return _ok(rid, {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed,
+                         "oauth_tokens_present": tokens_present})
     try:
         tools = _probe_single_server(name, cfg, details=details)
         token_present = _oauth_tokens_present(name) if needs_oauth_token else True
