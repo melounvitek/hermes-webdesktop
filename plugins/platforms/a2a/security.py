@@ -1,13 +1,7 @@
-"""
-A2A security primitives — shared by the inbound adapter and the client tools.
-
-A2A is a *network* surface (adversarial peers in, private context out). Layers,
-opt-out only by explicit config: bind safety (no token => 127.0.0.1 only); peer
-identity (A2A_PEER_TOKENS token->name, shared A2A_BEARER_TOKEN => ip:<addr>; rate
-limiting and trust key on this, never on the body); inbound injection filtering;
-outbound credential redaction; JSONL audit log; optional trusted-peer allow-list;
-HMAC-SHA256 push signing + SSRF-safe callback URLs.
-"""
+"""A2A security primitives (adapter + client tools). A2A is a *network* surface: bind safety (no
+token => 127.0.0.1 only); peer identity from credentials, never the body (A2A_PEER_TOKENS
+token->name, shared A2A_BEARER_TOKEN => ip:<addr>); inbound injection filtering; outbound
+credential redaction; JSONL audit; trusted-peer allow-list; HMAC push signing; SSRF-safe URLs."""
 
 from __future__ import annotations
 
@@ -28,11 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def _startup_env(name: str) -> str:
-    """Read one A2A setting from the active profile's scope, else the env.
-
-    Inside a secondary profile's scope the scope is authoritative: a miss yields
-    "" and never falls through to ``os.environ`` (the default profile's tokens).
-    """
+    """One A2A setting from the active profile's scope, else the env. Inside a secondary
+    profile's scope a miss yields "" and never falls through to the default profile's env."""
     if _profile_scoped():
         from agent.secret_scope import get_secret
         return (get_secret(name) or "").strip()
@@ -41,14 +32,8 @@ def _startup_env(name: str) -> str:
 
 def _parse_peer_tokens(raw: str) -> dict[str, str]:
     """"alice:tok1,bob:tok2" -> {token: peer_name}."""
-    out: dict[str, str] = {}
-    for pair in raw.split(","):
-        if ":" not in pair:
-            continue
-        name, token = (s.strip() for s in pair.split(":", 1))
-        if name and token:
-            out[token] = name
-    return out
+    pairs = [tuple(s.strip() for s in pair.split(":", 1)) for pair in raw.split(",") if ":" in pair]
+    return {token: name for name, token in pairs if name and token}
 
 
 def _configured_trusted_peers() -> frozenset[str]:
@@ -80,13 +65,10 @@ class A2ASecurityContext:
     @classmethod
     def capture(cls) -> "A2ASecurityContext":
         bearer_token = _startup_env("A2A_BEARER_TOKEN")
-        return cls(
-            bearer_token=bearer_token,
-            peer_tokens=tuple(_parse_peer_tokens(_startup_env("A2A_PEER_TOKENS")).items()),
-            trusted_peers=_configured_trusted_peers(),
-            allow_all_users=_startup_env("A2A_ALLOW_ALL_USERS").lower() in {"1", "true", "yes"},
-            requested_host=_startup_env("A2A_HOST") or "127.0.0.1",
-            push_secret=_startup_env("A2A_PUSH_SECRET") or bearer_token)
+        return cls(bearer_token=bearer_token, peer_tokens=tuple(_parse_peer_tokens(_startup_env("A2A_PEER_TOKENS")).items()),
+                   trusted_peers=_configured_trusted_peers(),
+                   allow_all_users=_startup_env("A2A_ALLOW_ALL_USERS").lower() in {"1", "true", "yes"},
+                   requested_host=_startup_env("A2A_HOST") or "127.0.0.1", push_secret=_startup_env("A2A_PUSH_SECRET") or bearer_token)
 
     def localhost_only(self) -> bool:
         return not (self.bearer_token or self.peer_tokens)
@@ -131,28 +113,10 @@ class A2ASecurityContext:
         return hmac.new(self.push_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
-# Module-level conveniences: capture a fresh context from the current scope.
-def authenticate(auth_header: Optional[str], client_ip: str = "") -> Optional[str]:
-    return A2ASecurityContext.capture().authenticate(auth_header, client_ip)
-
-
 def localhost_only() -> bool:
+    """Fresh-context convenience for callers outside the adapter."""
     return A2ASecurityContext.capture().localhost_only()
 
-
-def resolve_bind_host() -> str:
-    return A2ASecurityContext.capture().resolve_bind_host()
-
-
-def is_trusted_peer(identity: str) -> bool:
-    return A2ASecurityContext.capture().is_trusted_peer(identity)
-
-
-def sign_push_payload(payload: dict) -> str:
-    return A2ASecurityContext.capture().sign_push_payload(payload)
-
-
-# ── Inbound injection filtering ───────────────────────────────────────────────
 
 # Neutralise (don't reject) so a task that merely *mentions* these still gets through.
 _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -190,9 +154,7 @@ _REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 def filter_inbound(text: str) -> str:
     """Defang prompt-injection markers in inbound task text."""
-    if not text:
-        return text
-    for pat in _INJECTION_PATTERNS:
+    for pat in _INJECTION_PATTERNS if text else ():
         text = pat.sub("[filtered]", text)
     return text
 
@@ -205,18 +167,13 @@ def wrap_inbound(peer: str, text: str) -> str:
 
 def redact_outbound(text: str) -> str:
     """Scrub credential-shaped substrings before sending text to a peer."""
-    if not text:
-        return text
-    for pat, repl in _REDACTION_PATTERNS:
+    for pat, repl in _REDACTION_PATTERNS if text else ():
         text = pat.sub(repl, text)
     return text
 
 
-# ── SSRF protection for push notification callback URLs ───────────────────────
-
-# Blocked even in localhost-only mode — a remote peer must not make us probe internal
-# services: link-local/AWS metadata, loopback, RFC1918, unspecified, IPv6 loopback/link-local/ULA.
-# Loopback is allowed only in localhost mode (local testing).
+# Blocked even in localhost-only mode — a remote peer must not make us probe internal services
+# (link-local/AWS metadata, RFC1918, unspecified, IPv6 link-local/ULA). Loopback only in localhost mode.
 _BLOCKED_PREFIXES = ("169.254.", "127.", "10.", *(f"172.{i}." for i in range(16, 32)), "192.168.",
                      "0.0.0.0", "::1", "fe80:", "fc00:", "fd00:")
 
@@ -225,15 +182,11 @@ def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> 
     """True when a push callback URL is http(s) and not internal/private/loopback."""
     if localhost_mode is None:
         localhost_mode = localhost_only()
-    if not url or not isinstance(url, str):
-        return False
     try:
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlparse(url) if url and isinstance(url, str) else None
     except Exception:
         return False
-    if parsed.scheme not in ("http", "https"):
-        return False
-    hostname = parsed.hostname or ""
+    hostname = (parsed.hostname or "") if parsed and parsed.scheme in ("http", "https") else ""
     if not hostname:
         return False
     hostname_lower = hostname.lower()
@@ -251,16 +204,13 @@ def is_safe_callback_url(url: str, *, localhost_mode: Optional[bool] = None) -> 
     return True
 
 
-# ── Audit log ─────────────────────────────────────────────────────────────────
-
 def audit(direction: str, peer: str, task_id: str, summary: str) -> None:
     """Append an audit record (direction: inbound | outbound | push). Never raises."""
     try:
         from .protocol import _hermes_home
         rec = {"ts": time.time(), "direction": direction, "peer": peer, "task_id": task_id, "summary": (summary or "")[:500]}
-        path = _hermes_home() / "a2a_audit.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        _hermes_home().mkdir(parents=True, exist_ok=True)
+        with (_hermes_home() / "a2a_audit.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("A2A: audit write failed", exc_info=True)
