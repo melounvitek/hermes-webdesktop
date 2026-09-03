@@ -3488,7 +3488,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 task = asyncio.create_task(asyncio.to_thread(fire_fn, *fire_args, adapters=adapters, loop=loop))
                 reservation["detached"] = True
                 task.add_done_callback(lambda _task: _release_pending_api_work(self, reservation))
-                self._track_background_task(task)
+                self._track_background_task(task, tolerate_missing=True)
                 return web.json_response({"status": "accepted", "job_id": job_id}, status=202)
 
             if not provider_supports_split_fire(provider):
@@ -3508,9 +3508,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     # -- Agent execution --------------------------------------------------------------
 
-    def _track_background_task(self, task) -> None:
-        """Register a task in ``_background_tasks`` (tolerates test doubles) with auto-discard."""
-        with suppress(TypeError, AttributeError):
+    def _track_background_task(self, task, *, tolerate_missing: bool = False) -> None:
+        """Register a task in ``_background_tasks`` (tolerates test doubles) with auto-discard.
+        ``tolerate_missing`` (cron fire paths) also swallows AttributeError from the whole
+        registration; the run/sweep paths only tolerate an unhashable task."""
+        if tolerate_missing:
+            with suppress(TypeError, AttributeError):
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            return
+        with suppress(TypeError):
             self._background_tasks.add(task)
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)

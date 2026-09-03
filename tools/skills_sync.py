@@ -19,8 +19,9 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 # Force UTF-8 stdout/stderr: GBK-style Windows locales can't encode the glyphs
 # printed here (✓ ↑ →), and install.ps1 parses this script's stdout as UTF-8.
 for _stream in (sys.stdout, sys.stderr):
-    with suppress(AttributeError, ValueError, TypeError):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(_stream, "reconfigure"):
+        with suppress(ValueError, TypeError):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path
 from tools.skill_usage import _read_skill_name, read_suppressed_names  # noqa: F401  (re-exported)

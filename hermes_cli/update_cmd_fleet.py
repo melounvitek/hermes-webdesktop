@@ -33,8 +33,9 @@ _LIST_GATEWAY_UNITS = ["list-units", "hermes-gateway*", "hermes-serve*", "--plai
 
 def _write_gateway_update_exit_code(ok: bool) -> None:
     from hermes_cli.update_cmd import get_hermes_home
+    path = get_hermes_home() / ".update_exit_code"
     with suppress(OSError):
-        (get_hermes_home() / ".update_exit_code").write_text("0" if ok else "1", encoding="utf-8")
+        path.write_text("0" if ok else "1", encoding="utf-8")
 
 
 def _fleet_restart_pending_marker_path() -> Path:

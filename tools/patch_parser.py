@@ -298,11 +298,12 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
 def _write_file_accepts_pre_content(file_ops: Any) -> bool:
     """Whether ``file_ops.write_file`` accepts ``pre_content`` — read from the signature, not by
     catching TypeError around the call, so a TypeError raised *inside* it can't double-write."""
-    with contextlib.suppress(TypeError, ValueError):
+    try:
         params = inspect.signature(file_ops.write_file).parameters
-        return "pre_content" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
-    return False
+    except (TypeError, ValueError):
+        return False
+    return "pre_content" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _apply_add(op: PatchOperation, file_ops: Any) -> ApplyResult:
