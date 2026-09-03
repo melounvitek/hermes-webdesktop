@@ -420,8 +420,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
         style_refs = _collect_style_refs(
-            image_url, reference_image_urls, kwargs.get("image_style_references"),
-        )
+            image_url, reference_image_urls, kwargs.get("image_style_references"))
         if not prompt:
             return prompt_required_error("krea", aspect)
 

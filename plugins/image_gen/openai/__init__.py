@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return resolve_static_model(
-        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai",
-    )
+        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai")
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -107,8 +106,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
         request: Dict[str, Any] = dict(
-            model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"],
-        )
+            model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
         if is_edit:
             try:
                 files = [_named_bytes_io(ref) for ref in sources]

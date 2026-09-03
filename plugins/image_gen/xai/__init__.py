@@ -56,8 +56,7 @@ _MAX_SOURCE_IMAGES = 3
 _REQUEST_TIMEOUT = 120
 _REMOTE_PREFIXES = ("http://", "https://", "data:")
 _FILE_OUTPUT_EXTRA_KEYS = (
-    "filename", "expires_at", "public_url_expires_at", "public_url_error", "storage_error",
-)
+    "filename", "expires_at", "public_url_expires_at", "public_url_error", "storage_error")
 
 
 def _base_url(creds: Dict[str, Any]) -> str:
@@ -248,8 +247,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
         }
         base_url = _base_url(creds)
         storage_options = build_xai_storage_options(
-            "image_gen", filename_prefix="hermes-xai-image", extension="png",
-        )
+            "image_gen", filename_prefix="hermes-xai-image", extension="png")
         storage_notice = maybe_mark_xai_storage_notice_seen("image_gen")
         storage_cfg = read_xai_imagine_storage_config("image_gen")
 
@@ -276,8 +274,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
 
         fail = error_factory(provider_name, aspect, model=model_id, prompt=prompt)
         result, failure = post_json(
-            endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI",
-        )
+            endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI")
         if failure:
             if failure.kind == "http":
                 logger.error("xAI image gen failed (%d): %s", failure.status, failure.message)

@@ -20,8 +20,7 @@ _PAID_FEATURE_FALLBACKS = (
     ("keepAlive", "keepAlive may require paid plan (402), retrying without it. "
                   "Sessions may timeout during long operations."),
     ("proxies", "Proxies unavailable (402), retrying without proxies. "
-                "Bot detection may be less effective."),
-)
+                "Bot detection may be less effective."))
 
 
 class BrowserbaseBrowserProvider(CloudBrowserProvider):

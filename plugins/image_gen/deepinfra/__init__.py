@@ -142,9 +142,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
             prefix=f"deepinfra_{model_id.split('/', 1)[-1].replace(':', '_')}", label="DeepInfra",
             provider="deepinfra", model=model_id, prompt=prompt, aspect=aspect,
             on_url_fail=lambda exc: logger.debug(
-                "DeepInfra: caching delivery URL failed (%s); returning URL", exc,
-            ),
-        )
+                "DeepInfra: caching delivery URL failed (%s); returning URL", exc))
         if err:
             return err
         return success_response(
