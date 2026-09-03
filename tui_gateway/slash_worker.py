@@ -3,12 +3,11 @@
 Protocol: reads JSON lines from stdin {id, command}, writes {id, ok, output|error} to stdout.
 """
 
-# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
-# from shadowing Hermes's own top-level modules.  This worker is spawned as
-# ``-m tui_gateway.slash_worker`` and inherits the user's CWD, so the ``import
-# cli`` below would otherwise resolve ``utils`` to a colliding local package and
-# crash the child in a retry loop.  ``hermes_bootstrap`` lives at the repo root
-# (no collision risk), so importing it before the guard runs is safe.
+# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory from shadowing Hermes's
+# own top-level modules. This worker is spawned as ``-m tui_gateway.slash_worker`` and inherits the
+# user's CWD, so the ``import cli`` below would otherwise resolve ``utils`` to a colliding local
+# package and crash the child in a retry loop. ``hermes_bootstrap`` lives at the repo root (no
+# collision risk), so importing it before the guard runs is safe.
 import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
@@ -42,11 +41,8 @@ def _is_orphaned(original_ppid, getppid=os.getppid) -> bool:
 
 
 def _prepare_slash_worker_runtime() -> None:
-    """Start bounded MCP discovery before HermesCLI snapshots tools.
-
-    Each slash_worker child is its own process — the parent ``hermes serve``
-    discovery thread does not populate this registry.
-    """
+    """Start bounded MCP discovery before HermesCLI snapshots tools: each slash_worker child is its
+    own process — the parent ``hermes serve`` discovery thread does not populate this registry."""
     from hermes_cli.mcp_startup import start_background_mcp_discovery, wait_for_mcp_discovery
 
     start_background_mcp_discovery(logger=logger, thread_name="slash-worker-mcp-discovery")
@@ -71,27 +67,22 @@ def _run(cli: HermesCLI, command: str) -> str:
         return ""
     if not cmd.startswith("/"):
         cmd = f"/{cmd}"
-
     buf = io.StringIO()
-
-    # Rich Console captures its file handle at construction, so redirect_stdout
-    # won't affect it; swap the console's file so self.console.print() is captured.
+    # Rich Console captures its file handle at construction, so redirect_stdout won't affect it;
+    # swap the console's file so self.console.print() is captured.
     cli.console = Console(file=buf, force_terminal=True, width=120)
-
     old = getattr(cli_mod, "_cprint", None)
     if old is not None:
         cli_mod._cprint = lambda text: print(text)
-
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             cli.process_command(cmd)
     finally:
         if old is not None:
             cli_mod._cprint = old
-
-    # Desktop chat bubbles render plain text, not ANSI.  A command that emits
-    # Rich color (e.g. /journey building its own Console under the gateway's
-    # inherited COLORTERM) would leak raw escapes; strip at this single choke point.
+    # Desktop chat bubbles render plain text, not ANSI. A command that emits Rich color (e.g.
+    # /journey building its own Console under the gateway's inherited COLORTERM) would leak raw
+    # escapes; strip at this single choke point.
     from tools.ansi_strip import strip_ansi
 
     return strip_ansi(buf.getvalue().rstrip())
@@ -106,20 +97,24 @@ def main():
     os.environ["HERMES_SESSION_KEY"] = args.session_key
     os.environ["HERMES_INTERACTIVE"] = "1"
 
-    # Start before the (hundreds-of-ms) HermesCLI build — that window is itself
-    # an orphan risk if the gateway dies mid-spawn.
+    # Start before the (hundreds-of-ms) HermesCLI build — that window is itself an orphan risk if
+    # the gateway dies mid-spawn.
     _start_parent_death_watchdog(os.getppid())
     _prepare_slash_worker_runtime()
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
 
-    # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue
-    # as the gateway entry point — any child inheriting fd 0 can flip the flag).
+    # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway
+    # entry point — any child inheriting fd 0 can flip the flag).
     _sw_recovery_times: list[float] = []
 
     def _sw_log(reason: str) -> None:
         print(f"[slash-worker] {reason}", file=sys.stderr, flush=True)
+
+    def _reply(**fields) -> None:
+        sys.stdout.write(json.dumps(fields) + "\n")
+        sys.stdout.flush()
 
     while True:
         raw = sys.stdin.readline()
@@ -127,27 +122,22 @@ def main():
             if not handle_spurious_eof(_sw_recovery_times, _sw_log):
                 break
             continue
-
         line = raw.strip()
         if not line:
             continue
-
         _in_flight.set()
         rid = None
         try:
             req = json.loads(line)
             rid = req.get("id")
-            out = _run(cli, req.get("command", ""))
-            sys.stdout.write(json.dumps({"id": rid, "ok": True, "output": out}) + "\n")
-            sys.stdout.flush()
+            _reply(id=rid, ok=True, output=_run(cli, req.get("command", "")))
         except Exception as e:
-            sys.stdout.write(json.dumps({"id": rid, "ok": False, "error": str(e)}) + "\n")
-            sys.stdout.flush()
+            _reply(id=rid, ok=False, error=str(e))
         finally:
             _in_flight.clear()
-            # Workers persist for the TUI session: release allocator pages at the
-            # command boundary like other long-lived gateway processes
-            # (trim_memory's shared cooldown coalesces nearby activity).
+            # Workers persist for the TUI session: release allocator pages at the command boundary
+            # like other long-lived gateway processes (trim_memory's shared cooldown coalesces
+            # nearby activity).
             try:
                 from hermes_cli.mem_trim import trim_memory
 
