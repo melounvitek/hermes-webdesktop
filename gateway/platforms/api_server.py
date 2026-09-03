@@ -86,15 +86,11 @@ def _prefix_names_served_profile(profile: str) -> bool:
 # Profile selected by the /p/<profile>/ URL prefix for the current request.
 # Set by the profile-prefix middleware; read by handlers / _run_agent.
 _api_request_profile: ContextVar[Optional[str]] = ContextVar(
-    "api_server_request_profile", default=None
-)
+    "api_server_request_profile", default=None)
 _api_request_browser_control_principal: ContextVar[str] = ContextVar(
-    "api_server_browser_control_principal", default=""
-)
+    "api_server_browser_control_principal", default="")
 _api_request_browser_control_transport_family: ContextVar[str] = ContextVar(
-    "api_server_browser_control_transport_family", default=""
-)
-
+    "api_server_browser_control_transport_family", default="")
 
 #: Minimal scope shape accepted by :func:`gateway.browser_control_artifacts
 #: .artifact_scope_key`: principal + session + transport family.  The API
@@ -126,25 +122,19 @@ _STATIC_FEATURE_FLAGS = {
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
-    "session_key_header": "X-Hermes-Session-Key",
-}
+    "session_key_header": "X-Hermes-Session-Key"}
 # /v1/capabilities "endpoints" table: name -> (method, path).
 _CAPABILITY_ENDPOINTS = (
-    ("health", ("GET", "/health")),
-    ("health_detailed", ("GET", "/health/detailed")),
-    ("models", ("GET", "/v1/models")),
-    ("model_options", ("GET", "/api/model/options")),
+    ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
+    ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
-    ("responses", ("POST", "/v1/responses")),
-    ("runs", ("POST", "/v1/runs")),
+    ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
     ("run_status", ("GET", "/v1/runs/{run_id}")),
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
-    ("run_stop", ("POST", "/v1/runs/{run_id}/stop")),
-    ("skills", ("GET", "/v1/skills")),
-    ("toolsets", ("GET", "/v1/toolsets")),
-    ("sessions", ("GET", "/api/sessions")),
+    ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
+    ("toolsets", ("GET", "/v1/toolsets")), ("sessions", ("GET", "/api/sessions")),
     ("session_create", ("POST", "/api/sessions")),
     ("session", ("GET", "/api/sessions/{session_id}")),
     ("session_update", ("PATCH", "/api/sessions/{session_id}")),
@@ -164,15 +154,10 @@ _BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX = "hermes-browser-control-ticket."
 
 
 def _approval_event_choices(
-    *, smart_denied: bool, allow_session: bool, allow_permanent: bool
-) -> list[str]:
+    *, smart_denied: bool, allow_session: bool, allow_permanent: bool) -> list[str]:
     if smart_denied or not allow_session:
         return ["once", "deny"]
-    return (
-        ["once", "session", "always", "deny"]
-        if allow_permanent
-        else ["once", "session", "deny"]
-    )
+    return(["once", "session", "always", "deny"] if allow_permanent else["once", "session", "deny"])
 
 
 try:
@@ -192,8 +177,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     is_network_accessible,
-    validate_media_delivery_path,
-)
+    validate_media_delivery_path)
 # Re-exported here for existing imports and constructor monkeypatches.
 from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 from agent.redact import redact_sensitive_text
@@ -206,8 +190,7 @@ from gateway.browser_control_artifacts import (
     ArtifactTooLarge,
     DEFAULT_ALLOWED_MIME_TYPES,
     DEFAULT_MAX_ARTIFACT_BYTES,
-    DEFAULT_ARTIFACT_TTL_SECONDS,
-)
+    DEFAULT_ARTIFACT_TTL_SECONDS)
 from gateway.browser_control_broker import (
     BROWSER_CONTROL_ARTIFACT_CAPABILITIES,
     BROWSER_CONTROL_CAPABILITIES,
@@ -217,8 +200,7 @@ from gateway.browser_control_broker import (
     browser_control_developer_mode,
     browser_control_protocol_supported,
     filter_browser_control_capabilities,
-    get_browser_control_broker,
-)
+    get_browser_control_broker)
 
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
@@ -363,16 +345,9 @@ _REQUEST_OPTION_MISSING = object()
 # Full internal ladder + "none" (what /reasoning and config.yaml accept); provider
 # vocabulary clamping happens downstream in agent.reasoning_effort.
 _REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-)
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _RUNTIME_AGENT_OVERRIDE_KEYS = (
-    "api_key",
-    "base_url",
-    "provider",
-    "api_mode",
-    "command",
-    "args",
-    "credential_pool",
+    "api_key", "base_url", "provider", "api_mode", "command", "args", "credential_pool",
     "max_tokens",
 )
 
@@ -428,8 +403,7 @@ def _request_service_tier(model_options: Any) -> Any:
 
 
 def _apply_runtime_agent_overrides(
-    runtime_kwargs: Dict[str, Any], overrides: Optional[Dict[str, Any]]
-) -> Dict[str, Any]:
+    runtime_kwargs: Dict[str, Any], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge resolved provider/runtime fields into ``runtime_kwargs`` in place."""
     if not isinstance(overrides, dict):
         return runtime_kwargs
@@ -479,15 +453,11 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
-        "max_tokens": max_tokens,
-    }
+        "max_tokens": max_tokens}
 
 
 def _request_agent_overrides(
-    body: Any,
-    *,
-    virtual_model: Optional[str] = None,
-    allow_bare_model: bool = True,
+    body: Any, *, virtual_model: Optional[str] = None, allow_bare_model: bool = True
 ) -> Dict[str, Any]:
     """Extract per-request model/provider/options for _run_agent.
 
@@ -544,9 +514,7 @@ def _project_client_message(message: Dict[str, Any]) -> Dict[str, Any]:
     carrier's inherited calls are historical context, not live client output.
     """
     from agent.compaction_display import (
-        _COMPACTION_INTERNAL_FIELDS,
-        project_compaction_message_for_display,
-    )
+        _COMPACTION_INTERNAL_FIELDS, project_compaction_message_for_display)
     projected = project_compaction_message_for_display(message)
     if projected is None:
         projected = message.copy()
@@ -560,8 +528,7 @@ def _project_client_message(message: Dict[str, Any]) -> Dict[str, Any]:
 def _auto_truncate_response_history(
     conversation_history: List[Dict[str, Any]],
     *,
-    limit: int = RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT,
-) -> List[Dict[str, Any]]:
+    limit: int = RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT) -> List[Dict[str, Any]]:
     """Keep recent Responses history without dropping the compaction handoff.
 
     Compaction summaries are preserved wherever they sit in the history —
@@ -574,8 +541,7 @@ def _auto_truncate_response_history(
     summary_indices = [
         index
         for index, message in enumerate(conversation_history)
-        if _is_compressed_summary_message(message)
-    ]
+        if _is_compressed_summary_message(message)]
     if not summary_indices:
         return conversation_history[-limit:]
     kept_indices = set(summary_indices[:limit])
@@ -593,8 +559,7 @@ def _auto_truncate_response_history(
 
 
 def _normalize_chat_content(
-    content: Any, *, _max_depth: int = 10, _depth: int = 0,
-) -> str:
+    content: Any, *, _max_depth: int = 10, _depth: int = 0) -> str:
     """Normalize OpenAI chat message content into a plain text string.
 
     Some clients (Open WebUI, LobeChat, etc.) send content as an array of
@@ -737,12 +702,10 @@ def _normalize_multimodal_content(content: Any) -> Any:
                 if not lowered.startswith("data:image/") or "," not in url_value:
                     raise ValueError(
                         "unsupported_content_type:Only image data URLs are supported. "
-                        "Non-image data payloads are not supported."
-                    )
+                        "Non-image data payloads are not supported.")
             elif not (lowered.startswith("http://") or lowered.startswith("https://")):
                 raise ValueError(
-                    "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs."
-                )
+                    "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs.")
             image_part: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url_value}}
             if detail is not None:
                 if not isinstance(detail, str) or not detail.strip():
@@ -753,15 +716,13 @@ def _normalize_multimodal_content(content: Any) -> Any:
         if part_type in _FILE_PART_TYPES:
             raise ValueError(
                 "unsupported_content_type:Inline image inputs are supported, "
-                "but uploaded files and document inputs are not supported on this endpoint."
-            )
+                "but uploaded files and document inputs are not supported on this endpoint.")
 
         # Unknown part type — reject explicitly so clients get a clear error
         # instead of a silently dropped turn.
         raise ValueError(
             f"unsupported_content_type:Unsupported content part type {raw_type!r}. "
-            "Only text and image_url/input_image parts are supported."
-        )
+            "Only text and image_url/input_image parts are supported.")
     if not normalized_parts:
         return ""
 
@@ -798,8 +759,7 @@ def _multimodal_validation_error(exc: ValueError, *, param: str) -> "web.Respons
 
 
 def _reap_disconnected_agent_processes(
-    agent: Any, *, source: str = "api_server_sse_disconnect"
-) -> None:
+    agent: Any, *, source: str = "api_server_sse_disconnect") -> None:
     """Reap background processes an abandoned API-server turn created.
 
     API-server turns bypass ``TurnRunner``, so they need their own trigger for
@@ -824,11 +784,9 @@ def _reap_disconnected_agent_processes(
         is_still_current = _epoch_still_current
     from gateway.run import _reap_gateway_turn_processes
     threading.Thread(
-        target=_reap_gateway_turn_processes,
-        args=(process_task_id, process_baseline),
+        target=_reap_gateway_turn_processes, args=(process_task_id, process_baseline),
         kwargs={"source": source, "is_still_current": is_still_current},
-        name=f"api-turn-reaper-{process_task_id[:12]}",
-        daemon=True,
+        name=f"api-turn-reaper-{process_task_id[:12]}", daemon=True,
     ).start()
 
 
@@ -891,8 +849,7 @@ def _chat_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
     return {
         "prompt_tokens": usage.get("input_tokens", 0),
         "completion_tokens": usage.get("output_tokens", 0),
-        "total_tokens": usage.get("total_tokens", 0),
-    }
+        "total_tokens": usage.get("total_tokens", 0)}
 
 
 def _responses_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
@@ -900,14 +857,12 @@ def _responses_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
     return {
         "input_tokens": usage.get("input_tokens", 0),
         "output_tokens": usage.get("output_tokens", 0),
-        "total_tokens": usage.get("total_tokens", 0),
-    }
+        "total_tokens": usage.get("total_tokens", 0)}
 
 
 async def _abandon_agent_task(
     agent_ref, agent_task, reason: str, *,
-    reap_source: str = "api_server_sse_disconnect", await_cancel: bool = True,
-) -> None:
+    reap_source: str = "api_server_sse_disconnect", await_cancel: bool = True) -> None:
     """Interrupt + reap an abandoned SSE agent run, then cancel its task wrapper.
 
     The run will never be resumed, so its background processes are reaped
@@ -986,43 +941,31 @@ class ResponseStore:
         if not self._db_path:
             return
         for candidate in (
-            Path(self._db_path),
-            Path(f"{self._db_path}-wal"),
-            Path(f"{self._db_path}-shm"),
-        ):
+            Path(self._db_path), Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
             try:
                 if candidate.exists():
                     candidate.chmod(0o600)
             except OSError:
                 logger.debug(
-                    "Failed to restrict response store permissions for %s",
-                    candidate,
-                    exc_info=True,
+                    "Failed to restrict response store permissions for %s", candidate, exc_info=True
                 )
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
         row = self._conn.execute(
-            "SELECT data FROM responses WHERE response_id = ?", (response_id,)
-        ).fetchone()
+            "SELECT data FROM responses WHERE response_id = ?", (response_id,)).fetchone()
         if row is None:
             return None
         self._conn.execute(
-            "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
-            (time.time(), response_id),
+            "UPDATE responses SET accessed_at = ? WHERE response_id = ?", (time.time(), response_id)
         )
         self._conn.commit()
         try:
             return json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
             logger.warning(
-                "Corrupted JSON in response store for id=%s, evicting entry",
-                response_id,
-            )
-            self._conn.execute(
-                "DELETE FROM responses WHERE response_id = ?",
-                (response_id,),
-            )
+                "Corrupted JSON in response store for id=%s, evicting entry", response_id)
+            self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
             self._conn.commit()
             return None
 
@@ -1030,8 +973,7 @@ class ResponseStore:
         """Store a response, evicting the oldest if at capacity."""
         self._conn.execute(
             "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
-            (response_id, json.dumps(data, default=str), time.time()),
-        )
+            (response_id, json.dumps(data, default=str), time.time()))
         # Evict oldest entries beyond max_size
         count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
         if count > self._max_size:
@@ -1040,48 +982,36 @@ class ResponseStore:
                 row[0]
                 for row in self._conn.execute(
                     "SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?",
-                    (count - self._max_size,),
-                ).fetchall()
-            ]
+                    (count - self._max_size,)).fetchall()]
             if evict_ids:
                 placeholders = ",".join("?" for _ in evict_ids)
                 # Clear conversation mappings pointing to evicted responses
                 self._conn.execute(
-                    f"DELETE FROM conversations WHERE response_id IN ({placeholders})",
-                    evict_ids,
-                )
+                    f"DELETE FROM conversations WHERE response_id IN ({placeholders})", evict_ids)
                 # Delete evicted responses
                 self._conn.execute(
-                    f"DELETE FROM responses WHERE response_id IN ({placeholders})",
-                    evict_ids,
-                )
+                    f"DELETE FROM responses WHERE response_id IN ({placeholders})", evict_ids)
         self._conn.commit()
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
         # Clear conversation mappings pointing to this response
-        self._conn.execute(
-            "DELETE FROM conversations WHERE response_id = ?", (response_id,)
-        )
-        cursor = self._conn.execute(
-            "DELETE FROM responses WHERE response_id = ?", (response_id,)
-        )
+        self._conn.execute("DELETE FROM conversations WHERE response_id = ?", (response_id,))
+        cursor = self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
         self._conn.commit()
         return cursor.rowcount > 0
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
         row = self._conn.execute(
-            "SELECT response_id FROM conversations WHERE name = ?", (name,)
-        ).fetchone()
+            "SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
         return row[0] if row else None
 
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id."""
         self._conn.execute(
             "INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)",
-            (name, response_id),
-        )
+            (name, response_id))
         self._conn.commit()
 
     def close(self) -> None:
@@ -1102,9 +1032,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
-}
-
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key"}
 
 if AIOHTTP_AVAILABLE:
     @web.middleware
@@ -1128,7 +1056,6 @@ if AIOHTTP_AVAILABLE:
 else:
     cors_middleware = None  # type: ignore[assignment]
 
-
 _MEDIA_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _MEDIA_MIME = {
     ".png": "image/png",
@@ -1136,8 +1063,7 @@ _MEDIA_MIME = {
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
-    ".bmp": "image/bmp",
-}
+    ".bmp": "image/bmp"}
 _MEDIA_DATA_URL_MAX_BYTES = 5 * 1024 * 1024  # skip images larger than 5MB
 
 
@@ -1194,9 +1120,7 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
             "message": _redact_api_error_text(message),
             "type": err_type,
             "param": param,
-            "code": code,
-        }
-    }
+            "code": code}}
 
 
 def _error_response(
@@ -1208,8 +1132,7 @@ def _error_response(
 
 
 _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextVar(
-    "api_agent_request_reservation", default=None
-)
+    "api_agent_request_reservation", default=None)
 
 
 def _admit_api_agent_request(handler):
@@ -1227,8 +1150,7 @@ def _admit_api_agent_request(handler):
         auth_err = (
             self._check_run_auth(request, permission="dispatch")
             if _api_runs._uses_room_run_auth(self, request)
-            else self._check_auth(request)
-        )
+            else self._check_auth(request))
         if auth_err:
             return auth_err
         draining = self._draining_response()
@@ -1299,9 +1221,7 @@ _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "X-XSS-Protection": "0",
-    "Referrer-Policy": "no-referrer",
-}
-
+    "Referrer-Policy": "no-referrer"}
 
 if AIOHTTP_AVAILABLE:
     @web.middleware
@@ -1366,9 +1286,7 @@ def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
 
 
 def _derive_chat_session_id(
-    system_prompt: Optional[str],
-    first_user_message: str,
-) -> str:
+    system_prompt: Optional[str], first_user_message: str) -> str:
     """Derive a stable session ID from the conversation's first user message.
 
     OpenAI-compatible frontends (Open WebUI, LibreChat, etc.) send the full
@@ -1392,12 +1310,10 @@ try:
         remove_job as _cron_remove,
         pause_job as _cron_pause,
         resume_job as _cron_resume,
-        trigger_job as _cron_trigger,
-    )
+        trigger_job as _cron_trigger)
     from cron.scheduler import (
         CronSchedulerRegistrationError as _CronSchedulerRegistrationError,
-        create_job_with_scheduler_registration as _cron_create,
-    )
+        create_job_with_scheduler_registration as _cron_create)
     _CRON_AVAILABLE = True
 except ImportError:
     _cron_list = None
@@ -1476,11 +1392,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._port: int = _coerce_port(raw_port, DEFAULT_PORT)
         self._api_key: str = extra.get("key", _get_scoped_secret("API_SERVER_KEY", ""))
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
-            extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
-        )
+            extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")))
         self._model_name: str = self._resolve_model_name(
-            extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
-        )
+            extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")))
         # model_routes (platforms.api_server.extra): alias → per-client backend.
         #   model_routes:
         #     minimax-m2:                 # alias the client sends as "model"
@@ -1489,15 +1403,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         #       api_key: "sk-…"           # optional UPSTREAM key (not caller auth; never logged)
         #       base_url: "https://…"     # optional
         self._model_routes: Dict[str, Dict[str, Any]] = self._parse_model_routes(
-            extra.get("model_routes"),
-        )
+            extra.get("model_routes"))
         # direct_model_requests: opt-in passthrough for a bare ``model`` (no provider) on
         # the OpenAI-compatible surfaces. Off by default: generic clients hardcode
         # "gpt-4o" etc. and rely on the gateway default. Explicit ``provider`` and the
         # Hermes-native endpoints are always honored.
         self._direct_model_requests: bool = _coerce_request_bool(
-            extra.get("direct_model_requests"), default=False
-        )
+            extra.get("direct_model_requests"), default=False)
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -1547,8 +1459,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return (
                 int(getattr(self, "_pending_agent_requests", 0))
                 + int(self._inflight_agent_runs)
-                + sum(not task.done() for task in self._active_run_tasks.values())
-            )
+                + sum(not task.done() for task in self._active_run_tasks.values()))
         except Exception:
             return 0
 
@@ -1586,9 +1497,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 runner
                 and (
                     getattr(runner, "_draining", False)
-                    or getattr(runner, "_external_drain_active", False)
-                )
-            )
+                    or getattr(runner, "_external_drain_active", False)))
         except Exception:
             return False
 
@@ -1597,9 +1506,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not self._gateway_is_draining():
             return None
         return _error_response(
-            "Gateway is draining existing work; retry shortly.",
-            503,
-            code="gateway_draining",
+            "Gateway is draining existing work; retry shortly.", 503, code="gateway_draining",
             headers={"Retry-After": "1"},
         )
 
@@ -1617,8 +1524,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             for status in self._run_statuses.values()
             # "stopping" is not terminal: real executor work continues until the agent
             # notices the interrupt (unbounded window), so it must still count.
-            if status.get("status") in {"queued", "running", "waiting_for_approval", "stopping"}
-        )
+            if status.get("status") in {"queued", "running", "waiting_for_approval", "stopping"})
         process_depth = 0
         active_delegations = 0
         try:
@@ -1658,12 +1564,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         try:
             from hermes_cli.config import cfg_get, load_config
             raw = cfg_get(
-                load_config(),
-                "gateway",
-                "api_server",
-                "max_concurrent_runs",
-                default=default,
-            )
+                load_config(), "gateway", "api_server", "max_concurrent_runs", default=default)
             value = int(raw)
         except Exception:
             return default
@@ -1742,8 +1643,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "real_ip": self._clean_log_value(request.headers.get("X-Real-IP", "")),
             "method": self._clean_log_value(request.method, max_len=16),
             "path": self._clean_log_value(request.path_qs, max_len=500),
-            "user_agent": self._clean_log_value(request.headers.get("User-Agent", ""), max_len=300),
-        }
+            "user_agent": self._clean_log_value(request.headers.get("User-Agent", ""), max_len=300)}
 
     def _request_audit_log_suffix(self, request: "web.Request") -> str:
         ctx = self._request_audit_context(request)
@@ -1788,8 +1688,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.warning(
                 "Failed to resolve a usable profile-scoped API_SERVER_KEY for %r: %s",
                 profile,
-                type(exc).__name__,
-            )
+                type(exc).__name__)
             return ""
 
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
@@ -1813,18 +1712,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "API server rejected request for profile %r: no profile-scoped "
                 "API_SERVER_KEY is configured; %s",
                 profile,
-                self._request_audit_log_suffix(request),
-            )
+                self._request_audit_log_suffix(request))
             return web.json_response(
                 {
                     "error": {
                         "message": "Invalid gateway API key (API_SERVER_KEY)",
                         "type": "gateway_auth_error",
-                        "code": "gateway_auth_failed",
-                    }
-                },
-                status=401,
-            )
+                        "code": "gateway_auth_failed"}},
+                status=401)
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
@@ -1833,13 +1728,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if hmac.compare_digest(token.encode(), expected_key.encode()):
                 return None  # Auth OK
         logger.warning(
-            "API server rejected invalid API key: %s",
-            self._request_audit_log_suffix(request),
-        )
+            "API server rejected invalid API key: %s", self._request_audit_log_suffix(request))
         return web.json_response(
             {"error": {"message": "Invalid gateway API key (API_SERVER_KEY)", "type": "gateway_auth_error", "code": "gateway_auth_failed"}},
-            status=401,
-        )
+            status=401)
 
     @staticmethod
     def _normalize_callback_platform(value: str) -> str:
@@ -1849,10 +1741,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return normalized
 
     def _get_platform_callback_adapter(
-        self,
-        request: "web.Request",
-        platform_name: str,
-    ) -> Optional[Any]:
+        self, request: "web.Request", platform_name: str) -> Optional[Any]:
         injected = request.app.get("platform_event_adapters")
         if isinstance(injected, dict):
             adapter = injected.get(platform_name)
@@ -1887,8 +1776,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "Platform adapter does not support HTTP events",
                 503,
-                code="platform_http_events_unsupported",
-            )
+                code="platform_http_events_unsupported")
         auth_header = request.headers.get("Authorization", "")
         try:
             if asyncio.iscoroutinefunction(verifier):
@@ -1905,8 +1793,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "Invalid platform event authorization",
                 401,
-                code=code or "invalid_platform_event_authorization",
-            )
+                code=code or "invalid_platform_event_authorization")
         try:
             payload = await request.json()
         except Exception:
@@ -1918,9 +1805,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         except Exception:
             logger.exception("Platform HTTP event dispatch failed for %s", platform_name)
             return _error_response(
-                "Platform event dispatch failed",
-                500,
-                err_type="server_error",
+                "Platform event dispatch failed", 500, err_type="server_error",
                 code="platform_event_dispatch_failed",
             )
         return web.json_response(result if isinstance(result, dict) else {})
@@ -1951,20 +1836,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Multiplexing off: only a self-referential prefix may fall through. Ignoring
             # any prefix served the owner's toolsets/capabilities (and misdelivered peer
             # DMs) under another profile's URL — fail closed.
-            return (
-                None
-                if _prefix_names_served_profile(profile)
-                else _PROFILE_REJECTED
-            )
+            return(None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED)
         try:
             from hermes_cli.profiles import profiles_to_serve
             served = {
                 name
                 for name, _ in profiles_to_serve(
                     multiplex=True,
-                    profile_allowlist=getattr(cfg, "multiplex_profile_allowlist", None),
-                )
-            }
+                    profile_allowlist=getattr(cfg, "multiplex_profile_allowlist", None))}
         except Exception:
             return _PROFILE_REJECTED
         if profile not in served:
@@ -2010,11 +1889,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 with self._profile_scope(profile):
                     resolved_profile = profile or "default"
                     principal_token = _api_request_browser_control_principal.set(
-                        self._derive_browser_control_principal(resolved_profile)
-                    )
+                        self._derive_browser_control_principal(resolved_profile))
                     family_token = _api_request_browser_control_transport_family.set(
-                        self._browser_control_transport_family(request)
-                    )
+                        self._browser_control_transport_family(request))
                     try:
                         return await handler(request)
                     finally:
@@ -2072,8 +1949,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("DELETE", "/api/jobs/{job_id}", self._handle_delete_job),
             ("POST", "/api/jobs/{job_id}/pause", self._handle_pause_job),
             ("POST", "/api/jobs/{job_id}/resume", self._handle_resume_job),
-            ("POST", "/api/jobs/{job_id}/run", self._handle_run_job),
-        ]
+            ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
         if _CRON_AVAILABLE:
@@ -2094,8 +1970,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _SESSION_SOURCE = "api_server"
 
     def _declared_conversation_session(
-        self, gateway_session_key: Optional[str]
-    ) -> Optional[str]:
+        self, gateway_session_key: Optional[str]) -> Optional[str]:
         """Resolve the live session a client declared with ``X-Hermes-Session-Key``.
 
         The key names the *conversation*; ``session_id`` names its current
@@ -2118,16 +1993,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None
         try:
             row = db.find_latest_gateway_session_for_peer(
-                source=self._SESSION_SOURCE, session_key=key
-            )
+                source=self._SESSION_SOURCE, session_key=key)
         except Exception:
             logger.debug("[%s] declared-conversation lookup failed", self.name, exc_info=True)
             return None
         return str(row["id"]) if row and row.get("id") else None
 
     def _bind_declared_conversation(
-        self, session_id: Optional[str], gateway_session_key: Optional[str]
-    ) -> None:
+        self, session_id: Optional[str], gateway_session_key: Optional[str]) -> None:
         """Record the declared conversation key on the session row.
 
         Counterpart to :meth:`_declared_conversation_session`: ``AIAgent``
@@ -2150,29 +2023,20 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             current = str(existing.get("session_key") or "").strip()
             if current and current != key:
                 logger.debug(
-                    "[%s] refusing to rebind session %s from a different "
-                    "declared conversation",
-                    self.name,
-                    sid,
+                    "[%s] refusing to rebind session %s from a different declared conversation",
+                    self.name, sid,
                 )
                 return
             db.record_gateway_session_peer(
-                sid,
-                source=self._SESSION_SOURCE,
-                session_key=key,
+                sid, source=self._SESSION_SOURCE, session_key=key,
                 include_compression_ancestors=True,
             )
         except Exception:
             logger.debug(
-                "[%s] declared-conversation bind failed for %s",
-                self.name,
-                sid,
-                exc_info=True,
-            )
+                "[%s] declared-conversation bind failed for %s", self.name, sid, exc_info=True)
 
     def _parse_session_key_header(
-        self, request: "web.Request"
-    ) -> tuple[Optional[str], Optional["web.Response"]]:
+        self, request: "web.Request") -> tuple[Optional[str], Optional["web.Response"]]:
         """Extract and validate ``X-Hermes-Session-Key`` (stable per-channel memory scope).
 
         Independent of ``X-Hermes-Session-Id``. Returns ``(key_or_None, None)``
@@ -2185,8 +2049,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not self._api_key:
             logger.warning(
                 "X-Hermes-Session-Key rejected: no API key configured. "
-                "Set API_SERVER_KEY to enable long-term memory scoping."
-            )
+                "Set API_SERVER_KEY to enable long-term memory scoping.")
             return None, _error_response("X-Hermes-Session-Key requires API key authentication. "
                     "Configure API_SERVER_KEY to enable this feature.", 403)
 
@@ -2195,13 +2058,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if re.search(r'[\r\n\x00]', raw):
             return None, web.json_response(
                 {"error": {"message": "Invalid session key", "type": "invalid_request_error"}},
-                status=400,
-            )
+                status=400)
         if len(raw) > self._MAX_SESSION_HEADER_LEN:
             return None, web.json_response(
                 {"error": {"message": "Session key too long", "type": "invalid_request_error"}},
-                status=400,
-            )
+                status=400)
         return raw, None
 
     # ------------------------------------------------------------------
@@ -2320,8 +2181,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if raw:
                 logger.warning(
                     "api_server model_routes ignored: expected a mapping, got %s",
-                    type(raw).__name__,
-                )
+                    type(raw).__name__)
             return {}
         allowed_keys = ("model", "provider", "api_key", "base_url")
         routes: Dict[str, Dict[str, Any]] = {}
@@ -2329,18 +2189,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             alias_str = str(alias).strip()
             if not alias_str or not isinstance(cfg, dict):
                 logger.warning(
-                    "api_server model_routes: dropping invalid route entry %r", alias_str or alias
-                )
+                    "api_server model_routes: dropping invalid route entry %r", alias_str or alias)
                 continue
             route = {
                 key: str(cfg[key]).strip()
                 for key in allowed_keys
-                if cfg.get(key) is not None and str(cfg[key]).strip()
-            }
+                if cfg.get(key) is not None and str(cfg[key]).strip()}
             if not route.get("model"):
                 logger.warning(
-                    "api_server model_routes: route %r has no 'model'; dropping", alias_str
-                )
+                    "api_server model_routes: route %r has no 'model'; dropping", alias_str)
                 continue
             routes[alias_str] = route
         return routes
@@ -2452,14 +2309,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "require_model_lock was set but no model/provider was provided",
                 400,
-                code="missing_model",
-            )
+                code="missing_model")
         if not route or runtime_request.get("route_source") == "global":
             return _error_response(
                 "Requested Browser model lock cannot be routed; refusing silent global fallback",
                 409,
-                code="model_lock_unavailable",
-            )
+                code="model_lock_unavailable")
         return None
 
     def _persist_session_runtime_lock(self, session_id: str, runtime_request: Dict[str, Any]) -> bool:
@@ -2478,9 +2333,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return False
         try:
             db.update_session_runtime_lock(
-                session_id,
-                model=model or None,
-                provider=provider or None,
+                session_id, model=model or None, provider=provider or None,
                 model_options=runtime_request.get("model_options") or {},
                 route_source=runtime_request.get("route_source") or "",
                 confirmed=bool(runtime_request.get("require_model_lock")),
@@ -2504,10 +2357,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return {}
 
     def _runtime_request_from_persisted_session_lock(
-        self,
-        session: Optional[Dict[str, Any]],
-        body: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+        self, session: Optional[Dict[str, Any]], body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(session, dict):
             return None
         model_config = self._parse_session_model_config(session.get("model_config"))
@@ -2519,9 +2369,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not model and not provider:
             return None
         persisted_route_source = self._clean_runtime_id(
-            lock.get("route_source"),
-            max_len=64,
-        ).lower()
+            lock.get("route_source"), max_len=64).lower()
         route: Optional[Dict[str, Any]] = None
         if persisted_route_source == "model_routes":
             route = self._resolve_route(model) if model else None
@@ -2532,8 +2380,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_options = (
             body.get("model_options")
             if isinstance(body.get("model_options"), dict)
-            else lock.get("model_options")
-        )
+            else lock.get("model_options"))
         return {
             "requested": {"provider": provider, "model": model, "raw_model": model},
             "route": route or None,
@@ -2541,15 +2388,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "runtime_options": self._runtime_options_from_model_options(model_options),
             "require_model_lock": True,
             "model_options": model_options if isinstance(model_options, dict) else {},
-            "persisted_lock": True,
-        }
+            "persisted_lock": True}
 
     def _effective_session_runtime_request(
-        self,
-        *,
-        session: Optional[Dict[str, Any]],
-        body: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        self, *, session: Optional[Dict[str, Any]], body: Dict[str, Any]) -> Dict[str, Any]:
         runtime_request = self._session_runtime_request_from_body(body)
         requested = runtime_request.get("requested") or {}
         if requested.get("model") or requested.get("provider"):
@@ -2564,13 +2406,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         runtime: Optional[Dict[str, Any]] = None,
         requested_runtime: Optional[Dict[str, Any]] = None,
         route_source: str = "global",
-        model_lock: str = "",
-    ) -> Dict[str, Any]:
+        model_lock: str = "") -> Dict[str, Any]:
         payload = dict(runtime or {})
         provider = cls._clean_runtime_id(
             payload.get("provider") or payload.get("provider_id") or payload.get("effective_provider"),
-            max_len=80,
-        )
+            max_len=80)
         model = cls._clean_runtime_id(payload.get("model") or payload.get("model_id") or payload.get("effective_model"))
         result: Dict[str, Any] = {
             "provider": provider,
@@ -2581,8 +2421,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             req = requested_runtime or payload.get("requested") or {}
             result["requested"] = {
                 "provider": cls._clean_runtime_id(req.get("provider"), max_len=80),
-                "model": cls._clean_runtime_id(req.get("model")),
-            }
+                "model": cls._clean_runtime_id(req.get("model"))}
         if model_lock or payload.get("model_lock"):
             result["model_lock"] = cls._clean_runtime_id(model_lock or payload.get("model_lock"), max_len=32)
         return result
@@ -2619,8 +2458,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 logger.debug(
                     "api_server failed to rehydrate session /model override for %s",
                     session_key,
-                    exc_info=True,
-                )
+                    exc_info=True)
             override = runner._session_model_overrides.get(session_key)
             return dict(override) if isinstance(override, dict) else None
         except Exception:
@@ -2633,8 +2471,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         gateway_session_key: Optional[str],
         requested_model: Optional[str],
         requested_provider: Optional[str],
-        route: Optional[Dict[str, Any]],
-    ) -> Optional[str]:
+        route: Optional[Dict[str, Any]]) -> Optional[str]:
         """Return a 400-worthy conflict string for ambiguous route/provider mixes."""
         request_provider = _clean_request_string(requested_provider)
         if not request_provider or not isinstance(route, dict):
@@ -2650,13 +2487,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if route_provider and request_provider != route_provider:
             return (
                 f"Model route '{route_alias}' is pinned to provider '{route_provider}'. "
-                f"Remove 'provider' or use '{route_provider}'."
-            )
+                f"Remove 'provider' or use '{route_provider}'.")
         if not route_provider and (route_api_key or route_base_url):
             return (
                 f"Model route '{route_alias}' pins route credentials/base_url. "
-                "Do not combine it with an explicit 'provider'."
-            )
+                "Do not combine it with an explicit 'provider'.")
         return None
 
     def _select_agent_runtime(
@@ -2670,8 +2505,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_model: Optional[str],
         confirmed_runtime_lock: bool,
         gateway_session_key: Optional[str],
-        session_id: Optional[str],
-    ) -> tuple:
+        session_id: Optional[str]) -> tuple:
         """Apply the model/provider precedence chain for one agent (mutates ``runtime_kwargs``).
 
         Precedence mirrors the gateway contract: confirmed Browser model lock →
@@ -2689,19 +2523,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         route_base_url = _clean_request_string(route.get("base_url")) if isinstance(route, dict) else None
 
         def _resolve_provider_runtime(
-            provider: Optional[str],
-            *,
-            target_model: Optional[str],
-            required: bool,
+            provider: Optional[str], *, target_model: Optional[str], required: bool
         ) -> Optional[Dict[str, Any]]:
             provider_name = _clean_request_string(provider)
             if not provider_name:
                 return None
             try:
                 return _resolve_request_runtime_agent_kwargs(
-                    provider_name,
-                    target_model=target_model or None,
-                )
+                    provider_name, target_model=target_model or None)
             except Exception as exc:
                 try:
                     from gateway.run import _resolve_runtime_agent_kwargs_for_provider
@@ -2715,9 +2544,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     raise _ProviderAuthResolutionError(str(exc)) from exc
                 logger.debug(
                     "api_server provider-runtime refresh failed for provider=%s model=%s",
-                    provider_name,
-                    target_model or "",
-                    exc_info=True,
+                    provider_name, target_model or "", exc_info=True,
                 )
                 return None
 
@@ -2735,10 +2562,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_provider = _clean_request_string(session_override.get("provider"))
             current_provider = _clean_request_string(runtime_kwargs.get("provider"))
             provider_runtime = _resolve_provider_runtime(
-                session_provider or current_provider,
-                target_model=override_model,
-                required=False,
-            )
+                session_provider or current_provider, target_model=override_model, required=False)
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
@@ -2746,25 +2570,20 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if route or request_model or request_provider:
                 logger.debug(
                     "api_server request selection skipped: session /model override wins for %s",
-                    session_key or "",
-                )
+                    session_key or "")
         elif session_row_model and not confirmed_runtime_lock:
             # Session-persisted raw model (no route alias) is a standing selection and
             # pins this session's turns ahead of per-request body values.
             current_provider = _clean_request_string(runtime_kwargs.get("provider"))
             provider_runtime = _resolve_provider_runtime(
-                current_provider,
-                target_model=session_row_model,
-                required=False,
-            )
+                current_provider, target_model=session_row_model, required=False)
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
             model = resolve_effective_model(None, session_row_model, model)
             if request_model or request_provider:
                 logger.debug(
                     "api_server request selection skipped: session-persisted model wins for %s",
-                    session_key or "",
-                )
+                    session_key or "")
         else:
             if route is not None:
                 # The request's ``model`` field selected this route, so its
@@ -2778,16 +2597,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             effective_provider = request_provider or route_provider or current_provider
             provider_runtime = None
             if effective_provider and (
-                bool(request_provider or route_provider) or effective_model != model
-            ):
+                bool(request_provider or route_provider) or effective_model != model):
                 provider_runtime = _resolve_provider_runtime(
                     effective_provider,
                     target_model=effective_model,
                     # A confirmed Browser lock fails closed: if the locked
                     # provider cannot be resolved, never fall through to
                     # the previous global provider's credentials.
-                    required=bool(request_provider) or confirmed_runtime_lock,
-                )
+                    required=bool(request_provider) or confirmed_runtime_lock)
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
             elif effective_provider and effective_provider != current_provider:
@@ -2805,8 +2622,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     model,
                     runtime_kwargs.get("provider"),
                     route_provider or "",
-                    request_provider or "",
-                )
+                    request_provider or "")
 
         # No model.default but a provider resolved (e.g. `hermes auth add` without
         # `hermes model`): use the provider's first catalog model. Runs after the
@@ -2818,8 +2634,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 if model:
                     logger.info(
                         "No model configured — defaulting to %s for provider %s",
-                        model, runtime_kwargs["provider"],
-                    )
+                        model, runtime_kwargs["provider"])
             except Exception:
                 pass
 
@@ -2835,8 +2650,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "Empty model resolved for session=%s — recovering "
                     "last-known-good model %s (config read likely returned "
                     "empty; see #35314)",
-                    _resolved_key, _recovered,
-                )
+                    _resolved_key, _recovered)
                 model = _recovered
         elif model:
             if model != self._model_name:
@@ -2861,8 +2675,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_model: Optional[str] = None,
         confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[Dict[str, Any]] = None,
-        room_execution_policy: Optional[Dict[str, Any]] = None,
-    ) -> Any:
+        room_execution_policy: Optional[Dict[str, Any]] = None) -> Any:
         """Create an AIAgent using the gateway's runtime config + platform toolsets.
 
         ``gateway_session_key`` (X-Hermes-Session-Key) persists across
@@ -2879,8 +2692,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             _resolve_runtime_agent_kwargs,
             _resolve_gateway_model,
             _load_gateway_config,
-            GatewayRunner,
-        )
+            GatewayRunner)
         from hermes_cli.tools_config import _get_platform_tools
 
         # Catch RuntimeError ONLY around this call: it is the sole raiser for provider
@@ -2903,8 +2715,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             runtime_kwargs, model,
             requested_model=requested_model, requested_provider=requested_provider, route=route,
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-            gateway_session_key=gateway_session_key, session_id=session_id,
-        )
+            gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         max_iterations = _current_max_iterations()
@@ -2916,11 +2727,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
-        fallback_model = (
-            None
-            if confirmed_runtime_lock
-            else GatewayRunner._load_fallback_model()
-        )
+        fallback_model = (None if confirmed_runtime_lock else GatewayRunner._load_fallback_model())
 
         # Resolve reasoning against the model that will actually run (per-model
         # reasoning_overrides key off it), so only after the precedence chain settles.
@@ -2928,8 +2735,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         reasoning_config = (
             request_reasoning_config
             if request_reasoning_config is not None
-            else GatewayRunner._load_reasoning_config(model)
-        )
+            else GatewayRunner._load_reasoning_config(model))
         agent_kwargs = {
             "model": model,
             **runtime_kwargs,
@@ -2948,8 +2754,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "session_db": self._ensure_session_db(),
             "fallback_model": fallback_model,
             "reasoning_config": reasoning_config,
-            "gateway_session_key": gateway_session_key,
-        }
+            "gateway_session_key": gateway_session_key}
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
@@ -2963,9 +2768,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 if session_override
                 else "raw_request"
                 if route or request_model or request_provider
-                else "global"
-            ),
-        }
+                else "global")}
         return agent
 
     # ------------------------------------------------------------------
@@ -2975,8 +2778,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response(
-            {"status": "ok", "platform": "hermes-agent", "version": _hermes_version()}
-        )
+            {"status": "ok", "platform": "hermes-agent", "version": _hermes_version()})
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — rich status for cross-container dashboard probing.
@@ -2993,8 +2795,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             derive_gateway_drainable,
             normalize_updated_at,
             parse_active_agents,
-            read_runtime_status,
-        )
+            read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
         gw_active = parse_active_agents(runtime.get("active_agents", 0))
@@ -3004,10 +2805,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
         from gateway.run import _resolve_gateway_model
         readiness = collect_runtime_readiness(
-            configured_model=_resolve_gateway_model(),
-            runtime_status=runtime,
-            active_api_runs=active_api_runs,
-            process_completion_queue_depth=process_depth,
+            configured_model=_resolve_gateway_model(), runtime_status=runtime,
+            active_api_runs=active_api_runs, process_completion_queue_depth=process_depth,
             active_delegations=active_delegations,
         )
         return web.json_response({
@@ -3019,20 +2818,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "platforms": runtime.get("platforms", {}),
             "active_agents": gw_active,
             "gateway_busy": derive_gateway_busy(
-                gateway_running=True,
-                gateway_state=gw_state,
-                active_agents=gw_active,
-            ),
+                gateway_running=True, gateway_state=gw_state, active_agents=gw_active),
             "gateway_drainable": derive_gateway_drainable(
-                gateway_running=True,
-                gateway_state=gw_state,
-            ),
+                gateway_running=True, gateway_state=gw_state),
             "exit_reason": runtime.get("exit_reason"),
             # Contract: updated_at is RFC3339 string | null, never a number —
             # the state file may carry legacy epoch floats or hand-edited junk.
             "updated_at": normalize_updated_at(runtime.get("updated_at")),
-            "pid": os.getpid(),
-        })
+            "pid": os.getpid()})
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — list hermes-agent and any configured model_routes aliases.
@@ -3048,10 +2841,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # Middleware already entered the profile runtime scope when a /p/
         # prefix was present, so get_active_profile_name() resolves correctly.
         model_name = (
-            self._resolve_model_name("")
-            if _api_request_profile.get()
-            else self._model_name
-        )
+            self._resolve_model_name("") if _api_request_profile.get() else self._model_name)
         models = [
             {
                 "id": model_name,
@@ -3060,9 +2850,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "owned_by": "hermes",
                 "permission": [],
                 "root": model_name,
-                "parent": None,
-            }
-        ]
+                "parent": None}]
         # Expose configured model route aliases so clients can discover them.
         # Only the alias and resolved model name are exposed — never provider
         # credentials.
@@ -3076,8 +2864,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "owned_by": "hermes",
                 "permission": [],
                 "root": route_cfg.get("model", alias),
-                "parent": model_name,
-            })
+                "parent": model_name})
         return web.json_response({"object": "list", "data": models})
 
     async def _handle_model_options(self, request: "web.Request") -> "web.Response":
@@ -3097,10 +2884,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
             def _build_payload() -> Dict[str, Any]:
                 return build_model_options_payload(
-                    load_picker_context(),
-                    include_unconfigured=True,
-                    refresh=refresh,
-                )
+                    load_picker_context(), include_unconfigured=True, refresh=refresh)
 
             # Inventory enrichment can fetch pricing and provider catalogs.
             # Keep all synchronous picker work off aiohttp's event loop.
@@ -3132,9 +2916,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "description": (
                     "The API server creates a server-side Hermes AIAgent; "
                     "tools execute on the API-server host unless a future "
-                    "explicit split-runtime mode is enabled."
-                ),
-            },
+                    "explicit split-runtime mode is enabled.")},
             "features": {
                 "chat_completions": True,
                 "chat_completions_streaming": True,
@@ -3156,20 +2938,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "artifact_transport": {
                         "upload": {"method": "POST", "path": "/v1/artifacts/upload"},
                         "download": {
-                            "method": "GET",
-                            "path": "/v1/artifacts/download/{artifact_id}",
-                        },
+                            "method": "GET", "path": "/v1/artifacts/download/{artifact_id}"},
                         "max_bytes": DEFAULT_MAX_ARTIFACT_BYTES,
                         "ttl_seconds": DEFAULT_ARTIFACT_TTL_SECONDS,
-                        "allowed_mime_types": sorted(DEFAULT_ALLOWED_MIME_TYPES),
-                    },
+                        "allowed_mime_types": sorted(DEFAULT_ALLOWED_MIME_TYPES)},
                     "real_browser_actions": True,
                     "transports": {
                         "local_vps": "websocket-subprotocol-ticket",
-                        "cloud": "authenticated-gateway-rpc",
-                    },
-                },
-            },
+                        "cloud": "authenticated-gateway-rpc"}}},
             "endpoints": {name: {"method": m, "path": p} for name, (m, p) in _CAPABILITY_ENDPOINTS},
         })
 
@@ -3199,18 +2975,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "Browser control is not enabled on this server.",
                 404,
-                code="browser_control_disabled",
-            )
+                code="browser_control_disabled")
         if not self._api_key:
             logger.warning(
                 "browser-control registration rejected: no API key configured; "
-                "set API_SERVER_KEY to enable authenticated browser control."
-            )
+                "set API_SERVER_KEY to enable authenticated browser control.")
             return _error_response(
-                "Browser control registration requires a configured API key.",
-                403,
-                err_type="gateway_auth_error",
-                code="browser_control_auth_required",
+                "Browser control registration requires a configured API key.", 403,
+                err_type="gateway_auth_error", code="browser_control_auth_required",
             )
         auth_err = self._check_auth(request)
         if auth_err:
@@ -3225,8 +2997,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "Unsupported browser-control protocol version.",
                 400,
-                code="browser_control_protocol_unsupported",
-            )
+                code="browser_control_protocol_unsupported")
         controller_id = str(payload.get("controller_id") or "").strip()
         browser_profile_id = str(payload.get("browser_profile_id") or "").strip()
         session_id = str(payload.get("session_id") or "").strip()
@@ -3234,47 +3005,37 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "controller_id, browser_profile_id, and session_id are required.",
                 400,
-                code="browser_control_invalid_registration",
-            )
+                code="browser_control_invalid_registration")
         db = await self._ensure_session_db_async()
         if db is None:
             return _error_response("Session database unavailable.", 503, code="session_db_unavailable")
         session = await asyncio.to_thread(db.get_session, session_id)
         if not session:
             return _error_response(
-                "Browser control may register only for an existing server session.",
-                403,
-                err_type="gateway_auth_error",
-                code="browser_control_session_forbidden",
+                "Browser control may register only for an existing server session.", 403,
+                err_type="gateway_auth_error", code="browser_control_session_forbidden",
             )
         profile = _api_request_profile.get() or "default"
         capabilities = filter_browser_control_capabilities(
-            payload.get("capabilities"),
-            developer_mode=self._browser_control_developer_mode(),
-        )
+            payload.get("capabilities"), developer_mode=self._browser_control_developer_mode())
         if not capabilities:
             return _error_response(
                 "At least one permitted browser-control capability is required.",
                 400,
-                code="browser_control_no_capabilities",
-            )
+                code="browser_control_no_capabilities")
         # Developer capabilities may only be negotiated while the broker
         # itself runs in Developer Mode (fail closed even if a registration
         # somehow slipped through the filter).
         if (
             capabilities & BROWSER_CONTROL_DEVELOPER_CAPABILITIES
-            and not self._browser_control_developer_mode()
-        ):
+            and not self._browser_control_developer_mode()):
             return _error_response(
                 "Developer Mode is required for browser_evaluate and raw CDP.",
                 403,
-                code="browser_control_developer_mode_required",
-            )
+                code="browser_control_developer_mode_required")
         scope = ControllerScope(
-            principal_id=self._derive_browser_control_principal(profile),
-            profile_id=profile,
-            session_id=session_id or None,
-            controller_id=controller_id,
+            principal_id=self._derive_browser_control_principal(profile), profile_id=profile,
+            session_id=session_id or None, controller_id=controller_id,
             browser_profile_id=browser_profile_id,
             transport_family=self._browser_control_transport_family(request),
             capabilities=capabilities,
@@ -3298,11 +3059,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "controller_id": scope.controller_id,
                     "browser_profile_id": scope.browser_profile_id,
                     "transport_family": scope.transport_family,
-                    "capabilities": sorted(scope.capabilities),
-                },
-            },
-            status=201,
-        )
+                    "capabilities": sorted(scope.capabilities)}},
+            status=201)
 
     async def _handle_browser_control_ws(self, request: "web.Request") -> "web.WebSocketResponse":
         """GET /v1/browser-control/ws — controller WebSocket (one-shot ticket).
@@ -3329,17 +3087,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_protocols = [
             value.strip()
             for value in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
-            if value.strip()
-        ]
+            if value.strip()]
         ticket_protocols = [
             value
             for value in requested_protocols
-            if value.startswith(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX)
-        ]
+            if value.startswith(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX)]
         if (
-            _BROWSER_CONTROL_WS_PROTOCOL not in requested_protocols
-            or len(ticket_protocols) != 1
-        ):
+            _BROWSER_CONTROL_WS_PROTOCOL not in requested_protocols or len(ticket_protocols) != 1):
             raise web.HTTPUnauthorized()
         ticket_value = ticket_protocols[0][len(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX) :]
         if not ticket_value:
@@ -3351,10 +3105,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         except Exception:
             logger.exception("browser-control WS ticket consumption failed")
             raise web.HTTPUnauthorized() from None
-        ws = web.WebSocketResponse(
-            heartbeat=30.0,
-            protocols=(_BROWSER_CONTROL_WS_PROTOCOL,),
-        )
+        ws = web.WebSocketResponse(heartbeat=30.0, protocols=(_BROWSER_CONTROL_WS_PROTOCOL,))
         await ws.prepare(request)
         loop = asyncio.get_running_loop()
         _send = _browser_controller_ws_sender(ws, loop)
@@ -3371,11 +3122,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         continue
                     if isinstance(frame, dict):
                         reply = await asyncio.to_thread(
-                            self._handle_browser_control_frame,
-                            scope,
-                            frame,
-                            owner=ws,
-                        )
+                            self._handle_browser_control_frame, scope, frame, owner=ws)
                         if isinstance(reply, dict):
                             await ws.send_json(reply)
                 elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
@@ -3385,12 +3132,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return ws
 
     def _handle_browser_control_frame(
-        self,
-        scope: "ControllerScope",
-        frame: dict,
-        *,
-        owner: Any = None,
-    ) -> Optional[dict]:
+        self, scope: "ControllerScope", frame: dict, *, owner: Any = None) -> Optional[dict]:
         """Apply one controller→broker frame with exact-scope checks."""
         method = frame.get("method")
         params = frame.get("params")
@@ -3406,9 +3148,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # exact-scope controller socket. This proves the socket path is live
             # without granting a new capability or touching broker commands.
             return {
-                "method": "browser.controller.heartbeat",
-                "params": {"nonce": nonce, "ok": True},
-            }
+                "method": "browser.controller.heartbeat", "params": {"nonce": nonce, "ok": True}}
         if method == "browser.controller.detach":
             self._browser_control_broker.detach(scope, owner=owner, notify_controller=False)
             return {"method": "browser.controller.detach", "params": {"ok": True}}
@@ -3419,9 +3159,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 # this socket's scope; a stranger's command id is a no-op.
                 ok = params.get("ok") is True
                 self._browser_control_broker.complete(
-                    command_id,
-                    scope=scope,
-                    ok=ok,
+                    command_id, scope=scope, ok=ok,
                     result=params.get("result") if ok else params.get("error"),
                 )
         elif method == "browser.controller.cancel":
@@ -3523,9 +3261,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             except Exception:
                 raise ArtifactError("no artifact root is resolvable") from None
         store = ArtifactStore(
-            root,
-            ttl_seconds=DEFAULT_ARTIFACT_TTL_SECONDS,
-            max_bytes=DEFAULT_MAX_ARTIFACT_BYTES,
+            root, ttl_seconds=DEFAULT_ARTIFACT_TTL_SECONDS, max_bytes=DEFAULT_MAX_ARTIFACT_BYTES,
             allowed_mime_types=DEFAULT_ALLOWED_MIME_TYPES,
         )
         store.prune_expired()
@@ -3543,9 +3279,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Return the per-principal artifact route limiter (lazy)."""
         if self._browser_control_artifact_limiter is None:
             self._browser_control_artifact_limiter = ArtifactRateLimiter(
-                window_seconds=60.0,
-                max_requests=30,
-            )
+                window_seconds=60.0, max_requests=30)
         return self._browser_control_artifact_limiter
 
     def _inject_browser_control_artifacts(
@@ -3553,8 +3287,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         store: Optional[ArtifactStore],
         limiter: Optional[ArtifactRateLimiter] = None,
         *,
-        profile: str = "default",
-    ) -> None:
+        profile: str = "default") -> None:
         """Inject a store/limiter (tests, diagnostics)."""
         if store is None:
             self._browser_control_artifacts.pop(profile, None)
@@ -3573,14 +3306,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None, _error_response(
                 "Browser control is not enabled on this server.",
                 404,
-                code="browser_control_disabled",
-            )
+                code="browser_control_disabled")
         if not self._api_key:
             return None, _error_response(
-                "Artifact transport requires a configured API key.",
-                403,
-                err_type="gateway_auth_error",
-                code="browser_control_auth_required",
+                "Artifact transport requires a configured API key.", 403,
+                err_type="gateway_auth_error", code="browser_control_auth_required",
             )
         auth_err = self._check_auth(request)
         if auth_err:
@@ -3589,11 +3319,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         principal = self._derive_browser_control_principal(profile)
         if not self._artifact_limiter().allow(f"{action}:{principal}"):
             return None, _error_response(
-                f"Artifact {action} rate limit exceeded.",
-                429,
-                err_type="rate_limit_error",
-                code="rate_limit_exceeded",
-                headers={"Retry-After": "1"},
+                f"Artifact {action} rate limit exceeded.", 429, err_type="rate_limit_error",
+                code="rate_limit_exceeded", headers={"Retry-After": "1"},
             )
         return (profile, principal), None
 
@@ -3642,10 +3369,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 filename=filename,
                 content_type=content_type,
                 scope=_ArtifactScopeFacade(
-                    principal,
-                    transport_family=self._browser_control_transport_family(request),
-                ),
-            )
+                    principal, transport_family=self._browser_control_transport_family(request)))
         except ArtifactTooLarge as exc:
             return _error_response(str(exc), 413, code="artifact_too_large")
         except ArtifactError as exc:
@@ -3654,8 +3378,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(str(exc), status, code=code)
         return web.json_response(
             receipt.to_dict(download_path=f"/v1/artifacts/download/{receipt.artifact_id}"),
-            status=201,
-        )
+            status=201)
 
     async def _handle_artifact_download(self, request: "web.Request") -> "web.Response":
         """GET /v1/artifacts/download/{artifact_id} — one-shot download.
@@ -3681,10 +3404,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             data, receipt = store.load(
                 artifact_id,
                 scope=_ArtifactScopeFacade(
-                    principal,
-                    transport_family=self._browser_control_transport_family(request),
-                ),
-            )
+                    principal, transport_family=self._browser_control_transport_family(request)))
         except ArtifactError as exc:
             message = str(exc)
             if "expired" in message:
@@ -3698,9 +3418,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             headers={
                 "X-Artifact-Sha256": receipt.sha256,
                 "X-Artifact-Id": receipt.artifact_id,
-                "Content-Disposition": f'attachment; filename="{receipt.filename}"',
-            },
-        )
+                "Content-Disposition": f'attachment; filename="{receipt.filename}"'})
 
     async def _handle_skills(self, request: "web.Request") -> "web.Response":
         """GET /v1/skills — list installed skills visible to the API-server agent.
@@ -3743,15 +3461,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 _get_effective_configurable_toolsets,
                 _get_platform_tools,
                 _toolset_has_keys,
-                get_nous_subscription_features,
-            )
+                get_nous_subscription_features)
             from toolsets import resolve_toolset
             config = load_config()
             enabled_toolsets = _get_platform_tools(
-                config,
-                "api_server",
-                include_default_mcp_servers=False,
-            )
+                config, "api_server", include_default_mcp_servers=False)
             features = get_nous_subscription_features(config)
             data: List[Dict[str, Any]] = []
             for name, label, desc in _get_effective_configurable_toolsets():
@@ -3766,8 +3480,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "description": desc,
                     "enabled": is_enabled,
                     "configured": _toolset_has_keys(name, config, features=features),
-                    "tools": tools,
-                })
+                    "tools": tools})
         except Exception:
             logger.exception("GET /v1/toolsets failed")
             return _error_response("Failed to enumerate toolsets", 500, err_type="server_error")
@@ -3796,8 +3509,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "output_tokens", "cache_read_tokens", "cache_write_tokens",
             "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
             "api_call_count", "parent_session_id", "last_active", "preview",
-            "_lineage_root_id", "pinned", "archived", "hidden",
-        )
+            "_lineage_root_id", "pinned", "archived", "hidden")
         payload = {key: session.get(key) for key in safe_keys if key in session}
         # SQLite stores these as 0/1; clients reconcile against a real boolean.
         for flag in ("pinned", "archived", "hidden"):
@@ -3815,8 +3527,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         safe_keys = (
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls",
             "tool_name", "timestamp", "token_count", "finish_reason", "reasoning",
-            "reasoning_content", "display_kind",
-        )
+            "reasoning_content", "display_kind")
         return {key: message.get(key) for key in safe_keys if key in message}
 
     async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
@@ -3865,8 +3576,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # blanket hidden listing stays off this client surface.
         title_filter = (request.query.get("title") or "").strip() or None
         include_hidden = bool(title_filter) and _coerce_request_bool(
-            request.query.get("include_hidden"), default=False
-        )
+            request.query.get("include_hidden"), default=False)
 
         async def _list() -> list:
             # include_pinned: a pin means "always reachable", back-filled past the recency
@@ -3875,8 +3585,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             rows = await asyncio.to_thread(
                 db.list_sessions_rich, source=source, limit=limit, offset=offset,
                 include_children=include_children, order_by_last_active=True, include_pinned=True,
-                search_query=title_filter, include_hidden=include_hidden,
-            )
+                search_query=title_filter, include_hidden=include_hidden)
             if title_filter:
                 rows = [s for s in rows if (s.get("title") or "").strip() == title_filter]
             return rows
@@ -3901,8 +3610,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "data": [self._session_response(s) for s in sessions],
             "limit": limit,
             "offset": offset,
-            "has_more": windowed >= limit,
-        })
+            "has_more": windowed >= limit})
 
     async def _handle_create_session(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions -- create an empty Hermes session row.
@@ -3951,18 +3659,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "model_options": runtime_request.get("model_options") or {},
                     "route_source": runtime_request.get("route_source") or "",
                     "confirmed": bool(runtime_request.get("require_model_lock")),
-                    "updated_at": time.time(),
-                }
-            }
+                    "updated_at": time.time()}}
         title = body.get("title")
 
         # One _execute_write (BEGIN IMMEDIATE) makes existence-check + insert + title
         # atomic; a concurrent same-id create blocks on the write lock and sees the row.
         def _do_create():
             def _atomic(conn):
-                row = conn.execute(
-                    "SELECT id FROM sessions WHERE id = ?", (session_id,)
-                ).fetchone()
+                row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
                 if row:
                     return None, "exists"
                 import time as _time
@@ -3976,31 +3680,22 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         model_name,
                         json.dumps(model_config) if model_config else None,
                         system_prompt,
-                        _time.time(),
-                    ),
-                )
+                        _time.time()))
                 if title is not None:
                     clean_title = db.sanitize_title(str(title))
                     if clean_title:
                         conflict = conn.execute(
                             "SELECT id FROM sessions WHERE title = ? AND id != ?",
-                            (clean_title, session_id),
-                        ).fetchone()
+                            (clean_title, session_id)).fetchone()
                         if conflict:
-                            conn.execute(
-                                "DELETE FROM sessions WHERE id = ?", (session_id,)
-                            )
+                            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
                             return None, f"title:Title already in use by session {conflict['id']}"
                     conn.execute(
-                        "UPDATE sessions SET title = ? WHERE id = ?",
-                        (clean_title, session_id),
-                    )
+                        "UPDATE sessions SET title = ? WHERE id = ?", (clean_title, session_id))
                 session_row = conn.execute(
-                    "SELECT * FROM sessions WHERE id = ?", (session_id,)
-                ).fetchone()
+                    "SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
                 return (dict(session_row) if session_row else {
-                    "id": session_id, "source": source,
-                    "model": model_name, "title": title,
+                    "id": session_id, "source": source, "model": model_name, "title": title
                 }), None
             return db._execute_write(_atomic)
         session, err = await asyncio.to_thread(_do_create)
@@ -4040,8 +3735,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 f"Unsupported session fields: {', '.join(unknown)}",
                 400,
-                code="unsupported_session_field",
-            )
+                code="unsupported_session_field")
         for flag in ("pinned", "archived", "hidden", "unread"):
             if flag in body and not isinstance(body[flag], bool):
                 return _error_response(f"'{flag}' must be a boolean", 400, code="invalid_session_field")
@@ -4107,12 +3801,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         latest_page = order == "latest" or (order is None and default_page)
         limit = 500 if default_page else min(requested_limit, 500)
         messages = await asyncio.to_thread(
-            db.get_messages,
-            resolved_id,
-            limit=limit,
-            offset=offset,
-            latest=latest_page,
-        )
+            db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page)
         return web.json_response({
             "object": "list",
             "session_id": resolved_id,
@@ -4121,9 +3810,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "limit": limit,
                 "offset": offset,
                 "order": order or ("latest" if default_page else "oldest"),
-                "returned": len(messages),
-            },
-        })
+                "returned": len(messages)}})
 
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives."""
@@ -4147,12 +3834,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # CLI /branch semantics via SessionDB's native parent_session_id/end_reason
         # model: end the original as branched, create a child carrying the transcript.
         await asyncio.to_thread(db.end_session, source_id, "branched")
-        await asyncio.to_thread(db.create_session,
-            fork_id,
-            "api_server",
-            model=source.get("model"),
-            system_prompt=source.get("system_prompt"),
-            parent_session_id=source_id,
+        await asyncio.to_thread(
+            db.create_session, fork_id, "api_server", model=source.get("model"),
+            system_prompt=source.get("system_prompt"), parent_session_id=source_id,
         )
         messages = await asyncio.to_thread(db.get_messages, source_id)
         await asyncio.to_thread(db.replace_messages, fork_id, messages)
@@ -4206,8 +3890,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None, _error_response(
                 "Could not persist the requested session model lock",
                 500,
-                code="model_lock_persistence_failed",
-            )
+                code="model_lock_persistence_failed")
         lock_active = bool(runtime_request.get("require_model_lock"))
         if lock_active:
             route = runtime_request.get("route")
@@ -4227,11 +3910,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_model = stored_model if (stored_model and stored_route is None) else None
             agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
             selection_error = self._request_route_conflict_error(
-                session_id=session_id,
-                gateway_session_key=gateway_session_key,
+                session_id=session_id, gateway_session_key=gateway_session_key,
                 requested_model=agent_overrides.get("requested_model"),
-                requested_provider=agent_overrides.get("requested_provider"),
-                route=route,
+                requested_provider=agent_overrides.get("requested_provider"), route=route,
             )
             if selection_error:
                 return None, _error_response(selection_error, 400)
@@ -4282,17 +3963,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         agent_overrides = ctx["agent_overrides"]
         history = await self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
-            user_message=user_message,
-            conversation_history=history,
-            ephemeral_system_prompt=system_prompt,
-            session_id=session_id,
-            gateway_session_key=gateway_session_key,
-            route=route,
-            session_model=session_model,
+            user_message=user_message, conversation_history=history,
+            ephemeral_system_prompt=system_prompt, session_id=session_id,
+            gateway_session_key=gateway_session_key, route=route, session_model=session_model,
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
-            confirmed_runtime_lock=lock_active,
-            **agent_overrides,
+            confirmed_runtime_lock=lock_active, **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
@@ -4304,18 +3980,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             runtime=runtime,
             requested_runtime=runtime_request.get("requested"),
             route_source=runtime_request.get("route_source") or "global",
-            model_lock=self._model_lock_state(runtime_request, runtime),
-        )
+            model_lock=self._model_lock_state(runtime_request, runtime))
         return web.json_response(
             {
                 "object": "hermes.session.chat.completion",
                 "session_id": effective_session_id or session_id,
                 "message": {"role": "assistant", "content": final_response},
                 "usage": usage,
-                "runtime": runtime,
-            },
-            headers=headers,
-        )
+                "runtime": runtime},
+            headers=headers)
 
     @_admit_api_agent_request
     async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
@@ -4336,8 +4009,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         runtime_meta = self._sanitize_runtime_metadata(
             requested_runtime=runtime_request.get("requested"),
             route_source=runtime_request.get("route_source") or "global",
-            model_lock=("accepted" if lock_active else ""),
-        )
+            model_lock=("accepted" if lock_active else ""))
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
         message_id = f"msg_{uuid.uuid4().hex}"
@@ -4346,11 +4018,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # state exists, so /v1/runs/{id}* control is confined to the starting profile.
         self._run_owners[run_id] = self._run_idempotency_scope(request)
         self._set_run_status(
-            run_id,
-            "queued",
-            session_id=session_id,
-            model=body.get("model", self._model_name),
-        )
+            run_id, "queued", session_id=session_id, model=body.get("model", self._model_name))
         seq = 0
 
         def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
@@ -4391,26 +4059,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             try:
                 await queue.put(_event_payload("run.started", {
                     "user_message": {"role": "user", "content": user_message},
-                    "runtime": runtime_meta,
-                }))
+                    "runtime": runtime_meta}))
                 self._set_run_status(run_id, "running", last_event="run.started")
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
                 history = await self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
-                    user_message=user_message,
-                    conversation_history=history,
-                    ephemeral_system_prompt=system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_delta,
-                    tool_progress_callback=_tool_progress,
-                    active_run_id=run_id,
-                    gateway_session_key=gateway_session_key,
-                    route=route,
+                    user_message=user_message, conversation_history=history,
+                    ephemeral_system_prompt=system_prompt, session_id=session_id,
+                    stream_delta_callback=_delta, tool_progress_callback=_tool_progress,
+                    active_run_id=run_id, gateway_session_key=gateway_session_key, route=route,
                     session_model=session_model,
                     requested_runtime=runtime_request.get("requested") or {},
                     route_source=runtime_request.get("route_source") or "global",
-                    confirmed_runtime_lock=lock_active,
-                    **agent_overrides,
+                    confirmed_runtime_lock=lock_active, **agent_overrides,
                 )
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -4420,8 +4081,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     runtime=effective_runtime,
                     requested_runtime=runtime_request.get("requested"),
                     route_source=runtime_request.get("route_source") or "global",
-                    model_lock=self._model_lock_state(runtime_request, effective_runtime),
-                )
+                    model_lock=self._model_lock_state(runtime_request, effective_runtime))
                 is_partial = bool(result.get("partial")) if isinstance(result, dict) else False
                 await queue.put(_event_payload("assistant.completed", {
                     "session_id": effective_session_id,
@@ -4430,8 +4090,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "completed": True,
                     "partial": is_partial,
                     "interrupted": False,
-                    "runtime": effective_runtime,
-                }))
+                    "runtime": effective_runtime}))
                 # A steer accepted after the final reply lands in result["pending_steer"];
                 # surface it so clients can replay it rather than lose it.
                 pending_steer = result.get("pending_steer") if isinstance(result, dict) else None
@@ -4441,18 +4100,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     "completed": True,
                     "messages": turn_messages,
                     "usage": usage,
-                    "runtime": effective_runtime,
-                }
+                    "runtime": effective_runtime}
                 if pending_steer:
                     completed_payload["pending_steer"] = pending_steer
                 await queue.put(_event_payload("run.completed", completed_payload))
                 self._set_run_status(
-                    run_id,
-                    "completed",
-                    session_id=effective_session_id,
-                    usage=usage,
+                    run_id, "completed", session_id=effective_session_id, usage=usage,
                     last_event="run.completed",
-                    **({"pending_steer": pending_steer} if pending_steer else {}),
+                    ** ({"pending_steer": pending_steer} if pending_steer else {}),
                 )
             except asyncio.CancelledError:
                 self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
@@ -4460,11 +4115,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             except Exception as exc:
                 logger.exception("[api_server] session chat stream failed")
                 self._set_run_status(
-                    run_id,
-                    "failed",
-                    error=_redact_api_error_text(exc),
-                    last_event="run.failed",
-                )
+                    run_id, "failed", error=_redact_api_error_text(exc), last_event="run.failed")
                 await queue.put(_event_payload("error", {"message": _redact_api_error_text(exc)}))
             finally:
                 self._active_run_agents.pop(run_id, None)
@@ -4485,8 +4136,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "X-Hermes-Session-Id": session_id,
-        }
+            "X-Hermes-Session-Id": session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
         response = web.StreamResponse(status=200, headers=headers)
@@ -4504,13 +4154,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 await response.write(_sse_frame(payload, event=name, ensure_ascii=False))
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             await self._drain_session_stream_task_on_disconnect(
-                run_id, task, interrupt_message="SSE client disconnected", shield_wait=False
-            )
+                run_id, task, interrupt_message="SSE client disconnected", shield_wait=False)
             logger.info("Session SSE client disconnected; interrupted live run %s", run_id)
         except asyncio.CancelledError:
             await self._drain_session_stream_task_on_disconnect(
-                run_id, task, interrupt_message="SSE task cancelled", shield_wait=True
-            )
+                run_id, task, interrupt_message="SSE task cancelled", shield_wait=True)
             logger.info("Session SSE task cancelled; drained live run %s", run_id)
             raise
         except Exception as exc:
@@ -4518,12 +4166,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return response
 
     async def _drain_session_stream_task_on_disconnect(
-        self,
-        run_id: str,
-        task: "asyncio.Task",
-        *,
-        interrupt_message: str,
-        shield_wait: bool,
+        self, run_id: str, task: "asyncio.Task", *, interrupt_message: str, shield_wait: bool
     ) -> None:
         """Preserve live run control refs until the executor-backed turn actually exits."""
         agent = self._active_run_agents.get(run_id)
@@ -4560,25 +4203,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(
                 "Could not persist the requested session model lock",
                 500,
-                code="model_lock_persistence_failed",
-            )
+                code="model_lock_persistence_failed")
         requested = runtime_request.get("requested") or {}
         route = runtime_request.get("route") or {}
         runtime = self._sanitize_runtime_metadata(
             runtime={
                 "provider": route.get("provider") or requested.get("provider") or "",
                 "model": route.get("model") or requested.get("model") or "",
-                "route_source": runtime_request.get("route_source") or "raw_request",
-            },
+                "route_source": runtime_request.get("route_source") or "raw_request"},
             requested_runtime=requested,
             route_source=runtime_request.get("route_source") or "raw_request",
-            model_lock="accepted",
-        )
+            model_lock="accepted")
         return web.json_response({
-            "object": "hermes.session.model_lock",
-            "session_id": session_id,
-            "runtime": runtime,
-        })
+            "object": "hermes.session.model_lock", "session_id": session_id, "runtime": runtime})
     # ------------------------------------------------------------------
     # GET / DELETE response endpoints
     # ------------------------------------------------------------------
@@ -4607,8 +4244,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.warning(
                 "Cron jobs API rejected invalid job_id %r: %s",
                 job_id,
-                self._request_audit_log_suffix(request),
-            )
+                self._request_audit_log_suffix(request))
             return job_id, web.json_response({"error": "Invalid job ID format"}, status=400)
         return job_id, None
 
@@ -4638,8 +4274,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Length cap + injection scan shared by create/update/run."""
         if len(prompt) > self._MAX_PROMPT_LENGTH:
             return web.json_response(
-                {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
-            )
+                {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400)
         if prompt and _scan_cron_prompt is not None:
             scan_error = _scan_cron_prompt(prompt)
             if scan_error:
@@ -4688,8 +4323,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return web.json_response({"error": "Name is required"}, status=400)
             if len(name) > self._MAX_NAME_LENGTH:
                 return web.json_response(
-                    {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400,
-                )
+                    {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400)
             if not schedule:
                 return web.json_response({"error": "Schedule is required"}, status=400)
             prompt_err = self._validate_cron_prompt(prompt)
@@ -4702,8 +4336,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "schedule": schedule,
                 "name": name,
                 "deliver": body.get("deliver", "local"),
-                "origin": self._cron_origin_from_request(request),
-            }
+                "origin": self._cron_origin_from_request(request)}
             if skills:
                 kwargs["skills"] = skills
             if repeat is not None:
@@ -4731,8 +4364,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return web.json_response({"error": "No valid fields to update"}, status=400)
             if "name" in sanitized and len(sanitized["name"]) > self._MAX_NAME_LENGTH:
                 return web.json_response(
-                    {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400,
-                )
+                    {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400)
             if "prompt" in sanitized:
                 prompt_err = self._validate_cron_prompt(sanitized["prompt"])
                 if prompt_err:
@@ -4816,8 +4448,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             token=token,
             expected_audience=cfg_get(cfg, "cron", "chronos", "expected_audience", default=""),
             jwks_or_key=cfg_get(cfg, "cron", "chronos", "nas_jwks_url", default="") or None,
-            issuer=cfg_get(cfg, "cron", "chronos", "portal_url", default="") or None,
-        )
+            issuer=cfg_get(cfg, "cron", "chronos", "portal_url", default="") or None)
         try:
             if asyncio.iscoroutinefunction(verifier):
                 claims = await verifier(**verify_kwargs)
@@ -4832,9 +4463,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             claims = None
         if claims is None:
             logger.warning(
-                "cron fire: rejected invalid token: %s",
-                self._request_audit_log_suffix(request),
-            )
+                "cron fire: rejected invalid token: %s", self._request_audit_log_suffix(request))
             return web.json_response({"error": "invalid fire token"}, status=401)
         draining = self._draining_response()
         if draining is not None:
@@ -4848,9 +4477,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if not job_id:
                 return web.json_response({"error": "missing job_id"}, status=400)
             from cron.scheduler_provider import (
-                provider_supports_split_fire,
-                resolve_cron_scheduler,
-            )
+                provider_supports_split_fire, resolve_cron_scheduler)
             provider = resolve_cron_scheduler()
             loop = asyncio.get_running_loop()
             # Pass live adapters (parity with the built-in ticker): E2EE and relay-fronted
@@ -4917,11 +4544,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             inflight -= 1
         if inflight >= limit:
             return _error_response(
-                f"Too many concurrent runs (max {limit})",
-                429,
-                err_type="rate_limit_error",
-                code="rate_limit_exceeded",
-                headers={"Retry-After": "1"},
+                f"Too many concurrent runs (max {limit})", 429, err_type="rate_limit_error",
+                code="rate_limit_exceeded", headers={"Retry-After": "1"},
             )
         return None
 
@@ -4932,8 +4556,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_key: str = "",
         session_id: str = "",
         browser_control_principal: str = "",
-        browser_control_transport_family: str = "",
-    ) -> list:
+        browser_control_transport_family: str = "") -> list:
         """Bind session contextvars for an API-server agent run.
 
         This is the SINGLE structural chokepoint every API-server agent-entry
@@ -4951,20 +4574,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """
         from gateway.session_context import set_session_vars
         return set_session_vars(
-            platform="api_server",
-            chat_id=chat_id,
-            session_key=session_key,
-            session_id=session_id,
+            platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
             browser_control_principal=browser_control_principal,
-            browser_control_transport_family=browser_control_transport_family,
-            async_delivery=False,
+            browser_control_transport_family=browser_control_transport_family, async_delivery=False,
             cron_session="",
         )
 
     def _turn_runtime_metadata(
         self, agent: Any, *, route: Optional[Dict[str, Any]], requested_runtime: Optional[Dict[str, Any]],
-        route_source: str, confirmed_runtime_lock: bool,
-    ) -> Dict[str, Any]:
+        route_source: str, confirmed_runtime_lock: bool) -> Dict[str, Any]:
         """Sanitized actual-vs-requested runtime for a finished turn.
 
         Raises ``RuntimeError`` when a confirmed model lock's provider/model
@@ -4986,27 +4604,23 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             )
             expected_model = self._clean_runtime_id((route or {}).get("model") or (requested_runtime or {}).get("model"))
             if (expected_provider and actual_provider != expected_provider) or (
-                expected_model and actual_model != expected_model
-            ):
+                expected_model and actual_model != expected_model):
                 raise RuntimeError(
                     "confirmed model lock runtime mismatch: "
                     f"expected provider={expected_provider or '<unspecified>'} "
                     f"model={expected_model or '<unspecified>'}; "
                     f"actual provider={actual_provider or '<unknown>'} "
-                    f"model={actual_model or '<unknown>'}"
-                )
+                    f"model={actual_model or '<unknown>'}")
         if requested_runtime:
             runtime["requested"] = {
                 "provider": self._clean_runtime_id((requested_runtime or {}).get("provider"), max_len=80),
-                "model": self._clean_runtime_id((requested_runtime or {}).get("model")),
-            }
+                "model": self._clean_runtime_id((requested_runtime or {}).get("model"))}
         runtime["route_source"] = route_source or runtime.get("route_source") or "global"
         runtime = self._sanitize_runtime_metadata(
             runtime=runtime,
             requested_runtime=requested_runtime,
             route_source=route_source or "global",
-            model_lock=("confirmed" if confirmed_runtime_lock else ""),
-        )
+            model_lock=("confirmed" if confirmed_runtime_lock else ""))
         return runtime
 
     async def _run_agent(
@@ -5030,8 +4644,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None,
         route_source: str = "global",
         confirmed_runtime_lock: bool = False,
-        bind_declared_conversation: bool = False,
-    ) -> tuple:
+        bind_declared_conversation: bool = False) -> tuple:
         """Create an agent and run one turn in a thread executor.
 
         Returns ``(result_dict, usage_dict)``. ``agent_ref[0]`` receives the
@@ -5046,40 +4659,30 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # run_in_executor threads, so the profile scope must be re-entered
         # inside _run() from this explicit value.
         request_profile = _api_request_profile.get()
-        request_browser_control_principal = (
-            _api_request_browser_control_principal.get()
-        )
+        request_browser_control_principal = (_api_request_browser_control_principal.get())
         request_browser_control_transport_family = (
-            _api_request_browser_control_transport_family.get()
-        )
+            _api_request_browser_control_transport_family.get())
 
         def _run():
             from gateway.session_context import clear_session_vars
             with self._profile_scope(request_profile):
                 tokens = self._bind_api_server_session(
-                    chat_id=session_id or "",
-                    session_key=gateway_session_key or session_id or "",
+                    chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
                     session_id=session_id or "",
                     browser_control_principal=request_browser_control_principal,
-                    browser_control_transport_family=(
-                        request_browser_control_transport_family
-                    ),
+                    browser_control_transport_family=(request_browser_control_transport_family),
                 )
                 agent = None
                 try:
                     agent = self._create_agent(
-                        ephemeral_system_prompt=ephemeral_system_prompt,
-                        session_id=session_id,
+                        ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
                         stream_delta_callback=stream_delta_callback,
                         tool_progress_callback=tool_progress_callback,
                         tool_start_callback=tool_start_callback,
                         tool_complete_callback=tool_complete_callback,
-                        gateway_session_key=gateway_session_key,
-                        requested_model=requested_model,
-                        requested_provider=requested_provider,
-                        model_options=model_options,
-                        route=route,
-                        session_model=session_model,
+                        gateway_session_key=gateway_session_key, requested_model=requested_model,
+                        requested_provider=requested_provider, model_options=model_options,
+                        route=route, session_model=session_model,
                         confirmed_runtime_lock=confirmed_runtime_lock,
                     )
                     if agent_ref is not None:
@@ -5094,13 +4697,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     result = agent.run_conversation(
                         user_message=user_message,
                         conversation_history=conversation_history,
-                        task_id=effective_task_id,
-                    )
+                        task_id=effective_task_id)
                     usage = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                    }
+                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0}
                     # Effective session id lets callers track compression-triggered rotations.
                     _eff_sid = getattr(agent, "session_id", session_id)
                     if isinstance(_eff_sid, str) and _eff_sid:
@@ -5110,8 +4711,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     _compacted_in_place = bool(getattr(agent, "_last_compaction_in_place", False))
                     _session_rotated = (
                         isinstance(_eff_sid, str) and isinstance(session_id, str)
-                        and _eff_sid != session_id
-                    )
+                        and _eff_sid != session_id)
                     if _compacted_in_place or _session_rotated:
                         result["_compressed"] = True
                     if requested_runtime or route or confirmed_runtime_lock or (route_source and route_source != "global"):
@@ -5134,10 +4734,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                             "final_response": f"⚠️ Provider authentication failed: {exc}",
                             "messages": [],
                             "api_calls": 0,
-                            "tools": [],
-                        },
-                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                    )
+                            "tools": []},
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 finally:
                     # Turn over (any outcome): clear ownership so a late disconnect can't
                     # reap background work this turn deliberately left running.
@@ -5151,8 +4749,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         if bind_declared_conversation:
                             self._bind_declared_conversation(
                                 getattr(agent, "session_id", None) or session_id,
-                                gateway_session_key,
-                            )
+                                gateway_session_key)
                     clear_session_vars(tokens)
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
@@ -5203,23 +4800,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def _handle_room_member_invitation(self, request: "web.Request") -> "web.Response":
         return await _room_grants._handle_room_member_invitation(
-            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile,
-        )
+            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile)
 
     async def _handle_room_member_capabilities(self, request: "web.Request") -> "web.Response":
         return await _room_grants._handle_room_member_capabilities(
-            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile,
-        )
+            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile)
 
     async def _handle_room_member_grant_refresh(self, request: "web.Request") -> "web.Response":
         return await _room_grants._handle_room_member_grant_refresh(
-            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile,
-        )
+            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile)
 
     async def _handle_room_member_grant_revoke(self, request: "web.Request") -> "web.Response":
         return await _room_grants._handle_room_member_grant_revoke(
-            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile,
-        )
+            self, request, _openai_error=_openai_error, _api_request_profile=_api_request_profile)
 
     def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
         return _api_runs._durable_run_status(self, request, run_id)
@@ -5271,8 +4864,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.error(
                 "[%s] Refusing to start: API_SERVER_KEY is required for the API server, "
                 "including loopback-only binds on %s.",
-                self.name, self._host,
-            )
+                self.name, self._host)
             return False
         try:
             from hermes_cli.auth import has_usable_secret
@@ -5284,8 +4876,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "verified (%s: %s), and this endpoint dispatches "
                 "terminal-capable agent work. Repair the installation before "
                 "starting the API server on %s.",
-                self.name, type(exc).__name__, exc, self._host,
-            )
+                self.name, type(exc).__name__, exc, self._host)
             return False
         if not has_usable_secret(self._api_key, min_length=16):
             logger.error(
@@ -5295,8 +4886,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "key is remote code execution. Generate a strong secret "
                 "(e.g. `openssl rand -hex 32`) and set API_SERVER_KEY "
                 "before starting the API server on %s.",
-                self.name, self._host,
-            )
+                self.name, self._host)
             return False
         return True
 
@@ -5318,8 +4908,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "error logged above). Generate a strong secret (e.g. "
                 "`openssl rand -hex 32`), set API_SERVER_KEY, then "
                 "`/platform resume api_server`.",
-                retryable=False,
-            )
+                retryable=False)
             return False
         try:
             mws = [
@@ -5328,10 +4917,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     self._make_profile_prefix_middleware(),
                     cors_middleware,
                     body_limit_middleware,
-                    security_headers_middleware,
-                )
-                if mw is not None
-            ]
+                    security_headers_middleware)
+                if mw is not None]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
             # Native routes + multiplex /p/<profile>/… mirrors. Same handlers;
@@ -5361,9 +4948,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if is_network_accessible(self._host):
                 try:
                     from hermes_cli.config import load_config as _load_cfg
-                    _backend = (
-                        ((_load_cfg() or {}).get("terminal") or {}).get("backend", "local")
-                    )
+                    _backend = (((_load_cfg() or {}).get("terminal") or {}).get("backend", "local"))
                 except Exception:
                     _backend = "local"
                 if str(_backend).lower() == "local":
@@ -5374,8 +4959,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         "with full terminal/file access. Strongly consider a "
                         "sandboxed backend (terminal.backend: docker) and "
                         "firewalling this port to trusted networks only.",
-                        self.name, self._host,
-                    )
+                        self.name, self._host)
 
             # Plugin-registered native handlers (aiohttp web.Application —
             # router routes). Wired before AppRunner.setup() freezes the router.
@@ -5386,9 +4970,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # as "in use"). SO_REUSEADDR: off on macOS (BSD semantics can silently split
             # traffic between two listeners), default on Linux (only permits TIME_WAIT rebind).
             self._site = web.TCPSite(
-                self._runner,
-                self._host,
-                self._port,
+                self._runner, self._host, self._port,
                 reuse_address=False if sys.platform == "darwin" else None,
             )
             try:
@@ -5406,19 +4988,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         f"Port {self._port} already in use. Set "
                         f"platforms.api_server.port in config.yaml to a "
                         f"different value, then `/platform resume api_server`.",
-                        retryable=False,
-                    )
+                        retryable=False)
                 logger.error(
                     "[%s] Could not bind %s:%d: %s. Set a different port in "
                     "config.yaml: platforms.api_server.port",
-                    self.name, self._host, self._port, exc,
-                )
+                    self.name, self._host, self._port, exc)
                 return False
             self._mark_connected()
             logger.info(
                 "[%s] API server listening on http://%s:%d (model: %s)",
-                self.name, self._host, self._port, self._model_name,
-            )
+                self.name, self._host, self._port, self._model_name)
             return True
         except Exception as e:
             logger.error("[%s] Failed to start API server: %s", self.name, e)
@@ -5460,8 +5039,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         chat_id: str,
         content: str,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
+        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """
         Not used — HTTP request/response cycle handles delivery directly.
         """
