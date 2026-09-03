@@ -1,12 +1,9 @@
 """agent-browser / Chromium discovery and install: PATH merging, npx resolution, candidate binaries, Chromium detection + auto-install, requirement checks.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there so
-``tools.browser_tool.<name>`` keeps resolving (and monkeypatching). Origin
-symbols and module state are read/written through ``_bt`` (the origin module,
-resolved per call by :func:`tools.browser_tool_origin.origin_module`) so
-``patch("tools.browser_tool.X")`` is honoured and no import cycle exists.
-"""
+Split out of ``tools/browser_tool.py``; every name is re-imported there (tests monkeypatch ``tools.browser_tool.<name>``).
+Origin symbols/state go through ``_bt`` (origin module, resolved per call) — no import cycle."""
 
+import contextlib
 import functools
 import os
 import shutil
@@ -20,63 +17,44 @@ from tools.browser_tool_origin import origin_module as _origin
 
 @functools.lru_cache(maxsize=1)
 def _discover_homebrew_node_dirs() -> tuple[str, ...]:
-    """Find Homebrew versioned Node.js bin directories (e.g. node@20, node@24).
-
-    When Node is installed via ``brew install node@24`` and NOT linked into
-    /opt/homebrew/bin, agent-browser isn't discoverable on the default PATH.
-    This function finds those directories so they can be prepended.
-    """
-    dirs: list[str] = []
+    """Homebrew versioned Node bin dirs (node@20, ...) that ``brew`` may not link into /opt/homebrew/bin."""
     homebrew_opt = "/opt/homebrew/opt"
-    if not os.path.isdir(homebrew_opt):
-        return tuple(dirs)
     try:
-        for entry in os.listdir(homebrew_opt):
-            if entry.startswith("node") and entry != "node":
-                bin_dir = os.path.join(homebrew_opt, entry, "bin")
-                if os.path.isdir(bin_dir):
-                    dirs.append(bin_dir)
+        entries = os.listdir(homebrew_opt) if os.path.isdir(homebrew_opt) else []
     except OSError:
-        pass
-    return tuple(dirs)
+        entries = []
+    return tuple(
+        bin_dir
+        for entry in entries
+        if entry.startswith("node") and entry != "node"
+        if os.path.isdir(bin_dir := os.path.join(homebrew_opt, entry, "bin"))
+    )
 
 
 def _browser_candidate_path_dirs() -> list[str]:
     """Return ordered browser CLI PATH candidates shared by discovery and execution."""
     _bt = _origin()
-    hermes_home = _bt.get_hermes_home()
-    hermes_node_bin = str(hermes_home / "node" / "bin")
-    hermes_node_root = str(hermes_home / "node")
-    hermes_nm_bin = str(hermes_home / "node_modules" / ".bin")
-    return [hermes_node_bin, hermes_node_root, hermes_nm_bin, *list(_bt._discover_homebrew_node_dirs()), *_bt._SANE_PATH_DIRS]
+    home = _bt.get_hermes_home()
+    managed = (home / "node" / "bin", home / "node", home / "node_modules" / ".bin")
+    return [*map(str, managed), *_bt._discover_homebrew_node_dirs(), *_bt._SANE_PATH_DIRS]
 
 
 def _merge_browser_path(existing_path: str = "") -> str:
     """Prepend browser-specific PATH fallbacks without reordering existing entries."""
-    _bt = _origin()
     path_parts = [p for p in (existing_path or "").split(os.pathsep) if p]
-    existing_parts = set(path_parts)
     prefix_parts: list[str] = []
-
-    for part in _bt._browser_candidate_path_dirs():
-        if not part or part in existing_parts or part in prefix_parts:
-            continue
-        if os.path.isdir(part):
+    for part in _origin()._browser_candidate_path_dirs():
+        if part and part not in path_parts and part not in prefix_parts and os.path.isdir(part):
             prefix_parts.append(part)
-
     return os.pathsep.join(prefix_parts + path_parts)
 
 
 def _browser_install_hint() -> str:
-    _bt = _origin()
-    if _bt._is_termux_environment():
-        return "npm install -g agent-browser && agent-browser install"
-    return "npm install -g agent-browser && agent-browser install --with-deps"
+    return "npm install -g agent-browser && agent-browser install" + ("" if _origin()._is_termux_environment() else " --with-deps")
 
 
 def _is_npx_agent_browser_sentinel(browser_cmd: str) -> bool:
-    _bt = _origin()
-    return browser_cmd.strip() == _bt.NPX_AGENT_BROWSER_SENTINEL
+    return browser_cmd.strip() == _origin().NPX_AGENT_BROWSER_SENTINEL
 
 
 def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
@@ -85,11 +63,7 @@ def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
 
 
 def _termux_browser_install_error() -> str:
-    _bt = _origin()
-    return (
-        "Local browser automation on Termux cannot rely on the bare npx fallback. "
-        f"Install agent-browser explicitly first: {_bt._browser_install_hint()}"
-    )
+    return f"Local browser automation on Termux cannot rely on the bare npx fallback. Install agent-browser explicitly first: {_origin()._browser_install_hint()}"
 
 
 def _agent_browser_candidate_present(path: str | None) -> bool:
@@ -101,32 +75,25 @@ def _agent_browser_candidate_present(path: str | None) -> bool:
 
 
 def _resolve_npx_bin() -> Optional[str]:
-    """Resolve a runnable npx, preferring the Hermes-managed/Homebrew extended PATH.
+    """Resolve a runnable npx, extended (Hermes-managed/Homebrew) PATH first.
 
-    Bare PATH first would let a broken system npx shadow a healthy managed one
-    with no recovery, so every candidate is validated with ``node_tool_runnable``
-    before being trusted.
+    Bare PATH first would let a broken system npx shadow a healthy managed one,
+    so every candidate is validated with ``node_tool_runnable`` before use.
     """
     _bt = _origin()
     extended_path = _bt._merge_browser_path("")
-    if extended_path:
-        extended_npx = shutil.which("npx", path=extended_path)
-        if extended_npx and _bt.node_tool_runnable(extended_npx):
-            return extended_npx
-    npx_path = shutil.which("npx")
-    if npx_path and _bt.node_tool_runnable(npx_path):
-        return npx_path
+    for path in ([extended_path] if extended_path else []) + [None]:
+        npx = shutil.which("npx", path=path)
+        if npx and _bt.node_tool_runnable(npx):
+            return npx
     return None
 
 
 def _agent_browser_candidates(extended_path: str):
-    """Yield agent-browser lookup candidates in resolution order (lazily — each is a filesystem probe).
+    """Yield agent-browser lookup candidates lazily: ambient PATH → extended PATH → repo-local node_modules/.bin.
 
-    Order: ambient PATH (global install) → extended PATH (Hermes-managed Node,
-    macOS versioned Homebrew, Termux/system dirs) → repo-local node_modules/.bin.
-    The local lookup goes through ``shutil.which`` with an explicit path so
-    Windows resolves the ``.cmd`` shim (CreateProcess cannot run npm's
-    extensionless POSIX shim — WinError 193) while POSIX keeps the plain one.
+    The local lookup uses ``shutil.which`` with an explicit path so Windows resolves the ``.cmd`` shim
+    (CreateProcess cannot run npm's extensionless POSIX shim — WinError 193).
     """
     yield shutil.which("agent-browser")
     if extended_path:
@@ -137,127 +104,78 @@ def _agent_browser_candidates(extended_path: str):
 
 
 def _find_agent_browser(*, validate: bool = True) -> str:
-    """
-    Find the agent-browser CLI executable.
+    """Find the agent-browser CLI: PATH, Homebrew/managed dirs, local node_modules/.bin, npx fallback, lazy install.
 
-    Checks in order: current PATH, Homebrew/common bin dirs, Hermes-managed
-    node, local node_modules/.bin/, npx fallback, then a lazy install.
-
-    Every candidate is validated with ``agent_browser_runnable`` before it is
-    cached. A bare ``shutil.which`` hit is NOT trusted: agent-browser's npm
-    postinstall re-points a global symlink at our local node_modules binary,
-    which disappears on the next ``hermes update`` and leaves a dangling link
-    that ``which`` still reports but exec fails on (exit 127). Validating lets a
-    dead candidate fall through instead of being cached and killing every
-    browser tool. ``validate=False`` (schema-time check_fn) only tests presence
-    and never caches.
-
-    Raises:
-        FileNotFoundError: If agent-browser is not installed
+    A bare ``shutil.which`` hit is NOT trusted: agent-browser's npm postinstall re-points a global symlink at our
+    local node_modules binary, which vanishes on the next ``hermes update`` and leaves a dangling link ``which``
+    still reports (exec fails with 127). Candidates are validated with ``agent_browser_runnable`` before caching
+    so a dead one falls through. ``validate=False`` (schema-time check_fn) only tests presence and never caches.
+    Raises FileNotFoundError when agent-browser is not installed.
     """
     _bt = _origin()
-    if _bt._agent_browser_resolved:
-        if _bt._cached_agent_browser is None:
-            raise FileNotFoundError(
-                "agent-browser CLI not found (cached). Install it with: "
-                f"{_bt._browser_install_hint()}\n"
-                "Or ensure npx is available in your PATH."
-            )
-        return _bt._cached_agent_browser
+
+    def _not_found(cached: bool) -> FileNotFoundError:
+        return FileNotFoundError(f"agent-browser CLI not found{' (cached)' if cached else ''}. Install it with: "
+                                 f"{_bt._browser_install_hint()}\nOr ensure npx is available in your PATH.")
 
     def _accept(candidate: str) -> str:
-        # _agent_browser_resolved is set at each accept site (not before the
-        # search) so a concurrent reader never sees resolved=True with a None cache.
+        # Set resolved at each accept site (not before the search) so a concurrent reader never sees
+        # resolved=True with a None cache.
         if validate:
             _bt._cached_agent_browser = candidate
             _bt._agent_browser_resolved = True
         return candidate
 
+    if _bt._agent_browser_resolved:
+        if _bt._cached_agent_browser is None:
+            raise _not_found(cached=True)
+        return _bt._cached_agent_browser
     ok = _bt.agent_browser_runnable if validate else _bt._agent_browser_candidate_present
     extended_path = _bt._merge_browser_path("")
     for candidate in _bt._agent_browser_candidates(extended_path):
         if candidate and ok(candidate):
             return _accept(candidate)
-
     # npx fallback (also searches the extended PATH)
     if _bt._resolve_npx_bin():
         return _accept(_bt.NPX_AGENT_BROWSER_SENTINEL)
-
     if not validate:
         raise FileNotFoundError("agent-browser CLI not found")
-
-    # Nothing found — try lazy installation before giving up.
-    try:
+    try:  # Nothing found — try lazy installation before giving up.
         from hermes_cli.dep_ensure import ensure_dependency
         if ensure_dependency("browser"):
-            candidates = [
-                shutil.which("agent-browser"),
-                shutil.which("agent-browser", path=extended_path) if extended_path else None,
-                shutil.which("agent-browser", path=str(_bt.get_hermes_home() / "node_modules" / ".bin")),
-                shutil.which("agent-browser", path=str(_bt.get_hermes_home() / "node" / "bin")),
-                shutil.which("agent-browser", path=str(_bt.get_hermes_home() / "node")),
-            ]
-            for recheck in candidates:
+            home = _bt.get_hermes_home()
+            managed = (home / "node_modules" / ".bin", home / "node" / "bin", home / "node")
+            for path in (None, *([extended_path] if extended_path else []), *map(str, managed)):
+                recheck = shutil.which("agent-browser", path=path)
                 if recheck and _bt.agent_browser_runnable(recheck):
                     return _accept(recheck)
     except Exception:
         pass
-
     _bt._agent_browser_resolved = True
-    raise FileNotFoundError(
-        "agent-browser CLI not found. Install it with: "
-        f"{_bt._browser_install_hint()}\n"
-        "Or ensure npx is available in your PATH."
-    )
+    raise _not_found(cached=False)
 
 
 def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
-    """Best-effort pre-fetch of the agent-browser npm package via npx.
+    """Best-effort pre-fetch of the agent-browser npm package via npx (``hermes update`` / ``doctor --fix``).
 
-    agent-browser resolves lazily via ``npx agent-browser`` (not a root
-    package.json dependency), so the first invocation in a session would pay
-    npx's registry fetch; ``hermes update`` / ``hermes doctor --fix`` call this
-    to warm the cache first. Runs with the credential-scrubbed env every other
-    agent-browser spawn uses (registry-fetched npm code must never see the
-    operator keyring), in its own process group, and tree-kills on timeout so
-    a surviving descendant cannot hold the capture pipe open.
-    Never raises; True only when npx actually exited 0.
+    Runs with the credential-scrubbed env every other agent-browser spawn uses (registry-fetched npm code must
+    never see the operator keyring), in its own process group, and tree-kills on timeout so a surviving
+    descendant cannot hold the capture pipe open. Never raises; True only when npx exited 0.
     """
     _bt = _origin()
     npx_bin = _bt._resolve_npx_bin()
     if not npx_bin:
         return False
-
     env = _bt._build_browser_env()
     env["PATH"] = _bt._merge_browser_path(env.get("PATH", ""))
-
-    popen_kwargs: dict = {
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "text": True,
-        "env": env,
-        "creationflags": _bt.windows_hide_flags(),
-    }
+    popen_kwargs: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "env": env}
     if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
+        popen_kwargs.update(creationflags=_bt.windows_hide_flags(), start_new_session=True)
     else:
-        popen_kwargs["creationflags"] |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-    cmd = [
-        npx_bin,
-        # --ignore-scripts: AGENT_BROWSER_NPX_SPEC is a floating ^0.26.0
-        # range, not an exact pin — a compromised future 0.26.x patch must
-        # not get to run its own install-time lifecycle scripts here.
-        "--ignore-scripts",
-        # --prefer-offline: once cached, repeat `hermes update`/`doctor
-        # --fix` runs shouldn't hit the registry just to re-confirm
-        # "latest" is still latest — that would defeat the point of
-        # warming the cache in the first place.
-        "--prefer-offline",
-        "-y",
-        _bt.AGENT_BROWSER_NPX_SPEC,
-        "--version",
-    ]
+        popen_kwargs["creationflags"] = _bt.windows_hide_flags() | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    # --ignore-scripts: AGENT_BROWSER_NPX_SPEC is a floating range; a compromised future patch must not run
+    # install-time lifecycle scripts here. --prefer-offline: once cached, repeat runs must not re-hit the registry.
+    cmd = [npx_bin, "--ignore-scripts", "--prefer-offline", "-y", _bt.AGENT_BROWSER_NPX_SPEC, "--version"]
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, **popen_kwargs)
     except Exception:
@@ -265,144 +183,87 @@ def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
     try:
         proc.communicate(timeout=timeout)
         return proc.returncode == 0
-    except subprocess.TimeoutExpired:
+    except Exception as exc:
         _bt._kill_process_tree(proc)
-        try:
-            proc.communicate(timeout=5)
-        except Exception:
-            pass
-        return False
-    except Exception:
-        _bt._kill_process_tree(proc)
+        if isinstance(exc, subprocess.TimeoutExpired):
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=5)
         return False
 
 
 def _chromium_search_roots() -> List[str]:
-    """Directories to scan for a Chromium / headless-shell build, in the order
-    agent-browser and Playwright probe them: ``PLAYWRIGHT_BROWSERS_PATH``, then
-    Playwright's per-OS default cache."""
-    roots: List[str] = []
+    """Chromium / headless-shell scan roots in agent-browser/Playwright probe order: ``PLAYWRIGHT_BROWSERS_PATH``, then the per-OS default cache."""
     env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if env_path and env_path != "0":
-        roots.append(env_path)
     home = os.path.expanduser("~")
+    roots: List[str] = [env_path] if env_path and env_path != "0" else []
     roots.append(os.path.join(home, ".cache", "ms-playwright"))
     if sys.platform == "darwin":
         roots.append(os.path.join(home, "Library", "Caches", "ms-playwright"))
     if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA") or os.path.join(
-            home, "AppData", "Local"
-        )
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
         roots.append(os.path.join(local, "ms-playwright"))
     return roots
 
 
-def _chromium_installed() -> bool:
-    """Return True when a usable Chromium (or headless-shell) build is on disk.
+def _has_chromium_build(root: str) -> bool:
+    """True when ``root`` holds a Playwright ``chromium-*`` / ``chromium_headless_shell-*`` dir (agent-browser accepts either)."""
+    try:
+        return any(e.startswith(("chromium-", "chromium_headless_shell-")) for e in os.listdir(root))
+    except OSError:
+        return False
 
-    Checks ``AGENT_BROWSER_EXECUTABLE_PATH``, then system Chrome/Chromium on
-    PATH, then Playwright's cache (``chromium-*`` / ``chromium_headless_shell-*``
-    dirs). Without a binary the CLI hangs on first use until the command
-    timeout fires, so the tool must not be advertised.
+
+def _chromium_installed() -> bool:
+    """True when a usable Chromium (or headless-shell) build is on disk; cached.
+
+    Checks ``AGENT_BROWSER_EXECUTABLE_PATH``, then system Chrome/Chromium on PATH, then Playwright's cache.
+    Without a binary the CLI hangs on first use until the command timeout fires, so the tool must not be advertised.
     """
     _bt = _origin()
     if _bt._cached_chromium_installed is not None:
         return _bt._cached_chromium_installed
-
-    # 1. AGENT_BROWSER_EXECUTABLE_PATH — explicit user-configured browser
     ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
-    if ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)):
-        _bt._cached_chromium_installed = True
-        return True
-
-    # 2. System Chrome/Chromium in PATH (common names)
-    system_chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or shutil.which("chrome")
+    _bt._cached_chromium_installed = bool(
+        (ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)))
+        or any(shutil.which(name) for name in ("google-chrome", "chromium", "chromium-browser", "chrome"))
+        or any(root and os.path.isdir(root) and _has_chromium_build(root) for root in _bt._chromium_search_roots())
     )
-    if system_chrome:
-        _bt._cached_chromium_installed = True
-        return True
-
-    # 3. Playwright browser cache (legacy — chromium-* / chromium_headless_shell-* dirs)
-    for root in _bt._chromium_search_roots():
-        if not root or not os.path.isdir(root):
-            continue
-        try:
-            entries = os.listdir(root)
-        except OSError:
-            continue
-        # Playwright names them ``chromium-<build>`` and
-        # ``chromium_headless_shell-<build>``; agent-browser accepts either.
-        for entry in entries:
-            if entry.startswith("chromium-") or entry.startswith(
-                "chromium_headless_shell-"
-            ):
-                _bt._cached_chromium_installed = True
-                return True
-
-    _bt._cached_chromium_installed = False
-    return False
+    return _bt._cached_chromium_installed
 
 
 def _maybe_autoinstall_chromium() -> bool:
     """Best-effort, gated download of the Chromium *binary* on local cold start.
 
-    Binary only (``agent-browser install``), never ``--with-deps`` — that shells
-    ``apt`` and needs root, so missing system libraries stay a user action.
-    Gated by ``security.allow_lazy_installs``, skipped in Docker (Chromium ships
-    in the image), attempted once per process. True only when Chromium is
-    present afterwards.
+    Binary only (``agent-browser install``), never ``--with-deps`` — that shells ``apt`` and needs root. Gated by
+    ``security.allow_lazy_installs``, skipped in Docker (Chromium ships in the image), attempted once per process.
     """
     _bt = _origin()
     if _bt._chromium_autoinstall_attempted:
         return _bt._chromium_installed()
     _bt._chromium_autoinstall_attempted = True
-
     if _bt._running_in_docker():
         return False
-
     from tools.lazy_deps import _allow_lazy_installs
     if not _allow_lazy_installs():
         return False
-
     try:
         browser_cmd = _bt._find_agent_browser()
     except FileNotFoundError:
         return False
-
+    install_cmd = [browser_cmd, "install"]
     if _bt._is_npx_agent_browser_sentinel(browser_cmd):
-        install_cmd = [
-            _bt._resolve_npx_bin() or "npx", "--ignore-scripts", "-y", _bt.AGENT_BROWSER_NPX_SPEC, "install",
-        ]
-    else:
-        install_cmd = [browser_cmd, "install"]
+        install_cmd = [_bt._resolve_npx_bin() or "npx", "--ignore-scripts", "-y", _bt.AGENT_BROWSER_NPX_SPEC, "install"]
 
-    _bt.logger.info(
-        "browser: Chromium missing — auto-installing the browser binary "
-        "(one-time ~170MB; disable via security.allow_lazy_installs)"
-    )
+    _bt.logger.info("browser: Chromium missing — auto-installing the browser binary (one-time ~170MB; disable via security.allow_lazy_installs)")
     try:
-        proc = subprocess.run(
-            install_cmd,
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=600,
-            env=_bt._build_browser_env(),
-        )
+        proc = subprocess.run(install_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_bt._build_browser_env())
     except (OSError, subprocess.SubprocessError) as e:
         _bt.logger.warning("browser: Chromium auto-install failed to start: %s", e)
         return False
-
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-300:]
-        _bt.logger.warning(
-            "browser: Chromium auto-install exited %s: %s", proc.returncode, tail
-        )
+        _bt.logger.warning("browser: Chromium auto-install exited %s: %s", proc.returncode, tail)
         return False
-
     _bt._cached_chromium_installed = None
     return _bt._chromium_installed()
 
@@ -421,67 +282,41 @@ def _running_in_docker() -> bool:
 def check_browser_requirements() -> bool:
     """Whether the browser tools should be advertised.
 
-    Local mode needs the ``agent-browser`` CLI plus a Chromium build (except
-    Lightpanda-only text workflows); cloud mode needs the CLI plus provider
-    credentials (the provider hosts its own Chromium).
+    Local mode needs the ``agent-browser`` CLI plus a Chromium build (except Lightpanda-only text workflows);
+    cloud mode needs the CLI plus provider credentials (the provider hosts its own Chromium).
     """
-    # Browser Use CLI backend — browser_exec replaces the whole browser_*
-    # surface (including browser_cdp/browser_dialog, whose check_fns funnel
-    # through here), so hide these tools from the model.
     _bt = _origin()
+    # Browser Use CLI backend: browser_exec replaces the whole browser_* surface (incl. browser_cdp/browser_dialog check_fns).
     if _bt._is_browser_use_cli_mode():
         return False
-
-    # Camofox backend — only needs the server URL, no agent-browser CLI
+    # Camofox only needs the server URL, no agent-browser CLI.
     if _bt._is_camofox_mode():
         return True
-
-    # CDP override mode can connect to an existing remote/local browser endpoint
-    # without requiring the local agent-browser binary on PATH.
-    # Raw (no-I/O) check: this runs during tool-schema assembly at startup,
-    # where a stale endpoint must not cost a blocking HTTP probe.
+    # CDP override needs no local binary. Raw (no-I/O) check: this runs during schema build, where a stale endpoint must not cost a blocking probe.
     if _bt._get_cdp_override_raw():
         return True
-
-    # The agent-browser CLI is required for local launch and cloud-provider flows.
-    # Tool-schema assembly runs during Desktop startup; do not execute
-    # ``agent-browser --version`` here, because Windows .cmd shims route through
-    # cmd.exe and can flash a console before the user invokes any browser tool.
-    # Actual browser execution paths still validate the candidate before use.
+    # Do not exec ``agent-browser --version`` here: Windows .cmd shims flash a console during Desktop startup. Execution paths still validate.
     try:
         browser_cmd = _bt._find_agent_browser(validate=False)
     except FileNotFoundError:
         return False
-
-    # On Termux, the bare npx fallback is too fragile to treat as a satisfied
-    # local browser dependency. Require a real install (global or local) so the
-    # browser tool is not advertised as available when it will likely fail on
-    # first use.
+    # Termux: the bare npx fallback is too fragile to advertise as a satisfied local dependency.
     if _bt._requires_real_termux_browser_install(browser_cmd):
         return False
-
-    # In cloud mode, also require provider credentials. Cloud browsers
-    # don't need a local Chromium binary.
+    # Cloud mode also requires provider credentials; no local Chromium needed.
     provider = _bt._get_cloud_provider()
     if provider is not None:
         return provider.is_configured()
-
-    # Local mode with Lightpanda can provide text/navigation tools without a
-    # local Chromium install. Chrome fallback, screenshots, and browser_vision
-    # will still return actionable Chromium install errors if invoked.
+    # Lightpanda provides text/navigation tools without Chromium; screenshots/vision still return install errors.
     if _bt._using_lightpanda_engine():
         return True
-
-    # Local Chrome mode: agent-browser needs a Chromium build on disk. Without
-    # it the CLI hangs on first use until the command timeout fires.
+    # Local Chrome mode needs Chromium on disk or the CLI hangs until the command timeout.
     return _bt._chromium_installed()
 
 
 def check_browser_vision_requirements() -> bool:
-    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision
-    backend — otherwise it fails at call time with a cryptic provider error."""
-    _bt = _origin()
-    if not _bt.check_browser_requirements():
+    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision backend."""
+    if not _origin().check_browser_requirements():
         return False
     try:
         from tools.vision_tools import check_vision_requirements
