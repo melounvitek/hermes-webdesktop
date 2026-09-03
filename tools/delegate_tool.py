@@ -11,11 +11,9 @@ the delegation call and the summary result, never the child's intermediate
 tool calls or reasoning.
 """
 
-import json
 import logging
 import time
 import weakref
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -43,7 +41,8 @@ from tools.delegate_tool_config import (  # noqa: F401
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import (  # noqa: F401
-    _dispatch_background, _run_children_parallel,
+    _Batch, _announce_batch, _capture_origin, _dispatch_background, _execute_and_aggregate, _run_batch,
+    _run_children_parallel,
 )
 from tools.delegate_tool_progress import (  # noqa: F401
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
@@ -441,55 +440,6 @@ def _run_single_child(
         )
 
 
-@dataclass
-class _Batch:
-    """One delegate_task call's built children plus everything needed to run
-    them and assemble the combined result (shared by the sync path and the
-    background runner)."""
-
-    task_list: List[Dict[str, Any]]
-    children: List[tuple]
-    parent_agent: Any
-    max_children: int
-    live_deleg_id: Optional[str]
-    live_writers: list
-    live_paths: list
-    origin_ui_session_id: str
-    origin_owner_transport: Any
-    origin_owner_session_record: Any
-    overall_start: float
-
-
-def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) -> None:
-    """Announce the batch tag once so interleaved ``[tag n/N]`` lines are attributable."""
-    if n_tasks <= 1 or not live_deleg_id:
-        return
-    _hdr = f"  🔀 [{format_batch_tag(live_deleg_id)}] delegating {n_tasks} tasks"
-    _hdr_spinner = getattr(parent_agent, "_delegate_spinner", None)
-    if _hdr_spinner:
-        try:
-            _hdr_spinner.print_above(_hdr)
-            return
-        except Exception:
-            pass
-    _emit_parent_console(parent_agent, _hdr)
-
-def _capture_origin() -> tuple[str, str, Any, Any]:
-    """``(wake_sid, ui_session_id, owner_transport, owner_session_record)`` of the
-    ORIGINATING session, captured BEFORE building any child: AIAgent construction
-    clobbers the HERMES_SESSION_ID ContextVar/os.environ with the subagent's id."""
-    from tools.async_delegation import _current_origin_session_id
-
-    _origin_wake_sid = _current_origin_session_id()
-    try:
-        from gateway.session_context import get_session_env
-
-        _origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
-    except Exception:
-        _origin_ui_session_id = ""
-    transport, record = _capture_gateway_steer_authority(_origin_ui_session_id)
-    return _origin_wake_sid, _origin_ui_session_id, transport, record
-
 def _build_children(
     task_list: List[Dict[str, Any]],
     task_schemas: List[Optional[Dict[str, Any]]],
@@ -557,66 +507,6 @@ def _build_children(
         children.append((i, t, child))
     return children, None
 
-def _finalize_live_transcripts(results: list, live_writers: list, live_paths: list) -> None:
-    """Close out live transcripts (files are retained as the full-fidelity
-    record; retention pruning happens on future dispatches)."""
-    for entry in results:
-        _idx = entry.get("task_index", -1)
-        _w = live_writers[_idx] if isinstance(_idx, int) and 0 <= _idx < len(live_writers) else None
-        if _w is not None:
-            try:
-                _w.finalize(entry)
-            except Exception:
-                logger.debug("Live transcript finalize failed", exc_info=True)
-            if _idx < len(live_paths):
-                entry["live_transcript"] = live_paths[_idx]
-
-def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True) -> dict:
-    """Run all built children, join, finalize (hooks + cost rollup), return the combined dict.
-
-    Shared by the sync path and the background runner: even in the background
-    the batch JOINS on itself here so ONE consolidated results block re-enters
-    the conversation.
-    """
-    from tools.delegation_live_log import update_manifest_statuses
-
-    results: list = []
-    n_tasks = len(batch.task_list)
-    if n_tasks == 1:
-        _i, _t, child = batch.children[0]
-        results.append(_run_single_child(
-            _i,
-            _t["goal"],
-            child,
-            batch.parent_agent,
-            owner_session_id=batch.origin_ui_session_id or None,
-            owner_transport=batch.origin_owner_transport,
-            owner_session_record=batch.origin_owner_session_record,
-        ))
-    else:
-        _run_children_parallel(
-            batch.children,
-            results,
-            parent_agent=batch.parent_agent,
-            n_tasks=n_tasks,
-            max_children=batch.max_children,
-            task_labels=[t["goal"][:40] for t in batch.task_list],
-            live_deleg_id=batch.live_deleg_id,
-            honor_parent_interrupt=honor_parent_interrupt,
-            origin_ui_session_id=batch.origin_ui_session_id,
-            origin_owner_transport=batch.origin_owner_transport,
-            origin_owner_session_record=batch.origin_owner_session_record,
-        )
-
-    _finalize_child_results(results, batch.task_list, batch.children, batch.parent_agent)
-    total_duration = round(time.monotonic() - batch.overall_start, 2)
-    _finalize_live_transcripts(results, batch.live_writers, batch.live_paths)
-    update_manifest_statuses(batch.live_deleg_id, results)
-
-    combined: Dict[str, Any] = {"results": results, "total_duration_seconds": total_duration}
-    if batch.live_paths:
-        combined["live_transcripts"] = list(batch.live_paths)
-    return combined
 
 def delegate_task(
     goal: Optional[str] = None,
@@ -707,7 +597,7 @@ def delegate_task(
         task_list, context, model=creds.get("model"), provider=creds.get("provider")
     )
     _announce_batch(parent_agent, len(task_list), live_deleg_id)
-    _origin_wake_sid, _origin_ui_session_id, _origin_owner_transport, _origin_owner_session_record = _capture_origin()
+    origin = _capture_origin()
 
     children, err = _build_children(
         task_list,
@@ -722,28 +612,10 @@ def delegate_task(
     if err:
         return tool_error(err)
     batch = _Batch(
-        task_list, children, parent_agent, max_children, live_deleg_id, live_writers, live_paths,
-        _origin_ui_session_id, _origin_owner_transport, _origin_owner_session_record, overall_start,
+        task_list, children, parent_agent, creds, context, top_role, max_children,
+        live_deleg_id, live_writers, live_paths, *origin, overall_start,
     )
-
-    def _run(*, honor_parent_interrupt: bool = True) -> dict:
-        return _execute_and_aggregate(batch, honor_parent_interrupt=honor_parent_interrupt)
-
-    if background:
-        return _dispatch_background(
-            parent_agent=parent_agent,
-            context=context,
-            task_list=task_list,
-            children=children,
-            creds=creds,
-            top_role=top_role,
-            live_deleg_id=live_deleg_id,
-            live_paths=live_paths,
-            origin_wake_sid=_origin_wake_sid,
-            origin_ui_session_id=_origin_ui_session_id,
-            execute_and_aggregate=_run,
-        )
-    return json.dumps(_run(), ensure_ascii=False)
+    return _run_batch(batch, background)
 
 
 # ── OpenAI function-calling schema ──────────────────────────────────────────

@@ -9,6 +9,7 @@ import logging
 import enum
 import os
 import threading
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
 
@@ -20,14 +21,25 @@ logger = logging.getLogger("tools.delegate_tool")
 # the parent-facing failure summary so every surface agrees.
 SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "error", "timeout"})
 
+@contextmanager
+def _quiet(log_message: Optional[str], *log_args: Any, exc_info: bool = False):
+    """Best-effort block: any Exception is swallowed (never reaches the run) and,
+    when ``log_message`` is given, logged at debug — the exception fills a trailing
+    unsatisfied ``%s``."""
+    try:
+        yield
+    except Exception as exc:
+        if log_message is None:
+            return
+        if log_message.count("%") > len(log_args):
+            log_args = log_args + (exc,)
+        logger.debug(log_message, *log_args, exc_info=exc_info)
+
 def _safe_progress(cb: Any, event_type: Any, *args: Any, **kwargs: Any) -> None:
     """Invoke a child progress callback; relay failures never reach the run."""
-    if not cb:
-        return
-    try:
-        cb(event_type, *args, **kwargs)
-    except Exception as e:
-        logger.debug("Progress callback %s failed: %s", event_type, e)
+    if cb:
+        with _quiet("Progress callback %s failed: %s", event_type):
+            cb(event_type, *args, **kwargs)
 
 def _clean_error_text(error: Any, max_chars: int = 200) -> str:
     """Reduce an error payload (traceback / JSON wall) to one clean line: the
@@ -147,13 +159,11 @@ def _build_child_system_prompt(
         # (identity belongs to the parent). workspace_path comes only from
         # explicit sources (_resolve_workspace_hint, never bare getcwd), so the
         # install-tree-fallback leak doesn't apply. Best-effort.
-        try:
+        _ctx_files = ""
+        with _quiet("subagent: workspace context-files load failed", exc_info=True):
             from agent.prompt_builder import build_context_files_prompt
 
             _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
-        except Exception:
-            logger.debug("subagent: workspace context-files load failed", exc_info=True)
-            _ctx_files = ""
         if _ctx_files.strip():
             parts.append(
                 "\nThe workspace's project context files are reproduced "
@@ -263,22 +273,19 @@ def _emit_parent_console(parent_agent, line: str) -> None:
     bare ``print()`` would land on stdout and corrupt JSON-RPC framing."""
     printer = getattr(parent_agent, "_safe_print", None)
     if callable(printer):
-        try:
+        with _quiet(None):
             printer(line)
             return
-        except Exception:
-            pass
     print(line)
 
-def _print_completion_line(parent_agent: Any, spinner_ref: Any, line: str) -> None:
-    """Above-spinner line when a spinner exists (console fallback if it raises), else console."""
+def _print_completion_line(parent_agent: Any, spinner_ref: Any, line: str, console_line: Optional[str] = None) -> None:
+    """Above-spinner line when a spinner exists (console fallback if it raises), else console
+    (``console_line`` when given, else the line indented two spaces)."""
     if spinner_ref:
-        try:
+        with _quiet(None):
             spinner_ref.print_above(line)
             return
-        except Exception:
-            pass
-    _emit_parent_console(parent_agent, f"  {line}")
+    _emit_parent_console(parent_agent, f"  {line}" if console_line is None else console_line)
 
 def _short(text: str, n: int) -> str:
     return (text[:n] + "...") if len(text) > n else text
@@ -334,19 +341,14 @@ class _ChildProgressRelay:
             return
         payload = self._identity_kwargs()
         payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
-        try:
+        with _quiet("Parent callback failed: %s"):
             self.parent_cb(event_type, tool_name, preview, args, **payload)
-        except Exception as e:
-            logger.debug("Parent callback failed: %s", e)
 
     def _tree_line(self, text: str) -> None:
         """Print one tree-view line above the CLI spinner (no-op without a spinner)."""
-        if not self.spinner:
-            return
-        try:
-            self.spinner.print_above(f" {self._prefix()}├─ {text}")
-        except Exception as e:
-            logger.debug("Spinner print_above failed: %s", e)
+        if self.spinner:
+            with _quiet("Spinner print_above failed: %s"):
+                self.spinner.print_above(f" {self._prefix()}├─ {text}")
 
     def _flush(self) -> None:
         """Flush remaining batched tool names to the gateway."""
@@ -390,10 +392,8 @@ class _ChildProgressRelay:
         if summary_text:
             self._tree_line(f"🔀 {summary_text}")
         if self.parent_cb:
-            try:
+            with _quiet("Parent callback relay failed: %s"):
                 self.parent_cb("subagent_progress", f"{self._prefix()}{summary_text}")
-            except Exception as e:
-                logger.debug("Parent callback relay failed: %s", e)
 
     def _on_tool_started(self, tool_name, preview, args, kwargs):
         self.tool_count += 1
