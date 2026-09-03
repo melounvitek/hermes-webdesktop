@@ -956,8 +956,7 @@ def _recover_via_lost_and_found(
         destination_conn.close()
     copy_report: dict[str, dict[str, Any]] = {
         table: {
-            "mode": "lost_and_found_salvage",
-            "status": "partial",
+            "mode": "lost_and_found_salvage", "status": "partial",
             "copied_rows": int(mapping["direct_table_rows"].get(table) or 0) + int(mapping["mapped"].get(table) or 0),
             "error": "recovered via page-level lost_and_found salvage; "
             "row completeness cannot be verified against the source",
@@ -972,12 +971,11 @@ def _recover_via_lost_and_found(
         output, expected_counts={"sessions": None, "messages": None}, copy_report=copy_report, allow_partial=True,
         orphan_cleanup=orphan_cleanup,
     )
-    verification["loss_detected"] = True
     verification["warnings"].append(
         "BEST-EFFORT page-level salvage: the source table schemas were unreadable, so rows were rebuilt from raw "
         "pages and mapped heuristically. Review every count before trusting this output."
     )
-    verification["complete"] = False
+    verification.update(loss_detected=True, complete=False)
     return _recovery_report(
         source, output, inspection, disk_space, verification, on_source_change="healthy",
         allow_partial=True, mode="lost_and_found_salvage", best_effort=True, unreadable_schemas=missing_required,

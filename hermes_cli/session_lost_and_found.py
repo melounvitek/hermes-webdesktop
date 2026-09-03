@@ -112,15 +112,12 @@ def run_cli_lost_and_found_recover(
         attempt["usable"] = _lost_and_found_db_usable(lf_path)
         if attempt["usable"]:
             return {"binary": sqlite3_bin, "attempts": attempts}
-    raise LostAndFoundError(
-        "sqlite3 .recover did not produce a usable lost_and_found database: "
-        + "; ".join(
-            f"[{a['command']}] dump rc={a['dump_returncode']} "
-            f"load rc={a['load_returncode']} "
-            f"{a['dump_stderr_tail'] or a['load_stderr_tail']}".strip()
-            for a in attempts
-        )
+    details = "; ".join(
+        f"[{a['command']}] dump rc={a['dump_returncode']} load rc={a['load_returncode']} "
+        f"{a['dump_stderr_tail'] or a['load_stderr_tail']}".strip()
+        for a in attempts
     )
+    raise LostAndFoundError(f"sqlite3 .recover did not produce a usable lost_and_found database: {details}")
 
 
 def _lost_and_found_db_usable(lf_path: Path) -> bool:
@@ -286,18 +283,14 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                 try:
                     if kind == "sessions" and nfield == SESSIONS_LEGACY_MINIMAL_NFIELD:
                         # Pre-modern layout with unknown column order: salvage identity + timing only.
-                        inserted = (
-                            dest.execute(
-                                "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
-                                (
-                                    cells[0],
-                                    cells[1] if _looks_like_source(cells[1]) else "recovered",
-                                    _heuristic_started_at(cells),
-                                    "[best-effort recovered] legacy session row (layout unknown)",
-                                ),
-                            ).rowcount
-                            == 1
+                        row_values = (
+                            cells[0], cells[1] if _looks_like_source(cells[1]) else "recovered",
+                            _heuristic_started_at(cells), "[best-effort recovered] legacy session row (layout unknown)",
                         )
+                        inserted = dest.execute(
+                            "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
+                            row_values,
+                        ).rowcount == 1
                         report["legacy_minimal_sessions"] += int(inserted)
                     else:
                         # messages: the rowid-alias PK is NULL in the record; use the lost_and_found rowid.
