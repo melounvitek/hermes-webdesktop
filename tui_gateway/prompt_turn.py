@@ -692,12 +692,13 @@ def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseExcept
 
 def _finish_turn(sid: str, session: dict, st: _TurnRun) -> None:
     """Finally-path of the turn: release everything, then the "tui turn finished" bookend."""
-    # Drop both pre-turn history snapshots before asking glibc to return pages.
-    st.history.clear()
-    if isinstance(st.run_kwargs, dict):
-        st.run_kwargs.clear()
-    # While the profile HERMES_HOME override is still active (session's own config).
-    try:
+    # Drop both pre-turn history snapshots before asking glibc to return pages (a test
+    # inspects these two locals by name).
+    history, run_kwargs = st.history, st.run_kwargs
+    history.clear()
+    if isinstance(run_kwargs, dict):
+        run_kwargs.clear()
+    try:  # while the profile HERMES_HOME override is still active (session's own config)
         from hermes_cli.mem_trim import trim_memory
         trim_memory(reason="tui turn completion")
     except Exception:
