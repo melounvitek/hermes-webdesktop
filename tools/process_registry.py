@@ -434,12 +434,11 @@ class ProcessRegistry:
         matched_lines = []
         matched_pattern = None
         for line in new_text.splitlines():
-            for pat in session.watch_patterns:
-                if pat in line:
-                    matched_lines.append(line.rstrip())
-                    if matched_pattern is None:
-                        matched_pattern = pat
-                    break  # one match per line is enough
+            pat = next((p for p in session.watch_patterns if p in line), None)  # one match per line
+            if pat is not None:
+                matched_lines.append(line.rstrip())
+                if matched_pattern is None:
+                    matched_pattern = pat
         if not matched_lines:
             return
 
@@ -767,8 +766,9 @@ class ProcessRegistry:
         return "/tmp"
 
     def _scope_argv(self, session: ProcessSession, safe_command: str, unit_suffix: str, label: str) -> List[str]:
-        """Login-shell argv for *safe_command*, wrapped in a transient systemd scope when
-        we are the supervised gateway (own cgroup: an OOM kills only the worker, not the
+        """Login-shell argv for *safe_command* (parity with LocalEnvironment: rc files
+        sourced, user tools on PATH), wrapped in a transient systemd scope when we are
+        the supervised gateway (own cgroup: an OOM kills only the worker, not the
         gateway and its messaging control plane)."""
         argv = [_find_shell(), "-lic", f"set +m; {safe_command}"]
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()
@@ -780,14 +780,21 @@ class ProcessRegistry:
             # the whole gateway down.
             logger.debug(
                 "%s background executor not isolated in a systemd scope "
-                "(systemd-run --user unavailable); worker shares the gateway cgroup.",
-                label,
+                "(systemd-run --user unavailable); worker shares the gateway cgroup.", label,
             )
         return argv
 
-    def _track_started(self, session: ProcessSession, reader_target, reader_name: str) -> None:
+    @staticmethod
+    def _spawn_env(env_vars: dict) -> dict:
+        """Sanitized child env; PYTHONUNBUFFERED so tqdm/datasets-style buffering
+        doesn't hide progress from process(action="poll")."""
+        env = _sanitize_subprocess_env(os.environ, env_vars)
+        env["PYTHONUNBUFFERED"] = "1"
+        return env
+
+    def _track_started(self, session: ProcessSession, reader_target, reader_name: str, extra_args=()) -> None:
         """Start the output reader thread, register the session and checkpoint it."""
-        reader = threading.Thread(target=reader_target, args=(session,), daemon=True, name=reader_name)
+        reader = threading.Thread(target=reader_target, args=(session, *extra_args), daemon=True, name=reader_name)
         session._reader_thread = reader
         reader.start()
         with self._lock:
@@ -805,8 +812,7 @@ class ProcessRegistry:
             from winpty import PtyProcess as _PtyProcessCls
         else:
             from ptyprocess import PtyProcess as _PtyProcessCls
-        pty_env = _sanitize_subprocess_env(os.environ, env_vars)
-        pty_env["PYTHONUNBUFFERED"] = "1"
+        pty_env = self._spawn_env(env_vars)
         # A PTY is a real TTY, so pager-happy tools (git log/diff, man) WILL page and
         # hang waiting for `q` — default them to cat, honoring any pager the user set.
         pty_env.setdefault("GIT_PAGER", "cat")
@@ -851,11 +857,7 @@ class ProcessRegistry:
                         ) from e
                     session.systemd_unit = ""
 
-        # Pipe path (non-PTY or PTY fallback). The user's login shell keeps parity with
-        # LocalEnvironment (rc files sourced, user tools on PATH). PYTHONUNBUFFERED so
-        # tqdm/datasets-style buffering doesn't hide progress from process(action="poll").
-        bg_env = _sanitize_subprocess_env(os.environ, env_vars)
-        bg_env["PYTHONUNBUFFERED"] = "1"
+        # Pipe path (non-PTY or PTY fallback).
         _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
         unit_suffix = f"{session.id}-pipe-fallback" if pty_scope_attempted else session.id
         spawn_argv = self._scope_argv(session, safe_command, unit_suffix, "Local")
@@ -865,8 +867,8 @@ class ProcessRegistry:
         # session (observed as dead TUIs in state T). Cgroup isolation is unaffected —
         # the scope attaches to the invoked process, not the spawning session.
         proc = subprocess.Popen(
-            spawn_argv, text=True, cwd=session.cwd, env=bg_env, encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            spawn_argv, text=True, cwd=session.cwd, env=self._spawn_env(env_vars), encoding="utf-8",
+            errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, **_popen_kwargs,
         )
         session.process = proc
@@ -923,11 +925,7 @@ class ProcessRegistry:
         try:
             result = env.execute(bg_command, timeout=timeout, rewrite_compound_background=False)
             output = result.get("output", "").strip()
-            for line in output.splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    session.pid = int(line)
-                    break
+            session.pid = next((int(ln) for ln in map(str.strip, output.splitlines()) if ln.isdigit()), None)
             # No PID from the wrapper (syntax error, broken redirect): a failed launch,
             # not a fake running session.
             if session.pid is None:
@@ -936,22 +934,13 @@ class ProcessRegistry:
         except Exception as e:
             session.mark_exited(-1, "failed_start", "failed_start")
             session.output_buffer = f"Failed to start: {e}"
-
         if session.exited:
             with self._lock:
                 self._prune_if_needed()
             return session
-        # Poller thread periodically reads the log file
-        reader = threading.Thread(
-            target=self._env_poller_loop, args=(session, env, log_path, pid_path, exit_path),
-            daemon=True, name=f"proc-poller-{session.id}",
+        self._track_started(
+            session, self._env_poller_loop, f"proc-poller-{session.id}", (env, log_path, pid_path, exit_path),
         )
-        session._reader_thread = reader
-        reader.start()
-        with self._lock:
-            self._prune_if_needed()
-            self._running[session.id] = session
-        self._write_checkpoint()
         return session
 
     # ----- Reader / Poller Threads -----
@@ -997,14 +986,12 @@ class ProcessRegistry:
 
             # select() needs a real OS fd; mocked streams (tests, adapters) may lack
             # fileno() and use the blocking read instead.
-            fd = None
-            if raw_read is not None and not _IS_WINDOWS:
-                try:
-                    candidate = stdout.fileno()
-                except Exception:
-                    candidate = None
-                if isinstance(candidate, int) and candidate >= 0:
-                    fd = candidate
+            try:
+                fd = stdout.fileno() if raw_read is not None and not _IS_WINDOWS else None
+            except Exception:
+                fd = None
+            if not (isinstance(fd, int) and fd >= 0):
+                fd = None
             if fd is not None:
                 import select as _select
             idle_after_exit = 0
@@ -1032,20 +1019,25 @@ class ProcessRegistry:
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
         finally:
-            # Flush the decoder: a truncated multibyte sequence at EOF becomes one
-            # U+FFFD instead of vanishing.
-            try:
-                tail = decoder.decode(b"", final=True)
-                if tail:
-                    _append_chunk(tail)
-            except Exception:
-                pass
-            # Always reap the child to prevent zombie processes.
-            try:
-                session.process.wait(timeout=5)
-            except Exception as e:
-                logger.debug("Process wait timed out or failed: %s", e)
-            self._finish_exited(session, session.process.returncode)
+            self._finish_reader(
+                session, decoder, _append_chunk, "Process",
+                lambda: session.process.wait(timeout=5), lambda: session.process.returncode,
+            )
+
+    def _finish_reader(self, session, decoder, append, label, wait, exit_code) -> None:
+        """Reader-thread teardown: flush the decoder (a truncated multibyte tail becomes
+        one U+FFFD instead of vanishing), reap the child (no zombies), record the exit."""
+        try:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                append(tail)
+        except Exception:
+            pass
+        try:
+            wait()
+        except Exception as e:
+            logger.debug("%s wait timed out or failed: %s", label, e)
+        self._finish_exited(session, exit_code())
 
     def _env_poller_loop(self, session: ProcessSession, env: Any, log_path: str, pid_path: str, exit_path: str):
         """Background thread: poll a sandbox log file for non-local backends."""
@@ -1080,10 +1072,8 @@ class ProcessRegistry:
                     return
             except Exception:
                 # Environment might be gone (sandbox reaped, etc.)
-                session.exited = True
-                session.exit_code = -1
-                session.completion_reason = "lost"
-                session.termination_source = "backend_lost"
+                session.exited, session.exit_code = True, -1
+                session.completion_reason, session.termination_source = "lost", "backend_lost"
                 self._move_to_finished(session)
                 return
 
@@ -1105,18 +1095,10 @@ class ProcessRegistry:
                     break
         except Exception as e:
             logger.debug("PTY stdout reader ended: %s", e)
-        # Flush any partial multibyte sequence held by the decoder.
-        try:
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                self._ingest_output(session, tail)
-        except Exception:
-            pass
-        try:
-            pty.wait()
-        except Exception as e:
-            logger.debug("PTY wait timed out or failed: %s", e)
-        self._finish_exited(session, pty.exitstatus if hasattr(pty, 'exitstatus') else -1)
+        self._finish_reader(
+            session, decoder, lambda t: self._ingest_output(session, t), "PTY",
+            pty.wait, lambda: pty.exitstatus if hasattr(pty, 'exitstatus') else -1,
+        )
 
     def _ingest_output(self, session: ProcessSession, text: str) -> None:
         """Buffer a freshly-read chunk, then scan watch patterns and stream it live."""
@@ -1280,6 +1262,22 @@ class ProcessRegistry:
         except Exception:
             return False
 
+    @staticmethod
+    def _owns_event(evt: dict, session_key: str, owns_event, is_async_delegation: bool) -> bool:
+        """Routing verdict for one drained event (see drain_notifications); False = requeue."""
+        evt_session_key = str(evt.get("session_key") or "")
+        requires_positive_proof = is_async_delegation or bool(evt_session_key or evt.get("origin_ui_session_id"))
+        if owns_event is not None and requires_positive_proof:
+            try:
+                return bool(owns_event(evt))
+            except Exception:
+                return False  # fail closed — never leak on a broken check
+        if session_key and requires_positive_proof:
+            return evt_session_key == session_key
+        # Restored payloads from a previous process: an unfiltered drain cannot prove
+        # ownership, so leave them for the owner.
+        return not (is_async_delegation and evt.get("restored"))
+
     def drain_notifications(
         self, session_key: str = "", owns_event=None, *, skip_poll_observed: bool = True,
     ) -> "list[tuple[dict, str]]":
@@ -1305,25 +1303,7 @@ class ProcessRegistry:
             except Exception:
                 break
             is_async_delegation = evt.get("type") == "async_delegation"
-            evt_session_key = str(evt.get("session_key") or "")
-            requires_positive_proof = is_async_delegation or bool(
-                evt_session_key or evt.get("origin_ui_session_id")
-            )
-            if owns_event is not None and requires_positive_proof:
-                try:
-                    owned = bool(owns_event(evt))
-                except Exception:
-                    owned = False  # fail closed — never leak on a broken check
-                if not owned:
-                    requeue.append(evt)
-                    continue
-            elif session_key and requires_positive_proof:
-                if evt_session_key != session_key:
-                    requeue.append(evt)
-                    continue
-            elif is_async_delegation and evt.get("restored"):
-                # Restored payloads from a previous process: an unfiltered drain
-                # cannot prove ownership, so leave them for the owner.
+            if not self._owns_event(evt, session_key, owns_event, is_async_delegation):
                 requeue.append(evt)
                 continue
             # Routing happened first so a foreign session cannot drop the owner's
@@ -1438,6 +1418,14 @@ class ProcessRegistry:
         )
         self._move_to_finished(session)
 
+    @staticmethod
+    def _status_head(session: ProcessSession) -> dict:
+        return {
+            "session_id": session.id,
+            "command": session.command,
+            "status": "exited" if session.exited else "running",
+        }
+
     def poll(self, session_id: str) -> dict:
         """Check status and get new output for a background process."""
         session = self.get(session_id)
@@ -1447,9 +1435,7 @@ class ProcessRegistry:
         with session._lock:
             output_preview = _output_tail(session, 1000)
         result = {
-            "session_id": session.id,
-            "command": session.command,
-            "status": "exited" if session.exited else "running",
+            **self._status_head(session),
             "pid": session.pid,
             "uptime_seconds": int(time.time() - session.started_at),
             "output_preview": output_preview,
@@ -1489,9 +1475,7 @@ class ProcessRegistry:
             stop = slice(offset, offset + limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
         result = {
-            "session_id": session.id,
-            "command": session.command,
-            "status": "exited" if session.exited else "running",
+            **self._status_head(session),
             "output": "\n".join(selected),
             "total_lines": total_lines,
             "showing": f"{len(selected)} lines",
@@ -1532,6 +1516,7 @@ class ProcessRegistry:
             if session is None:
                 return _not_found(session_id)
             self._reconcile_local_exit(session)  # orphaned-pipe reader guard
+            result = None
             if session.exited:
                 self._completion_consumed.add(session_id)
                 result = self._exit_snapshot(session, "exited")
@@ -1542,8 +1527,6 @@ class ProcessRegistry:
                     "output": _output_tail(session, 1000),
                     "note": "User sent a new message -- wait interrupted",
                 }
-            else:
-                result = None
             if result is not None:
                 if timeout_note:
                     result["timeout_note"] = timeout_note
@@ -1564,13 +1547,12 @@ class ProcessRegistry:
         base_note = f"Wait window of {effective_timeout}s elapsed — the process is still running. This is not an error."
         if session.started_at:
             base_note += f" Uptime: {int(time.time() - session.started_at)}s."
-        if session.notify_on_complete:
-            base_note += " notify_on_complete is set: you will be notified on exit — do more work instead of waiting again."
-        else:
-            base_note += (
-                " Poll again later or use terminal(background=true, "
-                "notify_on_complete=true) next time for automatic notification."
-            )
+        base_note += (
+            " notify_on_complete is set: you will be notified on exit — do more work instead of waiting again."
+            if session.notify_on_complete else
+            " Poll again later or use terminal(background=true, "
+            "notify_on_complete=true) next time for automatic notification."
+        )
         result["timeout_note"] = f"{timeout_note}. {base_note}" if timeout_note else base_note
         return result
 
@@ -1676,10 +1658,8 @@ class ProcessRegistry:
         else:
             return {
                 "status": "error",
-                "error": (
-                    "Recovered process cannot be killed after restart because "
-                    "its original runtime handle is no longer available"
-                ),
+                "error": "Recovered process cannot be killed after restart because "
+                         "its original runtime handle is no longer available",
             }
         return None
 
@@ -1724,20 +1704,18 @@ class ProcessRegistry:
         """Send data + newline to stdin (like pressing Enter).
 
         On a Windows PTY, Enter is a carriage return: ConPTY treats ``\\r`` as
-        end-of-line and a bare ``\\n`` through pywinpty is NOT a line terminator —
-        the child's blocking line read (``readline()``, Go ``bufio.Scanner`` in
-        ``gh auth login``) never returns and the process hangs looking healthy.
-        ``\\r\\n`` gives it both; POSIX PTYs and pipes keep ``\\n``.
+        end-of-line and a bare ``\\n`` through pywinpty is NOT a line terminator — the
+        child's blocking line read (``readline()``, Go ``bufio.Scanner``) never returns
+        and the process hangs looking healthy. ``\\r\\n`` gives it both; POSIX keeps ``\\n``.
         """
         session = self.get(session_id)
         is_windows_pty = bool(_IS_WINDOWS and session is not None and session._pty)
         return self.write_stdin(session_id, data + ("\r\n" if is_windows_pty else "\n"))
 
     def request_close_terminal(self, session_id: str) -> dict:
-        """Ask the desktop GUI to close this process's read-only terminal tab.
-
-        Does NOT kill the process — output keeps buffering and the tab can be
-        reopened from the status stack. Errors when no UI close sink is wired."""
+        """Ask the desktop GUI to close this process's read-only terminal tab. Does NOT
+        kill the process — output keeps buffering and the tab can be reopened from the
+        status stack. Errors when no UI close sink is wired."""
         sink = self.on_close
         if sink is None:
             return {"status": "error", "error": "close_terminal is only available in the Hermes desktop app."}
@@ -1882,7 +1860,6 @@ class ProcessRegistry:
         now = time.time()
         expired = [sid for sid, s in self._finished.items() if (now - s.started_at) > FINISHED_TTL_SECONDS]
         if len(self._running) + len(self._finished) - len(expired) >= MAX_PROCESSES:
-            # Still over the limit: also drop the oldest surviving finished session.
             survivors = [sid for sid in self._finished if sid not in expired]
             if survivors:
                 expired.append(min(survivors, key=lambda sid: self._finished[sid].started_at))
@@ -2114,7 +2091,6 @@ def _handle_process(args, **kw):
     action = args.get("action", "")
     # Coerce to string — some models send session_id as an integer
     session_id = str(args.get("session_id", "")) if args.get("session_id") is not None else ""
-
     if action == "list":
         return json.dumps(_list_processes(kw.get("task_id")), ensure_ascii=False)
     if action in _SESSION_ACTIONS:

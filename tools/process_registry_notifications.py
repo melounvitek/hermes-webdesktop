@@ -78,8 +78,7 @@ def _delegation_model_not_found_notice(results) -> "list[str] | None":
         f'"{model}" was rejected by provider "{provider}" '
         "(HTTP 400: not a valid model ID).",
         "Every task in this batch failed for this reason before doing any work.",
-        "Check Settings → Advanced → Subagent Model (or: "
-        "hermes config get delegation.model).",
+        "Check Settings → Advanced → Subagent Model (or: hermes config get delegation.model).",
     ]
     try:
         from hermes_cli.fallback_config import get_fallback_chain
@@ -144,15 +143,13 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
     lines.extend(_task_source_lines(evt))
     lines.append(f"{_role_model(evt)}   Total duration: {total_dur}s")
     if error and not results:
-        lines.append("--- ERROR ---")
-        lines.append(f"The batch did not complete successfully: {error}")
+        lines += ["--- ERROR ---", f"The batch did not complete successfully: {error}"]
         return "\n".join(lines)
     # Config-level rejection notice BEFORE the per-task wall — a rejected
     # delegation model fails every task identically and must not stay buried.
     _notice = _delegation_model_not_found_notice(results)
     if _notice:
-        lines.append("")
-        lines.extend(_notice)
+        lines += ["", *_notice]
     for r in sorted(results, key=lambda x: x.get("task_index", 0)):
         idx = r.get("task_index", 0)
         r_status = r.get("status", "?")
@@ -161,19 +158,14 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
         r_goal = goals[idx] if idx < len(goals) else r.get("goal", "")
         r_truncated = _is_truncated(r)
         icon = "⚠" if r_truncated else ("✓" if r_status in ("completed", "success") else "✗")
-        lines.append("")
-        header = f"--- {icon} TASK {idx + 1}/{n}"
-        if r_goal:
-            header += f": {r_goal}"
-        header += f"  (status={r_status}"
+        header = f"--- {icon} TASK {idx + 1}/{n}" + (f": {r_goal}" if r_goal else "") + f"  (status={r_status}"
         if r.get("api_calls"):
             header += f", api_calls={r['api_calls']}"
         if r.get("duration_seconds") is not None:
             header += f", {r['duration_seconds']}s"
         if r_truncated:
             header += ", TRUNCATED: hit max_iterations — work may be incomplete"
-        header += ") ---"
-        lines.append(header)
+        lines += ["", header + ") ---"]
         if r_status in ("completed", "success") and r_summary:
             if r_truncated:
                 lines.append(_TRUNCATED_SUMMARY_NOTE)
@@ -181,30 +173,26 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
         elif r_summary:
             if r_error:
                 lines.append(f"({r_status}: {r_error})")
-            lines.append("Partial output:")
-            lines.append(r_summary)
+            lines += ["Partial output:", r_summary]
         else:
             lines.append(f"(no summary — status={r_status}" + (f": {r_error}" if r_error else "") + ")")
-        r_live = r.get("live_transcript")
-        if r_live:
-            lines.append(f"Full live transcript (complete tool/assistant trace): {r_live}")
+        if r.get("live_transcript"):
+            lines.append(f"Full live transcript (complete tool/assistant trace): {r['live_transcript']}")
     return "\n".join(lines)
 
 
 def _format_async_delegation(evt: dict) -> str:
     """Format an async-delegation completion into a self-contained re-injection.
 
-    Carries the FULL original task source (goal, context, toolsets, role,
-    model) plus dispatch time, status, and the complete result summary: when
-    this re-enters the conversation the agent may be deep in unrelated context
-    and must be able to use the result OR re-dispatch without remembering why
-    the subagent existed.
+    Carries the FULL original task source (goal, context, toolsets, role, model) plus
+    dispatch time, status, and the complete result summary: when this re-enters the
+    conversation the agent may be deep in unrelated context and must be able to use
+    the result OR re-dispatch without remembering why the subagent existed.
     """
     deleg_id = evt.get("delegation_id", "unknown")
     completed_at = evt.get("completed_at") or time.time()
     if evt.get("is_batch") or isinstance(evt.get("results"), list):
         return _format_batch_delegation(evt, deleg_id, completed_at)
-
     status = evt.get("status") or "completed"
     summary = evt.get("summary")
     error = evt.get("error")
@@ -222,14 +210,13 @@ def _format_async_delegation(evt: dict) -> str:
     lines.append(_role_model(evt))
     _notice = _delegation_model_not_found_notice([evt])
     if _notice:
-        lines.append("")
-        lines.extend(_notice)
+        lines += ["", *_notice]
     _trunc = " [TRUNCATED: hit max_iterations — work may be incomplete]" if truncated else ""
-    lines.append(
+    lines += [
         f"Status: {status}   API calls: {evt.get('api_calls', 0)}   "
-        f"Duration: {evt.get('duration_seconds', '?')}s{_trunc}"
-    )
-    lines.append("--- RESULT ---")
+        f"Duration: {evt.get('duration_seconds', '?')}s{_trunc}",
+        "--- RESULT ---",
+    ]
     if status in ("completed", "success") and summary:
         if truncated:
             lines.append(_TRUNCATED_SUMMARY_NOTE)
@@ -242,8 +229,7 @@ def _format_async_delegation(evt: dict) -> str:
                 f"The subagent did not complete successfully (status={status})." + (f"\n{error}" if error else "")
             )
         if summary:
-            lines.append("Partial output:")
-            lines.append(summary)
+            lines += ["Partial output:", summary]
     return "\n".join(lines)
 
 
@@ -271,10 +257,7 @@ def _delegation_attribution_line(evt: dict) -> "str | None":
     if len(goal) > 120:
         goal = goal[:117] + "..."
     deleg = info.get("delegation_id")
-    parts = [f"Started by subagent {task_id}"]
-    if deleg:
-        parts.append(f"of delegation {deleg}")
-    line = " ".join(parts) + "."
+    line = f"Started by subagent {task_id}" + (f" of delegation {deleg}" if deleg else "") + "."
     if goal:
         line += f' Task: "{goal}"'
     return line
