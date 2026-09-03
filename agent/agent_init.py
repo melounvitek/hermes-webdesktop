@@ -1068,32 +1068,26 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         quiet_mode=agent.quiet_mode,
     )
 
-    agent.valid_tool_names = set()
-    if agent.tools:
-        agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools}
-        tool_names = sorted(agent.valid_tool_names)
-        if not agent.quiet_mode:
-            print(f"🛠️  Loaded {len(agent.tools)} tools: {', '.join(tool_names)}")
-            if enabled_toolsets:
-                print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
-            if disabled_toolsets:
-                print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
-    elif not agent.quiet_mode:
-        print("🛠️  No tools loaded (all tools filtered out or unavailable)")
-
+    agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
     # Kanban guidance is session-static (kanban_show iff HERMES_KANBAN_TASK); resolve once.
     from agent.prompt_builder import KANBAN_GUIDANCE
     agent._kanban_worker_guidance = (
         KANBAN_GUIDANCE if "kanban_show" in agent.valid_tool_names else ""
     )
-
     if agent.quiet_mode:
         return
     if agent.tools:
+        print(f"🛠️  Loaded {len(agent.tools)} tools: {', '.join(sorted(agent.valid_tool_names))}")
+        if enabled_toolsets:
+            print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
+        if disabled_toolsets:
+            print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
         requirements = _ra().check_toolset_requirements()
         missing_reqs = [name for name, available in requirements.items() if not available]
         if missing_reqs:
             print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
+    else:
+        print("🛠️  No tools loaded (all tools filtered out or unavailable)")
     if agent.save_trajectories:
         print("📝 Trajectory saving enabled")
     if agent.ephemeral_system_prompt:
@@ -1729,18 +1723,18 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
 
     # model.max_tokens from config when the caller did not pass one.
     _model_cfg = _agent_cfg.get("model", {})
-    if agent.max_tokens is None and isinstance(_model_cfg, dict):
-        _config_max_tokens = _model_cfg.get("max_tokens")
-        if _config_max_tokens is not None:
-            agent.max_tokens = _positive_int(_config_max_tokens, reject=(bool,))
-            if agent.max_tokens is None:
-                _warn_invalid_config_int(
-                    "model.max_tokens in config.yaml", _config_max_tokens,
-                    "must be a positive integer (e.g. 4096)", "provider default",
-                )
+    _model_section = _model_cfg if isinstance(_model_cfg, dict) else {}
+    _config_max_tokens = _model_section.get("max_tokens")
+    if agent.max_tokens is None and _config_max_tokens is not None:
+        agent.max_tokens = _positive_int(_config_max_tokens, reject=(bool,))
+        if agent.max_tokens is None:
+            _warn_invalid_config_int(
+                "model.max_tokens in config.yaml", _config_max_tokens,
+                "must be a positive integer (e.g. 4096)", "provider default",
+            )
     agent._session_init_model_config["max_tokens"] = agent.max_tokens
 
-    _config_context_length = _model_cfg.get("context_length") if isinstance(_model_cfg, dict) else None
+    _config_context_length = _model_section.get("context_length")
     if _config_context_length is not None:
         try:
             _config_context_length = int(_config_context_length)
@@ -1763,9 +1757,9 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
 
     # ``model.context_length`` describes the configured default model; drop it when the
     # startup runtime (model or route) differs from that default.
-    if _config_context_length is not None and isinstance(_model_cfg, dict):
+    if _config_context_length is not None:
         _config_context_length = _scope_context_length_to_default_runtime(
-            agent, _agent_cfg, _model_cfg, _custom_providers, _config_context_length, base_url
+            agent, _agent_cfg, _model_section, _custom_providers, _config_context_length, base_url
         )
 
     # Reused by _check_compression_model_feasibility (aux compression model detection).
