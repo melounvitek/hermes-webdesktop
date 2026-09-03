@@ -19,8 +19,7 @@ from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMe
 
 TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 TOOL_CALL_JSON_RE = re.compile(
-    r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}",
-    re.DOTALL,
+    r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL
 )
 
 TOOL_CALL_CONTRACT = (
@@ -42,32 +41,23 @@ class StreamChunks(list):
 
 
 def completion_to_stream_chunks(completion: SimpleNamespace) -> StreamChunks:
-    """Re-shape a one-shot ACP response as OpenAI stream chunks (data chunk + usage chunk).
-
-    Response-level attributes other than choices/usage/model are copied onto the result.
-    """
+    """Re-shape a one-shot ACP response as OpenAI stream chunks (data chunk + usage chunk); response-level
+    attributes other than choices/usage/model are copied onto the result."""
     choice = completion.choices[0]
     message = choice.message
     tool_call_deltas = None
     if message.tool_calls:
         tool_call_deltas = [
             SimpleNamespace(
-                index=index,
-                id=getattr(tool_call, "id", None),
-                type=getattr(tool_call, "type", "function"),
-                function=SimpleNamespace(
-                    name=getattr(tool_call.function, "name", None),
-                    arguments=getattr(tool_call.function, "arguments", None),
-                ),
+                index=index, id=getattr(tool_call, "id", None), type=getattr(tool_call, "type", "function"),
+                function=SimpleNamespace(name=getattr(tool_call.function, "name", None),
+                                         arguments=getattr(tool_call.function, "arguments", None)),
             )
             for index, tool_call in enumerate(message.tool_calls)
         ]
     delta = SimpleNamespace(
-        role="assistant",
-        content=message.content or None,
-        tool_calls=tool_call_deltas,
-        reasoning_content=getattr(message, "reasoning_content", None),
-        reasoning=getattr(message, "reasoning", None),
+        role="assistant", content=message.content or None, tool_calls=tool_call_deltas,
+        reasoning_content=getattr(message, "reasoning_content", None), reasoning=getattr(message, "reasoning", None),
     )
     data_chunk = SimpleNamespace(
         choices=[SimpleNamespace(index=0, delta=delta, finish_reason=choice.finish_reason)],
@@ -144,11 +134,8 @@ def _parse_tool_call(raw_json: str, ordinal: int) -> ChatCompletionMessageToolCa
 
 
 def extract_tool_calls_from_text(text: str) -> tuple[list[ChatCompletionMessageToolCall], str]:
-    """Pull ``<tool_call>`` blocks out of an ACP response.
-
-    Returns ``(tool_calls, cleaned_text)`` with the consumed blocks removed so the assistant message
-    doesn't show raw JSON. Bare-JSON fallback runs only when no XML block parsed.
-    """
+    """Pull ``<tool_call>`` blocks out of an ACP response → ``(tool_calls, cleaned_text)`` with the consumed blocks
+    removed so the assistant message doesn't show raw JSON. Bare-JSON fallback runs only when no XML block parsed."""
     if not isinstance(text, str) or not text.strip():
         return [], ""
     extracted: list[ChatCompletionMessageToolCall] = []
