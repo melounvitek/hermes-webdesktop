@@ -60,12 +60,10 @@ def _serialize_auto_reload(ar, format_money) -> dict | None:
         return None
     card_out = None
     if ar.card is not None:
+        card_out = {"kind": ar.card.kind}
         if ar.card.kind == "distinct":
-            card_out = {
-                "kind": "distinct", "payment_method_id": ar.card.payment_method_id,
-                "brand": ar.card.brand, "last4": ar.card.last4}
-        else:
-            card_out = {"kind": ar.card.kind}
+            card_out.update(payment_method_id=ar.card.payment_method_id, brand=ar.card.brand,
+                            last4=ar.card.last4)
     return {
         "enabled": ar.enabled, "threshold_usd": _wire_str(ar.threshold_usd),
         "threshold_display": format_money(ar.threshold_usd),
@@ -77,20 +75,18 @@ def _serialize_billing_state(state) -> dict:
     """Serialize a BillingState for the wire (Decimals → strings, money-safe)."""
     from agent.billing_view import format_money
 
-    card = None
+    card = mc = None
     if state.card is not None:
         card = {
             "brand": state.card.brand, "last4": state.card.last4, "masked": state.card.masked,
             # None/False on older NAS payloads; resolved_via = rung for rung-gated surfaces.
             "display": state.card.display, "resolved_via": state.card.resolved_via}
-    monthly_cap = None
     if state.monthly_cap is not None:
-        mc = state.monthly_cap
-        monthly_cap = {
-            "limit_usd": _wire_str(mc.limit_usd), "limit_display": format_money(mc.limit_usd),
-            "spent_this_month_usd": _wire_str(mc.spent_this_month_usd),
-            "spent_display": format_money(mc.spent_this_month_usd),
-            "is_default_ceiling": mc.is_default_ceiling}
+        m = state.monthly_cap
+        mc = {"limit_usd": _wire_str(m.limit_usd), "limit_display": format_money(m.limit_usd),
+              "spent_this_month_usd": _wire_str(m.spent_this_month_usd),
+              "spent_display": format_money(m.spent_this_month_usd),
+              "is_default_ceiling": m.is_default_ceiling}
     return {
         "ok": True, "logged_in": state.logged_in, "org_name": state.org_name,
         "org_slug": state.org_slug, "role": state.role, "is_admin": state.is_admin,
@@ -102,8 +98,7 @@ def _serialize_billing_state(state) -> dict:
         "charge_presets_display": [format_money(p) for p in state.charge_presets],
         "min_usd": _wire_str(state.min_usd), "max_usd": _wire_str(state.max_usd),
         "card": card, "payment_method": _serialize_payment_method(state.payment_method),
-        "monthly_cap": monthly_cap,
-        "auto_reload": _serialize_auto_reload(state.auto_reload, format_money),
+        "monthly_cap": mc, "auto_reload": _serialize_auto_reload(state.auto_reload, format_money),
         "portal_url": state.portal_url, "error": state.error,
         # Shared two-bar dollar usage model so /topup matches /usage and /subscription; fail-open.
         "usage": _usage_payload(state)}

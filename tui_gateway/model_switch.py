@@ -288,8 +288,7 @@ def _sync_bot_capabilities(sid: str, session: dict) -> None:
     try:
         title = str(getattr(agent, "_session_title_hint", "") or "").strip()
         if not title:
-            db = getattr(agent, "_session_db", None)
-            key = session.get("session_key") or ""
+            db, key = getattr(agent, "_session_db", None), session.get("session_key") or ""
             title = str((db.get_session_title(key) if (db and key) else None) or "").strip()
         if title != "Bot Chat":
             return

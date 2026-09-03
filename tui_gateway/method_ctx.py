@@ -109,11 +109,8 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
         return v
 
     def _has_own_fn(v):
-        if isinstance(v, dict):
-            return any(_has_own_fn(x) for x in v.values())
-        if isinstance(v, (tuple, list)):
-            return any(_has_own_fn(x) for x in v)
-        return _own_fn(v)
+        items = v.values() if isinstance(v, dict) else v if isinstance(v, (tuple, list)) else None
+        return _own_fn(v) if items is None else any(_has_own_fn(x) for x in items)
 
     for name, obj in list(module_globals.items()):
         if name.startswith("__") or name in _PLUMBING or name in skip:

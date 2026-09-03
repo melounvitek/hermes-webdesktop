@@ -35,18 +35,16 @@ class WsPublisherTransport:
         self._url = url
         self._lock = threading.Lock()
         self._ws: Optional[object] = None
-        self._dead = False
+        self._dead = ws_connect is None
         self._q: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_MAX)
         self._worker: Optional[threading.Thread] = None
-        if ws_connect is None:
-            self._dead = True
+        if self._dead:
             return
         try:
             self._ws = ws_connect(url, open_timeout=connect_timeout, max_size=None)
         except Exception as exc:
             _log.debug("event publisher connect failed: %s", exc)
             self._dead = True
-            self._ws = None
             return
         self._worker = threading.Thread(target=self._drain, name="hermes-ws-pub", daemon=True)
         self._worker.start()

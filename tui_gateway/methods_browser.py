@@ -140,9 +140,7 @@ def _browser_connect(rid, params: dict) -> dict:
     if raw_url is not None and not isinstance(raw_url, str):
         return _err(rid, 4015, f"browser url must be a string, got {type(raw_url).__name__}")
     url = (raw_url or "").strip() or DEFAULT_BROWSER_CDP_URL
-    sid = params.get("session_id") or ""
-    system = platform.system()
-    messages: list[str] = []
+    sid, system, messages = params.get("session_id") or "", platform.system(), []
 
     def announce(message: str, *, level: str = "info") -> None:
         messages.append(message)
