@@ -43,7 +43,6 @@ def _hermes_home_scope(path) -> Any:
     """Scope ``load_config``/``save_config`` (anything resolving ``get_hermes_home()`` at call
     time) to ``path`` for the block via the context-local HERMES_HOME override."""
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-
     token = set_hermes_home_override(str(path))
     try:
         yield
@@ -64,15 +63,11 @@ def _is_other_profile(profile: Optional[str]) -> bool:
 
 
 def _approval_mode_of(config: Dict[str, Any]) -> str:
-    """Normalize approvals.mode from an in-memory config document.
-
-    Both sides of the broadcast comparison use in-memory documents: re-reading through
-    the config cache after a save can serve the pre-save document when the replacement
-    file collides on the (mtime_ns, size) cache key, suppressing the broadcast exactly
-    when the mode changed. Absent block/key normalizes to the approval gate's default.
-    """
+    """Normalize approvals.mode from an in-memory config document. Both sides of the
+    broadcast comparison use in-memory documents: re-reading through the config cache after
+    a save can serve the pre-save document when the replacement file collides on the
+    (mtime_ns, size) cache key, suppressing the broadcast exactly when the mode changed."""
     from tools.approval import _normalize_approval_mode
-
     approvals = config.get("approvals")
     default_mode = (DEFAULT_CONFIG.get("approvals") or {}).get("mode", "manual")
     mode = approvals.get("mode", default_mode) if isinstance(approvals, dict) else default_mode
@@ -174,7 +169,6 @@ def _write_profile_mcp_servers(profile_dir: Path, servers: List["MCPServerCreate
     """
     from hermes_cli.web_server import load_config, save_config
     from hermes_cli.mcp_config import _save_bearer_auth_token
-
     written = 0
     with _hermes_home_scope(profile_dir):
         cfg = load_config()
@@ -199,12 +193,9 @@ def _write_profile_mcp_servers(profile_dir: Path, servers: List["MCPServerCreate
     return written
 
 
-# ---------------------------------------------------------------------------
 # Skills & Tools endpoints accept an optional ``profile`` query param so the dashboard can
-# manage ANY profile's skills/toolsets, not just the one the dashboard process runs under
-# ("Set as active" only flips the sticky active_profile file for FUTURE invocations, which
-# misled users into thinking toggles landed in the activated profile).
-# ---------------------------------------------------------------------------
+# manage ANY profile's skills/toolsets ("Set as active" only flips the sticky active_profile
+# file for FUTURE invocations, which misled users into thinking toggles landed there).
 
 
 _SKILLS_PROFILE_LOCK = threading.RLock()
@@ -215,22 +206,17 @@ def _profile_scope(profile: Optional[str]):
     """Scope config + skill-directory resolution to ``profile`` for one request.
 
     Two seams: (1) ``load_config``/``save_config`` resolve ``get_hermes_home()`` at call
-    time, so the contextvar override (``_config_profile_scope``) reaches them; (2)
-    ``tools.skills_tool`` / ``tools.skill_manager_tool`` bind ``SKILLS_DIR`` at import
-    time, so both are retargeted under a lock and restored immediately after (like
-    ``_call_cron_for_profile`` does for cron). ``tools.skills_sync`` needs no retargeting —
-    its lookups resolve at call time through the same override.
-
-    For the dashboard's own profile (None/""/"current") config resolution is untouched, but
-    the skill-module globals are still retargeted to the *current* ``get_hermes_home()`` so
-    writes land in the live home even when the import-time binding is stale (process
-    imported the modules before a HERMES_HOME override, or under test isolation).
-    Yields the profile dir for a named profile, None for the current one.
+    time, so the contextvar override reaches them; (2) ``tools.skills_tool`` /
+    ``tools.skill_manager_tool`` bind ``SKILLS_DIR`` at import time, so both are retargeted
+    under a lock and restored after. For the dashboard's own profile config resolution is
+    untouched, but the skill-module globals are still retargeted to the *current*
+    ``get_hermes_home()`` so writes land in the live home even when the import-time binding
+    is stale (test isolation, late HERMES_HOME override). Yields the profile dir for a named
+    profile, None for the current one.
     """
     from hermes_constants import get_hermes_home
     from tools import skills_tool as _skills_tool
     from tools import skill_manager_tool as _skill_mgr
-
     with _config_profile_scope(profile) as scoped:
         profile_dir = get_hermes_home() if scoped is None else scoped
         modules = (_skills_tool, _skill_mgr)
@@ -247,14 +233,10 @@ def _profile_scope(profile: Optional[str]):
 
 @contextmanager
 def _config_profile_scope(profile: Optional[str]):
-    """Await-safe, config-only profile scope for handlers that ``await``.
-
-    Touches ONLY the task-local ``set_hermes_home_override`` contextvar — never the
-    process-global ``skills_tool``/``skill_manager`` attributes ``_profile_scope`` swaps:
-    holding those across an ``await`` lets a concurrent skills request restore THIS
-    request's dir on its ``finally``. Enough for endpoints that resolve ``get_hermes_home()``
-    at call time (config, env, gateway status). None/""/"current" = no override.
-    """
+    """Await-safe, config-only profile scope: touches ONLY the task-local HERMES_HOME
+    contextvar, never the process-global skills-module attributes ``_profile_scope`` swaps
+    (holding those across an ``await`` lets a concurrent request restore THIS request's dir
+    on its ``finally``). None/""/"current" = no override."""
     from hermes_cli.web_server import _resolve_profile_dir
     if _is_current_profile(profile):
         yield None
@@ -264,12 +246,8 @@ def _config_profile_scope(profile: Optional[str]):
         yield profile_dir
 
 
-# ---------------------------------------------------------------------------
-# Terminal execution backend picker — GUI counterpart of terminal.backend. Each row carries a
-# fast, defensive health probe so the Capabilities panel renders Ready / Needs setup instead
-# of a bare enum. Probes must never raise — a probe failure renders as a status, not a 500.
-# Keep in sync with tools/terminal_tool.py::_create_environment and the terminal.backend enum.
-# ---------------------------------------------------------------------------
+# Terminal backend picker rows — GUI counterpart of terminal.backend. Keep in sync with
+# tools/terminal_tool.py::_create_environment and the terminal.backend enum.
 
 _TERMINAL_BACKENDS: List[Dict[str, str]] = [
     dict(zip(("name", "label", "description"), row)) for row in (
@@ -288,13 +266,11 @@ def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()  # idempotent — plugin state may not be loaded yet
     except Exception:
         pass
     try:
         from agent.terminal_env_registry import list_providers
-
         for provider in list_providers():
             try:
                 rows.append({"name": provider.name.strip().lower(), "label": provider.display_name,
@@ -306,10 +282,7 @@ def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Token / cost analytics endpoint
-# ---------------------------------------------------------------------------
-
+# Token / cost analytics helpers.
 _AUX_COUNTERS = ("input_tokens", "output_tokens", "estimated_cost", "api_calls")
 
 
@@ -347,12 +320,9 @@ def _aux_usage_rows(db, cutoff: float) -> List[Dict[str, Any]]:
 
 def _merge_aux_into_by_model(
     by_model: List[Dict[str, Any]], aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fold aux usage rows into the sessions-derived per-model list.
-
-    Aux usage lives only in session_model_usage (never in the sessions counters), so
-    adding it here cannot double-count. Models that ONLY appear via aux calls (e.g. a
-    dedicated vision model) get their own entry.
-    """
+    """Fold aux usage rows into the sessions-derived per-model list. Aux usage lives only in
+    session_model_usage (never in the sessions counters), so this cannot double-count;
+    models that ONLY appear via aux calls (e.g. a vision model) get their own entry."""
     if not aux_rows:
         return by_model
     merged: Dict[str, Dict[str, Any]] = {row.get("model") or "unknown": row for row in by_model}
@@ -383,12 +353,9 @@ def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _profile_cli_args(profile: Optional[str]) -> List[str]:
-    """``["-p", <name>]`` for a validated non-default profile, else ``[]``.
-
-    Hub install/uninstall/update run in a fresh ``hermes`` subprocess whose
-    ``_apply_profile_override()`` reads ``-p`` from argv — the only mechanism that reaches
-    import-time-bound globals like ``skills_hub.SKILLS_DIR``.
-    """
+    """``["-p", <name>]`` for a validated non-default profile, else ``[]``. Hub actions run in
+    a fresh ``hermes`` subprocess whose ``_apply_profile_override()`` reads ``-p`` from argv —
+    the only mechanism that reaches import-time-bound globals like ``skills_hub.SKILLS_DIR``."""
     requested = (profile or "").strip()
     if not requested or requested.lower() in {"current", "default"}:
         return []
@@ -398,12 +365,9 @@ def _profile_cli_args(profile: Optional[str]) -> List[str]:
 
 
 def _hub_action_name(verb: str, key: str) -> str:
-    """Unique per-skill hub action name (+ registered log file).
-
-    ``_spawn_hermes_action`` tracks one process/log per name, so a shared
-    "skills-install" would make concurrent row-level actions overwrite each other's
-    status/log while the UI polls per identifier. Slug (readable) + hash (collision-proof).
-    """
+    """Unique per-skill hub action name (+ registered log file): ``_spawn_hermes_action``
+    tracks one process/log per name, so a shared "skills-install" would make concurrent
+    row-level actions overwrite each other. Slug (readable) + hash (collision-proof)."""
     slug = re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")[:48] or "skill"
     digest = hashlib.sha1(key.encode()).hexdigest()[:8]
     name = f"skills-{verb}-{slug}-{digest}"
@@ -412,13 +376,11 @@ def _hub_action_name(verb: str, key: str) -> str:
 
 
 def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
-    """identifier -> installed lock entry for hub-installed skills, so the UI can mark
-    search results already installed. Scoped to ``profile``'s skills/.hub/lock.json when
-    given (HubLockFile takes an explicit path, sidestepping the import-time LOCK_FILE
-    binding). Best-effort: {} when the lock file can't be read."""
+    """identifier -> installed lock entry for hub-installed skills (UI marks installed search
+    results). Scoped to ``profile``'s skills/.hub/lock.json when given — HubLockFile takes an
+    explicit path, sidestepping the import-time LOCK_FILE binding. {} when unreadable."""
     try:
         from tools.skills_hub import HubLockFile
-
         if _is_current_profile(profile):
             lock = HubLockFile()
         else:

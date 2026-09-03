@@ -62,20 +62,16 @@ def _count_status_active_sessions() -> int:
     """Best-effort status garnish. Opens read-only (via the shared stale-schema heal) so
     /api/status never routinely writes to state.db while another Hermes process uses it."""
     from hermes_state import _default_db_path
-
     # The heal helper bootstraps a missing store; this garnish must not — on a fresh install
     # /api/status polls would otherwise create state.db before the user's first session.
     if not Path(_default_db_path()).exists():
         return 0
-
     db = _open_session_db_for_profile(None, read_only=True)
     try:
         sessions = db.list_sessions_rich(limit=50, compact_rows=True)
         now = time.time()
-        return sum(
-            1 for s in sessions
-            if s.get("ended_at") is None
-            and (now - s.get("last_active", s.get("started_at", 0))) < 300)
+        return sum(1 for s in sessions if s.get("ended_at") is None
+                   and (now - s.get("last_active", s.get("started_at", 0))) < 300)
     finally:
         db.close()
 
@@ -86,9 +82,8 @@ async def _status_active_sessions() -> int:
             run_in_threadpool(_count_status_active_sessions),
             timeout=_STATUS_ACTIVE_SESSIONS_TIMEOUT)
     except asyncio.TimeoutError:
-        _log.debug(
-            "/api/status active session count exceeded %.2fs; returning 0",
-            _STATUS_ACTIVE_SESSIONS_TIMEOUT)
+        _log.debug("/api/status active session count exceeded %.2fs; returning 0",
+                   _STATUS_ACTIVE_SESSIONS_TIMEOUT)
     except Exception as exc:
         _log.debug("/api/status active session count unavailable: %s", exc)
     return 0
@@ -128,14 +123,11 @@ def _is_profile_platform_status_key(key: object) -> bool:
 
 
 def _status_platform_key_allowed(key: object, configured: "set[str] | None") -> bool:
-    """Whether a runtime-status platform key may appear publicly.
-
-    Namespaced ``<profile>:<platform>`` keys are validated against the key grammar
-    *unconditionally* — the config-set load failing must not fail open into projecting
-    arbitrary colon-containing keys from a process-local JSON file onto the public
-    endpoint. Plain platform keys keep the long-standing behavior: checked against the
-    configured set when it loaded, passed through when it did not.
-    """
+    """Whether a runtime-status platform key may appear publicly: namespaced
+    ``<profile>:<platform>`` keys are validated against the grammar *unconditionally* (a
+    failed config-set load must not fail open into projecting arbitrary keys from a
+    process-local JSON file); plain keys are checked against the configured set when it
+    loaded, passed through when it did not."""
     if not isinstance(key, str):
         return False
     if ":" in key:
@@ -157,15 +149,11 @@ def _public_platform_entry(value: Any) -> Any:
 
 
 def _merge_profile_gateway_platforms(gateway_platforms: dict, profile_platforms: dict) -> dict:
-    """Merge independent per-profile gateway platform states.
-
-    Hosts running separate gateway services per profile (``gateway_mode == "multiple"``)
-    persist each profile's platform failures in that profile's own ``gateway_state.json``.
-    The unparameterized ``/api/status`` — the machine-level probe NAS health monitoring
-    reads — only read the active profile's file, so those failures were invisible to fleet
-    health. Fold them in under the validated ``<profile>:<platform>`` grammar. The active
-    profile's own map is skipped (already present) and existing keys are never overwritten.
-    """
+    """Merge independent per-profile gateway platform states: hosts running separate gateway
+    services per profile (``gateway_mode == "multiple"``) persist each profile's platform
+    failures in its own ``gateway_state.json``, invisible to the machine-level probe NAS
+    reads unless folded in under the validated ``<profile>:<platform>`` grammar. The active
+    profile's own map is skipped (already present); existing keys are never overwritten."""
     try:
         from hermes_cli.profiles import get_active_profile_name
         active = get_active_profile_name()
@@ -194,10 +182,8 @@ def _bounded_health_probe():
         try:
             return future.result(timeout=_GATEWAY_HEALTH_ROUTE_TIMEOUT)
         except concurrent.futures.TimeoutError:
-            _log.warning(
-                "/api/status gateway health probe exceeded %.2fs; "
-                "using local status",
-                _GATEWAY_HEALTH_ROUTE_TIMEOUT)
+            _log.warning("/api/status gateway health probe exceeded %.2fs; using local status",
+                         _GATEWAY_HEALTH_ROUTE_TIMEOUT)
             return False, None
         except Exception:
             return False, None
@@ -205,18 +191,12 @@ def _bounded_health_probe():
 
 def _project_gateway_platforms(gateway_platforms: dict, configured: "set[str] | None",
                                gateway_running: bool, gateway_state) -> dict:
-    """Public projection of a runtime's platform map.
-
-    Colon-containing keys are validated against the narrow grammar UNCONDITIONALLY — a
-    failed config load must not fail open into projecting arbitrary keys from a
-    process-local JSON file onto this public endpoint (the config set belongs to the
-    active/default profile, so suffix-checking secondary-profile keys against it would
-    incorrectly hide them). A cleanly stopped gateway's platform states are stale noise
-    and are cleared so a dead process can't report "connected"; a startup_failed
-    gateway's FATAL entries are the diagnosis (per-profile credential collisions, auth
-    failures) that the single exit_reason string can't express, so they are kept —
-    upstream writer-identity/freshness filtering already dropped other processes' entries.
-    """
+    """Public projection of a runtime's platform map (see ``_status_platform_key_allowed``
+    for the key rules). A cleanly stopped gateway's platform states are stale noise and are
+    cleared so a dead process can't report "connected"; a startup_failed gateway's FATAL
+    entries are the diagnosis (credential collisions, auth failures) that the single
+    exit_reason string can't express, so they are kept — upstream writer-identity/freshness
+    filtering already dropped other processes' entries."""
     platforms = {
         key: _public_platform_entry(value)
         for key, value in gateway_platforms.items()
@@ -230,17 +210,15 @@ def _project_gateway_platforms(gateway_platforms: dict, configured: "set[str] | 
 
 
 async def _resolve_gateway_status(profile_dir: Optional[Path], health_url) -> Dict[str, Any]:
-    """Liveness + runtime-state readout: gateway_running/pid/state/platforms/exit_reason/
-    updated_at plus the raw ``runtime`` document used downstream.
+    """Liveness + runtime-state readout (running/pid/state/platforms/exit_reason/updated_at
+    plus the raw ``runtime`` document).
 
-    Liveness is delegated to the single shared ladder in gateway.status so this endpoint
-    and /api/messaging/platforms can never disagree about whether the gateway is up. With
-    ``?profile=<name>`` PID/state reads are scoped to that profile's directory — gateway
-    identity files live in the per-profile home, not the process-level HERMES_HOME; plain
-    /api/status keeps the exact zero-arg call so its behavior (and cache signature) is
+    Liveness is delegated to the shared ladder in gateway.status so this endpoint and
+    /api/messaging/platforms can never disagree. With ``?profile=<name>`` PID/state reads are
+    scoped to that profile's directory (gateway identity files live in the per-profile
+    home); plain /api/status keeps the exact zero-arg call so its cache signature is
     unchanged. The module-level probe references are handed to the resolver so the
-    long-standing ``monkeypatch.setattr(web_server, "get_running_pid_cached", ...)`` seam
-    still intercepts them.
+    ``monkeypatch.setattr(web_server, "get_running_pid_cached", ...)`` seam still intercepts.
     """
     local_runtime = (read_runtime_status(path=profile_dir / "gateway_state.json")
                      if profile_dir else read_runtime_status())
@@ -294,17 +272,12 @@ async def _resolve_gateway_status(profile_dir: Optional[Path], health_url) -> Di
 
 
 def _auth_gate_status() -> Dict[str, Any]:
-    """Dashboard auth gate readout: whether the gate is engaged, which providers are
-    registered, and the RFC 8252 native-app capability advertisement (``auth_flows``).
-
-    The desktop reads ``auth_flows`` to decide whether it can use the system-browser +
-    loopback + PKCE flow or must fall back to the embedded-webview cookie flow. "cookie" is
-    always available in gated mode; "native_pkce" is present when at least one interactive
-    session provider is registered (OAuth providers broker the IDP round trip, password
-    providers complete at /login in the system browser where OS password managers can
-    autofill). Token-only credentials (e.g. drain) don't count. Absent field / missing
-    "native_pkce" ⇒ older gateway ⇒ desktop falls back automatically.
-    """
+    """Dashboard auth gate readout: gate engaged, registered providers, and the RFC 8252
+    native-app capability advertisement ``auth_flows`` the desktop reads to pick the
+    system-browser + loopback + PKCE flow over the embedded-webview cookie flow. "cookie" is
+    always available in gated mode; "native_pkce" when at least one interactive session
+    provider is registered (token-only credentials such as drain don't count). Missing
+    "native_pkce" ⇒ older gateway ⇒ desktop falls back automatically."""
     auth_required = bool(getattr(app.state, "auth_required", False))
     auth_providers: list[str] = []
     auth_flows: list[str] = []
@@ -324,11 +297,10 @@ def _auth_gate_status() -> Dict[str, Any]:
 
 
 def _nous_session_validity() -> str:
-    """Nous bootstrap-session validity for the NAS health sweep. A hosted agent whose Nous
-    auth dies terminally (invalid_grant / quarantine) looks HEALTHY to every liveness probe
-    yet every inference turn fails; this is the ONLY signal that surfaces it, determinable
-    with no working token (local auth-store state). NAS re-mints the bootstrap session when
-    it reads "terminal". Best-effort: never let auth classification break the probe."""
+    """Nous bootstrap-session validity for the NAS health sweep: a hosted agent whose Nous
+    auth dies terminally looks HEALTHY to every liveness probe yet every inference turn
+    fails, and this is the ONLY signal that surfaces it (local auth-store state, no token
+    needed). Best-effort: never let auth classification break the probe."""
     try:
         from hermes_cli.auth import get_nous_session_validity
         return get_nous_session_validity()
@@ -337,12 +309,10 @@ def _nous_session_validity() -> str:
 
 
 async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
-    """Component-level health rollup: counts and status enums only — this payload is
-    public (PUBLIC_API_PATHS), so no messages, paths, or other detail that could carry
-    secrets. The storage probe reuses the gateway readiness state_db check (read-only,
-    1s-bounded) in an executor so a wedged DB can't stall the event loop."""
+    """Component-level health rollup: counts and status enums only (public payload — no
+    messages, paths or other detail that could carry secrets). The storage probe reuses the
+    gateway readiness state_db check (read-only, 1s-bounded) off-loop."""
     from hermes_cli.web_server import DASHBOARD_HEALTH
-
     gateway_running, gateway_state = gateway["gateway_running"], gateway["gateway_state"]
     gateway_platforms = gateway["gateway_platforms"]
     components: Dict[str, Any] = {
@@ -352,7 +322,6 @@ async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
         "dashboard": DASHBOARD_HEALTH.snapshot()}
     try:
         from gateway.readiness import _probe_state_db
-
         storage_check = await run_in_threadpool(_probe_state_db, get_hermes_home())
         components["storage"] = {"status": storage_check.get("status", "degraded")}
     except Exception:
@@ -370,14 +339,10 @@ async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _advisory_pressure(status: Dict[str, Any], home: Path) -> None:
-    """Memory / disk pressure rollups + deferred FTS rebuild progress.
-
-    Coarse MB numbers/enums/booleans only — this endpoint is public, same disclosure class
-    as nous_session_valid. Deliberately NOT folded into components/overall: pressure is
-    advisory (toast material), not a liveness verdict, and flipping ``overall`` on it would
-    page NAS's availability sweep for a condition the valve is already handling. The FTS
-    probe (schema v23) lets the desktop render "search index rebuilding: N%"; absent when
-    no rebuild is pending. All read-only, never raise.
+    """Memory / disk pressure rollups + deferred FTS rebuild progress (coarse numbers/enums
+    only; public payload). Deliberately NOT folded into components/overall: pressure is
+    advisory, not a liveness verdict, and flipping ``overall`` on it would page NAS's
+    availability sweep for a condition the valve is already handling. Read-only, never raise.
     """
     for key, mod_name, fn_name in (("memory", "gateway.memory_status", "collect_memory_status"),
                                    ("disk", "gateway.disk_status", "collect_disk_status")):
@@ -390,7 +355,6 @@ async def _advisory_pressure(status: Dict[str, Any], home: Path) -> None:
     try:
         from hermes_state import SessionDB as _SDB
         from hermes_constants import get_hermes_home as _ghh
-
         _db_path = _ghh() / "state.db"
         if _db_path.exists():
             _sdb = _SDB(db_path=_db_path, read_only=True)
@@ -409,11 +373,9 @@ async def get_status(profile: Optional[str] = None):
     """Public machine-level liveness probe (``PUBLIC_API_PATHS``): version, gateway state,
     active session count and the auth-gate shape — no bodies, no session content, no secrets.
 
-    Plain /api/status stays the machine-level probe; the dashboard adds ``?profile=`` when
-    its management switcher targets another profile so its gateway badge follows. That uses
-    the config-only (contextvar) scope, NOT _profile_scope: this handler awaits the remote
-    health probe, and _profile_scope swaps process-global skills-module attributes that a
-    concurrent request would cross-restore across that await.
+    ``?profile=`` (dashboard management switcher) uses the config-only contextvar scope, NOT
+    _profile_scope: this handler awaits the remote health probe, and _profile_scope swaps
+    process-global skills-module attributes a concurrent request would cross-restore.
     """
     from hermes_cli.web_server import _GATEWAY_HEALTH_URL
     status_scope = None
@@ -429,11 +391,9 @@ async def get_status(profile: Optional[str] = None):
         gateway = await _resolve_gateway_status(profile_dir, _GATEWAY_HEALTH_URL)
         gateway_running, gateway_state = gateway["gateway_running"], gateway["gateway_state"]
 
-        # Topology (cached, TTL 10s) is fetched before the platform rollup because plain
-        # /api/status is the machine-level probe NAS reads: hosts with per-profile gateway
-        # services persist each profile's platform failures in its own gateway_state.json,
-        # folded in here under the validated ``<profile>:<platform>`` grammar. A
-        # ``?profile=`` request targets one profile's view and is left unmerged.
+        # Topology (cached, TTL 10s) is fetched before the platform rollup so per-profile
+        # gateway failures fold into the machine-level view (see
+        # _merge_profile_gateway_platforms); a ``?profile=`` request is left unmerged.
         topology = await run_in_threadpool(_collect_profile_gateway_topology_cached)
         if not requested_profile:
             gateway["gateway_platforms"] = _merge_profile_gateway_platforms(
@@ -441,15 +401,12 @@ async def get_status(profile: Optional[str] = None):
 
         active_sessions = await _status_active_sessions()
 
-        # Busy/drainable readout (NAS lifecycle-safety gate). active_agents is the in-flight
-        # gateway-turn count persisted at every turn boundary; busy/drainable derive from it
-        # + liveness via the shared contract in gateway.status. Liveness keys off
-        # gateway_running (live PID/health probe), NEVER gateway_updated_at — a healthy idle
-        # gateway never advances that.
+        # Busy/drainable (NAS lifecycle-safety gate) derive from the persisted in-flight turn
+        # count + liveness via gateway.status. Liveness keys off gateway_running, NEVER
+        # gateway_updated_at — a healthy idle gateway never advances that.
         active_agents = parse_active_agents((gateway["runtime"] or {}).get("active_agents", 0))
-        # Drain timeout offloaded to a thread: on a cold Windows install the first import of
-        # hermes_cli.gateway blocks the loop for 15-30s (.pyc compilation + Defender scans),
-        # exceeding the desktop handshake's 15s socket timeout.
+        # Off-loop: on a cold Windows install the first import of hermes_cli.gateway blocks
+        # 15-30s (.pyc compilation + Defender), exceeding the desktop handshake's 15s timeout.
         restart_drain_timeout = await run_in_threadpool(_resolve_restart_drain_timeout)
         auth = _auth_gate_status()
 
@@ -475,9 +432,8 @@ async def get_status(profile: Optional[str] = None):
             **auth,
             "nous_session_valid": _nous_session_validity()}
 
-        # Stable per-install identity. First call may touch disk, so keep it off the loop;
-        # afterwards it is a process-global cache hit. Omitted (not null) when unpersistable
-        # so older-client behavior and the no-identity fallback stay identical.
+        # Stable per-install identity (first call may touch disk). Omitted (not null) when
+        # unpersistable so older-client behavior and the no-identity fallback stay identical.
         install_id = await run_in_threadpool(get_install_id)
         if install_id:
             status["install_id"] = install_id
@@ -488,17 +444,15 @@ async def get_status(profile: Optional[str] = None):
                              else "degraded")
         await _advisory_pressure(status, profile_dir if profile_dir else get_hermes_home())
 
-        # Split by sensitivity: profile NAMES and ``gateway_mode`` are low-sensitivity
-        # PRODUCT surface — Hermes Cloud renders the profile list in the Portal over a gated
-        # bind, so they must survive the auth gate. Per-gateway ``gateways[]`` carries host
-        # ports (deployment recon) and stays gated with the host paths / PID below.
+        # Profile NAMES and ``gateway_mode`` are low-sensitivity product surface (Hermes Cloud
+        # renders the profile list over a gated bind) so they survive the auth gate; the
+        # per-gateway ``gateways[]`` carries host ports and stays gated below.
         status["profiles"] = topology["profiles"]
         status["gateway_mode"] = topology["gateway_mode"]
 
-        # Absolute host paths, the gateway PID, the internal health URL and per-gateway ports
-        # are deployment recon a liveness probe never needs; on a network-exposed (gated)
-        # bind *any* unauthenticated caller reaches this endpoint. Surface them only on a
-        # loopback / ``--insecure`` bind — the same split ``should_require_auth`` draws.
+        # Host paths, gateway PID, internal health URL and per-gateway ports are deployment
+        # recon a liveness probe never needs, and on a gated bind *any* unauthenticated caller
+        # reaches this endpoint — surface them only on a loopback / ``--insecure`` bind.
         if not auth["auth_required"]:
             status.update({
                 "hermes_home": str(get_hermes_home()),
@@ -516,9 +470,8 @@ async def get_status(profile: Optional[str] = None):
 
 @router.get("/api/system/stats")
 async def get_system_stats():
-    """Host + process system stats for the System page: OS / Python / host identity from
-    stdlib; CPU / memory / disk / uptime from psutil when available. Read-only and
-    non-sensitive (no env values, no paths beyond the hermes home root)."""
+    """Host + process system stats for the System page (stdlib identity; psutil CPU/memory/
+    disk/uptime when available). Non-sensitive: no env values, no paths beyond hermes home."""
     import platform as _platform
 
     info: Dict[str, Any] = {
@@ -531,12 +484,6 @@ async def get_system_stats():
         "python_impl": _platform.python_implementation(),
         "hermes_version": __version__,
         "cpu_count": os.cpu_count()}
-
-    def _optional(fill):
-        try:
-            fill()
-        except Exception:
-            pass
 
     def _disk():
         du = psutil.disk_usage(str(get_hermes_home()))
@@ -557,15 +504,17 @@ async def get_system_stats():
                            "create_time": int(proc.create_time()),
                            "num_threads": proc.num_threads()}
 
-    # psutil enriches the picture when present; everything below is optional.
+    # psutil enriches the picture when present; every probe below is optional.
     try:
         import psutil  # type: ignore
-
         vm = psutil.virtual_memory()
         info["memory"] = {"total": vm.total, "available": vm.available, "used": vm.used,
                           "percent": vm.percent}
         for fill in (_disk, _cpu, _uptime, _process):
-            _optional(fill)
+            try:
+                fill()
+            except Exception:
+                pass
         info["psutil"] = True
     except Exception:
         info["psutil"] = False
@@ -578,10 +527,7 @@ async def get_system_stats():
     return info
 
 
-# ---------------------------------------------------------------------------
-# Curator endpoints — background skill-maintenance (archive stale, prune, pin) status +
-# the pause/resume/run-now controls `hermes curator` exposes.
-# ---------------------------------------------------------------------------
+# Curator — background skill-maintenance status + the pause/resume/run-now controls.
 
 
 @router.get("/api/curator")
@@ -599,15 +545,13 @@ async def get_curator_status():
         "paused": _safe_call(curator, "is_paused", False),
         "interval_hours": _safe_call(curator, "get_interval_hours", None),
         "last_run_at": state.get("last_run_at"),
-        "min_idle_hours": _safe_call(curator, "get_min_idle_hours", None),
-        "stale_after_days": _safe_call(curator, "get_stale_after_days", None),
-        "archive_after_days": _safe_call(curator, "get_archive_after_days", None)}
+        **{key: _safe_call(curator, f"get_{key}", None)
+           for key in ("min_idle_hours", "stale_after_days", "archive_after_days")}}
 
 
 @router.put("/api/curator/paused")
 async def set_curator_paused(body: CuratorPause):
     from agent import curator
-
     curator.set_paused(bool(body.paused))
     return {"ok": True, "paused": bool(body.paused)}
 
@@ -629,9 +573,7 @@ async def run_curator():
 
 @router.get("/api/learning/graph")
 async def get_learning_graph(profile: Optional[str] = None):
-    """Learning graph payload for the desktop panel: profile-scoped view of learned,
-    non-base skills plus memory chunks, with links from skill relations and memory-skill
-    overlap."""
+    """Learning graph for the desktop panel: profile-scoped learned skills + memory chunks."""
     def _run():
         from agent.learning_graph import build_learning_graph
         return build_learning_graph()
@@ -685,9 +627,7 @@ def _safe_call(mod, fn_name: str, default):
         return default
 
 
-# ---------------------------------------------------------------------------
-# Portal endpoint — Nous Portal auth + Tool Gateway routing status (read-only).
-# ---------------------------------------------------------------------------
+# Portal — Nous Portal auth + Tool Gateway routing status (read-only).
 
 
 @router.get("/api/portal")
@@ -710,9 +650,7 @@ def _get_portal_status_sync():
     auth: Dict[str, Any] = {}
     try:
         from hermes_cli.auth import get_nous_auth_status_local
-
-        # Read-only dashboard endpoint: refresh-free snapshot so polling never performs an
-        # OAuth refresh or burns a refresh token.
+        # Refresh-free snapshot so polling never performs an OAuth refresh.
         auth = get_nous_auth_status_local() or {}
     except Exception:
         auth = {}
@@ -720,7 +658,6 @@ def _get_portal_status_sync():
     features = []
     try:
         from hermes_cli.nous_subscription import get_nous_subscription_features
-
         feats = get_nous_subscription_features(cfg)
         if feats is not None:
             features = [{"label": getattr(feat, "label", ""), "state": _feature_state(feat)}
@@ -738,10 +675,7 @@ def _get_portal_status_sync():
         "features": features}
 
 
-# ---------------------------------------------------------------------------
-# Diagnostics: prompt-size, support dump, debug upload, config migrate. All produce text
-# output, so they spawn background actions tailed via /api/actions/<name>/status.
-# ---------------------------------------------------------------------------
+# Diagnostics: text-output actions spawned in the background, tailed via /api/actions/<name>.
 
 
 @router.post("/api/ops/prompt-size")
@@ -761,15 +695,10 @@ async def run_config_migrate():
 
 @router.post("/api/ops/debug-share")
 async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
-    """Upload a redacted debug report + full logs and return the paste URLs.
-
-    Unlike the other diagnostics actions this is *synchronous*: the point of ``debug share``
-    is the set of shareable URLs it produces, so the upload runs in a worker thread and the
-    structured ``{urls, failures, redacted, ...}`` payload is returned directly for the
-    dashboard to render as copyable links. Pastes auto-delete after 6 hours (share core).
-    """
+    """Upload a redacted debug report + full logs and return the paste URLs. Synchronous,
+    unlike the other diagnostics actions: the point is the shareable URLs, returned as a
+    structured payload the dashboard renders as copyable links."""
     from hermes_cli.debug import build_debug_share
-
     req = body or DebugShareRequest()
     try:
         result = await asyncio.to_thread(
@@ -789,17 +718,11 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
         "auto_delete_seconds": result.auto_delete_seconds}
 
 
-# ---------------------------------------------------------------------------
-# Log viewer endpoint
-# ---------------------------------------------------------------------------
-
-
 @logs_router.get("/api/logs")
 async def get_logs(
     file: str = "agent", lines: int = 100, level: Optional[str] = None,
     component: Optional[str] = None, search: Optional[str] = None):
     from hermes_cli.logs import _read_tail, LOG_FILES
-
     log_name = LOG_FILES.get(file)
     if not log_name:
         raise HTTPException(status_code=400, detail=f"Unknown log file: {file}")
@@ -811,11 +734,10 @@ async def get_logs(
         from hermes_logging import COMPONENT_PREFIXES
     except ImportError:
         COMPONENT_PREFIXES = {}
-
-    # Normalize "ALL" / "all" / empty → no filter. _matches_filters treats an empty tuple as
-    # "must match a prefix" (startswith(()) is always False), so passing () instead of None
-    # silently drops every line.
+    # "ALL"/"all"/empty → no filter (None, not (): _matches_filters treats an empty tuple as
+    # "must match a prefix", which silently drops every line).
     min_level = level if level and level.upper() != "ALL" else None
+    comp_prefixes = None
     if component and component.lower() != "all":
         comp_prefixes = COMPONENT_PREFIXES.get(component)
         if comp_prefixes is None:
@@ -823,12 +745,9 @@ async def get_logs(
                 status_code=400,
                 detail=f"Unknown component: {component}. "
                        f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}")
-    else:
-        comp_prefixes = None
-
-    has_filters = bool(min_level or comp_prefixes or search)
     result = _read_tail(
-        log_path, min(lines, 500) if not search else 2000, has_filters=has_filters,
+        log_path, min(lines, 500) if not search else 2000,
+        has_filters=bool(min_level or comp_prefixes or search),
         min_level=min_level, component_prefixes=comp_prefixes)
     # _read_tail doesn't support free-text search, so post-filter (case-insensitive
     # substring) here and trim to the requested line count afterward.
