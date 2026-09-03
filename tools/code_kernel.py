@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -430,11 +431,10 @@ def _bind_rpc_socket(kernel: SessionKernel) -> str:
         rpc_endpoint = f"tcp://{host}:{port}"
     else:
         sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-        kernel.sock_path = os.path.join(sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+        rpc_endpoint = kernel.sock_path = os.path.join(sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
         server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server_sock.bind(kernel.sock_path)
         os.chmod(kernel.sock_path, 0o600)
-        rpc_endpoint = kernel.sock_path
     server_sock.listen(1)
     kernel.server_sock = server_sock
     return rpc_endpoint
@@ -449,8 +449,7 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     rpc_endpoint = _bind_rpc_socket(kernel)
     for name, src in (("hermes_tools.py", generate_hermes_tools_module(list(sandbox_tools))),
                       ("hermes_kernel_runner.py", KERNEL_RUNNER_SOURCE)):
-        with open(os.path.join(kernel.tmpdir, name), "w", encoding="utf-8") as f:
-            f.write(src)
+        Path(kernel.tmpdir, name).write_text(src, encoding="utf-8")
     child_env = _build_child_env(rpc_endpoint=rpc_endpoint, rpc_token=kernel.rpc_token,
                                  tmpdir=kernel.tmpdir, child_python=child_python)
     child_env["HERMES_KERNEL_SENTINEL"] = kernel.sentinel
@@ -461,9 +460,8 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     kernel.proc = subprocess.Popen(
         [child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")],
         # Strict mode passes an empty cwd: the kernel's staging dir plays the per-call tmpdir's role.
-        cwd=child_cwd or kernel.tmpdir, env=child_env,
+        cwd=child_cwd or kernel.tmpdir, env=child_env, start_new_session=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
-        start_new_session=True,
         creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
     )
     # Deliberately NOT propagate_context_to_thread: that would freeze the spawning cell's

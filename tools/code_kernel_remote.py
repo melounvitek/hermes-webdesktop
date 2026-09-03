@@ -243,8 +243,7 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str
     from tools.code_execution_tool import _ship_file_to_remote
     kernel.cell_seq += 1
     seq = f"{kernel.cell_seq:06d}"
-    q_cells = shlex.quote(f"{kernel.kernel_dir}/cells")
-    q_res = shlex.quote(f"cell_res_{seq}.json")
+    q_cells, q_res = shlex.quote(f"{kernel.kernel_dir}/cells"), shlex.quote(f"cell_res_{seq}.json")
     _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json.tmp",
                          json.dumps({"id": seq, "code": code}, ensure_ascii=False))
     kernel.sh(f"mv {q_cells}/cell_req_{seq}.json.tmp {q_cells}/cell_req_{seq}.json", timeout=10)
@@ -271,12 +270,9 @@ def execute_in_remote_kernel(
     code: str, *, env, env_type: str, task_env_id: str, sandbox_tools: frozenset,
     timeout: int, max_tool_calls: int, reset: bool, idle_exit: int = 1800,
 ) -> Optional[Dict[str, Any]]:
-    """Run one cell in the owner's remote kernel.
-
-    Returns the raw cell result dict (caller post-processes output), or ``None`` when no
-    kernel could be spawned (caller falls open to per-call). ``state_lost`` / ``state_reset`` /
-    ``reused`` ride in the ``kernel`` sub-dict, matching the local kernel's result shape.
-    """
+    """Run one cell in the owner's remote kernel. Returns the raw cell result dict (caller
+    post-processes output), or ``None`` when no kernel could be spawned (caller falls open to
+    per-call). ``state_lost``/``state_reset``/``reused`` ride in the ``kernel`` sub-dict."""
     from tools.code_kernel import _resolve_owner
     from tools.code_execution_tool import _rpc_poll_loop
     from tools.thread_context import propagate_context_to_thread
@@ -294,16 +290,13 @@ def execute_in_remote_kernel(
         kernel.sh(f"rm -f {q_rpc}/req_* {q_rpc}/res_*", timeout=10)
     except Exception:
         pass
-    tool_call_log: list = []
     tool_call_counter, stop_event = [0], threading.Event()
     # Per-cell RPC thread carrying THIS call's approval/session context — the remote analogue
     # of CellAuthority: authority lives exactly as long as the cell's poll loop.
     rpc_thread = threading.Thread(
-        target=propagate_context_to_thread(_rpc_poll_loop),
-        args=(env, f"{kernel.kernel_dir}/rpc", task_env_id, tool_call_log, tool_call_counter,
-              max_tool_calls, sandbox_tools, stop_event, kernel.rpc_token),
-        daemon=True,
-    )
+        target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
+        args=(env, f"{kernel.kernel_dir}/rpc", task_env_id, [], tool_call_counter,
+              max_tool_calls, sandbox_tools, stop_event, kernel.rpc_token))
     rpc_thread.start()
     cell_status, cell_payload = "no-result", {}
     try:
@@ -313,26 +306,23 @@ def execute_in_remote_kernel(
         rpc_thread.join(timeout=5)
     kernel_info: Dict[str, Any] = {"reused": reused, "remote": True}
     result: Dict[str, Any] = {
-        "status": "error", "stdout": cell_payload.get("stdout", ""),
-        "stderr": cell_payload.get("stderr", ""), "traceback": cell_payload.get("traceback", ""),
-        "tool_calls_made": tool_call_counter[0], "kernel": kernel_info,
+        "status": "error", "stdout": cell_payload.get("stdout", ""), "stderr": cell_payload.get("stderr", ""),
+        "traceback": cell_payload.get("traceback", ""), "tool_calls_made": tool_call_counter[0], "kernel": kernel_info,
     }
     if cell_status in ("timeout", "protocol-error", "no-result"):
         # No safe way to interrupt one cell in place (same contract as local): kill, report, respawn.
         _REGISTRY.discard(key, kernel)
         if cell_status == "timeout":
             result["status"] = "timeout"
-            note = ("Cell timed out; the remote session kernel was killed and "
-                    "its state was lost. The next call starts a fresh kernel.")
-        else:
-            note = "Remote kernel protocol failure; kernel killed, state lost."
-        kernel_info.update(ended=True, state_lost=True, note=note)
+        kernel_info.update(ended=True, state_lost=True, note=(
+            "Cell timed out; the remote session kernel was killed and its state was lost. The next call "
+            "starts a fresh kernel." if cell_status == "timeout"
+            else "Remote kernel protocol failure; kernel killed, state lost."))
         return result
     if cell_status == "exit":
         _REGISTRY.discard(key, kernel)
         kernel_info["ended"] = True
-    kernel.execution_count = int(cell_payload.get("execution_count", 0) or 0)
-    kernel_info["execution_count"] = kernel.execution_count
+    kernel.execution_count = kernel_info["execution_count"] = int(cell_payload.get("execution_count", 0) or 0)
     if cell_status in ("ok", "exit"):
         result["status"] = "success"
     result["stdout_clipped"] = bool(cell_payload.get("stdout_clipped"))

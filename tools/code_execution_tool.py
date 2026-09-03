@@ -28,8 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tools.thread_context import propagate_context_to_thread
 from tools.registry import registry, tool_error
 
-# Env/interpreter resolution and RPC servers live in sibling modules; re-exported
-# here so `from tools.code_execution_tool import X` / patch() targets keep working.
+# Sibling-module symbols re-exported so `from tools.code_execution_tool import X` / patch() keep working.
 from tools.code_execution_env import (  # noqa: F401
     _SAFE_ENV_PREFIXES, _SECRET_SUBSTRINGS, _HERMES_CHILD_ALLOWED, _WINDOWS_ESSENTIAL_ENV_VARS,
     _scrub_child_env, _build_child_env, _PROBE_CACHE_MAX, _usable_python_cache, _python_prefix_cache,
@@ -53,18 +52,14 @@ DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
-# Hard ceiling on the spilled file, mirroring web_tools' MAX_STORED_TEXT_CHARS
-# rationale: a runaway print loop must not write unbounded bytes to disk.
+# Hard ceiling on the spilled file (as web_tools' MAX_STORED_TEXT_CHARS): a runaway print loop must not fill the disk.
 MAX_SPILLED_STDOUT_BYTES = 5_000_000
 
 
 def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
-    """Cap stdout by bytes (40% head / 60% tail) with explicit truncation metadata.
-
-    Byte counts ride alongside the textual marker because a client layer can miss
-    or re-truncate the marker. The omitted middle is spilled to cache/exec and the
-    result carries the path (recover-don't-rerun, as web_extract's cache/web).
-    """
+    """Cap stdout by bytes (40% head / 60% tail) with explicit truncation metadata: byte counts
+    ride alongside the textual marker because a client layer can miss or re-truncate it. The
+    omitted middle is spilled to cache/exec and the result carries the path (recover-don't-rerun)."""
     stdout_bytes = stdout_text.encode("utf-8", errors="replace")
     total = len(stdout_bytes)
     captured = min(total, MAX_STDOUT_BYTES)
@@ -123,9 +118,7 @@ def check_sandbox_requirements() -> bool:
     return config.get("env_type") != "vercel_sandbox" or _check_vercel_sandbox_requirements(config)
 
 
-# ---------------------------------------------------------------------------
-# hermes_tools.py code generator
-# ---------------------------------------------------------------------------
+# ---- hermes_tools.py code generator ----
 
 # Per-tool stub templates: (signature, docstring, args_dict_expr — the JSON payload sent over RPC).
 _TOOL_STUBS = {
@@ -404,9 +397,14 @@ def _call(tool_name, args):
 '''
 
 
-# ---------------------------------------------------------------------------
-# Remote execution support (file-based RPC via terminal backend)
-# ---------------------------------------------------------------------------
+# ---- Remote execution support (file-based RPC via terminal backend) ----
+
+# execute_code's container_config keys (a subset of terminal_tool's; the create path fills the rest).
+_CONTAINER_CONFIG_DEFAULTS = (
+    ("container_cpu", 1), ("container_memory", 5120), ("container_disk", 51200), ("container_persistent", True),
+    ("vercel_runtime", ""), ("docker_volumes", []), ("docker_run_as_host_user", False), ("docker_network", True),
+)
+
 
 def _get_or_create_env(task_id: str):
     """``(env, env_type)`` — the environment the terminal/file tools share for *task_id*, created on
@@ -438,14 +436,7 @@ def _get_or_create_env(task_id: str):
         overrides = _task_env_overrides.get(effective_task_id, {})
         container_config = None
         if _is_container_backend(env_type):
-            container_config = {
-                "container_cpu": config.get("container_cpu", 1), "container_memory": config.get("container_memory", 5120),
-                "container_disk": config.get("container_disk", 51200),
-                "container_persistent": config.get("container_persistent", True),
-                "vercel_runtime": config.get("vercel_runtime", ""), "docker_volumes": config.get("docker_volumes", []),
-                "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
-                "docker_network": config.get("docker_network", True),
-            }
+            container_config = {key: config.get(key, default) for key, default in _CONTAINER_CONFIG_DEFAULTS}
         logger.info("Creating new %s environment for execute_code task %s...",
                      env_type, effective_task_id[:8])
         env = _create_environment(
@@ -578,10 +569,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
     quoted_sandbox_dir = shlex.quote(sandbox_dir)
     quoted_rpc_dir = shlex.quote(f"{sandbox_dir}/rpc")
-    tool_call_log: list = []
-    tool_call_counter = [0]
-    stop_event = threading.Event()
-    rpc_thread = None
+    tool_call_counter, stop_event, rpc_thread = [0], threading.Event(), None
     try:
         env.execute(f"mkdir -p {quoted_rpc_dir}", cwd="/", timeout=10)
         rpc_token = secrets.token_urlsafe(32)
@@ -591,15 +579,12 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # Wrapped so the thread inherits the turn's approval context + callbacks
         # (tools.thread_context) — else sandbox RPC tool calls lose approval routing.
         rpc_thread = threading.Thread(
-            target=propagate_context_to_thread(_rpc_poll_loop),
-            args=(env, f"{sandbox_dir}/rpc", effective_task_id, tool_call_log, tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token),
-            daemon=True,
-        )
+            target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
+            args=(env, f"{sandbox_dir}/rpc", effective_task_id, [], tool_call_counter,
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token))
         rpc_thread.start()
-        env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} "
-                      f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
-                      f"PYTHONDONTWRITEBYTECODE=1")
+        env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
+                      "PYTHONDONTWRITEBYTECODE=1")
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
@@ -640,10 +625,8 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
     _cfg = _load_config()
-    timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
-    max_tool_calls = _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
-    sandbox_tools = _sandbox_tools_for(enabled_tools)
-    effective_task_id = task_id or "default"
+    timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
     env, env_type = _get_or_create_env(effective_task_id)
     exec_start = time.monotonic()
     try:
@@ -674,9 +657,7 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
                                 timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+# ---- Main entry point ----
 
 
 def execute_code(
@@ -686,13 +667,10 @@ def execute_code(
     reset: bool = False,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
-    with RPC access to a subset of Hermes tools; returns the JSON result string.
-
-    "Sandbox" means the security envelope (env scrubbing, tool whitelist + call budget, output
-    redaction), not an isolation jail: default `project` mode runs in the session's cwd with the
-    project venv. ``enabled_tools`` ∩ SANDBOX_ALLOWED_TOOLS; ``reset`` kills the existing kernel
-    first (ignored on per-call paths).
-    """
+    with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
+    the security envelope (env scrubbing, tool whitelist + call budget, output redaction), not an
+    isolation jail: default `project` mode runs in the session's cwd with the project venv.
+    ``enabled_tools`` ∩ SANDBOX_ALLOWED_TOOLS; ``reset`` kills the existing kernel first."""
     if not SANDBOX_AVAILABLE:
         return tool_error("execute_code sandbox is unavailable in this environment. "
                           "Use normal tool calls (terminal, read_file, write_file, ...) instead.")
@@ -787,9 +765,7 @@ def _load_config() -> dict:
         return {}
 
 
-# ---------------------------------------------------------------------------
-# Execution mode resolution (strict vs project)
-# ---------------------------------------------------------------------------
+# ---- Execution mode resolution (strict vs project) ----
 
 # Canonical code_execution.mode values (referenced by tests and the config layer). Session
 # kernels are the only local execution model; a leftover kernel_mode config key is ignored.
@@ -810,9 +786,7 @@ def _get_execution_mode() -> str:
     return DEFAULT_EXECUTION_MODE
 
 
-# ---------------------------------------------------------------------------
-# OpenAI Function-Calling Schema
-# ---------------------------------------------------------------------------
+# ---- OpenAI Function-Calling Schema ----
 
 # Per-tool documentation lines for the execute_code description, in canonical display order.
 _TOOL_DOC_LINES = [
@@ -843,8 +817,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         mode = _get_execution_mode()
     tool_lines = "\n".join(doc for name, doc in _TOOL_DOC_LINES if name in enabled_sandbox_tools)
     import_examples = [n for n in ("web_search", "terminal") if n in enabled_sandbox_tools]
-    if not import_examples:
-        import_examples = sorted(enabled_sandbox_tools)[:2]
+    import_examples = import_examples or sorted(enabled_sandbox_tools)[:2]
     import_str = ", ".join(import_examples) + ", ..." if import_examples else "..."
     if mode == "strict":
         cwd_note = (
