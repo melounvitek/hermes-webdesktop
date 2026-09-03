@@ -1,4 +1,4 @@
-"""Attachment staging for prompt.submit / prompt.attach: image sniffing, size caps, per-session attachment dirs, gateway attachment path resolution.
+"""Attachment staging: image sniffing, size caps, per-session attachment dirs, path resolution.
 
 Bodies are rebound onto server.py's globals at install time (see
 method_ctx.bind_module), so they reference server.py globals bare.
@@ -17,41 +17,41 @@ _ATTACH_BYTES_MAX_BYTES = 25 * 1024 * 1024
 _PDF_ATTACH_MAX_BYTES = 50 * 1024 * 1024
 _PDF_ATTACH_MAX_PAGES = 25
 
-# Leading magic bytes → file extension, for filename-less uploads.
+# Leading magic bytes -> file extension, for filename-less uploads.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"),
-    (b"BM", ".bmp"),
-)
+    (b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"), (b"BM", ".bmp"))
 
 # Context-ref values containing any of these must be quoted (desktop formatRefValue parity).
 _ATTACHMENT_REF_NEEDS_QUOTING_RE = _re.compile(r"""[\s()\[\]{}<>"'`]""")
 del _re  # bodies are rebound onto server globals: import inside functions only
 
 
+def _b64_payload(raw: str, data_url_re: str, flags: int) -> bytes:
+    """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then
+    strictly decode (raises ``binascii.Error``/``ValueError`` on bad base64)."""
+    import base64 as _base64
+    import re as _re
+    cleaned = (raw or "").strip()
+    m = _re.match(data_url_re, cleaned, flags)
+    if m:
+        cleaned = m.group(1)
+    return _base64.b64decode(_re.sub(r"\s+", "", cleaned), validate=True)
+
+
 def _decode_attach_base64(raw: str, *, mime_prefix: str) -> bytes | None:
     """Decode a base64 payload, optionally ``data:<mime_prefix>...;base64,``-wrapped,
     tolerating embedded whitespace. ``None`` when not valid base64."""
-    import base64 as _base64
     import re as _re
-
-    cleaned = raw.strip()
-    m = _re.match(
-        rf"^data:{_re.escape(mime_prefix)}[a-zA-Z0-9.+-]*;base64,(.*)$", cleaned, _re.DOTALL,
-    )
-    if m:
-        cleaned = m.group(1)
-    cleaned = _re.sub(r"\s+", "", cleaned)
     try:
-        return _base64.b64decode(cleaned, validate=True)
+        return _b64_payload(
+            raw, rf"^data:{_re.escape(mime_prefix)}[a-zA-Z0-9.+-]*;base64,(.*)$", _re.DOTALL)
     except Exception:
         return None
 
 
-def _decode_attach_payload(rid, raw_b64: str, *, mime_prefix: str, max_bytes: int,
-                           label: str, empty_msg: str):
+def _decode_attach_payload(
+    rid, raw_b64: str, *, mime_prefix: str, max_bytes: int, label: str, empty_msg: str):
     """``(bytes, None)`` or ``(None, error)`` for an upload: 4017 on bad/empty
     base64, 4018 over *max_bytes*."""
     data = _decode_attach_base64(raw_b64, mime_prefix=mime_prefix)
@@ -68,23 +68,17 @@ def _decode_attach_payload(rid, raw_b64: str, *, mime_prefix: str, max_bytes: in
 def _sniff_image_ext(img_bytes: bytes, filename: str = "") -> str:
     """Extension from the filename hint, else magic bytes (WebP needs the RIFF/WEBP
     container check), else ``.png``."""
-    if filename:
-        suffix = Path(filename).suffix.lower()
-        if suffix:
-            return suffix
+    if filename and (suffix := Path(filename).suffix.lower()):
+        return suffix
     head = img_bytes[:16]
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return ".webp"
-    for sig, ext in _IMAGE_MAGIC:
-        if head.startswith(sig):
-            return ext
-    return ".png"
+    return next((ext for sig, ext in _IMAGE_MAGIC if head.startswith(sig)), ".png")
 
 
 def _allowed_image_extensions() -> frozenset[str]:
     try:
         from cli import _IMAGE_EXTENSIONS
-
         return frozenset(_IMAGE_EXTENSIONS)
     except Exception:
         return frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
@@ -100,8 +94,7 @@ def _session_home_dir(session: dict, name: str) -> Path:
     can never see the file.
     """
     profile_home = session.get("profile_home")
-    base = Path(profile_home) if profile_home else _hermes_home
-    return base / name
+    return (Path(profile_home) if profile_home else _hermes_home) / name
 
 
 def _session_images_dir(session: dict) -> Path:
@@ -131,12 +124,9 @@ def _format_ref_value(value: str) -> str:
     ``@file:`` ref round-trips through ``agent.context_references``."""
     if not value or not _ATTACHMENT_REF_NEEDS_QUOTING_RE.search(value):
         return value
-    if "`" not in value:
-        return f"`{value}`"
-    if '"' not in value:
-        return f'"{value}"'
-    if "'" not in value:
-        return f"'{value}'"
+    for q in ("`", '"', "'"):
+        if q not in value:
+            return f"{q}{value}{q}"
     return value
 
 
@@ -144,8 +134,7 @@ def _attachment_ref_path(session: dict, target: Path) -> str:
     """Workspace-relative path for an attachment, or the absolute path if outside."""
     workspace = Path(_session_cwd(session)).resolve()
     try:
-        rel = target.resolve().relative_to(workspace)
-        return str(rel).replace(os.sep, "/")
+        return str(target.resolve().relative_to(workspace)).replace(os.sep, "/")
     except ValueError:
         return str(target.resolve())
 
@@ -161,11 +150,8 @@ def _desktop_attachment_dir(session: dict) -> Path:
 
 def _sanitize_attachment_name(name: str) -> str:
     import re as _re
-
-    candidate = Path(str(name or "").strip()).name
-    candidate = _re.sub(r"[\x00-\x1f]+", "_", candidate)
-    candidate = candidate.strip().strip(".")
-    return candidate or "attachment"
+    candidate = _re.sub(r"[\x00-\x1f]+", "_", Path(str(name or "").strip()).name)
+    return candidate.strip().strip(".") or "attachment"
 
 
 def _unique_attachment_path(root: Path, filename: str) -> Path:
@@ -175,11 +161,9 @@ def _unique_attachment_path(root: Path, filename: str) -> Path:
     stem = Path(filename).stem or "attachment"
     suffix = Path(filename).suffix
     counter = 2
-    while True:
-        next_candidate = root / f"{stem}-{counter}{suffix}"
-        if not next_candidate.exists():
-            return next_candidate
+    while (next_candidate := root / f"{stem}-{counter}{suffix}").exists():
         counter += 1
+    return next_candidate
 
 
 def _resolve_gateway_attachment_path(raw: str) -> Path | None:
@@ -190,7 +174,6 @@ def _resolve_gateway_attachment_path(raw: str) -> Path | None:
         from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
     except Exception:
         return None
-
     dropped = _detect_file_drop(raw)
     if dropped:
         return Path(dropped["path"]).resolve()
@@ -202,34 +185,23 @@ def _resolve_gateway_attachment_path(raw: str) -> Path | None:
 def _decode_attachment_data_url(data_url: str) -> bytes:
     """Decode a ``data:<any-mime>;base64,<b64>`` payload (any media type, unlike the
     image-specific ``_decode_attach_base64``); bare base64 also accepted."""
-    import base64 as _base64
     import binascii as _binascii
     import re as _re
-
-    cleaned = (data_url or "").strip()
-    m = _re.match(r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", cleaned, _re.DOTALL | _re.I)
-    if m:
-        cleaned = m.group(1)
-    cleaned = _re.sub(r"\s+", "", cleaned)
     try:
-        return _base64.b64decode(cleaned, validate=True)
+        return _b64_payload(
+            data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.I)
     except (ValueError, _binascii.Error) as exc:
         raise ValueError("invalid data_url payload") from exc
 
 
 def _stage_session_file_attachment(
-    session: dict,
-    *,
-    raw_path: str,
-    data_url: str,
-    name: str,
-) -> tuple[Path, bool]:
+    session: dict, *, raw_path: str, data_url: str, name: str) -> tuple[Path, bool]:
     """Make a desktop file attachment available to the gateway agent.
 
-    1. Path resolves INSIDE the session workspace → use as-is (``uploaded=False``).
-    2. Gateway-visible file OUTSIDE the workspace → copy into ``attachments/``
+    1. Path resolves INSIDE the session workspace -> use as-is (``uploaded=False``).
+    2. Gateway-visible file OUTSIDE the workspace -> copy into ``attachments/``
        (bind-mounted into container backends) so ``@file:`` resolves in the sandbox.
-    3. Not on the gateway (remote client disk) → decode ``data_url`` bytes into
+    3. Not on the gateway (remote client disk) -> decode ``data_url`` bytes into
        ``attachments/``.
     Returns ``(stored_path, uploaded)``.
     """
@@ -247,9 +219,8 @@ def _stage_session_file_attachment(
             raise ValueError("file not found on gateway and no data_url provided")
         payload = _decode_attachment_data_url(data_url)
         filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
-
-    upload_dir = _desktop_attachment_dir(session)
-    target = _unique_attachment_path(upload_dir, _sanitize_attachment_name(filename))
+    target = _unique_attachment_path(
+        _desktop_attachment_dir(session), _sanitize_attachment_name(filename))
     target.write_bytes(payload)
     return target.resolve(), True
 
