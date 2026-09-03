@@ -9,7 +9,7 @@ from plugins.memory.honcho.session_auth import HonchoAuthError
 
 logger = logging.getLogger("plugins.memory.honcho.session")
 
-_EMPTY_REPRESENTATION = {"representation": "", "card": ""}
+_FAILED = object()  # sentinel: a guarded call raised (distinct from a legitimately empty/None result)
 
 
 class SessionContextMixin:
@@ -25,14 +25,21 @@ class SessionContextMixin:
             logger.log(level, msg, *args, e)
             return default
 
+    def _guarded_authed(self, label: str, fn: Callable[[], Any], default: Any, level: int, msg: str, *args: Any) -> Any:
+        """``_guarded`` around ``_authed_call(label, fn)`` (401 -> forced refresh + one retry)."""
+        return self._guarded(lambda: self._authed_call(label, fn), default, level, msg, *args)
+
+    def _guarded_session(
+        self, session_key: str, fn: Callable[[Any], Any], default: Any, level: int, msg: str, *args: Any,
+    ) -> Any:
+        """``_guarded`` over ``fn(session)`` for the cached session; ``default`` when no session is cached."""
+        session = self._cache.get(session_key)
+        return self._guarded(lambda: fn(session), default, level, msg, *args) if session else default
+
     @staticmethod
     def _normalize_card(card: Any) -> list[str]:
         """Normalize Honcho card payloads into a plain list of strings."""
-        if not card:
-            return []
-        if isinstance(card, list):
-            return [str(item) for item in card if item]
-        return [str(card)]
+        return ([str(item) for item in card if item] if isinstance(card, list) else [str(card)]) if card else []
 
     @staticmethod
     def _target_kwargs(target: str | None) -> dict[str, str]:
@@ -43,86 +50,73 @@ class SessionContextMixin:
         """Fetch a peer card from the peer object (session.context() can return an empty card)."""
         def _get_card() -> Any:
             peer = self._get_or_create_peer(peer_id)
-            for name in ("get_card", "card"):  # "card" is the legacy SDK getter
-                getter = getattr(peer, name, None)
-                if callable(getter):
-                    return getter(**self._target_kwargs(target))
-            return None
-
+            getters = (getattr(peer, n, None) for n in ("get_card", "card"))  # "card" is the legacy SDK getter
+            getter = next((g for g in getters if callable(g)), None)
+            return getter(**self._target_kwargs(target)) if getter else None
         return self._normalize_card(self._authed_call("peer card fetch", _get_card))
 
     def _fetch_peer_context(
         self, peer_id: str, search_query: str | None = None, *, target: str | None = None,
     ) -> dict[str, Any]:
-        """Fetch representation + peer card from a peer object.
-
-        Raises HonchoAuthError when auth is dead or a 401 survives the forced
-        refresh; the non-auth fallback chain would just repeat the failure.
-        """
+        """Fetch representation + peer card from a peer object; when peer.context() leaves either
+        empty, fall back to the dedicated representation / card getters. Raises HonchoAuthError when
+        auth is dead or a 401 survives the forced refresh; the fallback chain would just repeat it."""
         context_kwargs: dict[str, Any] = self._target_kwargs(target)
         if search_query is not None:
             context_kwargs["search_query"] = search_query
-
-        def _peer_context() -> tuple[str, list[str]]:
-            ctx = self._authed_call(
-                "peer context fetch", lambda: self._get_or_create_peer(peer_id).context(**context_kwargs),
-            )
-            rep = getattr(ctx, "representation", None) or getattr(ctx, "peer_representation", None) or ""
-            return rep, self._normalize_card(getattr(ctx, "peer_card", None))
-
-        def _peer_representation() -> Any:
-            return self._get_or_create_peer(peer_id).representation(**self._target_kwargs(target))
-
-        representation, card = self._guarded(
-            _peer_context, ("", []), logging.DEBUG, "Direct peer.context() failed for '%s': %s", peer_id,
+        peer = lambda: self._get_or_create_peer(peer_id)  # noqa: E731
+        failed = "Direct %s failed for '%%s': %%s"
+        ctx = self._guarded_authed(
+            "peer context fetch", lambda: peer().context(**context_kwargs), None, logging.DEBUG,
+            failed % "peer.context()", peer_id,
         )
-
+        representation = getattr(ctx, "representation", None) or getattr(ctx, "peer_representation", None) or ""
+        card = self._normalize_card(getattr(ctx, "peer_card", None))
         if not representation:
-            representation = self._guarded(
-                lambda: self._authed_call("peer representation fetch", _peer_representation) or "",
-                "", logging.DEBUG, "Direct peer.representation() failed for '%s': %s", peer_id,
-            )
+            representation = self._guarded_authed(
+                "peer representation fetch", lambda: peer().representation(**self._target_kwargs(target)),
+                "", logging.DEBUG, failed % "peer.representation()", peer_id,
+            ) or ""
         if not card:
             card = self._guarded(
-                lambda: self._fetch_peer_card(peer_id, target=target),
-                [], logging.DEBUG, "Direct peer card fetch failed for '%s': %s", peer_id,
+                lambda: self._fetch_peer_card(peer_id, target=target), [], logging.DEBUG,
+                failed % "peer card fetch", peer_id,
             )
         return {"representation": representation, "card": card}
 
+    def _peer_context_strings(self, peer_id: str, search_query: str | None = None, *, target: str | None = None):
+        """``_fetch_peer_context`` flattened to ``(representation, newline-joined card)`` for prompt injection."""
+        ctx = self._fetch_peer_context(peer_id, search_query, target=target)
+        return ctx["representation"], "\n".join(ctx["card"])
+
     def get_prefetch_context(self, session_key: str, user_message: str | None = None) -> dict[str, str]:
         """Pre-fetch user + AI peer context (representation, card) plus the session summary.
-
-        ``user_message`` is passed as search_query so Honcho returns topic-relevant
-        conclusions. Stops early (returning what it has) once auth is dead.
-        """
+        ``user_message`` is passed as search_query so Honcho returns topic-relevant conclusions.
+        Stops early (returning what it has) once auth is dead."""
         session = self._cache.get(session_key)
         if not session:
             return {}
-
         result: dict[str, str] = {}
 
         def _summary() -> None:
             if session.honcho_session_id not in self._sessions_cache:
                 return
             ctx = self._authed_call(
-                "session summary fetch",
-                lambda: self._sdk_session(session.honcho_session_id).context(summary=True),
+                "session summary fetch", lambda: self._sdk_session(session.honcho_session_id).context(summary=True),
             )
             if ctx.summary and getattr(ctx.summary, "content", None):
                 result["summary"] = ctx.summary.content
 
         def _user() -> None:
             observer_peer_id, target_peer_id = self._resolve_observer_target(session, "user")
-            ctx = self._fetch_peer_context(
-                observer_peer_id, search_query=user_message or None,
-                target=target_peer_id or session.user_peer_id,
+            result["representation"], result["card"] = self._peer_context_strings(
+                observer_peer_id, search_query=user_message or None, target=target_peer_id or session.user_peer_id,
             )
-            result["representation"], result["card"] = ctx["representation"], "\n".join(ctx["card"])
 
         def _ai() -> None:
-            ctx = self._fetch_peer_context(session.assistant_peer_id, target=session.assistant_peer_id)
-            result["ai_representation"], result["ai_card"] = ctx["representation"], "\n".join(ctx["card"])
-
+            result["ai_representation"], result["ai_card"] = self._peer_context_strings(
+                session.assistant_peer_id, target=session.assistant_peer_id,
+            )
         for step, level, msg in (
             (_summary, logging.DEBUG, "Failed to fetch session summary from Honcho: %s"),
             (_user, logging.WARNING, "Failed to fetch user context from Honcho: %s"),
@@ -131,21 +125,17 @@ class SessionContextMixin:
             try:
                 step()
             except HonchoAuthError:
-                # Auth is dead; the pop_auth_notice path tells the model why context is missing.
-                break
+                break  # Auth is dead; the pop_auth_notice path tells the model why context is missing.
             except Exception as e:
                 logger.log(level, msg, e)
         return result
 
     def get_session_context(self, session_key: str, peer: str = "user") -> dict[str, Any]:
         """Fetch session-level context (summary, representation, card, recent messages).
-
-        Raises HonchoAuthError so callers can tell rejected credentials from no context.
-        """
+        Raises HonchoAuthError so callers can tell rejected credentials from no context."""
         session = self._cache.get(session_key)
         if not session:
             return {}
-
         if session.honcho_session_id not in self._sessions_cache:
             # Fall back to peer-level context, respecting the requested peer.
             peer_id = self._resolve_peer_id(session, peer)
@@ -156,9 +146,7 @@ class SessionContextMixin:
             ctx = self._authed_call(
                 "session context fetch",
                 lambda: self._sdk_session(session.honcho_session_id).context(
-                    summary=True,
-                    peer_target=target_peer_id or observer_peer_id,
-                    peer_perspective=observer_peer_id,
+                    summary=True, peer_target=target_peer_id or observer_peer_id, peer_perspective=observer_peer_id,
                 ),
             )
             result: dict[str, Any] = {}
@@ -174,64 +162,42 @@ class SessionContextMixin:
                     for m in ctx.messages[-10:]
                 ]
             return result
-
         return self._guarded(_fetch, {}, logging.DEBUG, "Session context fetch failed: %s")
 
     def get_peer_card(self, session_key: str, peer: str = "user") -> list[str]:
         """Fetch a peer card (curated facts, no LLM). [] if unavailable; raises HonchoAuthError."""
-        session = self._cache.get(session_key)
-        if not session:
-            return []
-
-        def _fetch() -> list[str]:
+        def _fetch(session: Any) -> list[str]:
             observer_peer_id, target_peer_id = self._resolve_observer_target(session, peer)
             card = self._fetch_peer_card(observer_peer_id, target=target_peer_id)
-            if card:
-                return card
             # Some backends store cards on the target peer, not the observer-target slot.
-            return self._fetch_peer_card(target_peer_id) if target_peer_id else []
+            return card or (self._fetch_peer_card(target_peer_id) if target_peer_id else [])
+        return self._guarded_session(session_key, _fetch, [], logging.DEBUG, "Failed to fetch peer card from Honcho: %s")
 
-        return self._guarded(_fetch, [], logging.DEBUG, "Failed to fetch peer card from Honcho: %s")
-
-    def search_context(
-        self, session_key: str, query: str, max_tokens: int = 800, peer: str = "user",
-    ) -> str:
-        """Hybrid search over raw messages visible from ``peer``'s perspective, all sessions.
-
-        Snippets accumulate until ``max_tokens`` (~4 chars/token) is exhausted.
-        Returns "" when nothing matches; raises HonchoAuthError on rejected credentials.
-        """
+    def search_context(self, session_key: str, query: str, max_tokens: int = 800, peer: str = "user") -> str:
+        """Hybrid search over raw messages visible from ``peer``'s perspective, all sessions. Snippets
+        accumulate until ``max_tokens`` (~4 chars/token) is exhausted. Returns "" when nothing matches;
+        raises HonchoAuthError on rejected credentials."""
         session = self._cache.get(session_key)
         q = (query or "").strip()[:4000]  # Honcho caps query length for the embedding model.
         if not session or not q:
             return ""
         peer_id = self._resolve_peer_id(session, peer)
-
         char_budget = max(200, int(max_tokens) * 4)
         limit = max(3, min(20, char_budget // 300))
-
-        try:
-            messages = self._authed_call(
-                "message search",
-                lambda: self.honcho.search(q, filters={"peer_perspective": peer_id}, limit=limit),
-            )
-        except HonchoAuthError:
-            raise
-        except Exception as e:
-            logger.debug("Honcho message search failed (peer_perspective=%s): %s", peer_id, e)
+        messages = self._guarded_authed(
+            "message search", lambda: self.honcho.search(q, filters={"peer_perspective": peer_id}, limit=limit),
+            _FAILED, logging.DEBUG, "Honcho message search failed (peer_perspective=%s): %s", peer_id,
+        )
+        if messages is _FAILED:
             # Older Honcho versions lack the perspective filter; fall back to peer-authored search.
-            messages = self._guarded(
-                lambda: self._authed_call(
-                    "peer search", lambda: self._get_or_create_peer(peer_id).search(q, limit=limit),
-                ),
+            messages = self._guarded_authed(
+                "peer search", lambda: self._get_or_create_peer(peer_id).search(q, limit=limit),
                 None, logging.DEBUG, "Honcho peer search fallback also failed: %s",
             )
         if not messages:
             return ""
-
         # Author labels distinguish user-stated facts from assistant-derived ones.
         lines: list[str] = []
-        used = 0
         for m in messages:
             content = (getattr(m, "content", "") or "").strip()
             if not content:
@@ -240,8 +206,8 @@ class SessionContextMixin:
             who = "assistant" if author == session.assistant_peer_id else author
             sess = getattr(m, "session_id", "") or ""
             entry = f"[{who}{f' · {sess}' if sess else ''}] {content[:1200]}"
-            separator = "\n\n" if lines else ""
-            remaining = char_budget - used - len(separator)
+            # Budget left after the joined snippets so far plus the separator this entry would need.
+            remaining = char_budget - len("\n\n".join(lines)) - (2 if lines else 0)
             if remaining <= 0:
                 break
             truncated = len(entry) > remaining
@@ -249,17 +215,14 @@ class SessionContextMixin:
             if not entry:
                 break
             lines.append(entry)
-            used += len(separator) + len(entry)
             if truncated:
                 break
         return "\n\n".join(lines)
 
     def _conclusions_scope(self, session: Any, target_peer_id: str) -> Any:
         """ConclusionScope for observing target_peer_id; shared by create/delete/list."""
-        if target_peer_id == session.assistant_peer_id or self._ai_observe_others:
-            observer = self._get_or_create_peer(session.assistant_peer_id)
-        else:
-            observer = self._get_or_create_peer(target_peer_id)
+        ai_observes = target_peer_id == session.assistant_peer_id or self._ai_observe_others
+        observer = self._get_or_create_peer(session.assistant_peer_id if ai_observes else target_peer_id)
         return observer.conclusions_of(target_peer_id)
 
     def create_conclusion(self, session_key: str, content: str, peer: str = "user") -> bool:
@@ -276,46 +239,28 @@ class SessionContextMixin:
             if target_peer_id is None:
                 logger.warning("Could not resolve conclusion peer '%s' for session '%s'", peer, session_key)
                 return False
-            self._authed_call(
-                "conclusion create",
-                lambda: self._conclusions_scope(session, target_peer_id).create([{
-                    "content": content.strip(),
-                    "session_id": session.honcho_session_id,
-                }]),
-            )
+            payload = [{"content": content.strip(), "session_id": session.honcho_session_id}]
+            self._authed_call("conclusion create", lambda: self._conclusions_scope(session, target_peer_id).create(payload))
             logger.info("Created conclusion about %s for %s: %s", target_peer_id, session_key, content[:80])
             return True
-
         return self._guarded(_create, False, logging.ERROR, "Failed to create conclusion: %s")
 
     def delete_conclusion(self, session_key: str, conclusion_id: str, peer: str = "user") -> bool:
         """Delete a conclusion by ID. Use only for PII removal."""
-        session = self._cache.get(session_key)
-        if not session:
-            return False
-
-        def _delete() -> bool:
+        def _delete(session: Any) -> bool:
             target_peer_id = self._resolve_peer_id(session, peer)
             self._authed_call(
-                "conclusion delete",
-                lambda: self._conclusions_scope(session, target_peer_id).delete(conclusion_id),
+                "conclusion delete", lambda: self._conclusions_scope(session, target_peer_id).delete(conclusion_id),
             )
             logger.info("Deleted conclusion %s for %s", conclusion_id, session_key)
             return True
-
-        return self._guarded(
-            _delete, False, logging.ERROR, "Failed to delete conclusion %s: %s", conclusion_id,
+        return self._guarded_session(
+            session_key, _delete, False, logging.ERROR, "Failed to delete conclusion %s: %s", conclusion_id,
         )
 
-    def list_conclusions(
-        self, session_key: str, query: str | None = None, peer: str = "user", limit: int = 20,
-    ) -> list[dict]:
+    def list_conclusions(self, session_key: str, query: str | None = None, peer: str = "user", limit: int = 20):
         """List (or semantically search with ``query``) conclusions as {"id", "content"} dicts."""
-        session = self._cache.get(session_key)
-        if not session:
-            return []
-
-        def _list() -> list[dict]:
+        def _list(session: Any) -> list[dict]:
             target_peer_id = self._resolve_peer_id(session, peer)
             if target_peer_id is None:
                 return []
@@ -323,41 +268,29 @@ class SessionContextMixin:
             def _fetch() -> Any:
                 scope = self._conclusions_scope(session, target_peer_id)
                 return scope.query(query, top_k=limit) if query else scope.list(size=limit).items
-
-            conclusions = self._authed_call("conclusion list", _fetch)
-            return [{"id": c.id, "content": c.content} for c in conclusions]
-
-        return self._guarded(_list, [], logging.DEBUG, "Honcho list_conclusions failed: %s")
+            return [{"id": c.id, "content": c.content} for c in self._authed_call("conclusion list", _fetch)]
+        return self._guarded_session(session_key, _list, [], logging.DEBUG, "Honcho list_conclusions failed: %s")
 
     def set_peer_card(self, session_key: str, card: list[str], peer: str = "user") -> list[str] | None:
         """Replace a peer's card. Returns the updated card, or None on failure."""
-        session = self._cache.get(session_key)
-        if not session:
-            return None
-
-        def _update() -> list[str] | None:
+        def _update(session: Any) -> list[str] | None:
             observer_peer_id, target_peer_id = self._resolve_observer_target(session, peer)
             if observer_peer_id is None:
                 logger.warning("Could not resolve peer '%s' for set_peer_card in session '%s'", peer, session_key)
                 return None
-
             result = self._authed_call(
                 "peer card update",
                 lambda: self._get_or_create_peer(observer_peer_id).set_card(card, **self._target_kwargs(target_peer_id)),
             )
-            logger.info(
-                "Updated peer card observer=%s target=%s (%d facts)",
-                observer_peer_id, target_peer_id or observer_peer_id, len(card),
-            )
+            logger.info("Updated peer card observer=%s target=%s (%d facts)",
+                        observer_peer_id, target_peer_id or observer_peer_id, len(card))
             return result
-
-        return self._guarded(_update, None, logging.ERROR, "Failed to set peer card: %s")
+        return self._guarded_session(session_key, _update, None, logging.ERROR, "Failed to set peer card: %s")
 
     def seed_ai_identity(self, session_key: str, content: str, source: str = "manual") -> bool:
-        """Seed the AI peer's representation from text (SOUL.md, exported chats, ...).
-
-        Sent as an assistant-peer message so Honcho's reasoning model incorporates it.
-        """
+        """Seed the AI peer's representation from text (SOUL.md, exported chats, ...), sent as an
+        assistant-peer message so Honcho's reasoning model incorporates it. Unlike the other
+        operations, auth failures are logged and swallowed here too."""
         if not content or not content.strip():
             return False
         session = self._cache.get(session_key)
@@ -367,7 +300,6 @@ class SessionContextMixin:
         if session.honcho_session_id not in self._sessions_cache:
             logger.warning("No Honcho session cached for '%s', skipping AI seed", session_key)
             return False
-
         wrapped = f"<ai_identity_seed>\n<source>{source}</source>\n\n{content.strip()}\n</ai_identity_seed>"
 
         def _seed() -> bool:
@@ -375,7 +307,6 @@ class SessionContextMixin:
             self._sdk_session(session.honcho_session_id).add_messages([assistant_peer.message(wrapped)])
             logger.info("Seeded AI identity from '%s' into %s", source, session_key)
             return True
-
         try:
             return self._authed_call("identity seed", _seed)
         except Exception as e:
@@ -384,43 +315,27 @@ class SessionContextMixin:
 
     def get_ai_representation(self, session_key: str) -> dict[str, str]:
         """Fetch the AI peer's representation + card ("" values if unavailable)."""
-        session = self._cache.get(session_key)
-        if not session:
-            return dict(_EMPTY_REPRESENTATION)
-
-        def _fetch() -> dict[str, str]:
-            ctx = self._fetch_peer_context(session.assistant_peer_id, target=session.assistant_peer_id)
-            return {"representation": ctx["representation"] or "", "card": "\n".join(ctx["card"])}
-
-        return self._guarded(
-            _fetch, dict(_EMPTY_REPRESENTATION), logging.DEBUG, "Failed to fetch AI representation: %s",
+        def _fetch(session: Any) -> dict[str, str]:
+            rep, card = self._peer_context_strings(session.assistant_peer_id, target=session.assistant_peer_id)
+            return {"representation": rep, "card": card}
+        return self._guarded_session(
+            session_key, _fetch, {"representation": "", "card": ""}, logging.DEBUG,
+            "Failed to fetch AI representation: %s",
         )
 
     def dialectic_query(
-        self, session_key: str, query: str,
-        reasoning_level: str | None = None,
-        peer: str = "user",
-        apply_injection_cap: bool = True,
-        raise_errors: bool = False,
+        self, session_key: str, query: str, reasoning_level: str | None = None, peer: str = "user",
+        apply_injection_cap: bool = True, raise_errors: bool = False,
     ) -> str:
         """Ask Honcho's dialectic endpoint about a peer (LLM on the backend; run off-thread).
-
-        Args:
-            reasoning_level: Override honored only when dialecticDynamic is true.
-            apply_injection_cap: Clip to ``dialecticMaxChars`` (automatic injection only).
-            raise_errors: Re-raise backend failures instead of returning "" so explicit
-                tool calls can tell a timeout from an empty answer.
-
-        Raises:
-            HonchoAuthError: credentials rejected after a forced refresh and one retry.
-        """
+        ``reasoning_level`` is honored only when dialecticDynamic is true. ``apply_injection_cap``
+        clips to ``dialecticMaxChars`` (automatic injection only). ``raise_errors`` re-raises backend
+        failures instead of returning "" so explicit tool calls can tell a timeout from an empty answer.
+        Raises HonchoAuthError when credentials are rejected after a forced refresh and one retry."""
         session = self._cache.get(session_key)
-        if not session:
-            return ""
-        target_peer_id = self._resolve_peer_id(session, peer)
+        target_peer_id = self._resolve_peer_id(session, peer) if session else None
         if target_peer_id is None:
             return ""
-
         if len(query) > self._dialectic_max_input_chars:
             query = query[:self._dialectic_max_input_chars].rsplit(" ", 1)[0]
         level = reasoning_level if (self._dialectic_dynamic and reasoning_level) else self._dialectic_reasoning_level
@@ -431,13 +346,10 @@ class SessionContextMixin:
                 observer = self._get_or_create_peer(session.assistant_peer_id)
                 return observer.chat(query, target=target_peer_id, reasoning_level=level) or ""
             return self._get_or_create_peer(target_peer_id).chat(query, reasoning_level=level) or ""
-
         try:
             result = self._authed_call("dialectic query", _chat_once)
-            cap = self._dialectic_max_chars
-            if apply_injection_cap and result and cap and len(result) > cap:
-                result = result[:cap].rsplit(" ", 1)[0] + " …"
-            return result
+            cap = self._dialectic_max_chars if apply_injection_cap else 0
+            return result[:cap].rsplit(" ", 1)[0] + " …" if result and cap and len(result) > cap else result
         except HonchoAuthError:
             raise
         except Exception as e:
