@@ -298,13 +298,13 @@ def _parse_duration(val) -> Optional[int]:
     except ValueError:
         pass
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    if s and s[-1] in units:
-        try:
-            n = float(s[:-1])
-        except ValueError as exc:
-            raise ValueError(f"malformed duration {val!r}") from exc
-        return int(n * units[s[-1]])
-    raise ValueError(f"malformed duration {val!r} (expected 30s, 5m, 2h, 1d, or a number)")
+    if not (s and s[-1] in units):
+        raise ValueError(f"malformed duration {val!r} (expected 30s, 5m, 2h, 1d, or a number)")
+    try:
+        n = float(s[:-1])
+    except ValueError as exc:
+        raise ValueError(f"malformed duration {val!r}") from exc
+    return int(n * units[s[-1]])
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -831,10 +831,8 @@ def _cmd_attach_rm(args: argparse.Namespace) -> int:
 
 
 def _worker_run_id_for(task_id: str) -> Optional[int]:
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
-        return None
     raw = os.environ.get("HERMES_KANBAN_RUN_ID")
-    if not raw:
+    if os.environ.get("HERMES_KANBAN_TASK") != task_id or not raw:
         return None
     try:
         return int(raw)
@@ -856,14 +854,13 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
 
         client, model = get_text_auxiliary_client("goal_judge")
     except Exception:
-        return ("done", None)
+        client, model = None, None
     if client is None or not model:
         return ("done", None)
 
     from hermes_cli.goals import judge_goal
 
-    verdict = "done"
-    reason = ""
+    verdict, reason = "done", ""
     try:
         verdict, reason, _, _, _ = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip(),
@@ -1162,14 +1159,14 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
         return 0
     for s in subs:
         thr = f":{s['thread_id']}" if s.get("thread_id") else ""
-        owner = f"  owner={s['notifier_profile']}" if s.get("notifier_profile") else ""
-        dmode = s.get("delivery_mode") or "notify"
-        mode = "" if dmode == "notify" else f"  mode={dmode}"
-        ctype = s.get("chat_type") or "dm"
-        ct = "" if ctype == "dm" else f"  chat_type={ctype}"
-        uid_alt = f"  user_id_alt={s['user_id_alt']}" if s.get("user_id_alt") else ""
-        print(f"  {s['task_id']:10s}  {s['platform']}:{s['chat_id']}{thr}"
-              f"  (since event {s['last_event_id']}){owner}{ct}{uid_alt}{mode}")
+        dmode, ctype = s.get("delivery_mode") or "notify", s.get("chat_type") or "dm"
+        extras = "".join((
+            f"  owner={s['notifier_profile']}" if s.get("notifier_profile") else "",
+            "" if ctype == "dm" else f"  chat_type={ctype}",
+            f"  user_id_alt={s['user_id_alt']}" if s.get("user_id_alt") else "",
+            "" if dmode == "notify" else f"  mode={dmode}",
+        ))
+        print(f"  {s['task_id']:10s}  {s['platform']}:{s['chat_id']}{thr}  (since event {s['last_event_id']}){extras}")
     return 0
 
 
@@ -1227,39 +1224,28 @@ def _cmd_context(args: argparse.Namespace) -> int:
     return 0
 
 
-def _triage_sweep_ids(args: argparse.Namespace, verb: str, list_triage_ids, json_key: str):
-    """Shared arg validation for ``specify`` / ``decompose``: ``(ids|None, rc)``.
-
-    ``ids is None`` with ``rc == 0`` means "nothing to do, already reported".
-    """
-    all_flag = bool(getattr(args, "all_triage", False))
-    tenant = getattr(args, "tenant", None)
-    if args.task_id and all_flag:
-        return None, _err("kanban: pass either a task id OR --all, not both", 2)
-    if all_flag:
-        ids = list_triage_ids(tenant=tenant)
-        if not ids:
-            if getattr(args, "json", False):
-                print(json.dumps({json_key: 0, "total": 0}))
-            else:
-                print("No triage tasks" + (f" for tenant {tenant!r}" if tenant else "") + ".")
-            return None, 0
-        return ids, 0
-    if args.task_id:
-        return [args.task_id], 0
-    return None, _err(f"kanban: {verb} requires a task id or --all", 2)
-
-
 def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_key: str,
                       json_fields: tuple[str, ...], human_ok) -> int:
-    """Shared driver for ``specify`` / ``decompose``: validate ids, run ``run_one(tid, author=...)``
-    per id, print JSON or human lines, exit code."""
+    """Shared driver for ``specify`` / ``decompose``: validate ids (one task id XOR ``--all``), run
+    ``run_one(tid, author=...)`` per id, print JSON or human lines, exit code."""
     all_flag = bool(getattr(args, "all_triage", False))
     author = getattr(args, "author", None) or _profile_author()
     want_json = bool(getattr(args, "json", False))
-    ids, rc = _triage_sweep_ids(args, verb, mod.list_triage_ids, json_key)
-    if ids is None:
-        return rc
+    tenant = getattr(args, "tenant", None)
+    if args.task_id and all_flag:
+        return _err("kanban: pass either a task id OR --all, not both", 2)
+    if all_flag:
+        ids = mod.list_triage_ids(tenant=tenant)
+        if not ids:
+            if want_json:
+                print(json.dumps({json_key: 0, "total": 0}))
+            else:
+                print("No triage tasks" + (f" for tenant {tenant!r}" if tenant else "") + ".")
+            return 0
+    elif args.task_id:
+        ids = [args.task_id]
+    else:
+        return _err(f"kanban: {verb} requires a task id or --all", 2)
 
     ok_count = 0
     for tid in ids:
