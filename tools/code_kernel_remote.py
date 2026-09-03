@@ -32,15 +32,13 @@ from tools.code_kernel import RUNNER_CELL_SOURCE, KernelRegistry
 
 logger = logging.getLogger(__name__)
 
-# How often the host polls the remote for a cell result file. Each poll is
-# one env.execute round-trip (typically 0.1-0.4s on ssh/docker), so this is
-# a floor, not a rate.
+# Host poll interval for a cell result file; each poll is one env.execute round-trip
+# (0.1-0.4s on ssh/docker), so this is a floor, not a rate.
 _CELL_POLL_INTERVAL = 0.5
 
-# The remote runner: a tiny forever-loop that polls for cell request files,
-# execs them in one persistent namespace, and writes response files. It is
-# deliberately transport-agnostic (pure files) and stdlib-only. Cells and
-# tool-RPC share the kernel dir but use distinct prefixes.
+# The remote runner: a forever-loop that polls for cell request files, execs them in one
+# persistent namespace, writes response files. Pure files + stdlib only (transport-agnostic);
+# cells and tool-RPC share the kernel dir under distinct prefixes.
 REMOTE_KERNEL_RUNNER_SOURCE = '''\
 """Auto-generated Hermes REMOTE session-kernel runner (file cell protocol)."""
 import contextlib
@@ -173,7 +171,6 @@ def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
     from tools.code_execution_tool import (
         MAX_STDOUT_BYTES, _ship_file_to_remote, _env_temp_dir, generate_hermes_tools_module,
     )
-
     kernel_dir = f"{_env_temp_dir(env)}/hermes_rkernel_{uuid.uuid4().hex[:12]}"
     q_dir = shlex.quote(kernel_dir)
     kernel = None
@@ -184,7 +181,6 @@ def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
             cell_source=RUNNER_CELL_SOURCE, capture_limit=MAX_STDOUT_BYTES, idle_exit=idle_exit))
         _ship_file_to_remote(env, f"{kernel_dir}/hermes_tools.py",
                              generate_hermes_tools_module(list(sandbox_tools), transport="file"))
-
         env_prefix = (
             f"HERMES_KERNEL_DIR={q_dir} "
             f"HERMES_RPC_DIR={shlex.quote(kernel_dir + '/rpc')} "
@@ -226,10 +222,8 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
     """Find/respawn the owner's kernel: (kernel|None, reused, state_reset, state_lost)."""
     key = _kernel_key(owner, env_type, task_env_id)
     state_lost = state_reset = False
-
     with _REGISTRY.lock:
         kernel = _REMOTE_KERNELS.get(key)
-
     if kernel is not None and reset:
         _REGISTRY.discard(key, kernel)
         kernel, state_reset = None, True
@@ -239,7 +233,6 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
         # best-effort dir cleanup; the process is already gone).
         _REGISTRY.discard(key, kernel)
         kernel, state_lost = None, True
-
     reused = kernel is not None
     if kernel is None:
         kernel = _spawn_remote_kernel(env, env_type, owner, task_env_id, sandbox_tools, idle_exit=idle_exit)
@@ -252,7 +245,6 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
 def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str, Dict[str, Any]]:
     """Ship one cell request and poll for its result: (cell status, payload)."""
     from tools.code_execution_tool import _ship_file_to_remote
-
     kernel.cell_seq += 1
     seq = f"{kernel.cell_seq:06d}"
     q_cells = shlex.quote(f"{kernel.kernel_dir}/cells")
@@ -260,7 +252,6 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str
     _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json.tmp",
                          json.dumps({"id": seq, "code": code}, ensure_ascii=False))
     kernel.sh(f"mv {q_cells}/cell_req_{seq}.json.tmp {q_cells}/cell_req_{seq}.json", timeout=10)
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -286,15 +277,13 @@ def execute_in_remote_kernel(
 ) -> Optional[Dict[str, Any]]:
     """Run one cell in the owner's remote kernel.
 
-    Returns the raw cell result dict (caller does output post-processing),
-    or ``None`` when no kernel could be spawned — the caller falls open to
-    the per-call path. ``state_lost`` / ``state_reset`` / ``reused`` ride in
-    the ``kernel`` sub-dict, matching the local kernel's result shape.
+    Returns the raw cell result dict (caller post-processes output), or ``None`` when no
+    kernel could be spawned (caller falls open to per-call). ``state_lost`` / ``state_reset`` /
+    ``reused`` ride in the ``kernel`` sub-dict, matching the local kernel's result shape.
     """
     from tools.code_kernel import _resolve_owner
     from tools.code_execution_tool import _rpc_poll_loop
     from tools.thread_context import propagate_context_to_thread
-
     owner = _resolve_owner(task_env_id)
     kernel, reused, state_reset, state_lost = _acquire_remote_kernel(
         env, env_type, owner, task_env_id, sandbox_tools, reset=reset, idle_exit=idle_exit)
@@ -302,21 +291,17 @@ def execute_in_remote_kernel(
         return None  # fail open to per-call
     key = _kernel_key(owner, env_type, task_env_id)
     kernel.last_used = time.monotonic()
-
-    # Clean stale tool-RPC requests from a previous cell before arming this
-    # cell's poll loop, so a background thread the last cell leaked cannot
-    # smuggle a call into this cell's authority window.
+    # Clean stale tool-RPC requests from a previous cell before arming this cell's poll loop, so
+    # a background thread the last cell leaked cannot smuggle a call into this authority window.
     q_rpc = shlex.quote(kernel.kernel_dir + '/rpc')
     try:
         kernel.sh(f"rm -f {q_rpc}/req_* {q_rpc}/res_*", timeout=10)
     except Exception:
         pass
-
     tool_call_log: list = []
     tool_call_counter, stop_event = [0], threading.Event()
-    # Per-cell RPC thread carrying THIS call's approval/session context —
-    # the remote analogue of CellAuthority: authority lives exactly as long
-    # as the cell's poll loop.
+    # Per-cell RPC thread carrying THIS call's approval/session context — the remote analogue
+    # of CellAuthority: authority lives exactly as long as the cell's poll loop.
     rpc_thread = threading.Thread(
         target=propagate_context_to_thread(_rpc_poll_loop),
         args=(env, f"{kernel.kernel_dir}/rpc", task_env_id, tool_call_log, tool_call_counter,
@@ -324,14 +309,12 @@ def execute_in_remote_kernel(
         daemon=True,
     )
     rpc_thread.start()
-
     cell_status, cell_payload = "no-result", {}
     try:
         cell_status, cell_payload = _run_remote_cell(kernel, code, timeout)
     finally:
         stop_event.set()
         rpc_thread.join(timeout=5)
-
     kernel_info: Dict[str, Any] = {"reused": reused, "remote": True}
     result: Dict[str, Any] = {
         "status": "error", "stdout": cell_payload.get("stdout", ""),
@@ -339,8 +322,7 @@ def execute_in_remote_kernel(
         "tool_calls_made": tool_call_counter[0], "kernel": kernel_info,
     }
     if cell_status in ("timeout", "protocol-error", "no-result"):
-        # No safe way to interrupt one cell in place (same contract as
-        # local): kill the kernel, report the loss, respawn next call.
+        # No safe way to interrupt one cell in place (same contract as local): kill, report, respawn.
         _REGISTRY.discard(key, kernel)
         if cell_status == "timeout":
             result["status"] = "timeout"
@@ -350,7 +332,6 @@ def execute_in_remote_kernel(
             note = "Remote kernel protocol failure; kernel killed, state lost."
         kernel_info.update(ended=True, state_lost=True, note=note)
         return result
-
     if cell_status == "exit":
         _REGISTRY.discard(key, kernel)
         kernel_info["ended"] = True
@@ -365,8 +346,7 @@ def execute_in_remote_kernel(
     if state_lost:
         kernel_info.update(state_lost=True, note=(
             "The previous remote kernel was gone (transport drop, container "
-            "restart, or idle self-exit); state from earlier calls was lost "
-            "and a fresh kernel was started."))
+            "restart, or idle self-exit); state from earlier calls was lost and a fresh kernel was started."))
     if cell_status == "error" and result["traceback"]:
         result["error"] = result["traceback"].strip().splitlines()[-1]
     return result

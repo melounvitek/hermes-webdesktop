@@ -69,12 +69,9 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         is_passthrough = is_env_passthrough
     if is_windows is None:
         is_windows = _IS_WINDOWS
-
     scrubbed = {}
-    # Non-secret HERMES_* vars that no allowlist admits are dropped on purpose,
-    # but a script importing a repo module that reads one at import time would
-    # otherwise see it silently unset — log the drop once, pointing at the
-    # env_passthrough opt-in.
+    # Non-secret HERMES_* vars no allowlist admits are dropped on purpose; a script importing a
+    # repo module that reads one would see it silently unset — log the drop, point at the opt-in.
     _dropped_hermes = []
     for k, v in source_env.items():
         if is_passthrough(k):
@@ -98,14 +95,11 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
             "env_passthrough in the skill/config so it passes by explicit opt-in.",
             len(_dropped_hermes), ", ".join(sorted(_dropped_hermes)),
         )
-
-    # delegate_task children are marked by a ContextVar, not os.environ, and the
-    # sandbox crosses a process boundary: bridge the marker and strip
-    # dispatcher-owned Kanban vars AFTER the scrub so an explicit passthrough
-    # cannot re-grant a delegated child the parent's board mutation capability.
+    # delegate_task children are marked by a ContextVar, not os.environ, and the sandbox crosses
+    # a process boundary: strip dispatcher-owned Kanban vars AFTER the scrub so an explicit
+    # passthrough cannot re-grant a delegated child the parent's board mutation capability.
     try:
         from agent.delegation_context import is_delegated_child_process_context, scrub_kanban_env
-
         if is_delegated_child_process_context():
             scrubbed = scrub_kanban_env(scrubbed)
     except Exception:
@@ -121,10 +115,8 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
     child_env["HERMES_RPC_TOKEN"] = rpc_token
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # Force UTF-8 stdio and default file encoding: on Windows sys.stdout is
-    # bound to the console code page (cp1252) and print("→") raises
-    # UnicodeEncodeError; PYTHONUTF8 also makes open()'s default UTF-8.
-    # Harmless belt-and-suspenders under a C/POSIX locale (minimal containers).
+    # Force UTF-8 stdio and default file encoding: on Windows sys.stdout is bound to the console
+    # code page (cp1252) and print("→") raises; harmless under a C/POSIX locale (containers).
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
     # Only TZ reaches the child; HERMES_TIMEZONE is an internal setting.
@@ -132,15 +124,11 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     if _tz_name:
         child_env["TZ"] = _tz_name
     child_env.pop("HERMES_TIMEZONE", None)
-
     apply_subprocess_home_env(child_env)
-    # PYTHONPATH: the staging dir (hermes_tools.py lives there) must always be
-    # importable, even when project mode changes CWD. Hermes's own root is
-    # added ONLY when the child runs in Hermes's Python environment — exposing
-    # Hermes's site-packages to an external project interpreter can mix
-    # incompatible compiled extensions (3.12 NumPy under a 3.9 venv). Inherited
-    # Hermes-owned entries (PYTHONPATH passes the scrub) are stripped first so
-    # they never shadow the child's sys.path.
+    # PYTHONPATH: the staging dir (hermes_tools.py) must always be importable even when project
+    # mode changes CWD. Hermes's root is added ONLY when the child runs in Hermes's Python env —
+    # exposing Hermes's site-packages to an external interpreter can mix incompatible compiled
+    # extensions (3.12 NumPy under a 3.9 venv). Inherited Hermes-owned entries are stripped first.
     from tools.environments.local import _strip_hermes_owned_pythonpath
     _strip_hermes_owned_pythonpath(child_env)
     _existing_pp = child_env.get("PYTHONPATH", "")
@@ -148,8 +136,7 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     if _uses_hermes_python_environment(child_python):
         _pp_parts.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     elif child_python not in _external_env_logged:
-        # Import behavior changes silently otherwise — surface it once per
-        # interpreter path so "import hermes_constants fails" is diagnosable.
+        # Surface once per interpreter so "import hermes_constants fails" is diagnosable.
         _external_env_logged.add(child_python)
         logger.info("execute_code: child interpreter %s is outside the Hermes "
                     "environment; hermes root omitted from PYTHONPATH", child_python)
@@ -159,9 +146,8 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     return child_env
 
 
-# Interpreter-probe caches: success-only dicts (FIFO-evicted at the cap) rather
-# than lru_cache — a transient probe failure (fork pressure, 5s timeout on a
-# loaded host) must not stick for the process lifetime.
+# Interpreter-probe caches: success-only dicts (FIFO-evicted at the cap) rather than lru_cache —
+# a transient probe failure (fork pressure, 5s timeout) must not stick for the process lifetime.
 _PROBE_CACHE_MAX = 32
 _usable_python_cache: dict = {}
 _python_prefix_cache: dict = {}
@@ -181,7 +167,6 @@ def _probe_python(python_path: str, code: str, *, text: bool = False):
     """Run ``python_path -c code``; None if missing, unspawnable, or past the 5s timeout."""
     try:
         from agent.delegation_context import delegated_child_subprocess_env
-
         return subprocess.run(
             [python_path, "-c", code], timeout=5, capture_output=True, text=text,
             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
@@ -218,13 +203,9 @@ def _python_environment_prefix(python_path: str) -> str:
 
 
 def _uses_hermes_python_environment(python_path: str) -> bool:
-    """Whether *python_path* belongs to Hermes's active Python environment.
-
-    Short-circuits when it IS the running interpreter (by path or realpath) so
-    no probe runs on the default strict path and a flaky probe of
-    sys.executable can never drop the hermes root; the realpath leg also covers
-    venvs whose bin/python resolves to the same binary (``uv run``).
-    """
+    """Whether *python_path* belongs to Hermes's active Python environment. Short-circuits when
+    it IS the running interpreter (by path or realpath — covers ``uv run`` venvs) so no probe
+    runs on the default strict path and a flaky probe can never drop the hermes root."""
     if python_path == sys.executable or os.path.realpath(python_path) == os.path.realpath(sys.executable):
         return True
     return _python_environment_prefix(python_path) == os.path.realpath(sys.prefix)
@@ -236,7 +217,6 @@ def _resolve_child_python(mode: str) -> str:
     3.8+ probe, else ``sys.executable``."""
     if mode != "project":
         return sys.executable
-
     subdir, exe_names = ("Scripts", ("python.exe", "python3.exe")) if _IS_WINDOWS else ("bin", ("python", "python3"))
     for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         root = os.environ.get(var, "").strip()
@@ -251,24 +231,18 @@ def _resolve_child_python(mode: str) -> str:
             logger.info("execute_code: skipping %s=%s (Python version < 3.8 or broken). "
                         "Using sys.executable instead.", var, candidate)
             return sys.executable
-
     return sys.executable
 
 
 def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
-    """Working directory for the child.
-
-    Strict mode: the staging dir. Project mode mirrors the terminal/file-tool
-    ladder so every file-writing path in a session agrees: the session's cwd
-    record (its `cd` state) → registered ``session.cwd.set`` override →
-    TERMINAL_CWD → os.getcwd() → staging dir (never Popen on a missing cwd).
-    """
+    """Child cwd. Strict: the staging dir. Project mirrors the terminal/file-tool ladder so every
+    file-writing path agrees: session cwd record (`cd` state) → registered ``session.cwd.set``
+    override → TERMINAL_CWD → os.getcwd() → staging dir (never Popen on a missing cwd)."""
     if mode != "project":
         return staging_dir
     if task_id:
         try:
             from tools.terminal_tool import get_session_cwd
-
             recorded = get_session_cwd(task_id)
         except Exception:
             recorded = None
@@ -276,14 +250,12 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
             return recorded
         try:
             from tools.file_tools import _registered_task_cwd_override
-
             session_cwd = _registered_task_cwd_override(task_id)
         except Exception:
             session_cwd = None
         if session_cwd and os.path.isdir(session_cwd):
             return session_cwd
     from agent.runtime_cwd import scope_terminal_cwd
-
     raw = scope_terminal_cwd().strip()
     if raw:
         expanded = os.path.expanduser(raw)
