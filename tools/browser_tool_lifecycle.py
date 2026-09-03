@@ -277,13 +277,16 @@ def _owner_pid_alive(socket_dir: str, session_name: str) -> Tuple[Optional[int],
     return owner_pid, _pid_exists(owner_pid)
 
 
-def _terminate_verified_daemon(daemon_pid: int) -> bool:
+def _terminate_verified_daemon(daemon_pid: int, session_name: str, log) -> bool:
     """Tree-kill ``daemon_pid`` if it has a start-time fingerprint (so a PID swapped
-    between check and kill is refused); False when no fingerprint. Raises on OS errors."""
+    between check and kill is refused); False (logged via ``log``) when no fingerprint.
+    Raises on OS errors."""
     from gateway.status import get_process_start_time
     from tools.process_registry import ProcessRegistry
     daemon_start = get_process_start_time(daemon_pid)
     if daemon_start is None:
+        log("Refusing to reap browser daemon PID %d (session %s): no start-time fingerprint available",
+            daemon_pid, session_name)
         return False
     ProcessRegistry._terminate_host_pid(daemon_pid, daemon_start)
     return True
@@ -335,10 +338,7 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
     # Tree-kill so Chromium children (renderer, GPU, ...) go too.
     reaped = False
     try:
-        if not _terminate_verified_daemon(daemon_pid):
-            _bt.logger.warning(
-                "Refusing to reap browser daemon PID %d (session %s): "
-                "no start-time fingerprint available", daemon_pid, session_name)
+        if not _terminate_verified_daemon(daemon_pid, session_name, _bt.logger.warning):
             return False
         _bt.logger.info("Reaped orphaned browser daemon PID %d (session %s)", daemon_pid, session_name)
         reaped = True
@@ -415,9 +415,8 @@ def _start_browser_cleanup_thread():
     with _bt._cleanup_lock:
         if _bt._cleanup_thread is None or not _bt._cleanup_thread.is_alive():
             _bt._cleanup_running = True
-            _bt._cleanup_thread = threading.Thread(
-                target=_bt._browser_cleanup_thread_worker, daemon=True, name="browser-cleanup"
-            )
+            _bt._cleanup_thread = threading.Thread(target=_bt._browser_cleanup_thread_worker, daemon=True,
+                                                   name="browser-cleanup")
             _bt._cleanup_thread.start()
             _bt.logger.info("Started inactivity cleanup thread (timeout: %ss)", _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT)
 
@@ -537,12 +536,9 @@ def _drop_last_active_binding(task_id: str) -> None:
     still the recorded owner — a later click can't resurrect a cleaned sidecar on
     about:blank while a primary-session binding is preserved.
     """
-    if _bt._is_local_sidecar_key(task_id):
-        bare_task_id = _bt._bare_task_id_for_session_key(task_id)
-        if _bt._last_active_session_key.get(bare_task_id) == task_id:
-            _bt._last_active_session_key.pop(bare_task_id, None)
-    else:
-        _bt._last_active_session_key.pop(task_id, None)
+    bare_task_id = _bt._bare_task_id_for_session_key(task_id)
+    if bare_task_id == task_id or _bt._last_active_session_key.get(bare_task_id) == task_id:
+        _bt._last_active_session_key.pop(bare_task_id, None)
 
 
 def cleanup_browser(task_id: Optional[str] = None) -> None:
@@ -552,12 +548,10 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
         task_id = "default"
 
     session_keys = [task_id]
-    if not _bt._is_local_sidecar_key(task_id):
-        sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
-        with _bt._cleanup_lock:
-            if sidecar_key in _bt._active_sessions:
-                session_keys.append(sidecar_key)
-
+    sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
+    with _bt._cleanup_lock:
+        if not _bt._is_local_sidecar_key(task_id) and sidecar_key in _bt._active_sessions:
+            session_keys.append(sidecar_key)
     for session_key in session_keys:
         _bt._cleanup_single_browser_session(session_key)
     _bt._drop_last_active_binding(task_id)
@@ -572,14 +566,10 @@ def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
     try:
         daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
         if not _bt._verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
-            _bt.logger.debug(
-                "Skipped daemon kill for %s: pid %s failed identity "
-                "verification", session_name, daemon_pid)
+            _bt.logger.debug("Skipped daemon kill for %s: pid %s failed identity verification", session_name, daemon_pid)
             return False
-        if not _terminate_verified_daemon(daemon_pid):
-            _bt.logger.debug(
-                "Skipped daemon kill for %s: no start-time "
-                "fingerprint for pid %s", session_name, daemon_pid)
+        if not _terminate_verified_daemon(daemon_pid, session_name, lambda *_a: _bt.logger.debug(
+                "Skipped daemon kill for %s: no start-time fingerprint for pid %s", session_name, daemon_pid)):
             return False
         _bt.logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
         return True

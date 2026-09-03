@@ -162,12 +162,8 @@ def _popen_agent_browser(argv: List[str], env: Dict[str, str], socket_dir: str, 
 
 def _session_record(prefix: str, cdp_url: Optional[str], features: Dict[str, Any]) -> Dict[str, Any]:
     """Fresh session dict with a random ``<prefix>_<hex10>`` session name."""
-    return {
-        "session_name": f"{prefix}_{uuid.uuid4().hex[:10]}",
-        "bb_session_id": None,
-        "cdp_url": cdp_url,
-        "features": features,
-    }
+    return {"session_name": f"{prefix}_{uuid.uuid4().hex[:10]}", "bb_session_id": None,
+            "cdp_url": cdp_url, "features": features}
 
 
 def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict[str, str]:
@@ -245,24 +241,16 @@ def _create_cloud_session_or_fallback(task_id: str, provider) -> Dict[str, Any]:
         return session_info
     except Exception as e:
         provider_name = type(provider).__name__
-        _bt.logger.warning(
-            "Cloud provider %s failed (%s); attempting fallback to local "
-            "Chromium for task %s",
-            provider_name, e, task_id,
-            exc_info=True,
-        )
+        _bt.logger.warning("Cloud provider %s failed (%s); attempting fallback to local Chromium for task %s",
+                           provider_name, e, task_id, exc_info=True)
         try:
             session_info = _bt._create_local_session(task_id)
         except Exception as local_error:
-            raise RuntimeError(
-                f"Cloud provider {provider_name} failed ({e}) and local "
-                f"fallback also failed ({local_error})"
-            ) from e
+            raise RuntimeError(f"Cloud provider {provider_name} failed ({e}) and local "
+                               f"fallback also failed ({local_error})") from e
         if isinstance(session_info, dict):  # mark degraded for observability
-            session_info = dict(session_info)
-            session_info["fallback_from_cloud"] = True
-            session_info["fallback_reason"] = str(e)
-            session_info["fallback_provider"] = provider_name
+            session_info = {**session_info, "fallback_from_cloud": True, "fallback_reason": str(e),
+                            "fallback_provider": provider_name}
         return session_info
 
 
@@ -353,9 +341,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     return session_info
 
 
-def _discard_timed_out_browser_session(
-    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
-) -> None:
+def _discard_timed_out_browser_session(task_id: str, session_info: Dict[str, Any], task_socket_dir: str) -> None:
     """Drop a stuck client generation without losing cloud cleanup state."""
     with _bt._cleanup_lock:
         if _bt._active_sessions.get(task_id) is not session_info:
@@ -419,9 +405,7 @@ def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.
         entries = os.listdir(task_socket_dir)
     except OSError:
         return False
-    for entry in entries:
-        if not entry.endswith(".sock"):
-            continue
+    for entry in (e for e in entries if e.endswith(".sock")):
         try:
             with socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM) as s:
                 s.settimeout(probe_timeout_s)
@@ -432,9 +416,7 @@ def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.
     return False
 
 
-def _handle_browser_command_timeout(
-    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
-) -> None:
+def _handle_browser_command_timeout(task_id: str, session_info: Dict[str, Any], task_socket_dir: str) -> None:
     """Recover session state after a browser command timeout.
 
     * Cloud / CDP: no local daemon to probe — replace the stuck client generation
@@ -462,16 +444,12 @@ def _handle_browser_command_timeout(
         and _bt._browser_daemon_responsive(task_socket_dir)
     )
     if daemon_alive:
-        _bt.logger.warning(
-            "browser daemon for %s is alive after command timeout; session "
-            "marked suspect and will be recycled at next use", task_id,
-        )
+        _bt.logger.warning("browser daemon for %s is alive after command timeout; session "
+                           "marked suspect and will be recycled at next use", task_id)
         return
 
-    _bt.logger.warning(
-        "browser daemon for %s is wedged or dead after command timeout; "
-        "tree-killing and evicting the session", task_id,
-    )
+    _bt.logger.warning("browser daemon for %s is wedged or dead after command timeout; "
+                       "tree-killing and evicting the session", task_id)
     _bt._discard_timed_out_browser_session(task_id, session_info, task_socket_dir)
     # The poisoned entry is gone either way; the flag must not poison a session
     # created later under the same key.
@@ -491,14 +469,14 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
         _bt.logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
 
     stdout_text = stdout.strip()
-    if not stdout_text and returncode == 0 and command not in _bt._EMPTY_OK_COMMANDS:
-        _bt.logger.warning("browser '%s' returned empty output (rc=0)", command)
-        return {"success": False, "error": f"Browser command '{command}' returned no output"}
     if not stdout_text:
         if returncode != 0:
             error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
             _bt.logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
             return {"success": False, "error": error_msg}
+        if command not in _bt._EMPTY_OK_COMMANDS:
+            _bt.logger.warning("browser '%s' returned empty output (rc=0)", command)
+            return {"success": False, "error": f"Browser command '{command}' returned no output"}
         return {"success": True, "data": {}}
 
     try:
@@ -507,8 +485,7 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
         raw = stdout_text[:2000]
         _bt.logger.warning("browser '%s' returned non-JSON output (rc=%s): %s", command, returncode, raw[:500])
         if command == "screenshot":
-            stderr_text = (stderr or "").strip()
-            combined_text = "\n".join(part for part in [stdout_text, stderr_text] if part)
+            combined_text = "\n".join(part for part in [stdout_text, (stderr or "").strip()] if part)
             recovered_path = _bt._extract_screenshot_path_from_text(combined_text)
             if recovered_path and Path(recovered_path).exists():
                 _bt.logger.info("browser 'screenshot' recovered file from non-JSON output: %s", recovered_path)
@@ -519,9 +496,8 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
     if command == "snapshot" and parsed.get("success"):
         snap_data = parsed.get("data", {})
         if not snap_data.get("snapshot") and not snap_data.get("refs"):
-            _bt.logger.warning("snapshot returned empty content. "
-                           "Possible stale daemon or CDP connection issue. "
-                           "returncode=%s", returncode)
+            _bt.logger.warning("snapshot returned empty content. Possible stale daemon or CDP connection issue. "
+                               "returncode=%s", returncode)
     return parsed
 
 
@@ -636,18 +612,17 @@ def _run_browser_command(
 
     # Cloud/CDP: ``--cdp <ws_url>`` (NEVER with --session: agent-browser >=0.13
     # would create a local browser and silently ignore --cdp). Local: ``--session <name>``.
+    # Engine injection keys off the resolved session backend, not global provider
+    # state: hybrid routing can create a local sidecar while a cloud provider stays configured.
+    engine = _engine_override or _bt._get_browser_engine()
     if session_info.get("cdp_url"):
         backend_args = ["--cdp", session_info["cdp_url"]]
     else:
         backend_args = ["--session", session_info["session_name"]]
         if _bt._is_headed_mode():
             backend_args.append("--headed")
-
-    # Engine injection keys off the resolved session backend, not global provider
-    # state: hybrid routing can create a local sidecar while a cloud provider stays configured.
-    engine = _engine_override or _bt._get_browser_engine()
-    if engine != "auto" and not _bt._is_camofox_mode() and not session_info.get("cdp_url"):
-        backend_args += ["--engine", engine]
+        if engine != "auto" and not _bt._is_camofox_mode():
+            backend_args += ["--engine", engine]
 
     cmd_parts = _bt._agent_browser_argv(browser_cmd) + backend_args + ["--json", command] + args
 

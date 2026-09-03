@@ -23,11 +23,7 @@ from typing import Dict, Any, Optional, Union
 from pathlib import Path
 from agent.redact import redact_cdp_url
 from hermes_constants import (  # noqa: F401  (test-patchable surface, read via origin by sibling modules)
-    agent_browser_runnable,
-    get_hermes_home,
-    get_hermes_home_override,
-    hermes_home_key,
-    node_tool_runnable,
+    agent_browser_runnable, get_hermes_home, get_hermes_home_override, hermes_home_key, node_tool_runnable,
 )
 from utils import env_int, is_truthy_value  # noqa: F401  (read via origin by sibling modules)
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get
@@ -54,12 +50,8 @@ def __getattr__(name: str):
 # agent-browser is a Node process loading npm deps: a compromised transitive
 # dependency could read every Hermes secret from process.env.
 _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
-    "BROWSERBASE_API_KEY",
-    "BROWSERBASE_PROJECT_ID",
-    "BROWSER_USE_API_KEY",
-    "FIRECRAWL_API_KEY",
-    "FIRECRAWL_API_URL",
-    "FIRECRAWL_BROWSER_TTL",
+    "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "BROWSER_USE_API_KEY",
+    "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_BROWSER_TTL",
 )
 
 
@@ -69,9 +61,7 @@ def _build_browser_env() -> dict:
     from tools.environments.local import hermes_subprocess_env
 
     env = hermes_subprocess_env(inherit_credentials=False)
-    for _key in _BROWSER_PASSTHROUGH_KEYS:
-        if _key in os.environ:
-            env[_key] = os.environ[_key]
+    env.update({k: os.environ[k] for k in _BROWSER_PASSTHROUGH_KEYS if k in os.environ})
     return env
 
 
@@ -95,9 +85,7 @@ except Exception:
 # Browser-provider ABC + registry; per-vendor providers live under
 # ``plugins/browser/<vendor>/``. Legacy class names are re-exported as shims.
 from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
-from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
-    get_provider as _registry_get_browser_provider,
-)
+from agent.browser_registry import get_provider as _registry_get_browser_provider  # noqa: F401  (test-patchable)
 try:
     from agent.browser_registry import registry_generation as _browser_registry_generation
 except ImportError:
@@ -105,15 +93,9 @@ except ImportError:
     # with only ``get_provider``; no mutable registry → constant generation.
     def _browser_registry_generation(*, scope=None):
         return (0, 0)
-from plugins.browser.browserbase.provider import (  # noqa: F401  (legacy import surface)
-    BrowserbaseBrowserProvider as BrowserbaseProvider,
-)
-from plugins.browser.browser_use.provider import (  # noqa: F401
-    BrowserUseBrowserProvider as BrowserUseProvider,
-)
-from plugins.browser.firecrawl.provider import (  # noqa: F401
-    FirecrawlBrowserProvider as FirecrawlProvider,
-)
+from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider as BrowserbaseProvider  # noqa: F401  (legacy import surface)
+from plugins.browser.browser_use.provider import BrowserUseBrowserProvider as BrowserUseProvider  # noqa: F401
+from plugins.browser.firecrawl.provider import FirecrawlBrowserProvider as FirecrawlProvider  # noqa: F401
 from tools.tool_backend_helpers import normalize_browser_cloud_provider  # noqa: F401  (read via origin)
 # Optional backends: Camofox (CAMOFOX_URL routes everything through its REST API)
 # and the Browser Use CLI.
@@ -131,16 +113,9 @@ logger = logging.getLogger(__name__)
 # PATH fallbacks for minimal-PATH environments (systemd services): Termux,
 # macOS Homebrew, and the usual system dirs — needed for agent-browser/npx/node.
 _SANE_PATH_DIRS = (
-    "/data/data/com.termux/files/usr/bin",
-    "/data/data/com.termux/files/usr/sbin",
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
-    "/usr/local/sbin",
-    "/usr/local/bin",
-    "/usr/sbin",
-    "/usr/bin",
-    "/sbin",
-    "/bin",
+    "/data/data/com.termux/files/usr/bin", "/data/data/com.termux/files/usr/sbin",
+    "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/sbin", "/usr/local/bin",
+    "/usr/sbin", "/usr/bin", "/sbin", "/bin",
 )
 _SANE_PATH = os.pathsep.join(_SANE_PATH_DIRS)
 
@@ -299,9 +274,7 @@ from tools.browser_tool_cdp import (  # noqa: F401  (re-exported; tests patch to
 # ----------------------------------------------------------------------------
 
 _PROVIDER_REGISTRY: Dict[str, type] = {
-    "browserbase": BrowserbaseProvider,
-    "browser-use": BrowserUseProvider,
-    "firecrawl": FirecrawlProvider,
+    "browserbase": BrowserbaseProvider, "browser-use": BrowserUseProvider, "firecrawl": FirecrawlProvider,
 }
 # Frozen import-time copy used to detect test-time monkeypatching. NEVER mutate.
 _DEFAULT_PROVIDER_REGISTRY: Dict[str, type] = dict(_PROVIDER_REGISTRY)
@@ -351,30 +324,26 @@ def _url_is_private(url: str) -> bool:
     import socket
     from urllib.parse import urlparse
 
-    def private(ip) -> bool:
+    def private(host: str) -> Optional[bool]:  # None when ``host`` is not an IP literal
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return None
         return ip.is_private or ip.is_loopback or ip.is_link_local or ip in ipaddress.ip_network("100.64.0.0/10")
 
     try:
         hostname = (urlparse(url).hostname or "").strip().lower().rstrip(".")
         if not hostname:
             return False
-        try:
-            return private(ipaddress.ip_address(hostname))
-        except ValueError:
-            pass
+        if (literal := private(hostname)) is not None:
+            return literal
         if hostname == "localhost" or hostname.endswith(_PRIVATE_HOST_SUFFIXES):
             return True
         try:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except socket.gaierror:
             return False
-        for *_, sockaddr in addr_info:
-            try:
-                if private(ipaddress.ip_address(sockaddr[0])):
-                    return True
-            except ValueError:
-                continue
-        return False
+        return any(private(sockaddr[0]) for *_, sockaddr in addr_info)
     except Exception as exc:
         logger.debug("URL-privacy check failed for %s: %s", url, exc)
         return False
@@ -492,12 +461,9 @@ _suspect_browser_sessions: Dict[str, str] = {}
 
 
 class _BrowserSessionBackend:
-    """``agent.deadline.SuspectableBackend`` adapter for one cached session key.
-
-    Stateless view over ``_active_sessions[key]``. The timeout path calls
-    ``mark_suspect`` inline; ``ensure_healthy`` runs at the top of
-    ``_get_session_info`` — the choke point every command passes through.
-    """
+    """``agent.deadline.SuspectableBackend`` adapter for one cached session key: the
+    timeout path calls ``mark_suspect`` inline; ``ensure_healthy`` runs at the top of
+    ``_get_session_info`` — the choke point every command passes through."""
 
     __slots__ = ("_session_key",)
 
@@ -505,16 +471,13 @@ class _BrowserSessionBackend:
         self._session_key = session_key
 
     def mark_suspect(self, reason: str) -> None:
-        """MUST stay cheap, non-blocking and lock-free (runs inline on the timed-out
-        caller's thread); all recycle work is deferred to ``ensure_healthy``."""
+        """MUST stay cheap and lock-free (runs inline on the timed-out caller's thread)."""
         _suspect_browser_sessions[self._session_key] = reason
 
     def ensure_healthy(self) -> bool:
         """Recycle the session when a prior timeout marked it suspect; False after teardown.
-
-        The flag is popped BEFORE teardown: the ``close`` re-enters
-        ``_get_session_info`` and must not recurse into another recycle.
-        """
+        The flag is popped BEFORE teardown: ``close`` re-enters ``_get_session_info``
+        and must not recurse into another recycle."""
         reason = _suspect_browser_sessions.pop(self._session_key, None)
         if reason is None:
             return True
@@ -767,10 +730,8 @@ def evaluate_url_safety(url: str) -> Optional[dict]:
 
 
 _BOT_DETECTION_TITLE_PATTERNS = (
-    "access denied", "access to this page has been denied",
-    "blocked", "bot detected", "verification required",
-    "please verify", "are you a robot", "captcha",
-    "cloudflare", "ddos protection", "checking your browser",
+    "access denied", "access to this page has been denied", "blocked", "bot detected", "verification required",
+    "please verify", "are you a robot", "captcha", "cloudflare", "ddos protection", "checking your browser",
     "just a moment", "attention required",
 )
 
@@ -954,8 +915,7 @@ def _failed_response(result: Dict[str, Any], default_error: str) -> str:
 
 
 def _tool_response(result: Dict[str, Any], ok: Dict[str, Any], default_error: str) -> str:
-    """Standard tool JSON: success → ``{"success": True, **ok}``, failure →
-    ``{"success": False, "error": result.error or default_error}``; fallback metadata on either."""
+    """``{"success": True, **ok}`` or ``{"success": False, "error": result.error or default}``, plus fallback metadata."""
     if not result.get("success"):
         return _failed_response(result, default_error)
     return _json_with_fallback({"success": True, **ok}, result)
@@ -1236,12 +1196,10 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
 
         return _dumps(_eval_ok_response(parsed), default=str)
     except Exception as e:
-        error_msg = str(e)
-        if any(code in error_msg for code in ("404", "405", "501")):  # server without eval support
-            return json.dumps(_err(
-                "JavaScript evaluation is not supported by this Camofox server. "
-                "Use browser_snapshot or browser_vision to inspect page state."))
-        return tool_error(error_msg, success=False)
+        if any(code in str(e) for code in ("404", "405", "501")):  # server without eval support
+            return json.dumps(_err("JavaScript evaluation is not supported by this Camofox server. "
+                                   "Use browser_snapshot or browser_vision to inspect page state."))
+        return tool_error(str(e), success=False)
 
 
 def _maybe_start_recording(task_id: str):
@@ -1254,14 +1212,10 @@ def _maybe_start_recording(task_id: str):
         hermes_home = get_hermes_home()
         if not cfg_get(read_raw_config(), "browser", "record_sessions", default=False):
             return
-
         recordings_dir = hermes_home / "browser_recordings"
         recordings_dir.mkdir(parents=True, exist_ok=True)
         _cleanup_old_recordings(max_age_hours=72)
-
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        recording_path = recordings_dir / f"session_{timestamp}_{task_id[:16]}.webm"
-
+        recording_path = recordings_dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}_{task_id[:16]}.webm"
         result = _run_browser_command(task_id, "record", ["start", str(recording_path)])
         if result.get("success"):
             with _cleanup_lock:
@@ -1281,8 +1235,7 @@ def _maybe_stop_recording(task_id: str):
     try:
         result = _run_browser_command(task_id, "record", ["stop"])
         if result.get("success"):
-            path = result.get("data", {}).get("path", "")
-            logger.info("Saved browser recording for session %s: %s", task_id, path)
+            logger.info("Saved browser recording for session %s: %s", task_id, result.get("data", {}).get("path", ""))
     except Exception as e:
         logger.debug("Could not stop recording for %s: %s", task_id, e)
     finally:
@@ -1292,10 +1245,7 @@ def _maybe_stop_recording(task_id: str):
 
 _GET_IMAGES_JS = """JSON.stringify(
         [...document.images].map(img => ({
-            src: img.src,
-            alt: img.alt || '',
-            width: img.naturalWidth,
-            height: img.naturalHeight
+            src: img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight
         })).filter(img => img.src && !img.src.startsWith('data:'))
     )"""
 
@@ -1317,11 +1267,9 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
     raw_result = result.get("data", {}).get("result", "[]")
     try:
         images = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-        return _json_with_fallback(
-            {"success": True, "images": _redact_browser_output(images), "count": len(images)}, result)
+        return _json_with_fallback({"success": True, "images": _redact_browser_output(images), "count": len(images)}, result)
     except json.JSONDecodeError:
-        return _json_with_fallback(
-            {"success": True, "images": [], "count": 0, "warning": "Could not parse image data"}, result)
+        return _json_with_fallback({"success": True, "images": [], "count": 0, "warning": "Could not parse image data"}, result)
 
 
 _LP_VISION_FALLBACK_REASON = "Lightpanda has no graphical renderer for screenshots; used Chrome for vision capture."
@@ -1331,6 +1279,33 @@ from tools.browser_tool_vision import (  # noqa: F401  (re-exported; tests patch
     _vision_mode_label, _lightpanda_vision_preroute, _native_vision_result,
     _analyze_screenshot_with_aux_llm,
 )
+
+
+def _capture_vision_screenshot(effective_task_id: str, annotate: bool, screenshot_path: Path, lp_prerouted: bool):
+    """Take (or adopt the pre-routed) screenshot; returns ``(result, path, error_json_or_None)``."""
+    if lp_prerouted and screenshot_path.exists():
+        result = _annotate_lightpanda_fallback(
+            {"success": True, "data": {"path": str(screenshot_path)}}, _LP_VISION_FALLBACK_REASON)
+    else:
+        screenshot_args = (["--annotate"] if annotate else []) + ["--full", str(screenshot_path)]
+        # A failed Lightpanda pre-route forces Chrome so _run_browser_command
+        # doesn't trigger a redundant LP fallback.
+        result = _run_browser_command(effective_task_id, "screenshot", screenshot_args,
+                                      _engine_override="auto" if lp_prerouted else None)
+    if not result.get("success"):
+        return result, screenshot_path, _json_with_fallback(_err(
+            f"Failed to take screenshot ({_vision_mode_label()} mode): {result.get('error', 'Unknown error')}"
+        ), result)
+    if result.get("data", {}).get("path"):
+        screenshot_path = Path(result["data"]["path"])
+    if not screenshot_path.exists():
+        return result, screenshot_path, _dumps(_err(
+            f"Screenshot file was not created at {screenshot_path} ({_vision_mode_label()} mode). "
+            f"This may indicate a socket path issue (macOS /var/folders/), "
+            f"a missing Chromium install ('agent-browser install'), "
+            f"or a stale daemon process."
+        ))
+    return result, screenshot_path, None
 
 
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
@@ -1361,40 +1336,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     try:
         screenshots_dir.mkdir(parents=True, exist_ok=True)
         _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
-
-        if _lp_prerouted and screenshot_path.exists():
-            result = _annotate_lightpanda_fallback(
-                {"success": True, "data": {"path": str(screenshot_path)}},
-                _LP_VISION_FALLBACK_REASON,
-            )
-        else:
-            screenshot_args = ["--annotate"] if annotate else []
-            screenshot_args += ["--full", str(screenshot_path)]
-            result = _run_browser_command(
-                effective_task_id,
-                "screenshot",
-                screenshot_args,
-                # A failed Lightpanda pre-route forces Chrome so _run_browser_command
-                # doesn't trigger a redundant LP fallback.
-                _engine_override="auto" if _lp_prerouted else None,
-            )
-
-        if not result.get("success"):
-            return _json_with_fallback(_err(
-                f"Failed to take screenshot ({_vision_mode_label()} mode): {result.get('error', 'Unknown error')}"
-            ), result)
-
-        actual_screenshot_path = result.get("data", {}).get("path")
-        if actual_screenshot_path:
-            screenshot_path = Path(actual_screenshot_path)
-
-        if not screenshot_path.exists():
-            return _dumps(_err(
-                f"Screenshot file was not created at {screenshot_path} ({_vision_mode_label()} mode). "
-                f"This may indicate a socket path issue (macOS /var/folders/), "
-                f"a missing Chromium install ('agent-browser install'), "
-                f"or a stale daemon process."
-            ))
+        result, screenshot_path, error = _capture_vision_screenshot(
+            effective_task_id, annotate, screenshot_path, _lp_prerouted)
+        if error is not None:
+            return error
 
         # Native image routing for the active main model: attach the screenshot
         # directly instead of describing it through an aux vision LLM (no information loss).
