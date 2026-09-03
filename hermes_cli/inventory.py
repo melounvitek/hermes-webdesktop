@@ -359,13 +359,14 @@ def _provider_auth_hint(slug: str) -> tuple[str, str]:
     return auth_type, key_env
 
 
+def _row(slug: str, name: str, is_current: bool, **extra: Any) -> dict:
+    return {"slug": slug, "name": name, "is_current": is_current, "is_user_defined": False, **extra}
+
+
 def _canonical_row(entry, cur: str, **extra: Any) -> dict:
     from hermes_cli.models import _PROVIDER_LABELS
 
-    return {
-        "slug": entry.slug, "name": _PROVIDER_LABELS.get(entry.slug, entry.label),
-        "is_current": entry.slug.lower() == cur, "is_user_defined": False, **extra,
-    }
+    return _row(entry.slug, _PROVIDER_LABELS.get(entry.slug, entry.label), entry.slug.lower() == cur, **extra)
 
 
 def _append_unconfigured_rows(
@@ -467,9 +468,8 @@ def _external_process_signed_in(slug: str) -> bool:
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY, get_external_process_provider_status
         pconfig = PROVIDER_REGISTRY.get(slug)
-        if not pconfig or pconfig.auth_type != "external_process":
-            return False
-        return bool(get_external_process_provider_status(slug).get("auth_verified"))
+        return bool(pconfig and pconfig.auth_type == "external_process"
+                    and get_external_process_provider_status(slug).get("auth_verified"))
     except Exception:
         return False
 
@@ -624,9 +624,8 @@ def _local_runtime_row(ctx: "ConfigContext") -> dict | None:
             except Exception:
                 current = False
         # Bare "Local" user-facing (engine name is an implementation detail); authenticated = reachability.
-        return {"slug": "llamacpp", "name": "Local", "is_current": current, "is_user_defined": False,
-                "models": staged, "total_models": len(staged), "source": "local-runtime",
-                "authenticated": True, "auth_type": "local", "warning": None}
+        return _row("llamacpp", "Local", current, models=staged, total_models=len(staged),
+                    source="local-runtime", authenticated=True, auth_type="local", warning=None)
     except Exception:
         return None
 
@@ -641,11 +640,9 @@ def _moa_provider_row(current_provider: str = "") -> dict | None:
         models = list(cfg.get("presets", {}).keys())
         if not models:
             return None
-        return {
-            "slug": "moa", "name": "Mixture of Agents", "is_current": (current_provider or "").lower() == "moa",
-            "is_user_defined": False, "models": models, "total_models": len(models), "source": "virtual",
-            "authenticated": True, "auth_type": "virtual",
-            "warning": "Aggregator acts as the selected model; references provide analysis before each call.",
-        }
+        return _row(
+            "moa", "Mixture of Agents", (current_provider or "").lower() == "moa", models=models,
+            total_models=len(models), source="virtual", authenticated=True, auth_type="virtual",
+            warning="Aggregator acts as the selected model; references provide analysis before each call.")
     except Exception:
         return None
