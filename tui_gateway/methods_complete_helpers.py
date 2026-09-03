@@ -19,8 +19,7 @@ _FUZZY_CACHE_TTL_S = 5.0
 _FUZZY_CACHE_MAX_FILES = 20000
 _FUZZY_FALLBACK_EXCLUDES = frozenset(
     {".git", ".hg", ".svn", ".next", ".cache", ".venv", "venv", "node_modules", "__pycache__",
-     "dist", "build", "target", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
-)
+     "dist", "build", "target", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
 _fuzzy_cache_lock = threading.Lock()
 _fuzzy_cache: dict[str, tuple[float, list[str]]] = {}
 
@@ -35,10 +34,8 @@ def _list_repo_files(root: str) -> list[str]:
         cached = _fuzzy_cache.get(root)
         if cached and now - cached[0] < _FUZZY_CACHE_TTL_S:
             return cached[1]
-
     files: list[str] = []
     from hermes_cli._subprocess_compat import windows_hide_flags
-
     run_kw = dict(capture_output=True, timeout=2.0, check=False, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
     try:
         top_result = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], **run_kw)
@@ -59,7 +56,6 @@ def _list_repo_files(root: str) -> list[str]:
                         break
     except (OSError, subprocess.TimeoutExpired):
         pass
-
     if not files:
         # Fallback walk skips vendor/build dirs + dot-dirs; dotfiles survive (the ranker
         # decides based on whether the query starts with `.`).
@@ -76,10 +72,8 @@ def _list_repo_files(root: str) -> list[str]:
                     break
         except OSError:
             pass
-
     with _fuzzy_cache_lock:
         _fuzzy_cache[root] = (now, files)
-
     return files
 
 
@@ -89,13 +83,10 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     · 3 substring · 4 subsequence (query chars appear in order)."""
     if not query:
         return (3, len(name))
-
     nl = name.lower()
     ql = query.lower()
-
     if nl == ql:
         return (0, len(name))
-
     if nl.startswith(ql):
         return (1, len(name))
 
@@ -115,17 +106,14 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     for p in parts:
         if p.lower().startswith(ql):
             return (2, len(name))
-
     if ql in nl:
         return (3, len(name))
-
     i = 0
     for ch in nl:
         if ch == ql[i]:
             i += 1
             if i == len(ql):
                 return (4, len(name))
-
     return None
 
 
@@ -136,13 +124,10 @@ def _abs_completion_prefix_exists(path_part: str) -> bool:
     expanded = _normalize_completion_path(path_part)
     parent = os.path.dirname(expanded.rstrip("/")) or "/"
     tail = os.path.basename(expanded.rstrip("/"))
-
     if not os.path.isdir(parent):
         return False
-
     if not tail or expanded.endswith("/"):
         return os.path.isdir(expanded) or expanded == "/"
-
     try:
         tail_lower = tail.lower()
         return any(e.lower().startswith(tail_lower) for e in os.listdir(parent))
@@ -171,11 +156,9 @@ def _details_root_meta(candidate: str) -> str:
 def _details_completions(text: str) -> list[dict] | None:
     if not text.lower().startswith("/details"):
         return None
-
     stripped = text.strip()
     if stripped and not "/details".startswith(stripped.lower().split()[0]):
         return None
-
     body = text[len("/details") :]
     if body.startswith(" "):
         body = body[1:]
@@ -183,41 +166,33 @@ def _details_completions(text: str) -> list[dict] | None:
     has_trailing_space = text.endswith(" ")
     sections, modes = _DETAILS_SECTIONS, _DETAILS_MODES
     root_candidates = (*modes, "cycle", *sections)
-
     if not body or (len(parts) == 0 and has_trailing_space):
         return [_details_root_completion_item(c, _details_root_meta(c), not has_trailing_space) for c in root_candidates]
-
     if len(parts) == 1 and not has_trailing_space:
         prefix = parts[0].lower()
         return [
             _details_completion_item(c, _details_root_meta(c))
             for c in root_candidates
-            if c.startswith(prefix) and c != prefix
-        ]
-
+            if c.startswith(prefix) and c != prefix]
     section = parts[0].lower() if parts else ""
     if section not in sections:
         return []
 
     def section_meta(candidate: str) -> str:
         return f"clear {section} override" if candidate == "reset" else f"set {section}"
-
     if len(parts) == 1 and has_trailing_space:
         return [_details_completion_item(c, section_meta(c)) for c in (*modes, "reset")]
-
     if len(parts) == 2 and not has_trailing_space:
         prefix = parts[1].lower()
         return [
             _details_completion_item(c, section_meta(c)) for c in (*modes, "reset") if c.startswith(prefix) and c != prefix
         ]
-
     return []
 
 
 def _model_picker_context(agent):
     """Layer live session state onto config without losing custom identity."""
     from hermes_cli.inventory import load_picker_context
-
     ctx = load_picker_context()
     provider = getattr(agent, "provider", "") if agent else ""
     base_url = getattr(agent, "base_url", "") if agent else ""
@@ -225,16 +200,13 @@ def _model_picker_context(agent):
     if str(provider or "").strip().lower() == "custom":
         try:
             from hermes_cli.runtime_provider import canonical_custom_identity
-
             provider = (
                 canonical_custom_identity(
                     base_url=base_url or None, config_provider=ctx.current_provider, model=model or None
                 )
-                or provider
-            )
+                or provider)
         except Exception:
             logger.debug("custom provider identity recovery failed (model picker)", exc_info=True)
-
     return ctx.with_overrides(
         current_provider=provider, current_model=model or _resolve_model(), current_base_url=base_url
     )

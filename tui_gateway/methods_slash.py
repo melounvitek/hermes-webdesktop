@@ -43,15 +43,12 @@ def _format_live_review_output(session: Optional[dict], arg: str) -> str:
         return "Nothing to review yet — send a message first."
     if session.get("running"):
         return "session busy — wait for the current turn to finish, then /review"
-
     with session.get("history_lock") or contextlib.nullcontext():
         snapshot = list(session.get("history", []))
     if not snapshot:
         snapshot = list(getattr(agent, "_session_messages", None) or [])
-
     try:
         from agent.review_engine import format_dispatch_note, start_review
-
         result = start_review(agent, snapshot, arg or "")
     except ValueError as exc:
         return str(exc)
@@ -73,27 +70,23 @@ def _format_live_usage_output(session: dict) -> str:
 
     def n(key: str) -> str:
         return f"{int(usage.get(key) or 0):,}"
-
     lines = [
         "Session Token Usage",
         "────────────────────────────────────────",
         f"Model: {usage.get('model') or _metadata_mirror(session).get('model') or getattr(agent, 'model', '') or '(unknown)'}",
         f"Input tokens:                 {n('input')}",
-        f"Output tokens:                {n('output')}",
-    ]
+        f"Output tokens:                {n('output')}"]
     if int(usage.get("reasoning") or 0):
         lines.append(f"Reasoning tokens:             {n('reasoning')}")
     lines += [
         f"Prompt tokens:                {n('prompt')}",
         f"Completion tokens:            {n('completion')}",
         f"Total tokens:                 {n('total')}",
-        f"API calls:                    {n('calls')}",
-    ]
+        f"API calls:                    {n('calls')}"]
     if usage.get("context_max"):
         lines.append(
             f"Current context:              {n('context_used')} / {n('context_max')} "
-            f"({int(usage.get('context_percent') or 0)}%)"
-        )
+            f"({int(usage.get('context_percent') or 0)}%)")
     lines += [f"Messages:                     {message_count:,}", f"Compressions:                 {n('compressions')}"]
     return "\n".join(lines)
 
@@ -106,8 +99,7 @@ def _live_session_messages(session: dict) -> Optional[list]:
         if db is not None and session.get("session_key"):
             try:
                 return db.get_messages_as_conversation(
-                    session["session_key"], include_ancestors=True, include_row_ids=True
-                )
+                    session["session_key"], include_ancestors=True, include_row_ids=True)
             except Exception:
                 pass
     return None
@@ -140,8 +132,7 @@ def _format_live_prompt_output(session: dict) -> str:
         mirror.get("system_prompt")
         or getattr(agent, "ephemeral_system_prompt", None)
         or getattr(agent, "_cached_system_prompt", None)
-        or ""
-    )
+        or "")
     if not prompt:
         return "Current system prompt is not built yet; send a message first."
     return f"Current system prompt:\n{prompt}"
@@ -164,8 +155,7 @@ def _format_live_context_output(session: dict) -> str:
         roles[role] = roles.get(role, 0) + 1
     lines.append(
         f"  user: {roles.get('user', 0)}, assistant: {roles.get('assistant', 0)}, "
-        f"tool: {roles.get('tool', 0)}, system: {roles.get('system', 0)}"
-    )
+        f"tool: {roles.get('tool', 0)}, system: {roles.get('system', 0)}")
     model = mirror.get("model") or usage.get("model") or ""
     if model:
         lines.append(f"Model: {model}")
@@ -197,7 +187,6 @@ def _format_live_tools_output(session: dict) -> str:
 def _format_live_help_output() -> str:
     try:
         from hermes_cli.commands import COMMANDS_BY_CATEGORY
-
         lines = ["Available commands:", ""]
         for category, commands in COMMANDS_BY_CATEGORY.items():
             lines.append(f"{category}:")
@@ -238,8 +227,7 @@ _LIVE_SLASH_OUTPUT = {
     "clear": (None, lambda sid, s, a: "Screen clear is terminal-only; desktop/TUI chat left unchanged."),
     "models": (None, lambda sid, s, a: "Use /model to view or switch the current model; desktop users can also open the model picker."),
     "rename": (None, lambda sid, s, a: "Use /title <name> to rename this session."),
-    "effort": (None, lambda sid, s, a: "Use /reasoning <effort> to change reasoning effort."),
-}
+    "effort": (None, lambda sid, s, a: "Use /reasoning <effort> to change reasoning effort.")}
 
 
 def _live_slash_command_output(sid: str, session: Optional[dict], name: str, arg: str) -> Optional[str]:
@@ -270,21 +258,21 @@ def _live_slash_command_output(sid: str, session: Optional[dict], name: str, arg
 _MUTATES_WHILE_RUNNING = frozenset({"model", "personality", "prompt", "compress"})
 
 
-def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, snapshot_kwargs: bool) -> dict:
-    """Compress the live session; return the ``summarize_manual_compression`` dict.
+def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, snapshot_kwargs: bool) -> str:
+    """Compress the live session; return the user-facing feedback text.
 
     Shared by command.dispatch /compress and the slash mirror so every route shows
     "compressed N → M messages / ~X → ~Y tokens". ``snapshot_kwargs`` forwards the
     pre-read snapshot (approx_tokens/before_messages/history_version) to
     ``_compress_session_history``; the slash mirror passes only the raw arg. The raw
     arg goes through unparsed — the choke point parses ``here [N]`` / ``--keep N``.
-    CompressionLockHeld and other errors propagate to the caller, which finalizes
-    the deferred context-engine notification.
+    CompressionLockHeld is a clean no-op (its skip note is returned; the choke point
+    already discarded the deferred context-engine notification); other errors propagate
+    to the caller, which finalizes that notification.
     """
     from agent.conversation_compression import finalize_context_engine_compression_notification
-    from agent.manual_compression_feedback import summarize_manual_compression
+    from agent.manual_compression_feedback import describe_compression_lock_skip, summarize_manual_compression
     from agent.model_metadata import estimate_request_tokens_rough
-
     with session["history_lock"]:
         before_messages = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -293,38 +281,29 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
     before_tokens = (
         estimate_request_tokens_rough(before_messages, system_prompt=sys_prompt, tools=tools) if before_messages else 0
     )
-    if snapshot_kwargs:
-        _compress_session_history(
-            session,
-            arg.strip() or None,
-            approx_tokens=before_tokens,
-            before_messages=before_messages,
-            history_version=history_version,
-        )
-    else:
-        _compress_session_history(session, arg)
+    try:
+        if snapshot_kwargs:
+            _compress_session_history(
+                session, arg.strip() or None, approx_tokens=before_tokens, before_messages=before_messages,
+                history_version=history_version)
+        else:
+            _compress_session_history(session, arg)
+    except CompressionLockHeld as e:
+        return describe_compression_lock_skip(e.holder)
     _sync_session_key_after_compress(sid, session)
     with session["history_lock"]:
         after_messages = list(session.get("history", []))
     after_tokens = (
         estimate_request_tokens_rough(
-            after_messages,
-            system_prompt=getattr(agent, "_cached_system_prompt", "") or sys_prompt,
-            tools=getattr(agent, "tools", None) or tools,
-        )
-        if after_messages
-        else 0
-    )
+            after_messages, system_prompt=getattr(agent, "_cached_system_prompt", "") or sys_prompt,
+            tools=getattr(agent, "tools", None) or tools)
+        if after_messages else 0)
     _emit("session.info", sid, _session_info(agent, session))
     fb = summarize_manual_compression(
-        before_messages,
-        after_messages,
-        before_tokens,
-        after_tokens,
-        compression_state=getattr(agent, "context_compressor", None),
-    )
+        before_messages, after_messages, before_tokens, after_tokens,
+        compression_state=getattr(agent, "context_compressor", None))
     finalize_context_engine_compression_notification(agent, committed=True)
-    return fb
+    return "\n".join(filter(None, [fb["headline"], fb["token_line"], fb.get("note")]))
 
 
 def _mirror_model(sid, session, agent, arg) -> str:
@@ -345,7 +324,6 @@ def _mirror_personality(sid, session, agent, arg) -> str:
         pname, new_prompt = _validate_personality(arg, _load_cfg())
         # Persist through the single owner so this surface never drifts from the others.
         from hermes_cli.personality import persist_personality
-
         persist_personality(pname)
         _apply_personality_to_session(sid, session, new_prompt, pname)
     return ""
@@ -360,29 +338,17 @@ def _mirror_prompt(sid, session, agent, arg) -> str:
 
 
 def _mirror_compress(sid, session, agent, arg) -> str:
-    if not agent:
-        return ""
-    try:
-        fb = _compress_live_with_feedback(sid, session, agent, arg, snapshot_kwargs=False)
-    except CompressionLockHeld as e:
-        from agent.manual_compression_feedback import describe_compression_lock_skip
+    return _compress_live_with_feedback(sid, session, agent, arg, snapshot_kwargs=False) if agent else ""
 
-        return describe_compression_lock_skip(e.holder)
-    lines = [fb["headline"], fb["token_line"]]
-    if fb.get("note"):
-        lines.append(fb["note"])
-    return "\n".join(lines)
+
+_FAST_TIERS = {"fast": "priority", "on": "priority", "normal": None, "off": None, "auto": "auto", "cold": "cold"}
 
 
 def _mirror_fast(sid, session, agent, arg) -> str:
     if agent:
         mode = arg.lower()
-        if mode in {"fast", "on"}:
-            agent.service_tier = "priority"
-        elif mode in {"normal", "off"}:
-            agent.service_tier = None
-        elif mode in {"auto", "cold"}:
-            agent.service_tier = mode
+        if mode in _FAST_TIERS:
+            agent.service_tier = _FAST_TIERS[mode]
         _emit("session.info", sid, _session_info(agent, session))
     return ""
 
@@ -395,7 +361,6 @@ def _mirror_reload_mcp(sid, session, agent, arg) -> str:
 
 def _mirror_stop(sid, session, agent, arg) -> str:
     from tools.process_registry import process_registry
-
     process_registry.kill_all()
     return ""
 
@@ -408,8 +373,7 @@ _SLASH_MIRRORS = {
     "compress": _mirror_compress,
     "fast": _mirror_fast,
     "reload-mcp": _mirror_reload_mcp,
-    "stop": _mirror_stop,
-}
+    "stop": _mirror_stop}
 
 
 def _compute_host_slash(sid: str, session: dict, name: str, command: str) -> tuple[str, str]:
@@ -426,13 +390,9 @@ def _compute_host_slash(sid: str, session: dict, name: str, command: str) -> tup
 
     def _on_late_ack(late: dict, _sid=sid) -> None:
         _adopt_late_compute_host_compress_ack(_sid, _late_session, late, route_name=route_name)
-
     try:
         ack = _send_compute_host_control(
-            sid,
-            route_name=route_name,
-            command=command,
-            wait=True,
+            sid, route_name=route_name, command=command, wait=True,
             **({"timeout": _compute_host_compress_wait_seconds(), "on_late_ack": _on_late_ack} if is_compress else {}),
         )
     except queue.Empty:
@@ -457,12 +417,10 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
         # /compact aliases /compress everywhere; the compute-host control forwards the
         # raw alias verbatim, so without this the child mirror silently no-ops.
         name = "compress"
-
     if _session_uses_compute_host(session) and name in _MUTATES_WHILE_RUNNING:
         return _compute_host_slash(sid, session, name, command)[1]
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
         return f"session busy — /interrupt the current turn before running /{name}"
-
     mirror = _SLASH_MIRRORS.get(name)
     if mirror is None:
         return ""
@@ -471,7 +429,6 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     except Exception as e:
         if name == "compress" and agent:
             from agent.conversation_compression import finalize_context_engine_compression_notification
-
             finalize_context_engine_compression_notification(agent, committed=False)
         return f"live session sync failed: {e}"
 
