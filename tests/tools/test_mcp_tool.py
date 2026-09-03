@@ -2358,7 +2358,7 @@ class TestDiscoveryFailedCount:
             _ensure_mcp_loop()
 
             # Capture the logger to verify failed_count in summary
-            with patch("tools.mcp_tool.logger") as mock_logger:
+            with patch("tools.mcp_tool_discovery.logger") as mock_logger:
                 discover_mcp_tools()
 
                 # Find the summary info call
@@ -2401,7 +2401,7 @@ class TestDiscoveryFailedCount:
              patch("tools.mcp_tool._existing_tool_names", return_value=["mcp__ok1__t", "mcp__ok2__t"]):
             _ensure_mcp_loop()
 
-            with patch("tools.mcp_tool.logger") as mock_logger:
+            with patch("tools.mcp_tool_discovery.logger") as mock_logger:
                 discover_mcp_tools()
 
                 info_calls = [str(call) for call in mock_logger.info.call_args_list]

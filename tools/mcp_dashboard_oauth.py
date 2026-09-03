@@ -18,6 +18,20 @@ from typing import Iterator
 from urllib.parse import parse_qs, urlparse
 
 
+@contextmanager
+def contextvar_set(var: contextvars.ContextVar, value) -> Iterator[None]:
+    """Set *var* to *value* for the block, restoring the previous value after."""
+    token = var.set(value)
+    try:
+        yield
+    finally:
+        var.reset(token)
+
+
+def _event_field():
+    return field(default_factory=threading.Event, init=False, repr=False)
+
+
 @dataclass
 class DashboardOAuthFlow:
     flow_id: str
@@ -34,9 +48,9 @@ class DashboardOAuthFlow:
     expected_state: str | None = field(default=None, init=False)
     _callback: tuple[str, str | None] | None = field(default=None, init=False, repr=False)
     _callback_error: str | None = field(default=None, init=False, repr=False)
-    _authorization_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
-    _callback_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
-    _worker_done: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _authorization_ready: threading.Event = _event_field()
+    _callback_ready: threading.Event = _event_field()
+    _worker_done: threading.Event = _event_field()
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     async def publish_authorization_url(self, url: str) -> None:
@@ -58,29 +72,17 @@ class DashboardOAuthFlow:
             raise TimeoutError(message)
 
     async def wait_for_authorization_url(self, timeout: float = 30.0) -> str:
-        await self._await_event(
-            self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL"
-        )
+        await self._await_event(self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL")
         if not self.authorization_url:
             raise RuntimeError(self.error or "MCP OAuth flow ended before authorization")
         return self.authorization_url
 
-    def deliver_callback(
-        self,
-        *,
-        code: str | None,
-        state: str | None,
-        error: str | None,
-    ) -> None:
+    def deliver_callback(self, *, code: str | None, state: str | None, error: str | None) -> None:
         """Hand the browser redirect to the waiting flow; ``state`` must match exactly."""
         with self._lock:
             if self._callback_ready.is_set():
                 raise ValueError("OAuth callback already received")
-            if (
-                self.expected_state is None
-                or state is None
-                or not secrets.compare_digest(self.expected_state, state)
-            ):
+            if self.expected_state is None or state is None or not secrets.compare_digest(self.expected_state, state):
                 raise ValueError("OAuth callback state mismatch")
             if error:
                 self._callback_error = error
@@ -91,9 +93,7 @@ class DashboardOAuthFlow:
             self._callback_ready.set()
 
     async def wait_for_callback(self, timeout: float = 300.0) -> tuple[str, str | None]:
-        await self._await_event(
-            self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback"
-        )
+        await self._await_event(self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback")
         if self._callback_error:
             raise RuntimeError(f"OAuth authorization failed: {self._callback_error}")
         if self._callback is None:
@@ -139,13 +139,9 @@ _current_dashboard_flow: contextvars.ContextVar[DashboardOAuthFlow | None] = (
 )
 
 
-@contextmanager
-def dashboard_oauth_flow(flow: DashboardOAuthFlow) -> Iterator[None]:
-    token = _current_dashboard_flow.set(flow)
-    try:
-        yield
-    finally:
-        _current_dashboard_flow.reset(token)
+def dashboard_oauth_flow(flow: DashboardOAuthFlow):
+    """Make *flow* the active dashboard OAuth flow for the block (ContextVar-scoped)."""
+    return contextvar_set(_current_dashboard_flow, flow)
 
 
 def get_dashboard_oauth_flow() -> DashboardOAuthFlow | None:
