@@ -149,8 +149,8 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
             pgid = None
 
     def stop(sig: int, fallback: Callable[[], None]) -> None:
-        if pgid is not None and killpg is not None:
-            killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (killpg checked above)
+        if pgid is not None:
+            killpg(pgid, sig)  # windows-footgun: ok — POSIX-only branch (pgid only set when killpg exists)
         else:
             fallback()
 
@@ -186,8 +186,7 @@ def _run_start_phase(
     finally:
         _terminate_process_group(proc)
         try:
-            if proc.stdout is not None:
-                output = proc.stdout.read() or ""
+            output = proc.stdout.read() or "" if proc.stdout is not None else ""
         except (OSError, ValueError):
             output = ""
     return ReadinessResult(url, ready, status, time.monotonic() - started, error, _tail(output))
@@ -218,9 +217,6 @@ def run_verify(
             if not phase_result.ok and stop_on_failure:
                 return result
 
-    failed = not all(p.ok for p in result.phases)
-    if skip_start or "start" not in selected or failed or not recipe.start:
-        return result
-
-    result.readiness = _run_start_phase(recipe, root, ready_timeout, port_override)
+    if not skip_start and "start" in selected and recipe.start and all(p.ok for p in result.phases):
+        result.readiness = _run_start_phase(recipe, root, ready_timeout, port_override)
     return result

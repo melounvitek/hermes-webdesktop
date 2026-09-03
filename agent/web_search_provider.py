@@ -1,33 +1,22 @@
-"""
-Web Search Provider ABC
-=======================
+"""Web Search Provider ABC.
 
-Pluggable-backend interface for web search and content extraction — the SINGLE
-plugin-facing surface every in-tree web provider (brave-free, ddgs, searxng,
-exa, parallel, tavily, keenable, firecrawl) implements. Providers register via
-``PluginContext.register_web_search_provider()``; the active one (selected by
-``web.search_backend`` / ``web.extract_backend`` / ``web.backend``) services
-every ``web_search`` / ``web_extract`` call.
+The single plugin-facing surface every web provider (brave-free, ddgs, searxng,
+exa, parallel, tavily, keenable, firecrawl) implements; registered via
+``PluginContext.register_web_search_provider()`` and selected by
+``web.search_backend`` / ``web.extract_backend`` / ``web.backend``.
 
-Response shape (preserved from the legacy contract so the tool wrapper does not
-translate). Search::
+Response shapes (legacy contract, the tool wrapper does not translate)::
 
-    {"success": True, "data": {"web": [
-        {"title": str, "url": str, "description": str, "position": int}, ...]}}
-
-Extract::
-
-    {"success": True, "data": [
-        {"url": str, "title": str, "content": str, "raw_content": str, "metadata": dict}, ...]}
-
-On failure (either capability): ``{"success": False, "error": str}``.
+    search:  {"success": True, "data": {"web": [{"title", "url", "description", "position"}, ...]}}
+    extract: {"success": True, "data": [{"url", "title", "content", "raw_content", "metadata"}, ...]}
+    failure: {"success": False, "error": str}
 """
 
 from __future__ import annotations
 
 import abc
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from agent.provider_base import ProviderBase
 
@@ -40,7 +29,6 @@ def get_provider_env(name: str) -> str:
     subprocess agent runs). Falls back to bare ``os.getenv`` when the config
     module is unavailable. Returns the stripped value, or ``""`` when unset.
     """
-    val: Optional[str] = None
     try:
         from hermes_cli.config import get_env_value
 

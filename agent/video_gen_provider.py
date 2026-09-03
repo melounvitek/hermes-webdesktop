@@ -1,38 +1,24 @@
-"""
-Video Generation Provider ABC
-=============================
+"""Video Generation Provider ABC.
 
-Pluggable-backend interface for video generation. Providers register via
-``PluginContext.register_video_gen_provider()``; the one selected by
-``video_gen.provider`` services every ``video_generate`` call. Providers live in
-``<repo>/plugins/video_gen/<name>/`` (built-in) or
-``~/.hermes/plugins/video_gen/<name>/`` (user, opt-in). Mirrors
-``agent/image_gen_provider.py`` so the two surfaces stay learnable together.
+Providers register via ``PluginContext.register_video_gen_provider()`` and live
+in ``<repo>/plugins/video_gen/<name>/`` (built-in) or
+``~/.hermes/plugins/video_gen/<name>/``; mirrors ``agent/image_gen_provider.py``.
+One tool covers text-to-video and image-to-video: ``image_url`` present routes to
+the provider's image-to-video endpoint. Video edit/extend are deliberately NOT
+exposed — backends are too inconsistent for one unified tool.
 
-One tool covers text-to-video and image-to-video: ``image_url`` present routes
-to the provider's image-to-video endpoint, absent routes to text-to-video. Users
-pick one model family; the provider picks the FAL/xAI endpoint. Video edit and
-extend are deliberately NOT exposed — backends are too inconsistent for one
-unified tool.
-
-Response shape (built by :func:`success_response` / :func:`error_response`)::
-
-    success         bool
-    video           str | None      URL or absolute file path
-    model           str             provider-specific model identifier
-    prompt          str             echoed prompt
-    modality        str             "text" | "image" (which mode was used)
-    aspect_ratio    str             provider-native (e.g. "16:9") or ""
-    duration        int             seconds (0 if not applicable)
-    provider        str             provider name (for diagnostics)
-    error           str             only when success=False
-    error_type      str             only when success=False
+Response shape (:func:`success_response` / :func:`error_response`): ``success``,
+``video`` (URL or absolute path), ``model``, ``prompt``, ``modality``
+("text" | "image"), ``aspect_ratio``, ``duration`` (seconds, 0 if n/a),
+``provider``; plus ``error`` / ``error_type`` only when ``success`` is False.
 """
 
 from __future__ import annotations
 
 import abc
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,16 +56,10 @@ class VideoGenProvider(CatalogProviderBase):
         and the picker. Default fails closed: text-only, no optional features.
         """
         return {
-            "modalities": ["text"],
-            "aspect_ratios": list(COMMON_ASPECT_RATIOS),
-            "resolutions": list(COMMON_RESOLUTIONS),
-            "max_duration": 10,
-            "min_duration": 1,
-            "supports_audio": False,
-            "supports_negative_prompt": False,
-            "supports_seed": False,
-            "supports_upscale": False,
-            "max_reference_images": 0,
+            "modalities": ["text"], "aspect_ratios": list(COMMON_ASPECT_RATIOS),
+            "resolutions": list(COMMON_RESOLUTIONS), "max_duration": 10, "min_duration": 1,
+            "supports_audio": False, "supports_negative_prompt": False, "supports_seed": False,
+            "supports_upscale": False, "max_reference_images": 0,
         }
 
     @abc.abstractmethod
@@ -97,11 +77,6 @@ class VideoGenProvider(CatalogProviderBase):
         ``upscale`` (bool) — a post-generation high-res pass; providers that
         honor it report ``upscaled: True`` in ``extra``.
         """
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def save_b64_video(b64_data: str,*, prefix: str="video", extension: str="mp4") -> Path:
@@ -141,18 +116,11 @@ def success_response(
 ) -> Dict[str, Any]:
     """Uniform success dict; ``extra`` keys are added without overriding standard ones."""
     payload: Dict[str, Any] = {
-        "success": True,
-        "video": video,
-        "model": model,
-        "prompt": prompt,
-        "modality": modality,
-        "aspect_ratio": aspect_ratio,
-        "duration": int(duration) if duration else 0,
-        "provider": provider,
+        "success": True, "video": video, "model": model, "prompt": prompt, "modality": modality,
+        "aspect_ratio": aspect_ratio, "duration": int(duration) if duration else 0, "provider": provider,
     }
-    if extra:
-        for k, v in extra.items():
-            payload.setdefault(k, v)
+    for k, v in (extra or {}).items():
+        payload.setdefault(k, v)
     return payload
 
 
@@ -162,20 +130,9 @@ def error_response(
 ) -> Dict[str, Any]:
     """Build a uniform error response dict."""
     return {
-        "success": False,
-        "video": None,
-        "error": error,
-        "error_type": error_type,
-        "model": model,
-        "prompt": prompt,
-        "aspect_ratio": aspect_ratio,
-        "provider": provider,
+        "success": False, "video": None, "error": error, "error_type": error_type, "model": model,
+        "prompt": prompt, "aspect_ratio": aspect_ratio, "provider": provider,
     }
-
-
-# ---------------------------------------------------------------------------
-# Reusable OpenAI-compatible backend
-# ---------------------------------------------------------------------------
 
 
 class OpenAICompatibleVideoGenProvider(VideoGenProvider):
@@ -207,8 +164,6 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
     _poll_deadline_s: float = 900.0
 
     def _api_key(self) -> str:
-        import os
-
         return os.environ.get(self._env_key, "").strip()
 
     def is_available(self) -> bool:
@@ -217,8 +172,6 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
     def _create_and_poll(self, client: Any, call_kwargs: Dict[str, Any]) -> Any:
         """Create the job and poll to a terminal status (any); raise
         :class:`TimeoutError` when ``_poll_deadline_s`` passes first."""
-        import time
-
         video = client.videos.create(**call_kwargs)
         terminal = {"completed", "succeeded", "failed", "error", "cancelled", "canceled"}
         deadline = time.monotonic() + self._poll_deadline_s
@@ -234,10 +187,7 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
         return video
 
     def _base_url(self) -> str:
-        import os
-
-        override = os.environ.get(f"{self.name.upper()}_BASE_URL", "").strip()
-        return override or self._default_base_url
+        return os.environ.get(f"{self.name.upper()}_BASE_URL", "").strip() or self._default_base_url
 
     def generate(
         self, prompt: str, *, model: Optional[str] = None, image_url: Optional[str] = None,
@@ -247,13 +197,10 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
         seed: Optional[int] = None, **kwargs: Any,
     ) -> Dict[str, Any]:
         if not prompt or not prompt.strip():
-            return error_response(
-                error="prompt is required", error_type="invalid_request", provider=self.name
-            )
+            return error_response(error="prompt is required", error_type="invalid_request", provider=self.name)
         if not self._api_key():
             return error_response(
-                error=f"{self._env_key} is not set", error_type="missing_credentials",
-                provider=self.name,
+                error=f"{self._env_key} is not set", error_type="missing_credentials", provider=self.name
             )
         try:
             import openai
@@ -270,12 +217,17 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
                 error_type="no_model", provider=self.name,
             )
 
+        def fail(error: str, error_type: str) -> Dict[str, Any]:
+            return error_response(
+                error=error, error_type=error_type, provider=self.name, model=model_id, prompt=prompt,
+                aspect_ratio=aspect_ratio,
+            )
+
         # Fields ``videos.create`` doesn't name natively ride in ``extra_body``.
         extra_body = {
             k: v
             for k, v in {
-                "negative_prompt": negative_prompt,
-                "aspect_ratio": aspect_ratio,
+                "negative_prompt": negative_prompt, "aspect_ratio": aspect_ratio,
                 "image_url": image_url,  # presence ⇒ image-to-video
                 "seed": seed,
             }.items()
@@ -295,30 +247,22 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
                 video = self._create_and_poll(client, call_kwargs)
             except Exception as exc:  # noqa: BLE001 - surface any SDK/API/timeout failure uniformly
                 logger.debug("%s video generation failed", self.name, exc_info=True)
-                return error_response(
-                    error=f"{self.name} video generation failed: {exc}", error_type="api_error",
-                    provider=self.name, model=model_id, prompt=prompt, aspect_ratio=aspect_ratio,
-                )
+                return fail(f"{self.name} video generation failed: {exc}", "api_error")
 
             # DeepInfra reports "succeeded", OpenAI/Sora "completed" — accept both.
             status = getattr(video, "status", None)
             if status not in ("completed", "succeeded"):
                 # ``video.error`` is a pydantic object — str() keeps the dict JSON-serializable.
                 job_error = getattr(video, "error", None)
-                return error_response(
-                    error=str(job_error) if job_error else f"video job ended with status={status!r}",
-                    error_type="job_failed", provider=self.name, model=model_id, prompt=prompt,
-                    aspect_ratio=aspect_ratio,
-                )
+                return fail(str(job_error) if job_error else f"video job ended with status={status!r}", "job_failed")
 
             # Output is a delivery URL in ``data`` (DeepInfra/FAL) or only reachable
             # via the SDK download endpoint (OpenAI/Sora). Save locally either way —
             # DeepInfra's delivery URLs are short-lived.
             url = None
             for item in getattr(video, "data", None) or []:
-                candidate = item.get("url") if isinstance(item, dict) else getattr(item, "url", None)
-                if candidate:
-                    url = candidate
+                url = (item.get("url") if isinstance(item, dict) else getattr(item, "url", None)) or None
+                if url:
                     break
 
             try:
@@ -328,15 +272,10 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
                     raw = client.videos.download_content(video.id).read()
                     video_ref = str(save_bytes_video(raw, prefix=self.name))
             except Exception as exc:  # noqa: BLE001
-                if url:
-                    logger.debug("%s: saving video locally failed (%s); returning URL", self.name, exc)
-                    video_ref = url
-                else:
-                    return error_response(
-                        error=f"{self.name} video job succeeded but no output could be retrieved: {exc}",
-                        error_type="empty_response", provider=self.name, model=model_id,
-                        prompt=prompt, aspect_ratio=aspect_ratio,
-                    )
+                if not url:
+                    return fail(f"{self.name} video job succeeded but no output could be retrieved: {exc}", "empty_response")
+                logger.debug("%s: saving video locally failed (%s); returning URL", self.name, exc)
+                video_ref = url
 
             return success_response(
                 video=video_ref, model=model_id, prompt=prompt,

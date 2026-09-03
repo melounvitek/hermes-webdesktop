@@ -1,17 +1,12 @@
 """Static run-recipe detection for project verification.
 
-Ported nearly 1:1 from superagent-ai/grok-cli ``src/verify/recipes.ts``, keeping
-its detection order and command choices: Node (lockfile-based package manager +
-framework), Python (Django / FastAPI / Flask / generic, uv/poetry/pipenv aware),
-Go, Rust, Java (Maven/Gradle), Makefile fallback, docker-compose.
-
-Layer ownership vs :mod:`agent.coding_context`: ``detect_project_facts`` owns the
-cheap, byte-stable prompt-time facts (manifests, package managers, verify
-commands) — never push runtime detection into it. This module owns the deep
-runtime recipe (framework id, bootstrap/build/test, start command, port,
-readiness path) that lets ``hermes verify`` boot the app and prove it serves
-HTTP; the CLI merges project-facts verify commands the recipe missed into its
-test list (``hermes_cli.verify_cmd._merge_project_facts_commands``).
+Ported nearly 1:1 from superagent-ai/grok-cli ``src/verify/recipes.ts`` (same
+detection order and command choices). Layer ownership: ``detect_project_facts``
+in :mod:`agent.coding_context` owns the cheap, byte-stable prompt-time facts —
+never push runtime detection into it. This module owns the deep runtime recipe
+(framework, bootstrap/build/test, start command, port, readiness path) that lets
+``hermes verify`` boot the app; the CLI merges project-facts verify commands the
+recipe missed (``hermes_cli.verify_cmd._merge_project_facts_commands``).
 """
 
 from __future__ import annotations
@@ -24,11 +19,8 @@ from typing import Any
 
 
 def _as_strings(value: Any) -> list[str]:
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    if not isinstance(value, list):
-        return []
-    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+    values = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [v.strip() for v in values if isinstance(v, str) and v.strip()]
 
 
 @dataclass
@@ -66,7 +58,7 @@ class Recipe:
         name = raw.get("name") or raw.get("appLabel")
         if not isinstance(name, str) or not name.strip():
             return None
-        kind = raw.get("kind") or raw.get("appKind") or "unknown"
+        kind = raw.get("kind") or raw.get("appKind")
         if not isinstance(kind, str) or not kind.strip():
             kind = "unknown"
 
@@ -99,12 +91,9 @@ def _read_text(root: Path, name: str) -> str | None:
 
 
 def _read_package_json(root: Path) -> dict[str, Any] | None:
-    raw = _read_text(root, "package.json")
-    if raw is None:
-        return None
     try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        parsed = json.loads(_read_text(root, "package.json") or "")
+    except ValueError:  # includes JSONDecodeError; also the missing-file "" case
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -159,8 +148,7 @@ def _detect_node_recipe(root: Path, pkg: dict[str, Any]) -> Recipe:
     raw_scripts = pkg.get("scripts")
     scripts: dict[str, str] = raw_scripts if isinstance(raw_scripts, dict) else {}
     deps: dict[str, Any] = {}
-    for key in ("dependencies", "devDependencies"):
-        section = pkg.get(key)
+    for section in (pkg.get("dependencies"), pkg.get("devDependencies")):
         if isinstance(section, dict):
             deps.update(section)
 
@@ -288,14 +276,12 @@ def _detect_make_recipe(root: Path) -> Recipe | None:
         return None
     targets = [m.group(1) for m in map(_MAKE_TARGET_RE.match, makefile.splitlines()) if m]
     picked = {
-        phase: next((f"make {n}" for n in names if n in targets), None)
+        phase: [f"make {n}" for n in names if n in targets][:1]
         for phase, names in _MAKE_PHASE_TARGETS.items()
     }
     return Recipe(
-        name="Makefile-driven project", kind="make", start=picked["start"],
-        bootstrap=[picked["bootstrap"]] if picked["bootstrap"] else [],
-        build=[picked["build"]] if picked["build"] else [],
-        test=[picked["test"]] if picked["test"] else [],
+        name="Makefile-driven project", kind="make", start=(picked["start"] or [None])[0],
+        bootstrap=picked["bootstrap"], build=picked["build"], test=picked["test"],
         evidence=["Detected Makefile", f"Targets: {', '.join(targets) or '(none)'}"],
     )
 

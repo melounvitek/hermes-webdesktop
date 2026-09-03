@@ -1,25 +1,12 @@
-"""
-Video Generation Provider Registry
-==================================
+"""Video Generation Provider Registry.
 
-Central map of registered providers. Populated by plugins at import-time via
-``PluginContext.register_video_gen_provider()``; consumed by the
-``video_generate`` tool to dispatch each call to the active backend.
-
-Active selection
-----------------
-The active provider is chosen by ``video_gen.provider`` in ``config.yaml``.
-If unset, :func:`get_active_provider` applies fallback logic:
-
-1. If exactly one *available* provider is registered, use it.
-2. Otherwise return ``None`` (the tool surfaces a helpful error pointing
-   the user at ``hermes tools``).
-
-Mirrors ``agent/image_gen_registry.py``: the unconfigured fallback is
-filtered by ``is_available()`` so a box with credentials for only one backend
-(e.g. DeepInfra, while ``fal``/``xai`` register unconditionally) auto-selects
-it instead of returning ``None``. Unlike image gen there is no legacy ``fal``
-preference, and a configured-but-unregistered name fails closed.
+Populated by plugins via ``PluginContext.register_video_gen_provider()``;
+consumed by the ``video_generate`` tool. The active provider is
+``video_gen.provider`` from ``config.yaml``; a configured-but-unregistered name
+fails closed. If unset, the single *available* registered provider is used
+(mirrors ``agent/image_gen_registry.py`` minus its legacy ``fal`` preference)
+so a box with credentials for only one backend auto-selects it; otherwise None
+and the tool points the user at ``hermes tools``.
 """
 
 from __future__ import annotations
@@ -46,18 +33,14 @@ def get_active_provider() -> Optional[VideoGenProvider]:
 
     if configured:
         provider = snapshot.get(configured)
-        if provider is not None:
-            return provider
-        logger.debug(
-            "video_gen.provider='%s' configured but not registered; failing closed", configured
-        )
-        return None
+        if provider is None:
+            logger.debug(
+                "video_gen.provider='%s' configured but not registered; failing closed", configured
+            )
+        return provider
 
     available = [
         p for p in snapshot.values()
         if is_available_safe(p, logger, "video_gen provider %s.is_available() raised %s")
     ]
-    if len(available) == 1:
-        return available[0]
-
-    return None
+    return available[0] if len(available) == 1 else None

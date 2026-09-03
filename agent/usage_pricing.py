@@ -391,33 +391,34 @@ def resolve_billing_route(
     return BillingRoute(provider=provider_name or "unknown", model=bare if model else "", base_url=url, billing_mode="unknown")
 
 
-def _normalize_bedrock_model_name(model: str) -> str:
-    """Normalize a Bedrock model id to its bare foundation-model form.
+_BEDROCK_REGION_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca.", "sa.", "me.", "af.")
+# Bedrock ids end in documented date/revision/profile components (``-20250514-v1:0``).
+_BEDROCK_TRAILERS = (r":\d+$", r"-v\d+$", r"-\d{8}$")
 
-    Cross-region inference profiles prefix the id with a region scope
-    (``us.``/``global.``/``apac.``/``au.``/...); the pricing table is keyed on
-    the bare ``anthropic.claude-*`` id, so the prefix is stripped. Also maps
-    dotted versions (``4.7`` → ``4-7``) and strips only the documented
-    trailing date/revision/profile components (``-20250514-v1:0``).
-    """
-    name = model.lower().strip()
-    for prefix in ("global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca.", "sa.", "me.", "af."):
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
-    name = re.sub(r"(\d+)\.(\d+)", r"\1-\2", name)
-    name = re.sub(r":\d+$", "", name)
-    name = re.sub(r"-v\d+$", "", name)
-    name = re.sub(r"-\d{8}$", "", name)
+
+def _strip_prefix(name: str, prefixes: tuple[str, ...]) -> str:
+    """Drop the first matching prefix (at most one), else return ``name`` unchanged."""
+    return next((name[len(p):] for p in prefixes if name.startswith(p)), name)
+
+
+def _normalize_bedrock_model_name(model: str) -> str:
+    """Bare foundation-model id: strip the cross-region inference-profile scope
+    (``us.``/``global.``/...), map dotted versions (``4.7`` → ``4-7``), then
+    strip the trailing date/revision/profile components."""
+    name = re.sub(r"(\d+)\.(\d+)", r"\1-\2", _strip_prefix(model.lower().strip(), _BEDROCK_REGION_PREFIXES))
+    for pattern in _BEDROCK_TRAILERS:
+        name = re.sub(pattern, "", name)
     return name
 
 
 def _normalize_anthropic_model_name(model: str) -> str:
     """Strip an ``anthropic/`` prefix and map dotted versions (4.7 → 4-7)."""
-    name = model.lower().strip()
-    if name.startswith("anthropic/"):
-        name = name[len("anthropic/"):]
-    return re.sub(r"(\d+)\.(\d+)", r"\1-\2", name)
+    return re.sub(r"(\d+)\.(\d+)", r"\1-\2", _strip_prefix(model.lower().strip(), ("anthropic/",)))
+
+
+# Anthropic dot-notation (opus-4.7) and Bedrock region-prefixed ids need
+# normalizing before a second lookup.
+_MODEL_NORMALIZERS = {"anthropic": _normalize_anthropic_model_name, "bedrock": _normalize_bedrock_model_name}
 
 
 def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]:
@@ -425,18 +426,9 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     entry = _OFFICIAL_DOCS_PRICING.get((route.provider, model))
     if entry:
         return entry
-    # Anthropic dot-notation (opus-4.7) and Bedrock region-prefixed ids need
-    # normalizing before a second lookup.
-    normalize = {
-        "anthropic": _normalize_anthropic_model_name, "bedrock": _normalize_bedrock_model_name
-    }.get(route.provider)
-    if normalize:
-        normalized = normalize(model)
-        if normalized != model:
-            entry = _OFFICIAL_DOCS_PRICING.get((route.provider, normalized))
-            if entry:
-                return entry
-    return None
+    normalize = _MODEL_NORMALIZERS.get(route.provider)
+    normalized = normalize(model) if normalize else model
+    return _OFFICIAL_DOCS_PRICING.get((route.provider, normalized)) if normalized != model else None
 
 
 def _openrouter_pricing_entry(route: BillingRoute) -> Optional[PricingEntry]:
@@ -453,30 +445,25 @@ def _pricing_entry_from_metadata(
     if model_id not in metadata:
         return None
     pricing = metadata[model_id].get("pricing") or {}
-    prompt = _to_decimal(pricing.get("prompt"))
-    completion = _to_decimal(pricing.get("completion"))
-    request = _to_decimal(pricing.get("request"))
-    cache_read = _to_decimal(
-        pricing.get("cache_read") or pricing.get("cached_prompt") or pricing.get("input_cache_read")
-    )
-    cache_write = _to_decimal(
-        pricing.get("cache_write")
-        or pricing.get("cache_creation")
-        or pricing.get("input_cache_write")
-    )
-    if prompt is None and completion is None and request is None:
-        return None
 
-    def _per_million(value: Optional[Decimal]) -> Optional[Decimal]:
+    def per_million(key: str, *aliases: str) -> Optional[Decimal]:
+        raw = pricing.get(key)
+        for alias in aliases:  # alias chain is truthiness-based (``a or b or c``)
+            raw = raw or pricing.get(alias)
+        value = _to_decimal(raw)
         return None if value is None else value * _ONE_MILLION
 
+    prompt = per_million("prompt")
+    completion = per_million("completion")
+    request = _to_decimal(pricing.get("request"))
+    if prompt is None and completion is None and request is None:
+        return None
     return PricingEntry(
-        input_cost_per_million=_per_million(prompt),
-        output_cost_per_million=_per_million(completion),
-        cache_read_cost_per_million=_per_million(cache_read),
-        cache_write_cost_per_million=_per_million(cache_write), request_cost=request,
-        source="provider_models_api", source_url=source_url, pricing_version=pricing_version,
-        fetched_at=_UTC_NOW(),
+        input_cost_per_million=prompt, output_cost_per_million=completion,
+        cache_read_cost_per_million=per_million("cache_read", "cached_prompt", "input_cache_read"),
+        cache_write_cost_per_million=per_million("cache_write", "cache_creation", "input_cache_write"),
+        request_cost=request, source="provider_models_api", source_url=source_url,
+        pricing_version=pricing_version, fetched_at=_UTC_NOW(),
     )
 
 
@@ -609,32 +596,24 @@ def estimate_usage_cost(
 
     # Whole-request context tier (e.g. Gemini Pro >200k prompts): above the
     # threshold the *_above rates apply to the entire request; None falls back.
-    input_rate = entry.input_cost_per_million
-    output_rate = entry.output_cost_per_million
-    cache_read_rate = entry.cache_read_cost_per_million
-    cache_write_rate = entry.cache_write_cost_per_million
-    if entry.tier_threshold_tokens is not None and usage.prompt_tokens > entry.tier_threshold_tokens:
-        if entry.input_cost_per_million_above is not None:
-            input_rate = entry.input_cost_per_million_above
-        if entry.output_cost_per_million_above is not None:
-            output_rate = entry.output_cost_per_million_above
-        if entry.cache_read_cost_per_million_above is not None:
-            cache_read_rate = entry.cache_read_cost_per_million_above
-
-    if usage.input_tokens and input_rate is None:
-        return _unknown_cost(entry.source)
-    if usage.output_tokens and output_rate is None:
-        return _unknown_cost(entry.source)
-    if usage.cache_read_tokens and cache_read_rate is None:
-        return _unknown_cost(entry.source, "cache-read pricing unavailable for route")
-    if usage.cache_write_tokens and cache_write_rate is None:
-        return _unknown_cost(entry.source, "cache-write pricing unavailable for route")
+    above = entry.tier_threshold_tokens is not None and usage.prompt_tokens > entry.tier_threshold_tokens
+    buckets = []
+    for tokens, rate, rate_above, note in (
+        (usage.input_tokens, entry.input_cost_per_million, entry.input_cost_per_million_above, ()),
+        (usage.output_tokens, entry.output_cost_per_million, entry.output_cost_per_million_above, ()),
+        (usage.cache_read_tokens, entry.cache_read_cost_per_million, entry.cache_read_cost_per_million_above,
+         ("cache-read pricing unavailable for route",)),
+        (usage.cache_write_tokens, entry.cache_write_cost_per_million, None,
+         ("cache-write pricing unavailable for route",)),
+    ):
+        if above and rate_above is not None:
+            rate = rate_above
+        if tokens and rate is None:
+            return _unknown_cost(entry.source, *note)
+        buckets.append((tokens, rate))
 
     amount = _ZERO
-    for tokens, rate in (
-        (usage.input_tokens, input_rate), (usage.output_tokens, output_rate),
-        (usage.cache_read_tokens, cache_read_rate), (usage.cache_write_tokens, cache_write_rate),
-    ):
+    for tokens, rate in buckets:
         if rate is not None:
             amount += Decimal(tokens) * rate / _ONE_MILLION
     if entry.request_cost is not None and usage.request_count:

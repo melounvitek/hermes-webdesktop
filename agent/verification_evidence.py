@@ -8,6 +8,7 @@ and never upgrades targeted checks into "repo green".
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sqlite3
 import tempfile
@@ -135,9 +136,8 @@ def _connect() -> sqlite3.Connection:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, and ALWAYS close it.
 
-    ``sqlite3.Connection`` as a context manager only commits/rolls back; it does
-    not close. Relying on it alone leaks a connection (and its WAL/SHM fds) per
-    call until GC runs, which can exhaust ``RLIMIT_NOFILE`` in a long process.
+    ``sqlite3.Connection`` as a context manager only commits/rolls back; without
+    the close, each call leaks a connection (and WAL/SHM fds) until GC runs.
     """
     conn = _connect()
     try:
@@ -249,28 +249,20 @@ def _exit_status_is_attributable(segments: list[_ShellSegment], match_index: int
 
 def _canonical_tokens(canonical: str) -> list[str]:
     """Tokenize a canonical command, stripping leading ``./`` from each token."""
-    def clean(token: str) -> str:
-        token = token.strip()
-        while token.startswith("./"):
-            token = token[2:]
-        return token
-
     try:
-        return [clean(t) for t in shlex.split(canonical) if t]
+        return [re.sub(r"^(?:\./)+", "", t.strip()) for t in shlex.split(canonical) if t]
     except ValueError:
         return []
 
 
 def _strip_command_prefix(tokens: list[str]) -> list[str]:
     """Remove harmless command prefixes (env, VAR=x, command/time/noglob)."""
-    remaining = list(tokens)
-    if remaining and remaining[0] == "env":
-        remaining = remaining[1:]
-    while remaining and "=" in remaining[0] and not remaining[0].startswith("-"):
-        remaining = remaining[1:]
-    while remaining and remaining[0] in {"command", "time", "noglob"}:
-        remaining = remaining[1:]
-    return remaining
+    i = 1 if tokens and tokens[0] == "env" else 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    while i < len(tokens) and tokens[i] in {"command", "time", "noglob"}:
+        i += 1
+    return list(tokens[i:])
 
 
 def _equivalent_needles(needle: list[str]) -> list[list[str]]:
@@ -452,12 +444,12 @@ def classify_verification_command(
     verify_commands = list(facts.get("verifyCommands") or [])
     match = _find_canonical_match(command, verify_commands, int(exit_code))
     is_ad_hoc = False
-    if match is None and not verify_commands:
-        ad_hoc_args = _find_ad_hoc_match(command, facts.get("root"), int(exit_code))
-        is_ad_hoc = ad_hoc_args is not None
-        match = ("ad-hoc verification script", ad_hoc_args) if is_ad_hoc else None
     if match is None:
-        return None
+        ad_hoc_args = None if verify_commands else _find_ad_hoc_match(command, facts.get("root"), int(exit_code))
+        if ad_hoc_args is None:
+            return None
+        is_ad_hoc = True
+        match = ("ad-hoc verification script", ad_hoc_args)
 
     canonical, trailing_args = match
     return VerificationEvidence(
@@ -484,10 +476,9 @@ def record_verify_run(
 ) -> Optional[dict[str, Any]]:
     """Record a completed ``hermes verify`` run as verification evidence.
 
-    Explicit CLI-side write with nothing to classify: a pass marks the workspace
-    ``passed`` for the verify-on-stop guard like a canonical test command would;
-    a failure keeps the guard asking for a fix. ``root`` is re-resolved through
-    project facts so it matches what :func:`verification_status` derives later.
+    A pass marks the workspace ``passed`` for the verify-on-stop guard like a
+    canonical test command would. ``root`` is re-resolved through project facts
+    so it matches what :func:`verification_status` derives later.
     """
     resolved = str(Path(root).resolve())
     return _insert_evidence(VerificationEvidence(
@@ -596,5 +587,4 @@ def verification_status(*, session_id: str | None, cwd: str | Path | None) -> di
 
     evidence = dict(event)
     stale = bool(state["last_edit_at"]) and state["last_edit_at"] > evidence["created_at"]
-    result["evidence"] = evidence
-    return {"status": "stale" if stale else evidence["status"], **result}
+    return {"status": "stale" if stale else evidence["status"], **result, "evidence": evidence}
