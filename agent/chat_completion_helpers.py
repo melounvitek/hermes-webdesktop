@@ -2487,19 +2487,26 @@ def _emit_stream_end(agent, *, final_text: str, finished: bool, error: str | Non
         emit(final_text=final_text, finished=finished, error=error)
 
 
+def _with_stream_emitters(agent, run):
+    """Bracket ``run()`` with the agent's stream start/end emitters (end carries
+    the final text on success, the error string on failure) and re-raise."""
+    _emit_stream_start(agent)
+    try:
+        response = run()
+    except Exception as exc:
+        _emit_stream_end(agent, final_text="", finished=False, error=str(exc))
+        raise
+    _emit_stream_end(agent, final_text=_stream_final_text(response), finished=True, error=None)
+    return response
+
+
 def _stream_codex_passthrough(agent, api_kwargs: dict, on_first_delta):
     """Codex streams internally via _run_codex_stream (reached through
     _interruptible_api_call); park ``on_first_delta`` on the agent so it can pick
     it up, and bracket the call with the stream start/end emitters."""
     agent._codex_on_first_delta = on_first_delta
-    _emit_stream_start(agent)
     try:
-        response = agent._interruptible_api_call(api_kwargs)
-        _emit_stream_end(agent, final_text=_stream_final_text(response), finished=True, error=None)
-        return response
-    except Exception as exc:
-        _emit_stream_end(agent, final_text="", finished=False, error=str(exc))
-        raise
+        return _with_stream_emitters(agent, lambda: agent._interruptible_api_call(api_kwargs))
     finally:
         agent._codex_on_first_delta = None
 
@@ -2667,36 +2674,32 @@ class _BedrockStream:
             f"stream so the retry/fallback path can recover."
         )
 
+    def _poll(self):
+        t = threading.Thread(target=_context_thread_target(self._worker), daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(timeout=0.3)
+            self._raise_if_interrupted("Agent interrupted during Bedrock API call", worker=t)
+            stale_elapsed = time.time() - self.last_event
+            if stale_elapsed > self.stale_timeout:
+                self._on_stale(stale_elapsed)
+                break
+        # The Bedrock callback returns a PARTIAL response on interrupt
+        # without raising (on_interrupt_check), so the in-loop raise may
+        # never fire. Re-check so /stop is not swallowed (#59999 area).
+        self._raise_if_interrupted("Agent interrupted during Bedrock API call (post-worker)")
+        if self.result["error"] is not None:
+            raise self.result["error"]
+        # Success clears the cross-turn breaker (#58962).
+        if self.result["response"] is not None:
+            _reset_stale_streak(self.agent)
+        return self.result["response"]
+
     def run(self):
-        agent = self.agent
         # Cross-turn stale-stream circuit breaker (#58962), as on the OpenAI/
         # Anthropic path.
-        _check_stale_giveup(agent)
-        _emit_stream_start(agent)
-        try:
-            t = threading.Thread(target=_context_thread_target(self._worker), daemon=True)
-            t.start()
-            while t.is_alive():
-                t.join(timeout=0.3)
-                self._raise_if_interrupted("Agent interrupted during Bedrock API call", worker=t)
-                stale_elapsed = time.time() - self.last_event
-                if stale_elapsed > self.stale_timeout:
-                    self._on_stale(stale_elapsed)
-                    break
-            # The Bedrock callback returns a PARTIAL response on interrupt
-            # without raising (on_interrupt_check), so the in-loop raise may
-            # never fire. Re-check so /stop is not swallowed (#59999 area).
-            self._raise_if_interrupted("Agent interrupted during Bedrock API call (post-worker)")
-            if self.result["error"] is not None:
-                raise self.result["error"]
-            # Success clears the cross-turn breaker (#58962).
-            if self.result["response"] is not None:
-                _reset_stale_streak(agent)
-            _emit_stream_end(agent, final_text=_stream_final_text(self.result["response"]), finished=True, error=None)
-            return self.result["response"]
-        except Exception as exc:
-            _emit_stream_end(agent, final_text="", finished=False, error=str(exc))
-            raise
+        _check_stale_giveup(self.agent)
+        return _with_stream_emitters(self.agent, self._poll)
 
 
 def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
@@ -2789,6 +2792,8 @@ class _StreamingCall:
         self.stream_attempt_lock = threading.Lock()
         self.stream_attempt_state = {"current": 0, "cancelled": set(), "discarded_chunks": 0, "discarded_bytes": 0}
         self.managed_stream_holder = {"stream": None}
+        # Per-attempt: single-writer token, request-local client, raw HTTP response (chat wire).
+        self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
 
     # ── shared small helpers ────────────────────────────────────────────
 
@@ -2939,6 +2944,59 @@ class _StreamingCall:
             finish_reason = "stop"
         return usage, finish_reason
 
+    def _open_chat_stream(self, stream_kwargs: dict[str, Any]):
+        # Native Gemini rejects OpenAI's usage-streaming extension.
+        if not is_native_gemini_base_url(self.agent.base_url):
+            stream_kwargs["stream_options"] = {"include_usage": True}
+        request_client = self._attempt_request_client = self.clients.set_client(
+            self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
+        self.last_chunk_time["t"] = time.time()
+        self.agent._touch_activity("waiting for provider response (streaming)")
+        return request_client.chat.completions.create(**stream_kwargs)
+
+    def _chat_stream_created(self, raw_stream: Any) -> None:
+        response = self._attempt_stream_response = getattr(raw_stream, "response", None)
+        self.agent._capture_rate_limits(response)
+        self.agent._capture_credits(response)
+        self.agent._stream_diag_capture_response(self.clients.diag, response)
+        self.agent._check_openrouter_cache_status(response)
+        self._writer_token = claim_stream_writer(self.agent)
+
+    def _accept_chat_chunk(self, stream_attempt_id: int, chunk: Any) -> bool:
+        with contextlib.suppress(Exception):
+            choices = getattr(chunk, "choices", None)
+            choice = choices[0] if choices else None
+            delta = getattr(choice, "delta", None)
+            # A stale-attempt fence can win while Relay hands back a tool-call
+            # chunk: record that a tool call was in flight (retry policy must
+            # not see a partial text response); the chunk is still rejected.
+            if getattr(delta, "tool_calls", None):
+                self.provider_tool_in_flight["yes"] = True
+            # Marker-only finish chunk (no writable delta) always passes: the
+            # fence only stops MORE text; fending the completion signal would
+            # make the drop-guard mislabel a clean end as a drop.
+            if getattr(choice, "finish_reason", None) and not any(
+                getattr(delta, attr, None) for attr in ("content", "tool_calls", "reasoning_content", "reasoning")):
+                return True
+        if not self._stream_attempt_is_active(stream_attempt_id):
+            return False
+        if not self._writer_still_current("Streaming"):
+            return False
+        # Stamp BEFORE Relay processes the chunk so the watchdog can't cancel
+        # a live stream mid-interceptor.
+        self.last_chunk_time["t"] = time.time()
+        return True
+
+    def _writer_still_current(self, label: str) -> bool:
+        """Single-writer fence: False (with a warning) once a newer stream claimed the writer slot."""
+        token = self._writer_token
+        if token is None or stream_writer_is_current(self.agent, token):
+            return True
+        logger.warning(
+            "%s attempt superseded by a newer stream; stopping consumption to preserve the "
+            "single-writer invariant (model=%s).", label, self.api_kwargs.get("model", "unknown"))
+        return False
+
     def _call_chat_completions(self, stream_attempt_id: int):
         """Stream a chat completions response."""
         import httpx as _httpx
@@ -2951,62 +3009,11 @@ class _StreamingCall:
         finish_reason = model_name = usage_obj = None
         role = "assistant"
         _diag = self._new_diag()
-        _writer_token = {"value": None}
-        attempt_request_client = {"value": None}
-        attempt_stream_response = {"value": None}
+        self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
             timeout = _httpx.Timeout(connect=conn_cap, read=read_timeout, write=base_timeout, pool=conn_cap)
-            stream_kwargs = {**next_api_kwargs, "stream": True, "timeout": timeout}
-            # Native Gemini rejects OpenAI's usage-streaming extension.
-            if not is_native_gemini_base_url(self.agent.base_url):
-                stream_kwargs["stream_options"] = {"include_usage": True}
-            request_client = attempt_request_client["value"] = self.clients.set_client(
-                self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs)
-            )
-            self.last_chunk_time["t"] = time.time()
-            self.agent._touch_activity("waiting for provider response (streaming)")
-            return request_client.chat.completions.create(**stream_kwargs)
-
-        def _stream_created(raw_stream: Any) -> None:
-            response = attempt_stream_response["value"] = getattr(raw_stream, "response", None)
-            self.agent._capture_rate_limits(response)
-            self.agent._capture_credits(response)
-            self.agent._stream_diag_capture_response(_diag, response)
-            self.agent._check_openrouter_cache_status(response)
-            _writer_token["value"] = claim_stream_writer(self.agent)
-
-        def _accept_stream_chunk(_chunk: Any) -> bool:
-            try:
-                choices = getattr(_chunk, "choices", None)
-                choice = choices[0] if choices else None
-                delta = getattr(choice, "delta", None)
-                # A stale-attempt fence can win while Relay hands back a tool-call
-                # chunk: record that a tool call was in flight (retry policy must
-                # not see a partial text response); the chunk is still rejected.
-                if getattr(delta, "tool_calls", None):
-                    self.provider_tool_in_flight["yes"] = True
-                # Marker-only finish chunk (no writable delta) always passes: the
-                # fence only stops MORE text; fending the completion signal would
-                # make the drop-guard mislabel a clean end as a drop.
-                if getattr(choice, "finish_reason", None) and not any(
-                    getattr(delta, attr, None) for attr in ("content", "tool_calls", "reasoning_content", "reasoning")
-                ):
-                    return True
-            except Exception:
-                pass
-            if not self._stream_attempt_is_active(stream_attempt_id):
-                return False
-            token = _writer_token["value"]
-            if token is not None and not stream_writer_is_current(self.agent, token):
-                logger.warning(
-                    "Streaming attempt superseded by a newer stream; stopping consumption to preserve the "
-                    "single-writer invariant (model=%s).", self.api_kwargs.get("model", "unknown"))
-                return False
-            # Stamp BEFORE Relay processes the chunk so the watchdog can't cancel
-            # a live stream mid-interceptor.
-            self.last_chunk_time["t"] = time.time()
-            return True
+            return self._open_chat_stream({**next_api_kwargs, "stream": True, "timeout": timeout})
 
         def _relay_final_response() -> dict[str, Any]:
             message = {"role": role, "content": "".join(content_parts) or None,
@@ -3025,14 +3032,15 @@ class _StreamingCall:
 
         stream = self._set_managed_stream(relay_llm.stream(self.api_kwargs, _open_stream,
             **_relay_stream_identity(self.agent, "provider"), finalizer=_relay_final_response,
-            on_stream_created=_stream_created, accept_chunk=_accept_stream_chunk,
+            on_stream_created=self._chat_stream_created,
+            accept_chunk=lambda chunk: self._accept_chat_chunk(stream_attempt_id, chunk),
             completed_response_predicate=lambda value: hasattr(value, "choices"),
             metadata=_relay_stream_metadata(self.agent, "chat_completions"), defer_logical_completion=True))
         if self.agent.provider == "moa":
             # Hermes interrupts the managed stream; Relay alone closes the provider stream.
             self.clients.set_stream_handle(stream)
 
-        for chunk in _iter_provider_stream_chunks(stream, response=lambda: attempt_stream_response["value"]):
+        for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
             self._count_chunk(_diag, chunk)
             if self.agent._interrupt_requested:
                 # A half-read SSE response stays checked out of the httpx pool and
@@ -3042,9 +3050,9 @@ class _StreamingCall:
                     stream.close()
                 except Exception:
                     # Still checked out: poison the slot so the finally really closes the pool.
-                    request_client = attempt_request_client["value"]
-                    if request_client is not None:
-                        self.agent._abort_request_openai_client(request_client, reason="interrupt_stream_close_failed")
+                    if self._attempt_request_client is not None:
+                        self.agent._abort_request_openai_client(
+                            self._attempt_request_client, reason="interrupt_stream_close_failed")
                 break
             if not self._stream_attempt_is_active(stream_attempt_id):
                 self._discard_stale_stream_chunk(stream_attempt_id, chunk)
@@ -3226,7 +3234,7 @@ class _StreamingCall:
         saw_stream_event = False
         self.last_chunk_time["t"] = time.time()
         _diag = self._new_diag()
-        _writer_token = {"value": None}
+        self._writer_token = None
         _stream_context = {"manager": None, "stream": None}
         base_final_message = None
 
@@ -3248,22 +3256,12 @@ class _StreamingCall:
             self._quiet(
                 lambda: self.agent._stream_diag_capture_response(_diag, getattr(raw_stream, "response", None))
             )
-            _writer_token["value"] = claim_stream_writer(self.agent)
-
-        def _accept_anthropic_event(_event: Any) -> bool:
-            token = _writer_token["value"]
-            if token is None or stream_writer_is_current(self.agent, token):
-                return True
-            logger.warning(
-                "Anthropic streaming attempt superseded by a newer stream; stopping consumption to preserve the "
-                "single-writer invariant (model=%s).", self.api_kwargs.get("model", "unknown"),
-            )
-            return False
+            self._writer_token = claim_stream_writer(self.agent)
 
         stream = self._set_managed_stream(relay_llm.stream(self.api_kwargs, _open_anthropic_stream,
             **_relay_stream_identity(self.agent, "anthropic"), finalizer=accumulator.finalize,
             on_stream_created=_anthropic_stream_created, on_chunk=accumulator.observe,
-            accept_chunk=_accept_anthropic_event,
+            accept_chunk=lambda _event: self._writer_still_current("Anthropic streaming"),
             metadata=_relay_stream_metadata(self.agent, "anthropic_messages"), defer_logical_completion=True))
         try:
             for event in stream:
@@ -3406,6 +3404,14 @@ class _StreamingCall:
         self.result["error"] = e
         return False
 
+    def _call_wire(self, stream_attempt_id: int):
+        if self.agent.api_mode != "anthropic_messages":
+            return self._call_chat_completions(stream_attempt_id)
+        # Per-request client so the watchdog aborts its socket, not the shared one.
+        request_client = self.clients.set_client(
+            self.agent._create_request_anthropic_client(reason="anthropic_stream_request"), kind="anthropic_messages")
+        return self._call_anthropic(request_client)
+
     def _call(self):
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)
         try:
@@ -3416,21 +3422,11 @@ class _StreamingCall:
                 if self.agent._interrupt_requested:
                     self._cancel_current_stream_attempt("interrupt_before_stream_retry")
                     raise InterruptedError("Agent interrupted before stream retry")
-                _emit_stream_start(self.agent)
                 try:
-                    if self.agent.api_mode == "anthropic_messages":
-                        # Per-request client so the watchdog aborts its socket, not the shared one.
-                        request_client = self.clients.set_client(
-                            self.agent._create_request_anthropic_client(reason="anthropic_stream_request"),
-                            kind="anthropic_messages")
-                        self.result["response"] = self._call_anthropic(request_client)
-                    else:
-                        self.result["response"] = self._call_chat_completions(stream_attempt_id)
-                    final_text = _stream_final_text(self.result["response"])
-                    _emit_stream_end(self.agent, final_text=final_text, finished=True, error=None)
+                    self.result["response"] = _with_stream_emitters(
+                        self.agent, lambda: self._call_wire(stream_attempt_id))
                     return  # success
                 except Exception as e:
-                    _emit_stream_end(self.agent, final_text="", finished=False, error=str(e))
                     self._close_managed_stream()
                     if not self._handle_stream_error(e, _stream_attempt, _max_stream_retries):
                         return
