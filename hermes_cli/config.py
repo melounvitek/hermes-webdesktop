@@ -1,8 +1,7 @@
-"""Configuration management for Hermes Agent."""
+"""Configuration management for Hermes Agent: config.yaml / .env loading, saving,
+validation, migration, and the ``hermes config`` command."""
 
 import copy
-from decimal import Decimal, InvalidOperation
-from hermes_cli.cli_output import line_input
 import json
 import logging
 import os
@@ -17,24 +16,30 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 
+import yaml
+
+from hermes_cli.cli_output import line_input
+from hermes_cli.colors import Colors, color
+from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
+# Re-export from hermes_constants — canonical definition lives there.
+from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
+from utils import atomic_replace, fast_safe_load
 
 logger = logging.getLogger(__name__)
 
-# Track which (config_path, mtime_ns, size) tuples we've already warned about
-# so concurrent CLI/gateway loads of a broken config.yaml don't spam stderr
-# every time. Cleared automatically when the file changes (different mtime).
+# (config_path, mtime_ns, size) tuples already warned about, so concurrent CLI/gateway
+# loads of a broken config.yaml don't spam stderr. A changed file (new mtime) warns again.
 _CONFIG_PARSE_WARNED: set = set()
 
-# Parallel record of active parse failures keyed by path -> (mtime_ns, size,
-# error message). Written by _warn_config_parse_failure() (the single funnel
-# every load-path parse failure goes through) and probed by
-# get_active_config_parse_failure() so provider auto-resolution can refuse to
-# adopt a paid provider from environment keys while the user's REAL config —
-# which may name a completely different provider — is unreadable (#81952).
+# path -> (mtime_ns, size, error message) of active parse failures. Written by
+# _warn_config_parse_failure() (the single funnel for every load-path parse failure) and
+# probed by get_active_config_parse_failure() so provider auto-resolution can refuse to
+# adopt a paid provider from env keys while the user's REAL config is unreadable.
 _CONFIG_PARSE_FAILURES: dict = {}
 
 
@@ -43,37 +48,22 @@ class InvalidUserConfigError(RuntimeError):
 
 
 def _backup_corrupt_config(config_path: Path) -> Optional[Path]:
-    """Preserve a corrupted ``config.yaml`` by copying it to a timestamped ``.bak``.
+    """Copy an unparseable ``config.yaml`` to a timestamped ``.corrupt.*.bak``; None on skip/failure.
 
-    When the YAML can't be parsed, ``load_config()`` silently falls back to ``DEFAULT_CONFIG`` and
-    the user's broken file stays on disk untouched.
-
-    Returns the backup path on success, else ``None``. Symlinks are not followed/copied (mirrors the
-    Gemini #21541 lstat guard) to avoid clobbering whatever a malicious/misconfigured symlink points
-    at.
+    Symlinks are not followed (never clobber whatever a malicious symlink points at). A sibling
+    backup of the same size means this corruption was already snapshotted — skip to avoid churn.
     """
     try:
         if config_path.is_symlink():
             return None
         st = config_path.stat()
         if st.st_size == 0:
-            # Empty file isn't worth preserving and yaml.safe_load returns {}
-            # for it anyway (so it wouldn't reach here), but guard regardless.
             return None
         ts = time.strftime("%Y%m%d-%H%M%S")
         backup_path = config_path.with_name(f"{config_path.name}.corrupt.{ts}.bak")
-        # Don't clobber an existing backup from the same second; if there's
-        # already a corrupt backup for this exact mtime, assume we've snapshotted
-        # this corruption already and skip (the dedup cache normally prevents a
-        # second call, but a process restart can clear it).
-        sibling_baks = list(
-            config_path.parent.glob(f"{config_path.name}.corrupt.*.bak")
-        )
-        for existing in sibling_baks:
+        for existing in config_path.parent.glob(f"{config_path.name}.corrupt.*.bak"):
             try:
                 if existing.stat().st_size == st.st_size:
-                    # Same size as the current broken file — likely the same
-                    # corruption already preserved. Avoid backup churn.
                     return None
             except OSError:
                 continue
@@ -85,23 +75,34 @@ def _backup_corrupt_config(config_path: Path) -> Optional[Path]:
         return None
 
 
+_PARSE_FAILURE_FALLBACK_MSG = {
+    "last-known-good": (
+        "Keeping the previously loaded config for this process — "
+        "edits to config.yaml are being IGNORED until the YAML is fixed."
+    ),
+    "refuse-write": (
+        "REFUSING to write config.yaml so the existing file is preserved. "
+        "Fix the YAML (hermes config edit) and retry."
+    ),
+}
+_PARSE_FAILURE_DEFAULTS_MSG = (
+    "Falling back to default config — every user override "
+    "(auxiliary providers, fallback chain, model settings) is being IGNORED. "
+    "Fix the YAML and restart."
+)
+
+
 def _warn_config_parse_failure(
     config_path: Path, exc: Exception, *, fallback: str = "defaults"
 ) -> None:
-    """Surface a config.yaml parse failure to user, log, and stderr.
+    """Surface a config.yaml parse failure to log and stderr (once per file signature).
 
-    A YAML parse error in ``~/.hermes/config.yaml`` causes ``load_config()`` to silently fall back
-    to ``DEFAULT_CONFIG``, which means every user override (auxiliary providers, fallback chain,
-    model overrides, etc.) is dropped.
+    Silent fallback to ``DEFAULT_CONFIG`` drops every user override, so this must be loud.
     """
     try:
         st = config_path.stat()
         key = (str(config_path), st.st_mtime_ns, st.st_size)
-        _CONFIG_PARSE_FAILURES[str(config_path)] = (
-            st.st_mtime_ns,
-            st.st_size,
-            str(exc),
-        )
+        _CONFIG_PARSE_FAILURES[str(config_path)] = (st.st_mtime_ns, st.st_size, str(exc))
     except OSError:
         key = (str(config_path), 0, 0)
     if key in _CONFIG_PARSE_WARNED:
@@ -109,26 +110,9 @@ def _warn_config_parse_failure(
     _CONFIG_PARSE_WARNED.add(key)
 
     backup_path = _backup_corrupt_config(config_path)
-
-    if fallback == "last-known-good":
-        msg = (
-            f"Failed to parse {config_path}: {exc}. "
-            f"Keeping the previously loaded config for this process — "
-            f"edits to config.yaml are being IGNORED until the YAML is fixed."
-        )
-    elif fallback == "refuse-write":
-        msg = (
-            f"Failed to parse {config_path}: {exc}. "
-            f"REFUSING to write config.yaml so the existing file is preserved. "
-            f"Fix the YAML (hermes config edit) and retry."
-        )
-    else:
-        msg = (
-            f"Failed to parse {config_path}: {exc}. "
-            f"Falling back to default config — every user override "
-            f"(auxiliary providers, fallback chain, model settings) is being IGNORED. "
-            f"Fix the YAML and restart."
-        )
+    msg = f"Failed to parse {config_path}: {exc}. " + _PARSE_FAILURE_FALLBACK_MSG.get(
+        fallback, _PARSE_FAILURE_DEFAULTS_MSG
+    )
     if backup_path is not None:
         msg += f" A copy of the corrupted file was saved to {backup_path}."
     logger.warning(msg)
@@ -140,12 +124,8 @@ def _warn_config_parse_failure(
 
 
 def get_active_config_parse_failure() -> Optional[str]:
-    """Return the parse-error message if the ACTIVE config.yaml is corrupt.
-
-    Probes the failure record written by :func:`_warn_config_parse_failure` for the current
-    :func:`get_config_path` and re-stats the file NOW: the recorded error is returned only while the
-    file is byte-identical (mtime_ns + size) to the one that failed to parse.
-    """
+    """Return the recorded parse error while the ACTIVE config.yaml is still byte-identical
+    (mtime_ns + size) to the file that failed to parse; else None."""
     try:
         path = get_config_path()
         recorded = _CONFIG_PARSE_FAILURES.get(str(path))
@@ -163,49 +143,36 @@ def get_active_config_parse_failure() -> Optional[str]:
 _IS_WINDOWS = platform.system() == "Windows"
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Env var names that influence how the next subprocess executes — never writable
-# through ``save_env_value``: dynamic loader (LD_*/DYLD_*: attacker code loads
-# before main()), interpreter init (PYTHON*, NODE_*: Hermes restarts through
-# them), PATH (too broad; fix tool lookup with absolute paths in integration
-# config instead), git rewrites (fire on every plugin install / update),
-# implicitly-invoked commands (BROWSER/EDITOR/VISUAL/PAGER = RCE on next $EDITOR),
-# SHELL (shell=True defense in depth), and Hermes runtime-location flags
-# (config.yaml is the supported surface; .env writes would relocate state).
+# Env var names that influence how the next subprocess executes — never writable through
+# ``save_env_value``: dynamic loader (LD_*/DYLD_*: attacker code loads before main()),
+# interpreter init (PYTHON*, NODE_*: Hermes restarts through them), PATH (fix tool lookup
+# with absolute paths instead), git rewrites (fire on every plugin install/update),
+# implicitly-invoked commands (BROWSER/EDITOR/VISUAL/PAGER = RCE on next $EDITOR), SHELL,
+# and Hermes runtime-location / security-policy flags (config.yaml is the supported surface).
 #
-# IMPORTANT: ``HERMES_*`` overall is NOT blocked — many integration credentials
-# use that prefix (HERMES_LANGFUSE_PUBLIC_KEY, HERMES_SPOTIFY_CLIENT_ID, ...).
-# The denylist is name-by-name so the gate stays narrow and cannot break provider
-# setup wizards. Enforced on *write* only: pre-existing/out-of-band ``.env``
-# values keep working; the point is the dashboard's writable surface cannot
-# escalate by planting them.
+# ``HERMES_*`` overall is NOT blocked — many integration credentials use that prefix
+# (HERMES_LANGFUSE_PUBLIC_KEY, HERMES_SPOTIFY_CLIENT_ID, ...). The denylist is name-by-name so
+# it cannot break provider setup wizards. Enforced on *write* only: pre-existing/out-of-band
+# ``.env`` values keep working; the dashboard's writable surface just cannot escalate.
 _ENV_VAR_NAME_DENYLIST: frozenset[str] = frozenset({
     # Loader / linker
     "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG",
     "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
     "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH",
-    # Python
+    # Python / Node
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
-    "PYTHONEXECUTABLE", "PYTHONNOUSERSITE",
-    # Node
-    "NODE_OPTIONS", "NODE_PATH",
-    # General
+    "PYTHONEXECUTABLE", "PYTHONNOUSERSITE", "NODE_OPTIONS", "NODE_PATH",
+    # General / git
     "PATH", "SHELL", "BROWSER", "EDITOR", "VISUAL", "PAGER",
-    # Git
     "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_SHELL",
-    # Hermes runtime location — never via dashboard env writer.
-    # NOT a HERMES_* blanket: integration credentials (HERMES_GEMINI_*,
-    # HERMES_LANGFUSE_*, HERMES_SPOTIFY_*, ...) ARE allowed.
+    # Hermes runtime location
     "HERMES_HOME", "HERMES_PROFILE", "HERMES_CONFIG", "HERMES_ENV",
     "HERMES_CONFIG_PATH", "HERMES_ENV_PATH",
-    # MCP catalog trust root. Package-manager wrappers may still provide this
-    # in the process environment; only generic persistence writes are blocked.
+    # MCP catalog trust root; package-manager wrappers may still set it in the process env.
     "HERMES_OPTIONAL_MCPS",
-    # Local ACP subprocess selection. Existing operator/package-manager values
-    # remain readable; generic writers cannot acquire executable/argv authority.
+    # Local ACP subprocess selection (executable/argv authority).
     "HERMES_COPILOT_ACP_COMMAND", "HERMES_COPILOT_ACP_ARGS",
-    # Hermes security policy / approval-routing context. These remain available
-    # through their dedicated CLI/config/session controls, but a generic
-    # credential writer must not persist them for the next process startup.
+    # Security policy / approval-routing context — set via their dedicated controls only.
     "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS", "HERMES_REDACT_SECRETS",
     "HERMES_INTERACTIVE", "HERMES_EXEC_ASK", "HERMES_GATEWAY_SESSION",
     "HERMES_CRON_SESSION", "HERMES_SINGLE_QUERY_SESSION",
@@ -214,12 +181,8 @@ _ENV_VAR_NAME_DENYLIST: frozenset[str] = frozenset({
 
 
 def _env_var_policy_name(key: str, *, is_windows: Optional[bool] = None) -> str:
-    """Return the name used for environment policy comparisons.
-
-    Windows environment names are case-insensitive; POSIX names are not. The explicit override keeps
-    both semantics directly testable without pretending the test interpreter is running on another
-    host OS.
-    """
+    """Name used for env policy comparisons: Windows env names are case-insensitive, POSIX not.
+    The override keeps both semantics testable on any host."""
     windows = _IS_WINDOWS if is_windows is None else is_windows
     return key.upper() if windows else key
 
@@ -239,40 +202,31 @@ def _reject_denylisted_env_var(key: str) -> None:
 
 
 def validate_env_var_name_for_write(key: str) -> None:
-    """Validate an environment name before a generic persistence write.
-
-    Exposed separately from :func:`save_env_value` so batch-style callers can validate their
-    complete request before writing the first value.
-    """
+    """Validate an env name before a generic persistence write (exposed for batch callers)."""
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
 
-_LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
-# path -> (user_mtime_ns, user_size, managed_mtime_ns, managed_size, merged_value,
-# env_ref_snapshot). load_config() returns a deepcopy of the cached value while
-# the signature matches, skipping safe_load + _deep_merge + _normalize_* +
-# _expand_env_vars (~13 ms/call). save_config()/migrate_config() write via
-# atomic_yaml_write (fresh inode → new mtime_ns), so no explicit invalidation
-# hook is needed. The managed-file signature is folded in so editing the
-# managed-scope config.yaml invalidates the cache, and the env snapshot
-# invalidates it when a referenced ${VAR} changes value (late .env load,
-# in-process rotation).
-_LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, int, int, Dict[str, Any], Dict[str, Optional[str]]]] = {}
-# (path, mtime_ns, size) -> cached raw yaml dict. Same pattern as
-# _LOAD_CONFIG_CACHE but for read_raw_config() — used when callers want
-# the user's on-disk values without defaults merged in.
-_RAW_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
-# Serializes all config read/write paths. libyaml's C extension is not
-# thread-safe for concurrent safe_load() on the same file, and multiple
-# tool threads (approval.py, browser_tool.py, setup flows) hit
-# load_config / read_raw_config / save_config from different threads
-# during long agent runs. RLock (not Lock) because save_config internally
-# calls read_raw_config. Also covers mutation of the module-level cache
-# dicts above.
+# Serializes all config read/write paths and guards the module-level caches below. libyaml's
+# C extension is not thread-safe for concurrent safe_load() on one file, and tool threads
+# (approval, browser, setup flows) load/save config concurrently during long agent runs.
+# RLock because save_config internally calls read_raw_config.
 _CONFIG_LOCK = threading.RLock()
-# Env var names written to .env that aren't in OPTIONAL_ENV_VARS
-# (managed by setup/provider flows directly).
+# path -> last successfully loaded (expanded) config; served after a parse failure so a
+# mid-edit broken YAML never silently drops user overrides (e.g. approvals.deny rules).
+_LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
+# path -> (user_mtime_ns, user_size, managed_mtime_ns, managed_size, merged, env_ref_snapshot).
+# load_config() returns a deepcopy of the cached value while the signature matches (skips
+# safe_load + merge + normalize + expand, ~13 ms). Writers use atomic_yaml_write (fresh inode
+# -> new mtime_ns) so no explicit invalidation is needed. The managed-file signature is folded
+# in so editing the managed-scope config.yaml invalidates, and the env snapshot invalidates
+# when a referenced ${VAR} changes value (late .env load, in-process rotation).
+_LOAD_CONFIG_CACHE: Dict[str, Tuple[int, int, int, int, Dict[str, Any], Dict[str, Optional[str]]]] = {}
+# path -> (mtime_ns, size, raw yaml dict) for read_raw_config() (no defaults merged in).
+_RAW_CONFIG_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+
+# Env var names written to .env that aren't in OPTIONAL_ENV_VARS (managed by setup/provider
+# flows directly). Also the set reload_env() may remove from os.environ.
 _EXTRA_ENV_KEYS = frozenset({
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
     "DISCORD_HOME_CHANNEL", "DISCORD_HOME_CHANNEL_NAME",
@@ -296,31 +250,24 @@ _EXTRA_ENV_KEYS = frozenset({
     "QQ_STT_API_KEY", "QQ_STT_BASE_URL", "QQ_STT_MODEL",
     "IRC_SERVER", "IRC_PORT", "IRC_NICKNAME", "IRC_CHANNEL", "IRC_USE_TLS", "IRC_SERVER_PASSWORD",
     "IRC_NICKSERV_PASSWORD", "TERMINAL_ENV", "TERMINAL_SSH_KEY", "TERMINAL_SSH_PORT",
-    # HERMES_TOOL_PROGRESS_MODE is deprecated (replaced by display.tool_progress) but STILL READ
-    # by the gateway as a back-compat fallback, so it must stay known to reload/compat paths. The
-    # boolean HERMES_TOOL_PROGRESS variant is unsupported since the v12 support floor retired its
-    # only consumer (the v3→4 migration): not listed here; doctor flags it as ignored.
+    # Deprecated (replaced by display.tool_progress) but STILL READ by the gateway as a
+    # back-compat fallback. The boolean HERMES_TOOL_PROGRESS variant is unsupported (its only
+    # consumer, the v3->4 migration, is below the v12 support floor); doctor flags it as ignored.
     "HERMES_TOOL_PROGRESS_MODE",
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_HOME_CHANNEL_NAME", "MATTERMOST_REPLY_MODE",
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_DEVICE_ID", "MATRIX_HOME_ROOM",
     "MATRIX_REQUIRE_MENTION", "MATRIX_FREE_RESPONSE_ROOMS", "MATRIX_AUTO_THREAD", "MATRIX_DM_AUTO_THREAD",
     "MATRIX_RECOVERY_KEY",
-    # Langfuse observability plugin — optional tuning keys + standard SDK vars. Activation is via
-    # plugins.enabled (`hermes plugins enable observability/langfuse` / `hermes tools → Langfuse`);
-    # credentials gate the plugin at runtime.
+    # Langfuse observability plugin tuning keys + standard SDK vars (activation is via
+    # plugins.enabled; credentials gate the plugin at runtime).
     "HERMES_LANGFUSE_ENV", "HERMES_LANGFUSE_RELEASE", "HERMES_LANGFUSE_SAMPLE_RATE",
     "HERMES_LANGFUSE_MAX_CHARS", "HERMES_LANGFUSE_CAPTURE", "HERMES_LANGFUSE_DEBUG",
     "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL",
-    # ACP (Agent Client Protocol) keys — profile-isolable so different profiles can use
-    # different ACP backends without cross-leak.
+    # ACP (Agent Client Protocol) keys — profile-isolable so profiles can use different backends.
     "HERMES_ACP_AUTH_METHOD", "HERMES_ACP_AUTO_APPROVE", "HERMES_COPILOT_ACP_COMMAND",
     "HERMES_COPILOT_ACP_ARGS", "COPILOT_CLI_PATH", "COPILOT_ACP_BASE_URL",
 })
-import yaml
-
-from hermes_cli.colors import Colors, color
-from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 
 
 # =============================================================================
@@ -329,29 +276,25 @@ from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 
 _MANAGED_TRUE_VALUES = ("true", "1", "yes")
 _NIX_MANAGED_SYSTEMS = {"nixos", "home-manager"}
-# Only the NixOS module ever wrote a bare "true" or an empty marker, so both
-# legacy signals name that system.
+# Only the NixOS module ever wrote a bare "true" or an empty marker.
 _LEGACY_MANAGED_SYSTEM = "nixos"
-# The Nix store root. Used by detect_install_method to identify installs
-# from `nix run` / `nix profile install` (which don't set HERMES_MANAGED).
-# A module-level constant so tests can patch it without creating files
-# under the real /nix/store.
+# Nix store root; identifies `nix run` / `nix profile install` installs (which don't set
+# HERMES_MANAGED). Module-level so tests can patch it without touching /nix/store.
 _NIX_STORE = Path("/nix/store")
-# Values that used to signal a Homebrew-managed install. Homebrew is no
-# longer a supported distribution method, so these are explicitly ignored
-# rather than treated as a managed system — they fall through to git/unknown
+# Homebrew is no longer a supported distribution: these markers fall through to git/unknown
 # detection instead of blocking config writes.
 _IGNORED_MANAGED_VALUES = frozenset({"brew", "homebrew"})
 
 
 def get_managed_system() -> Optional[str]:
-    """Return the package manager owning this install, if any."""
+    """Return the package manager owning this install, if any.
+
+    Signals: HERMES_MANAGED env var (systemd service) or a ``.managed`` marker file in
+    HERMES_HOME (NixOS activation script — interactive shells don't see the service env).
+    """
     marker = os.getenv("HERMES_MANAGED", "").strip().lower() or None
     if marker is None:
         managed_marker = get_hermes_home() / ".managed"
-        # An interactive shell reads the marker, because it does not see the
-        # HERMES_MANAGED variable of the service. A marker with content
-        # names the system that manages the install.
         if managed_marker.exists():
             try:
                 marker = managed_marker.read_text(encoding="utf-8", errors="replace").strip().lower()
@@ -366,17 +309,12 @@ def get_managed_system() -> Optional[str]:
 
 
 def is_managed() -> bool:
-    """Check if Hermes is running in package-manager-managed mode.
-
-    Two signals: the HERMES_MANAGED env var (set by the systemd service) or a .managed marker
-    file in HERMES_HOME (set by the NixOS activation script so interactive shells see it too).
-    """
+    """Check if Hermes is running in package-manager-managed mode."""
     return get_managed_system() is not None
 
 
-# Nix installs arrive by several routes (nix run, nix profile, a system flake,
-# home-manager), and the running process cannot tell which one. Thus this text
-# names the routes instead of one command.
+# Nix installs arrive by several routes (nix run, nix profile, system flake, home-manager) and
+# the running process cannot tell which, so the text names the routes instead of one command.
 _NIX_UPDATE_MSG = (
     "Update Hermes through the Nix source that installed it "
     "(e.g. nix profile upgrade, or update your flake input and rebuild with nixos-rebuild or home-manager switch)"
@@ -385,21 +323,29 @@ _NIX_UPDATE_MSG = (
 
 def get_managed_update_command() -> Optional[str]:
     """Return the preferred upgrade command for a managed install."""
-    managed_system = get_managed_system()
-    if managed_system in _NIX_MANAGED_SYSTEMS:
+    if get_managed_system() in _NIX_MANAGED_SYSTEMS:
         return _NIX_UPDATE_MSG
     return None
 
 
 def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
-    """Resolve the directory that holds the *running code* (the install tree).
-
-    This is the parent of ``hermes_cli/`` — i.e. the git checkout for source installs,
-    ``/opt/hermes`` inside the published image. It is a property of the running interpreter, NOT of
-    ``$HERMES_HOME``, which is why a code-scoped stamp here is immune to two installs sharing one
-    data directory.
-    """
+    """The install tree holding the *running code* (parent of ``hermes_cli/``) — a property of
+    the interpreter, NOT of $HERMES_HOME, so a stamp there survives two installs sharing a home."""
     return project_root if project_root is not None else get_project_root()
+
+
+# "apt" is the Termux APT distribution identifier, not a generic Debian/Ubuntu signal; another
+# APT distribution needs its own method. "home-manager" is listed because the managed marker can
+# return it and a stamp must name every method this function returns.
+_SUPPORTED_INSTALL_METHODS = frozenset({"apt", "docker", "nix", "nixos", "home-manager", "git", "unknown"})
+
+
+def _install_method_stamp(path: Path) -> Optional[str]:
+    try:
+        method = path.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return None
+    return method if method in _SUPPORTED_INSTALL_METHODS else None
 
 
 def detect_install_method(project_root: Optional[Path] = None) -> str:
@@ -413,32 +359,11 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     really inside a container, and being in a container alone never implies 'docker'.
     """
     root = _install_method_project_root(project_root)
-    # "apt" is intentionally the Termux APT distribution identifier, not a
-    # generic Debian/Ubuntu APT signal. If another APT-managed distribution is
-    # added, give it a distinct install method or make update-command selection
-    # platform-aware instead of silently reusing Termux's `pkg` command.
-    # "home-manager" is here because step 3 can return it. A stamp must name
-    # every method that this function returns. Without it, the stamp of a
-    # home-manager install gives "unknown".
-    supported_methods = {"apt", "docker", "nix", "nixos", "home-manager", "git", "unknown"}
-
-    def _stamp(path: Path) -> Optional[str]:
-        try:
-            method = path.read_text(encoding="utf-8").strip().lower()
-        except OSError:
-            return None
-        return method if method in supported_methods else None
-
-    # 1. Code-scoped stamp — authoritative, immune to shared $HERMES_HOME.
-    method = _stamp(root / ".install_method")
+    method = _install_method_stamp(root / ".install_method")
     if method:
         return method
 
-    # 2. Legacy home-scoped stamp — back-compat. Ignore a ``docker`` value
-    #    when we are not actually containerised: that is the signature of a
-    #    host install whose shared $HERMES_HOME was stamped by a co-located
-    #    container, and honouring it wrongly blocks ``hermes update``.
-    method = _stamp(get_hermes_home() / ".install_method")
+    method = _install_method_stamp(get_hermes_home() / ".install_method")
     if method and not (method == "docker" and not _running_in_container()):
         return method
 
@@ -446,10 +371,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     if managed:
         return managed.lower().replace(" ", "-")
 
-    # detect Nix installs that don't set HERMES_MANAGED (e.g. ``nix run``,
-    # ``nix profile install``). The code lives under /nix/store/ which is the
-    # hallmark of a nix-built install — no other supported install path puts
-    # code there.
+    # Code under /nix/store/ is the hallmark of a nix-built install.
     try:
         resolved = root.resolve()
         if resolved != _NIX_STORE and _NIX_STORE in resolved.parents:
@@ -457,8 +379,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     except OSError:
         pass
 
-    # detect git repo installs (normal installer, development env) — a .git
-    # directory, or a ``gitdir:`` pointer file for worktrees.
+    # A .git directory, or a ``gitdir:`` pointer file for worktrees.
     git_path = root / ".git"
     if git_path.is_dir():
         return "git"
@@ -472,7 +393,7 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
 
 
 def _running_in_container() -> bool:
-    """Thin wrapper around ``hermes_constants.is_container`` (import-safe)."""
+    """Import-safe wrapper around ``hermes_constants.is_container``."""
     try:
         from hermes_constants import is_container
 
@@ -482,46 +403,38 @@ def _running_in_container() -> bool:
 
 
 def is_nix_install_method(method: str) -> bool:
-    """Return True for every install method that Nix owns.
-
-    The callers that branch on the install method must treat "nix", "nixos" and "home-manager" the
-    same way. One helper keeps the three names in one place, so a new Nix shape cannot miss a call
-    site.
-    """
+    """True for every install method Nix owns ("nix", "nixos", "home-manager")."""
     return method == "nix" or method in _NIX_MANAGED_SYSTEMS
+
+
+_UPDATE_COMMAND_BY_METHOD = {
+    "docker": "docker pull nousresearch/hermes-agent:latest",
+    "apt": "pkg upgrade hermes-agent",  # "apt" == Termux APT by contract; uses Termux's `pkg`.
+}
 
 
 def recommended_update_command_for_method(method: str) -> str:
     """Return the update command or guidance for a given install method."""
     if is_nix_install_method(method):
         return _NIX_UPDATE_MSG
-    if method == "docker":
-        return "docker pull nousresearch/hermes-agent:latest"
-    if method == "apt":
-        # By contract, the current "apt" install method is the Termux APT
-        # distribution. It deliberately uses Termux's `pkg` frontend.
-        return "pkg upgrade hermes-agent"
-    return "hermes update"
+    return _UPDATE_COMMAND_BY_METHOD.get(method, "hermes update")
 
 
 def recommended_update_command() -> str:
-    """Return the best update command for the current installation."""
-    # The managed state wins over the code-scoped stamp. A managed install
-    # can carry a stale stamp from an earlier install shape, and the stamp
-    # then names an update path that the managed guard refuses.
+    """Return the best update command for the current installation.
+
+    Managed state wins over the code-scoped stamp: a managed install can carry a stale stamp
+    naming an update path the managed guard refuses.
+    """
     managed_cmd = get_managed_update_command()
     if managed_cmd:
         return managed_cmd
-    method = detect_install_method(get_project_root())
-    return recommended_update_command_for_method(method)
+    return recommended_update_command_for_method(detect_install_method(get_project_root()))
 
 
-# Long-form text for ``hermes update`` / ``--check`` inside the Docker image,
-# shared by ``cmd_update`` and ``_cmd_update_check`` (hermes_cli/main.py) so the
-# wording never forks. The published image excludes ``.git`` (.dockerignore), so
-# the git update path can never succeed there, and the generic "Not a git
-# repository, reinstall via install.sh" fallback is misleading (that installs a
-# NEW host-side Hermes). The right action is ``docker pull`` + restart.
+# Shared by ``cmd_update`` and ``_cmd_update_check`` (hermes_cli/main.py) so the wording never
+# forks. The published image excludes ``.git``, so the git update path can never succeed there
+# and the generic "reinstall via install.sh" fallback would install a NEW host-side Hermes.
 _DOCKER_UPDATE_MESSAGE = """\
 ✗ ``hermes update`` doesn't apply inside the Docker container.
 
@@ -550,11 +463,7 @@ Notes:
 
 
 def format_docker_update_message() -> str:
-    """Return the user-facing message for ``hermes update`` inside Docker.
-
-    Centralised so ``cmd_update`` (the apply path) and ``_cmd_update_check`` (the dry-run path)
-    share the same wording. See ``_DOCKER_UPDATE_MESSAGE`` above for the full rationale.
-    """
+    """Return the user-facing message for ``hermes update`` inside Docker."""
     return _DOCKER_UPDATE_MESSAGE
 
 
@@ -566,21 +475,19 @@ def format_managed_message(action: str = "modify this Hermes installation") -> s
         "Use your package manager to upgrade or reinstall Hermes."
     )
 
+
 def managed_error(action: str = "modify configuration"):
     """Print user-friendly error for managed mode."""
     print(format_managed_message(action), file=sys.stderr)
 
 
-# =============================================================================
-# Container-aware CLI (NixOS container mode)
-# =============================================================================
-
 def get_container_exec_info() -> Optional[dict]:
     """Read container mode metadata from HERMES_HOME/.container-mode.
 
     Written by the NixOS activation script when container.enable = true; tells the host CLI to
-    exec into the container instead of running locally. Returns None when container mode is off,
-    when already inside the container, or when HERMES_DEV=1 is set.
+    exec into the container instead of running locally. None when container mode is off, when
+    already inside the container, or when HERMES_DEV=1 is set. Only FileNotFoundError is
+    swallowed; other errors (permissions, malformed data) propagate.
     """
     if os.environ.get("HERMES_DEV") == "1":
         return None
@@ -590,7 +497,6 @@ def get_container_exec_info() -> Optional[dict]:
         return None
 
     container_mode_file = get_hermes_home() / ".container-mode"
-
     try:
         info = {}
         with open(container_mode_file, "r", encoding="utf-8") as f:
@@ -601,7 +507,6 @@ def get_container_exec_info() -> Optional[dict]:
                     info[key.strip()] = value.strip()
     except FileNotFoundError:
         return None
-    # All other exceptions (PermissionError, malformed data, etc.) propagate
 
     return {
         "backend": info.get("backend", "docker"),
@@ -612,12 +517,8 @@ def get_container_exec_info() -> Optional[dict]:
 
 
 # =============================================================================
-# Config paths
+# Config paths / HERMES_HOME skeleton
 # =============================================================================
-
-# Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: E402,F401
-from utils import atomic_replace, fast_safe_load
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -627,13 +528,10 @@ def get_config_path() -> Path:
 def require_parseable_user_config(*, ignore_user_config: bool = False) -> None:
     """Reject an existing invalid config before a non-interactive agent run.
 
-    Interactive surfaces retain ``load_config()``'s recovery behavior so the operator can repair
-    their configuration. A one-shot or single-query run has no such repair opportunity: allowing
-    defaults there can silently pick a hosted provider/model and spend against credentials loaded
-    from ``.env``.
-
-    Missing and empty files remain valid first-run states. The explicit ``--ignore-user-
-    config``/safe-mode escape hatch also remains authoritative.
+    Interactive surfaces keep ``load_config()``'s recovery behavior so the operator can repair
+    the file; a one-shot run has no such chance, and defaults there could silently pick a hosted
+    provider and spend against ``.env`` credentials. Missing/empty files stay valid first-run
+    states; ``--ignore-user-config`` / HERMES_IGNORE_USER_CONFIG=1 remain authoritative.
     """
     if ignore_user_config or os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1":
         return
@@ -649,9 +547,7 @@ def require_parseable_user_config(*, ignore_user_config: bool = False) -> None:
     else:
         if data is None or isinstance(data, dict):
             return
-        parse_error = TypeError(
-            f"top-level YAML value must be a mapping, got {type(data).__name__}"
-        )
+        parse_error = TypeError(f"top-level YAML value must be a mapping, got {type(data).__name__}")
 
     backup_path = _backup_corrupt_config(config_path)
     message = (
@@ -669,19 +565,21 @@ def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
     return get_hermes_home() / ".env"
 
+
 def get_project_root() -> Path:
     """Get the project installation directory."""
     return Path(__file__).parent.parent.resolve()
 
-def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
-    """Read the HERMES_UID / HERMES_GID env vars set by Docker deployments.
 
-    The entrypoint chowns the top-level HERMES_HOME once, but subdirectories created at runtime
-    (notably ``profiles/<name>/``) need the same chown or they land as root:root and block later
-    uid-mapped workers with PermissionError. Returns (None, None) if unset/invalid or on Windows.
+def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
+    """Read HERMES_UID / HERMES_GID (set by Docker deployments); (None, None) if unset/invalid/Windows.
+
+    The entrypoint chowns HERMES_HOME once, but subdirs created at runtime (``profiles/<name>/``)
+    need the same chown or they land root:root and block later uid-mapped workers.
     """
     if sys.platform == "win32":
         return None, None
+
     def _env_int(name: str) -> Optional[int]:
         raw = os.environ.get(name, "").strip()
         try:
@@ -693,39 +591,22 @@ def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
 
 
 def _chown_to_hermes_uid(path) -> None:
-    """Chown ``path`` to ``HERMES_UID:HERMES_GID`` if those env vars are set.
-
-    No-op when: - Either env var is unset/invalid - The current process isn't root (chown will EPERM
-    — silently ignored) - On Windows (chown semantics don't apply)
-    """
+    """Chown ``path`` to ``HERMES_UID:HERMES_GID`` when set; EPERM/ENOENT are non-fatal (the
+    entrypoint's startup chown -R fixes ownership on the next restart)."""
     uid, gid = _resolve_hermes_uid_gid()
     if uid is None and gid is None:
         return
     try:
-        # os.chown with -1 means "don't change" for that field.
-        os.chown(
-            path,
-            uid if uid is not None else -1,
-            gid if gid is not None else -1,
-        )
+        os.chown(path, uid if uid is not None else -1, gid if gid is not None else -1)
     except (OSError, AttributeError, NotImplementedError):
-        # OSError covers EPERM (not running as root) and ENOENT (race),
-        # both of which are non-fatal — the dir is still created and
-        # the entrypoint's startup chown -R will fix it on next restart.
         pass
 
 
 def _secure_dir(path):
-    """Set directory to owner-only access (0700 by default). No-op on Windows.
+    """chmod a directory owner-only (0700) and apply HERMES_UID/GID ownership. No-op when managed.
 
-    The mode can be overridden via the HERMES_HOME_MODE environment variable (e.g.
-    HERMES_HOME_MODE=0701) for deployments where a web server (nginx, caddy, etc.) needs to traverse
-    HERMES_HOME to reach a served subdirectory. The execute-only bit on a directory permits cd-
-    through without exposing directory listings.
-
-    Also applies ``HERMES_UID``/``HERMES_GID``-based ownership when those env vars are set (#34107 —
-    Docker deployments need this so profile subdirs created at runtime by kanban workers don't land
-    as root:root and block subsequent uid-mapped workers).
+    HERMES_HOME_MODE (e.g. 0701) overrides the mode so a web server can traverse HERMES_HOME to
+    a served subdirectory without directory listings.
     """
     if is_managed():
         return
@@ -744,18 +625,15 @@ def _secure_dir(path):
 
 
 def _is_container() -> bool:
-    """Detect if we're running inside a Docker/Podman/LXC container.
+    """Detect Docker/Podman/LXC (or HERMES_CONTAINER / HERMES_SKIP_CHMOD opt-out).
 
-    Used to skip forcing 0o600 on volume-mounted config: in containers the gateway and dashboard
-    may run as different UIDs, or the mount itself needs broader permissions.
+    Volume-mounted config is not forced to 0o600 in containers: gateway and dashboard may run
+    as different UIDs, or the mount itself needs broader permissions.
     """
-    # Explicit opt-out
     if os.environ.get("HERMES_CONTAINER") or os.environ.get("HERMES_SKIP_CHMOD"):
         return True
-    # Docker / Podman marker file
     if os.path.exists("/.dockerenv"):
         return True
-    # LXC / cgroup-based detection
     try:
         with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
             cgroup_content = f.read()
@@ -767,11 +645,8 @@ def _is_container() -> bool:
 
 
 def _secure_file(path):
-    """Set file to owner-only read/write (0600). No-op on Windows.
-
-    Skipped in managed mode (the NixOS activation script sets 0640 group-readable config) and in
-    containers (volume mounts often need broader permissions). HERMES_SKIP_CHMOD=1 forces a skip.
-    """
+    """chmod a file 0600. Skipped when managed (activation sets 0640 group-readable) or in a
+    container (mounts often need broader permissions)."""
     if is_managed() or _is_container():
         return
     try:
@@ -782,12 +657,8 @@ def _secure_file(path):
 
 
 def _ensure_default_soul_md(home: Path) -> None:
-    """Seed a default SOUL.md into HERMES_HOME, upgrading legacy empty templates.
-
-    First run: write DEFAULT_SOUL_MD. Installs whose SOUL.md is still the old comment-only
-    scaffold (seeded by older installers/images, shadowing the runtime default) are upgraded in
-    place. A SOUL.md the user actually customized is never touched.
-    """
+    """Seed DEFAULT_SOUL_MD on first run; upgrade a legacy comment-only scaffold in place.
+    A SOUL.md the user actually customized is never touched."""
     soul_path = home / "SOUL.md"
     if soul_path.exists():
         try:
@@ -796,30 +667,30 @@ def _ensure_default_soul_md(home: Path) -> None:
             return
         if not is_legacy_template_soul(existing):
             return
-        # Legacy empty template -> upgrade to the real default in place.
     soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
     _secure_file(soul_path)
 
 
-# Home paths whose directory skeleton has been created this process — see
-# ensure_hermes_home(). Only successful passes are recorded, so a raised
-# managed-mode/missing-profile error keeps re-checking on later loads.
+# Home paths whose directory skeleton was created this process. Only successful passes are
+# recorded, so a raised managed-mode/missing-profile error keeps re-checking on later loads.
 _HERMES_HOME_ENSURED: set = set()
+_HERMES_HOME_SUBDIRS = (
+    "cron", "sessions", "logs", "logs/curator", "memories",
+    "pairing", "hooks", "image_cache", "audio_cache", "skills",
+)
 
 
 def ensure_hermes_home():
-    """Ensure ~/.hermes directory structure exists with secure permissions.
+    """Ensure the ~/.hermes directory skeleton exists with secure permissions.
 
-    Memoized per home path: this runs on EVERY ``load_config()`` (inside the config lock), and the
-    ~14 mkdir/chmod syscalls per call made repeated config loads the dominant cost of hot read paths
-    like ``model.options``.
+    Memoized per home path: this runs on EVERY ``load_config()`` and the ~14 mkdir/chmod syscalls
+    made repeated loads the dominant cost of hot read paths.
     """
     home = get_hermes_home()
     key = str(home)
 
-    # Named profiles must be created explicitly (e.g. ``hermes profile create``).
-    # Check tombstones before the memo so a stale empty shell cannot skip
-    # the deleted-profile guard.
+    # Named profiles must be created explicitly. Check tombstones BEFORE the memo so a stale
+    # empty shell cannot skip the deleted-profile guard.
     from hermes_constants import assert_named_profile_home_live
     assert_named_profile_home_live(home)
     if key in _HERMES_HOME_ENSURED and home.is_dir():
@@ -833,10 +704,7 @@ def ensure_hermes_home():
     else:
         home.mkdir(parents=True, exist_ok=True)
         _secure_dir(home)
-        for subdir in (
-            "cron", "sessions", "logs", "logs/curator", "memories",
-            "pairing", "hooks", "image_cache", "audio_cache", "skills",
-        ):
+        for subdir in _HERMES_HOME_SUBDIRS:
             d = home / subdir
             d.mkdir(parents=True, exist_ok=True)
             _secure_dir(d)
@@ -848,18 +716,14 @@ def ensure_hermes_home():
 def _ensure_hermes_home_managed(home: Path):
     """Managed-mode variant: verify dirs exist (activation creates them), seed SOUL.md."""
     if not home.is_dir():
-        raise RuntimeError(
-            f"HERMES_HOME {home} does not exist."
-        )
+        raise RuntimeError(f"HERMES_HOME {home} does not exist.")
     for subdir in ("cron", "sessions", "logs", "memories"):
         d = home / subdir
         if not d.is_dir():
             raise RuntimeError(f"{d} does not exist.")
-    # Curator reports dir is a sub-path of logs/; create it if missing.
-    # In managed mode the activation script may not know about this subdir,
-    # so we mkdir it ourselves (it's inside an already-secured logs/ dir).
+    # The activation script may not know about logs/curator; it is inside an already-secured
+    # logs/ dir. Inside umask(0o007) scope, so SOUL.md is created 0660.
     (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
-    # Inside umask(0o007) scope — SOUL.md will be created as 0660
     _ensure_default_soul_md(home)
 
 
@@ -867,8 +731,8 @@ def _ensure_hermes_home_managed(home: Path):
 # Config loading/saving
 # =============================================================================
 
-from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: F401
-from hermes_cli.config_providers import (  # noqa: F401  (re-exported; callers/tests use hermes_cli.config.<name>)
+from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: E402,F401
+from hermes_cli.config_providers import (  # noqa: E402,F401  (re-exported; callers/tests use hermes_cli.config.<name>)
     _API_MODE_ALIASES,
     _CAMEL_ALIASES,
     _KNOWN_PROVIDER_KEYS,
@@ -896,13 +760,20 @@ from hermes_cli.config_providers import (  # noqa: F401  (re-exported; callers/t
     providers_dict_to_custom_providers,
     stringify_provider_map,
 )
+# Back-compat re-exports — :mod:`hermes_cli.personality` owns personality/overlay semantics.
+from hermes_cli.personality import (  # noqa: E402,F401
+    NEUTRAL_PERSONALITY_NAMES as _NEUTRAL_PERSONALITY_NAMES,
+    prompt_text as _prompt_text,
+    render_personality_prompt,
+    resolve_ephemeral_system_prompt as resolve_ephemeral_system_prompt_from_config,
+)
 
 # =============================================================================
 # Config Migration System
 # =============================================================================
 
-# Track which env vars were introduced in each config version.
-# Migration only mentions vars new since the user's previous version.
+# Env vars introduced per config version; migration only mentions vars new since the user's
+# previous version.
 ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
     3: ["FIRECRAWL_API_KEY", "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "FAL_KEY"],
     4: ["VOICE_TOOLS_OPENAI_KEY", "ELEVENLABS_API_KEY"],
@@ -912,14 +783,9 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
     11: ["TERMINAL_MODAL_MODE"],
 }
 
-# Required environment variables with metadata for migration prompts.
-# LLM provider is required but handled in the setup wizard's provider
-# selection step (Nous Portal / OpenRouter / Custom endpoint), so this
-# dict is intentionally empty — no single env var is universally required.
+# Intentionally empty: the LLM provider is required but handled by the setup wizard's provider
+# selection step, so no single env var is universally required.
 REQUIRED_ENV_VARS = {}
-
-# Tool Gateway env vars are always visible — they're useful for
-# self-hosted / custom gateway setups regardless of subscription state.
 
 
 def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
@@ -936,11 +802,8 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
 
 
 def _split_key_path(key: str) -> list[str]:
-    """Split a dotted config-key path, honoring backslash-escaped dots.
-
-    Backslashes before any other character are preserved verbatim. Keys without escapes behave
-    exactly as ``key.split(".")``.
-    """
+    """Split a dotted config-key path, honoring backslash-escaped dots (``a\\.b`` -> ``a.b``).
+    Backslashes before any other character are preserved verbatim."""
     parts: list[str] = []
     current: list[str] = []
     i = 0
@@ -962,12 +825,8 @@ def _split_key_path(key: str) -> list[str]:
 
 
 def _greedy_literal_match(container: dict, parts: list) -> Optional[Tuple[str, int]]:
-    """Return ``(literal_key, n_consumed)`` for the longest dotted literal match.
-
-    Backward compatible: when no multi-segment literal key exists, the single segment ``parts[0]``
-    is the only candidate, which is exactly the historic plain-split behavior. Returns ``None`` when
-    nothing matches.
-    """
+    """Return ``(literal_key, n_consumed)`` for the longest dotted literal key present in
+    *container*, or None. With no multi-segment literal this is the historic plain-split walk."""
     if not isinstance(container, dict) or not parts:
         return None
     return next(
@@ -977,13 +836,9 @@ def _greedy_literal_match(container: dict, parts: list) -> Optional[Tuple[str, i
 
 
 def _phantom_sibling(container: dict, part: str) -> Optional[str]:
-    """Return an existing sibling key that ``part`` would shadow, if any.
-
-    Called before CREATING an intermediate mapping named ``part``. If the mapping already holds
-    a literal dotted key starting with ``part + '.'`` (creating ``grok-4`` beside ``grok-4.5``),
-    the split chopped a dotted leaf and the write would produce a phantom sibling the runtime
-    never reads -- fail loudly instead of silently corrupting.
-    """
+    """Existing literal dotted key that creating an intermediate mapping ``part`` would shadow
+    (``grok-4`` beside ``grok-4.5``) — the write would produce a phantom sibling the runtime never
+    reads, so callers fail loudly instead."""
     if not isinstance(container, dict):
         return None
     prefix = part + "."
@@ -991,11 +846,9 @@ def _phantom_sibling(container: dict, part: str) -> Optional[str]:
 
 
 def _set_nested(config, dotted_key: str, value):
-    """Set a value at an arbitrarily nested dotted key path.
+    """Set a value at a dotted key path, creating intermediate dicts on demand.
 
-    Intermediate dicts are created on demand. List indices are parsed from numeric path segments;
-    the referenced index must already exist (we do not grow lists — the user is navigating into
-    structure they wrote themselves).
+    Numeric segments index lists; the index must already exist (lists are never grown).
     """
     parts = _split_key_path(dotted_key)
     current = config
@@ -1035,8 +888,6 @@ def _set_nested(config, dotted_key: str, value):
             if at_leaf:
                 current[part] = value
                 return
-            # About to CREATE an intermediate mapping. Refuse when that would
-            # write a phantom sibling of an existing dotted literal key.
             shadowed = _phantom_sibling(current, part)
             if shadowed is not None:
                 escaped = shadowed.replace(".", "\\.")
@@ -1050,9 +901,7 @@ def _set_nested(config, dotted_key: str, value):
             current = current[part]
             i += 1
         else:
-            raise TypeError(
-                f"Cannot navigate into {type(current).__name__} at key {dotted_key!r}"
-            )
+            raise TypeError(f"Cannot navigate into {type(current).__name__} at key {dotted_key!r}")
 
 
 def clear_model_endpoint_credentials(
@@ -1064,10 +913,9 @@ def clear_model_endpoint_credentials(
 ) -> Dict[str, Any]:
     """Remove stale inline endpoint credentials from a model config.
 
-    ``model.api_key`` is valid only for explicit custom endpoint assignments. Built-in providers
-    resolve credentials from env vars, auth.json, or the credential pool. When switching away from a
-    custom endpoint, leaving these fields behind keeps secrets in config.yaml and can contaminate
-    later custom resolution paths.
+    ``model.api_key`` is valid only for explicit custom endpoints; built-in providers resolve
+    credentials from env/auth.json/the pool. Leftovers keep secrets in config.yaml and can
+    contaminate later custom resolution paths.
     """
     if not isinstance(model_cfg, dict):
         return model_cfg
@@ -1118,12 +966,8 @@ def _locate_nested(config, parts: list):
 
 
 def _get_nested(config, dotted_key: str):
-    """Return a dotted-path value from nested dict/list config data.
-
-    Mirrors ``_set_nested`` navigation: honors backslash-escaped dots and prefers an existing
-    literal dotted key over blind splitting, so ``models.grok-4.6.context_length`` reads the real
-    ``grok-4.6`` entry instead of reporting the key unset.
-    """
+    """Return a dotted-path value (``_MISSING`` when absent); same navigation as ``_set_nested``
+    so ``models.grok-4.6.context_length`` reads the real ``grok-4.6`` entry."""
     loc = _locate_nested(config, _split_key_path(dotted_key))
     if loc is None:
         return _MISSING
@@ -1132,11 +976,8 @@ def _get_nested(config, dotted_key: str):
 
 
 def _unset_nested(config, dotted_key: str) -> bool:
-    """Remove a dotted-path value from nested dict/list config data.
-
-    Same escape-aware, greedy-literal navigation as ``_set_nested`` / ``_get_nested``: unsetting
-    an unescaped dotted key removes the real literal entry rather than a phantom sibling.
-    """
+    """Remove a dotted-path value; True if it existed. Empty dict containers left behind are
+    dropped, while user-authored empty lists and non-empty sibling branches are preserved."""
     loc = _locate_nested(config, _split_key_path(dotted_key))
     if loc is None:
         return False
@@ -1146,8 +987,6 @@ def _unset_nested(config, dotted_key: str) -> bool:
     else:
         del current[key]
 
-    # Drop empty dict containers left behind by the deletion while preserving
-    # user-authored empty lists and non-empty sibling branches.
     for parent, part in reversed(parents):
         if current != {}:
             break
@@ -1165,24 +1004,26 @@ def _unset_nested(config, dotted_key: str) -> bool:
     return True
 
 
+_ENV_CONFIG_KEYS = frozenset({
+    'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
+    'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
+    'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
+    'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY', 'API_SERVER_KEY',
+    'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
+    'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
+    'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
+    'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
+    'GITHUB_TOKEN', 'HONCHO_API_KEY',
+})
+
+
 def _is_env_config_key(key: str) -> bool:
     """Return whether `hermes config set` routes this key to .env."""
     if "." in key:
         return False
     key_upper = key.upper()
-    api_keys = [
-        'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_TOOLS_OPENAI_KEY',
-        'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
-        'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
-        'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY', 'API_SERVER_KEY',
-        'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
-        'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
-        'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
-        'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
-        'GITHUB_TOKEN', 'HONCHO_API_KEY',
-    ]
     return (
-        key_upper in api_keys
+        key_upper in _ENV_CONFIG_KEYS
         or key_upper.endswith(('_API_KEY', '_TOKEN', '_SECRET'))
         or key_upper.startswith('TERMINAL_SSH')
     )
@@ -1225,7 +1066,7 @@ def get_missing_config_fields() -> List[Dict[str, Any]]:
 
 
 def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
-    """Return skill-declared config vars that are missing or empty in config.yaml."""
+    """Return skill-declared config vars (``skills.config.<key>``) that are missing or empty."""
     try:
         from agent.skill_utils import discover_all_skill_config_vars, SKILL_CONFIG_PREFIX
     except Exception:
@@ -1234,9 +1075,7 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     try:
         all_vars = discover_all_skill_config_vars()
     except Exception as e:
-        # A malformed SKILL.md, unreadable external skill dir, or similar
-        # should never break `hermes update`.  Skill-config prompting is a
-        # post-migration nicety, not a blocker.
+        # A malformed SKILL.md must never break `hermes update`; this prompting is a nicety.
         logger.debug("discover_all_skill_config_vars failed: %s", e)
         return []
     if not all_vars:
@@ -1245,8 +1084,6 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
     config = load_config()
     missing: List[Dict[str, Any]] = []
     for var in all_vars:
-        # Skill config is stored under skills.config.<logical_key>;
-        # missing = key doesn't exist or is an empty string.
         value = cfg_get(config, *f"{SKILL_CONFIG_PREFIX}.{var['key']}".split("."))
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(var)
@@ -1265,11 +1102,11 @@ def _coerce_config_version(value: Any) -> int:
 
 
 def _raw_config_has_explicit_version() -> bool:
-    """True when config.yaml exists, parses, and carries a ``_config_version`` key.
+    """True when config.yaml exists, parses, and carries ``_config_version``.
 
-    Distinguishes an ANCIENT config (explicit old version → refused by the v12 support floor) from a
-    fresh minimal/hand-written/cloned config with no version key at all (→ migrated + stamped
-    normally). Missing or unparseable files return False so they never trip the floor gate.
+    Distinguishes an ANCIENT config (explicit old version -> refused by the v12 support floor)
+    from a fresh minimal config with no version key (-> migrated + stamped normally). Missing or
+    unparseable files return False so they never trip the floor gate.
     """
     config_path = get_config_path()
     if not config_path.exists():
@@ -1282,11 +1119,11 @@ def _raw_config_has_explicit_version() -> bool:
 
 
 def check_config_version() -> Tuple[int, int]:
-    """Check the raw on-disk config schema version; returns (current_version, latest_version).
+    """Return ``(current_version, latest_version)`` from the raw on-disk config.
 
-    Reads the raw file rather than ``load_config()``, which deep-merges over ``DEFAULT_CONFIG``
-    and would make a file lacking ``_config_version`` inherit the latest version in memory,
-    hiding that the persisted schema was never migrated.
+    Reads the raw file rather than ``load_config()``: the deep-merge would make a file lacking
+    ``_config_version`` inherit the latest version, hiding that the schema was never migrated.
+    Invalid YAML gets a parse warning, not an automatic schema rewrite.
     """
     latest = _coerce_config_version(DEFAULT_CONFIG.get("_config_version", 1)) or 1
     config_path = get_config_path()
@@ -1297,15 +1134,12 @@ def check_config_version() -> Tuple[int, int]:
         with open(config_path, encoding="utf-8") as f:
             config = fast_safe_load(f) or {}
     except Exception as e:
-        # Invalid YAML needs a parse warning, not an automatic schema rewrite
-        # that could replace the user's broken file with defaults.
         _warn_config_parse_failure(config_path, e)
         return latest, latest
 
     if not isinstance(config, dict):
         config = {}
-    current = _coerce_config_version(config.get("_config_version"))
-    return current, latest
+    return _coerce_config_version(config.get("_config_version")), latest
 
 
 # =============================================================================
@@ -2377,16 +2211,6 @@ def cfg_get(cfg: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> A
             return default
         node = node[key]
     return node
-
-
-# Back-compat re-exports — :mod:`hermes_cli.personality` is the single owner of
-# personality/overlay semantics; these names stay importable from here.
-from hermes_cli.personality import (  # noqa: E402,F401
-    NEUTRAL_PERSONALITY_NAMES as _NEUTRAL_PERSONALITY_NAMES,
-    prompt_text as _prompt_text,
-    render_personality_prompt,
-    resolve_ephemeral_system_prompt as resolve_ephemeral_system_prompt_from_config,
-)
 
 
 def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
