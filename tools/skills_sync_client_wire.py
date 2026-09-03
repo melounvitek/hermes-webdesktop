@@ -44,7 +44,6 @@ SYNC_MANIFEST_VERSION = 1
 
 # Content addressing: the wire uses the FULL 64-hex sha256 -- a different namespace from the
 # truncated 16-hex local `content_hash` (skills_guard.py).
-
 def wire_address(data: bytes) -> str:
     """``sha256:<64-hex>`` -- the wire address of ``data``."""
     return "sha256:" + hashlib.sha256(data).hexdigest()
@@ -84,7 +83,6 @@ def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
 
 
 # Object building
-
 class ObjectSet:
     """Objects to push, ``hash -> (kind, bytes)``, deduped by content address."""
 
@@ -178,7 +176,6 @@ def assemble_root_from_skill_trees(skill_trees: Dict[str, str], objects: ObjectS
 
 
 # HTTP client (routes under /v1/sync/)
-
 class SyncError(RuntimeError):
     """A non-recoverable wire error (4xx the client can't retry)."""
 
@@ -288,7 +285,6 @@ class SyncClient:
 
 
 # Reading remote trees
-
 def read_ref_hash(client: SyncClient, ref: str, *, org_scope: bool = False) -> Optional[str]:
     """Hash of *ref* (queried with itself as prefix), or None if absent."""
     refs = client.get_refs(ref, org_scope=org_scope)
@@ -318,18 +314,11 @@ def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: b
 def read_manifest_of_root(client: SyncClient, root_tree_hash: str) -> Optional[Dict[str, bool]]:
     """``{name: enabled}`` from the root ``sync-manifest`` blob (how a device learns another's opt-ins)."""
     try:
-        tree = client.get_tree_json(root_tree_hash)
+        for e in client.get_tree_json(root_tree_hash).get("entries", []):
+            if e.get("name") == SYNC_MANIFEST_ENTRY_NAME and e.get("kind") == KIND_BLOB:
+                return parse_sync_manifest(client.get_object(e["hash"])[1])
     except Exception as e:
-        logger.debug("skills_sync_client: manifest root read failed: %s", e)
-        return None
-    for e in tree.get("entries", []):
-        if e.get("name") == SYNC_MANIFEST_ENTRY_NAME and e.get("kind") == KIND_BLOB:
-            try:
-                _kind, data = client.get_object(e["hash"])
-            except Exception as ex:
-                logger.debug("skills_sync_client: manifest blob fetch failed: %s", ex)
-                return None
-            return parse_sync_manifest(data)
+        logger.debug("skills_sync_client: manifest read failed: %s", e)
     return None
 
 

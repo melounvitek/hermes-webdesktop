@@ -76,7 +76,6 @@ def _read_org_head(client: SyncClient, org_id: str) -> Optional[str]:
 
 
 # Local mirror sidecars
-
 def _mirror_root(org_id: str) -> Path:
     return _ssc()._org_dir() / org_id
 
@@ -189,7 +188,6 @@ def list_org_skill_names() -> List[str]:
 
 
 # Pull / propose
-
 def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None,
                     ) -> Dict[str, Any]:
     """Pull the org canonical set into the mirror (fast-forward only, no client merge). A skill with

@@ -123,7 +123,6 @@ def sync_default_opt_in() -> bool:
 
 
 # Local skill eligibility + the personal opt-in flag
-
 def _skills_dir() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home() / "skills"
@@ -227,7 +226,6 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
 
 
 # Device label (commit ``author.device``; advisory, never an auth input)
-
 def _default_device_label() -> str:
     """Short hostname + random suffix (two machines can share a hostname); bare uuid if unusable."""
     import socket
@@ -275,7 +273,6 @@ def set_device_name(name: str) -> str:
 
 # Local sync STATE: last HEAD pushed/pulled + its root tree (FULL-digest namespace). Distinct from
 # the bundled manifest (skills_sync.py) and the plane's `sync-manifest`. ~/.hermes/skills/.sync_state.
-
 _EMPTY_STATE: Dict[str, Any] = {"head": None, "skills": {}}
 
 
@@ -324,7 +321,6 @@ def _record_head(state: Dict[str, Any], head: str, root: str) -> None:
 
 
 # Profile snapshot -- the root tree mirrors each skill's relative path (categories = intermediate trees).
-
 def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
                      ) -> Tuple[ObjectSet, str, Dict[str, str]]:
     """All objects for *skill_names* + profile root -> ``(objects, root_hash, {name: tree_hash})``.
@@ -350,7 +346,6 @@ def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_
 
 
 # Personal refs, push, pull
-
 def user_head_ref(owner: str) -> str:
     return f"refs/user/{owner}/HEAD"
 
@@ -500,7 +495,6 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
 
 
 # Gated public entrypoints (gate-and-swallow, like maybe_run_curator): never raise; dict or None.
-
 def _gate_and_swallow(op: str, run: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]):
     """Run *run(identity)* only if all gates hold (Nous admin, feature on, base URL); None if inert/error."""
     try:

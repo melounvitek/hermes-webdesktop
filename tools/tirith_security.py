@@ -1,13 +1,10 @@
-"""Tirith pre-exec security scanning wrapper.
-
-Runs the tirith binary as a subprocess to scan commands for content-level threats
-(homograph URLs, pipe-to-interpreter, terminal injection, ...). The exit code is the
-verdict source of truth (0 allow, 1 block, 2 warn); JSON stdout only enriches findings.
-Operational failures (spawn error, timeout, unknown exit) respect ``fail_open``;
-programming errors propagate. Auto-install: if tirith is not on PATH / the configured
-path it is downloaded from GitHub releases to $HERMES_HOME/bin/tirith in a background
-thread. SHA-256 is always verified; cosign provenance when cosign is on PATH.
-"""
+"""Tirith pre-exec security scanning wrapper: runs the tirith binary as a subprocess to scan
+commands for content-level threats (homograph URLs, pipe-to-interpreter, terminal injection).
+The exit code is the verdict source of truth (0 allow, 1 block, 2 warn); JSON stdout only
+enriches findings. Operational failures (spawn error, timeout, unknown exit) respect
+``fail_open``; programming errors propagate. Auto-install: a missing tirith is downloaded from
+GitHub releases to $HERMES_HOME/bin/tirith in a background thread -- SHA-256 always verified,
+cosign provenance when cosign is on PATH."""
 
 import hashlib
 import json
@@ -34,7 +31,6 @@ _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/rele
 _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
 # --- Config helpers ---
-
 def _env_bool(key: str, default: bool) -> bool:
     val = os.getenv(key)
     return default if val is None else val.lower() in {"1", "true", "yes"}
@@ -122,7 +118,6 @@ def _set_failed(reason: str) -> None:
 
 
 # --- Disk failure marker ---
-
 def _failure_marker_path() -> str:
     return os.path.join(str(get_hermes_home()), ".tirith-install-failed")
 
@@ -177,7 +172,6 @@ def _disk_marker_blocks_install() -> bool:
 
 
 # --- Auto-install ---
-
 def _hermes_bin_dir() -> str:
     """$HERMES_HOME/bin, created if needed."""
     os.makedirs(d := os.path.join(str(get_hermes_home()), "bin"), exist_ok=True)
@@ -212,8 +206,7 @@ def _download_file(url: str, dest: str, timeout: int = 10):
 
 
 def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool | None:
-    """Verify cosign provenance on checksums.txt: True verified, False rejected,
-    None when cosign is not on PATH / failed to execute."""
+    """Cosign provenance of checksums.txt: True verified, False rejected, None if cosign absent/failed."""
     if not (cosign := shutil.which("cosign")):
         logger.info("cosign not found on PATH")
         return None
@@ -349,7 +342,6 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
 
 
 # --- Path resolution ---
-
 def _is_executable(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
@@ -361,10 +353,9 @@ def _find_local_tirith() -> str | None:
 
 
 def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str | None, bool]:
-    """Network-free resolution shared by _resolve_tirith_path and ensure_installed ->
-    ``(path, may_install)``. ``path`` set = resolved (module state updated). Otherwise
-    ``may_install`` is False when the miss is terminal (explicit path missing, cached
-    non-retryable failure) and True when the disk marker / install step may proceed."""
+    """Network-free resolution -> ``(path, may_install)``: ``path`` set = resolved (module state
+    updated); else ``may_install`` False = terminal miss (explicit path missing, cached non-retryable
+    failure), True = the disk marker / install step may proceed."""
     global _resolved_path, _install_failure_reason
     expanded = os.path.expanduser(configured_path)
     # An explicit (non-"tirith") path is authoritative: never auto-download a replacement.
@@ -404,10 +395,9 @@ def _record_install_result(installed: str | None, reason: str) -> None:
 
 
 def _resolve_tirith_path(configured_path: str) -> str:
-    """Resolve the tirith binary path, auto-installing synchronously if necessary.
-    Default "tirith": PATH → $HERMES_HOME/bin/tirith → auto-install; failed installs are
-    cached for the process (and on disk for 24h). On any miss the expanded configured path
-    is returned so the spawn fails open via the dedupe'd OSError handler."""
+    """Resolve the tirith path, auto-installing synchronously if needed (default "tirith": PATH →
+    $HERMES_HOME/bin/tirith → install; failures cached in-process and on disk for 24h). On a miss
+    the expanded configured path is returned so the spawn fails open via the dedupe'd OSError."""
     if cached := _cached_path():
         return cached
     expanded = os.path.expanduser(configured_path)
@@ -440,9 +430,8 @@ def _background_install(*, log_failures: bool = True):
 
 
 def ensure_installed(*, log_failures: bool = True):
-    """Ensure tirith is available, downloading in a daemon thread if needed. Local checks
-    are synchronous; the download never blocks startup. Returns the resolved path if
-    available now, else None. Safe to call repeatedly."""
+    """Resolved path if available now, else None after kicking off a daemon-thread download (local
+    checks are synchronous; the download never blocks startup). Safe to call repeatedly."""
     global _install_thread
     cfg = _load_security_config()
     if not cfg["tirith_enabled"]:
@@ -465,7 +454,6 @@ def ensure_installed(*, log_failures: bool = True):
 
 
 # --- Main API ---
-
 _MAX_FINDINGS = 50
 _MAX_SUMMARY_LEN = 500
 _EXIT_ACTIONS = {0: "allow", 1: "block", 2: "warn"}
