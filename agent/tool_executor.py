@@ -910,6 +910,16 @@ def _run_sequential_tool_execution_middleware(
         executor.shutdown(wait=not abandoned, cancel_futures=abandoned)
 
 
+def _safe_callback(callback, label: str, *args, **kwargs) -> None:
+    """Invoke a UI/bridge callback if set; a failing callback is logged, never fatal."""
+    if not callback:
+        return
+    try:
+        callback(*args, **kwargs)
+    except Exception as callback_error:
+        logging.debug("%s callback error: %s", label, callback_error)
+
+
 def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -> None:
     """Run user-visible and checkpoint preflight on final tool arguments."""
     function_name, function_args, effective_task_id, tool_call_id = ref.name, ref.args, ref.task_id, ref.call_id
@@ -931,15 +941,11 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
     if agent.tool_progress_callback:
         try:
             preview = _build_tool_preview(function_name, display_args)
-            agent.tool_progress_callback("tool.started", function_name, preview, display_args)
         except Exception as callback_error:
             logging.debug("Tool progress callback error: %s", callback_error)
-
-    if agent.tool_start_callback:
-        try:
-            agent.tool_start_callback(tool_call_id, function_name, display_args)
-        except Exception as callback_error:
-            logging.debug("Tool start callback error: %s", callback_error)
+        else:
+            _safe_callback(agent.tool_progress_callback, "Tool progress", "tool.started", function_name, preview, display_args)
+    _safe_callback(agent.tool_start_callback, "Tool start", tool_call_id, function_name, display_args)
 
     if not agent._checkpoint_mgr.enabled:
         return
@@ -955,38 +961,20 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
         pass
 
 
-def _emit_tool_completed_progress(agent, function_name: str, *, duration: float, is_error: bool, result) -> None:
-    """``tool.completed`` UI projection; downstream of the canonical append so resume
-    can reconstruct the result even if the UI bridge dies mid-projection."""
-    if not agent.tool_progress_callback:
-        return
-    try:
-        agent.tool_progress_callback(
-            "tool.completed", function_name, None, None,
-            duration=duration, is_error=is_error, result=result,
-        )
-    except Exception as cb_err:
-        logging.debug("Tool progress callback error: %s", cb_err)
-
-
 def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata, blocked: bool) -> None:
     """Fire ``tool_complete_callback`` (unless blocked) then the ``tool.output_risk`` projection."""
-    function_name, function_args, tool_call_id = ref.name, ref.args, ref.call_id
     if not blocked and agent.tool_complete_callback:
         try:
-            display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
-            agent.tool_complete_callback(tool_call_id, function_name, display_args, result)
+            display_args = _redact_tool_args_for_display(ref.name, ref.args) or ref.args
         except Exception as cb_err:
             logging.debug("Tool complete callback error: %s", cb_err)
-
-    if risk_metadata is not None and risk_metadata.get("risk") != "low" and agent.tool_progress_callback:
-        try:
-            agent.tool_progress_callback(
-                "tool.output_risk", function_name, None, None,
-                tool_call_id=tool_call_id, risk_metadata=risk_metadata,
-            )
-        except Exception as cb_err:
-            logging.debug("Tool output risk callback error: %s", cb_err)
+        else:
+            _safe_callback(agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name, display_args, result)
+    if risk_metadata is not None and risk_metadata.get("risk") != "low":
+        _safe_callback(
+            agent.tool_progress_callback, "Tool output risk",
+            "tool.output_risk", ref.name, None, None, tool_call_id=ref.call_id, risk_metadata=risk_metadata,
+        )
 
 
 def _commit_tool_result(
@@ -1041,7 +1029,12 @@ def _commit_tool_result(
         return None
 
     if not blocked:
-        _emit_tool_completed_progress(agent, function_name, duration=tool_duration, is_error=is_error, result=function_result)
+        # ``tool.completed`` projects AFTER the canonical append + flush so resume can
+        # reconstruct the result even if the UI bridge dies mid-projection.
+        _safe_callback(
+            agent.tool_progress_callback, "Tool progress",
+            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error, result=function_result,
+        )
     return persisted_result, function_result, tool_message.get("_tool_output_risk")
 
 
