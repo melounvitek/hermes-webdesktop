@@ -21,20 +21,13 @@ from gateway.kanban_watchers_common import _list_boards, _to_thread_process_serv
 TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = (
-    "completed", "gave_up", "crashed", "timed_out",
-    "blocked", "review_requested", "changes_requested",
-    "block_loop_detected",
-)
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
 MAX_SEND_FAILURES = 12
 
-_LOCAL_PATH_RE = re.compile(
-    r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|"
-    r"[A-Za-z]:\\[^\s,;]+)"
-)
+_LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
 
 def _safe_review_reason(value: Any, limit: int = 160) -> str:
@@ -64,18 +57,15 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
             if value:
                 return str(value)
     resolver = getattr(adapter, "scope_id_for_chat", None)
-    if callable(resolver):
-        try:
-            resolved = resolver(str(sub.get("chat_id") or ""))
-        except Exception as exc:
-            # An adapter-side lookup failure yields no scope, never an error.
-            logger.debug(
-                "kanban notifier: scope lookup failed for chat %s: %s", sub.get("chat_id"), exc, exc_info=True,
-            )
-            return None
-        if resolved:
-            return str(resolved)
-    return None
+    if not callable(resolver):
+        return None
+    try:
+        resolved = resolver(str(sub.get("chat_id") or ""))
+    except Exception as exc:
+        # An adapter-side lookup failure yields no scope, never an error.
+        logger.debug("kanban notifier: scope lookup failed for chat %s: %s", sub.get("chat_id"), exc, exc_info=True)
+        return None
+    return str(resolved) if resolved else None
 
 
 def _platform_names(mapping: Any) -> set[str]:
@@ -352,9 +342,8 @@ class _KanbanNotification:
         self.title = (task.title if task else sub["task_id"])[:120]
         self.board_tag = f"[{self.board_slug}] " if self.board_slug else ""
         # Attribute the ping to the worker that did the work.
-        who = task.assignee if task and task.assignee else None
-        self.tag = f"@{who} " if who else ""
-        self.head = f"{self.board_tag}{self.tag}Kanban {self.task_id}"
+        tag = f"@{task.assignee} " if task and task.assignee else ""
+        self.head = f"{self.board_tag}{tag}Kanban {self.task_id}"
         # The wake self-post path needs the key even when every event was skipped.
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
@@ -362,14 +351,11 @@ class _KanbanNotification:
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
         # creator doesn't re-decompose work already on the board.
-        self.wake_handoff = ""
-        self.wake_review_detail = ""
+        self.wake_handoff = self.wake_review_detail = self.session_key = self.synth = ""
         self.plat: Any = None
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
-        self.session_key = ""
-        self.synth = ""
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -400,11 +386,8 @@ class _KanbanNotification:
             await self.rewind()
 
     async def _wake_failed(self, fmt: str, exc: Exception) -> None:
-        await self.delivery_failed(
-            fmt, (self.task_id,),
-            "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures",
-            exc, True,
-        )
+        drop_fmt = "kanban notifier: dropping subscription %s on %s after %d consecutive wake failures"
+        await self.delivery_failed(fmt, (self.task_id,), drop_fmt, exc, True)
 
     # -- formatting --
 
@@ -494,10 +477,7 @@ class _KanbanNotification:
         # (else the event is lost); None / non-SendResult keeps the
         # "no exception == delivered" contract.
         if getattr(_send_res, "success", True) is False:
-            raise RuntimeError(
-                "adapter send() reported failure: "
-                f"{getattr(_send_res, 'error', None) or 'unknown error'}"
-            )
+            raise RuntimeError(f"adapter send() reported failure: {getattr(_send_res, 'error', None) or 'unknown error'}")
         logger.debug(
             "kanban notifier: delivered %s event for %s to %s/%s on board %s",
             ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug,
@@ -525,10 +505,8 @@ class _KanbanNotification:
             # IS the delivery and resolves the failure counter.
             if not self.is_push_adapter and self.wake_agent:
                 logger.debug(
-                    "kanban notifier: adapter %s has no push "
-                    "channel; skipping text ping for %s, relying "
-                    "on wake self-post instead",
-                    self.platform_str, self.task_id,
+                    "kanban notifier: adapter %s has no push channel; skipping text ping for %s, relying "
+                    "on wake self-post instead", self.platform_str, self.task_id,
                 )
                 continue
             if not self.send_passive:
@@ -539,10 +517,8 @@ class _KanbanNotification:
                 self.clear_failures()
             except Exception as exc:
                 await self.delivery_failed(
-                    "kanban notifier: send failed for %s on %s (attempt %d/%d): %s",
-                    (self.task_id, self.platform_str),
-                    "kanban notifier: dropping subscription %s on %s after %d consecutive send failures",
-                    exc, False,
+                    "kanban notifier: send failed for %s on %s (attempt %d/%d): %s", (self.task_id, self.platform_str),
+                    "kanban notifier: dropping subscription %s on %s after %d consecutive send failures", exc, False,
                 )
                 return False
         return True
@@ -559,10 +535,8 @@ class _KanbanNotification:
         # default) has no adapter.
         adapter = self.runner._authorization_adapter(self.plat, self.sub_profile or None)
         if adapter is None:
-            logger.debug(
-                "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
-                self.platform_str, self.task_id,
-            )
+            logger.debug("kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
+                         self.platform_str, self.task_id)
             await self.rewind()
             return
         self.adapter = adapter
@@ -572,7 +546,6 @@ class _KanbanNotification:
         if not await self._send_pings():
             return
         # All text pings delivered (or skipped for non-push / wake-only).
-        task_terminal = self.task and self.task.status == "archived"
         self.build_wake_text()
         wake_kinds, is_push = self.wake_kinds, self.is_push_adapter
 
@@ -603,5 +576,5 @@ class _KanbanNotification:
             except Exception as _wk_err:
                 logger.warning("kanban notifier: wakeup injection failed for %s: %s", self.task_id, _wk_err, exc_info=True)
         # Unsubscribe only on archive; ``done`` is reversible.
-        if task_terminal:
+        if self.task and self.task.status == "archived":
             await self.unsub()

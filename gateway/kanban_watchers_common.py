@@ -46,15 +46,6 @@ def _board_slugs(kb: Any) -> list:
     return [b.get("slug") or kb.DEFAULT_BOARD for b in _list_boards(kb)]
 
 
-def _kanban_cfg(load_config: Callable[[], Any]) -> Optional[dict]:
-    """``kanban`` section of the live config; ``None`` when the loader raises."""
-    try:
-        cfg = load_config()
-    except Exception:
-        return None
-    return cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-
-
 def _positive_int_setting(kanban_cfg: dict, key: str) -> Optional[int]:
     """Parse an optional ``kanban.<key>`` int cap; None when unset or invalid (< 1 is invalid)."""
     raw = kanban_cfg.get(key)
@@ -78,9 +69,11 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> "tuple[b
     Fails safe: a config read error returns ``(False, 3)`` rather than
     re-enabling a feature the user turned off. ``per_tick`` is clamped to ``>= 1``.
     """
-    kcfg = _kanban_cfg(load_config)
-    if kcfg is None:
+    try:
+        cfg = load_config()
+    except Exception:
         return False, 3
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
     try:
         per_tick = int(kcfg.get("auto_decompose_per_tick", 3) or 3)
     except (TypeError, ValueError):
