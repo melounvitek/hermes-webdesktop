@@ -1,6 +1,5 @@
-"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID
-ledger), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth),
-protocol negotiation and initial tool discovery."""
+"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID ledger), Streamable HTTP
+/ SSE connect (preflight, identity header, client certs, OAuth), protocol negotiation and initial tool discovery."""
 
 import logging
 import asyncio
@@ -273,12 +272,11 @@ class MCPServerTransportMixin:
             "HTTP / SSE endpoint (e.g. https://host/mcp, not https://host/).")
 
     def _reconnect_or_reraise_group(self, eg: BaseExceptionGroup) -> str:
-        """Map an SDK transport TaskGroup failure to a clean ``"reconnect"``: HTTP/SSE stream pumps
-        run in an anyio TaskGroup, so a transient drop escapes as a ``BaseExceptionGroup`` that would
-        otherwise park the server for 300s over a sub-second glitch. Re-raise when it is not one:
-        shutdown in progress (``_shutdown_event`` is set before cancel), KeyboardInterrupt/SystemExit
-        or a real CancelledError in the group, or no live session this attempt (``_ready`` unset —
-        connect failures must back off, not hot-loop)."""
+        """Map an SDK transport TaskGroup failure to a clean ``"reconnect"``: HTTP/SSE stream pumps run in an anyio
+        TaskGroup, so a transient drop escapes as a ``BaseExceptionGroup`` that would otherwise park the server for
+        300s over a sub-second glitch. Re-raise when it is not one: shutdown in progress (``_shutdown_event`` is
+        set before cancel), KeyboardInterrupt/SystemExit or a real CancelledError in the group, or no live session
+        this attempt (``_ready`` unset — connect failures must back off, not hot-loop)."""
         if (self._shutdown_event.is_set()
                 or eg.split((KeyboardInterrupt, SystemExit))[0] is not None
                 or eg.split(asyncio.CancelledError)[0] is not None
@@ -401,11 +399,10 @@ class MCPServerTransportMixin:
         self._register_discovered_tools_if_needed()
 
     def _register_discovered_tools_if_needed(self) -> None:
-        """Publish freshly discovered tools when none are registered (initial registration normally
-        happens in ``_discover_and_register_server``). Outage handling may clear ``_ready`` and
-        deregister stale tools; ownership via ``_servers`` authorizes publishing before readiness is
-        restored so a revival (or a server retained after a recoverable initial failure) never comes
-        back with zero tools."""
+        """Publish freshly discovered tools when none are registered (initial registration normally happens in
+        ``_discover_and_register_server``). Outage handling may clear ``_ready`` and deregister stale tools;
+        ownership via ``_servers`` authorizes publishing before readiness is restored so a revival (or a server
+        retained after a recoverable initial failure) never comes back with zero tools."""
         if self._registered_tool_names:
             return
         with _core._lock:

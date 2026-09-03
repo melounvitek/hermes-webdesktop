@@ -20,9 +20,8 @@ _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 
 def _jsonrpc_matches(exc: BaseException, codes: tuple, markers: tuple, code=None) -> bool:
-    """Structural ``MCPError.error.code`` (or *code*) in *codes*, else any *marker* in
-    ``str(exc).lower()``. Never ``isinstance`` on SDK exception types: they arrive wrapped in
-    ExceptionGroups and drift across generations."""
+    """Structural ``MCPError.error.code`` (or *code*) in *codes*, else any *marker* in ``str(exc).lower()``. Never
+    ``isinstance`` on SDK exception types: they arrive wrapped in ExceptionGroups and drift across generations."""
     code = getattr(getattr(exc, "error", None), "code", None) or code
     return code in codes or any(marker in str(exc).lower() for marker in markers)
 
@@ -293,12 +292,11 @@ _EXC_TRAVERSAL_MAX_NODES = 10_000
 
 
 def _is_session_expired_error(exc: BaseException) -> bool:
-    """True if ``exc`` looks like a transport session expiry (Streamable-HTTP servers GC session
-    state on idle TTL / restart / pod rotation while the OAuth token stays valid) — the fix is a
-    transport reconnect, not an OAuth refresh. Iterative walk over ``exceptions`` / ``__cause__`` /
-    ``__context__`` with a visited set AND a node budget; every reachable node is inspected so an
-    InterruptedError anywhere overrides transport markers, and the chain walk matters because SDK
-    wrappers raise a generic RuntimeError *from* a message-less ClosedResourceError."""
+    """True if ``exc`` looks like a transport session expiry (Streamable-HTTP servers GC session state on idle TTL /
+    restart / pod rotation while the OAuth token stays valid) — the fix is a transport reconnect, not an OAuth
+    refresh. Iterative walk over ``exceptions`` / ``__cause__`` / ``__context__`` with a visited set AND a node
+    budget; every reachable node is inspected so an InterruptedError anywhere overrides transport markers, and the
+    chain walk matters because SDK wrappers raise a generic RuntimeError *from* a message-less ClosedResourceError."""
     # AnyIO stream exceptions are often message-less, so type checks complement marker matching.
     transport_error_types = tuple(_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
     stack: "list[BaseException | None]" = [exc]

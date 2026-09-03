@@ -1,10 +1,9 @@
-"""Central manager for per-server MCP OAuth state (one instance per process): per-server
-providers, cross-process token reload (mtime-based disk watch so tokens refreshed by cron/another
-CLI are picked up without a restart), 401 deduplication (N concurrent 401s with the same
-access_token trigger one recovery) and reconnect signalling (``MCPServerTask`` drives the
-reconnect; the manager decides when). The ONLY place that instantiates the SDK's
-``OAuthClientProvider`` for runtime use; refresh stays lazy in the SDK — one ``stat()`` per tool
-call is cheaper than an await + refresh round-trip."""
+"""Central manager for per-server MCP OAuth state (one instance per process): per-server providers, cross-process
+token reload (mtime-based disk watch so tokens refreshed by cron/another CLI are picked up without a restart), 401
+deduplication (N concurrent 401s with the same access_token trigger one recovery) and reconnect signalling
+(``MCPServerTask`` drives the reconnect; the manager decides when). The ONLY place that instantiates the SDK's
+``OAuthClientProvider`` for runtime use; refresh stays lazy in the SDK — one ``stat()`` per tool call is cheaper
+than an await + refresh round-trip."""
 
 from __future__ import annotations
 
@@ -171,12 +170,11 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
         return re.search(rb"\binvalid_client\b", (await response.aread()).lower()) is not None
 
     async def _maybe_flag_poisoned_client(self, response: Any) -> None:
-        """An ``invalid_client`` rejection of our ``client_id`` at the token endpoint proves the
-        cached registration is dead server-side: delete ``client.json`` (+ stale metadata) so the
-        SDK re-runs DCR next flow. Conservative: acts ONLY on 400/401 at the discovered
-        ``token_endpoint`` (the only request carrying our ``client_id``) with ``invalid_client``
-        in the body; pre-registered clients are never poisoned; any failure is swallowed. The
-        browser-side "Redirect URI Mismatch" case has no HTTP signal (``hermes mcp reauth``)."""
+        """An ``invalid_client`` rejection of our ``client_id`` at the token endpoint proves the cached registration
+        is dead server-side: delete ``client.json`` (+ stale metadata) so the SDK re-runs DCR next flow.
+        Conservative: acts ONLY on 400/401 at the discovered ``token_endpoint`` (the only request carrying our
+        ``client_id``) with ``invalid_client`` in the body; pre-registered clients are never poisoned; any failure
+        is swallowed. The browser-side "Redirect URI Mismatch" case has no HTTP signal (``hermes mcp reauth``)."""
         try:
             if (self._hermes_preregistered or getattr(response, "status_code", None) not in (400, 401)
                     or not await self._is_invalid_client_at_token_endpoint(response)):
@@ -370,10 +368,9 @@ class MCPOAuthManager:
             entry.pending_401.pop(key, None)
 
     async def handle_401(self, server_name: str, failed_access_token: Optional[str] = None) -> bool:
-        """Handle a 401 from a tool call. True: a (possibly new) token is available — reconnect
-        and retry. False: no recovery path — surface ``needs_reauth`` so the model stops
-        hallucinating manual refreshes. Concurrent 401s with the same ``failed_access_token``
-        fire one recovery attempt; the rest await its future."""
+        """Handle a 401 from a tool call. True: a (possibly new) token is available — reconnect and retry. False: no
+        recovery path — surface ``needs_reauth`` so the model stops hallucinating manual refreshes. Concurrent 401s
+        with the same ``failed_access_token`` fire one recovery attempt; the rest await its future."""
         entry = self._entries.get(self._key(server_name))
         if entry is None or entry.provider is None:
             return False

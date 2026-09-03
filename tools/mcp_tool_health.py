@@ -130,9 +130,8 @@ class MCPServerHealthMixin:
                 _forget_mcp_tool_server(tool_name)
 
     async def _refresh_tools(self):
-        """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes
-        rapid-fire notifications; after the list_tools ``await`` all mutations are synchronous —
-        atomic on the event loop."""
+        """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes rapid-fire
+        notifications; after the list_tools ``await`` all mutations are synchronous — atomic on the event loop."""
         if not self._advertises_tools():
             return  # tools/list would raise MCPError(-32601)
         async with self._refresh_lock:

@@ -46,9 +46,8 @@ def _annotation_read_only_hint(mcp_tool: Any) -> bool:
 
 
 def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]) -> None:
-    """Capture per-server trust and per-tool readOnlyHint at discovery — the security
-    boundary: the call-time gate classifies from data we control, never re-read
-    server-supplied state."""
+    """Capture per-server trust and per-tool readOnlyHint at discovery — the security boundary: the call-time gate
+    classifies from data we control, never re-read server-supplied state."""
     with _core._lock:
         _core._server_trust_levels[server_name] = _normalize_server_trust((config or {}).get("trust"))
         hints = _core._tool_read_only_hints.setdefault(server_name, {})
@@ -109,9 +108,8 @@ def _existing_tool_names() -> List[str]:
 
 
 def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
-    """Include/exclude predicate for a server's tool names: ``tools.include`` is a whitelist
-    (``[]`` = register nothing), ``tools.exclude`` a blacklist; entries are exact names or
-    fnmatch globs; include wins over exclude."""
+    """Include/exclude predicate for a server's tool names: ``tools.include`` is a whitelist (``[]`` = register
+    nothing), ``tools.exclude`` a blacklist; entries are exact names or fnmatch globs; include wins over exclude."""
     tools_filter = config.get("tools") or {}
     include_raw = tools_filter.get("include")
     include_set = _normalize_name_filter(include_raw, f"mcp_servers.{name}.tools.include")
