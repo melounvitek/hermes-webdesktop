@@ -82,6 +82,13 @@ def _cap_read_tracker_data(task_data: dict) -> None:
             _evict_oldest(container, cap)
 
 
+def _resolved_or_none(filepath: str, task_id: str) -> str | None:
+    try:
+        return str(_resolve_path_for_task(filepath, task_id))
+    except (OSError, ValueError):
+        return None
+
+
 def _pop_not_found(op: str, resolved_str: str, task_id: str) -> None:
     """Drop the negative-cache entry for *(op, resolved_str)*. Lock must be held."""
     task_data = _read_tracker.get(task_id)
@@ -167,9 +174,8 @@ def notify_other_tool_call(task_id: str = "default"):
 def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
     """Evict every dedup entry (all offset/limit ranges) and not-found entry for *filepath*
     after a write, so the next read returns fresh content. Acquires the lock itself."""
-    try:
-        resolved = str(_resolve_path_for_task(filepath, task_id))
-    except (OSError, ValueError):
+    resolved = _resolved_or_none(filepath, task_id)
+    if resolved is None:
         return
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
@@ -187,10 +193,12 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
     """After a successful write: invalidate dedup and refresh the stored mtime so
     consecutive edits by the same task don't trigger false staleness warnings."""
     _invalidate_dedup_for_path(filepath, task_id)
+    resolved = _resolved_or_none(filepath, task_id)
+    if resolved is None:
+        return
     try:
-        resolved = str(_resolve_path_for_task(filepath, task_id))
         current_mtime = os.path.getmtime(resolved)
-    except (OSError, ValueError):
+    except OSError:
         return
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
@@ -202,9 +210,8 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
 def _check_file_staleness(filepath: str, task_id: str) -> str | None:
     """Warn (don't block) when the file's mtime changed since this task last read it.
     ``None`` when never read, fresh, or unstattable (a deleted file is the write's problem)."""
-    try:
-        resolved = str(_resolve_path_for_task(filepath, task_id))
-    except (OSError, ValueError):
+    resolved = _resolved_or_none(filepath, task_id)
+    if resolved is None:
         return None
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)

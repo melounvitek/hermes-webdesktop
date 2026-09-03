@@ -26,8 +26,7 @@ UNICODE_MAP = {
     "\u2014": "--", "\u2013": "-",  # em/en dashes
     "\u2026": "...", "\u00a0": " ",  # ellipsis and non-breaking space
     "\u2212": "-",  # typographic minus (math/scientific docs)
-    # Space-separator family (Zs) beyond NBSP: otherwise such files miss every
-    # precise strategy and fall to the similarity fallback (wrong-region risk).
+    # Space-separator family (Zs): otherwise such files fall to the similarity fallback.
     "\u2000": " ", "\u2001": " ", "\u2002": " ", "\u2003": " ",
     "\u2004": " ", "\u2005": " ", "\u2006": " ", "\u2007": " ",
     "\u2008": " ", "\u2009": " ", "\u200a": " ", "\u202f": " ",
@@ -548,18 +547,11 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
     if not anchor:
         return ""
 
-    scored = []
-    for i, line in enumerate(content_lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        ratio = SequenceMatcher(None, anchor, stripped).ratio()
-        if ratio > 0.3:
-            scored.append((ratio, i))
-    if not scored:
+    scored = sorted(((SequenceMatcher(None, anchor, line.strip()).ratio(), i)
+                     for i, line in enumerate(content_lines) if line.strip()), key=lambda x: -x[0])
+    top = [s for s in scored if s[0] > 0.3][:max_results]
+    if not top:
         return ""
-    scored.sort(key=lambda x: -x[0])
-    top = scored[:max_results]
 
     parts = []
     seen_ranges = set()
@@ -571,8 +563,6 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
         seen_ranges.add((start, end))
         parts.append("\n".join(
             f"{start + j + 1:4d}| {content_lines[start + j]}" for j in range(end - start)))
-    if not parts:
-        return ""
     result = "\n---\n".join(parts)
 
     # Whitespace-shaped miss: best line equals the anchor once stripped. Show

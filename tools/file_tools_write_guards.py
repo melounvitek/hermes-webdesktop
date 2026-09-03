@@ -30,36 +30,42 @@ _real_hermes_home_cached: str | None = None
 _real_hermes_home_loaded = False
 
 
-def _get_hermes_config_resolved() -> str | None:
-    """Return the resolved absolute path of the Hermes config file (cached)."""
-    global _hermes_config_resolved, _hermes_config_resolved_loaded
-    if not _hermes_config_resolved_loaded:
-        _hermes_config_resolved_loaded = True
+def _cached_lookup(slot: str, flag: str, primary, fallback) -> str | None:
+    """Fill module global *slot* once (guarded by *flag*) from ``primary()``, else
+    ``fallback()``, else None. Module globals so tests can monkeypatch the slots."""
+    g = globals()
+    if not g[flag]:
+        g[flag] = True
         try:
-            from hermes_cli.config import get_config_path
-            _hermes_config_resolved = str(get_config_path().resolve())
+            g[slot] = primary()
         except Exception:
             try:
-                _hermes_config_resolved = str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve())
+                g[slot] = fallback()
             except Exception:
-                _hermes_config_resolved = None
-    return _hermes_config_resolved
+                g[slot] = None
+    return g[slot]
+
+
+def _config_path_resolved() -> str:
+    from hermes_cli.config import get_config_path
+    return str(get_config_path().resolve())
+
+
+def _hermes_home_real() -> str:
+    from hermes_constants import get_hermes_home
+    return os.path.realpath(str(get_hermes_home()))
+
+
+def _get_hermes_config_resolved() -> str | None:
+    """Return the resolved absolute path of the Hermes config file (cached)."""
+    return _cached_lookup("_hermes_config_resolved", "_hermes_config_resolved_loaded", _config_path_resolved,
+                          lambda: str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve()))
 
 
 def _get_real_hermes_home() -> str | None:
     """Return the realpath of the authoritative Hermes home (cached)."""
-    global _real_hermes_home_cached, _real_hermes_home_loaded
-    if not _real_hermes_home_loaded:
-        _real_hermes_home_loaded = True
-        try:
-            from hermes_constants import get_hermes_home
-            _real_hermes_home_cached = os.path.realpath(str(get_hermes_home()))
-        except Exception:
-            try:
-                _real_hermes_home_cached = os.path.realpath(_expand_tilde("~/.hermes"))
-            except Exception:
-                _real_hermes_home_cached = None
-    return _real_hermes_home_cached
+    return _cached_lookup("_real_hermes_home_cached", "_real_hermes_home_loaded", _hermes_home_real,
+                          lambda: os.path.realpath(_expand_tilde("~/.hermes")))
 
 
 def _resolved_or_raw(filepath: str, task_id: str) -> str:
