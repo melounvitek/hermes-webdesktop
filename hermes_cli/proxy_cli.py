@@ -171,7 +171,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         # runs, NOT exported into an interactive shell); backfill so discovery sees them.
         loaded = _load_env_file_into_environ()
         if loaded:
-            console.print(f"  [dim]Loaded {loaded} provider key name(s) from " f"~/.hermes/.env for discovery.[/dim]")
+            console.print(f"  [dim]Loaded {loaded} provider key name(s) from ~/.hermes/.env for discovery.[/dim]")
 
     discovered = ip.discover_provider_mappings(available_env_names=available_env_names or None)
 
@@ -434,7 +434,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 1
     listening = ("[green]listening[/green]" if status.listening else "[yellow]not yet listening[/yellow]")
     console.print(
-        f"[green]✓[/green] iron-proxy running  pid={status.pid}  " f"port={status.tunnel_port}  {listening}"
+        f"[green]✓[/green] iron-proxy running  pid={status.pid}  port={status.tunnel_port}  {listening}"
     )
     return 0
 
