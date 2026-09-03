@@ -140,12 +140,7 @@ def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
     if isinstance(arguments, dict):
         return arguments, None
     return {}, json.dumps(
-        {
-            "error": "Invalid tool arguments",
-            "message": (
-                "Tool arguments must be a valid JSON object; tool was not executed."
-            ),
-        },
+        {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
         ensure_ascii=False,
     )
 
@@ -417,10 +412,10 @@ class _ParsedCall:
 def _parse_tool_call(agent, tool_call, *, flatten_probe: bool = False) -> _ParsedCall:
     name = _canonical_tool_name(tool_call.function.name)
     args, parse_error = _parse_tool_arguments(tool_call.function.arguments)
-    if parse_error is not None:
-        return _ParsedCall(tool_call, name, args, [], parse_error, None)
-    name, args, scope_block = _unwrap_tool_search_call(agent, name, args, flatten_probe=flatten_probe)
-    return _ParsedCall(tool_call, name, args, [], None, scope_block)
+    scope_block = None
+    if parse_error is None:
+        name, args, scope_block = _unwrap_tool_search_call(agent, name, args, flatten_probe=flatten_probe)
+    return _ParsedCall(tool_call, name, args, [], parse_error, scope_block)
 
 
 @dataclass
@@ -455,11 +450,11 @@ class _ConcurrentToolAuthorizationGate:
         self._lock_timeout = _authorization_gate_lock_timeout() if lock_timeout is None else lock_timeout
         self._session_key = session_key
         if self._session_key is None:
+            # Snapshot on the SUBMITTING thread: excluded_seconds() is polled from the
+            # batch wait loop, whose context may differ from the workers'.
             try:
                 from tools.approval import get_current_session_key
 
-                # Snapshot on the SUBMITTING thread: excluded_seconds() is polled from the
-                # batch wait loop, whose context may differ from the workers'.
                 self._session_key = get_current_session_key()
             except Exception:
                 logger.debug(
@@ -478,8 +473,7 @@ class _ConcurrentToolAuthorizationGate:
             return 0.0
 
     def run(self, callback):
-        acquired = self._serialization_lock.acquire(timeout=self._lock_timeout)
-        if not acquired:
+        if not self._serialization_lock.acquire(timeout=self._lock_timeout):
             logger.warning(
                 "authorization gate lock not acquired after %.1fs "
                 "(holder wedged in a pre_tool_call plugin or approval "
@@ -1127,17 +1121,13 @@ class _WorkerStartOnce:
     ``_BatchAbandoned`` (instead of dispatching late) when the batch was abandoned."""
 
     def __init__(self, gate: _StartOrderGate, order: int, tool_name: str) -> None:
-        self._gate, self._order, self._tool_name = gate, order, tool_name
-        self._advanced = False
+        self._gate, self._order, self._tool_name, self._advanced = gate, order, tool_name, False
 
     def advance(self, callback=None) -> None:
         if self._advanced:
             return
-        try:
-            proceed = self._gate.begin_in_order(self._order, callback, tool_name=self._tool_name)
-        finally:
-            self._advanced = True
-        if not proceed:
+        self._advanced = True
+        if not self._gate.begin_in_order(self._order, callback, tool_name=self._tool_name):
             raise _BatchAbandoned(self._tool_name)
 
 
@@ -1210,54 +1200,44 @@ class _ConcurrentBatch:
             logger.info("tool %s completed (%.2fs, %d chars)", ref.name, duration, len(result))
         return _ToolOutcome(ref.name, ref.args, result, duration, is_error, blocked, ref.trace)
 
-    def run_worker(self, index, tool_call, function_name, function_args, middleware_trace, scope_block, start_order):
+    def run_worker(self, index: int, start_order: int) -> None:
         """Worker function executed in a thread."""
-        agent = self.agent
+        agent, pc = self.agent, self.parsed_calls[index]
         with _registered_tool_worker(agent) as _worker_tid:
             # An interrupt may have fanned out before our registration; apply it to our tid.
             if agent._interrupt_requested:
                 _interrupt_worker_tids(agent, [_worker_tid], reason=getattr(agent, "_tool_interrupt_reason", None))
             _set_worker_activity_callback(agent)
-            start_gate = _WorkerStartOnce(self.gate, start_order, function_name)
-            ref = _ToolCallRef(function_name, function_args, self.effective_task_id, _pairing_tool_call_id(tool_call), middleware_trace)
+            start_gate = _WorkerStartOnce(self.gate, start_order, pc.name)
             try:
-                outcome = self._dispatch_worker(index, ref, scope_block, start_gate)
+                outcome = self._dispatch_worker(index, pc.ref(self.effective_task_id), pc.scope_block, start_gate)
                 if outcome is not None:
                     self.results[index] = outcome
             finally:
                 with contextlib.suppress(_BatchAbandoned):
                     start_gate.advance()  # keep later-ordered workers moving
 
-    def submit_all(self, executor, runnable_calls) -> tuple[list, dict]:
-        """Submit every runnable call; on interpreter shutdown, synthesize error results
+    def submit_all(self, executor, runnable: list[int]) -> tuple[list, dict]:
+        """Submit every runnable slot; on interpreter shutdown, synthesize error results
         for the unsubmitted remainder instead of raising. ``propagate_context_to_thread``
         carries turn ContextVars and thread-local approval/sudo callbacks into the worker."""
         futures = []
         future_to_index = {}
-        for submit_index, (i, tc, name, args, scope_block) in enumerate(runnable_calls):
+        for submit_index, i in enumerate(runnable):
             try:
-                f = executor.submit(
-                    propagate_context_to_thread(self.run_worker),
-                    i, tc, name, args, self.parsed_calls[i].middleware_trace, scope_block, submit_index,
-                )
+                f = executor.submit(propagate_context_to_thread(self.run_worker), i, submit_index)
             except RuntimeError as submit_error:
                 if not _is_interpreter_shutdown_submit_error(submit_error):
                     raise
-                skipped_calls = runnable_calls[submit_index:]
+                skipped = runnable[submit_index:]
                 logger.warning(
-                    "interpreter shutdown while scheduling concurrent tools; skipping %d unsubmitted tool(s)",
-                    len(skipped_calls),
+                    "interpreter shutdown while scheduling concurrent tools; skipping %d unsubmitted tool(s)", len(skipped),
                 )
-                for skipped_i, _tc, skipped_name, skipped_args, _scope_block in skipped_calls:
+                for skipped_i in skipped:
+                    pc = self.parsed_calls[skipped_i]
                     if self.results[skipped_i] is None:
-                        result = (
-                            f"Error executing tool '{skipped_name}': "
-                            "Python interpreter is shutting down; tool was not started"
-                        )
-                        self.results[skipped_i] = _ToolOutcome(
-                            skipped_name, skipped_args, result, 0.0, True, False,
-                            self.parsed_calls[skipped_i].middleware_trace,
-                        )
+                        result = f"Error executing tool '{pc.name}': Python interpreter is shutting down; tool was not started"
+                        self.results[skipped_i] = _ToolOutcome(pc.name, pc.args, result, 0.0, True, False, pc.middleware_trace)
                 break
             futures.append(f)
             future_to_index[f] = i
@@ -1274,15 +1254,13 @@ class _ConcurrentBatch:
         while True:
             wait_timeout = 5.0
             if deadline is not None:
-                effective_deadline = deadline + self.authorization_gate.excluded_seconds()
-                remaining = effective_deadline - time.monotonic()
+                remaining = deadline + self.authorization_gate.excluded_seconds() - time.monotonic()
                 if remaining <= 0:
-                    done, not_done = set(), {f for f in futures if not f.done()}
+                    not_done = {f for f in futures if not f.done()}
                 else:
                     wait_timeout = min(wait_timeout, remaining)
-                    done, not_done = concurrent.futures.wait(futures, timeout=wait_timeout)
-            else:
-                done, not_done = concurrent.futures.wait(futures, timeout=wait_timeout)
+            if deadline is None or remaining > 0:
+                _done, not_done = concurrent.futures.wait(futures, timeout=wait_timeout)
             if not not_done:
                 return False
 
@@ -1328,21 +1306,17 @@ class _ConcurrentBatch:
 
     def run(self) -> None:
         """Dispatch the runnable calls on a daemon pool and wait for the batch."""
-        runnable_calls = [
-            (i, pc.tool_call, pc.name, pc.args, pc.scope_block)
-            for i, pc in enumerate(self.parsed_calls)
-            if pc.parse_error is None
-        ]
-        if not runnable_calls:
+        runnable = [i for i, pc in enumerate(self.parsed_calls) if pc.parse_error is None]
+        if not runnable:
             return
         deadline = time.monotonic() + self.timeout_s if self.timeout_s is not None else None
-        max_workers = _max_workers_for_tool_batch(runnable_calls)
+        max_workers = _max_workers_for_tool_batch([(i, None, self.parsed_calls[i].name) for i in runnable])
         # Daemon workers: the stdlib pool's atexit join would let one wedged tool block exit.
         from tools.daemon_pool import DaemonThreadPoolExecutor
         executor = DaemonThreadPoolExecutor(max_workers=max_workers)
         abandon_executor = False
         try:
-            futures, future_to_index = self.submit_all(executor, runnable_calls)
+            futures, future_to_index = self.submit_all(executor, runnable)
             abandon_executor = self.await_completion(futures, future_to_index, deadline)
         finally:
             # Every abandoning exit releases gate-parked workers and leaves wedged threads
