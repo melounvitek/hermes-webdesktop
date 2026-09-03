@@ -134,9 +134,8 @@ def resolve_portal_base_url(state: Optional[dict[str, Any]] = None) -> str:
 def _absolutize_portal_url(portal_url: Optional[str]) -> Optional[str]:
     """Resolve a (possibly relative) server portalUrl against the client's portal base.
 
-    The server emits ``portalUrl`` relative by design (it doesn't know which deployment the client
-    points at). Idempotent: absolute URLs pass through unchanged. urljoin needs the trailing slash
-    on the base to join an absolute path like "/billing?..." against the host.
+    The server emits ``portalUrl`` relative by design; absolute URLs pass through unchanged. urljoin
+    needs the trailing slash on the base to join an absolute path like "/billing?..." to the host.
     """
     if not (isinstance(portal_url, str) and portal_url.strip()):
         return portal_url
@@ -170,12 +169,8 @@ def _billing_not_logged_in(exc: Optional[BaseException] = None) -> "BillingAuthE
 
 
 def _resolve_token_and_base(*, use_cache: bool = True) -> tuple[str, str]:
-    """Return ``(access_token, portal_base_url)``; cached for ``_TOKEN_CACHE_TTL_SECONDS``.
-
-    ``use_cache=False`` forces a fresh resolution (e.g. after a 401).
-    """
+    """``(access_token, portal_base_url)``, cached for ``_TOKEN_CACHE_TTL_SECONDS`` unless ``use_cache=False``."""
     global _token_cache
-
     if use_cache and _token_cache is not None:
         cached_at, token, base = _token_cache
         if (time.time() - cached_at) < _TOKEN_CACHE_TTL_SECONDS:
@@ -243,7 +238,6 @@ def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) 
     """Map an HTTP error response to the right typed :class:`BillingError` (see tables above)."""
     p = payload if isinstance(payload, dict) else {}
     error = p.get("error")
-    message = p.get("message")
     common = {
         "status": status, "error": error, "portal_url": _absolutize_portal_url(p.get("portalUrl")),
         "retry_after": _retry_after_seconds(headers), "payload": p,
@@ -256,7 +250,7 @@ def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) 
         or _ERRORS_BY_STATUS.get(status)
         or (BillingError, f"Billing request failed ({status}).")
     )
-    raise cls(message or (error if cls is BillingError else None) or fallback, **common)
+    raise cls(p.get("message") or (error if cls is BillingError else None) or fallback, **common)
 
 
 def _request(
@@ -269,13 +263,12 @@ def _request(
     one retry with a freshly-resolved token so a cached-but-just-expired token self-heals.
     """
     token, base = _resolve_token_and_base(use_cache=not _retried_auth)
-    url = f"{base}{path}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     headers.update(extra_headers or {})
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    req = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -314,7 +307,7 @@ def _request(
 
 
 # =============================================================================
-# The four endpoints
+# Endpoints
 # =============================================================================
 
 
@@ -339,19 +332,15 @@ def get_billing_state(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
 def patch_auto_top_up(
     *, enabled: bool, threshold: float | str, top_up_amount: float | str, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, Any]:
-    """``PATCH /api/billing/auto-top-up`` — configure auto-reload (scope required).
-
-    Body is strict server-side (extra keys are a 400); numbers are sent as JSON numbers.
-    """
+    """``PATCH /api/billing/auto-top-up`` — configure auto-reload (scope required; strict body, JSON numbers)."""
     body = {"enabled": bool(enabled), "threshold": float(threshold), "topUpAmount": float(top_up_amount)}
     return _request("PATCH", "/api/billing/auto-top-up", body=body, timeout=timeout)
 
 
 def post_charge(*, amount_usd: float | str, idempotency_key: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """``POST /api/billing/charge`` — buy credits (scope required).
+    """``POST /api/billing/charge`` — buy credits (scope required). Reuse the UUID ``idempotency_key`` on retry.
 
-    Generate a UUID ``idempotency_key`` per user-confirmed purchase and reuse it on retry. Returns
-    ``202 {chargeId}`` — money is NOT confirmed yet; poll with :func:`get_charge_status`.
+    Returns ``202 {chargeId}`` — money is NOT confirmed yet; poll with :func:`get_charge_status`.
     """
     return _post_idempotent("/api/billing/charge", {"amountUsd": float(amount_usd)}, idempotency_key, "a charge", timeout)
 
@@ -363,8 +352,7 @@ def get_charge_status(charge_id: str, *, timeout: float = DEFAULT_TIMEOUT) -> di
     ``{status:"pending"}`` (never 404) — a ``pending`` past the 5-min cap is a *timeout*, not an error.
     """
     charge_id = _require_str(charge_id, "A charge id is required.", "invalid_charge_id")
-    # Guard against a stray slash that would change the path shape.
-    safe_id = urllib.parse.quote(charge_id, safe="")
+    safe_id = urllib.parse.quote(charge_id, safe="")  # a stray slash must not change the path shape
     return _request("GET", f"/api/billing/charge/{safe_id}", timeout=timeout)
 
 
@@ -396,8 +384,8 @@ def put_subscription_pending_change(
 ) -> dict[str, Any]:
     """``PUT /api/billing/subscription/pending-change`` — set the single end-of-period intent.
 
-    ``cancel=True`` schedules a cancellation; ``subscription_type_id`` a downgrade / same-price
-    change. UPGRADES are rejected here (they charge now — use :func:`post_subscription_upgrade`).
+    ``cancel=True`` schedules a cancellation; ``subscription_type_id`` a downgrade / same-price change.
+    UPGRADES are rejected here (they charge now — use :func:`post_subscription_upgrade`).
     """
     if cancel:
         body: dict[str, Any] = {"type": "cancellation"}
@@ -412,8 +400,7 @@ def put_subscription_pending_change(
 def delete_subscription_pending_change(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """``DELETE /api/billing/subscription/pending-change`` — clear a scheduled downgrade/cancellation.
 
-    Chargeless, but re-enables recurring spend, so it needs ``billing:manage`` and honors the org
-    kill-switch.
+    Chargeless, but re-enables recurring spend: needs ``billing:manage`` and honors the org kill-switch.
     """
     return _request("DELETE", "/api/billing/subscription/pending-change", timeout=timeout)
 
@@ -423,8 +410,7 @@ def post_subscription_upgrade(
 ) -> dict[str, Any]:
     """``POST /api/billing/subscription/upgrade`` — immediate paid upgrade, the SINGLE money route.
 
-    One Stripe op prorates, charges the card on file, and flips the plan. Reuse the same
-    ``idempotency_key`` on retry so a replay cannot double-charge.
+    One Stripe op prorates, charges the card on file, flips the plan. Reuse ``idempotency_key`` on retry.
     """
     return _post_idempotent(
         "/api/billing/subscription/upgrade", {"subscriptionTypeId": subscription_type_id}, idempotency_key, "an upgrade", timeout
