@@ -236,17 +236,16 @@ def _compress_session_history(
     # request — otherwise prompt.submit etc. block on the dispatcher loop while compaction runs.
     if before_messages is None or history_version is None:
         with session["history_lock"]:
-            before_messages = list(session.get("history", []))
-            history_version = int(session.get("history_version", 0))
+            before_messages, history_version = list(session.get("history", [])), int(session.get("history_version", 0))
     history = before_messages
     if len(history) < 4:
         return 0, _get_usage(agent)
     partial, keep_last, focus_topic = parse_partial_compress_args(focus_topic or "")
     # Only the head is summarized; the last `keep_last` exchanges ride along verbatim. A degenerate
     # split (empty tail) falls back to full compression so the user still gets an action.
-    head, tail = (split_history_for_partial_compress(history, keep_last) if partial else (history, []))
+    head, tail = split_history_for_partial_compress(history, keep_last) if partial else (history, [])
     if not tail:
-        partial, head = False, history
+        head = history
     if approx_tokens is None:
         # Include system prompt + tool schemas so the figure reflects real request pressure.
         approx_tokens = estimate_request_tokens_rough(
@@ -273,7 +272,7 @@ def _compress_session_history(
         finalize_context_engine_compression_notification(agent, committed=False)
         raise CompressionLockHeld(_lock_skipped if isinstance(_lock_skipped, str) else None)
 
-    if partial:
+    if tail:
         compressed = rejoin_compressed_head_and_tail(compressed, tail)
     with session["history_lock"]:
         if int(session.get("history_version", 0)) != history_version:
@@ -311,24 +310,16 @@ def _sync_session_key_after_compress(
     # Even if the approval module fails to import, anchor session_key on the continuation id.
     session["session_key"] = new_session_id
     with contextlib.suppress(Exception):
-        from tools.approval import (
-            disable_session_yolo, enable_session_yolo, is_session_yolo_enabled, register_gateway_notify,
-            unregister_gateway_notify,
-        )
+        from tools import approval
 
         with contextlib.suppress(Exception):
-            unregister_gateway_notify(old_key)
-        try:
-            yolo_was_on = is_session_yolo_enabled(old_key)
-        except Exception:
-            yolo_was_on = False
-        if yolo_was_on:
-            with contextlib.suppress(Exception):
-                enable_session_yolo(new_session_id)
-                disable_session_yolo(old_key)
+            approval.unregister_gateway_notify(old_key)
         with contextlib.suppress(Exception):
-            register_gateway_notify(new_session_id, lambda data: _emit_approval_request(sid, data))
-
+            if approval.is_session_yolo_enabled(old_key):
+                approval.enable_session_yolo(new_session_id)
+                approval.disable_session_yolo(old_key)
+        with contextlib.suppress(Exception):
+            approval.register_gateway_notify(new_session_id, lambda data: _emit_approval_request(sid, data))
     # Invalidate any in-flight ``_drain_queued_prompt`` claim taken under the pre-rotation key: a raced
     # drain must not dispatch on the continuation (its envelope is restored to the queue).
     session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
