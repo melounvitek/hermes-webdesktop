@@ -11,6 +11,7 @@ import os
 import re
 import uuid
 from collections import OrderedDict
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -78,7 +79,6 @@ def _redact(text: str) -> str:
 def check_bluebubbles_requirements() -> bool:
     try:
         import aiohttp  # noqa: F401
-        import httpx  # noqa: F401
     except ImportError:
         return False
     return True
@@ -197,14 +197,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         """Fire a private-API chat action (typing/read); True only if the call was made."""
         if not self._private_api_enabled or not self._helper_connected or not self.client:
             return False
-        try:
+        with suppress(Exception):
             guid = await self._resolve_chat_guid(chat_id)
             if guid:
                 url = self._api_url(f"/api/v1/chat/{quote(guid, safe='')}/{action}")
                 await getattr(self.client, method)(url, timeout=5)
                 return True
-        except Exception:
-            pass
         return False
 
     # --- Lifecycle ---
@@ -286,12 +284,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     async def _find_registered_webhooks(self, url: str) -> list:
         """Return list of BB webhook entries matching *url*."""
-        try:
+        with suppress(Exception):
             data = (await self._api_get("/api/v1/webhook")).get("data")
             if isinstance(data, list):
                 return [wh for wh in data if wh.get("url") == url]
-        except Exception:
-            pass
         return []
 
     async def _register_webhook(self) -> bool:
@@ -353,7 +349,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if target in self._guid_cache:
             self._guid_cache.move_to_end(target)
             return self._guid_cache[target]
-        try:
+        with suppress(Exception):
             payload = await self._api_post("/api/v1/chat/query", {"limit": 100, "offset": 0})
             for chat in payload.get("data", []) or []:
                 if (chat.get("chatIdentifier") or chat.get("identifier")) != target:
@@ -364,8 +360,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     while len(self._guid_cache) > _GUID_CACHE_SIZE:
                         self._guid_cache.popitem(last=False)
                 return guid
-        except Exception:
-            pass
         return None
 
     async def _create_chat_for_handle(self, address: str, message: str) -> SendResult:
@@ -488,7 +482,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         is_group = ";+;" in (chat_id or "")
         info: Dict[str, Any] = {"name": chat_id, "type": "group" if is_group else "dm"}
-        try:
+        with suppress(Exception):
             guid = await self._resolve_chat_guid(chat_id)
             if guid:
                 res = await self._api_get(f"/api/v1/chat/{quote(guid, safe='')}?with=participants")
@@ -499,8 +493,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 ]
                 if participants:
                     info["participants"] = participants
-        except Exception:
-            pass
         return info
 
     def format_message(self, content: str) -> str:
