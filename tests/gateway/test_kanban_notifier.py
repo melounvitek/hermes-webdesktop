@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 from gateway.config import Platform
-from gateway.kanban_watchers import (
+from gateway.kanban_watchers_common import (
     _acquire_singleton_lock,
     _release_singleton_lock,
 )

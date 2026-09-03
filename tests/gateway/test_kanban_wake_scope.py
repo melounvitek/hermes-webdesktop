@@ -12,7 +12,7 @@ from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 from gateway.config import Platform, PlatformConfig
-from gateway.kanban_watchers import _wake_scope_id
+from gateway.kanban_watchers_notifier import _wake_scope_id
 from gateway.run import GatewayRunner
 from gateway.session import build_session_key
 from hermes_cli import kanban_db as kb

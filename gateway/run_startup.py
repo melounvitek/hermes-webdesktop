@@ -523,7 +523,7 @@ class GatewayStartupMixin:
 
         See #69089.
         """
-        from gateway.run import _arm_loop_floor_timer, start_loop_liveness_watchdog
+        from gateway.shutdown_watchdog import _arm_loop_floor_timer, start_loop_liveness_watchdog
         config = getattr(self, "config", None)
         if config is not None and not getattr(config, "loop_watchdog", True):
             return
@@ -673,7 +673,7 @@ class GatewayStartupMixin:
             # Loop live: the loop-liveness watchdog takes over from the startup watchdog. Disarm even
             # when loop guards are config-disabled; only inside this branch (no live loop = stay armed).
             with _log_suppressed(logging.DEBUG, "Startup watchdog disarm failed", exc_info=True):
-                from gateway.startup_watchdog import disarm_startup_watchdog
+                from hermes_startup_watchdog import disarm_startup_watchdog
                 disarm_startup_watchdog()
         logger.info("Session storage: %s", self.config.sessions_dir)
         self._start_log_systemd_timing_alignment()
@@ -1326,7 +1326,7 @@ class GatewayStartupMixin:
         self, row: Dict[str, Any], profile_name: Optional[str]
     ) -> "GatewayStartupMixin._HandoffDestination":
         """Resolve platform, transport, home channel, thread and destination source for a row."""
-        from gateway.run import resolve_delivery_transport
+        from gateway.delivery import resolve_delivery_transport
         cli_session_id = row["id"]
         platform_name = (row.get("handoff_platform") or "").strip().lower()
         if not platform_name:
