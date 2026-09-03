@@ -108,10 +108,8 @@ def _capture_mode() -> str:
     capture more than the operator intended)."""
     global _warned_invalid_capture
     value = _env("HERMES_LANGFUSE_CAPTURE").lower()
-    if not value:
-        return _DEFAULT_CAPTURE_MODE
-    if value in _CAPTURE_MODES:
-        return value
+    if not value or value in _CAPTURE_MODES:
+        return value or _DEFAULT_CAPTURE_MODE
     if not _warned_invalid_capture:
         _warned_invalid_capture = True
         logger.warning(
@@ -406,22 +404,18 @@ def _messages_for_langfuse_input(*, request_messages: Any = None, messages: Any 
     return serialized if system_msg is None else [system_msg, *serialized]
 
 
+def _serialize_message(message: dict[str, Any]) -> dict[str, Any]:
+    role, is_tool = message.get("role"), message.get("role") == "tool"
+    return {
+        "role": role, "content": _capture_content(message.get("content"), parse_json_strings=is_tool),
+        **({"tool_call_id": message["tool_call_id"]} if is_tool and message.get("tool_call_id") else {}),
+        **({"name": _safe_value(message["name"])} if is_tool and message.get("name") else {}),
+        **({"tool_calls": _capture_content(message["tool_calls"], parse_json_strings=True)} if message.get("tool_calls") else {}),
+    }
+
+
 def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
-    if not isinstance(messages, list):
-        return []
-    serialized = []
-    for message in messages[-12:]:
-        if not isinstance(message, dict):
-            continue
-        role, is_tool = message.get("role"), message.get("role") == "tool"
-        serialized.append({
-            "role": role, "content": _capture_content(message.get("content"), parse_json_strings=is_tool),
-            **({"tool_call_id": message["tool_call_id"]} if is_tool and message.get("tool_call_id") else {}),
-            **({"name": _safe_value(message["name"])} if is_tool and message.get("name") else {}),
-            **({"tool_calls": _capture_content(message["tool_calls"], parse_json_strings=True)}
-               if message.get("tool_calls") else {}),
-        })
-    return serialized
+    return [_serialize_message(m) for m in messages[-12:] if isinstance(m, dict)] if isinstance(messages, list) else []
 
 
 def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
@@ -491,33 +485,25 @@ def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
     return usage_details, cost_details
 
 
-def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, base_url: str) -> tuple[dict[str, int], dict[str, float]]:
+def _usage_and_cost(response: Any, *, provider: str, model: str, base_url: str, api_mode: str = "",
+                    usage: Optional[dict] = None) -> tuple[dict[str, int], dict[str, float]]:
+    """Langfuse usage/cost maps from ``response.usage`` (post_llm_call) or, when ``usage``
+    is given (post_api_request), from that pre-built CanonicalUsage summary dict."""
     raw_usage = getattr(response, "usage", None)
-    if not raw_usage:
+    if usage is None and not raw_usage:
         return {}, {}
     try:
-        from agent.usage_pricing import normalize_usage
+        from agent.usage_pricing import CanonicalUsage, normalize_usage
 
-        canonical = normalize_usage(raw_usage, provider=provider, api_mode=api_mode)
-        return _canonical_usage_and_cost(canonical, provider=provider, model=model, base_url=base_url)
-    except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"usage normalization failed: {exc}")
-        return {}, {}
-
-
-def _summary_usage_and_cost(usage: dict, *, provider: str, model: str, base_url: str) -> tuple[dict[str, int], dict[str, float]]:
-    """post_api_request path: usage arrives as a pre-built CanonicalUsage summary dict."""
-    try:
-        from agent.usage_pricing import CanonicalUsage
-
-        canonical = CanonicalUsage(
+        canonical = normalize_usage(raw_usage, provider=provider, api_mode=api_mode) if usage is None else CanonicalUsage(
             output_tokens=usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
             request_count=usage.get("request_count", 1),
-            **{attr: usage.get(attr, 0)
-               for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
+            **{attr: usage.get(attr, 0) for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
         )
         return _canonical_usage_and_cost(canonical, provider=provider, model=model, base_url=base_url)
-    except Exception:
+    except Exception as exc:  # pragma: no cover - fail-open
+        if usage is None:
+            _debug(f"usage normalization failed: {exc}")
         return {}, {}
 
 
@@ -621,11 +607,8 @@ def _flush(client: Any) -> None:
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
     client = _get_langfuse()
-    if client is None:
-        return
-
     with _STATE_LOCK:
-        state = _TRACE_STATE.pop(task_key, None)
+        state = _TRACE_STATE.pop(task_key, None) if client is not None else None
     if state is None:
         return
 
@@ -700,11 +683,8 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
     if client is None:
         return
     with _STATE_LOCK:
-        _get_or_start_state_locked(
-            task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider,
-            model=model, api_mode=api_mode, messages=messages, client=client,
-            turn_id=turn_id, api_request_id=api_request_id,
-        )
+        _get_or_start_state_locked(task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider, model=model,
+                                   api_mode=api_mode, messages=messages, client=client, turn_id=turn_id, api_request_id=api_request_id)
 
 
 def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, references: Any) -> None:
@@ -735,14 +715,10 @@ def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, refe
         metadata = {"moa_role": "reference", "label": label,
                     **{k: ref[k] for k in ("provider", "cost_status", "cost_source", "temperature") if ref.get(k) is not None}}
 
-        observation = _start_child_observation(
-            state, name=f"MoA advisor: {label}", as_type="generation",
-            input_value=None, metadata=metadata, model=ref.get("model"),
-        )
-        _end_observation(
-            observation, output=_capture_content(ref.get("output")),
-            usage_details=usage_details, cost_details=cost_details, metadata=metadata,
-        )
+        observation = _start_child_observation(state, name=f"MoA advisor: {label}", as_type="generation", input_value=None,
+                                               metadata=metadata, model=ref.get("model"))
+        _end_observation(observation, output=_capture_content(ref.get("output")), usage_details=usage_details,
+                         cost_details=cost_details, metadata=metadata)
 
 
 def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
@@ -761,10 +737,8 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
     if isinstance(body_model, str) and body_model:
         model = body_model
 
-    input_messages = _coerce_request_messages(
-        request_messages=request_messages, messages=messages,
-        conversation_history=conversation_history, user_message=user_message,
-    )
+    input_messages = _coerce_request_messages(request_messages=request_messages, messages=messages,
+                                              conversation_history=conversation_history, user_message=user_message)
     langfuse_input = _messages_for_langfuse_input(request_messages=input_messages, system_prompt=system_prompt)
     has_system = bool(langfuse_input) and langfuse_input[0].get("role") == "system"
     system_chars = len(str(langfuse_input[0].get("content") or "")) if has_system else 0
@@ -772,10 +746,8 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
 
     with _STATE_LOCK:
         state = _get_or_start_state_locked(
-            task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider,
-            model=model, api_mode=api_mode, messages=input_messages, client=client,
-            turn_id=turn_id, api_request_id=api_request_id,
-        )
+            task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider, model=model,
+            api_mode=api_mode, messages=input_messages, client=client, turn_id=turn_id, api_request_id=api_request_id)
         previous = state.generations.pop(req_key, None)
         if previous is not None:
             _end_observation(previous)
@@ -828,10 +800,9 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     # post_api_request's ``response`` is a sanitized dict with no ``.usage``;
     # gate on the attribute so the usage-dict fallback is actually reached.
     if getattr(response, "usage", None) is not None:
-        usage_details, cost_details = _usage_and_cost(response, provider=provider, api_mode=api_mode,
-                                                      model=model, base_url=base_url)
+        usage_details, cost_details = _usage_and_cost(response, provider=provider, api_mode=api_mode, model=model, base_url=base_url)
     elif isinstance(usage, dict) and usage:
-        usage_details, cost_details = _summary_usage_and_cost(usage, provider=provider, model=model, base_url=base_url)
+        usage_details, cost_details = _usage_and_cost(None, provider=provider, model=model, base_url=base_url, usage=usage)
     else:
         usage_details, cost_details = {}, {}
 
@@ -854,11 +825,8 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
         state = _TRACE_STATE.get(task_key)
         if state is None:
             return
-        observation = _start_child_observation(
-            state, name=f"Tool: {tool_name}", as_type="tool",
-            input_value=_capture_content(args),
-            metadata={"tool_name": tool_name, "tool_call_id": tool_call_id},
-        )
+        observation = _start_child_observation(state, name=f"Tool: {tool_name}", as_type="tool", input_value=_capture_content(args),
+                                               metadata={"tool_name": tool_name, "tool_call_id": tool_call_id})
         if tool_call_id:
             state.tools[tool_call_id] = observation
         else:
@@ -890,15 +858,12 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
             state = _TRACE_STATE.get(task_key)
             calls = state.turn_tool_calls if state is not None else []
             tool_call = next((tc for tc in reversed(calls) if tc.get("id") == tool_call_id), None)
-            if tool_call is not None:
-                tool_call["output"] = safe_result_value
-                if isinstance(tool_call.get("function"), dict):
-                    tool_call["function"]["output"] = safe_result_value
+            for target in (tool_call, tool_call.get("function")) if tool_call is not None else ():
+                if isinstance(target, dict):
+                    target["output"] = safe_result_value
 
-    _end_observation(
-        observation, output=safe_result_value,
-        metadata={"tool_name": tool_name, "args": _capture_content(args, parse_json_strings=True)},
-    )
+    _end_observation(observation, output=safe_result_value,
+                     metadata={"tool_name": tool_name, "args": _capture_content(args, parse_json_strings=True)})
 
 
 def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_count: int = 0,
@@ -980,8 +945,7 @@ def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = Non
                     **({"parent_subagent_id": parent_subagent_id} if parent_subagent_id else {})}
         state.subagents[str(child_session_id)] = _start_child_observation(
             state, name=f"Subagent: {child_role or 'delegate'}", as_type="span",
-            input_value=_capture_content(child_goal), metadata=metadata,
-        )
+            input_value=_capture_content(child_goal), metadata=metadata)
 
 
 def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, child_role: str = "",
