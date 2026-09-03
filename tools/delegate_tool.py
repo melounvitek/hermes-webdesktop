@@ -21,9 +21,8 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
-# The delegate_tool_* siblings hold the pieces split out of this module; every
-# name callers or patching tests reach as ``tools.delegate_tool.<name>`` is
-# re-imported here. Mutable flag globals live only in their owning module.
+# The delegate_tool_* siblings hold the pieces split out of this module; every name callers or patching tests reach as
+# ``tools.delegate_tool.<name>`` is re-imported here. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
     _ChildRun, _attach_child, _build_result_entry, _dump_subagent_timeout_diagnostic, _fabricated_entry,
     _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat, _validate_child_output_schema,
@@ -68,11 +67,10 @@ def _normalize_role(r: Optional[str]) -> str:
 
 DEFAULT_MAX_ITERATIONS = 250
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
-# Stale-heartbeat thresholds (cycles of _HEARTBEAT_INTERVAL with no progress).
-# Progress = iteration, current_tool OR last_activity_ts advancing; an in-flight
-# model wait refreshes last_activity_ts, so slow models are not "idle". Idle
-# stays tight so a truly wedged child doesn't mask the gateway timeout; in-tool
-# is much higher so legitimately long tools can finish.
+# Stale-heartbeat thresholds (cycles of _HEARTBEAT_INTERVAL with no progress). Progress = iteration, current_tool OR
+# last_activity_ts advancing; an in-flight model wait refreshes last_activity_ts, so slow models are not "idle". Idle
+# stays tight so a truly wedged child doesn't mask the gateway timeout; in-tool is much higher so legitimately long
+# tools can finish.
 _HEARTBEAT_STALE_CYCLES_IDLE = 15  # 450s idle between turns → stale
 _HEARTBEAT_STALE_CYCLES_IN_TOOL = 40  # 1200s stuck on same tool → stale
 
@@ -82,11 +80,10 @@ def check_delegate_requirements() -> bool:
 
 
 def _open_child_session_db(parent_agent) -> Any:
-    """DEDICATED SessionDB handle for the child, or None: the parent's handle can be
-    closed by its own lifecycle while a background child still flushes (transcript
-    silently dropped). It MUST open the same db FILE as the parent's handle
-    (non-launch profiles), else lineage / session_search break; released by the
-    child's close() via _owns_session_db."""
+    """DEDICATED SessionDB handle for the child, or None: the parent's handle can be closed by its own lifecycle while
+    a background child still flushes (transcript silently dropped). It MUST open the same db FILE as the parent's
+    handle (non-launch profiles), else lineage / session_search break; released by the child's close() via
+    _owns_session_db."""
     parent_session_db = getattr(parent_agent, "_session_db", None)
     if parent_session_db is None:
         return None
@@ -118,9 +115,8 @@ def _build_child_agent(
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
 ):
-    """Build (don't run) a child AIAgent on the main thread. override_* (from
-    delegation config) replace parent inheritance so children can run on a
-    different provider:model pair."""
+    """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
+    inheritance so children can run on a different provider:model pair."""
     import uuid as _uuid
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
@@ -242,9 +238,8 @@ def _run_single_child(
     """
     child_progress_cb = getattr(child, "tool_progress_callback", None)
     child_pool, leased_cred_id = _lease_child_credential(child)
-    # Heartbeat keeps the parent's _last_activity_ts moving so the gateway
-    # inactivity timeout doesn't fire while the child works; it stops itself
-    # once the child looks stale (see _HEARTBEAT_STALE_CYCLES_*).
+    # Heartbeat keeps the parent's _last_activity_ts moving so the gateway inactivity timeout doesn't fire while the
+    # child works; it stops itself once the child looks stale (see _HEARTBEAT_STALE_CYCLES_*).
     heartbeat = _start_heartbeat(child, parent_agent, task_index)
     # TUI/RPC registry entry (kill/pause/status by subagent_id); None for test
     # doubles without a stable id. Unregistered in the finally block.
@@ -343,11 +338,10 @@ def delegate_task(
     output_schema: Optional[Dict[str, Any]] = None, action: Optional[str] = None, subagent_id: Optional[str] = None,
     message: Optional[str] = None, parent_agent=None, credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control
-    running ones. ``action`` list/steer/stop run synchronously and bypass the pause
-    gate, depth limit and async dispatch. ``role`` is legacy (per-task beats
-    top-level; capability is depth-derived). Returns JSON with one results entry
-    per task, or a dispatch handle when running in the background."""
+    """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
+    list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
+    (per-task beats top-level; capability is depth-derived). Returns JSON with one results entry per task, or a
+    dispatch handle when running in the background."""
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 
@@ -401,9 +395,8 @@ def delegate_task(
         return tool_error(err)
 
     overall_start = time.monotonic()
-    # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a
-    # side channel with zero effect on message content or prompt caching.
-    # Best-effort: on failure live_paths is empty and delegation proceeds.
+    # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a side channel with zero effect on message
+    # content or prompt caching. Best-effort: on failure live_paths is empty and delegation proceeds.
     from tools.delegation_live_log import create_live_transcripts
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
         task_list, context, model=creds.get("model"), provider=creds.get("provider")
@@ -434,9 +427,8 @@ def _build_top_level_description() -> str:
     except Exception:
         orchestration_available = False
 
-    # Mention recursion only where it's actually available. send_message is
-    # deliberately not named (gateway-internal vocabulary); model_tools
-    # session-filters the list to tools the session has.
+    # Mention recursion only where it's actually available. send_message is deliberately not named (gateway-internal
+    # vocabulary); model_tools session-filters the list to tools the session has.
     if orchestration_available:
         restrictions_rule = (
             "- Children cannot call clarify, memory, or cronjob.\n"
@@ -505,11 +497,9 @@ def _p(type_: str, description: str, **extra) -> dict:
 
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
-    # description / tasks.description are placeholders: the real text is built per
-    # get_definitions() call by _build_dynamic_schema_overrides() so the model sees
-    # the user's actual max_concurrent_children / max_spawn_depth. Lazy (not at
-    # import) so cli.CLI_CONFIG isn't forced to load before the test conftest
-    # redirects HERMES_HOME.
+    # description / tasks.description are placeholders: the real text is built per get_definitions() call by
+    # _build_dynamic_schema_overrides() so the model sees the user's actual max_concurrent_children / max_spawn_depth.
+    # Lazy (not at import) so cli.CLI_CONFIG isn't forced to load before the test conftest redirects HERMES_HOME.
     "description": (
         "Spawn one or more subagents in isolated contexts. "
         "Description is rebuilt at every get_definitions() call to reflect the user's current delegation limits."
@@ -517,13 +507,10 @@ DELEGATE_TASK_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            # The handler also accepts the legacy single-goal shape (top-level
-            # `goal`/`context`/`output_schema`), wrapped into a one-entry batch at
-            # dispatch, and a per-task `role` (legacy, ignored: capability is
-            # depth-derived). Both unadvertised on purpose (old transcripts only);
-            # do not re-add. No maxItems — the runtime limit
-            # (delegation.max_concurrent_children) is enforced with a clear error in
-            # delegate_task().
+            # The handler also accepts the legacy single-goal shape (top-level `goal`/`context`/`output_schema`),
+            # wrapped into a one-entry batch at dispatch, and a per-task `role` (legacy, ignored: capability is
+            # depth-derived). Both unadvertised on purpose (old transcripts only); do not re-add. No maxItems — the
+            # runtime limit (delegation.max_concurrent_children) is enforced with a clear error in delegate_task().
             "tasks": {
                 "type": "array",
                 "minItems": 1,
@@ -580,13 +567,11 @@ DELEGATE_TASK_SCHEMA = {
 from tools.registry import registry, tool_error
 
 def _model_background_value(args: dict, parent_agent=None) -> bool:
-    """Background flag for the MODEL-facing dispatch path (registry fallback).
-    Top-level delegations always run in the background — the model does not choose
-    — for single tasks and fan-out batches alike (one async unit, one consolidated
-    result); an orchestrator subagent (depth > 0) is the exception since it needs
-    its workers' results within its own turn. The live path is
-    ``run_agent._dispatch_delegate_task``; this mirrors it for the rare case the
-    intercept is bypassed. Direct Python callers keep the synchronous default."""
+    """Background flag for the MODEL-facing dispatch path (registry fallback). Top-level delegations always run in the
+    background — the model does not choose — for single tasks and fan-out batches alike (one async unit, one
+    consolidated result); an orchestrator subagent (depth > 0) is the exception since it needs its workers' results
+    within its own turn. The live path is ``run_agent._dispatch_delegate_task``; this mirrors it for the rare case
+    the intercept is bypassed. Direct Python callers keep the synchronous default."""
     return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

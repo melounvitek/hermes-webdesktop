@@ -16,16 +16,14 @@ from tools.delegate_tool_registry import _active_subagents, _active_subagents_lo
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
 
-# Terminal child statuses that mean "the subagent did NOT deliver a usable
-# result". Shared by the CLI spinner echo, the gateway failure notice, and
-# the parent-facing failure summary so every surface agrees.
+# Terminal child statuses that mean "the subagent did NOT deliver a usable result". Shared by the CLI spinner echo,
+# the gateway failure notice, and the parent-facing failure summary so every surface agrees.
 SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "error", "timeout"})
 
 @contextmanager
 def _quiet(log_message: Optional[str], *log_args: Any, exc_info: bool = False):
-    """Best-effort block: any Exception is swallowed (never reaches the run) and,
-    when ``log_message`` is given, logged at debug — the exception fills a trailing
-    unsatisfied ``%s``."""
+    """Best-effort block: any Exception is swallowed (never reaches the run) and, when ``log_message`` is given,
+    logged at debug — the exception fills a trailing unsatisfied ``%s``."""
     try:
         yield
     except Exception as exc:
@@ -42,9 +40,8 @@ def _safe_progress(cb: Any, event_type: Any, *args: Any, **kwargs: Any) -> None:
             cb(event_type, *args, **kwargs)
 
 def _clean_error_text(error: Any, max_chars: int = 200) -> str:
-    """Reduce an error payload (traceback / JSON wall) to one clean line: the
-    exception message (last line of a traceback) or the first non-empty line,
-    hard-capped in length."""
+    """Reduce an error payload (traceback / JSON wall) to one clean line: the exception message (last line of a
+    traceback) or the first non-empty line, hard-capped in length."""
     lines = [ln.strip() for ln in str(error or "").strip().splitlines() if ln.strip()]
     if not lines:
         return ""
@@ -72,11 +69,10 @@ def format_subagent_failure_line(
 
 
 class DelegateEvent(str, enum.Enum):
-    """Formal delegation progress event types. The relay normalises incoming legacy
-    strings (``tool.started``, ``_thinking``, …) to these via ``_LEGACY_EVENT_MAP``;
-    external consumers (gateway SSE, ACP adapter, CLI) still receive the legacy
-    strings during the deprecation window. TASK_SPAWNED / TASK_COMPLETED /
-    TASK_FAILED are reserved for future orchestrator lifecycle events, not emitted yet."""
+    """Formal delegation progress event types. The relay normalises incoming legacy strings (``tool.started``,
+    ``_thinking``, …) to these via ``_LEGACY_EVENT_MAP``; external consumers (gateway SSE, ACP adapter, CLI) still
+    receive the legacy strings during the deprecation window. TASK_SPAWNED / TASK_COMPLETED / TASK_FAILED are
+    reserved for future orchestrator lifecycle events, not emitted yet."""
 
     TASK_SPAWNED = "delegate.task_spawned"
     TASK_PROGRESS = "delegate.task_progress"
@@ -95,9 +91,8 @@ _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
     "subagent_progress": DelegateEvent.TASK_PROGRESS,
 }
 
-# Event → _ChildProgressRelay method name. Lifecycle strings are emitted by the
-# orchestrator itself (not DelegateEvent). Any other DelegateEvent
-# (TASK_TOOL_STARTED and the reserved TASK_* values) takes the tool-started
+# Event → _ChildProgressRelay method name. Lifecycle strings are emitted by the orchestrator itself (not
+# DelegateEvent). Any other DelegateEvent (TASK_TOOL_STARTED and the reserved TASK_* values) takes the tool-started
 # path; None means "recognised but ignored".
 _LIFECYCLE_EVENTS = frozenset({"subagent.start", "subagent.complete", "subagent.text"})
 _EVENT_HANDLERS: Dict[Any, Optional[str]] = {
@@ -123,10 +118,9 @@ def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
     max_spawn_depth: int = 2, child_depth: int = 1,
 ) -> str:
-    """Focused system prompt for a child agent. role='orchestrator' appends a
-    delegation-capability block (modeled on OpenClaw's buildSubagentSystemPrompt);
-    its depth note is literal truth grounded in the passed config so the LLM can't
-    confabulate nesting."""
+    """Focused system prompt for a child agent. role='orchestrator' appends a delegation-capability block (modeled on
+    OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth grounded in the passed config so the LLM
+    can't confabulate nesting."""
     parts = ["You are a focused subagent working on a specific delegated task.", "", f"YOUR TASK:\n{goal}"]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
@@ -136,12 +130,10 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
-        # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...) via
-        # the SAME discovery/priority/cap logic as the main agent's prompt:
-        # children are built with skip_context_files=True, so without this a
-        # subagent works in a repo blind to its conventions. SOUL.md is skipped
-        # (identity belongs to the parent). workspace_path comes only from
-        # explicit sources (_resolve_workspace_hint, never bare getcwd), so the
+        # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...) via the SAME discovery/priority/cap logic
+        # as the main agent's prompt: children are built with skip_context_files=True, so without this a subagent
+        # works in a repo blind to its conventions. SOUL.md is skipped (identity belongs to the parent).
+        # workspace_path comes only from explicit sources (_resolve_workspace_hint, never bare getcwd), so the
         # install-tree-fallback leak doesn't apply. Best-effort.
         _ctx_files = ""
         with _quiet("subagent: workspace context-files load failed", exc_info=True):
@@ -214,12 +206,11 @@ _BATCH_ORDINALS: Dict[str, int] = {}
 _BATCH_ORDINALS_LOCK = threading.Lock()
 
 def format_batch_tag(delegation_id: Optional[str]) -> str:
-    """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1`` (first
-    batch seen in this process), the next distinct id → ``set 2``. Several batches
-    (a parent's fan-out plus a child's nested fan-out, or two concurrent tools)
-    print interleaved ``[n/N]`` lines to one console; without a tag ``✓ [3/3]`` and
-    ``✓ [3/9]`` are indistinguishable, and a raw hex slice is unreadable. Empty
-    string when no id is known so callers can concatenate unconditionally."""
+    """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1`` (first batch seen in this process), the
+    next distinct id → ``set 2``. Several batches (a parent's fan-out plus a child's nested fan-out, or two
+    concurrent tools) print interleaved ``[n/N]`` lines to one console; without a tag ``✓ [3/3]`` and ``✓ [3/9]``
+    are indistinguishable, and a raw hex slice is unreadable. Empty string when no id is known so callers can
+    concatenate unconditionally."""
     if not isinstance(delegation_id, str) or not delegation_id:
         return ""
     with _BATCH_ORDINALS_LOCK:
@@ -236,9 +227,8 @@ def _batch_prefix(delegation_id: Optional[str], task_index: int, task_count: int
     return f"[{tag}] " if tag else ""
 
 def _emit_parent_console(parent_agent, line: str) -> None:
-    """Emit a progress line through ``parent_agent._safe_print`` when available
-    so headless stdio hosts (ACP, gateway API) can redirect it to stderr; a
-    bare ``print()`` would land on stdout and corrupt JSON-RPC framing."""
+    """Emit a progress line through ``parent_agent._safe_print`` when available so headless stdio hosts (ACP, gateway
+    API) can redirect it to stderr; a bare ``print()`` would land on stdout and corrupt JSON-RPC framing."""
     printer = getattr(parent_agent, "_safe_print", None)
     if callable(printer):
         with _quiet(None):
@@ -260,12 +250,10 @@ def _short(text: str, n: int) -> str:
 
 
 class _ChildProgressRelay:
-    """Callable relaying one child's events to the parent display. CLI: prints
-    tree-view lines above the parent's delegation spinner. Gateway: batches tool
-    names (``_BATCH_SIZE``) and relays to the parent's progress callback, threading
-    the identity kwargs (subagent_id, parent_id, depth, model, toolsets) into every
-    event so the TUI can rebuild the live spawn tree and route per-branch controls
-    back by ``subagent_id``."""
+    """Callable relaying one child's events to the parent display. CLI: prints tree-view lines above the parent's
+    delegation spinner. Gateway: batches tool names (``_BATCH_SIZE``) and relays to the parent's progress callback,
+    threading the identity kwargs (subagent_id, parent_id, depth, model, toolsets) into every event so the TUI can
+    rebuild the live spawn tree and route per-branch controls back by ``subagent_id``."""
 
     _BATCH_SIZE = 5
 
@@ -346,9 +334,8 @@ class _ChildProgressRelay:
         self._relay("subagent.thinking", preview=text)
 
     def _on_progress(self, tool_name, preview, args, kwargs):
-        # Pre-batched summary from a nested orchestrator's grandchild arrives in
-        # the tool_name slot: render distinctly (no tool-emoji lookup) and relay
-        # upward without re-batching.
+        # Pre-batched summary from a nested orchestrator's grandchild arrives in the tool_name slot: render distinctly
+        # (no tool-emoji lookup) and relay upward without re-batching.
         summary_text = tool_name or preview or ""
         if summary_text:
             self._tree_line(f"🔀 {summary_text}")
@@ -386,9 +373,8 @@ def _build_child_progress_callback(
     parent_id: Optional[str] = None, depth: Optional[int] = None, model: Optional[str] = None,
     toolsets: Optional[List[str]] = None, session_ref: Optional[Dict[str, Any]] = None,
 ) -> Optional[callable]:
-    """Relay for one child's events (see ``_ChildProgressRelay``), or None when
-    the parent has neither a spinner nor a progress callback — the child then
-    runs with no progress callback at all (zero behavior change)."""
+    """Relay for one child's events (see ``_ChildProgressRelay``), or None when the parent has neither a spinner nor a
+    progress callback — the child then runs with no progress callback at all (zero behavior change)."""
     spinner = getattr(parent_agent, "_delegate_spinner", None)
     parent_cb = getattr(parent_agent, "tool_progress_callback", None)
     if not spinner and not parent_cb:

@@ -123,9 +123,8 @@ def _diag_sizes(child: Any) -> List[str]:
     return ["## Prompt / schema sizes"] + _diag_section("system_prompt: <error: ", _prompt) + _diag_section("tool_schema: <error: ", _tools)
 
 def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
-    """Worker stack plus all other live threads (bounded to 40): the worker is
-    often parked on a helper thread, so a pre-HTTP wedge is indistinguishable
-    from a slow provider without the full picture."""
+    """Worker stack plus all other live threads (bounded to 40): the worker is often parked on a helper thread, so a
+    pre-HTTP wedge is indistinguishable from a slow provider without the full picture."""
     import sys as _sys
     lines = ["## Worker thread stack at timeout"]
     frames = _sys._current_frames()
@@ -155,10 +154,9 @@ def _dump_subagent_timeout_diagnostic(
     *, child: Any, task_index: int, timeout_seconds: float, duration_seconds: float,
     worker_thread: Optional[threading.Thread], goal: str,
 ) -> Optional[str]:
-    """Structured diagnostic for a subagent that timed out before any API call
-    (otherwise "timed out with no response", 0 API calls, nothing to inspect):
-    ``~/.hermes/logs/subagent-timeout-<sid>-<ts>.log`` with the child's config,
-    prompt/schema sizes, activity snapshot and worker stack. Path, or None on failure."""
+    """Structured diagnostic for a subagent that timed out before any API call (otherwise "timed out with no
+    response", 0 API calls, nothing to inspect): ``~/.hermes/logs/subagent-timeout-<sid>-<ts>.log`` with the
+    child's config, prompt/schema sizes, activity snapshot and worker stack. Path, or None on failure."""
     try:
         from hermes_constants import get_hermes_home
         import datetime as _dt
@@ -263,9 +261,8 @@ def _register_child(
     child: Any, parent_agent: Any, goal: str, *, owner_session_id: Optional[str], owner_transport: Any,
     owner_session_record: Any,
 ) -> Optional[str]:
-    """Register the live child in the module registry; return its subagent_id. Test
-    doubles without a stable string ``_subagent_id`` are not registered (None) and
-    the caller skips every registry interaction for them."""
+    """Register the live child in the module registry; return its subagent_id. Test doubles without a stable string
+    ``_subagent_id`` are not registered (None) and the caller skips every registry interaction for them."""
     _subagent_id = getattr(child, "_subagent_id", None)
     if not isinstance(_subagent_id, str) or not _subagent_id:
         return None
@@ -284,10 +281,9 @@ def _register_child(
         "delegation_id": _str_or_none(getattr(child, "_delegation_id", None)),
         "model": _str_or_none(getattr(child, "model", None)),
         "started_at": time.time(), "status": "running", "tool_count": 0, "agent": child,
-        # Owning conversation's durable session id (same lineage completion
-        # delivery routes by), sourced from the child's stamp so it survives
-        # a parent_agent rebuild between dispatch and run; used for
-        # list/steer/stop ownership when the weakref chain breaks.
+        # Owning conversation's durable session id (same lineage completion delivery routes by), sourced from the
+        # child's stamp so it survives a parent_agent rebuild between dispatch and run; used for list/steer/stop
+        # ownership when the weakref chain breaks.
         "owner_agent_session_id": (
             str(getattr(child, "_parent_session_id", "") or "") or str(getattr(parent_agent, "session_id", "") or "") or None
         ),
@@ -323,14 +319,12 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
 def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     """Hand ``child.close()`` to a Future done-callback and drain its transports.
 
-    The interrupt is cooperative: the worker still runs its finally path, so closing
-    now could close SQLite under its final write — the done-callback is the first
-    safe boundary. The abandoned worker is usually parked in an OpenSSL read; NEVER
-    hard-close that transport from this thread (cross-thread FD release under a
-    live SSL read corrupts native state) — shutdown() the pooled sockets so the read
-    settles with EOF and the worker unwinds. One immediate sweep + one delayed
-    re-sweep for a connection opened in between; a worker that still won't settle
-    keeps its resources until process exit.
+    The interrupt is cooperative: the worker still runs its finally path, so closing now could close SQLite under its
+    final write — the done-callback is the first safe boundary. The abandoned worker is usually parked in an OpenSSL
+    read; NEVER hard-close that transport from this thread (cross-thread FD release under a live SSL read corrupts
+    native state) — shutdown() the pooled sockets so the read settles with EOF and the worker unwinds. One immediate
+    sweep + one delayed re-sweep for a connection opened in between; a worker that still won't settle keeps its
+    resources until process exit.
     """
     child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
     _drain = getattr(child, "_drain_transports_after_abandonment", None)
@@ -360,10 +354,9 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     return child_pool, leased_cred_id
 
 def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child: Any) -> None:
-    """Linearization boundary for registry steering: from here the child cannot
-    consume another steer. Closing under the registry lock either rejects a
-    concurrent caller or drains every accepted exact text into the result
-    before callbacks/result assembly run."""
+    """Linearization boundary for registry steering: from here the child cannot consume another steer. Closing under
+    the registry lock either rejects a concurrent caller or drains every accepted exact text into the result before
+    callbacks/result assembly run."""
     late = _close_subagent_steering(subagent_id, child) if subagent_id else None
     if late:
         existing = result.get("pending_steer")
@@ -380,9 +373,8 @@ class _SchemaOutcome:
 def _validate_child_output_schema(
     child: Any, result: Dict[str, Any], task_index: int, child_task_id: str, relay_child_text: Any
 ) -> _SchemaOutcome:
-    """Validate the final answer against the attached output_schema with ONE bounded
-    retry. Schema-less children (no dict on ``child._delegate_output_schema``) take
-    no branch here so their result entry stays byte-identical."""
+    """Validate the final answer against the attached output_schema with ONE bounded retry. Schema-less children (no
+    dict on ``child._delegate_output_schema``) take no branch here so their result entry stays byte-identical."""
     _output_schema = getattr(child, "_delegate_output_schema", None)
     if not isinstance(_output_schema, dict):
         return _SchemaOutcome(_output_schema, None, [], 0)
@@ -451,9 +443,8 @@ def _build_result_entry(
     child: Any, result: Dict[str, Any], task_index: int, duration: float, schema: _SchemaOutcome,
 ) -> Dict[str, Any]:
     """Parent-visible result entry (status, exit_reason, tool trace, tokens, cost).
-    ``status``/``exit_reason``/``truncated`` follow the ``_run_single_child`` contract;
-    a structured failure always wins over the summary-presence heuristic (a fallback
-    for legacy/mock results only)."""
+    ``status``/``exit_reason``/``truncated`` follow the ``_run_single_child`` contract; a structured failure always
+    wins over the summary-presence heuristic (a fallback for legacy/mock results only)."""
     summary = result.get("final_response") or ""
     # "(empty)" is run_agent's give-up sentinel after repeated empty LLM
     # responses (usually a transport bug) — a failure, not a success.
@@ -461,16 +452,14 @@ def _build_result_entry(
     if result.get("interrupted", False):
         status, exit_reason = "interrupted", "interrupted"
     elif result.get("failed") or result.get("error"):
-        # The loop returns the error text as final_response, which would
-        # otherwise read as "completed". Never report a provider rejection as
-        # "max_iterations" — that is only truthful for real budget exhaustion.
+        # The loop returns the error text as final_response, which would otherwise read as "completed". Never report a
+        # provider rejection as "max_iterations" — that is only truthful for real budget exhaustion.
         status, exit_reason = "failed", "error"
     else:
-        # exit_reason ("completed" vs "max_iterations") tells the parent HOW
-        # the task ended; completed=False with no failure = budget exhaustion.
-        # A declared schema still violated after the bounded retry makes the
-        # summary unusable under the contract, so status must not say completed
-        # (orchestrators reading only status/icon would accept an empty verdict).
+        # exit_reason ("completed" vs "max_iterations") tells the parent HOW the task ended; completed=False with no
+        # failure = budget exhaustion. A declared schema still violated after the bounded retry makes the summary
+        # unusable under the contract, so status must not say completed (orchestrators reading only status/icon would
+        # accept an empty verdict).
         exit_reason = "completed" if result.get("completed", False) else "max_iterations"
         status = "completed" if schema.valid is not False and usable_summary else "failed"
 
@@ -493,10 +482,9 @@ def _build_result_entry(
             "output": _num(getattr(child, "session_completion_tokens", 0)),
         },
         "tool_trace": _build_tool_trace(result.get("messages") or []),
-        # Captured before the finally block calls child.close() so the parent
-        # thread can fire subagent_stop with the correct role; stripped before
-        # the dict is serialised back to the model (as is _child_cost_usd,
-        # folded into the parent's session cost by the aggregator).
+        # Captured before the finally block calls child.close() so the parent thread can fire subagent_stop with the
+        # correct role; stripped before the dict is serialised back to the model (as is _child_cost_usd, folded into
+        # the parent's session cost by the aggregator).
         "_child_role": getattr(child, "_delegate_role", None),
         "_child_cost_usd": float(_cost or 0.0) if isinstance(_cost, (int, float)) else 0.0,
     }
@@ -505,8 +493,7 @@ def _build_result_entry(
     entry["cost_status"] = _cost_status if isinstance(_cost_status, str) and _cost_status else "unknown"
     if status == "failed":
         if schema.valid is False and usable_summary:
-            # The child DID respond; name the contract violation instead of
-            # the generic "no response" error.
+            # The child DID respond; name the contract violation instead of the generic "no response" error.
             entry["error"] = (
                 "Final answer does not satisfy the declared output_schema" + (" (after 1 retry)." if schema.retries else ".")
             )
@@ -560,9 +547,8 @@ class _ChildRun:
         return round(time.monotonic() - self.child_start, 2)
 
     def relay_text(self, delta: str) -> None:
-        """Stream callback forwarding the child's reply text up the progress relay so
-        gateway watch windows mirror it live (subagent.text → message.delta). Inert
-        under CLI/TUI: their progress handlers ignore non-tool events."""
+        """Stream callback forwarding the child's reply text up the progress relay so gateway watch windows mirror it
+        live (subagent.text → message.delta). Inert under CLI/TUI: their progress handlers ignore non-tool events."""
         if delta:
             _safe_progress(self.child_progress_cb, "subagent.text", preview=delta)
 
@@ -610,9 +596,8 @@ class _ChildRun:
     def finish_failed(
         self, entry: Dict[str, Any], late_steer: Optional[str], *, preview: str, summary: str = "", status: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Shared tail of every failure path: emit ``subagent.complete`` (``status``
-        defaults to the entry's), note the steer text that won the race with the
-        failure, report the worktree."""
+        """Shared tail of every failure path: emit ``subagent.complete`` (``status`` defaults to the entry's), note
+        the steer text that won the race with the failure, report the worktree."""
         _safe_progress(
             self.child_progress_cb, "subagent.complete", preview=preview, status=status or entry["status"],
             duration_seconds=entry["duration_seconds"], summary=summary,
@@ -625,20 +610,17 @@ class _ChildRun:
         return _close_subagent_steering(self.subagent_id, self.child) if self.subagent_id else None
 
     def await_child(self) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
-        """Run the child's conversation on a daemon worker: ``(result, None, False)``
-        or ``(None, error_entry, close_deferred)`` on timeout/exception.
+        """Run the child's conversation on a daemon worker: ``(result, None, False)`` or ``(None, error_entry,
+        close_deferred)`` on timeout/exception.
 
-        Hard timeout is off by default (``result(timeout=None)``; stuck children are
-        the heartbeat's job). Daemon worker: an abandoned timed-out child on a
-        non-daemon thread would block interpreter exit at atexit join. The worker
-        installs a non-interactive approval callback (deny/approve per
-        delegation.subagent_auto_approve) so dangerous-command prompts never fall
-        back to ``input()`` and deadlock the parent TUI. On failure: steer acceptance
-        closes BEFORE the stop signal (a concurrent steer is drained into the entry
-        or rejected, never lost); a 0-API-call timeout gets a diagnostic dump; a
-        worker that still owns the child gets ``child.close()`` via a Future
-        done-callback (``close_deferred=True``) — closing here would race its
-        still-unwinding finally path.
+        Hard timeout is off by default (``result(timeout=None)``; stuck children are the heartbeat's job). Daemon
+        worker: an abandoned timed-out child on a non-daemon thread would block interpreter exit at atexit join. The
+        worker installs a non-interactive approval callback (deny/approve per delegation.subagent_auto_approve) so
+        dangerous-command prompts never fall back to ``input()`` and deadlock the parent TUI. On failure: steer
+        acceptance closes BEFORE the stop signal (a concurrent steer is drained into the entry or rejected, never
+        lost); a 0-API-call timeout gets a diagnostic dump; a worker that still owns the child gets ``child.close()``
+        via a Future done-callback (``close_deferred=True``) — closing here would race its still-unwinding finally
+        path.
         """
         from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
         from tools.daemon_pool import DaemonThreadPoolExecutor
@@ -726,9 +708,8 @@ class _ChildRun:
         return None, _error_entry, close_deferred
 
     def append_sibling_write_reminder(self, entry: Dict[str, Any]) -> None:
-        """Warn the parent when this child wrote files the parent had already read.
-        Checks writes by ANY non-parent task_id (not just this child's) so nested
-        orchestrator→worker chains are covered too."""
+        """Warn the parent when this child wrote files the parent had already read. Checks writes by ANY non-parent
+        task_id (not just this child's) so nested orchestrator→worker chains are covered too."""
         if not (self.parent_task_id and self.parent_reads_snapshot):
             return
         with _quiet("file_state sibling-write check failed", exc_info=True):
@@ -748,9 +729,8 @@ class _ChildRun:
                 entry["stale_paths"] = mod_paths
 
     def emit_complete(self, result: Dict[str, Any], entry: Dict[str, Any], duration: float) -> None:
-        """Fire ``subagent.complete`` with the per-branch observability payload
-        (tokens, cost, files touched, tool-output tail); every field is optional
-        and degrades gracefully on the client."""
+        """Fire ``subagent.complete`` with the per-branch observability payload (tokens, cost, files touched,
+        tool-output tail); every field is optional and degrades gracefully on the client."""
         if not self.child_progress_cb:
             return
         child = self.child
@@ -785,11 +765,10 @@ class _ChildRun:
         _safe_progress(self.child_progress_cb, "subagent.complete", **complete_kwargs)
 
     def cleanup(self, *, heartbeat: tuple, child_pool: Any, leased_cred_id: Any, close_deferred: bool) -> None:
-        """Finally-path teardown (idempotent, never raises). Order matters: stop
-        heartbeat → drop registry entry → release credential lease → restore the
-        parent's process-global tool names → detach from the parent's interrupt list
-        → close the child (unless a timed-out worker still owns it) → pop the child's
-        Relay scope if no turn is active."""
+        """Finally-path teardown (idempotent, never raises). Order matters: stop heartbeat → drop registry entry →
+        release credential lease → restore the parent's process-global tool names → detach from the parent's
+        interrupt list → close the child (unless a timed-out worker still owns it) → pop the child's Relay scope if
+        no turn is active."""
         child = self.child
         _heartbeat_stop, _heartbeat_thread = heartbeat
         _heartbeat_stop.set()
@@ -818,9 +797,8 @@ class _ChildRun:
         if not close_deferred:
             _close_child(child, "Failed to close child agent after delegation")
 
-        # The AIAgent turn boundary normally closes the child scope itself. This
-        # fallback covers failures before that boundary starts, but must not pop
-        # a scope while a timed-out child worker is still unwinding.
+        # The AIAgent turn boundary normally closes the child scope itself. This fallback covers failures before that
+        # boundary starts, but must not pop a scope while a timed-out child worker is still unwinding.
         with _quiet("Failed to close child Relay session after delegation"):
             from agent import relay_runtime
             runtime = relay_runtime.get_runtime(create=False)

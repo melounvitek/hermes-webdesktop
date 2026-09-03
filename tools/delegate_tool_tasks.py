@@ -9,12 +9,10 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-# Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels,
-# or unexpanded template markers. The marker regex is deliberately NARROW —
-# only snake_case / space-separated placeholder identifiers (`<feature_name>`,
-# `{file path}`, `<FEATURE-NAME>`), the shape LLM templates leave behind. Bare
-# single-word brackets must never be rejected: legitimate goals are full of
-# generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
+# Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels, or unexpanded template markers. The
+# marker regex is deliberately NARROW — only snake_case / space-separated placeholder identifiers (`<feature_name>`,
+# `{file path}`, `<FEATURE-NAME>`), the shape LLM templates leave behind. Bare single-word brackets must never be
+# rejected: legitimate goals are full of generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
 # braces (`{a,b}`) and f-string style (`{i}`).
 _PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
 _TEMPLATE_MARKER_RE = re.compile(
@@ -38,13 +36,11 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
     return parsed, None
 
 def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
-    """Batch-only quality gate beyond per-task goal presence; actionable error or
-    None. No minimum count: a one-entry array is the canonical single-task shape
-    (legacy top-level `goal` is wrapped into one). Duplicate goals are deliberately
-    NOT rejected — identical-goal fan-outs (best-of-N / ensemble sampling) are
-    legitimate and blocking them broke real workflows. The too-short check applies
-    only to multi-task fan-outs (terse goals there are usually unexpanded
-    templates); a SINGLE task legitimately uses short goals ("Fix the tests")."""
+    """Batch-only quality gate beyond per-task goal presence; actionable error or None. No minimum count: a one-entry
+    array is the canonical single-task shape (legacy top-level `goal` is wrapped into one). Duplicate goals are
+    deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble sampling) are legitimate and blocking
+    them broke real workflows. The too-short check applies only to multi-task fan-outs (terse goals there are
+    usually unexpanded templates); a SINGLE task legitimately uses short goals ("Fix the tests")."""
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
         if _PLACEHOLDER_GOAL_RE.match(" ".join(goal.lower().split())):
@@ -110,9 +106,8 @@ def _normalize_task_list(
 def _coerce_task_schemas(
     task_list: List[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
 ) -> tuple[List[Optional[Dict[str, Any]]], Optional[str]]:
-    """Per-task coerced output schemas. A malformed output_schema fails the whole
-    call before any child spawns; schema-less tasks resolve to None and take no
-    new code paths downstream."""
+    """Per-task coerced output schemas. A malformed output_schema fails the whole call before any child spawns;
+    schema-less tasks resolve to None and take no new code paths downstream."""
     from tools.delegation_output_schema import coerce_output_schema
     task_schemas: List[Optional[Dict[str, Any]]] = []
     for i, task in enumerate(task_list):

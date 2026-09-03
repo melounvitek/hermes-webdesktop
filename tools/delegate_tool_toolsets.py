@@ -40,9 +40,8 @@ def _is_mcp_toolset_name(name: str) -> bool:
     return bool(target and str(target).startswith("mcp-"))
 
 def _expand_parent_toolsets(parent_toolsets: set) -> set:
-    """Add every toolset whose tools are a subset of the parent's tools: a parent on
-    a composite like ``hermes-cli`` must still let a child request ``web``/``terminal``;
-    bare name intersection would reject them."""
+    """Add every toolset whose tools are a subset of the parent's tools: a parent on a composite like ``hermes-cli``
+    must still let a child request ``web``/``terminal``; bare name intersection would reject them."""
     parent_tool_names = {t for ts_name in parent_toolsets for t in (TOOLSETS.get(ts_name) or {}).get("tools", [])}
     expanded = set(parent_toolsets)
     if parent_tool_names:
@@ -53,9 +52,8 @@ def _expand_parent_toolsets(parent_toolsets: set) -> set:
     return expanded
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
-    """Remove toolsets whose tools are ALL blocked (derived from DELEGATE_BLOCKED_TOOLS
-    so the two can't drift) plus composite toolsets children must never get
-    (``delegation``, ``kanban``)."""
+    """Remove toolsets whose tools are ALL blocked (derived from DELEGATE_BLOCKED_TOOLS so the two can't drift) plus
+    composite toolsets children must never get (``delegation``, ``kanban``)."""
     blocked_toolset_names = {"delegation", "kanban"} | {
         name for name, defn in TOOLSETS.items() if all(t in DELEGATE_BLOCKED_TOOLS for t in defn.get("tools", []))
     }
@@ -74,13 +72,11 @@ def _blocked_toolsets_for_role(role: str) -> List[str]:
 def _resolve_child_toolsets(
     parent_agent, toolsets: Optional[List[str]], effective_role: str
 ) -> tuple[List[str], List[str]]:
-    """``(enabled_toolsets, disabled_toolsets)`` for a child. Children never gain
-    tools the parent lacks: explicit ``toolsets`` are intersected with the parent's
-    (composite-expanded) set, else the parent's enabled set is inherited. Blocked
-    tools are stripped twice — whole blocked toolsets here, and exact one-tool deny
-    toolsets via ``disabled_toolsets`` so blocked names inside mixed bundles
-    (hermes-cli) are subtracted AFTER composite expansion and survive registry
-    refreshes. Orchestrators get ``delegation`` re-added unconditionally
+    """``(enabled_toolsets, disabled_toolsets)`` for a child. Children never gain tools the parent lacks: explicit
+    ``toolsets`` are intersected with the parent's (composite-expanded) set, else the parent's enabled set is
+    inherited. Blocked tools are stripped twice — whole blocked toolsets here, and exact one-tool deny toolsets via
+    ``disabled_toolsets`` so blocked names inside mixed bundles (hermes-cli) are subtracted AFTER composite
+    expansion and survive registry refreshes. Orchestrators get ``delegation`` re-added unconditionally
     (role-granted, not inherited)."""
     # enabled_toolsets=None means "all tools", so derive from loaded tool names.
     parent_enabled = getattr(parent_agent, "enabled_toolsets", None)

@@ -54,11 +54,10 @@ def _looks_like_error_output(content: Any) -> bool:
     return first.startswith(("error:", "failed:", "traceback ", "exception:"))
 
 def _extract_output_tail(result: Dict[str, Any], *, max_entries: int = 12, max_chars: int = 8000) -> List[Dict[str, Any]]:
-    """Last N tool-call results ``{tool, preview, is_error}`` from a child's
-    conversation (the overlay's "Output" section), chronological order. Content
-    blocks are flattened first so a block-wrapped "Error: ..." is still flagged;
-    line structure is preserved (capped at ``max_chars``) so the overlay shows
-    real output rather than a whitespace-collapsed blob."""
+    """Last N tool-call results ``{tool, preview, is_error}`` from a child's conversation (the overlay's "Output"
+    section), chronological order. Content blocks are flattened first so a block-wrapped "Error: ..." is still
+    flagged; line structure is preserved (capped at ``max_chars``) so the overlay shows real output rather than a
+    whitespace-collapsed blob."""
     messages = result.get("messages") if isinstance(result, dict) else None
     if not isinstance(messages, list):
         return []
@@ -100,10 +99,9 @@ def _sanitize_tool_target(key: str, value: Any) -> Any:
                 hostname = parsed.hostname
                 if not hostname:
                     return None
-                # ``SplitResult.netloc`` includes ``user:password@``. Rebuild
-                # the authority from parsed host/port so hook-visible history
-                # cannot carry URL credentials. Bracket IPv6 literals before
-                # appending a validated port.
+                # ``SplitResult.netloc`` includes ``user:password@``. Rebuild the authority from parsed host/port so
+                # hook-visible history cannot carry URL credentials. Bracket IPv6 literals before appending a
+                # validated port.
                 host = f"[{hostname}]" if ":" in hostname else hostname
                 netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
                 return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
@@ -166,23 +164,20 @@ def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
         })
     return history
 
-# Hard per-summary character ceiling layered on top of the dynamic headroom
-# budget (see _apply_summary_budget): belt-and-suspenders for models that
-# ignore "be concise". 0 disables the ceiling.
+# Hard per-summary character ceiling layered on top of the dynamic headroom budget (see _apply_summary_budget):
+# belt-and-suspenders for models that ignore "be concise". 0 disables the ceiling.
 DEFAULT_MAX_SUMMARY_CHARS = 24000
-# Fraction of the parent's *remaining* context headroom the whole batch of
-# summaries may consume, split per summary, so N children can't collectively
-# blow the parent's window (the compression/429 death spiral).
+# Fraction of the parent's *remaining* context headroom the whole batch of summaries may consume, split per summary,
+# so N children can't collectively blow the parent's window (the compression/429 death spiral).
 _SUMMARY_HEADROOM_FRACTION = 0.5
 # Floor so a single summary always gets a usable slice even when the parent is
 # already nearly full — below this we'd be truncating to noise.
 _MIN_SUMMARY_CHARS = 2000
 
 def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
-    """Write the full summary under ``cache/delegation`` (mounted read-only into
-    remote backends via ``credential_files._CACHE_DIRS``, so the parent's
-    terminal/``read_file`` can page it on any backend). Absolute path, or None on
-    failure — the trimmed head+tail is still returned regardless."""
+    """Write the full summary under ``cache/delegation`` (mounted read-only into remote backends via
+    ``credential_files._CACHE_DIRS``, so the parent's terminal/``read_file`` can page it on any backend). Absolute
+    path, or None on failure — the trimmed head+tail is still returned regardless."""
     try:
         from hermes_constants import get_hermes_dir
         import datetime as _dt
@@ -190,9 +185,8 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
         cache_dir.mkdir(parents=True, exist_ok=True)
         path = cache_dir / f"subagent-summary-{task_index}-{_dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.txt"
         from tools.spill_safety import write_text_exclusive
-        # Exclusive symlink-refusing create; not private because cache/delegation
-        # is bind-mounted read-only into remote backends whose container UID
-        # must be able to read it.
+        # Exclusive symlink-refusing create; not private because cache/delegation is bind-mounted read-only into
+        # remote backends whose container UID must be able to read it.
         write_text_exclusive(path, summary, private=False)
         return str(path)
     except Exception as exc:
@@ -200,10 +194,9 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
         return None
 
 def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[str, Optional[str]]:
-    """``(model_text, spill_path)`` for one over-budget summary: a ~75% head /
-    ~25% tail window snapped to line boundaries (so the opening AND the closing
-    outcomes/files-changed/issues both survive), the full text spilled to disk,
-    and a footer giving the exact ``read_file offset=`` for the omitted middle."""
+    """``(model_text, spill_path)`` for one over-budget summary: a ~75% head / ~25% tail window snapped to line
+    boundaries (so the opening AND the closing outcomes/files-changed/issues both survive), the full text spilled
+    to disk, and a footer giving the exact ``read_file offset=`` for the omitted middle."""
     original_len = len(summary)
     head_budget = int(cap * 0.75)
     tail_budget = cap - head_budget
@@ -235,10 +228,9 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
     return head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n".join(footer_lines), spill_path
 
 def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]:
-    """Per-summary char budget from the parent's *remaining* context headroom
-    (context length − prompt tokens − the compressor's output reserve), a
-    fraction of it split across the batch at ~4 chars/token. None when the
-    parent's context state is unknown — caller then uses the static ceiling only."""
+    """Per-summary char budget from the parent's *remaining* context headroom (context length − prompt tokens − the
+    compressor's output reserve), a fraction of it split across the batch at ~4 chars/token. None when the parent's
+    context state is unknown — caller then uses the static ceiling only."""
     try:
         compressor = getattr(parent_agent, "context_compressor", None)
         context_length = getattr(compressor, "context_length", None)
@@ -257,10 +249,9 @@ def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]
         return None
 
 def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
-    """Trim subagent summaries in-place so a batch can't overflow the parent's
-    context window (full text spilled to disk). Per-summary cap = MIN(dynamic
-    headroom budget, static ``delegation.max_summary_chars`` ceiling; 0 = disabled);
-    over-cap summaries become head+tail plus a pointer to the spill file."""
+    """Trim subagent summaries in-place so a batch can't overflow the parent's context window (full text spilled to
+    disk). Per-summary cap = MIN(dynamic headroom budget, static ``delegation.max_summary_chars`` ceiling; 0 =
+    disabled); over-cap summaries become head+tail plus a pointer to the spill file."""
     from tools.delegate_tool import _load_config
     summaries = [r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]]
     if not summaries:

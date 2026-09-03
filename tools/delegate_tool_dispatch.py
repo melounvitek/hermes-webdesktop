@@ -77,9 +77,8 @@ def _capture_origin() -> tuple[str, str, Any, Any]:
     return (_origin_wake_sid, _origin_ui_session_id, *_capture_gateway_steer_authority(_origin_ui_session_id))
 
 def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tasks, remaining) -> None:
-    """Print one completion line for a finished child and refresh the spinner text.
-    Failed/errored/timed-out children say WHY on the same line — a bare ✗ reads
-    as "silently dropped"."""
+    """Print one completion line for a finished child and refresh the spinner text. Failed/errored/timed-out children
+    say WHY on the same line — a bare ✗ reads as "silently dropped"."""
     idx = entry["task_index"]
     label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
     status = entry.get("status", "?")
@@ -94,15 +93,12 @@ def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tas
             spinner_ref.update_text(f"🔀 {'[' + tag + '] ' if tag else ''}{remaining} task{'s' if remaining != 1 else ''} remaining")
 
 def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interrupt: bool) -> None:
-    """Run the batch's children in parallel, appending entries to ``results``
-    (sorted by task_index on return, one completion line printed per child).
-    Polls futures with a short ``wait()`` timeout instead of ``as_completed()`` so
-    a wedged child cannot block the parent forever after an interrupt; on parent
-    interrupt the still-pending children are reported ``interrupted`` and
-    abandoned (they already got the interrupt signal)."""
-    # Daemon workers (tools.daemon_pool): the `with` block still joins normally,
-    # but if the parent is interrupted while a child is wedged, the abandoned
-    # worker must not block interpreter exit.
+    """Run the batch's children in parallel, appending entries to ``results`` (sorted by task_index on return, one
+    completion line printed per child). Polls futures with a short ``wait()`` timeout instead of ``as_completed()``
+    so a wedged child cannot block the parent forever after an interrupt; on parent interrupt the still-pending
+    children are reported ``interrupted`` and abandoned (they already got the interrupt signal)."""
+    # Daemon workers (tools.daemon_pool): the `with` block still joins normally, but if the parent is interrupted
+    # while a child is wedged, the abandoned worker must not block interpreter exit.
     from tools.daemon_pool import DaemonThreadPoolExecutor
     parent_agent, n_tasks = batch.parent_agent, len(batch.task_list)
     task_labels = [t["goal"][:40] for t in batch.task_list]
@@ -136,11 +132,10 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
     results.sort(key=lambda r: r["task_index"])  # match input order
 
 def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True) -> dict:
-    """Run all built children, join, finalize (hooks + cost rollup), return the
-    combined dict. Shared by the sync path and the background runner: even in the
-    background the batch JOINS on itself here so ONE consolidated results block
-    re-enters the conversation. Live transcripts are finalized but retained as the
-    full-fidelity record (retention pruning happens on future dispatches)."""
+    """Run all built children, join, finalize (hooks + cost rollup), return the combined dict. Shared by the sync path
+    and the background runner: even in the background the batch JOINS on itself here so ONE consolidated results
+    block re-enters the conversation. Live transcripts are finalized but retained as the full-fidelity record
+    (retention pruning happens on future dispatches)."""
     from tools.delegation_live_log import update_manifest_statuses
     results: list = []
     if len(batch.task_list) == 1:
@@ -188,12 +183,11 @@ def _run_sync_with_note(batch: _Batch, reason: str) -> str:
 def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
     """Wake target for a detached batch, or None to force synchronous execution.
 
-    Finite sessions (stateless HTTP requests, one-shot Kanban workers) cannot route
-    a detached result back after their turn/process ends — but if a raw session id
-    is bound (the API server always binds one), gateway.wake can still reach it by
-    self-POSTing /v1/chat/completions, so only fall back to sync when there is truly
-    no session id to wake. Uses the origin captured BEFORE child construction —
-    HERMES_SESSION_ID here would be the subagent's internal id.
+    Finite sessions (stateless HTTP requests, one-shot Kanban workers) cannot route a detached result back after their
+    turn/process ends — but if a raw session id is bound (the API server always binds one), gateway.wake can still
+    reach it by self-POSTing /v1/chat/completions, so only fall back to sync when there is truly no session id to
+    wake. Uses the origin captured BEFORE child construction — HERMES_SESSION_ID here would be the subagent's internal
+    id.
     """
     try:
         from gateway.session_context import async_delivery_supported
@@ -213,13 +207,11 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
 def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> tuple[str, str]:
     """``(session_key, origin_ui_session_id)`` the async registry routes completions by.
 
-    Desktop/TUI: the routable key is the durable AIAgent.session_id — compression
-    can rotate it mid-turn before the TUI-side dict is re-anchored, and a stale
-    approval-context key would orphan the completion. Gateway chats keep the
-    platform conversation key (agent:main:...). The CLI has no bound approval
-    contextvar and no HERMES_SESSION_KEY, so the key resolves empty; its drain is a
-    positive-ownership filter on the durable session_id (empty would fail closed),
-    so stamp the parent's durable id.
+    Desktop/TUI: the routable key is the durable AIAgent.session_id — compression can rotate it mid-turn before the
+    TUI-side dict is re-anchored, and a stale approval-context key would orphan the completion. Gateway chats keep the
+    platform conversation key (agent:main:...). The CLI has no bound approval contextvar and no HERMES_SESSION_KEY, so
+    the key resolves empty; its drain is a positive-ownership filter on the durable session_id (empty would fail
+    closed), so stamp the parent's durable id.
     """
     from tools.approval import get_current_session_key
     session_key = get_current_session_key(default="")
@@ -235,12 +227,11 @@ def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> 
     return session_key or agent_session_id, origin_ui_session_id
 
 def _batch_progress_token(child_agents: List[Any]) -> tuple:
-    """Progress token for the async registry's stale monitor: every child's
-    (api_call_count, current_tool, last_activity_ts). last_activity_ts ticks on
-    streamed chunks, tool transitions and API-call start/completion, so a child
-    streaming a long response counts as alive; a fully frozen token past the
-    threshold means the batch is wedged. ``in_tool`` is True while ANY child is
-    inside a tool so slow tools get the higher ceiling (mirrors the sync heartbeat)."""
+    """Progress token for the async registry's stale monitor: every child's (api_call_count, current_tool,
+    last_activity_ts). last_activity_ts ticks on streamed chunks, tool transitions and API-call start/completion,
+    so a child streaming a long response counts as alive; a fully frozen token past the threshold means the batch
+    is wedged. ``in_tool`` is True while ANY child is inside a tool so slow tools get the higher ceiling (mirrors
+    the sync heartbeat)."""
     parts = []
     in_tool = False
     for c in child_agents:
@@ -292,11 +283,10 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
     return payload
 
 def _dispatch_background(batch: _Batch) -> str:
-    """Dispatch the WHOLE batch as one async unit and return the tool result JSON.
-    The runner joins on every child and yields ONE consolidated results block that
-    re-enters the conversation as a single message when ALL children finish. Falls
-    back to running synchronously (with an explanatory ``note``) when the session
-    cannot receive detached completions or the async pool is at capacity."""
+    """Dispatch the WHOLE batch as one async unit and return the tool result JSON. The runner joins on every child and
+    yields ONE consolidated results block that re-enters the conversation as a single message when ALL children
+    finish. Falls back to running synchronously (with an explanatory ``note``) when the session cannot receive
+    detached completions or the async pool is at capacity."""
     from tools.delegate_tool import _get_max_async_children
     from tools.async_delegation import dispatch_async_delegation_batch
     wake_sid = _resolve_async_wake_sid(batch.origin_wake_sid)
@@ -307,9 +297,8 @@ def _dispatch_background(batch: _Batch) -> str:
     parent_agent = batch.parent_agent
     session_key, origin_ui_session_id = _resolve_async_session_key(parent_agent, batch.origin_ui_session_id)
     child_agents = [c for (_, _, c) in batch.children]
-    # The batch's lifecycle is owned by the async registry now: drop the children
-    # from the parent's interrupt-propagation list (_build_child_agent attached
-    # them, which is correct for sync runs).
+    # The batch's lifecycle is owned by the async registry now: drop the children from the parent's
+    # interrupt-propagation list (_build_child_agent attached them, which is correct for sync runs).
     for c in child_agents:
         _detach_child(parent_agent, c)
 

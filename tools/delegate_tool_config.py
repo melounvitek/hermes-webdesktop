@@ -24,10 +24,9 @@ _HIGH_CONCURRENCY_WARNED = False
 MAX_DEPTH = 1  # flat by default: parent (0) -> child (1); deeper needs max_spawn_depth
 _MIN_SPAWN_DEPTH = 1  # floor for the configurable cap; MAX_DEPTH stays the default
 _LEGACY_MAX_ASYNC_WARNED = False
-# No default wall-clock cap on children: legitimate heavy work (deep reviews,
-# research fan-outs, slow reasoning models) was being killed mid-task. Stuck-child
-# detection is the heartbeat staleness monitor; delegation.child_timeout_seconds
-# opts back in.
+# No default wall-clock cap on children: legitimate heavy work (deep reviews, research fan-outs, slow reasoning
+# models) was being killed mid-task. Stuck-child detection is the heartbeat staleness monitor;
+# delegation.child_timeout_seconds opts back in.
 DEFAULT_CHILD_TIMEOUT: Optional[float] = None
 
 def _cfg() -> dict:
@@ -63,9 +62,8 @@ def _get_subagent_approval_callback():
     return _subagent_auto_deny
 
 def _knob(key: str, env_var: Optional[str], parse, default, invalid_msg: str):
-    """delegation.<key> > <env_var> > default. A config value that fails ``parse``
-    logs ``invalid_msg`` (``%r`` = the value) and yields the default; an env value
-    that fails is silently ignored."""
+    """delegation.<key> > <env_var> > default. A config value that fails ``parse`` logs ``invalid_msg`` (``%r`` = the
+    value) and yields the default; an env value that fails is silently ignored."""
     val = _cfg().get(key)
     if val is not None:
         try:
@@ -111,10 +109,9 @@ def _get_worktree_isolation() -> bool:
     return bool(_cfg().get("worktree_isolation", False))
 
 def _get_max_async_children() -> int:
-    """Concurrency cap for background delegations == delegation.max_concurrent_children.
-    At capacity a new async dispatch is REJECTED (not queued) so a runaway model
-    can't pile up unbounded background work; the caller then runs synchronously. A
-    leftover ``delegation.max_async_children`` key is ignored with a one-time warning."""
+    """Concurrency cap for background delegations == delegation.max_concurrent_children. At capacity a new async
+    dispatch is REJECTED (not queued) so a runaway model can't pile up unbounded background work; the caller then
+    runs synchronously. A leftover ``delegation.max_async_children`` key is ignored with a one-time warning."""
     from tools.delegate_tool import _get_max_concurrent_children
     if _cfg().get("max_async_children") is not None:
         _warn_once(
@@ -130,20 +127,18 @@ def _parse_timeout(raw: Any) -> Optional[float]:
     return None if parsed <= 0 else max(30.0, parsed)
 
 def _get_child_timeout() -> Optional[float]:
-    """Hard wall-clock cap for one child, or None (default: no timeout). Failures
-    should come from what the child does (API/tool errors, iteration budget), not a
-    stopwatch; stuck children are caught by the heartbeat staleness monitor.
-    delegation.child_timeout_seconds > 0 opts in (floor 30 s); 0 or negative
-    disables. Env fallback: DELEGATION_CHILD_TIMEOUT_SECONDS."""
+    """Hard wall-clock cap for one child, or None (default: no timeout). Failures should come from what the child does
+    (API/tool errors, iteration budget), not a stopwatch; stuck children are caught by the heartbeat staleness
+    monitor. delegation.child_timeout_seconds > 0 opts in (floor 30 s); 0 or negative disables. Env fallback:
+    DELEGATION_CHILD_TIMEOUT_SECONDS."""
     return _knob(
         "child_timeout_seconds", "DELEGATION_CHILD_TIMEOUT_SECONDS", _parse_timeout, DEFAULT_CHILD_TIMEOUT,
         "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)",
     )
 
 def _get_max_spawn_depth() -> int:
-    """delegation.max_spawn_depth floored at 1 (no ceiling). Depth 0 is the parent;
-    agents at depths 0..N-1 may spawn, depth N is the leaf floor. Default 1 is
-    flat. Each extra level multiplies API cost."""
+    """delegation.max_spawn_depth floored at 1 (no ceiling). Depth 0 is the parent; agents at depths 0..N-1 may spawn,
+    depth N is the leaf floor. Default 1 is flat. Each extra level multiplies API cost."""
     def _floored(v):
         ival = int(v)
         if ival < _MIN_SPAWN_DEPTH:
@@ -173,10 +168,9 @@ def _normalized_runtime_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
 
 def _inherit_parent_capabilities(parent_agent, override_provider, override_base_url) -> Optional[dict]:
-    """Parent's endpoint-trust capability map for a child, or None. ``agent.capabilities``
-    is a trust decision scoped to one provider+endpoint: inherited ONLY when the
-    child runs the parent's exact route; any provider or base_url override stays
-    DEFAULT-DENY (matches the /model switch posture)."""
+    """Parent's endpoint-trust capability map for a child, or None. ``agent.capabilities`` is a trust decision scoped
+    to one provider+endpoint: inherited ONLY when the child runs the parent's exact route; any provider or base_url
+    override stays DEFAULT-DENY (matches the /model switch posture)."""
     if override_provider or override_base_url:
         return None
     parent_caps = getattr(parent_agent, "capabilities", None)
@@ -185,9 +179,8 @@ def _inherit_parent_capabilities(parent_agent, override_provider, override_base_
     return {key: value for key, value in parent_caps.items() if isinstance(key, str) and isinstance(value, bool)}
 
 def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> Optional[str]:
-    """Base URL the parent is actually calling (live client), not a stale attribute:
-    ``parent_agent.base_url`` can lag the live client (old OpenRouter URL vs local
-    Ollama) and inheriting the stale one 401s with a dummy/local key."""
+    """Base URL the parent is actually calling (live client), not a stale attribute: ``parent_agent.base_url`` can lag
+    the live client (old OpenRouter URL vs local Ollama) and inheriting the stale one 401s with a dummy/local key."""
     surface_url = _normalized_runtime_url(fallback_base_url)
     client_kwargs = getattr(parent_agent, "_client_kwargs", None)
     client = getattr(parent_agent, "client", None)
@@ -211,13 +204,11 @@ def _loaded_pool(key: Any):
 def _resolve_child_credential_pool(
     effective_provider: Optional[str], parent_agent, effective_base_url: Optional[str] = None,
 ):
-    """Credential pool for the child: parent's pool (same provider), that provider's
-    own pool, or None (child keeps its fixed credential). Custom endpoints all
-    collapse to ``provider="custom"``, so they are matched by endpoint identity (the
-    ``custom:<name>`` pool key) — sharing the parent's pool across different custom
-    endpoints would overwrite the child's delegated base_url on lease; an
-    unregistered custom endpoint (no custom_providers entry) keeps the child's fixed
-    credential rather than inherit the parent's."""
+    """Credential pool for the child: parent's pool (same provider), that provider's own pool, or None (child keeps
+    its fixed credential). Custom endpoints all collapse to ``provider="custom"``, so they are matched by endpoint
+    identity (the ``custom:<name>`` pool key) — sharing the parent's pool across different custom endpoints would
+    overwrite the child's delegated base_url on lease; an unregistered custom endpoint (no custom_providers entry)
+    keeps the child's fixed credential rather than inherit the parent's."""
     parent_pool = getattr(parent_agent, "_credential_pool", None)
     if not effective_provider:
         return parent_pool
@@ -243,11 +234,10 @@ def _resolve_child_credential_pool(
     return None
 
 def _merge_request_overrides(runtime_overrides, explicit_overrides):
-    """Merge explicit ``delegation.request_overrides`` OVER runtime-derived ones.
-    Explicit top-level keys win; ``extra_body`` is deep-merged ONE level so provider
-    personality (e.g. ``thinking: {type: disabled}``) survives unless the explicit
-    dict redefines that exact key. Both sides are deep-copied so transport-side
-    mutation can't leak into the config/runtime cache. None when both are empty."""
+    """Merge explicit ``delegation.request_overrides`` OVER runtime-derived ones. Explicit top-level keys win;
+    ``extra_body`` is deep-merged ONE level so provider personality (e.g. ``thinking: {type: disabled}``) survives
+    unless the explicit dict redefines that exact key. Both sides are deep-copied so transport-side mutation can't
+    leak into the config/runtime cache. None when both are empty."""
     import copy as _copy
     runtime_overrides = runtime_overrides if isinstance(runtime_overrides, dict) else None
     explicit_overrides = explicit_overrides if isinstance(explicit_overrides, dict) else None
@@ -265,9 +255,8 @@ def _merge_request_overrides(runtime_overrides, explicit_overrides):
         merged["extra_body"] = explicit_extra
     return merged or None
 
-# Native-SDK providers speak their own wire protocol and can't be reached via
-# chat_completions against a base_url: always take the runtime-provider path
-# (a configured base_url still flows through it, e.g. a Bedrock region).
+# Native-SDK providers speak their own wire protocol and can't be reached via chat_completions against a base_url:
+# always take the runtime-provider path (a configured base_url still flows through it, e.g. a Bedrock region).
 _NATIVE_SDK_PROVIDERS = frozenset({"bedrock", "vertex", "google", "google-genai"})
 _EXPLICIT_API_MODES = frozenset({"chat_completions", "codex_responses", "anthropic_messages"})
 
@@ -287,9 +276,8 @@ def _credential_bundle(model, provider, base_url, api_key, api_mode, request_ove
 
 def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
-    # Shared URL-based api_mode detector so Anthropic-compatible direct
-    # endpoints (/anthropic suffix: Azure AI Foundry, MiniMax, Zhipu, LiteLLM)
-    # get the Messages transport instead of 404ing on chat_completions.
+    # Shared URL-based api_mode detector so Anthropic-compatible direct endpoints (/anthropic suffix: Azure AI
+    # Foundry, MiniMax, Zhipu, LiteLLM) get the Messages transport instead of 404ing on chat_completions.
     from hermes_cli.runtime_provider import _detect_api_mode_for_url
     base_lower = v["base_url"].lower()
     host = base_url_hostname(v["base_url"])
@@ -305,9 +293,8 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     if v["api_mode"] in _EXPLICIT_API_MODES:
         api_mode = v["api_mode"]
 
-    # provider configured ALONGSIDE base_url: pull that provider's request
-    # personality (request_overrides / max_output_tokens) onto the explicit
-    # endpoint. Best-effort — a resolution failure only skips the overrides.
+    # provider configured ALONGSIDE base_url: pull that provider's request personality (request_overrides /
+    # max_output_tokens) onto the explicit endpoint. Best-effort — a resolution failure only skips the overrides.
     request_overrides = max_output_tokens = None
     if v["provider"]:
         try:
@@ -361,12 +348,11 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
     )
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
-    """Child credential bundle from the ``delegation`` config section. Three
-    branches: ``base_url`` set → direct endpoint (``api_key`` None means inherit the
-    parent's key, so providers keyed outside OPENAI_API_KEY work); ``provider`` set
-    → full bundle via the runtime provider system (same path as CLI/gateway
-    startup); neither → None values, child inherits everything. ``request_overrides``
-    is honored on every branch. Raises ValueError with a user-facing message."""
+    """Child credential bundle from the ``delegation`` config section. Three branches: ``base_url`` set → direct
+    endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);
+    ``provider`` set → full bundle via the runtime provider system (same path as CLI/gateway startup); neither →
+    None values, child inherits everything. ``request_overrides`` is honored on every branch. Raises ValueError
+    with a user-facing message."""
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
     explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
@@ -383,12 +369,10 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     return _runtime_provider_credentials(values, explicit_request_overrides)
 
 def _load_config() -> dict:
-    """The ``delegation`` config section (read-only — do NOT mutate). Prefers the
-    shared ``load_config_readonly()`` (follows HERMES_HOME/profile; no deepcopy,
-    since this runs on every get_definitions() rebuild) over the legacy
-    ``cli.CLI_CONFIG``, which can hide user-set keys — except that
-    ``HERMES_IGNORE_USER_CONFIG=1`` is only honored by the legacy loader, so it
-    stays authoritative when that flag is set."""
+    """The ``delegation`` config section (read-only — do NOT mutate). Prefers the shared ``load_config_readonly()``
+    (follows HERMES_HOME/profile; no deepcopy, since this runs on every get_definitions() rebuild) over the legacy
+    ``cli.CLI_CONFIG``, which can hide user-set keys — except that ``HERMES_IGNORE_USER_CONFIG=1`` is only honored
+    by the legacy loader, so it stays authoritative when that flag is set."""
     if os.environ.get("HERMES_IGNORE_USER_CONFIG") != "1":
         try:
             from hermes_cli.config import load_config_readonly
@@ -404,9 +388,8 @@ def _load_config() -> dict:
     except Exception:
         return {}
 
-# OpenRouter routing filters: inherited from the parent, but reset to these
-# defaults under a pinned provider — parent filters (e.g. only=["Anthropic"])
-# would silently force the child back onto the parent's provider.
+# OpenRouter routing filters: inherited from the parent, but reset to these defaults under a pinned provider — parent
+# filters (e.g. only=["Anthropic"]) would silently force the child back onto the parent's provider.
 # openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
 _ROUTING_FILTER_DEFAULTS = (
     ("providers_allowed", None), ("providers_ignored", None), ("providers_order", None), ("provider_sort", None),
@@ -420,18 +403,16 @@ def _resolve_child_runtime(
     override_base_url: Optional[str], override_api_key: Optional[str], override_api_mode: Optional[str],
     override_max_tokens: Optional[int], override_acp_command: Optional[str], override_acp_args: Optional[List[str]],
 ) -> Dict[str, Any]:
-    """Child credentials, transport and routing (config override > parent inherit)
-    as ``AIAgent`` kwargs. Rules that are easy to break: api_mode is re-derived (not
-    inherited) when the child's provider differs from the parent's or is Nous Portal
-    (dual-wire); a pinned ``delegation.command`` must exist on PATH or the spawn
-    fails loudly; ``override_provider`` clears the parent's ACP transport, fallback
-    chain and OpenRouter routing filters so the pinned provider is actually honoured."""
+    """Child credentials, transport and routing (config override > parent inherit) as ``AIAgent`` kwargs. Rules that
+    are easy to break: api_mode is re-derived (not inherited) when the child's provider differs from the parent's
+    or is Nous Portal (dual-wire); a pinned ``delegation.command`` must exist on PATH or the spawn fails loudly;
+    ``override_provider`` clears the parent's ACP transport, fallback chain and OpenRouter routing filters so the
+    pinned provider is actually honoured."""
     effective_model = model or parent_agent.model
     effective_provider = override_provider or getattr(parent_agent, "provider", None)
     effective_base_url = override_base_url or _inherit_parent_base_url(parent_agent, parent_agent.base_url)
-    # api_mode: each provider has its own wire, so a different provider re-derives
-    # (None) instead of inheriting (404s otherwise). Nous Portal is dual-wire
-    # within one provider (anthropic/* → Messages, else chat_completions), so
+    # api_mode: each provider has its own wire, so a different provider re-derives (None) instead of inheriting (404s
+    # otherwise). Nous Portal is dual-wire within one provider (anthropic/* → Messages, else chat_completions), so
     # same-provider inheritance would pin the child on the wrong wire — re-derive.
     _parent_provider = getattr(parent_agent, "provider", None) or ""
     if override_api_mode is not None:
@@ -486,9 +467,8 @@ def _resolve_child_runtime(
         "acp_command": effective_acp_command,
         "acp_args": effective_acp_args,
         "reasoning_config": child_reasoning,
-        # Inherit the parent's fallback chain EXCEPT under a pinned provider: a
-        # mid-run 429/auth failure must not silently reroute the quiet child onto
-        # the parent's fallbacks. Predictability > liveness for explicit pins.
+        # Inherit the parent's fallback chain EXCEPT under a pinned provider: a mid-run 429/auth failure must not
+        # silently reroute the quiet child onto the parent's fallbacks. Predictability > liveness for explicit pins.
         "fallback_model": None if override_provider else (getattr(parent_agent, "_fallback_chain", None) or None),
         "openrouter_min_coding_score": getattr(parent_agent, "openrouter_min_coding_score", None),
     }
