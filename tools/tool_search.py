@@ -18,13 +18,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.registry import tool_error
 from tools.tool_search_names import (  # noqa: F401 — re-exported public names
-    BRIDGE_TOOL_NAMES, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
-)
+    BRIDGE_TOOL_NAMES, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME)
 from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/test names
     CHARS_PER_TOKEN, CatalogEntry, _corpus_stats, _entry_search_text, _fn,
     _listing_group_label, _registry_entry, _short_desc, _stem, _tokenize,
-    build_catalog, build_catalog_listing_with_form, search_catalog,
-)
+    build_catalog, build_catalog_listing_with_form, search_catalog)
 from tools.tool_search_validation import validate_deferred_call_args  # noqa: F401
 
 logger = logging.getLogger("tools.tool_search")
@@ -143,8 +141,7 @@ _DEFAULT_DEFERRED_TOOLS = frozenset({
     # Desktop GUI surface (desktop_ui + project toolsets)
     "drive_preview", "gui_tour", "desktop_preview", "annotate_preview",
     "show_tip", "setup_mcp", "desktop_project", "close_terminal",
-    "apply_layout", "read_terminal", "read_window_below", "focus_pane",
-})
+    "apply_layout", "read_terminal", "read_window_below", "focus_pane"})
 
 
 def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) -> bool:
@@ -528,5 +525,4 @@ __all__ = [
     "should_activate", "build_catalog", "build_catalog_listing_with_form", "listing_token_budget",
     "search_catalog", "bridge_tool_schemas", "assemble_tool_defs", "is_bridge_tool",
     "dispatch_tool_search", "dispatch_tool_describe", "resolve_underlying_call",
-    "scoped_deferrable_names", "validate_deferred_call_args",
-]
+    "scoped_deferrable_names", "validate_deferred_call_args"]
