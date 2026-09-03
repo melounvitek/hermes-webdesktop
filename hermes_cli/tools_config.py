@@ -16,40 +16,26 @@ from hermes_cli.toolset_scope import (
     _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform)
 # Re-exports: keep ``hermes_cli.tools_config.X`` callers and test patch targets resolving.
 from hermes_cli.tools_config_cua import (  # noqa: F401
-    _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd,
-    _cua_driver_env, _CUA_DRIVER_CONTRACT_CACHE, _cua_driver_contract_status, _cua_driver_install_ready,
-    _pip_install, _cua_install_target_writable, _cua_driver_version, install_cua_driver,
-    _CUA_INSTALLER_TIMEOUT, _CUA_INSTALLER_DRAIN_GRACE, _CUA_BACKGROUND_UPDATE_TIMEOUT, _CUA_LOCK_STALE_AFTER,
-    _cua_install_home, _cua_install_lock_dir, _cua_windows_install_lock_file,
+    _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd, _cua_driver_env,
+    _cua_driver_contract_status, _cua_driver_install_ready, _pip_install, _cua_install_target_writable,
+    install_cua_driver, _CUA_INSTALLER_TIMEOUT, _CUA_INSTALLER_DRAIN_GRACE, _CUA_LOCK_STALE_AFTER,
     _clear_stale_windows_cua_install_lock, _clear_stale_cua_install_lock, _cua_install_lock_held,
-    _cua_release_endpoint_reachable, _ps_single_quote, _cua_driver_autostart_registered_windows,
-    _repair_cua_driver_autostart_windows, _remove_quietly, _print_cua_platform_notes,
-    _run_cua_driver_installer)
+    _cua_release_endpoint_reachable, _repair_cua_driver_autostart_windows, _run_cua_driver_installer)
 from hermes_cli.tools_config_post_setup import (  # noqa: F401
-    _ensure_browser_use_cli, _post_setup_lightpanda, _post_setup_agent_browser, _post_setup_camofox,
-    _KITTENTTS_WHEEL_URL, _PIP_POST_SETUP_HOOKS, _post_setup_pip, _post_setup_spotify, _post_setup_langfuse,
-    _post_setup_xai_grok, _POST_SETUP_HOOKS, _run_post_setup, valid_post_setup_keys, run_post_setup_command,
-    _POST_SETUP_INSTALLED, _post_setup_already_installed, _module_installed,
-    _RESTORABLE_PYTHON_TOOL_DEPENDENCIES, active_restorable_python_tool_dependencies,
-    restorable_python_tool_dependency, _agent_browser_installed, _camofox_installed, _lightpanda_installed,
-    _cloud_agent_browser_installed, _POST_SETUP_READY)
+    _ensure_browser_use_cli, _run_post_setup, valid_post_setup_keys, run_post_setup_command, _POST_SETUP_INSTALLED,
+    _post_setup_already_installed, _module_installed, active_restorable_python_tool_dependencies,
+    restorable_python_tool_dependency, _POST_SETUP_READY)
 from hermes_cli.tools_config_providers import (  # noqa: F401
-    _plugin_provider_rows, _plugin_image_gen_providers, _plugin_video_gen_providers,
-    _plugin_web_search_providers, _plugin_browser_providers, _plugin_tts_providers, web_provider_capabilities,
-    _PLUGIN_ROW_BUILDERS, _visible_providers, provider_readiness_status, _toolset_needs_configuration_prompt,
-    _any_plugin_provider_available, _configure_tool_category, _web_tier_matches, _is_provider_active,
-    _detect_active_provider_index, _fal_model_catalog, IMAGEGEN_BACKENDS, _plugin_model_catalog,
-    _plugin_image_gen_catalog, _plugin_video_gen_catalog, _pick_model_from_catalog, _configure_imagegen_model,
-    _configure_imagegen_model_for_plugin, _configure_videogen_model_for_plugin,
-    _configure_xai_imagine_storage, _select_plugin_gen_provider, _select_plugin_image_gen_provider,
-    _select_plugin_video_gen_provider, STT_MODEL_CATALOG, _STT_MODEL_CONFIG_KEY, _configure_stt_model,
-    _PROVIDER_MARKER_SECTIONS, _write_provider_config, apply_provider_selection, _nous_provider_gate,
-    _finish_provider_selection, _print_provider_selection, _configure_provider, _reconfigure_provider,
+    _plugin_image_gen_providers, _plugin_video_gen_providers, _plugin_web_search_providers, _plugin_browser_providers,
+    _plugin_tts_providers, web_provider_capabilities, _visible_providers, provider_readiness_status,
+    _toolset_needs_configuration_prompt, _configure_tool_category, _web_tier_matches, _is_provider_active,
+    _detect_active_provider_index, IMAGEGEN_BACKENDS, _plugin_image_gen_catalog, _plugin_video_gen_catalog,
+    _configure_imagegen_model, _configure_imagegen_model_for_plugin, _configure_videogen_model_for_plugin,
+    _select_plugin_image_gen_provider, _select_plugin_video_gen_provider, STT_MODEL_CATALOG, _configure_stt_model,
+    _write_provider_config, apply_provider_selection, _configure_provider, _reconfigure_provider,
     _configure_vision_backend, _configure_vision_provider_model, _configure_simple_requirements)
 from hermes_cli.tools_config_mcp import (  # noqa: F401
-    _mcp_match_filter, _mcp_preselected, _apply_mcp_checklist, _configure_mcp_tools_interactive,
-    _apply_toolset_change, _apply_mcp_change, _print_tools_list, _known_tool_platforms,
-    tools_disable_enable_command)
+    _configure_mcp_tools_interactive, _apply_toolset_change, _apply_mcp_change, tools_disable_enable_command)
 
 logger = logging.getLogger(__name__)
 
