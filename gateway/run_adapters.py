@@ -374,15 +374,12 @@ class GatewayAdapterLifecycleMixin:
         )
         # A relay credential revoked by opt-out is not an error to retry: render a clean "disabled"
         # state, not red "fatal"/"retrying" (non-retryable code, so it also leaves the queue below).
-        if adapter.fatal_error_code == "relay_disabled":
-            platform_state = "disabled"
-        elif adapter.fatal_error_retryable:
-            platform_state = "retrying"
-        else:
-            platform_state = "fatal"
         self._update_platform_runtime_status(
             adapter.platform.value,
-            platform_state=platform_state,
+            platform_state=(
+                "disabled" if adapter.fatal_error_code == "relay_disabled"
+                else "retrying" if adapter.fatal_error_retryable else "fatal"
+            ),
             error_code=adapter.fatal_error_code,
             error_message=adapter.fatal_error_message,
         )
@@ -975,13 +972,13 @@ class GatewayAdapterLifecycleMixin:
         if not isinstance(pending, dict):
             return
         current = asyncio.current_task()
-        tasks: list[asyncio.Task] = []
-        for profile_pending in pending.values():
-            if not isinstance(profile_pending, dict):
-                continue
-            for task in profile_pending.values():
-                if isinstance(task, asyncio.Task) and task is not current and not task.done():
-                    tasks.append(task)
+        tasks = [
+            task
+            for profile_pending in pending.values()
+            if isinstance(profile_pending, dict)
+            for task in profile_pending.values()
+            if isinstance(task, asyncio.Task) and task is not current and not task.done()
+        ]
         for task in tasks:
             task.cancel()
         timeout = self._adapter_disconnect_timeout_secs()
@@ -1082,16 +1079,18 @@ class GatewayAdapterLifecycleMixin:
 
         return connected
 
-    async def _start_one_profile_adapters(
-        self, profile_name: str, profile_home: "Path", claimed: Dict[tuple, str]
-    ) -> int:
-        """Create+connect one profile's adapters under its runtime scope."""
+    async def _load_secondary_profile_config(self, profile_name: str, profile_home: "Path"):
+        """Hydrate + enter ``profile_home``'s scope once; return its gateway config.
+
+        Raises ``MultiplexConfigError`` for an open dm/group policy and
+        ``SecondaryPortBindingConfigError`` when the profile enables a port-binding platform
+        (the default profile owns the single shared HTTP listener).
+        """
         from gateway.run import (
             MultiplexConfigError,
             SecondaryPortBindingConfigError,
             _load_gateway_runtime_config,
             _own_policy_open_startup_violation,
-            _platform_has_bot_credential,
             _profile_runtime_scope,
         )
         from gateway.config import load_gateway_config
@@ -1114,9 +1113,7 @@ class GatewayAdapterLifecycleMixin:
             # inert (its turns use a plugin manager keyed by resolved home).
             try:
                 from hermes_cli.config import load_config as _load_profile_config
-                from agent.shell_hooks import (
-                    register_from_config as _register_shell_hooks,
-                )
+                from agent.shell_hooks import register_from_config as _register_shell_hooks
                 from agent.outbound_webhooks import (
                     register_from_config as _register_outbound_webhooks,
                 )
@@ -1158,7 +1155,63 @@ class GatewayAdapterLifecycleMixin:
                 f"these platform entries from profile '{profile_name}'s config.yaml "
                 f"or configure them only on the default profile."
             )
+        return profile_cfg
 
+    def _refuse_duplicate_claim(
+        self, claim, claimed: Dict[tuple, str], profile_name: str, platform: Platform, kind: str
+    ) -> bool:
+        """Log + park a secondary adapter whose credential/listener another profile already owns.
+
+        Returns True when refused. The adapter has not connected and owns no resources, so it is
+        NOT disconnected: for a same-credential Photon adapter that would shut down the primary
+        profile's live sidecar.
+        """
+        owner = claimed.get(claim) if claim is not None else None
+        if owner is None:
+            return False
+        if kind == "credential":
+            message = (
+                f"Profile '{owner}' and '{profile_name}' both configure "
+                f"{platform.value} with the same credential. Give each "
+                f"profile its own {platform.value} credential."
+            )
+            logger.error(
+                "Profile '%s' and '%s' both configure %s with the same "
+                "credential — refusing to start the duplicate (one "
+                "credential cannot be consumed twice). Give each profile "
+                "its own %s credential.",
+                owner, profile_name, platform.value, platform.value,
+            )
+        else:
+            bind, port = claim[-2:]
+            message = (
+                f"Profile '{owner}' and '{profile_name}' both configure "
+                f"{platform.value} sidecars on the same listener. Configure "
+                f"a distinct listener for profile '{profile_name}'."
+            )
+            logger.error(
+                "Profile '%s' and '%s' both configure %s sidecars on "
+                "%s:%s — refusing to start the duplicate listener. "
+                "Set platforms.%s.extra.sidecar_port to a distinct port "
+                "for profile '%s'.",
+                owner, profile_name, platform.value, bind, port, platform.value, profile_name,
+            )
+        self._update_platform_runtime_status(
+            f"{profile_name}:{platform.value}",
+            platform_state="fatal",
+            error_code=f"duplicate_{kind}",
+            error_message=message,
+        )
+        return True
+
+    async def _start_one_profile_adapters(
+        self, profile_name: str, profile_home: "Path", claimed: Dict[tuple, str]
+    ) -> int:
+        """Create+connect one profile's adapters under its runtime scope."""
+        from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
+
+        profile_cfg = await self._load_secondary_profile_config(profile_name, profile_home)
+        multiplex = getattr(self.config, "multiplex_profiles", False)
         profile_map = self._profile_adapters.setdefault(profile_name, {})
         connected = 0
         for platform, platform_config in profile_cfg.platforms.items():
@@ -1168,10 +1221,7 @@ class GatewayAdapterLifecycleMixin:
             # profile's secret scope — the shared YAML enables it for the default profile only.
             # Building an adapter anyway would fan one inbound message out across every
             # credential-less profile; mirror the primary loop's credential gate and skip.
-            if (
-                getattr(self.config, "multiplex_profiles", False)
-                and not _platform_has_bot_credential(platform, platform_config)
-            ):
+            if multiplex and not _platform_has_bot_credential(platform, platform_config):
                 logger.info(
                     "[MULTIPLEX] Profile '%s': skipping %s - no bot credential "
                     "in this profile's secrets",
@@ -1182,10 +1232,7 @@ class GatewayAdapterLifecycleMixin:
             # Relay and WhatsApp are shared process-level ingress in multiplex mode (one connection
             # owned by the active profile, route-stamped source.profile fans out). WhatsApp is one
             # session per phone number; a secondary adapter would only retry-loop and stall startup.
-            if (
-                getattr(self.config, "multiplex_profiles", False)
-                and platform in (Platform.RELAY, Platform.WHATSAPP)
-            ):
+            if multiplex and platform in (Platform.RELAY, Platform.WHATSAPP):
                 continue
             try:
                 with _profile_runtime_scope(profile_home, hydrate_secrets=False):
@@ -1207,66 +1254,17 @@ class GatewayAdapterLifecycleMixin:
                 )
                 continue
 
-            # Same-token conflict detection — refuse a duplicate poll.
+            # Same-token / same-listener conflict detection — refuse a duplicate poll or bind.
             credential_claim = self._adapter_credential_claim(platform, adapter)
-            if credential_claim is not None:
-                owner = claimed.get(credential_claim)
-                if owner is not None:
-                    message = (
-                        f"Profile '{owner}' and '{profile_name}' both configure "
-                        f"{platform.value} with the same credential. Give each "
-                        f"profile its own {platform.value} credential."
-                    )
-                    logger.error(
-                        "Profile '%s' and '%s' both configure %s with the same "
-                        "credential — refusing to start the duplicate (one "
-                        "credential cannot be consumed twice). Give each profile "
-                        "its own %s credential.",
-                        owner, profile_name, platform.value, platform.value,
-                    )
-                    self._update_platform_runtime_status(
-                        f"{profile_name}:{platform.value}",
-                        platform_state="fatal",
-                        error_code="duplicate_credential",
-                        error_message=message,
-                    )
-                    # This adapter has not connected and therefore owns no resources to clean up.
-                    # Calling disconnect here can mutate the shared platform state and, for a same-
-                    # credential Photon adapter, shut down the primary profile's live sidecar.
-                    continue
-
+            if self._refuse_duplicate_claim(
+                credential_claim, claimed, profile_name, platform, "credential"
+            ):
+                continue
             listener_claim = self._adapter_listener_claim(platform, adapter)
-            if listener_claim is not None:
-                owner = claimed.get(listener_claim)
-                if owner is not None:
-                    bind, port = listener_claim[-2:]
-                    message = (
-                        f"Profile '{owner}' and '{profile_name}' both configure "
-                        f"{platform.value} sidecars on the same listener. Configure "
-                        f"a distinct listener for profile '{profile_name}'."
-                    )
-                    logger.error(
-                        "Profile '%s' and '%s' both configure %s sidecars on "
-                        "%s:%s — refusing to start the duplicate listener. "
-                        "Set platforms.%s.extra.sidecar_port to a distinct port "
-                        "for profile '%s'.",
-                        owner,
-                        profile_name,
-                        platform.value,
-                        bind,
-                        port,
-                        platform.value,
-                        profile_name,
-                    )
-                    self._update_platform_runtime_status(
-                        f"{profile_name}:{platform.value}",
-                        platform_state="fatal",
-                        error_code="duplicate_listener",
-                        error_message=message,
-                    )
-                    # Like credential conflicts, this adapter never connected
-                    # and owns no resources that should be disconnected.
-                    continue
+            if self._refuse_duplicate_claim(
+                listener_claim, claimed, profile_name, platform, "listener"
+            ):
+                continue
 
             self._configure_profile_adapter(adapter, profile_name, platform)
 
@@ -1277,13 +1275,12 @@ class GatewayAdapterLifecycleMixin:
                     )
                 if success:
                     profile_map[platform] = adapter
-                    # Restore persisted /voice state for this bot (#84872) —
-                    # primary startup and every reconnect path already do.
+                    # Restore persisted /voice state for this bot — primary startup and every
+                    # reconnect path already do.
                     self._sync_voice_mode_state_to_adapter(adapter)
-                    if credential_claim is not None:
-                        claimed[credential_claim] = profile_name
-                    if listener_claim is not None:
-                        claimed[listener_claim] = profile_name
+                    for claim in (credential_claim, listener_claim):
+                        if claim is not None:
+                            claimed[claim] = profile_name
                     connected += 1
                     logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
                 else:
@@ -1385,16 +1382,14 @@ class GatewayAdapterLifecycleMixin:
             while self._running:
                 adapter = None
                 try:
+                    # Lazy + per-attempt: keeps test monkeypatches on these modules live.
                     from hermes_cli.profiles import get_profile_dir
                     from hermes_cli.env_loader import hydrate_profile_secret_sources
                     from gateway.config import load_gateway_config
 
                     profile_home = get_profile_dir(profile_name)
-                    # Like the #16856 MCP discovery path, hydrate external secret
-                    # sources off-loop so they cannot starve platform heartbeats.
-                    await asyncio.to_thread(
-                        hydrate_profile_secret_sources, profile_home
-                    )
+                    # Hydrate external secret sources off-loop so they cannot starve heartbeats.
+                    await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
                     with _profile_runtime_scope(profile_home, hydrate_secrets=False):
                         profile_config = load_gateway_config().platforms.get(platform)
                         if profile_config is None or not profile_config.enabled:
@@ -1438,19 +1433,11 @@ class GatewayAdapterLifecycleMixin:
                                 platform, profile=profile_name
                             )
                             return
-                        # A newer reconnect already won the slot while this
-                        # attempt was awaiting connect; do not replace it.
-                        await self._safe_adapter_disconnect(adapter, platform)
-                        return
-
-                    # Shutdown can begin mid-connect(): never republish a newly connected adapter
-                    # after the registry has been drained; release its partial resources instead.
-                    if success:
-                        await self._safe_adapter_disconnect(adapter, platform)
-                        return
-
+                    # Not installed: a newer reconnect won the slot mid-connect (never replace it),
+                    # shutdown began mid-connect (never republish after the registry drained), or
+                    # connect failed. Release partial resources; stop only for a non-retryable fatal.
                     await self._safe_adapter_disconnect(adapter, platform)
-                    if (
+                    if success or (
                         getattr(adapter, "has_fatal_error", False)
                         and not getattr(adapter, "fatal_error_retryable", True)
                     ):
@@ -1481,15 +1468,15 @@ class GatewayAdapterLifecycleMixin:
                 )
                 await asyncio.sleep(backoff)
         finally:
+            # Release our slot unless a newer task already owns it.
             pending = self._profile_failed_platforms
-            if isinstance(pending, dict):
-                profile_pending = pending.get(profile_name)
-                task = profile_pending.get(platform) if isinstance(profile_pending, dict) else None
+            profile_pending = pending.get(profile_name) if isinstance(pending, dict) else None
+            if isinstance(profile_pending, dict):
+                task = profile_pending.get(platform)
                 if not isinstance(task, asyncio.Task) or task is current_task:
-                    if isinstance(profile_pending, dict):
-                        profile_pending.pop(platform, None)
-                        if not profile_pending:
-                            pending.pop(profile_name, None)
+                    profile_pending.pop(platform, None)
+                    if not profile_pending:
+                        pending.pop(profile_name, None)
 
     def _schedule_secondary_profile_startup_reconnect(
         self, profile_name: str, platform: Platform, adapter: BasePlatformAdapter
@@ -1609,6 +1596,23 @@ class GatewayAdapterLifecycleMixin:
             adapter.fatal_error_code or "unknown",
         )
 
+    @staticmethod
+    def _profile_home_or_none(profile_name: str):
+        from hermes_cli.profiles import get_profile_dir
+        try:
+            return get_profile_dir(profile_name)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _stamp_event_profile(event, profile_name: str) -> None:
+        """Best-effort: stamp ``source.profile`` on an inbound event that has none yet."""
+        try:
+            if getattr(event, "source", None) is not None and not event.source.profile:
+                event.source.profile = profile_name
+        except Exception:
+            pass
+
     def _make_profile_message_handler(self, profile_name: str):
         """Return a message handler that stamps source.profile then delegates.
 
@@ -1617,19 +1621,10 @@ class GatewayAdapterLifecycleMixin:
         so allowlists/tokens from that profile's ``.env`` are visible to ``get_secret`` / authz.
         """
         from gateway.run import _async_profile_runtime_scope
-        from hermes_cli.profiles import get_profile_dir
-
-        try:
-            profile_home = get_profile_dir(profile_name)
-        except Exception:
-            profile_home = None
+        profile_home = self._profile_home_or_none(profile_name)
 
         async def _handler(event):
-            try:
-                if getattr(event, "source", None) is not None and not event.source.profile:
-                    event.source.profile = profile_name
-            except Exception:
-                pass
+            self._stamp_event_profile(event, profile_name)
             if profile_home is not None:
                 async with _async_profile_runtime_scope(profile_home):
                     return await self._handle_message(event)
@@ -1640,11 +1635,7 @@ class GatewayAdapterLifecycleMixin:
     def _make_profile_busy_session_handler(self, profile_name: str):
         """Stamp an owning adapter's profile before resolving busy policy."""
         async def _handler(event, _session_key):
-            try:
-                if getattr(event, "source", None) is not None and not event.source.profile:
-                    event.source.profile = profile_name
-            except Exception:
-                pass
+            self._stamp_event_profile(event, profile_name)
             routed_session_key = self._session_key_for_source(event.source)
             return await self._handle_active_session_busy_message(
                 event, routed_session_key
@@ -1714,12 +1705,7 @@ class GatewayAdapterLifecycleMixin:
     def _make_profile_platform_event_handler(self, profile_name: str):
         """Bind platform-event auth and hook dispatch to one multiplex profile."""
         from gateway.run import _profile_runtime_scope
-        from hermes_cli.profiles import get_profile_dir
-
-        try:
-            profile_home = get_profile_dir(profile_name)
-        except Exception:
-            profile_home = None
+        profile_home = self._profile_home_or_none(profile_name)
 
         async def _handler(event, source):
             if getattr(source, "profile", None) is None:
@@ -1813,17 +1799,11 @@ class GatewayAdapterLifecycleMixin:
         # adapter polls the same bot token — a per-message race over which one answers.
         if not token:
             cfg = getattr(adapter, "config", None)
-            if cfg is not None:
-                for attr in ("token", "bot_token"):
-                    val = getattr(cfg, attr, None)
-                    if isinstance(val, str) and val.strip():
-                        token = val.strip()
-                        break
-        if not token:
-            config = getattr(adapter, "config", None)
-            val = getattr(config, "token", None)
-            if isinstance(val, str) and val.strip():
-                token = val.strip()
+            for attr in ("token", "bot_token"):
+                val = getattr(cfg, attr, None)
+                if isinstance(val, str) and val.strip():
+                    token = val.strip()
+                    break
         if not token:
             return None
         import hashlib
