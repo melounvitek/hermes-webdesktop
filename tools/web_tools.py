@@ -20,7 +20,9 @@ from plugins.web.firecrawl.provider import (  # noqa: F401 — backward-compat n
     Firecrawl, _firecrawl_backend_help_suffix, _get_firecrawl_client, _get_firecrawl_gateway_url,
     _is_tool_gateway_ready, check_firecrawl_api_key,
 )
-from plugins.web.tavily.provider import _normalize_tavily_documents, _normalize_tavily_search_results, _tavily_request  # noqa: F401
+from plugins.web.tavily.provider import (  # noqa: F401 — backward-compat names
+    _normalize_tavily_documents, _normalize_tavily_search_results, _tavily_request,
+)
 from plugins.web.parallel.provider import _get_async_parallel_client, _get_parallel_client  # noqa: F401
 from plugins.web.exa.provider import _get_exa_client  # noqa: F401
 
@@ -36,14 +38,15 @@ from tools.managed_tool_gateway import (  # noqa: F401 — backward-compat names
     build_vendor_gateway_url, resolve_managed_tool_gateway,
     peek_nous_access_token as _peek_nous_access_token, read_nous_access_token as _read_nous_access_token,
 )
-from tools.tool_backend_helpers import (  # noqa: F401
+from tools.tool_backend_helpers import (  # noqa: F401 — first three are backward-compat re-exports
     managed_nous_tools_enabled, nous_tool_gateway_unavailable_message, prefers_gateway,
+    NOUS_MANAGED_PROVIDER, selection_exists,
 )
 from tools.url_safety import async_is_safe_url
 from tools.web_tools_rescue import (  # noqa: F401 — re-exported (tests patch tools.web_tools.<name>)
     _keyless_rescue_enabled, _policy_blocked_result, _rescue_eligible, _rescue_extract, _rescue_search,
 )
-from tools.web_tools_truncate import (  # noqa: F401 — re-exported (tests + web_result_cache import via tools.web_tools)
+from tools.web_tools_truncate import (  # noqa: F401 — re-exported (tests + web_result_cache import these)
     DEFAULT_EXTRACT_CHAR_LIMIT, MAX_STORED_TEXT_CHARS, _clamp_char_limit, _effective_char_limit,
     _get_extract_char_limit, _store_full_text, _trim_results, _truncate_results, _truncate_with_footer,
     convert_base64_images_to_links,
@@ -60,7 +63,7 @@ logger = logging.getLogger(__name__)
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
-    """Resolve ``name`` via the Hermes config-aware env layer (``hermes config set`` values), then process env."""
+    """Resolve ``name`` via the config-aware env layer (``hermes config set`` values), then process env."""
     try:
         from hermes_cli.config import get_env_value
         val = get_env_value(name)
@@ -87,16 +90,8 @@ def _configured_backend(key: str = "backend") -> str:
     return (_load_web_config().get(key) or "").lower().strip()
 
 
-# Built-in backends probed by _BUILTIN_AVAILABILITY; any other name is a plugin-registered provider resolved
-# via the registry's ``is_available()``. Includes ``xai`` (probed via has_xai_credentials(), not a registered
-# provider) though the registry's _LEGACY_PREFERENCE omits it — drop it here if xai ever registers.
-_LEGACY_WEB_BACKENDS = frozenset(
-    {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai", "keenable"}
-)
-
-
 def _registry_call(func_name: str, default, *args):
-    """``agent.web_search_registry.<func_name>(*args)``, or *default* if it raised (registry is optional, never fatal)."""
+    """``agent.web_search_registry.<func_name>(*args)``, or *default* if it raised (registry never fatal)."""
     try:
         import agent.web_search_registry as registry_mod
         return getattr(registry_mod, func_name)(*args)
@@ -111,14 +106,13 @@ def _registered_web_provider(backend: str):
 
 
 def _probe(provider, method: str, context: str = "") -> Optional[bool]:
-    """``bool(provider.<method>())``, or ``None`` if it raised (logged; a broken provider is unavailable).
-
-    ``context`` is appended to the debug log line (e.g. " during readiness check").
-    """
+    """``bool(provider.<method>())``, or ``None`` if it raised (a broken provider is unavailable; *context* is
+    appended to the debug log line, e.g. " during readiness check")."""
     try:
         return bool(getattr(provider, method)())
     except Exception as exc:  # noqa: BLE001 — a broken provider is "unavailable"
-        logger.debug("web provider %r.%s() raised%s: %s", getattr(provider, "name", provider), method, context, exc)
+        name = getattr(provider, "name", provider)
+        logger.debug("web provider %r.%s() raised%s: %s", name, method, context, exc)
         return None
 
 
@@ -128,20 +122,14 @@ def _list_registered_web_providers():
 
 
 def _get_backend() -> str:
-    """Shared web backend name.
-
-    A stored ``web.backend`` is returned as-is — no availability probe, no fallback — so a broken selection
-    surfaces the vendor's honest error rather than silently rerouting. Autodetect runs ONLY when no web
-    selection has ever been stored.
-    """
+    """Shared web backend name. A stored ``web.backend`` is returned as-is — no availability probe, no
+    fallback — so a broken selection surfaces the vendor's honest error rather than silently rerouting.
+    Autodetect runs ONLY when no web selection has ever been stored."""
     configured = _configured_backend()
     if configured:
         # "nous" (managed subscription) is serviced by the firecrawl provider, whose client
         # resolver routes it through the managed Tool Gateway.
-        from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER
         return "firecrawl" if configured == NOUS_MANAGED_PROVIDER else configured
-
-    from tools.tool_backend_helpers import selection_exists
     if selection_exists("web"):
         # Selection exists (use_gateway / per-capability keys) but no shared name: keep the
         # firecrawl default rather than credential-laddering.
@@ -196,12 +184,8 @@ def _get_extract_backend() -> str:
     return _configured_backend("extract_backend") or _get_backend()
 
 
-def _tavily_explicitly_configured() -> bool:
-    return any(_configured_backend(key) == "tavily" for key in ("backend", "search_backend", "extract_backend"))
-
-
 def _xai_available() -> bool:
-    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may refresh over the network.
+    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may hit the network.
     try:
         from tools.xai_http import has_xai_credentials
         return has_xai_credentials()
@@ -218,27 +202,29 @@ def _ddgs_package_importable() -> bool:
         return False
 
 
-# Built-in availability probes (see _LEGACY_WEB_BACKENDS). Lambdas so test patches of module-level helpers
-# (e.g. _ddgs_package_importable, check_firecrawl_api_key) are honored at call time.
+# Built-in backends and their cheap availability probes; any other name is a plugin-registered provider
+# resolved via the registry's ``is_available()``. Lambdas so test patches of module-level helpers (e.g.
+# _ddgs_package_importable, check_firecrawl_api_key) are honored at call time. Includes ``xai`` (probed via
+# has_xai_credentials(), not a registered provider) though the registry's _LEGACY_PREFERENCE omits it —
+# drop it here if xai ever registers.
 _BUILTIN_AVAILABILITY = {
     "exa": lambda: _has_env("EXA_API_KEY"),
     "parallel": lambda: _has_env("PARALLEL_API_KEY"),
     "keenable": lambda: _has_env("KEENABLE_API_KEY"),
     "firecrawl": lambda: check_firecrawl_api_key(),
-    "tavily": lambda: _has_env("TAVILY_API_KEY") or _tavily_explicitly_configured(),
+    "tavily": lambda: _has_env("TAVILY_API_KEY")
+    or any(_configured_backend(k) == "tavily" for k in ("backend", "search_backend", "extract_backend")),
     "searxng": lambda: _has_env("SEARXNG_URL"),
     "brave-free": lambda: _has_env("BRAVE_SEARCH_API_KEY"),
     "ddgs": lambda: _ddgs_package_importable(),
     "xai": _xai_available,
 }
+_LEGACY_WEB_BACKENDS = frozenset(_BUILTIN_AVAILABILITY)
 
 
 def _is_backend_available(backend: str) -> bool:
-    """True when *backend* is usable — the single availability chokepoint.
-
-    Non-legacy names delegate to the registered provider's ``is_available()`` (unregistered names
-    fall through); built-ins use the cheap hardcoded probes.
-    """
+    """True when *backend* is usable — the single availability chokepoint. Non-legacy names delegate to the
+    registered provider's ``is_available()`` (unregistered names fall through); built-ins use cheap probes."""
     backend = (backend or "").lower().strip()
     if backend not in _LEGACY_WEB_BACKENDS:
         provider = _registered_web_provider(backend)
@@ -249,11 +235,9 @@ def _is_backend_available(backend: str) -> bool:
 
 
 def _web_requires_env() -> list[str]:
-    """Tool-registry metadata env vars for the web backends.
-
-    Gateway vars are always listed: gating them on ``managed_nous_tools_enabled()`` cost a synchronous portal
-    HTTP refresh at every CLI startup. Contract: set var -> tool sees it; extras are harmless for the not-logged-in.
-    """
+    """Tool-registry metadata env vars for the web backends. Gateway vars are always listed: gating them
+    on ``managed_nous_tools_enabled()`` cost a synchronous portal HTTP refresh at every CLI startup.
+    Contract: set var -> tool sees it; extras are harmless for the not-logged-in."""
     return [
         "EXA_API_KEY", "PARALLEL_API_KEY", "TAVILY_API_KEY", "KEENABLE_API_KEY", "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL", "TOOL_GATEWAY_DOMAIN", "TOOL_GATEWAY_SCHEME",
@@ -267,11 +251,9 @@ _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 def _ensure_web_plugins_loaded() -> None:
-    """Idempotently run plugin discovery so the web registry is populated.
-
-    Dispatch is reachable from contexts that never triggered discovery (subprocess agent runs, delegate
-    children, scripts); without it a configured backend yields a misleading "No web ... provider" error.
-    """
+    """Idempotently run plugin discovery so the web registry is populated. Dispatch is reachable from contexts
+    that never triggered discovery (subprocess agent runs, delegate children, scripts); without it a
+    configured backend yields a misleading "No web ... provider" error."""
     try:
         from hermes_cli.plugins import _ensure_plugins_discovered
         _ensure_plugins_discovered()
@@ -312,14 +294,12 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
-
         # Sync only — every provider's search() is sync.
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import get_active_search_provider, get_provider as _wsp_get_provider
         backend = _get_search_backend()
         provider = _wsp_get_provider(backend) if backend else None
         if provider is None or not provider.supports_search():
-            from tools.tool_backend_helpers import selection_exists
             if provider is None and backend and selection_exists("web"):
                 error_text = debug_call_data["error"] = _strict_selection_error("search", backend)
                 _finish_debug("web_search_tool", debug_call_data)
@@ -328,8 +308,12 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             provider = get_active_search_provider()
 
         if provider is None:
-            error_text = _no_provider_error("search", "No web search provider configured. Run `hermes tools` to set one up.")
-            response_data = {"success": False, "error": error_text}
+            response_data = {
+                "success": False,
+                "error": _no_provider_error(
+                    "search", "No web search provider configured. Run `hermes tools` to set one up."
+                ),
+            }
         else:
             logger.info("Web search via %s: '%s' (limit: %d)", provider.name, query, limit)
             response_data = _memoized_search(provider, query, limit)
@@ -339,18 +323,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         debug_call_data["final_response_size"] = len(result_json)
         _finish_debug("web_search_tool", debug_call_data)
         return result_json
-
     except Exception as e:
         return _debug_error("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
 
 
 def _memoized_search(provider, query: str, limit: int) -> dict:
-    """TTL memo + single-flight around the paid vendor call (tools/web_result_cache.py).
-
-    Sits after every safety/config check. The provider is asked for the BUCKETED count so near-identical
-    limits share an entry; the caller's count is sliced out. Only successful, non-rescued responses are
-    cached — caching a rescue would make the one-shot ring fallback sticky for a whole TTL.
-    """
+    """TTL memo + single-flight around the paid vendor call (tools/web_result_cache.py); sits after every
+    safety/config check. The provider is asked for the BUCKETED count so near-identical limits share an entry;
+    the caller's count is sliced out. Only successful, non-rescued responses are cached — caching a rescue
+    would make the one-shot ring fallback sticky for a whole TTL."""
     from tools.web_result_cache import bucket_limit, search_memo, slice_search_response
     def _paid_search() -> tuple[dict, bool]:
         fetch_limit = bucket_limit(limit)
@@ -402,21 +383,23 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                 safe_urls.append(url)
                 safe_indices.append(index)
             else:
-                ssrf_blocked[index] = _result_entry(url, "Blocked: URL targets a private or internal network address")
+                ssrf_blocked[index] = _result_entry(
+                    url, "Blocked: URL targets a private or internal network address"
+                )
 
-        if not safe_urls:
-            results = []
-        else:
+        results = []
+        if safe_urls:
             backend = _get_extract_backend()
             _ensure_web_plugins_loaded()
             provider, error_json = _resolve_extract_provider(backend)
             if error_json is not None:
                 return error_json
             results = await _extract_safe_urls(provider, safe_urls, format)
-
-        # Reconstruct input order across invalid, blocked, and provider entries (providers preserve safe-list order).
+        # Reconstruct input order across invalid, blocked, and provider entries (providers preserve
+        # the order of the safe URL list they receive).
         if invalid_urls or ssrf_blocked:
-            results = _merge_in_order(len(urls), {**ssrf_blocked, **invalid_urls}, safe_indices, safe_urls, results)
+            fixed = {**ssrf_blocked, **invalid_urls}
+            results = _merge_in_order(len(urls), fixed, safe_indices, safe_urls, results)
 
         logger.info("Extracted content from %d pages", len(results))
         debug_call_data["pages_extracted"] = len(results)
@@ -424,17 +407,15 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         debug_call_data["processing_applied"].append("truncate_and_store")
         _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
         trimmed = _trim_results(results)
-        if not trimmed:
-            result_json = tool_error("Content was inaccessible or not found")
-        else:
-            result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False)
-        # Belt-and-suspenders sweep over the serialized JSON in case a provider tucked a base64 blob in metadata.
+        result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed else tool_error(
+            "Content was inaccessible or not found"
+        )
+        # Belt-and-suspenders sweep of the serialized JSON: a provider may tuck a base64 blob in metadata.
         cleaned_result = convert_base64_images_to_links(result_json)
         debug_call_data["final_response_size"] = len(cleaned_result)
         debug_call_data["processing_applied"].append("base64_image_conversion")
         _finish_debug("web_extract_tool", debug_call_data)
         return cleaned_result
-
     except Exception as e:
         return _debug_error("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
 
@@ -442,9 +423,9 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
 def _provider_is_ready(provider) -> bool:
     """True when *provider* is keyed-available OR keyless-capable, without raising.
 
-    ``get_active_*_provider()`` returns an explicitly configured backend even when ``is_available()`` is False
-    (so dispatch can emit a precise error), so readiness gates (tool check_fn, ``hermes doctor``) must probe
-    for real. Keyless mode (Exa/Parallel free tier) is a working state, not a misconfig.
+    ``get_active_*_provider()`` returns an explicitly configured backend even when ``is_available()`` is
+    False (so dispatch can emit a precise error), so readiness gates (tool check_fn, ``hermes doctor``)
+    must probe for real. Keyless mode (Exa/Parallel free tier) is a working state, not a misconfig.
     """
     if provider is None:
         return False
@@ -460,8 +441,8 @@ def _provider_is_ready(provider) -> bool:
 def check_web_api_key() -> bool:
     """``check_fn`` gate for web_search / web_extract: is any web backend available?
 
-    A plugin-registered provider reporting ``is_available()`` must light the tools up even with no built-in
-    credentials; resolution funnels through :func:`_is_backend_available`.
+    A plugin-registered provider reporting ``is_available()`` must light the tools up even with no
+    built-in credentials; resolution funnels through :func:`_is_backend_available`.
     """
     configured = _configured_backend()
     if configured and _is_backend_available(configured):
@@ -473,15 +454,15 @@ def check_web_api_key() -> bool:
     try:
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import get_active_search_provider, get_active_extract_provider
-        return _provider_is_ready(get_active_search_provider()) or _provider_is_ready(get_active_extract_provider())
+        return _provider_is_ready(get_active_search_provider()) or _provider_is_ready(
+            get_active_extract_provider()
+        )
     except Exception as exc:  # noqa: BLE001 — registry optional; never fatal
         logger.debug("web provider registry availability check failed: %s", exc)
         return False
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
+# ─── Registry ─────────────────────────────────────────────────────────────────
 from tools.registry import registry, tool_error
 
 WEB_SEARCH_SCHEMA = {

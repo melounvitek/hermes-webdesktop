@@ -12,6 +12,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from tools.tool_backend_helpers import selection_error, selection_exists
 from tools.url_safety import normalize_url_for_request, sensitive_query_param_name
 from tools.web_tools_rescue import _rescue_eligible, _rescue_extract
 
@@ -38,24 +39,10 @@ def _disabled_plugin_error(capability: str, disabled_key: str) -> str:
     """Error text when the configured backend's bundled plugin is disabled in config."""
     vendor = disabled_key.split("/", 1)[-1]
     return (
-        f"web.{capability}_backend is set to '{vendor}', but its "
-        f"plugin ('{disabled_key}') is disabled in config. "
-        f"Re-enable it with `hermes plugins enable {disabled_key}` "
+        f"web.{capability}_backend is set to '{vendor}', but its plugin ('{disabled_key}') is disabled "
+        f"in config. Re-enable it with `hermes plugins enable {disabled_key}` "
         "(or remove it from plugins.disabled)."
     )
-
-
-def _strict_selection_error(capability: str, backend: str) -> str:
-    """Error for a stored-but-unregistered backend: name the disabled plugin, else the bad selection.
-
-    Strict selection never silently switches to whatever the availability walk finds.
-    """
-    from agent.web_search_registry import _disabled_web_plugin_for
-    from tools.tool_backend_helpers import selection_error
-    disabled_key = _disabled_web_plugin_for(capability=capability)
-    if disabled_key:
-        return _disabled_plugin_error(capability, disabled_key)
-    return selection_error("web", f"'{backend}'", f"no registered web {capability} provider has that name")
 
 
 def _no_provider_error(capability: str, fallback: str) -> str:
@@ -63,6 +50,14 @@ def _no_provider_error(capability: str, fallback: str) -> str:
     from agent.web_search_registry import _disabled_web_plugin_for
     disabled_key = _disabled_web_plugin_for(capability=capability)
     return _disabled_plugin_error(capability, disabled_key) if disabled_key else fallback
+
+
+def _strict_selection_error(capability: str, backend: str) -> str:
+    """Error for a stored-but-unregistered backend: name the disabled plugin, else the bad selection.
+    Strict selection never silently switches to whatever the availability walk finds."""
+    failure = f"no registered web {capability} provider has that name"
+    fallback = selection_error("web", f"'{backend}'", failure)
+    return _no_provider_error(capability, fallback)
 
 
 def _result_entry(url: str, error: Optional[str]) -> Dict[str, Any]:
@@ -85,7 +80,8 @@ def _merge_in_order(
     *fetch_positions* (a short provider list yields ``_NO_RESULT_ERROR`` entries for the rest)."""
     merged = dict(fixed)
     for pos, position in enumerate(fetch_positions):
-        merged[position] = results[pos] if pos < len(results) else _result_entry(fetch_urls[pos], _NO_RESULT_ERROR)
+        missing = _result_entry(fetch_urls[pos], _NO_RESULT_ERROR)
+        merged[position] = results[pos] if pos < len(results) else missing
     return [merged[i] for i in range(total)]
 
 
@@ -105,13 +101,16 @@ def _validate_extract_urls(urls: List[Any]):
         _url = _web_extract_url(item)
         if _url is None:
             invalid_urls[index] = _result_entry(
-                "", f"Invalid URL item at index {index}: expected a URL string or an object with a string 'url' or 'href' field"
+                "",
+                f"Invalid URL item at index {index}: expected a URL string "
+                "or an object with a string 'url' or 'href' field",
             )
             continue
         normalized_url = normalize_url_for_request(_url)
         if any(_PREFIX_RE.search(c) for c in (_url, unquote(_url), normalized_url, unquote(normalized_url))):
             return _refuse_all(
-                "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs."
+                "Blocked: URL contains what appears to be an API key or token. "
+                "Secrets must not be sent in URLs."
             )
         sensitive_query_key = sensitive_query_param_name(normalized_url)
         if sensitive_query_key:
@@ -129,8 +128,8 @@ def _validate_extract_urls(urls: List[Any]):
 def _resolve_extract_provider(backend: str):
     """Resolve the extract provider for *backend*; returns ``(provider, error_json)``.
 
-    A registered search-only backend is a typed error (never a silent switch). An unregistered name with a
-    stored web selection is a strict-selection error; with no selection, fall through to the availability walk.
+    A registered search-only backend is a typed error (never a silent switch). An unregistered name with
+    a stored web selection is a strict-selection error; with no selection, fall through to the walk.
     """
     from agent.web_search_registry import get_active_extract_provider, get_provider as _wsp_get_provider
     provider = _wsp_get_provider(backend) if backend else None
@@ -138,17 +137,16 @@ def _resolve_extract_provider(backend: str):
         return provider, None
     if provider is not None:
         return None, _extract_error_json(
-            f"{provider.display_name} is a search-only "
-            "backend and cannot extract URL content. "
+            f"{provider.display_name} is a search-only backend and cannot extract URL content. "
             "Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT
         )
-    from tools.tool_backend_helpers import selection_exists
     if backend and selection_exists("web"):
         return None, _extract_error_json(_strict_selection_error("extract", backend))
     provider = get_active_extract_provider()
     if provider is None:
         return None, _extract_error_json(_no_provider_error(
-            "extract", "No web extract provider configured. Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT,
+            "extract",
+            "No web extract provider configured. Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT,
         ))
     return provider, None
 
@@ -180,7 +178,7 @@ async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[st
             continue
         _content = fetched.get("raw_content", "") or fetched.get("content", "")
         if _content:
-            extract_cache_put(url, _content, title=fetched.get("title", ""), format=format, provider=provider.name)
+            extract_cache_put(url, _content, fetched.get("title", ""), format=format, provider=provider.name)
     return results
 
 
@@ -188,9 +186,9 @@ async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[st
     """Serve cache hits, fetch the rest, and merge back in ``safe_urls`` order.
 
     The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate, SSRF gate, and provider
-    resolution, and is gated per-URL on the website policy — a hit skips only the vendor call, never a control.
-    Policy-blocked URLs are cache misses so dispatch handles them exactly as without a cache. Keys include
-    provider and format, so switching either within the TTL never serves the other's content.
+    resolution, and is gated per-URL on the website policy — a hit skips only the vendor call, never a
+    control. Policy-blocked URLs are cache misses so dispatch handles them exactly as without a cache.
+    Keys include provider and format, so switching either within the TTL never serves the other's content.
     """
     from tools.web_result_cache import extract_cache_get
     from tools.website_policy import check_website_access as _check_site
@@ -211,7 +209,6 @@ async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[st
 
     if not fetch_urls:
         return [cached_results[i] for i in range(len(safe_urls))]
-
     logger.info("Web extract via %s: %d URL(s)", provider.name, len(fetch_urls))
     results = await _dispatch_extract(provider, fetch_urls, format)
     if not cached_results:

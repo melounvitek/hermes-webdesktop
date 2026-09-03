@@ -1,11 +1,9 @@
 """Truncate-and-store pipeline for web_extract (no LLM).
 
-Pages at or under the char budget are returned whole; larger pages become a
-head+tail window plus a footer that says how much is shown, where the full text
-is stored (cache/web) and the exact read_file call that pages the omitted middle.
-Inline base64 images are replaced with ``[IMAGE: alt]`` placeholders. Names are
-re-imported by tools/web_tools.py (``tools.web_tools.MAX_STORED_TEXT_CHARS``); logs
-under the origin logger name for parity.
+Pages at or under the char budget are returned whole; larger pages become a head+tail window plus a
+footer that says how much is shown, where the full text is stored (cache/web) and the exact read_file
+call that pages the omitted middle. Inline base64 images become ``[IMAGE: alt]`` placeholders. Names are
+re-imported by tools/web_tools.py (``tools.web_tools.MAX_STORED_TEXT_CHARS``); logs under the origin logger.
 """
 
 import logging
@@ -25,10 +23,8 @@ _CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
 
 
 def _clamp_char_limit(value: Any) -> int:
-    """Clamp to [2k, 500k]; raises TypeError/ValueError for non-numeric input.
-
-    Floor: below 2k the truncation footer dominates. Ceiling: a config typo must not blow up context.
-    """
+    """Clamp to [2k, 500k] (below 2k the truncation footer dominates; a config typo must not blow up context);
+    raises TypeError/ValueError for non-numeric input."""
     return max(_CHAR_LIMIT_FLOOR, min(int(value), _CHAR_LIMIT_CEILING))
 
 
@@ -45,11 +41,9 @@ def _get_extract_char_limit() -> int:
 
 
 def convert_base64_images_to_links(text: str) -> str:
-    """Replace inline base64 image blobs (token bombs) with ``[IMAGE: alt]`` placeholders.
-
-    Handles markdown images (alt text kept), parenthesised blobs, and bare ``data:image/...;base64,`` payloads.
-    Real http(s) markdown image links are left untouched so the agent can ``web_extract`` / ``vision_analyze`` them.
-    """
+    """Replace inline base64 image blobs (token bombs) with ``[IMAGE: alt]`` placeholders: markdown images
+    (alt kept), parenthesised blobs, and bare ``data:image/...;base64,`` payloads. Real http(s) markdown
+    image links are left untouched so the agent can ``web_extract`` / ``vision_analyze`` them."""
     def _md_repl(m: "re.Match[str]") -> str:
         alt = (m.group("alt") or "").strip()
         return f"[IMAGE: {alt}]" if alt else "[IMAGE]"
@@ -61,12 +55,9 @@ def convert_base64_images_to_links(text: str) -> str:
 
 
 def _store_full_text(url: str, content: str) -> Optional[str]:
-    """Write the full page to cache/web; absolute path or None.
-
-    cache/web is mounted read-only into remote backends (credential_files _CACHE_DIRS) so read_file
-    can page the complete text on any backend. Best-effort: on failure the truncated content is
-    still returned to the model.
-    """
+    """Write the full page to cache/web; absolute path or None. cache/web is mounted read-only into remote
+    backends (credential_files _CACHE_DIRS) so read_file can page the complete text on any backend.
+    Best-effort: on failure the truncated content is still returned to the model."""
     try:
         import hashlib
         from hermes_constants import get_hermes_dir
@@ -91,12 +82,9 @@ def _store_full_text(url: str, content: str) -> Optional[str]:
 
 
 def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str, bool]:
-    """Return (model_text, was_truncated).
-
-    Pages over ``char_limit`` become a ~75% head / ~25% tail window cut on line boundaries, plus a
-    footer saying how much is shown, where the full text is stored, and the read_file call that
-    pages the omitted middle. Deterministic.
-    """
+    """Return (model_text, was_truncated). Pages over ``char_limit`` become a ~75% head / ~25% tail window cut
+    on line boundaries, plus a footer saying how much is shown, where the full text is stored, and the
+    read_file call that pages the omitted middle. Deterministic."""
     if len(content) <= char_limit:
         return content, False
     head_budget = int(char_limit * 0.75)
@@ -114,14 +102,17 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
     footer_lines = [
         "",
         "─" * 8 + " [TRUNCATED] " + "─" * 8,
-        f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) of {len(content):,} total clean characters.",
+        f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
+        f"of {len(content):,} total clean characters.",
     ]
     if stored_path:
         # read_file is 1-indexed; +2 lands on the first line after the shown head.
+        middle_start_line = head.count("\n") + 2
         footer_lines += [
             f"Full text saved to: {stored_path}",
-            f'To read the omitted middle: read_file path="{stored_path}" offset={head.count(chr(10)) + 2} limit=200  '
-            "(the file is the complete page; raise/lower offset to page through it).",
+            f'To read the omitted middle: read_file path="{stored_path}" '
+            f"offset={middle_start_line} limit=200  (the file is the complete page; "
+            f"raise/lower offset to page through it).",
         ]
     else:
         footer_lines.append(
@@ -129,7 +120,8 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
             "specific URL or use browser_navigate for the complete page."
         )
     footer_lines.append("─" * 29)
-    return head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n" + "\n".join(footer_lines), True
+    model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail
+    return model_text + "\n" + "\n".join(footer_lines), True
 
 
 def _effective_char_limit(char_limit: Optional[int]) -> int:
@@ -168,7 +160,8 @@ def _trim_results(results: List[dict]) -> List[dict]:
     """Keep only url/title/content/error per entry (+ blocked_by_policy when present)."""
     return [
         {
-            "url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""), "error": r.get("error"),
+            "url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""),
+            "error": r.get("error"),
             **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
         }
         for r in results

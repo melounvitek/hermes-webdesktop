@@ -51,8 +51,8 @@ def _normalize_rule(rule: Any) -> Optional[str]:
 
 
 def _iter_blocklist_file_rules(path: Path) -> List[str]:
-    """Rules from a shared blocklist file; missing/unreadable files warn and yield nothing
-    rather than raising — a bad file path must not disable all web tools."""
+    """Rules from a shared blocklist file; missing/unreadable files warn and yield nothing rather than
+    raising — a bad file path must not disable all web tools."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -66,11 +66,9 @@ def _iter_blocklist_file_rules(path: Path) -> List[str]:
 
 def _require_mapping(value: Any, label: str) -> Dict[str, Any]:
     """``None`` (empty YAML section) counts as an empty mapping; other non-dicts are errors."""
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
+    if value is not None and not isinstance(value, dict):
         raise WebsitePolicyError(f"{label} must be a mapping")
-    return value
+    return value or {}
 
 
 def _load_policy_config(config_path: Path) -> Dict[str, Any]:
@@ -90,7 +88,6 @@ def _load_policy_config(config_path: Path) -> Dict[str, Any]:
         raise WebsitePolicyError(f"Failed to read config file {config_path}: {exc}") from exc
     if not isinstance(config, dict):
         raise WebsitePolicyError("config root must be a mapping")
-
     security = _require_mapping(config.get("security", {}), "security")
     website_blocklist = _require_mapping(security.get("website_blocklist", {}), "security.website_blocklist")
     return {**_DEFAULT_WEBSITE_BLOCKLIST, **website_blocklist}
@@ -102,13 +99,14 @@ def _require_type(policy: Dict[str, Any], key: str, kind: type, default: Any) ->
     if kind is list:
         value = value or []
     if not isinstance(value, kind):
-        raise WebsitePolicyError(f"security.website_blocklist.{key} must be a {'boolean' if kind is bool else 'list'}")
+        kind_name = "boolean" if kind is bool else "list"
+        raise WebsitePolicyError(f"security.website_blocklist.{key} must be a {kind_name}")
     return value
 
 
 def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Parsed website blocklist policy (``{"enabled", "rules"}``); cached for ``_CACHE_TTL_SECONDS`` for the
-    default config path only — an explicit ``config_path`` (tests) always bypasses and never populates the cache."""
+    """Parsed website blocklist policy (``{"enabled", "rules"}``); cached for ``_CACHE_TTL_SECONDS`` for
+    the default config path only — an explicit ``config_path`` (tests) bypasses and never populates it."""
     global _cached_policy, _cached_policy_path, _cached_policy_time
     default_path = get_hermes_home() / "config.yaml"
     resolved_path = str(config_path or default_path)
