@@ -1,41 +1,35 @@
 """Replica store and takeover primitives for hosted Group Chat rooms.
 
-The authority gateway owns a room's ordered log in ``gateway/hosted_rooms.py``;
-this module gives every OTHER participant gateway a durable local copy plus the
-fenced primitives to continue the room when the authority host dies:
-``ingest_page()`` (idempotent, gap- and epoch-regression-safe replay),
-``promote_replica()`` (resume locally at ``epoch + 1`` with a lineage-proving
-``authority.claimed`` event) and ``demote_room()`` (a returning stale authority
-records ``authority.lost`` when shown proof of a newer epoch).
-
-Storage primitives only: none decide *when* takeover is safe. The caller must
-establish that the previous owner can no longer commit before promoting.
+Non-authority gateways keep a durable local copy of the room log (``ingest_page()``: idempotent,
+gap- and epoch-regression-safe) plus fenced primitives to continue the room when the authority host
+dies: ``promote_replica()`` resumes locally at ``epoch + 1`` with a lineage-proving ``authority.claimed``
+event; ``demote_room()`` records ``authority.lost`` when a returning stale authority is shown a newer
+epoch. Storage primitives only: the caller decides *when* takeover is safe.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
 
 from gateway.hosted_rooms import (
     MAX_ACTOR_ID_CHARS,
-    MAX_EVENT_JSON_BYTES,
-    MAX_ROOM_ID_CHARS,
     HostedRoomError,
     RoomConflictError,
-    _canonical_json,
+    _actor_json,
     _connect,
+    _payload_json,
+    _room_id,
     _transaction,
     _validate_identifier,
     _validate_members,
     _validate_room_name,
-    local_authority_gateway_id,
-)
-from gateway.hosted_rooms_common import positive_int, utf8_len
+    local_authority_gateway_id)
+from gateway.hosted_rooms_common import bounded_int, clock, utf8_len
 
 MAX_REPLICA_ROOMS = 256
 MAX_REPLICA_EVENT_BYTES = 256 * 1024 * 1024
@@ -46,16 +40,13 @@ _INSERT_REPLICA_EVENT = f"INSERT INTO hosted_room_replica_events {_EVENT_COLUMNS
 _SELECT_REPLICA = "SELECT * FROM hosted_room_replicas WHERE room_id=?"
 
 
-class ReplicaError(HostedRoomError):
-    """Base class for invalid or conflicting replica operations."""
+class ReplicaError(HostedRoomError): """Base class for invalid or conflicting replica operations."""
 
 
-class ReplicaGapError(ReplicaError):
-    """A page does not start at the replica's next expected sequence."""
+class ReplicaGapError(ReplicaError): """A page does not start at the replica's next expected sequence."""
 
 
-class ReplicaEpochRegressionError(ReplicaError):
-    """A page or demotion carries an older authority epoch than stored."""
+class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries an older authority epoch than stored."""
 
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
@@ -83,8 +74,7 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
 def _replica_transaction(db_path: Path | str) -> Iterator[sqlite3.Connection]:
     """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction.
 
-    The schema DDL is re-run inside the transaction too; that double init is the
-    established statement order and is intentionally preserved.
+    The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
     """
     conn = _connect(db_path)
     try:
@@ -97,28 +87,19 @@ def _replica_transaction(db_path: Path | str) -> Iterator[sqlite3.Connection]:
         yield conn
 
 
-def _room_id(value: Any) -> str:
-    return _validate_identifier(value, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
-
-
-def _positive_int(value: Any, message: str) -> int:
-    return positive_int(value, error=ReplicaError, message=message)
+_positive_int = partial(bounded_int, error=ReplicaError, low=1)
 
 
 def _control_event_json(payload: dict[str, Any]) -> tuple[str, str]:
     """Canonical (actor_json, payload_json) for a system authority-control event."""
-    return (
-        _canonical_json(_SYSTEM_ACTOR, label="actor", max_bytes=4 * 1024),
-        _canonical_json(payload, label="payload", max_bytes=MAX_EVENT_JSON_BYTES),
-    )
+    return _actor_json(_SYSTEM_ACTOR), _payload_json(payload)
 
 
 def _event_bytes(event: dict[str, Any]) -> int:
     return utf8_len(
         str(event["event_id"]), str(event["kind"]),
         json.dumps(event["actor"], ensure_ascii=False, separators=(",", ":")),
-        json.dumps(event["payload"], ensure_ascii=False, separators=(",", ":")),
-    )
+        json.dumps(event["payload"], ensure_ascii=False, separators=(",", ":")))
 
 
 def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -131,14 +112,13 @@ def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not isinstance(authority, dict):
         raise ReplicaError("page.authority is required for replication")
     gateway_id = _validate_identifier(
-        authority.get("gateway_id"), label="page.authority.gateway_id", max_chars=MAX_ACTOR_ID_CHARS
-    )
-    epoch = _positive_int(authority.get("epoch"), "page.authority.epoch must be a positive integer")
+        authority.get("gateway_id"), label="page.authority.gateway_id", max_chars=MAX_ACTOR_ID_CHARS)
+    epoch = _positive_int(authority.get("epoch"), message="page.authority.epoch must be a positive integer")
     previous_seq: int | None = None
     for event in events:
         if not isinstance(event, dict):
             raise ReplicaError("page events must be objects")
-        seq = _positive_int(event.get("seq"), "event.seq must be a positive integer")
+        seq = _positive_int(event.get("seq"), message="event.seq must be a positive integer")
         if previous_seq is not None and seq != previous_seq + 1:
             raise ReplicaGapError("page events must be contiguous")
         previous_seq = seq
@@ -156,9 +136,7 @@ def _replica_row_state(conn: sqlite3.Connection, room_id: str) -> tuple[sqlite3.
     """Return (row, stored_epoch, last_seq, stored_bytes); a new room is admitted only under the room cap."""
     row = conn.execute(
         """SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
-             FROM hosted_room_replicas WHERE room_id=?""",
-        (room_id,),
-    ).fetchone()
+             FROM hosted_room_replicas WHERE room_id=?""", (room_id,)).fetchone()
     if row is None:
         count = conn.execute("SELECT COUNT(*) FROM hosted_room_replicas").fetchone()[0]
         if int(count) >= MAX_REPLICA_ROOMS:
@@ -169,8 +147,7 @@ def _replica_row_state(conn: sqlite3.Connection, room_id: str) -> tuple[sqlite3.
 
 def _store_replica(
     conn: sqlite3.Connection, *, is_new: bool, room_id: str, room_name: str, members_json: str,
-    authority: dict[str, Any], new_last: int, latest_seq: int, added_bytes: int, now: float,
-) -> None:
+    authority: dict[str, Any], new_last: int, latest_seq: int, added_bytes: int, now: float) -> None:
     """INSERT the replica row for a new room, else UPDATE it (event_bytes accumulates)."""
     values = (room_name, members_json, authority["gateway_id"], authority["epoch"], new_last, max(latest_seq, new_last))
     if is_new:
@@ -178,30 +155,23 @@ def _store_replica(
             """INSERT INTO hosted_room_replicas (room_id, name, members_json,
                 authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes,
                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (room_id, *values, added_bytes, now, now),
-        )
+            (room_id, *values, added_bytes, now, now))
     else:
         conn.execute(
             """UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
                 authority_epoch=?, last_seq=?, latest_seq=?, event_bytes=event_bytes+?,
-                updated_at=? WHERE room_id=?""",
-            (*values, added_bytes, now, room_id),
-        )
+                updated_at=? WHERE room_id=?""", (*values, added_bytes, now, room_id))
 
 
 def ingest_page(
     db_path: Path | str, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
 ) -> dict[str, Any]:
-    """Persist one replay page idempotently; refuses seq gaps and epoch regressions.
-
-    ``page`` is the verbatim ``groups.log`` (``read_events()``) result whose
-    ``authority`` stamp proves lineage.
-    """
+    """Persist one verbatim ``read_events()`` page idempotently; refuses seq gaps and epoch regressions."""
     room_id = _room_id(room_id)
     room_name = _validate_room_name(room_name)
     _, members_json = _validate_members(members)
     events, authority = _validate_page(page)
-    now = time.time() if now is None else float(now)
+    now = clock(now)
 
     with _replica_transaction(db_path) as conn:
         row, stored_epoch, last_seq, stored_bytes = _replica_row_state(conn, room_id)
@@ -216,15 +186,13 @@ def ingest_page(
             size = _event_bytes(event)
             if stored_bytes + added_bytes + size > MAX_REPLICA_EVENT_BYTES:
                 raise ReplicaError("replica event storage exhausted")
-            actor_json = _canonical_json(event["actor"], label="actor", max_bytes=4 * 1024)
-            payload_json = _canonical_json(event["payload"], label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
+            actor_json = _actor_json(event["actor"])
+            payload_json = _payload_json(event["payload"])
             conn.execute(
                 _INSERT_REPLICA_EVENT,
                 (
                     room_id, int(event["seq"]), event["event_id"], event["kind"], actor_json,
-                    event.get("authority_epoch"), payload_json, float(event.get("created_at") or now),
-                ),
-            )
+                    event.get("authority_epoch"), payload_json, float(event.get("created_at") or now)))
             added_bytes += size
         new_last = int(new_events[-1]["seq"]) if new_events else last_seq
         latest_seq = page.get("latest_seq")
@@ -232,13 +200,9 @@ def ingest_page(
             latest_seq = new_last
         _store_replica(
             conn, is_new=row is None, room_id=room_id, room_name=room_name, members_json=members_json,
-            authority=authority, new_last=new_last, latest_seq=latest_seq, added_bytes=added_bytes, now=now,
-        )
+            authority=authority, new_last=new_last, latest_seq=latest_seq, added_bytes=added_bytes, now=now)
     return {
-        "room_id": room_id,
-        "stored_seq": new_last,
-        "ingested": len(new_events),
-        "authority": authority,
+        "room_id": room_id, "stored_seq": new_last, "ingested": len(new_events), "authority": authority,
         "caught_up": new_last >= max(latest_seq, new_last),
     }
 
@@ -251,15 +215,10 @@ def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
     if row is None:
         raise ReplicaError("replica not found")
     return {
-        "room_id": row["room_id"],
-        "name": row["name"],
-        "members": json.loads(row["members_json"]),
+        "room_id": row["room_id"], "name": row["name"], "members": json.loads(row["members_json"]),
         "authority": {"gateway_id": row["authority_gateway_id"], "epoch": int(row["authority_epoch"])},
-        "last_seq": int(row["last_seq"]),
-        "latest_seq": int(row["latest_seq"]),
-        "event_bytes": int(row["event_bytes"]),
-        "created_at": float(row["created_at"]),
-        "updated_at": float(row["updated_at"]),
+        "last_seq": int(row["last_seq"]), "latest_seq": int(row["latest_seq"]), "event_bytes": int(row["event_bytes"]),
+        "created_at": float(row["created_at"]), "updated_at": float(row["updated_at"]),
     }
 
 
@@ -268,15 +227,14 @@ def promote_replica(
 ) -> dict[str, Any]:
     """Continue a replicated room on THIS gateway at ``epoch + 1``.
 
-    Copies the replica log into the authoritative store and appends a
-    lineage-proving ``authority.claimed`` event; wherever the claim replicates,
-    the old epoch is stale and every fenced primitive rejects it. The caller
-    decides takeover is safe; this only makes it atomic and provable.
+    Copies the replica log into the authoritative store and appends a lineage-proving
+    ``authority.claimed`` event, so wherever the claim replicates the old epoch is stale and every
+    fenced primitive rejects it. The caller decides takeover is safe; this makes it atomic and provable.
     """
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
         raise ReplicaError("reason must be a non-empty string of at most 200 chars")
-    now = time.time() if now is None else float(now)
+    now = clock(now)
     local_gateway = local_authority_gateway_id()
 
     with _replica_transaction(db_path) as conn:
@@ -296,11 +254,8 @@ def promote_replica(
         claim_seq = int(replica["last_seq"]) + 1
         claim_event_id = f"system:authority-claimed:{target_epoch}"
         claim_actor_json, claim_payload_json = _control_event_json({
-            "previous_gateway_id": previous_gateway,
-            "authority_gateway_id": local_gateway,
-            "authority_epoch": target_epoch,
-            "promoted_from_replica": True,
-            "reason": reason,
+            "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
+            "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason,
         })
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
 
@@ -311,31 +266,22 @@ def promote_replica(
                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
             (
                 room_id, replica["name"], replica["members_json"], local_gateway, target_epoch,
-                claim_seq + 1, int(replica["event_bytes"]) + claim_bytes, now, now,
-            ),
-        )
+                claim_seq + 1, int(replica["event_bytes"]) + claim_bytes, now, now))
         conn.execute(
             f"""INSERT INTO hosted_room_events {_EVENT_COLUMNS}
                SELECT room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at
                  FROM hosted_room_replica_events WHERE room_id=?""",
-            (room_id,),
-        )
+            (room_id,))
         conn.execute(
             _INSERT_ROOM_EVENT,
             (
                 room_id, claim_seq, claim_event_id, "authority.claimed",
-                claim_actor_json, target_epoch, claim_payload_json, now,
-            ),
-        )
+                claim_actor_json, target_epoch, claim_payload_json, now))
         conn.execute("DELETE FROM hosted_room_replica_events WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM hosted_room_replicas WHERE room_id=?", (room_id,))
     return {
-        "room_id": room_id,
-        "authority_gateway_id": local_gateway,
-        "authority_epoch": target_epoch,
-        "previous_gateway_id": previous_gateway,
-        "previous_epoch": previous_epoch,
-        "claim_seq": claim_seq,
+        "room_id": room_id, "authority_gateway_id": local_gateway, "authority_epoch": target_epoch,
+        "previous_gateway_id": previous_gateway, "previous_epoch": previous_epoch, "claim_seq": claim_seq,
         "latest_seq": claim_seq,
     }
 
@@ -345,34 +291,28 @@ def demote_room(
 ) -> dict[str, Any]:
     """Fence THIS gateway's stale room authority against a proven newer epoch.
 
-    Called when a returning gateway observes (replicated ``authority.claimed``
-    or a transport rejection) that another gateway owns the room at a higher
-    epoch. Appends ``authority.lost`` and adopts the observed lineage so no
-    local send can commit at the stale epoch. Idempotent per lineage.
+    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that
+    another gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed
+    lineage so no local send can commit at the stale epoch. Idempotent per lineage.
     """
     room_id = _room_id(room_id)
     observed_gateway_id = _validate_identifier(
-        observed_gateway_id, label="observed_gateway_id", max_chars=MAX_ACTOR_ID_CHARS
-    )
-    observed_epoch = _positive_int(observed_epoch, "observed_epoch must be a positive integer")
-    now = time.time() if now is None else float(now)
+        observed_gateway_id, label="observed_gateway_id", max_chars=MAX_ACTOR_ID_CHARS)
+    observed_epoch = _positive_int(observed_epoch, message="observed_epoch must be a positive integer")
+    now = clock(now)
     local_gateway = local_authority_gateway_id()
 
     with _transaction(db_path, immediate=True) as conn:
         row = conn.execute(
             """SELECT authority_gateway_id, authority_epoch, next_seq
-                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""",
-            (room_id,),
-        ).fetchone()
+                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             raise ReplicaError("room not found in the local authoritative store")
         current_gateway = str(row["authority_gateway_id"])
         current_epoch = int(row["authority_epoch"])
         if current_gateway == observed_gateway_id and current_epoch == observed_epoch:
             return {
-                "room_id": room_id,
-                "authority_gateway_id": current_gateway,
-                "authority_epoch": current_epoch,
+                "room_id": room_id, "authority_gateway_id": current_gateway, "authority_epoch": current_epoch,
                 "idempotent": True,
             }
         if observed_epoch <= current_epoch:
@@ -382,24 +322,18 @@ def demote_room(
         lost_actor_json, lost_payload_json = _control_event_json({
             "previous_gateway_id": current_gateway,
             "authority_gateway_id": observed_gateway_id,
-            "authority_epoch": observed_epoch,
-        })
+            "authority_epoch": observed_epoch})
         conn.execute(
             _INSERT_ROOM_EVENT,
             (
                 room_id, int(row["next_seq"]), f"system:authority-lost:{observed_epoch}",
-                "authority.lost", lost_actor_json, observed_epoch, lost_payload_json, now,
-            ),
-        )
+                "authority.lost", lost_actor_json, observed_epoch, lost_payload_json, now))
         conn.execute(
             """UPDATE hosted_rooms
                   SET authority_gateway_id=?, authority_epoch=?, next_seq=next_seq+1, revision=revision+1, updated_at=?
                 WHERE room_id=?""",
-            (observed_gateway_id, observed_epoch, now, room_id),
-        )
+            (observed_gateway_id, observed_epoch, now, room_id))
     return {
-        "room_id": room_id,
-        "authority_gateway_id": observed_gateway_id,
-        "authority_epoch": observed_epoch,
+        "room_id": room_id, "authority_gateway_id": observed_gateway_id, "authority_epoch": observed_epoch,
         "idempotent": False,
     }

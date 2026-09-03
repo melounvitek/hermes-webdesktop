@@ -12,6 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,23 +21,21 @@ from gateway.hosted_room_peer import (
     GatewayRoomCatalog,
     HostedRoomPeerError,
     TransportSecurity,
-    validate_room_link_url,
-)
+    validate_room_link_url)
+from gateway.hosted_rooms_common import compact_json, exact_fields
 
 
 MAX_LINKS = 512
 MAX_GRANT_CHARS = 16 * 1024
 _LEGACY_FIELDS = {
     "room_id", "member_id", "target_url", "target_profile", "grant", "catalog",
-    "cancellation_scope_id", "trace_id", "updated_at",
-}
+    "cancellation_scope_id", "trace_id", "updated_at"}
 _OPTIONAL_FIELDS = {"transport_security", "status"}
 # SQLite record columns that map 1:1 onto mapping fields, in record order
 # (``catalog_json`` is the serialized ``catalog``).
 _RECORD_FIELDS = (
     "room_id", "member_id", "target_url", "target_profile", "grant", "cancellation_scope_id",
-    "trace_id", "transport_security", "status", "updated_at",
-)
+    "trace_id", "transport_security", "status", "updated_at")
 _STATUSES = {"ready", "unavailable", "needs_reauthorization"}
 
 
@@ -56,8 +55,7 @@ class StoredRoomLink:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "StoredRoomLink":
-        if set(value) - _LEGACY_FIELDS - _OPTIONAL_FIELDS or not _LEGACY_FIELDS.issubset(value):
-            raise HostedRoomPeerError("stored room link fields are invalid")
+        _link_fields(value)
         room_id = _short_string(value["room_id"], "room_id")
         member_id = _short_string(value["member_id"], "member_id")
         target_profile = _short_string(value["target_profile"], "target_profile")
@@ -85,8 +83,7 @@ class StoredRoomLink:
             trace_id=_short_string(value["trace_id"], "trace_id"),
             transport_security=transport_security,  # type: ignore[arg-type]
             status=status,
-            updated_at=updated_at,
-        )
+            updated_at=updated_at)
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> "StoredRoomLink":
@@ -101,8 +98,14 @@ class StoredRoomLink:
 
     def as_record(self) -> dict[str, Any]:
         record = {name: getattr(self, name) for name in _RECORD_FIELDS}
-        record["catalog_json"] = json.dumps(self.catalog_mapping(), sort_keys=True, separators=(",", ":"))
+        record["catalog_json"] = compact_json(self.catalog_mapping(), ensure_ascii=False)
         return record
+
+
+_link_fields = partial(
+    exact_fields, label="stored room link", required=_LEGACY_FIELDS, optional=_OPTIONAL_FIELDS,
+    error=HostedRoomPeerError, not_object="stored room link fields are invalid",
+    missing_fmt="stored room link fields are invalid", unknown_fmt="stored room link fields are invalid")
 
 
 def _short_string(value: Any, field: str) -> str:
@@ -149,32 +152,15 @@ def mark_room_link_status(db_path: Path | str, *, room_id: str, member_id: str, 
         raise HostedRoomPeerError("stored room link status is invalid")
     return hosted_rooms.update_room_link_status(
         db_path, room_id=_short_string(room_id, "room_id"), member_id=_short_string(member_id, "member_id"),
-        status=status,
-    )
+        status=status)
 
 
 def make_stored_link(
-    *,
-    room_id: str,
-    member_id: str,
-    target_url: str,
-    target_profile: str,
-    grant: str,
-    catalog: GatewayRoomCatalog,
-    cancellation_scope_id: str,
-    trace_id: str,
-) -> StoredRoomLink:
+    *, room_id: str, member_id: str, target_url: str, target_profile: str, grant: str,
+    catalog: GatewayRoomCatalog, cancellation_scope_id: str, trace_id: str) -> StoredRoomLink:
     target_url, transport_security = validate_room_link_url(target_url)
     return StoredRoomLink.from_mapping({
-        "room_id": room_id,
-        "member_id": member_id,
-        "target_url": target_url,
-        "target_profile": target_profile,
-        "grant": grant,
-        "catalog": catalog.as_mapping(),
-        "cancellation_scope_id": cancellation_scope_id,
-        "trace_id": trace_id,
-        "transport_security": transport_security,
-        "status": "ready",
-        "updated_at": time.time(),
+        "room_id": room_id, "member_id": member_id, "target_url": target_url, "target_profile": target_profile,
+        "grant": grant, "catalog": catalog.as_mapping(), "cancellation_scope_id": cancellation_scope_id,
+        "trace_id": trace_id, "transport_security": transport_security, "status": "ready", "updated_at": time.time(),
     })
