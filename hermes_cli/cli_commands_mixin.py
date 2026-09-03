@@ -697,8 +697,7 @@ class CLICommandsMixin:
                 paths.append(arg)
         cwd = os.getenv("TERMINAL_CWD", os.getcwd())
         if mode == "session":
-            self._print_session_diff(cwd, stat_only)
-            return
+            return self._print_session_diff(cwd, stat_only)
         from tools.working_diff import collect_working_diff
         result = collect_working_diff(cwd, mode=mode, paths=paths or None)
         if not result.get("success"):
@@ -711,14 +710,11 @@ class CLICommandsMixin:
             print(f"\n  {_DIFF_LABELS[mode]}:")
             self._print_diff_text(stat)
         if untracked and mode in ("working", "all"):
-            print("\n  Untracked:")
-            for rel in untracked[:20]:
-                print(f"    + {rel}")
+            _pr("\n  Untracked:", *(f"    + {rel}" for rel in untracked[:20]))
             if len(untracked) > 20:
                 print(f"    ... and {len(untracked) - 20} more")
-        if stat_only or not diff:
-            return
-        self._print_diff_body(diff, "run /diff --stat for a summary")
+        if diff and not stat_only:
+            self._print_diff_body(diff, "run /diff --stat for a summary")
 
     def _print_diff_body(self, diff: str, stat_hint: str, limit: int = 400) -> None:
         """Print a diff, capped at ``limit`` lines with a pointer to the --stat form."""
@@ -747,9 +743,8 @@ class CLICommandsMixin:
             return print("  No changes — Hermes hasn't edited any files here yet.")
         if stat:
             self._print_diff_text(f"\n{stat}")
-        if stat_only or not diff:
-            return
-        self._print_diff_body(diff, "run /diff session --stat for a summary")
+        if diff and not stat_only:
+            self._print_diff_body(diff, "run /diff session --stat for a summary")
 
     def _print_diff_text(self, text: str) -> None:
         """Render diff/stat text with color when a rich console is present; plain print otherwise
@@ -2366,8 +2361,8 @@ class CLICommandsMixin:
                 marker = " ●" if s["name"] == current else "  "
                 source = f" ({s['source']})" if s["source"] == "user" else ""
                 print(f"   {marker} {s['name']}{source} — {s['description']}")
-            print("\n  Usage: /skin <name>")
-            return print(f"  Custom skins: drop a YAML file in {display_hermes_home()}/skins/\n")
+            return _pr("\n  Usage: /skin <name>",
+                       f"  Custom skins: drop a YAML file in {display_hermes_home()}/skins/\n")
         available = {s["name"] for s in list_skins()}
         if new_skin not in available:
             return _pr(f"  Unknown skin: {new_skin}",
@@ -2384,16 +2379,13 @@ class CLICommandsMixin:
         """Open ``$VISUAL``/``$EDITOR`` on a temp markdown file and return the saved buffer with
         ``#!`` comment lines stripped; "" if the editor failed or the buffer was left empty.
         Factored out so the read-back/strip logic is unit-testable."""
-        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
-        if not editor:
-            editor = "notepad" if os.name == "nt" else "nano"
-        header = (
-            "#! Compose your prompt below. Lines starting with '#!' are ignored.\n"
-            "#! Save and quit to send; leave empty to cancel.\n\n")
+        editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR")
+                  or ("notepad" if os.name == "nt" else "nano"))
         fd, path = tempfile.mkstemp(suffix=".md", prefix="hermes_prompt_")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(header)
+                fh.write("#! Compose your prompt below. Lines starting with '#!' are ignored.\n"
+                         "#! Save and quit to send; leave empty to cancel.\n\n")
                 if initial_text:
                     fh.write(initial_text)
             try:
