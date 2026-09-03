@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import threading
+import time
 from typing import Any, Callable, Optional
 
 # Modifier aliases mirrored from the TUI parser (``ui-tui/src/lib/platform.ts``
@@ -277,6 +279,11 @@ _continuous_no_speech_count = 0
 _CONTINUOUS_NO_SPEECH_LIMIT = 3
 
 
+def _callbacks() -> tuple:
+    """(on_transcript, on_status, on_silent_limit, on_stop_phrase) — caller holds the lock."""
+    return _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit, _continuous_on_stop_phrase
+
+
 def _detect_stop_phrase(transcript: Optional[str], where: str, tail: str) -> tuple[Optional[str], bool, str]:
     """Split a transcript into (deliverable text, is_stop_phrase, stop_text).
 
@@ -431,17 +438,11 @@ def stop_continuous(force_transcribe: bool = False) -> None:
             return
         _continuous_active = False
         rec = _continuous_recorder
-        on_status = _continuous_on_status
-        on_transcript = _continuous_on_transcript
-        on_silent_limit = _continuous_on_silent_limit
-        on_stop_phrase = _continuous_on_stop_phrase
-        auto_restart = _continuous_auto_restart
-        track_no_speech = force_transcribe and not auto_restart
+        on_transcript, on_status, on_silent_limit, on_stop_phrase = _callbacks()
+        track_no_speech = force_transcribe and not _continuous_auto_restart
         _continuous_stopping = rec is not None
-        _continuous_on_transcript = None
-        _continuous_on_status = None
-        _continuous_on_silent_limit = None
-        _continuous_on_stop_phrase = None
+        _continuous_on_transcript = _continuous_on_status = None
+        _continuous_on_silent_limit = _continuous_on_stop_phrase = None
         if not track_no_speech:
             _continuous_no_speech_count = 0
 
@@ -517,10 +518,7 @@ def _continuous_on_silence() -> None:
             _debug("_continuous_on_silence: loop inactive — abort")
             return
         rec = _continuous_recorder
-        on_transcript = _continuous_on_transcript
-        on_status = _continuous_on_status
-        on_silent_limit = _continuous_on_silent_limit
-        on_stop_phrase = _continuous_on_stop_phrase
+        on_transcript, on_status, on_silent_limit, on_stop_phrase = _callbacks()
 
     if rec is None:
         _debug("_continuous_on_silence: no recorder — abort")
@@ -581,8 +579,7 @@ def _continuous_on_silence() -> None:
     if not _tts_playing.is_set():
         _debug("_continuous_on_silence: waiting for TTS to finish")
         _tts_playing.wait(timeout=60)
-        import time as _time
-        _time.sleep(0.3)
+        time.sleep(0.3)
 
         with _continuous_lock:
             if not _continuous_active:
@@ -650,9 +647,6 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
     """
     if not text or not text.strip():
         return
-
-    import tempfile
-    import time
 
     # Cancel any live capture before opening the speakers — otherwise the user's
     # turn tail + our first syllables both land in the next recording window.
