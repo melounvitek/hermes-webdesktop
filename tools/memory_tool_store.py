@@ -21,9 +21,9 @@ MEMORY_BLOCK_HEADERS = {
 
 ENTRY_DELIMITER = "\n§\n"
 
+
 def _memory_dir() -> Path:
     from tools import memory_tool
-
     return memory_tool.get_memory_dir()
 
 
@@ -35,20 +35,15 @@ def _scan_memory_content(content: str) -> Optional[str]:
 
 def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
     """External drift: the file wouldn't round-trip, so flushing would discard content."""
-    return {
-        "success": False,
-        "error": (
-            f"Refusing to write {path.name}: file on disk has content that wouldn't round-trip "
-            f"through the memory tool (likely added by the patch tool, a shell append, a manual edit, "
-            f"or a concurrent session). A snapshot was saved to {bak_path}. Resolve the drift first — "
-            f"either rewrite the file as a clean §-delimited list of entries, or move the extra "
-            f"content out — then retry. This guard exists to prevent silent data loss (issue #26045)."
-        ),
-        "drift_backup": bak_path,
-        "remediation": (
-            "Open the .bak file, integrate the missing entries into the memory tool one at a time via "
-            "memory(action=add, content=...), then remove or rewrite the original file to a clean state."
-        )}
+    return {"success": False, "error": (
+        f"Refusing to write {path.name}: file on disk has content that wouldn't round-trip "
+        f"through the memory tool (likely added by the patch tool, a shell append, a manual edit, "
+        f"or a concurrent session). A snapshot was saved to {bak_path}. Resolve the drift first — "
+        f"either rewrite the file as a clean §-delimited list of entries, or move the extra "
+        f"content out — then retry. This guard exists to prevent silent data loss (issue #26045)."
+    ), "drift_backup": bak_path, "remediation": (
+        "Open the .bak file, integrate the missing entries into the memory tool one at a time via "
+        "memory(action=add, content=...), then remove or rewrite the original file to a clean state.")}
 
 
 def _read_failed_error(path: "Path") -> Dict[str, Any]:
@@ -64,11 +59,9 @@ def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int]
     """``(index, ambiguous)`` for entries containing *old_text*. Exact-duplicate
     matches are safe (first wins); distinct matches → ``(None, True)``."""
     matches = [i for i, e in enumerate(entries) if old_text in e]
-    if not matches:
-        return None, False
     if len({entries[i] for i in matches}) > 1:
         return None, True
-    return matches[0], False
+    return (matches[0] if matches else None), False
 
 
 class MemoryStore:
@@ -122,10 +115,8 @@ class MemoryStore:
         self.memory_entries = list(dict.fromkeys(self._read_file(mem_dir / "MEMORY.md")))
         self.user_entries = list(dict.fromkeys(self._read_file(mem_dir / "USER.md")))
         self._system_prompt_snapshot = {
-            target: self._render_block(target, self._sanitize_entries_for_snapshot(entries, filename))
-            for target, entries, filename in (
-                ("memory", self.memory_entries, "MEMORY.md"), ("user", self.user_entries, "USER.md"))
-        }
+            "memory": self._render_block("memory", self._sanitize_entries_for_snapshot(self.memory_entries, "MEMORY.md")),
+            "user": self._render_block("user", self._sanitize_entries_for_snapshot(self.user_entries, "USER.md"))}
 
     @staticmethod
     def _sanitize_entries_for_snapshot(entries: List[str], filename: str) -> List[str]:
@@ -133,16 +124,15 @@ class MemoryStore:
         (strict scope, same as writes); empty / already-blocked entries pass through."""
         from tools.threat_patterns import scan_for_threats
 
-        sanitized: List[str] = []
-        for entry in entries:
+        def _one(entry):
             findings = scan_for_threats(entry, scope="strict") if entry and not entry.startswith("[BLOCKED:") else None
             if not findings:
-                sanitized.append(entry)
-                continue
+                return entry
             logger.warning("Memory entry from %s blocked at load time: %s", filename, ", ".join(findings))
-            sanitized.append(f"[BLOCKED: {filename} entry contained threat pattern(s): {', '.join(findings)}. "
-                             f"Removed from system prompt; use memory(action=remove) to delete the original.]")
-        return sanitized
+            return (f"[BLOCKED: {filename} entry contained threat pattern(s): {', '.join(findings)}. "
+                    f"Removed from system prompt; use memory(action=remove) to delete the original.]")
+
+        return [_one(e) for e in entries]
 
     @staticmethod
     @contextmanager
@@ -150,31 +140,27 @@ class MemoryStore:
         """Exclusive lock on a separate .lock file so the memory file itself can
         still be atomically replaced."""
         from tools import memory_tool as _mt  # fcntl/msvcrt live (and are patched) there
-
         fcntl, msvcrt = _mt.fcntl, _mt.msvcrt
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         if fcntl is None and msvcrt is None:
             yield
             return
-        fd = open(lock_path, "a+", encoding="utf-8")
-
-        def _flock(unlock: bool):
-            if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
-            else:
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
-
-        try:
+        with open(lock_path, "a+", encoding="utf-8") as fd:
+            def _flock(unlock: bool):
+                if fcntl:
+                    fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
+                else:
+                    fd.seek(0)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
             _flock(False)
-            yield
-        finally:
             try:
-                _flock(True)
-            except OSError:
-                pass
-            fd.close()
+                yield
+            finally:
+                try:
+                    _flock(True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _path_for(target: str) -> Path:
@@ -231,7 +217,7 @@ class MemoryStore:
         idx, ambiguous = _find_unique_match(entries, old_text)
         if ambiguous:
             return None, {"success": False, "error": f"Multiple entries matched '{old_text}'. Be more specific.",
-                          "matches": self._previews([e for e in entries if old_text in e])}
+                          "matches": [e[:80] + ("..." if len(e) > 80 else "") for e in entries if old_text in e]}
         if idx is None:
             return None, self._consolidation_failure({
                 "success": False,
@@ -239,10 +225,20 @@ class MemoryStore:
                 "current_entries": entries})
         return idx, None
 
-    def _commit(self, target: str, entries: List[str], message: str) -> Dict[str, Any]:
-        self._set_entries(target, entries)
-        self.save_to_disk(target)
-        return self._success_response(target, message)
+    def _mutate(self, target: str, mutate, *, skip_drift: bool = False) -> Dict[str, Any]:
+        """Lock, reload, run ``mutate(entries, limit)`` -> ``(new_entries, message)`` or an
+        error dict, then persist and return the success response."""
+        with self._file_lock(self._path_for(target)):
+            err = self._reload_or_error(target, skip_drift=skip_drift)
+            if err:
+                return err
+            result = mutate(self._entries_for(target), self._char_limit(target))
+            if isinstance(result, dict):
+                return result
+            entries, message = result
+            self._set_entries(target, entries)
+            self.save_to_disk(target)
+            return self._success_response(target, message)
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
@@ -252,14 +248,8 @@ class MemoryStore:
         scan_error = _scan_memory_content(content)
         if scan_error:
             return {"success": False, "error": scan_error}
-        with self._file_lock(self._path_for(target)):
-            # Append-only: skip the drift guard (appending never clobbers foreign
-            # content) but still refuse a failed read — add rewrites the WHOLE file.
-            err = self._reload_or_error(target, skip_drift=True)
-            if err:
-                return err
-            entries = self._entries_for(target)
-            limit = self._char_limit(target)
+
+        def _add(entries, limit):
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
             if len(ENTRY_DELIMITER.join(entries + [content])) > limit:
@@ -268,8 +258,11 @@ class MemoryStore:
                     f"({len(content)} chars) would exceed the limit. Consolidate now: use 'replace' to merge "
                     f"overlapping entries into shorter ones or 'remove' stale or less important entries (see "
                     f"current_entries below), then retry this add — all in this turn."))
-            entries.append(content)
-            return self._commit(target, entries, "Entry added.")
+            return entries + [content], "Entry added."
+
+        # Append-only: skip the drift guard (appending never clobbers foreign
+        # content) but still refuse a failed read — add rewrites the WHOLE file.
+        return self._mutate(target, _add, skip_drift=True)
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -291,26 +284,22 @@ class MemoryStore:
 
     def _edit(self, target: str, old_text: str, new_content: Optional[str]) -> Dict[str, Any]:
         """Locked replace (``new_content`` set) or remove (None) of the unique entry matching *old_text*."""
-        with self._file_lock(self._path_for(target)):
-            err = self._reload_or_error(target)
-            if err:
-                return err
+        def _apply(entries, limit):
             idx, err = self._locate(target, old_text, "replace" if new_content else "remove")
             if err:
                 return err
-            entries = self._entries_for(target)
             if new_content is None:
-                entries.pop(idx)
-                return self._commit(target, entries, "Entry removed.")
-            limit = self._char_limit(target)
-            new_total = len(ENTRY_DELIMITER.join(entries[:idx] + [new_content] + entries[idx + 1:]))
+                return entries[:idx] + entries[idx + 1:], "Entry removed."
+            replaced = entries[:idx] + [new_content] + entries[idx + 1:]
+            new_total = len(ENTRY_DELIMITER.join(replaced))
             if new_total > limit:
                 return self._failure_with_entries(target, (
                     f"Replacement would put memory at {new_total:,}/{limit:,} chars. Shorten the new content, "
                     f"or 'remove' other stale or less important entries to make room (see current_entries "
                     f"below), then retry — all in this turn."))
-            entries[idx] = new_content
-            return self._commit(target, entries, "Entry replaced.")
+            return replaced, "Entry replaced."
+
+        return self._mutate(target, _apply)
 
     @staticmethod
     def _apply_batch_op(working: List[str], act: str, content: str, old_text: str, pos: str) -> Optional[str]:
@@ -346,22 +335,16 @@ class MemoryStore:
         if not operations:
             return {"success": False, "error": "operations list is empty."}
 
+        ops = [op or {} for op in operations]
         # Scan every add/replace content BEFORE touching disk -- one poisoned op rejects the batch.
-        for i, op in enumerate(operations):
-            op = op or {}
+        for i, op in enumerate(ops):
             scan_error = op.get("action") in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
             if scan_error:
                 return {"success": False, "error": f"Operation {i + 1}: {scan_error}"}
 
-        with self._file_lock(self._path_for(target)):
-            err = self._reload_or_error(target)
-            if err:
-                return err
-            # Work on a copy; only commit if the whole batch validates.
-            working: List[str] = list(self._entries_for(target))
-            limit = self._char_limit(target)
-            for i, op in enumerate(operations):
-                op = op or {}
+        def _apply(entries, limit):
+            working = list(entries)  # only committed if the whole batch validates
+            for i, op in enumerate(ops):
                 act = op.get("action")
                 content = (op.get("content") or op.get("new_text") or "").strip()
                 old_text = (op.get("old_text") or "").strip()
@@ -377,17 +360,14 @@ class MemoryStore:
                     f"After applying all {len(operations)} operations, memory would be at "
                     f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
                     f"entries in the same batch (see current_entries below), then retry."))
-            return self._commit(target, working, f"Applied {len(operations)} operation(s).")
+            return working, f"Applied {len(operations)} operation(s)."
+
+        return self._mutate(target, _apply)
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """Frozen load-time snapshot for the system prompt (NOT live state — mid-session
         writes don't touch it, preserving the prefix cache); None if empty."""
         return self._system_prompt_snapshot.get(target, "") or None
-
-    @staticmethod
-    def _previews(entries: List[str], width: int = 80) -> List[str]:
-        """Truncated one-line previews of entries for error feedback."""
-        return [e[:width] + ("..." if len(e) > width else "") for e in entries]
 
     def _success_response(self, target: str, message: str = None) -> Dict[str, Any]:
         # A successful write is progress: reset the per-turn (consecutive) failure budget.

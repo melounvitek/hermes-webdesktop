@@ -42,8 +42,7 @@ def get_memory_dir() -> Path:
 
 
 from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
-    ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore,
-    _drift_error, _read_failed_error, _scan_memory_content)
+    ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore, _scan_memory_content)
 
 
 def load_on_disk_store() -> "MemoryStore":
@@ -52,7 +51,6 @@ def load_on_disk_store() -> "MemoryStore":
     as ``agent_init``. Falls back to defaults if config can't load; never raises."""
     try:
         from hermes_cli.config import load_config
-
         config = load_config() or {}
         mem_cfg = get_builtin_memory_config(config)
         memory_enabled, user_profile_enabled = get_builtin_memory_store_flags(config)
@@ -85,20 +83,21 @@ def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Option
                       ensure_ascii=False)
 
 
-# action -> (gate summary verb, gate detail) for a single mutating op.
-_GATE_TEXT = {
-    "add": lambda label, content, old_text: (f"add to {label}", content or ""),
-    "replace": lambda label, content, old_text: (f"replace in {label}", f"old: {old_text}\nnew: {content}"),
-    "remove": lambda label, content, old_text: (f"remove from {label}", old_text or "")}
+# action -> (store call, gate (summary, detail) text) for the live tool path and staged replay.
+_STORE_ACTIONS = {
+    "add": (lambda store, target, content, old_text: store.add(target, content),
+            lambda label, content, old_text: (f"add to {label}", content or "")),
+    "replace": (lambda store, target, content, old_text: store.replace(target, old_text, content),
+                lambda label, content, old_text: (f"replace in {label}", f"old: {old_text}\nnew: {content}")),
+    "remove": (lambda store, target, content, old_text: store.remove(target, old_text),
+               lambda label, content, old_text: (f"remove from {label}", old_text or ""))}
 
 
 def _apply_write_gate(action: str, target: str, content: Optional[str], old_text: Optional[str]) -> Optional[str]:
-    """Gate a single mutating op (add/replace/remove); other actions pass."""
-    if action not in _GATE_TEXT:
-        return None
-    summary, detail = _GATE_TEXT[action]("user profile" if target == "user" else "memory", content, old_text)
-    payload = {"action": action, "target": target, "content": content, "old_text": old_text}
-    return _gate_or_stage(summary, detail, payload)
+    """Gate a single mutating op (add/replace/remove)."""
+    summary, detail = _STORE_ACTIONS[action][1]("user profile" if target == "user" else "memory", content, old_text)
+    return _gate_or_stage(summary, detail,
+                          {"action": action, "target": target, "content": content, "old_text": old_text})
 
 
 def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
@@ -108,15 +107,12 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
     for op in operations:
         op = op or {}
         act = op.get("action", "?")
-        _op_content = op.get("content") or op.get("new_text") or ""
-        if act == "remove":
-            detail_lines.append(f"- remove: {op.get('old_text', '')}")
-        elif act == "replace":
-            detail_lines.append(f"- replace: {op.get('old_text', '')} -> {_op_content}")
-        else:
-            detail_lines.append(f"- {act}: {_op_content}")
-    payload = {"action": "batch", "target": target, "operations": operations}
-    return _gate_or_stage(summary, "\n".join(detail_lines), payload)
+        content = op.get("content") or op.get("new_text") or ""
+        detail_lines.append(f"- remove: {op.get('old_text', '')}" if act == "remove"
+                            else f"- replace: {op.get('old_text', '')} -> {content}" if act == "replace"
+                            else f"- {act}: {content}")
+    return _gate_or_stage(summary, "\n".join(detail_lines),
+                          {"action": "batch", "target": target, "operations": operations})
 
 
 # -- Tool entry point --
@@ -134,35 +130,20 @@ def _validate_single_op(store, action, target, content, old_text) -> Optional[st
             "error": (f"'{action}' needs old_text -- a short unique substring of the entry "
                       f"to {action}. None was provided. Reissue the {action} with old_text "
                       f"set to part of one of the current_entries below."),
-            "current_entries": store._entries_for(target),
-            "usage": store._usage(target),
-        }, ensure_ascii=False)
+            "current_entries": store._entries_for(target), "usage": store._usage(target)}, ensure_ascii=False)
     if action == "replace" and not content:
         return tool_error("content is required for 'replace' action.", success=False)
     return None
 
 
-# action -> store call for both the live tool path and staged-write replay.
-_STORE_ACTIONS = {
-    "add": lambda store, target, content, old_text: store.add(target, content),
-    "replace": lambda store, target, content, old_text: store.replace(target, old_text, content),
-    "remove": lambda store, target, content, old_text: store.remove(target, old_text)}
-
-
-def memory_tool(
-    action: str = None,
-    target: str = "memory",
-    content: str = None,
-    old_text: str = None,
-    new_text: str = None,
-    operations: Optional[List[Dict[str, Any]]] = None,
-    store: Optional[MemoryStore] = None) -> str:
+def memory_tool(action: str = None, target: str = "memory", content: str = None, old_text: str = None,
+                new_text: str = None, operations: Optional[List[Dict[str, Any]]] = None,
+                store: Optional[MemoryStore] = None) -> str:
     """Tool entry point; returns a JSON string. Single op (action + content/old_text)
     or batch (``operations``, atomic against the final budget). ``new_text``
     aliases ``content`` — callers mirror ``old_text`` with it (patch-tool shape)."""
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
-
     if content is None and new_text is not None:
         content = new_text
     # Strict providers send JSON null for optional fields; treat as omitted.
@@ -170,7 +151,6 @@ def memory_tool(
     target_error = _memory_target_error(store, target)
     if target_error is not None:
         return json.dumps(target_error)
-
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
@@ -178,9 +158,7 @@ def memory_tool(
         if gate_result is not None:
             return gate_result
         return json.dumps(store.apply_batch(target, operations), ensure_ascii=False)
-
-    run = _STORE_ACTIONS.get(action)
-    if run is None:
+    if action not in _STORE_ACTIONS:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
     invalid = _validate_single_op(store, action, target, content, old_text)
     if invalid is not None:
@@ -189,7 +167,7 @@ def memory_tool(
     gate_result = _apply_write_gate(action, target, content, old_text)
     if gate_result is not None:
         return gate_result
-    return json.dumps(run(store, target, content, old_text), ensure_ascii=False)
+    return json.dumps(_STORE_ACTIONS[action][0](store, target, content, old_text), ensure_ascii=False)
 
 
 def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -199,7 +177,6 @@ def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[s
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
-
             config = load_config_readonly()
         except Exception:
             logger.debug("Could not read memory config for availability", exc_info=True)
@@ -227,7 +204,6 @@ def _memory_target_error(store: "MemoryStore", target: str) -> Optional[Dict[str
     """Return a shared validation error for an invalid or disabled target."""
     if target not in {"memory", "user"}:
         from tools.registry import _bound_error_text
-
         return {"success": False,
                 "error": _bound_error_text(f"Invalid memory target '{target}'. Use 'memory' or 'user'.")}
     if store.target_enabled(target):
@@ -245,10 +221,9 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
         return target_error
     if action == "batch":
         return store.apply_batch(target, payload.get("operations") or [])
-    run = _STORE_ACTIONS.get(action)
-    if run is None:
+    if action not in _STORE_ACTIONS:
         return {"success": False, "error": f"Unknown staged action '{action}'."}
-    return run(store, target, payload.get("content") or "", payload.get("old_text") or "")
+    return _STORE_ACTIONS[action][0](store, target, payload.get("content") or "", payload.get("old_text") or "")
 
 
 # -- OpenAI Function-Calling Schema --
@@ -328,13 +303,11 @@ MEMORY_SCHEMA = {
 
 # Schema text when only one built-in store is enabled: (target description, TARGETS replacement).
 _SINGLE_TARGET_TEXT = {
-    ("memory",): (
-        "The enabled built-in store: 'memory' for personal notes.",
-        "TARGET: only 'memory' is enabled for personal notes (environment, conventions, "
-        "tool quirks, lessons)."),
-    ("user",): (
-        "The enabled built-in store: 'user' for user profile.",
-        "TARGET: only 'user' is enabled for user profile facts (name, role, preferences, style).")}
+    ("memory",): ("The enabled built-in store: 'memory' for personal notes.",
+                  "TARGET: only 'memory' is enabled for personal notes (environment, conventions, "
+                  "tool quirks, lessons)."),
+    ("user",): ("The enabled built-in store: 'user' for user profile.",
+                "TARGET: only 'user' is enabled for user profile facts (name, role, preferences, style).")}
 
 
 def _build_memory_schema_overrides() -> Dict[str, Any]:

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Project tools — the agent's INTENTIONAL handle on first-class Projects.
-
-Projects (per-profile ``projects.db``) are the named workspaces the desktop sidebar
-groups sessions into; creating/switching one is an explicit tool call, never a side
-effect of a terminal ``cd``. GUI-only: the `project` toolset stays off
-``_HERMES_CORE_TOOLS`` and is folded in by the desktop/TUI gateway, which also wires
-``set_project_workspace_callback`` so the live session's cwd and sidebar follow.
-"""
+"""Project tools — the agent's INTENTIONAL handle on first-class Projects (per-profile
+``projects.db``, the desktop sidebar's named workspaces). Creating/switching is an explicit
+tool call, never a side effect of ``cd``. GUI-only: the `project` toolset stays off
+``_HERMES_CORE_TOOLS``; the desktop/TUI gateway folds it in and wires
+``set_project_workspace_callback`` so the live session's cwd and sidebar follow."""
 
 import json
 import os
@@ -14,9 +11,8 @@ from typing import Callable, Optional
 
 from tools.registry import registry
 
-# Set by the GUI gateway at session wiring: ``(task_id, primary_path, project_name)``
-# re-anchors that session's workspace. ``None`` in CLI/messaging contexts — the DB
-# write still happens; there is just no live GUI session to move.
+# Set by the GUI gateway: ``(task_id, primary_path, project_name)`` re-anchors that session's
+# workspace. ``None`` in CLI/messaging — the DB write still happens, nothing to move.
 _workspace_callback: Optional[Callable[[str, str, str], None]] = None
 
 
@@ -45,7 +41,6 @@ def _apply_workspace(task_id: Optional[str], path: Optional[str], name: str) -> 
 
 def _resolve(conn, token: str):
     from hermes_cli import projects_db as pdb
-
     token = (token or "").strip()
     if not token:
         return None
@@ -65,46 +60,37 @@ def _activated(proj, task_id: Optional[str]) -> str:
     primary = _primary_path(proj)
     _apply_workspace(task_id, primary, proj.name)
     return json.dumps({
-        "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name, "primary_path": primary,
-    })
+        "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name,
+        "primary_path": primary})
 
 
 def project_list(task_id: Optional[str] = None) -> str:
     from hermes_cli import projects_db as pdb
-
     with pdb.connect_closing() as conn:
         active = pdb.get_active_id(conn)
         projects = pdb.list_projects(conn)
-
     return json.dumps({
         "active_id": active,
         "projects": [
             {
                 "id": p.id, "slug": p.slug, "name": p.name,
-                "primary_path": _primary_path(p), "active": p.id == active,
-            }
-            for p in projects
-        ],
-    })
+                "primary_path": _primary_path(p), "active": p.id == active}
+            for p in projects]})
 
 
 def project_create(name: str, path: Optional[str] = None, task_id: Optional[str] = None) -> str:
     name = (name or "").strip()
     if not name:
         return json.dumps({"success": False, "error": "name is required"})
-
     from hermes_cli import projects_db as pdb
-
     folder = (path or "").strip()
     if folder:
         folder = os.path.abspath(os.path.expanduser(folder))
-
     try:
         with pdb.connect_closing() as conn:
             existing = pdb.find_by_primary_path(conn, folder) if folder else None
             if existing is not None:
-                # Idempotent create: re-activating the folder's project beats minting a
-                # duplicate (duplicates render N identical sidebar subtrees).
+                # Idempotent create: duplicates would render N identical sidebar subtrees.
                 pdb.set_active(conn, existing.id)
                 proj = existing
             else:
@@ -113,7 +99,6 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
                 proj = pdb.get_project(conn, pid)
     except ValueError as exc:
         return json.dumps({"success": False, "error": str(exc)})
-
     if proj is None:
         return json.dumps({"success": False, "error": "project vanished after create"})
     return _activated(proj, task_id)
@@ -121,7 +106,6 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
 
 def project_switch(project: str, task_id: Optional[str] = None) -> str:
     from hermes_cli import projects_db as pdb
-
     with pdb.connect_closing() as conn:
         proj = _resolve(conn, project)
         if proj is None:
@@ -133,10 +117,8 @@ def project_switch(project: str, task_id: Optional[str] = None) -> str:
 _ACTIONS = {
     "list": lambda args, tid: project_list(task_id=tid),
     "create": lambda args, tid: project_create(
-        name=args.get("name", ""), path=args.get("path"), task_id=tid,
-    ),
-    "switch": lambda args, tid: project_switch(project=args.get("name", ""), task_id=tid),
-}
+        name=args.get("name", ""), path=args.get("path"), task_id=tid),
+    "switch": lambda args, tid: project_switch(project=args.get("name", ""), task_id=tid)}
 
 
 def _handle_project(args, **kw):

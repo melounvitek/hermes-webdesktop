@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Plugin Guard — security scanner for externally-installed plugins.
+"""Plugin Guard — ``skills_guard`` engine applied to ``hermes plugins install``/``update``.
 
-Reuses the ``tools/skills_guard.py`` engine for ``hermes plugins install``/``update``.
-Plugins run Python in-process but are *expected* to read their own env keys, call
-provider HTTP APIs and spawn subprocesses, so: full pattern set on docs/config files
-(where prompt-injection lives); the "reads own secret"/"HTTP call with key" family is
-exempt on *code* files; plugin-sized structural limits; VCS/venv noise skipped.
-Verdict policy: ``safe`` installs; ``caution`` needs confirmation; ``dangerous`` is
-blocked and ``--force`` does NOT override.
+Plugins run in-process but are *expected* to read their own env keys, call provider APIs
+and spawn subprocesses, so: full pattern set on docs/config files (where prompt-injection
+lives); the "reads own secret"/"HTTP call with key" family exempt on *code* files;
+plugin-sized structural limits; VCS/venv noise skipped. ``safe`` installs, ``caution``
+needs confirmation, ``dangerous`` is blocked and ``--force`` does NOT override.
 """
 
 from __future__ import annotations
@@ -27,38 +25,23 @@ EXCLUDED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
 
-# Code files, where "reads an env secret" / "HTTP call with a key" is the normal
-# documented plugin pattern (requires_env).
+# Code files, where "reads an env secret" / "HTTP call with a key" is normal (requires_env).
 CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php"}
 
-# skills_guard pattern ids exempt on code files (every legitimate provider plugin
-# exhibits them); they still apply in full to docs/config files.
+# Pattern ids exempt on code files (every legitimate provider plugin trips them); still
+# applied in full to docs/config files.
 CODE_EXEMPT_PATTERN_IDS = {
-    "python_environ_get_secret",
-    "python_getenv_secret",
-    "python_os_environ",
-    "node_process_env",
-    "ruby_env_secret",
-    "env_exfil_httpx",
-    "env_exfil_requests",
-    "env_exfil_fetch",
-    "env_exfil_curl",
-    "env_exfil_wget",
-    # Agent-facing instruction patterns are meaningless inside code (docstrings
-    # about prompts trip them constantly).
-    "context_exfil",
-    "send_to_url",
-    "fake_policy",
-    # Plugins legitimately write their settings into config.yaml during post_setup
-    # and base64-encode credentials (HTTP Basic auth).
-    "agent_config_mod",
-    "agent_config_contract",
-    "encoded_exfil"}
+    "python_environ_get_secret", "python_getenv_secret", "python_os_environ", "node_process_env",
+    "ruby_env_secret", "env_exfil_httpx", "env_exfil_requests", "env_exfil_fetch",
+    "env_exfil_curl", "env_exfil_wget",
+    # Agent-facing instruction patterns are meaningless inside code (prompt docstrings trip them).
+    "context_exfil", "send_to_url", "fake_policy",
+    # Plugins legitimately write config.yaml in post_setup and base64 credentials (Basic auth).
+    "agent_config_mod", "agent_config_contract", "encoded_exfil"}
 
-# Plugin severity remaps: a bundled binary is warn-tier (repos occasionally vendor
-# one legitimately); a mere ``~/.hermes/.env`` mention is how READMEs tell users where
-# keys go (READING it still trips ``read_secrets_file``, critical); ``curl | sh``
-# install instructions are common in READMEs — caution, not an unoverridable block.
+# Severity remaps: a bundled binary is warn-tier (repos occasionally vendor one); a mere
+# ``~/.hermes/.env`` mention is how READMEs say where keys go (READING it still trips
+# ``read_secrets_file``, critical); ``curl | sh`` in READMEs is caution, not a hard block.
 SEVERITY_REMAP = {
     "binary_file": "high", "hermes_env_access": "medium", "curl_pipe_shell": "high"}
 
@@ -80,8 +63,7 @@ def _walk(plugin_dir: Path) -> Iterator[Tuple[Path, str]]:
 
 
 def _finding(pattern_id: str, severity: str, category: str, file: str, match: str, description: str) -> Finding:
-    return Finding(pattern_id=pattern_id, severity=severity, category=category,
-                   file=file, line=0, match=match, description=description)
+    return Finding(pattern_id, severity, category, file, 0, match, description)
 
 
 def _filter_findings(findings: List[Finding], rel_path: str) -> List[Finding]:
@@ -102,7 +84,6 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
     file_count = 0
     total_size = 0
     resolved_root = plugin_dir.resolve()
-
     for f, rel in _walk(plugin_dir):
         if f.is_symlink():
             file_count += 1
@@ -116,46 +97,38 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
                 findings.append(_finding("symlink_escape", "critical", "traversal", rel,
                                          f"symlink -> {resolved}", "symlink points outside the plugin directory"))
             continue
-
         if not f.is_file():
             continue
         file_count += 1
-
         try:
             size = f.stat().st_size
         except OSError:
             continue
         total_size += size
-
         if size > MAX_PLUGIN_SINGLE_FILE_KB * 1024:
             findings.append(_finding("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
                                      f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"))
-
         ext = f.suffix.lower()
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
             findings.append(_finding("binary_file", SEVERITY_REMAP["binary_file"], "structural", rel,
                                      f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)"))
-
     if file_count > MAX_PLUGIN_FILE_COUNT:
         findings.append(_finding("too_many_files", "medium", "structural", "(directory)", f"{file_count} files",
                                  f"plugin has {file_count} files (limit: {MAX_PLUGIN_FILE_COUNT})"))
     if total_size > MAX_PLUGIN_TOTAL_SIZE_KB * 1024:
         findings.append(_finding("oversized_bundle", "medium", "structural", "(directory)", f"{total_size // 1024}KB",
                                  f"plugin is {total_size // 1024}KB total (limit: {MAX_PLUGIN_TOTAL_SIZE_KB}KB)"))
-
     return findings
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     """Scan a plugin directory (typically the temp clone); every external plugin is ``community`` trust."""
     all_findings: List[Finding] = []
-
     if plugin_dir.is_dir():
         all_findings.extend(_check_plugin_structure(plugin_dir))
         for f, rel in sorted(_walk(plugin_dir)):
             if f.is_file() and not f.is_symlink():
                 all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel))
-
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

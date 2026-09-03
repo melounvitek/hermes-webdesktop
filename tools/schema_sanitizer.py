@@ -1,11 +1,10 @@
 """Sanitize tool JSON schemas for broad LLM-backend compatibility.
 
-Strict backends reject shapes OpenAI/Anthropic silently accept: llama.cpp's
-``json-schema-to-grammar`` fails on ``{"type": "object"}`` without ``properties``,
-bare-string schemas and ``type`` arrays; Anthropic rejects nullable ``anyOf`` at the
-top of ``input_schema``; Fireworks rejects ``default`` beside ``$ref``; OpenAI's
-Codex backend rejects top-level combinators. This module walks the final tool
-schema tree on a deep copy and fixes only those shapes.
+Strict backends reject shapes OpenAI/Anthropic accept: llama.cpp's grammar converter fails
+on ``{"type": "object"}`` without ``properties``, bare-string schemas and ``type`` arrays;
+Anthropic rejects nullable ``anyOf`` at the top of ``input_schema``; Fireworks rejects
+``default`` beside ``$ref``; Codex rejects top-level combinators. This module walks the
+final schema tree on a deep copy and fixes only those shapes.
 """
 
 from __future__ import annotations
@@ -18,9 +17,8 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
-# Anthropic (and Bedrock/Vertex/Azure fronting it) reject tool input schemas whose
-# property keys don't match this; one bad key anywhere in the tools array 400s the
-# entire request (Cloudflare's MCP ships 61 such keys).
+# Anthropic (and Bedrock/Vertex/Azure fronting it) reject property keys not matching this;
+# one bad key anywhere in the tools array 400s the request (Cloudflare's MCP ships 61).
 _PROP_KEY_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 _PROP_KEY_BAD_CHARS = re.compile(r"[^a-zA-Z0-9_.-]")
 
@@ -31,6 +29,15 @@ _UNION_META_KEYS = ("title", "description", "default", "examples")
 
 def _empty_object() -> dict:
     return {"type": "object", "properties": {}}
+
+
+def _rewrite(schema: Any, fn: Callable[[dict], Any]) -> Any:
+    """Bottom-up map over a schema tree: lists/dicts recurse, then *fn* sees each dict."""
+    if isinstance(schema, list):
+        return [_rewrite(item, fn) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    return fn({k: _rewrite(v, fn) for k, v in schema.items()})
 
 
 def sanitize_property_key(key: str) -> str:
@@ -86,7 +93,7 @@ def unrename_tool_args(params_schema: Any, args: Any) -> Any:
 
 
 def sanitize_tool_schemas(tools: list[dict]) -> list[dict]:
-    """Deep-copied ``tools`` (OpenAI format) with sanitized parameter schemas; callers may mutate."""
+    """Deep-copied ``tools`` (OpenAI format) with sanitized parameter schemas; safe to mutate."""
     if not tools:
         return tools
     return [_sanitize_single_tool(tool) for tool in tools]
@@ -97,12 +104,10 @@ def _sanitize_single_tool(tool: dict) -> dict:
     fn = out.get("function") if isinstance(out, dict) else None
     if not isinstance(fn, dict):
         return out
-
     params = fn.get("parameters")
     if not isinstance(params, dict):  # missing / non-dict → minimal valid shape
         fn["parameters"] = _empty_object()
         return out
-
     name = fn.get("name", "<tool>")
     top = _sanitize_node(params, path=name)
     # Guarantee the top level is an object with properties.
@@ -111,9 +116,8 @@ def _sanitize_single_tool(tool: dict) -> dict:
     top["type"] = "object"
     if not isinstance(top.get("properties"), dict):
         top["properties"] = {}
-    # Collapse nullable unions the recursive pass leaves intact (it only handles the
-    # array-form ``type: [X, "null"]``); keep ``nullable: true`` so runtime coercion
-    # (``model_tools._schema_allows_null``) still maps a model-emitted ``"null"`` to None.
+    # The recursive pass only handles array-form ``type: [X, "null"]``; collapse anyOf unions
+    # here, keeping ``nullable: true`` so ``model_tools._schema_allows_null`` still coerces.
     top = strip_nullable_unions(top, keep_nullable_hint=True)
     top = _strip_top_level_combinators(top, path=name)
     fn["parameters"] = _strip_ref_siblings(top)
@@ -126,15 +130,12 @@ _REF_FORBIDDEN_SIBLINGS = frozenset({"default"})
 
 def _strip_ref_siblings(node: Any) -> Any:
     """Recursively drop forbidden siblings of ``$ref`` (Fireworks rejects ``default`` there)."""
-    if isinstance(node, list):
-        return [_strip_ref_siblings(item) for item in node]
-    if not isinstance(node, dict):
-        return node
-    out = {key: _strip_ref_siblings(value) for key, value in node.items()}
-    if "$ref" in out:
-        for key in _REF_FORBIDDEN_SIBLINGS:
-            out.pop(key, None)
-    return out
+    def strip(out: dict) -> dict:
+        if "$ref" in out:
+            for key in _REF_FORBIDDEN_SIBLINGS:
+                out.pop(key, None)
+        return out
+    return _rewrite(node, strip)
 
 
 _TOP_LEVEL_FORBIDDEN_KEYS = ("allOf", "anyOf", "oneOf", "enum", "not")
@@ -172,35 +173,25 @@ def _carry_union_meta(outer: dict, replacement: dict, *, skip_default_on_ref: bo
 
 
 def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> Any:
-    """Collapse ``anyOf``/``oneOf`` nullable unions to the single non-null branch.
-
-    MCP/Pydantic optional fields arrive as ``{"anyOf": [{"type": "string"}, {"type":
-    "null"}], "default": null}``; Anthropic rejects the null branch, and optionality is
-    already expressed by the parent's ``required``. Only collapses when a null branch was
-    dropped AND exactly one non-null branch survives; outer metadata is carried over.
-    ``keep_nullable_hint`` sets ``nullable: true`` for runtime ``"null"`` → ``None`` coercion.
-    """
-    if isinstance(schema, list):
-        return [
-            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
-
-    stripped = {
-        k: strip_nullable_unions(v, keep_nullable_hint=keep_nullable_hint)
-        for k, v in schema.items()}
-    for key in _UNION_KEYS:
-        variants = stripped.get(key)
-        if not isinstance(variants, list):
-            continue
-        non_null = [item for item in variants if not _is_null_branch(item)]
-        if len(non_null) == 1 and len(non_null) != len(variants):
-            replacement = dict(non_null[0]) if isinstance(non_null[0], dict) else {}
-            if keep_nullable_hint:
-                replacement.setdefault("nullable", True)
-            _carry_union_meta(stripped, replacement, skip_default_on_ref=True)
-            return strip_nullable_unions(replacement, keep_nullable_hint=keep_nullable_hint)
-    return stripped
+    """Collapse ``anyOf``/``oneOf`` nullable unions to the single non-null branch. MCP/Pydantic
+    optional fields arrive as ``{"anyOf": [{"type": "string"}, {"type": "null"}]}``; Anthropic
+    rejects the null branch and optionality is already in the parent's ``required``. Only
+    collapses when a null branch was dropped AND exactly one non-null branch survives.
+    ``keep_nullable_hint`` sets ``nullable: true`` for runtime ``"null"`` → ``None`` coercion."""
+    def collapse(stripped: dict) -> Any:
+        for key in _UNION_KEYS:
+            variants = stripped.get(key)
+            if not isinstance(variants, list):
+                continue
+            non_null = [item for item in variants if not _is_null_branch(item)]
+            if len(non_null) == 1 and len(non_null) != len(variants):
+                replacement = dict(non_null[0]) if isinstance(non_null[0], dict) else {}
+                if keep_nullable_hint:
+                    replacement.setdefault("nullable", True)
+                _carry_union_meta(stripped, replacement, skip_default_on_ref=True)
+                return _rewrite(replacement, collapse)
+        return stripped
+    return _rewrite(schema, collapse)
 
 
 _CONST_PRIMITIVE_TYPES: dict[type, str] = {
@@ -210,61 +201,48 @@ _CONST_PRIMITIVE_TYPES: dict[type, str] = {
 def _const_branch_type(branch: Any) -> str | None:
     """JSON-Schema primitive type of a pure ``const`` branch, else None: a primitive ``const``
     whose declared ``type`` (if any) matches; only ``title``/``description`` may accompany it."""
-    if not isinstance(branch, dict) or "const" not in branch:
+    if not isinstance(branch, dict) or "const" not in branch \
+            or set(branch) - {"const", "type", "title", "description"}:
         return None
-    if set(branch) - {"const", "type", "title", "description"}:
-        return None
-    # ``type(value) is`` (not isinstance): bool is a subclass of int.
+    # ``type(value)`` lookup (not isinstance): bool is a subclass of int.
     json_type = _CONST_PRIMITIVE_TYPES.get(type(branch["const"]))
-    if json_type is None:
-        return None
-    declared = branch.get("type")
-    if declared is not None and declared != json_type:
-        return None
-    return json_type
+    return json_type if json_type is not None and branch.get("type") in (None, json_type) else None
 
 
 def collapse_const_unions(schema: Any) -> Any:
-    """Collapse ``anyOf``/``oneOf`` unions of same-typed consts to ``enum``.
-
-    Ported from block/goose ``tool_schema_normalize.rs`` (Apache-2.0). Rust/TS-generated
-    MCP servers emit ``{"anyOf": [{"const": "red"}, {"const": "green"}]}``; strict
-    backends mishandle these while ``{"type": "string", "enum": [...]}`` is universal.
+    """Collapse ``anyOf``/``oneOf`` unions of same-typed consts to ``enum`` (ported from
+    block/goose ``tool_schema_normalize.rs``, Apache-2.0). Rust/TS MCP servers emit
+    ``{"anyOf": [{"const": "red"}, {"const": "green"}]}``, which strict backends mishandle.
     Applies only when EVERY non-null branch is a pure ``const`` of one primitive type
-    (``bool`` never merges with ``integer``). One ``{"type": "null"}`` branch is
-    tolerated and recorded as ``nullable: true`` (null+multi-const unions land here,
-    not in ``strip_nullable_unions``). Enum order preserves branch order; outer
-    metadata is carried over; input is never mutated.
-    """
-    if isinstance(schema, list):
-        return [collapse_const_unions(item) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
-
-    out = {k: collapse_const_unions(v) for k, v in schema.items()}
-    for key in _UNION_KEYS:
-        variants = out.get(key)
-        if not isinstance(variants, list) or not variants:
-            continue
-        null_branches = [item for item in variants if _is_null_branch(item) and "const" not in item]
-        const_branches = [item for item in variants if item not in null_branches]
-        if len(null_branches) > 1 or not const_branches:
-            continue
-        branch_types = {_const_branch_type(item) for item in const_branches}
-        if len(branch_types) != 1 or None in branch_types:
-            continue
-        replacement: dict = {
-            "type": branch_types.pop(), "enum": [item["const"] for item in const_branches]}
-        if null_branches:
-            replacement["nullable"] = True
-        _carry_union_meta(out, replacement, skip_default_on_ref=False)
-        return replacement
-    return out
+    (``bool`` never merges with ``integer``); one ``{"type": "null"}`` branch is tolerated
+    and recorded as ``nullable: true`` (null+multi-const unions land here, not in
+    ``strip_nullable_unions``). Branch order is kept; outer metadata carried over; input
+    never mutated."""
+    def collapse(out: dict) -> Any:
+        for key in _UNION_KEYS:
+            variants = out.get(key)
+            if not isinstance(variants, list) or not variants:
+                continue
+            null_branches = [i for i in variants if _is_null_branch(i) and "const" not in i]
+            const_branches = [item for item in variants if item not in null_branches]
+            if len(null_branches) > 1 or not const_branches:
+                continue
+            branch_types = {_const_branch_type(item) for item in const_branches}
+            if len(branch_types) != 1 or None in branch_types:
+                continue
+            replacement: dict = {
+                "type": branch_types.pop(), "enum": [item["const"] for item in const_branches]}
+            if null_branches:
+                replacement["nullable"] = True
+            _carry_union_meta(out, replacement, skip_default_on_ref=False)
+            return replacement
+        return out
+    return _rewrite(schema, collapse)
 
 
 _BARE_TYPE_NAMES = frozenset({"object", "string", "number", "integer", "boolean", "array", "null"})
-# Sibling keywords whose values are NOT schemas: recursing would mistake literal strings
-# like "path" for bare-string schemas. Passed through (``required`` follows property renames).
+# Keys whose values are NOT schemas (recursing would treat "path" as a bare-string schema);
+# passed through (``required`` follows property renames).
 _NON_SCHEMA_LIST_KEYS = frozenset({"required", "enum", "examples", "dependentRequired"})
 
 
@@ -287,14 +265,10 @@ def _normalize_type_array(value: list, out: dict) -> None:
 
 
 def _sanitize_node(node: Any, path: str) -> Any:
-    """Recursively sanitize a JSON-Schema fragment.
-
-    Bare-string schemas become ``{"type": <value>}`` (unknown strings → permissive
-    object); object nodes gain ``properties: {}``; ``type`` arrays are normalized;
-    recursion covers ``properties``/``items``/``additionalProperties``/combinators/
-    ``$defs``/``definitions``; property keys are renamed to the provider-safe pattern
-    and ``required`` follows, with entries missing from ``properties`` pruned.
-    """
+    """Recursively sanitize a JSON-Schema fragment: bare-string schemas become ``{"type":
+    <value>}`` (unknown strings → permissive object); object nodes gain ``properties: {}``;
+    ``type`` arrays are normalized; property keys are renamed to the provider-safe pattern
+    and ``required`` follows, with entries missing from ``properties`` pruned."""
     if isinstance(node, str):
         if node in _BARE_TYPE_NAMES:
             logger.debug(
@@ -305,19 +279,15 @@ def _sanitize_node(node: Any, path: str) -> Any:
             "schema_sanitizer[%s]: replacing non-schema string %r "
             "with empty object schema", path, node)
         return _empty_object()
-
     if isinstance(node, list):
         return [_sanitize_node(item, f"{path}[{i}]") for i, item in enumerate(node)]
-
     if not isinstance(node, dict):
         return node
 
-    # Renames are computed up front so ``required`` can be remapped even when
-    # it precedes ``properties`` in the source dict.
+    # Renames computed up front so ``required`` remaps even when it precedes ``properties``.
     prop_renames: dict[str, str] = {}
     if isinstance(node.get("properties"), dict):
         prop_renames = _rename_property_keys(node["properties"], f"{path}.properties")
-
     out: dict = {}
     for key, value in node.items():
         if key == "type" and isinstance(value, list):
@@ -328,8 +298,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
                 renames.get(sub_k, sub_k): _sanitize_node(sub_v, f"{path}.{key}.{renames.get(sub_k, sub_k)}")
                 for sub_k, sub_v in value.items()}
         elif key in {"items", "additionalProperties"}:
-            # Bool ``additionalProperties`` is valid and widely accepted;
-            # ``items: true/false`` is non-standard but preserved rather than dropped.
+            # Bool ``additionalProperties`` is valid; bool ``items`` is non-standard but preserved.
             out[key] = value if isinstance(value, bool) else _sanitize_node(value, f"{path}.{key}")
         elif key in {"anyOf", "oneOf", "allOf"} and isinstance(value, list):
             out[key] = [_sanitize_node(item, f"{path}.{key}[{i}]") for i, item in enumerate(value)]
@@ -340,7 +309,6 @@ def _sanitize_node(node: Any, path: str) -> Any:
                 out[key] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
         else:
             out[key] = _sanitize_node(value, f"{path}.{key}") if isinstance(value, (dict, list)) else value
-
     if out.get("type") == "object":
         if not isinstance(out.get("properties"), dict):
             out["properties"] = {}
@@ -354,10 +322,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Reactive strips — only invoked after a backend rejects a schema
-# ---------------------------------------------------------------------------
-
+# ---- Reactive strips — only invoked after a backend rejects a schema -----------------------
 _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 
 
@@ -396,14 +361,10 @@ def _reactive_strip(
 
 
 def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
-    """Strip ``pattern``/``format`` keywords from tool schemas, in place.
-
-    Reactive: only after llama.cpp's grammar converter rejected a schema (HTTP 400); its
-    regex engine supports a small ECMAScript subset and few ``format`` values, while
-    cloud providers use these as prompting hints, so they stay in the default schema.
-    Only strips beside ``type``/combinators (schema nodes), so a property literally
-    *named* ``pattern`` (``search_files``) inside ``properties`` is untouched.
-    """
+    """Strip ``pattern``/``format`` keywords from tool schemas, in place. Reactive: only after
+    llama.cpp's grammar converter rejected a schema (its regex engine is a small ECMAScript
+    subset), since cloud providers use these as prompting hints. Only strips beside
+    ``type``/combinators, so a property literally *named* ``pattern`` is untouched."""
     def _strip(node: dict) -> int:
         if not ("type" in node or "anyOf" in node or "oneOf" in node or "allOf" in node):
             return 0
@@ -411,7 +372,6 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
         for k in hits:
             node.pop(k, None)
         return len(hits)
-
     return _reactive_strip(
         tools, _strip,
         "schema_sanitizer: stripped %d pattern/format keyword(s) from "
@@ -428,7 +388,6 @@ def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
             node.pop("enum", None)
             return 1
         return 0
-
     return _reactive_strip(
         tools, _strip,
         "schema_sanitizer: stripped %d enum keyword(s) containing '/' "
