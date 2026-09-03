@@ -501,9 +501,7 @@ class HermesConsoleEngine:
             return ConsoleResult("ok", output=output or "No history yet.")
         if head == "clear":
             return ConsoleResult("clear", output="\033[2J\033[H")
-        if head in {"exit", "quit"}:
-            return ConsoleResult("exit")
-        return None
+        return ConsoleResult("exit") if head in {"exit", "quit"} else None
 
     def _resolve_command(self, tokens: Sequence[str]) -> tuple[ConsoleCommand, list[str]]:
         rejected = self._rejection_for(tokens)
@@ -537,6 +535,15 @@ class HermesConsoleEngine:
 def _expect_no_args(args: Sequence[str], usage: str) -> None:
     if args:
         raise ConsoleCommandError(f"Usage: {usage}")
+
+
+def _parse(prog: str, args: Sequence[str], *specs) -> argparse.Namespace:
+    """Parse ``args`` with a help-less parser; each spec is ``(flags, kwargs)`` or a bare flag."""
+    parser = _ArgumentParser(prog=prog, add_help=False)
+    for spec in specs:
+        flags, kwargs = spec if isinstance(spec, tuple) else ((spec,), {})
+        parser.add_argument(*flags, **kwargs)
+    return parser.parse_args(args)
 
 
 def _captured(fn):
@@ -608,12 +615,10 @@ _cron_status = _simple_command("cron status", "hermes_cli.cron", "cron_status")
 def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if "-f" in args or "--follow" in args:
         raise ConsoleCommandError("`logs -f` is not available in Hermes Console.")
-    parser = _ArgumentParser(prog="logs", add_help=False)
-    parser.add_argument("log_name", nargs="?", default="agent")
-    parser.add_argument("-n", "--lines", type=int, default=50)
-    for flag in ("--level", "--session", "--since", "--component"):
-        parser.add_argument(flag)
-    ns = parser.parse_args(args)
+    ns = _parse(
+        "logs", args, (("log_name",), dict(nargs="?", default="agent")),
+        (("-n", "--lines"), dict(type=int, default=50)),
+        "--level", "--session", "--since", "--component")
     if ns.lines < 1 or ns.lines > 500:
         raise ConsoleCommandError("logs --lines must be between 1 and 500")
     from hermes_cli.logs import list_logs, tail_log
@@ -634,9 +639,7 @@ def _session_db():
 
 
 def _sessions_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    parser = _ArgumentParser(prog="sessions list", add_help=False)
-    parser.add_argument("--limit", type=int, default=20)
-    ns = parser.parse_args(args)
+    ns = _parse("sessions list", args, (("--limit",), dict(type=int, default=20)))
     if ns.limit < 1 or ns.limit > 200:
         raise ConsoleCommandError("sessions list --limit must be between 1 and 200")
     with _session_db() as db:
@@ -711,11 +714,7 @@ def _guard_exports(db, session_ids: list[str]) -> None:
 
 @_captured
 def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> None:
-    parser = _ArgumentParser(prog="sessions export", add_help=False)
-    parser.add_argument("output")
-    parser.add_argument("--source")
-    parser.add_argument("--session-id")
-    ns = parser.parse_args(args)
+    ns = _parse("sessions export", args, "output", "--source", "--session-id")
     with _session_db() as db:
         if ns.session_id:
             resolved_session_id = db.resolve_session_id(ns.session_id)
@@ -742,10 +741,7 @@ def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> None:
 
 @_captured
 def _sessions_rename(_engine: HermesConsoleEngine, args: list[str]) -> None:
-    parser = _ArgumentParser(prog="sessions rename", add_help=False)
-    parser.add_argument("session_id")
-    parser.add_argument("title", nargs="+")
-    ns = parser.parse_args(args)
+    ns = _parse("sessions rename", args, "session_id", (("title",), dict(nargs="+")))
     with _session_db() as db:
         resolved_session_id = db.resolve_session_id(ns.session_id)
         if not resolved_session_id:
@@ -765,10 +761,9 @@ def _sessions_optimize(_engine: HermesConsoleEngine, args: list[str]) -> None:
 
 @_captured
 def _sessions_repair(_engine: HermesConsoleEngine, args: list[str]) -> None:
-    parser = _ArgumentParser(prog="sessions repair", add_help=False)
-    parser.add_argument("--check-only", action="store_true")
-    parser.add_argument("--no-backup", action="store_true")
-    ns = parser.parse_args(args)
+    ns = _parse(
+        "sessions repair", args, (("--check-only",), dict(action="store_true")),
+        (("--no-backup",), dict(action="store_true")))
     from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
 
     db_path = DEFAULT_DB_PATH
@@ -797,9 +792,7 @@ def _profile_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 
 def _cron_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    parser = _ArgumentParser(prog="cron list", add_help=False)
-    parser.add_argument("--all", action="store_true")
-    ns = parser.parse_args(args)
+    ns = _parse("cron list", args, (("--all",), dict(action="store_true")))
     from hermes_cli.cron import cron_list
 
     return _capture_output(lambda: cron_list(show_all=ns.all))
@@ -829,11 +822,7 @@ def _cron_pause(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 
 def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    parser = _ArgumentParser(prog="cron resume", add_help=False)
-    parser.add_argument("job")
-    parser.add_argument("--at")
-    parser.add_argument("--run-now", action="store_true")
-    ns = parser.parse_args(args)
+    ns = _parse("cron resume", args, "job", "--at", (("--run-now",), dict(action="store_true")))
     if ns.at and ns.run_now:
         raise ConsoleCommandError("Use exactly one of --at or --run-now.")
     from cron.jobs import AmbiguousJobReference, _hermes_now, rearm_oneshot, resume_job
