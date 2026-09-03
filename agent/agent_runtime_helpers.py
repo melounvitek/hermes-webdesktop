@@ -1,7 +1,7 @@
-"""Assorted AIAgent runtime helpers, moved out of run_agent.py.
-
-Each function takes the parent ``AIAgent`` as ``agent`` except the stateless
-helpers (``sanitize_tool_call_arguments``, ``drop_thinking_only_and_merge_users``).
+"""Assorted AIAgent runtime helpers (message repair/sanitization, credential recovery, primary
+runtime restore, prompt-cache policy, client construction, model switching, tool invocation).
+Each function takes the parent ``AIAgent`` as ``agent`` except the stateless message helpers.
+``_ra()`` resolves ``run_agent`` lazily so tests patching ``run_agent.X`` keep intercepting.
 """
 
 from __future__ import annotations
@@ -33,8 +33,7 @@ from utils import base_url_host_matches, base_url_hostname, env_var_enabled, ato
 logger = logging.getLogger(__name__)
 
 
-# Cap consecutive same-entry OAuth token refreshes on a persistent auth failure;
-# without it a single-entry pool re-mints forever and never reaches fallback (#26080).
+# Cap same-entry OAuth refreshes on a persistent auth failure, else a single-entry pool re-mints forever.
 _MAX_AUTH_REFRESH_ATTEMPTS = 2
 
 
@@ -50,8 +49,7 @@ _TOOL_CALL_BLOCK_PATTERNS = tuple(
     for name in _TOOL_CALL_TAG_NAMES
 )
 
-# Named <function name=...> blocks; see strip_think_blocks step 1c for the
-# boundary/tempered-dot rationale.
+# Named <function name=...> blocks; boundary- and name-gated (see _THINK_STRIP_PATTERNS note).
 _NAMED_FUNCTION_BLOCK_PATTERN = re.compile(
     r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*'
     r'<function\b[^>]*\bname\s*=[^>]*>'
@@ -231,12 +229,9 @@ def sanitize_tool_call_arguments(
 ) -> int:
     """Repair corrupted assistant tool-call argument JSON in-place.
 
-    ``cursor`` (optional caller-owned dict) stores under ``"prefix"`` strong references to
-    the message objects validated last call; the longest ``is``-identical prefix is skipped
-    on the next call. Skipping is safe because only the surrogate/non-ASCII sanitizers
-    mutate arguments on live dicts (inside JSON string values), and every other path
-    replaces or reorders dicts, breaking identity. Strong refs (not ``id()``) rule out
-    address-reuse aliasing.
+    ``cursor["prefix"]`` holds strong refs (not ``id()``: address reuse aliases) to the
+    messages validated last call; the ``is``-identical prefix is skipped. Safe because only
+    the surrogate sanitizers mutate live dicts; every other path replaces dicts, breaking identity.
     """
     log = logger or logging.getLogger(__name__)
     if not isinstance(messages, list):
@@ -301,21 +296,18 @@ def sanitize_tool_call_arguments(
     return repaired
 
 
-# Session-scoped in-flight registry for note_turn_start. The gateway caches agents
-# per routing key while the transcript is keyed by session_id (many-to-one), so two
-# agent objects can run concurrent turns on one session unseen by per-agent state (#64934).
+# Session-scoped in-flight registry for note_turn_start: the gateway caches agents per routing
+# key while the transcript is keyed by session_id, so two agent objects can run concurrent
+# turns on one session unseen by per-agent state.
 _INFLIGHT_TURNS_BY_SESSION: Dict[str, Tuple[str, float]] = {}
 _INFLIGHT_TURNS_LOCK = threading.Lock()
 
 
 def note_turn_start(agent, turn_id: str):
-    """Tripwire: warn when a turn starts while a previous turn of the same agent
-    or the same session (on another agent object) has not finished its persist.
-
-    Does not prevent the overlap; it names it with both turn ids so the dispatch
-    route that bypassed the busy guard can be found in logs. Returns the previous
-    in-flight turn_id on overlap, else None; takes ownership of the slot either way.
-    """
+    """Tripwire: warn when a turn starts while a previous turn of the same agent or session
+    (on another agent object) has not finished its persist. Does not prevent the overlap; it
+    names both turn ids so the dispatch route that bypassed the busy guard is findable in logs.
+    Returns the previous in-flight turn_id on overlap, else None; takes the slot either way."""
     prev = getattr(agent, "_inflight_turn_id", None)
     prev_started = getattr(agent, "_inflight_turn_started", 0.0)
     agent._inflight_turn_id = turn_id
@@ -361,18 +353,14 @@ def note_turn_start(agent, turn_id: str):
 
 
 def note_turn_persisted(agent):
-    """Clear the in-flight marker at turn-end persist (see note_turn_start).
-
-    Unconditional by design: on a real overlap the first persist clears the
-    second slot and the tripwire under-reports rather than double-reports.
-    """
+    """Clear the in-flight marker at turn-end persist (see note_turn_start). Unconditional by
+    design: on a real overlap the first persist clears the second slot, so the tripwire
+    under-reports rather than double-reports."""
     agent._inflight_turn_id = None
     # Persist-disabled forks never registered a slot; popping here would
     # steal the live parent turn's slot (symmetric with note_turn_start).
     if not getattr(agent, "_persist_disabled", False):
-        session_id = getattr(agent, "_inflight_turn_session_id", None) or getattr(
-            agent, "session_id", None
-        )
+        session_id = getattr(agent, "_inflight_turn_session_id", None) or getattr(agent, "session_id", None)
         if session_id:
             with _INFLIGHT_TURNS_LOCK:
                 _INFLIGHT_TURNS_BY_SESSION.pop(session_id, None)
@@ -449,11 +437,9 @@ def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int
 
 
 def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
-    """Pass 1: drop tool results not following a known assistant tool call.
-
-    Consumes the whole alias group (call_id/id/response_item_id/composite) so a
-    duplicate keyed on a sibling alias is not replayed to strict providers.
-    """
+    """Pass 1: drop tool results not following a known assistant tool call. Consumes the whole
+    alias group (call_id/id/response_item_id/composite) so a duplicate keyed on a sibling
+    alias is not replayed to strict providers."""
     repairs = 0
     known_tool_ids: Dict[str, int] = {}
     matched_tool_groups: set = set()
@@ -493,11 +479,9 @@ def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
 
 
 def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]:
-    """Pass 2: prune tool_calls not answered in the IMMEDIATELY following tool run.
-
-    A displaced result masks the per-call stub pass and strict providers 400.
-    Payload-empty turns are dropped; codex interims exempt.
-    """
+    """Pass 2: prune tool_calls not answered in the IMMEDIATELY following tool run (a displaced
+    result masks the per-call stub pass and strict providers 400). Payload-empty turns are
+    dropped; codex interims exempt."""
     repairs = 0
     pruned: List[Dict] = []
     n = len(messages)
@@ -580,13 +564,11 @@ _SEQUENCE_REPAIR_PASSES = (
 def repair_message_sequence(agent, messages: List[Dict]) -> int:
     """Collapse malformed role-alternation left in the live history; returns repair count.
 
-    Providers require strict alternation after the system message; violations cause
-    silent empty responses or HTTP 400s. Runs right before the API call as a defensive
-    belt for host-fed, resumed, or replayed histories. Passes, in order: merge
-    consecutive assistant turns (BEFORE orphan detection so the merged tool_call-id
-    union is known); drop stray tool results; prune tool_calls unanswered in the
-    immediately following tool run; merge consecutive user messages. A user turn
-    directly after an assistant turn is valid and left alone.
+    Providers require strict alternation after the system message (violations: silent empty
+    responses or 400s); this is the pre-call belt for host-fed, resumed or replayed histories.
+    Passes in order: merge consecutive assistant turns (BEFORE orphan detection so the merged
+    tool_call-id union is known); drop stray tool results; prune unanswered tool_calls; merge
+    consecutive user turns. A user turn directly after an assistant turn is valid and left alone.
     """
     if not messages:
         return 0
@@ -602,38 +584,24 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
 
 
 def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
-    """Run :func:`repair_message_sequence` and keep ``_last_flushed_db_idx`` consistent (#44837).
-
-    Repair shrinks the list in place; counting survivors from the flushed prefix
-    (identity-preserved) gives the exact new cursor, whereas a ``min()`` clamp
-    would skip unflushed rows. Falls back to the clamp without a snapshot.
-    """
-    pre_repair_flushed_ids = None
+    """Run :func:`repair_message_sequence` and keep ``_last_flushed_db_idx`` consistent. Repair
+    shrinks the list in place; counting identity-preserved survivors of the flushed prefix gives
+    the exact new cursor, whereas a ``min()`` clamp would skip unflushed rows (used only without a snapshot)."""
     flush_cursor = getattr(agent, "_last_flushed_db_idx", None)
-    if isinstance(flush_cursor, int) and flush_cursor > 0:
-        pre_repair_flushed_ids = {id(m) for m in messages[:flush_cursor]}
-
+    flushed_ids = {id(m) for m in messages[:flush_cursor]} if isinstance(flush_cursor, int) and flush_cursor > 0 else None
     repairs = repair_message_sequence(agent, messages)
-
     if repairs > 0 and hasattr(agent, "_last_flushed_db_idx"):
-        if pre_repair_flushed_ids is not None:
-            agent._last_flushed_db_idx = sum(
-                1 for m in messages if id(m) in pre_repair_flushed_ids
-            )
+        if flushed_ids is not None:
+            agent._last_flushed_db_idx = sum(1 for m in messages if id(m) in flushed_ids)
         else:
-            agent._last_flushed_db_idx = min(
-                agent._last_flushed_db_idx, len(messages)
-            )
-
+            agent._last_flushed_db_idx = min(agent._last_flushed_db_idx, len(messages))
     return repairs
 
 
 def _flatten_content_text(content: Any) -> str:
-    """Flatten list/dict content (e.g. Anthropic-via-OpenRouter block lists) to text.
-
-    A raw list hitting ``re.sub`` raises TypeError and the conversation loop retries forever.
-    Thinking/reasoning blocks are dropped outright; their text key varies per provider.
-    """
+    """Flatten list/dict content (e.g. Anthropic-via-OpenRouter block lists) to text: a raw list
+    hitting ``re.sub`` raises TypeError and the loop retries forever. Thinking/reasoning blocks
+    are dropped outright; their text key varies per provider."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -666,14 +634,10 @@ _THINK_STRIP_PATTERNS = (
 
 
 def strip_think_blocks(agent, content: str) -> str:
-    """Remove reasoning/thinking blocks from content, returning only visible text.
-
-    Strips closed tag pairs, unterminated open tags at a block boundary (mirrors
-    ``gateway/stream_consumer.py``), stray orphan tags, all case-insensitive variants
-    (think/thinking/reasoning/REASONING_SCRATCHPAD/thought), and standalone tool-call XML
-    blocks some open models emit; the ``<function>`` variant is boundary- and
-    ``name=``-gated so prose mentions survive.
-    """
+    """Remove reasoning/thinking blocks from content, returning only visible text: closed tag
+    pairs, unterminated open tags at a block boundary (mirrors ``gateway/stream_consumer.py``),
+    stray orphan tags (all case-insensitive variants), and standalone tool-call XML blocks some
+    open models emit; ``<function>`` is boundary- and ``name=``-gated so prose mentions survive."""
     if not content:
         return ""
     content = _flatten_content_text(content)
@@ -685,11 +649,9 @@ def strip_think_blocks(agent, content: str) -> str:
 
 
 def sync_credential_pool_entry_id(agent) -> None:
-    """Rebind ``agent._credential_pool_entry_id`` from the current pool + key.
-
-    OAuth refreshes can replace the token before recovery runs, so the key
-    alone cannot attribute a failure; the stable entry ID can. Cleared when no pool is bound.
-    """
+    """Rebind ``agent._credential_pool_entry_id`` from the current pool + key. OAuth refreshes
+    can replace the token before recovery runs, so the key alone cannot attribute a failure;
+    the stable entry ID can. Cleared when no pool is bound."""
     pool = getattr(agent, "_credential_pool", None)
     try:
         agent._credential_pool_entry_id = (
@@ -709,11 +671,9 @@ _USAGE_LIMIT_MESSAGE_TOKENS = ("usage limit reached", "usage limit has been reac
 
 
 def _failed_credential_identity(agent, pool) -> Tuple[Optional[str], Optional[str]]:
-    """``(api_key_hint, credential_id)`` of the key actually dispatched, not ``pool.current()``.
-
-    The shared pointer often points at a different healthy entry, and marking it
-    exhausted can take the whole pool offline from one 429.
-    """
+    """``(api_key_hint, credential_id)`` of the key actually dispatched, not ``pool.current()``:
+    the shared pointer often points at a different healthy entry, and marking it exhausted
+    can take the whole pool offline from one 429."""
     api_key_hint = getattr(agent, "api_key", None) or None
     raw_id = getattr(agent, "_credential_pool_entry_id", None)
     credential_id = raw_id if isinstance(raw_id, str) and raw_id else None
@@ -729,11 +689,9 @@ def _failed_credential_identity(agent, pool) -> Tuple[Optional[str], Optional[st
 
 
 def _is_entitlement_403(agent, status_code, error_context) -> bool:
-    """Entitlement 403s look like auth failures but refresh cannot fix them.
-
-    Any xai-oauth 403 is treated as entitlement EXCEPT xAI's stale-token signals
-    (``[WKE=unauthenticated:...]``, "could not be validated"), which must stay refreshable.
-    """
+    """Entitlement 403s look like auth failures but refresh cannot fix them. Any xai-oauth 403
+    is entitlement EXCEPT xAI's stale-token signals (``[WKE=unauthenticated:...]``,
+    "could not be validated"), which must stay refreshable."""
     if agent._is_entitlement_failure(error_context, status_code):
         return True
     if status_code != 403:
@@ -837,14 +795,10 @@ def recover_with_credential_pool(
     classified_reason: Optional[FailoverReason] = None,
     error_context: Optional[Dict[str, Any]] = None, billing_unverified: bool = False,
 ) -> tuple[bool, bool]:
-    """Attempt credential recovery via pool rotation.
-
-    Returns (recovered, has_retried_429). Rate limits: retry once, then rotate.
-    Billing exhaustion: rotate immediately. Auth failures: refresh before rotating.
-    ``classified_reason`` honors the structured classifier over raw HTTP codes
-    (e.g. Anthropic 400 for "out of extra usage"). ``billing_unverified`` persists an
-    ambiguous billing verdict so the entry gets a short cooldown, not the one-hour bench.
-    """
+    """Attempt credential recovery via pool rotation; returns (recovered, has_retried_429).
+    Rate limits: retry once, then rotate. Billing: rotate immediately. Auth: refresh before
+    rotating. ``classified_reason`` beats raw HTTP codes (e.g. Anthropic 400 "out of extra
+    usage"); ``billing_unverified`` gives the entry a short cooldown, not the one-hour bench."""
     pool = agent._credential_pool
     if pool is None:
         return False, has_retried_429
@@ -934,10 +888,8 @@ def recover_with_credential_pool(
 
 
 def _apply_primary_runtime_fields(agent, rt: Dict[str, Any]) -> None:
-    """Copy the identity/transport fields of a ``_primary_runtime`` snapshot onto ``agent``.
-
-    Shared by transport recovery and turn-start restore; the caller rebuilds the client.
-    """
+    """Copy the identity/transport fields of a ``_primary_runtime`` snapshot onto ``agent``
+    (shared by transport recovery and turn-start restore; the caller rebuilds the client)."""
     agent.model = rt["model"]
     agent.provider = rt["provider"]
     agent.requested_provider = rt.get("requested_provider", agent.provider)
@@ -982,10 +934,8 @@ def _rebuild_primary_client(agent, rt: Dict[str, Any], *, reason: str) -> None:
 def try_recover_primary_transport(
     agent, api_error: Exception, *, retry_count: int, max_retries: int,
 ) -> bool:
-    """Rebuild the primary client once and retry after ``max_retries`` exhaust on a transient transport error.
-
-    Skipped for aggregator providers (OpenRouter, Nous) that already manage pools/retries server-side.
-    """
+    """Rebuild the primary client once and retry after ``max_retries`` exhaust on a transient
+    transport error. Skipped for aggregators (OpenRouter, Nous) that manage retries server-side."""
     if agent._fallback_activated:
         return False
     error_type = type(api_error).__name__
@@ -1037,10 +987,8 @@ def try_recover_primary_transport(
 
 
 def _merge_user_content(prev_content: Any, cur_content: Any) -> Any:
-    """Merged content for two adjacent user messages; ``_UNMERGEABLE`` for unknown shapes.
-
-    String+string joins with a blank line; list sides append as separate blocks.
-    """
+    """Merged content for two adjacent user messages (``_UNMERGEABLE`` for unknown shapes):
+    string+string joins with a blank line; list sides append as separate blocks."""
     if isinstance(prev_content, str) and isinstance(cur_content, str):
         return prev_content + ("\n\n" if prev_content and cur_content else "") + cur_content
     if isinstance(prev_content, list) and isinstance(cur_content, list):
@@ -1058,12 +1006,9 @@ _UNMERGEABLE = object()
 def drop_thinking_only_and_merge_users(
     messages: List[Dict[str, Any]], *, drop_codex_reasoning_items: bool = True
 ) -> List[Dict[str, Any]]:
-    """Drop thinking-only assistant turns and merge adjacent user messages left behind.
-
-    Operates on the per-call ``api_messages`` copy only; ``agent.messages`` is never mutated.
-    Drop-and-merge (not stub text) keeps history honest and preserves role alternation
-    (mirrors Claude Code's ``normalizeMessagesForAPI``).
-    """
+    """Drop thinking-only assistant turns and merge adjacent user messages left behind, on the
+    per-call ``api_messages`` copy only (``agent.messages`` is never mutated). Drop-and-merge
+    (not stub text) keeps history honest and preserves role alternation."""
     if not messages:
         return messages
     kept = [
@@ -1097,11 +1042,9 @@ def drop_thinking_only_and_merge_users(
 
 
 def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base_url, matches_primary, load_primary_pool):
-    """Reset-aware gate: skip a guaranteed-to-fail restore while the primary pool reports a future reset.
-
-    Fails open on any error/None. Returns ``(blocked, prefetched_pool, prefetched)`` so the
-    rebind step can reuse the loaded pool (one auth.json read at most).
-    """
+    """Reset-aware gate: skip a guaranteed-to-fail restore while the primary pool reports a
+    future reset; fails open on any error/None. Returns ``(blocked, prefetched_pool, prefetched)``
+    so the rebind step reuses the loaded pool (one auth.json read at most)."""
     prefetched_pool = None
     prefetched = False
     try:
@@ -1142,13 +1085,10 @@ def _restore_runtime_capabilities(agent, rt: Dict[str, Any]) -> None:
 
 
 def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, load_primary_pool, prefetched_pool, prefetched) -> None:
-    """Rebind and re-select the primary credential pool after a fallback turn.
-
-    A cross-provider fallback attaches the fallback's pool; leaving it would trip the
-    provider-mismatch guard on the next 401/429. Reload the primary pool, else clear it.
-    The snapshot api_key may be stale after pool rotation; re-select the pool's current
-    best entry, keeping the snapshot key when no usable entry exists.
-    """
+    """Rebind and re-select the primary credential pool after a fallback turn. A cross-provider
+    fallback attaches its own pool, which would trip the provider-mismatch guard on the next
+    401/429: reload the primary pool, else clear it. The snapshot api_key may be stale after
+    rotation; re-select the pool's best entry, keeping the snapshot key when none is usable."""
     pool = getattr(agent, "_credential_pool", None)
     pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
     if pool is not None and pool_provider and not matches_primary(pool):
@@ -1189,10 +1129,8 @@ def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, lo
 
 
 def restore_primary_runtime(agent) -> bool:
-    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped.
-
-    Needed for long-lived CLI agents and the gateway's cached agents (``_agent_cache``).
-    """
+    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
+    (long-lived CLI agents and the gateway's cached agents)."""
     if not agent._fallback_activated:
         # Reset the index even without activation: a failed _try_activate_fallback() can strand
         # _fallback_index past the chain end and silently block future fallbacks.
@@ -1299,11 +1237,8 @@ _INLINE_REASONING_PATTERNS = tuple(
 
 
 def extract_reasoning(agent, assistant_message) -> Optional[str]:
-    """Extract reasoning text from an assistant message, or None.
-
-    Checks ``reasoning``, ``reasoning_content``, ``reasoning_details`` (OpenRouter unified),
-    then inline thinking blocks in list content.
-    """
+    """Reasoning text from ``reasoning`` / ``reasoning_content`` / ``reasoning_details``
+    (OpenRouter unified), else inline thinking blocks in the content; None when absent."""
     parts: List[str] = []
 
     def _add(text) -> None:
@@ -1412,11 +1347,8 @@ def _direct_native_anthropic_tool_cache_capability(
 
 
 def cache_ttl_means_disabled(ttl: Any) -> bool:
-    """Return True when a ``prompt_caching.cache_ttl`` value means caching off.
-
-    Single predicate shared by ``agent_init`` and the stub policy paths (#76085).
-    Unknown values (``"2h"``, integers) are NOT a disable.
-    """
+    """True when a ``prompt_caching.cache_ttl`` value means caching off (single predicate shared
+    by ``agent_init`` and the stub policy paths). Unknown values (``"2h"``, ints) are NOT a disable."""
     if ttl in ("5m", "1h"):
         return False
     if ttl is False or ttl is None:
@@ -1428,41 +1360,31 @@ def cache_ttl_means_disabled(ttl: Any) -> bool:
 VALID_CACHE_TTLS = ("5m", "1h")
 
 
-def _raw_cache_ttl_from_config() -> Any:
-    """Read the raw ``prompt_caching.cache_ttl`` config value (may raise)."""
-    from hermes_cli.config import load_config_readonly
+def _raw_cache_ttl_from_config(default: Any) -> Any:
+    """Raw ``prompt_caching.cache_ttl`` config value, or ``default`` when config cannot be read."""
+    try:
+        from hermes_cli.config import load_config_readonly
 
-    pc_cfg = load_config_readonly().get("prompt_caching", {}) or {}
-    return pc_cfg.get("cache_ttl", "5m")
+        return (load_config_readonly().get("prompt_caching", {}) or {}).get("cache_ttl", "5m")
+    except Exception:
+        return default
 
 
 def prompt_caching_disabled_from_config() -> bool:
-    """Return True when ``prompt_caching.cache_ttl`` is configured as off (same detection as ``agent_init``; #76085 / #33555)."""
-    try:
-        ttl = _raw_cache_ttl_from_config()
-    except Exception:
-        return False
-    return cache_ttl_means_disabled(ttl)
+    """True when ``prompt_caching.cache_ttl`` is configured as off (same detection as ``agent_init``)."""
+    return cache_ttl_means_disabled(_raw_cache_ttl_from_config("5m"))
 
 
 def configured_cache_ttl() -> Optional[str]:
-    """Return the configured ``prompt_caching.cache_ttl`` tier (``5m``/``1h``), else None.
-
-    Mirrors ``agent_init`` so stub paths don't regress a configured ``1h`` to 5m (#84733).
-    """
-    try:
-        ttl = _raw_cache_ttl_from_config()
-    except Exception:
-        return None
+    """Configured ``prompt_caching.cache_ttl`` tier (``5m``/``1h``), else None; mirrors
+    ``agent_init`` so stub paths don't regress a configured ``1h`` to 5m."""
+    ttl = _raw_cache_ttl_from_config(None)
     return ttl if ttl in VALID_CACHE_TTLS else None
 
 
 def blank_cache_policy_stub(cache_disabled: Optional[bool] = None):
-    """Build the destination-identity-blank stub for ``anthropic_prompt_cache_policy``.
-
-    Sole sanctioned constructor so ``_cache_disabled`` is never omitted (#76085); when
-    ``cache_disabled`` is None the global config is consulted.
-    """
+    """Destination-identity-blank stub for ``anthropic_prompt_cache_policy``; the sole sanctioned
+    constructor so ``_cache_disabled`` is never omitted (None consults the global config)."""
     from types import SimpleNamespace
 
     if cache_disabled is None:
@@ -1477,13 +1399,10 @@ def plan_cache_sections_for_destination(
     model: str, cache_disabled: Optional[bool] = None, cache_ttl: Optional[str] = None,
     static_system_prefix: Optional[str] = None,
 ) -> Tuple[list, list]:
-    """Plan request-local cache sections for one resolved destination (MoA / auxiliary senders).
-
-    Returns stripped copies (non-caching route) or a ``build_prompt_cache_plan`` layout; never
-    mutates ``messages``/``tools``. ``cache_disabled`` and ``cache_ttl`` default to live config
-    so these paths honor the operator's disable (#76085) and tier (#84733);
-    ``static_system_prefix`` gives the system prompt the same early breakpoint as the main loop.
-    """
+    """Plan request-local cache sections for one resolved destination (MoA / auxiliary senders):
+    stripped copies (non-caching route) or a ``build_prompt_cache_plan`` layout; never mutates
+    inputs. ``cache_disabled``/``cache_ttl`` default to live config so the operator's disable and
+    tier are honored; ``static_system_prefix`` gives the system prompt the main loop's early breakpoint."""
     from agent.prompt_caching import (
         build_prompt_cache_plan, effective_cache_ttl, envelope_tool_part_cache_markers_supported,
         strip_anthropic_cache_control, strip_anthropic_tool_cache_control,
@@ -1514,7 +1433,7 @@ def plan_cache_sections_for_destination(
             stub, provider=provider, base_url=base_url, api_mode=api_mode, model=model
         ),
         # LiteLLM-style envelope routes forward part-level markers into
-        # tool_result.content[] → non-retryable 400 (#89886).
+        # tool_result.content[] → non-retryable 400.
         tool_part_markers=envelope_tool_part_cache_markers_supported(
             provider, base_url
         ),
@@ -1523,11 +1442,8 @@ def plan_cache_sections_for_destination(
 
 
 def _is_litellm_route(provider_lower: str, base_url: str) -> bool:
-    """True when a route is a LiteLLM proxy, by provider id or host token.
-
-    ``litellm`` must match as a whole delimited token (not substring) in provider or host;
-    a path segment never qualifies.
-    """
+    """True when a route is a LiteLLM proxy: ``litellm`` as a whole delimited token (not
+    substring) in the provider id or host; a path segment never qualifies."""
     return _has_litellm_token(provider_lower, ":-_/") or _has_litellm_token(base_url_hostname(base_url), ".-")
 
 
@@ -1539,11 +1455,8 @@ def _has_litellm_token(value: str, delimiters: str) -> bool:
 
 
 def _moa_aggregator_cache_policy(agent, eff_model: str) -> tuple[bool, bool]:
-    """MoA virtual provider: resolve the policy from the preset's real aggregator slot.
-
-    The virtual provider matches no caching branch and would silently lose caching
-    for the acting aggregator.
-    """
+    """MoA virtual provider: resolve the policy from the preset's real aggregator slot (the
+    virtual provider matches no caching branch and would silently lose caching)."""
     try:
         from hermes_cli.config import load_config as _load_moa_cfg
         from hermes_cli.moa_config import resolve_moa_preset
@@ -1619,11 +1532,10 @@ def anthropic_prompt_cache_policy(
 ) -> tuple[bool, bool]:
     """Decide whether to apply Anthropic prompt caching; returns ``(should_cache, use_native_layout)``.
 
-    ``use_native_layout`` puts markers on inner content blocks (native Anthropic wire);
-    otherwise on the message envelope (OpenRouter / OpenAI-wire proxies). Qwen/Alibaba routes
-    also honour envelope markers. An operator disable is read from ``_cache_disabled``
-    (not ``_cache_ttl``, unset during init) so it survives switches and restores.
-    Branch ORDER is load-bearing (see inline notes).
+    Native layout puts markers on inner content blocks (Anthropic wire), else on the message
+    envelope (OpenRouter / OpenAI-wire proxies; Qwen/Alibaba too). The operator disable is read
+    from ``_cache_disabled`` (not ``_cache_ttl``, unset during init) so it survives switches
+    and restores. Branch ORDER is load-bearing (see inline notes).
     """
     if getattr(agent, "_cache_disabled", False):
         return (False, False)
@@ -1723,13 +1635,10 @@ def anthropic_prompt_cache_policy(
 
 
 def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
-    """Ask the registered ProviderProfile for a custom client, if any.
-
-    Resolves by provider name first, then by the ``base_url`` scheme prefix so a runtime
-    configured only by URL (``acp://…``) still reaches its profile. A profile that raises
-    is logged and skipped: a third-party plugin must not be able to take the turn down,
-    it can only fail to provide a client.
-    """
+    """Ask the registered ProviderProfile for a custom client, if any. Resolves by provider name,
+    then by ``base_url`` prefix so a URL-only runtime (``acp://…``) still reaches its profile.
+    A profile that raises is logged and skipped: a third-party plugin must not be able to take
+    the turn down, it can only fail to provide a client."""
     try:
         from providers import get_provider_profile
     except Exception:
@@ -1759,12 +1668,9 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
 
 
 def _profile_for_base_url(base_url: str) -> Any | None:
-    """Registered profile whose own base_url is a prefix of ``base_url`` (used when the provider name did not resolve).
-
-    Prefix match, not equality: the replaced copilot-acp branch keyed on
-    ``startswith("acp://copilot")``, so a base_url carrying a path or a user override
-    under the same root must still resolve.
-    """
+    """Registered profile whose own base_url is a prefix of ``base_url`` (provider name did not
+    resolve). Prefix, not equality: the replaced copilot-acp branch keyed on
+    ``startswith("acp://copilot")``, so a path or user override under the same root must resolve."""
     try:
         from providers import list_providers
         candidates = list_providers()
@@ -1881,13 +1787,10 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
 
 
 def _apply_switched_provider_request_overrides(agent, new_provider):
-    """Re-derive the switched-to provider's ``request_overrides`` (custom_providers ``extra_body``) onto a live agent.
-
+    """Re-derive the switched-to provider's ``request_overrides`` (custom_providers ``extra_body``).
     Matches by provider key, base_url AND model (same rule as
-    ``agent_init._merge_custom_provider_extra_body``) so a different model at the
-    same endpoint never inherits another model's ``extra_body``. Stale
-    ``extra_body`` is cleared; ``service_tier`` / ``speed`` overrides are preserved.
-    """
+    ``agent_init._merge_custom_provider_extra_body``) so a different model at the same endpoint
+    never inherits another's ``extra_body``. Stale ``extra_body`` cleared; ``service_tier``/``speed`` kept."""
     from agent.agent_init import _custom_provider_extra_body_for_agent
 
     # Prefer the init-time cache (agent._custom_providers); reload only if absent.
@@ -1898,12 +1801,12 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
             custom_providers = get_compatible_custom_providers(load_config())
         except Exception:
             custom_providers = []
-
     new_extra_body = _custom_provider_extra_body_for_agent(
-        provider=new_provider, model=getattr(agent, "model", "") or "",
-        base_url=getattr(agent, "base_url", "") or "", custom_providers=custom_providers or [],
+        provider=new_provider,
+        model=getattr(agent, "model", "") or "",
+        base_url=getattr(agent, "base_url", "") or "",
+        custom_providers=custom_providers or [],
     )
-
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
     overrides.pop("extra_body", None)  # always drop the previous provider's extra_body
     if new_extra_body:
@@ -1934,11 +1837,9 @@ _MISSING = object()
 
 
 def _snapshot_switch_state(agent) -> Dict[str, Any]:
-    """Snapshot every field the swap+rebuild mutates so a failed rebuild rolls back atomically.
-
-    Otherwise a new model name + OLD client 400s next turn. The sentinel distinguishes
-    unset from None: tests build bare agents via ``__new__`` without all fields.
-    """
+    """Snapshot every field the swap+rebuild mutates so a failed rebuild rolls back atomically
+    (else a new model name + OLD client 400s next turn). The sentinel distinguishes unset from
+    None: tests build bare agents via ``__new__`` without all fields."""
     snapshot = {name: getattr(agent, name, _MISSING) for name in _SWITCH_SNAPSHOT_FIELDS}
     # Shallow-copy the dict so mutating the live one doesn't poison the rollback target.
     snapshot["_client_kwargs"] = dict(getattr(agent, "_client_kwargs", {}) or {})
@@ -2250,12 +2151,10 @@ def _persist_switch_billing_route(agent) -> None:
 def switch_model(
     agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None
 ):
-    """Switch the model/provider in-place for a live agent (rebuild clients, caching flags, compressor).
-
-    Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so the
-    change persists across turns. Any failure during the swap/rebuild rolls the agent
-    back to its pre-switch snapshot and re-raises (callers catch).
-    """
+    """Switch the model/provider in-place for a live agent (rebuild clients, caching flags,
+    compressor). Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
+    the change persists across turns. A failed swap/rebuild rolls back to the pre-switch
+    snapshot and re-raises (callers catch)."""
     old_model = agent.model
     old_provider = agent.provider
     old_norm = (old_provider or "").strip().lower()
@@ -2336,11 +2235,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                  skip_tool_request_middleware: bool = False,
                  tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
                  skip_tool_execution_middleware: bool = False) -> str:
-    """Invoke a single tool and return the result string; no display logic.
-
-    Handles agent-level and registry-dispatched tools. Used by the concurrent
-    path; the sequential path keeps its own inline invocation for display.
-    """
+    """Invoke a single tool (agent-level or registry-dispatched) and return the result string;
+    no display logic. Used by the concurrent path; the sequential path keeps its own inline
+    invocation for display."""
     from agent.inline_tool_executors import (
         InlineToolContext, emit_terminal_post_tool_call, resolve_invoke_tool_executor, tool_hook_ids
     )
@@ -2419,11 +2316,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
 
 def repair_tool_call(agent, tool_name: str) -> str | None:
-    """Repair a mismatched tool name (case, separators, CamelCase, ``_tool`` suffixes, then fuzzy match) before aborting.
-
-    Suffix stripping is applied twice so ``TodoTool_tool`` reduces fully.
-    Returns the repaired name if in valid_tool_names, else None.
-    """
+    """Repair a mismatched tool name (case, separators, CamelCase, ``_tool`` suffixes twice so
+    ``TodoTool_tool`` reduces fully, then fuzzy match) before aborting. Returns the repaired
+    name if in valid_tool_names, else None."""
     from difflib import get_close_matches
 
     if not tool_name:
@@ -2477,14 +2372,14 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
 # the stub placeholder in chat_completion_helpers so healed transcripts read consistently.
 _INTERRUPTED_PLACEHOLDER = "[response interrupted]"
 
-# Escalate repeated heals once per session window, then stay quiet (#96870). Default
+# Escalate repeated heals once per session window, then stay quiet. Default
 # threshold; tunable via ``agent.sanitizer_heal_escalation_threshold`` (<= 0 disables).
 _EMPTY_HEAL_ESCALATE_AFTER = 3
 _EMPTY_HEAL_WINDOW_S = 600.0
 _empty_heal_log_state: Dict[str, Dict[str, Any]] = {}
 _empty_heal_log_lock = threading.Lock()
 # Sessions already given the one-time user notice; separate from the windowed log state
-# so the user is told ONCE per session (#96870, out-of-band, never in conversation context).
+# so the user is told ONCE per session (out-of-band, never in conversation context).
 _empty_heal_user_notified: set = set()
 # One-shot pending notices keyed by session, drained by the conversation loop via
 # ``consume_pending_sanitizer_heal_notice`` and delivered via the status/warning callback.
@@ -2492,10 +2387,8 @@ _empty_heal_pending_notice: Dict[str, str] = {}
 
 
 def _msg_has_payload(msg: Dict[str, Any]) -> bool:
-    """True if ``msg`` carries anything the API treats as non-empty content (text, multimodal blocks, tool_calls, tool_call_id, reasoning).
-
-    Role-agnostic counterpart of ``AIAgent._is_thinking_only_assistant``.
-    """
+    """True if ``msg`` carries anything the API treats as non-empty content (text, multimodal
+    blocks, tool_calls, reasoning). Role-agnostic counterpart of ``AIAgent._is_thinking_only_assistant``."""
     content = msg.get("content")
     if isinstance(content, str):
         if content.strip():
@@ -2525,17 +2418,10 @@ def _msg_has_payload(msg: Dict[str, Any]) -> bool:
     )
 
 
-def fill_empty_non_final_wire_payload(
-    msg: Dict[str, Any], *, is_final: bool
-) -> bool:
-    """Write the interrupted placeholder onto an empty non-final wire copy; returns True when filled.
-
-    Pass the per-call copy only; durable history must not be mutated
-    (#88955, #96870).
-    """
-    if is_final or not isinstance(msg, dict):
-        return False
-    if msg.get("role") not in ("user", "assistant"):
+def fill_empty_non_final_wire_payload(msg: Dict[str, Any], *, is_final: bool) -> bool:
+    """Write the interrupted placeholder onto an empty non-final wire copy; True when filled.
+    Pass the per-call copy only; durable history must not be mutated."""
+    if is_final or not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
         return False
     if _msg_has_payload(msg):
         return False
@@ -2568,22 +2454,15 @@ def _heal_escalation_threshold() -> int:
 
 
 def consume_pending_sanitizer_heal_notice() -> Optional[str]:
-    """Drain the one-time user notice for the current session, if any (at most one per session lifetime).
-
-    Delivered through the status/warning callback, NEVER appended to the
-    conversation context.
-    """
+    """Drain the one-time user notice for the current session (at most one per session lifetime).
+    Delivered through the status/warning callback, NEVER appended to the conversation context."""
     key = _session_id_for_heal_log() or "-"
     with _empty_heal_log_lock:
         return _empty_heal_pending_notice.pop(key, None)
 
 
 def get_sanitizer_heal_stats() -> Dict[str, Dict[str, Any]]:
-    """Read-only snapshot of per-session sanitiser heal counters for diagnostics.
-
-    Keyed by session id; values carry ``heal_events``, ``messages_healed`` and
-    ``escalated``.
-    """
+    """Read-only per-session sanitiser heal counters (``heal_events``, ``messages_healed``, ``escalated``) for diagnostics."""
     with _empty_heal_log_lock:
         return {
             k: {
@@ -2596,11 +2475,9 @@ def get_sanitizer_heal_stats() -> Dict[str, Dict[str, Any]]:
 
 
 def _log_empty_non_final_heal(healed: int) -> None:
-    """WARNING on the first heals in a window, one ERROR at the threshold, then silent.
-
-    The threshold also queues a ONE-TIME out-of-band user notice (drained by
-    ``consume_pending_sanitizer_heal_notice``); never re-armed by a new window.
-    """
+    """WARNING on the first heals in a window, one ERROR at the threshold, then silent. The
+    threshold also queues a ONE-TIME out-of-band user notice (drained by
+    ``consume_pending_sanitizer_heal_notice``); never re-armed by a new window."""
     key = _session_id_for_heal_log() or "-"
     threshold = _heal_escalation_threshold()
     now = time.monotonic()
@@ -2665,12 +2542,9 @@ def repair_empty_non_final_messages(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Substitute a placeholder for empty-content non-final messages on the per-call copy.
-
-    Anthropic/litellm/Bedrock 400 on any empty non-final message, and a
-    persisted stub poisons every later turn; repairing the wire copy heals
-    the session in memory. Substitution (not deletion) keeps role alternation
-    and tool-call pairing intact. The final message is left untouched.
-    """
+    Anthropic/litellm/Bedrock 400 on any empty non-final message and a persisted stub poisons
+    every later turn; repairing the wire copy heals the session in memory. Substitution (not
+    deletion) keeps role alternation and tool-call pairing intact. The final message is untouched."""
     if not messages or len(messages) < 2:
         return messages
 
@@ -2700,16 +2574,11 @@ def repair_empty_non_final_messages(
 
 
 def _classify_tool_call_orphans(messages: List[Dict[str, Any]]):
-    """Classify orphaned tool-call / tool-result pairs; single source of truth for GLOBAL orphan detection.
-
-    Returns ``(surviving_call_ids, result_call_ids, orphaned_results,
-    missing_tool_calls)``. Every id variant of a tool_call (``id``,
-    ``call_id``, ``response_item_id``, composite bridge) is registered so a
-    result matching any alias survives (#55626, #63000, #58357).
-    ``orphaned_results`` are the actual dicts (filter by ``id(msg)``).
-    ``sanitize_api_messages`` pairs positionally instead (#94704) but shares
-    the ``tool_call_id_variants`` / ``tool_result_id_variants`` alias policy.
-    """
+    """Classify orphaned tool-call / tool-result pairs; single source of truth for GLOBAL orphan
+    detection. Returns ``(surviving_call_ids, result_call_ids, orphaned_results, missing_tool_calls)``;
+    every id variant of a tool_call is registered so a result matching any alias survives, and
+    ``orphaned_results`` are the actual dicts (filter by ``id(msg)``). ``sanitize_api_messages``
+    pairs positionally instead but shares the ``*_id_variants`` alias policy."""
     assistant_call_variants: List[tuple[Any, frozenset[str]]] = []
     surviving_call_ids: set[str] = set()
     for msg in messages:
@@ -2780,11 +2649,9 @@ def _drop_empty_tool_calls_arrays(messages: List[Dict[str, Any]]) -> List[Dict[s
 
 
 def _repair_nameless_tool_calls(messages: List[Dict[str, Any]]) -> None:
-    """Rename empty/missing ``function.name`` to a sentinel (in place).
-
-    Dropping would unpair the anti-priming result the dispatch loop keeps for
-    empty-name calls, and Responses adapters 400 on nameless calls.
-    """
+    """Rename empty/missing ``function.name`` to a sentinel (in place): dropping would unpair the
+    anti-priming result the dispatch loop keeps for empty-name calls, and Responses adapters
+    400 on nameless calls."""
     sentinel = "invalid_tool_call"
     for msg in messages:
         if msg.get("role") != "assistant":
@@ -2815,11 +2682,9 @@ def _repair_nameless_tool_calls(messages: List[Dict[str, Any]]) -> None:
 
 
 def _drop_results_without_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Drop tool results with a missing/empty tool_call_id.
-
-    Kept explicit (not left to the positional walk) for its own log line and so the
-    final-chokepoint guarantee holds for callers skipping ``repair_message_sequence``.
-    """
+    """Drop tool results with a missing/empty tool_call_id. Kept explicit (not left to the
+    positional walk) for its own log line and so the final-chokepoint guarantee holds for
+    callers skipping ``repair_message_sequence``."""
     kept = [
         m for m in messages
         if not (m.get("role") == "tool" and not (m.get("tool_call_id") or "").strip())
@@ -2833,11 +2698,9 @@ def _drop_results_without_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Positional tool_call <-> tool_result pairing.
-
-    Strict providers (DeepSeek v4, Kimi) require results IMMEDIATELY after their call:
-    drop positional orphans, stub unanswered declared ids; matching is alias-aware.
-    """
+    """Positional tool_call <-> tool_result pairing: strict providers (DeepSeek v4, Kimi) require
+    results IMMEDIATELY after their call. Drops positional orphans, stubs unanswered declared
+    ids; matching is alias-aware."""
     paired: List[Dict[str, Any]] = []
     declared_calls: Dict[str, tuple] = {}
     dropped = 0
@@ -2903,13 +2766,10 @@ def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[s
 
 
 def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Deduplicate tool_call_ids (strict providers 400 on duplicates).
-
-    Collapses duplicates within an assistant message and drops results answering
-    no OUTSTANDING call. Tracks outstanding calls (not ids ever seen) because
-    llama.cpp reuses one constant id, and the whole variant group so
-    alias-keyed results are not deleted.
-    """
+    """Deduplicate tool_call_ids (strict providers 400 on duplicates): collapse duplicates within
+    an assistant message, drop results answering no OUTSTANDING call. Tracks outstanding calls
+    (not ids ever seen) because llama.cpp reuses one constant id, and whole variant groups so
+    alias-keyed results are not deleted."""
     seen_assistant_call_ids: set = set()
     outstanding_call_ids: set = set()
     outstanding_groups: Dict[int, frozenset] = {}
@@ -2967,10 +2827,8 @@ def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 def _realign_tool_result_names(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Align each tool result's wire ``name`` with its call's function name (per-call copy only).
-
-    Google 400s on a mismatch, which is routine when tool_search bridges via ``tool_call``.
-    """
+    """Align each tool result's wire ``name`` with its call's function name (per-call copy only):
+    Google 400s on a mismatch, routine when tool_search bridges via ``tool_call``."""
     call_names: Dict[str, str] = {}
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -3003,11 +2861,9 @@ def _realign_tool_result_names(messages: List[Dict[str, Any]]) -> List[Dict[str,
 
 
 def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fix orphaned tool_call / tool_result pairs before every LLM call; runs unconditionally (not gated on the compressor).
-
-    Order matters: empty non-final messages are healed first so the substituted turn
-    participates in the pairing and dedup passes.
-    """
+    """Fix orphaned tool_call / tool_result pairs before every LLM call; runs unconditionally (not
+    gated on the compressor). Order matters: empty non-final messages are healed first so the
+    substituted turn participates in the pairing and dedup passes."""
     messages = _drop_invalid_roles(messages)
     messages = repair_empty_non_final_messages(messages)
     messages = _drop_empty_tool_calls_arrays(messages)
@@ -3034,11 +2890,8 @@ def looks_like_codex_intermediate_ack(
     require_workspace: bool = True,
 ) -> bool:
     """Detect a planning/ack message that should continue instead of ending the turn.
-
-    ``require_workspace=False`` (user opted into ``agent.intent_ack_continuation`` for all
-    api_modes) drops the filesystem/repo reference requirement; the future-ack +
-    short-content + no-prior-tools + action-verb checks always apply.
-    """
+    ``require_workspace=False`` (opt-in for all api_modes) drops the filesystem/repo reference
+    requirement; future-ack + short-content + no-prior-tools + action-verb checks always apply."""
     if any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages):
         return False
     assistant_text = agent._strip_think_blocks(assistant_content or "").strip().lower()
@@ -3090,11 +2943,9 @@ _INTENT_ACK_OFF = {"false", "never", "no", "off"}
 
 
 def intent_ack_continuation_mode(agent) -> str:
-    """Resolve the intent-ack continuation mode: ``"off"``, ``"codex_only"`` (workspace acks on codex_responses), or ``"all"``.
-
-    Mirrors ``agent.tool_use_enforcement``: ``"auto"`` -> codex_only; true-ish values -> all;
-    false-ish -> off; ``list`` -> all when a substring matches the active model name, else off.
-    """
+    """Intent-ack continuation mode: ``"off"``, ``"codex_only"`` (workspace acks on codex_responses)
+    or ``"all"``. Mirrors ``agent.tool_use_enforcement``: ``"auto"`` -> codex_only; true-ish -> all;
+    false-ish -> off; ``list`` -> all when a substring matches the active model name, else off."""
     mode = getattr(agent, "_intent_ack_continuation", "auto")
     if mode is True or (isinstance(mode, str) and mode.lower() in _INTENT_ACK_ON):
         return "all"
@@ -3117,13 +2968,10 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
 
 
 def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
-    """Re-pad or strip assistant turns' reasoning_content for the CURRENT provider after a fallback switch.
-
-    ``api_messages`` is shaped for the primary provider; require-side providers
-    (DeepSeek/Kimi/MiMo) 400 without the pad, strict ones (Mistral, Cerebras,
-    Groq, ...) 400/422 with it (#45655). Idempotent. Returns the number of
-    assistant turns changed.
-    """
+    """Re-pad or strip assistant turns' reasoning_content for the CURRENT provider after a
+    fallback switch: ``api_messages`` is shaped for the primary; require-side providers
+    (DeepSeek/Kimi/MiMo) 400 without the pad, strict ones (Mistral, Cerebras, Groq) 400/422
+    with it. Idempotent; returns the number of assistant turns changed."""
     from agent.message_sanitization import reapply_reasoning_echo
 
     return reapply_reasoning_echo(
@@ -3132,11 +2980,9 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
 
 
 def _iter_httpx_pool_objects(http_client: Any):
-    """Yield httpcore pool objects reachable from an httpx client, including mounted transports.
-
-    Keepalive and proxy configs put live connections on ``client._mounts``; walking
-    only ``_transport`` made ``force_close_tcp_sockets`` miss them.
-    """
+    """Yield httpcore pool objects reachable from an httpx client, including mounted transports:
+    keepalive and proxy configs put live connections on ``client._mounts``, which a
+    ``_transport``-only walk misses."""
     seen_pools: set[int] = set()
 
     def _pools_for_transport(transport: Any):
@@ -3163,19 +3009,10 @@ def _iter_httpx_pool_objects(http_client: Any):
 def _connection_candidates(conn: Any):
     """Walk nested ``_connection`` wrappers (proxy tunnel → HTTP11/2)."""
     seen: set[int] = set()
-    stack = [conn]
-    while stack:
-        candidate = stack.pop()
-        if candidate is None:
-            continue
-        marker = id(candidate)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield candidate
-        inner = getattr(candidate, "_connection", None)
-        if inner is not None and id(inner) not in seen:
-            stack.append(inner)
+    while conn is not None and id(conn) not in seen:
+        seen.add(id(conn))
+        yield conn
+        conn = getattr(conn, "_connection", None)
 
 
 def _socket_from_stream(stream: Any):
@@ -3205,13 +3042,10 @@ def _socket_from_stream(stream: Any):
 
 
 def _iter_pool_sockets(client: Any):
-    """Yield raw sockets reachable from an OpenAI/httpx client pool.
-
-    Traversal is defensive over private httpcore internals (``conn._connection``,
-    proxy tunnel wrappers) that vary by release. Also walks mount transports and
-    in-flight ``PoolRequest.connection`` objects, reachable when ``_connections``
-    is empty during checkout.
-    """
+    """Yield raw sockets reachable from an OpenAI/httpx client pool. Defensive over private
+    httpcore internals (``conn._connection``, proxy tunnel wrappers) that vary by release; also
+    walks mount transports and in-flight ``PoolRequest.connection`` objects (``_connections``
+    is empty during checkout)."""
     try:
         # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
         http_client = getattr(client, "_client", None)
@@ -3362,11 +3196,9 @@ def _requeue_pending_steer(agent, steer_text: str) -> None:
 
 
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
-    """Append pending /steer text to the last ``role:"tool"`` message of this batch, marked as user-origin.
-
-    Modifies existing content only, so role alternation is preserved.
-    ``num_tool_msgs`` bounds the tail slice searched.
-    """
+    """Append pending /steer text to the last ``role:"tool"`` message of this batch (bounded by
+    ``num_tool_msgs``), marked as user-origin. Modifies existing content only, so role
+    alternation is preserved."""
     if num_tool_msgs <= 0 or not messages:
         return
     steer_text = agent._drain_pending_steer()
@@ -3405,24 +3237,17 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
 
 
 def force_close_tcp_sockets(client: Any) -> int:
-    """Abort in-flight TCP I/O via ``shutdown(SHUT_RDWR)`` WITHOUT closing FDs.
-
-    ``close()`` from a non-owner thread is unsafe: the SSL BIO caches the raw
-    FD, the kernel recycles it, and a flushed TLS record lands in the wrong
-    file (#29507 clobbered a SQLite header). ``shutdown()`` is FD-safe from
-    any thread; the owning httpx thread releases the FD on unwind.
-
-    Returns the number of sockets shut down (logged as ``tcp_force_closed=N``
-    for backwards-compatible parsing).
-    """
+    """Abort in-flight TCP I/O via ``shutdown(SHUT_RDWR)`` WITHOUT closing FDs. ``close()`` from
+    a non-owner thread is unsafe: the SSL BIO caches the raw FD, the kernel recycles it, and a
+    flushed TLS record lands in the wrong file (once clobbered a SQLite header). ``shutdown()``
+    is FD-safe from any thread. Returns the count (logged as ``tcp_force_closed=N``)."""
     import socket as _socket
 
     shutdown_count = 0
     try:
         for sock in _iter_pool_sockets(client):
             try:
-                # Clear a blocking timeout so a hung SSL_read notices the shutdown (#85252).
-                # Still no close() — that is the #29507 race.
+                # Clear a blocking timeout so a hung SSL_read notices the shutdown. Still no close().
                 settimeout = getattr(sock, "settimeout", None)
                 if callable(settimeout):
                     try:
@@ -3431,9 +3256,7 @@ def force_close_tcp_sockets(client: Any) -> int:
                         pass
                 sock.shutdown(_socket.SHUT_RDWR)
             except OSError:
-                # Already shut down / not connected / FD invalid — all benign.
-                pass
-            # IMPORTANT (#29507): do NOT call sock.close() here. See docstring.
+                pass  # already shut down / not connected / FD invalid: all benign
             shutdown_count += 1
     except Exception as exc:
         _ra().logger.debug("Force-close TCP sockets sweep error: %s", exc)
@@ -3441,30 +3264,13 @@ def force_close_tcp_sockets(client: Any) -> int:
 
 
 __all__ = [
-    "convert_to_trajectory_format",
-    "sanitize_tool_call_arguments",
-    "repair_message_sequence",
-    "strip_think_blocks",
-    "recover_with_credential_pool",
-    "try_recover_primary_transport",
-    "drop_thinking_only_and_merge_users",
-    "restore_primary_runtime",
-    "extract_reasoning",
-    "dump_api_request_debug",
-    "prompt_caching_disabled_from_config",
-    "blank_cache_policy_stub",
-    "plan_cache_sections_for_destination",
-    "anthropic_prompt_cache_policy",
-    "create_openai_client",
-    "switch_model",
-    "invoke_tool",
-    "repair_tool_call",
-    "sanitize_api_messages",
-    "looks_like_codex_intermediate_ack",
-    "copy_reasoning_content_for_api",
-    "cleanup_dead_connections",
-    "extract_api_error_context",
-    "apply_pending_steer_to_tool_results",
-    "_iter_pool_sockets",
+    "convert_to_trajectory_format", "sanitize_tool_call_arguments", "repair_message_sequence",
+    "strip_think_blocks", "recover_with_credential_pool", "try_recover_primary_transport",
+    "drop_thinking_only_and_merge_users", "restore_primary_runtime", "extract_reasoning",
+    "dump_api_request_debug", "prompt_caching_disabled_from_config", "blank_cache_policy_stub",
+    "plan_cache_sections_for_destination", "anthropic_prompt_cache_policy", "create_openai_client",
+    "switch_model", "invoke_tool", "repair_tool_call", "sanitize_api_messages",
+    "looks_like_codex_intermediate_ack", "copy_reasoning_content_for_api", "cleanup_dead_connections",
+    "extract_api_error_context", "apply_pending_steer_to_tool_results", "_iter_pool_sockets",
     "force_close_tcp_sockets",
 ]
