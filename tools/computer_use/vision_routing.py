@@ -37,9 +37,7 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(vision, dict):
         return False
     provider = str(vision.get("provider") or "").strip().lower()
-    model = str(vision.get("model") or "").strip()
-    base_url = str(vision.get("base_url") or "").strip()
-    return not (provider in ("", "auto") and not model and not base_url)
+    return provider not in ("", "auto") or any(str(vision.get(k) or "").strip() for k in ("model", "base_url"))
 
 def _lookup_user_declared_supports_vision(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
     """Config-declared ``supports_vision`` for the active route (None on failure)."""
@@ -50,6 +48,12 @@ def _lookup_user_declared_supports_vision(provider: str, model: str, cfg: Option
         logger.debug("computer_use vision_routing: config override lookup failed: %s", exc)
         return None
 
+def _models_dev_supports_vision(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """Raw models.dev capability lookup (fallback when ``agent.image_routing`` is unavailable)."""
+    from agent.models_dev import get_model_capabilities
+    caps = get_model_capabilities(provider, model)
+    return None if caps is None else bool(getattr(caps, "supports_vision", False))
+
 def _lookup_supports_vision(provider: str, model: str, cfg: Optional[Dict[str, Any]] = None) -> Optional[bool]:
     """Config/models.dev ``supports_vision`` for *(provider, model)*. Prefers
     ``agent.image_routing._lookup_supports_vision``; falls back to raw models.dev capabilities
@@ -57,18 +61,14 @@ def _lookup_supports_vision(provider: str, model: str, cfg: Optional[Dict[str, A
     if not provider or not model:
         return None
     try:
-        from agent.image_routing import _lookup_supports_vision as _lookup_image_supports
+        from agent.image_routing import _lookup_supports_vision as lookup
     except Exception:
-        _lookup_image_supports = None
+        lookup = _models_dev_supports_vision
     try:
-        if _lookup_image_supports is not None:
-            return _lookup_image_supports(provider, model, cfg)
-        from agent.models_dev import get_model_capabilities
-        caps = get_model_capabilities(provider, model)
+        return lookup(provider, model, cfg)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use vision_routing: caps lookup failed for %s:%s — %s", provider, model, exc)
         return None
-    return None if caps is None else bool(getattr(caps, "supports_vision", False))
 
 def _provider_accepts_multimodal_tool_result(provider: str, model: str) -> Optional[bool]:
     """Whether *provider*+*model* carries images inside tool-result messages. Reuses
@@ -90,10 +90,8 @@ def should_route_capture_to_aux_vision(provider: str, model: str, cfg: Optional[
     if _explicit_aux_vision_override(cfg):
         return True
     user_declared = _lookup_user_declared_supports_vision(provider, model, cfg)
-    if user_declared is True:
-        return False
-    if user_declared is False:
-        return True
+    if isinstance(user_declared, bool):  # True → multimodal, False → aux
+        return not user_declared
     if not _provider_accepts_multimodal_tool_result(provider, model):
         return True
     return _lookup_supports_vision(provider, model, cfg) is not True

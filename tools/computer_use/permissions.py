@@ -52,12 +52,12 @@ def _doctor(binary: str) -> Optional[Dict[str, Any]]:
     try:
         data = _json_out(binary, "doctor", "--json", timeout=12)
     except Exception:
-        data = None
+        return None
     if not isinstance(data, dict):
         return None
-    checks = [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
-              for p in data.get("probes", []) if isinstance(p, dict)]
-    return {"ok": bool(data.get("ok")), "checks": checks}
+    return {"ok": bool(data.get("ok")),
+            "checks": [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
+                       for p in data.get("probes", []) if isinstance(p, dict)]}
 
 def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
     """Fold ``cua-driver permissions status --json`` booleans into ``out``."""
@@ -65,14 +65,13 @@ def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
         data = _json_out(binary, "permissions", "status", "--json", timeout=10)
     except subprocess.TimeoutExpired:
         out["error"] = "cua-driver permissions status timed out"
-        return
     except Exception as exc:  # spawn failure or malformed JSON
         out["error"] = f"cua-driver permissions status failed: {exc}"
-        return
-    if isinstance(data, dict):
-        out.update({k: data[k] for k in _BOOLS if isinstance(data.get(k), bool)})
-        if isinstance(data.get("source"), dict):
-            out["source"] = data["source"]
+    else:
+        if isinstance(data, dict):
+            out.update({k: data[k] for k in _BOOLS if isinstance(data.get(k), bool)})
+            if isinstance(data.get("source"), dict):
+                out["source"] = data["source"]
 
 def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     """Unified, OS-aware Computer Use readiness for the desktop card.
