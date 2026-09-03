@@ -108,7 +108,8 @@ def _history_tool_call_name_args(tool_call: dict[str, Any]) -> tuple[str, dict[s
     """Extract function name/arguments from an OpenAI-style tool_call."""
     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
     name = str(function.get("name") or tool_call.get("name") or "unknown_tool")
-    return name, coerce_tool_args(function.get("arguments") or tool_call.get("arguments") or tool_call.get("args") or {})
+    raw_args = function.get("arguments") or tool_call.get("arguments") or tool_call.get("args") or {}
+    return name, coerce_tool_args(raw_args)
 
 
 def _history_message_chunk(role: str, message: dict[str, Any]) -> UserMessageChunk | AgentMessageChunk | None:
@@ -314,8 +315,10 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             from hermes_cli.models import detect_provider_for_model, parse_model_input
 
             target_provider, new_model = parse_model_input(new_model, current_provider)
-            if target_provider == current_provider and (detected := detect_provider_for_model(new_model, current_provider)):
-                target_provider, new_model = detected
+            if target_provider == current_provider:
+                detected = detect_provider_for_model(new_model, current_provider)
+                if detected:
+                    target_provider, new_model = detected
         except Exception:
             logger.debug("Provider detection failed, using model as-is", exc_info=True)
         return target_provider, new_model
@@ -886,7 +889,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         # The local "waiting for model" interrupt status is metadata, not prose; stop_reason carries it.
         from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 
-        suppress = (result.get("interrupted") or cancelled) and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
+        interrupted = bool(result.get("interrupted")) or cancelled
+        suppress = interrupted and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
         # Send the final text unless already streamed — or if a plugin hook transformed it after.
         if final_response and conn and not suppress and (not streamed_message or result.get("response_transformed")):
             await conn.session_update(session_id, acp.update_agent_message_text(final_response))
