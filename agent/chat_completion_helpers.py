@@ -1890,165 +1890,133 @@ def _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api):
     return tools_for_api
 
 
-def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
-    """Build the keyword arguments dict for the active API mode."""
-    # One-shot continuation override — consumed exactly once, on the FIRST
-    # request this call builds (only one api_mode branch runs per invocation).
-    _wire_reasoning_config = _reasoning_config_for_wire(agent)
-    if tools_for_api is None:
-        tools_for_api = agent.tools
-    # The one place request_overrides are consumed: static /fast values are
-    # already pinned in agent.request_overrides; auto/cold windows layer the
-    # fast override here, per request, only while the window is open.
-    _request_overrides = effective_request_overrides(agent)
+def _consume_ephemeral_max_output(agent):
+    """Pop the one-shot ephemeral output cap; whichever path builds the request consumes it."""
+    ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
+    if ephemeral_out is not None:
+        agent._ephemeral_max_output_tokens = None
+    return ephemeral_out
 
-    if agent.api_mode == "anthropic_messages":
-        _transport = agent._get_transport()
-        anthropic_messages = agent._prepare_anthropic_messages_for_api(api_messages)
-        ctx_len = getattr(agent, "context_compressor", None)
-        ctx_len = ctx_len.context_length if ctx_len else None
-        ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
-        if ephemeral_out is not None:
-            agent._ephemeral_max_output_tokens = None  # consume immediately
-        anthropic_kwargs = _transport.build_kwargs(
-            model=agent.model,
-            messages=anthropic_messages,
-            tools=tools_for_api,
-            max_tokens=ephemeral_out if ephemeral_out is not None else agent.max_tokens,
-            reasoning_config=_wire_reasoning_config,
-            is_oauth=agent._is_anthropic_oauth,
-            preserve_dots=agent._anthropic_preserve_dots(),
-            context_length=ctx_len,
-            base_url=getattr(agent, "_anthropic_base_url", None),
-            fast_mode=_request_overrides.get("speed") == "fast",
-            drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
-        )
-        # Nous Portal reads ``tags`` and ``session_id`` as top-level body fields
-        # on its Messages route the same way it does on /chat/completions, but
-        # the profile hook that produces them is only consulted by the
-        # OpenAI-wire transport. Merge them here so Messages traffic keeps
-        # product attribution and sticky routing.
-        return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
 
-    # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
-    # The adapter handles message/tool conversion and boto3 calls directly.
-    if agent.api_mode == "bedrock_converse":
-        _bt = agent._get_transport()
-        region = getattr(agent, "_bedrock_region", None) or "us-east-1"
-        guardrail = getattr(agent, "_bedrock_guardrail_config", None)
-        return _bt.build_kwargs(
-            model=agent.model,
-            messages=api_messages,
-            tools=tools_for_api,
-            max_tokens=agent.max_tokens or 4096,
-            region=region,
-            guardrail_config=guardrail,
-        )
+def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides):
+    ctx_len = getattr(agent, "context_compressor", None)
+    ephemeral_out = _consume_ephemeral_max_output(agent)
+    anthropic_kwargs = agent._get_transport().build_kwargs(
+        model=agent.model,
+        messages=agent._prepare_anthropic_messages_for_api(api_messages),
+        tools=tools_for_api,
+        max_tokens=ephemeral_out if ephemeral_out is not None else agent.max_tokens,
+        reasoning_config=reasoning_config,
+        is_oauth=agent._is_anthropic_oauth,
+        preserve_dots=agent._anthropic_preserve_dots(),
+        context_length=ctx_len.context_length if ctx_len else None,
+        base_url=getattr(agent, "_anthropic_base_url", None),
+        fast_mode=request_overrides.get("speed") == "fast",
+        drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
+    )
+    # Nous Portal reads ``tags`` / ``session_id`` as top-level body fields on
+    # its Messages route too, but the profile hook that produces them is only
+    # consulted by the OpenAI-wire transport — merge here so Messages traffic
+    # keeps product attribution and sticky routing.
+    return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
 
-    # Rotation-stable logical cache scope, shared by every OpenAI-wire branch
-    # below (codex + both chat_completions paths). Memoized on the agent —
-    # cheap after the first call. Resolved after the anthropic/bedrock early
-    # returns above, which don't use prompt_cache_key.
-    _cache_scope_id = _prompt_cache_scope_for_agent(agent)
 
-    if agent.api_mode == "codex_responses":
-        _ct = agent._get_transport()
-        from agent.codex_responses_adapter import classify_responses_route
+def _build_bedrock_kwargs(agent, api_messages, tools_for_api):
+    # AWS Bedrock native Converse API — the adapter handles message/tool
+    # conversion and boto3 calls directly, bypassing the OpenAI client.
+    return agent._get_transport().build_kwargs(
+        model=agent.model,
+        messages=api_messages,
+        tools=tools_for_api,
+        max_tokens=agent.max_tokens or 4096,
+        region=getattr(agent, "_bedrock_region", None) or "us-east-1",
+        guardrail_config=getattr(agent, "_bedrock_guardrail_config", None),
+    )
 
-        is_codex_backend, is_xai_responses, is_github_responses = (
-            classify_responses_route(agent)
-        )
-        _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
 
-        # Native server-side compaction (gpt-5.6 on direct OpenAI API /
-        # ChatGPT Codex routes only) — None on every other route/model, in
-        # which case the request is unchanged from pre-feature behavior.
-        from agent.native_compaction import native_compaction_context_management
-        _context_management = native_compaction_context_management(
-            agent,
-            is_codex_backend=is_codex_backend,
-            is_xai_responses=is_xai_responses,
-            is_github_responses=is_github_responses,
-        )
+def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id):
+    from agent.codex_responses_adapter import classify_responses_route
+    from agent.native_compaction import native_compaction_context_management
 
-        # xAI's /responses endpoint rejects ``pattern`` and ``format`` keywords
-        # in tool schemas (HTTP 400 "Invalid arguments passed to the model").
-        # Most commonly hit when MCP-derived tools carry JSON Schema validation
-        # keywords through. Strip them before building kwargs. See #27197.
-        # It also rejects ``enum`` values containing ``/`` (HuggingFace IDs
-        # like ``Qwen/Qwen3.5-0.8B`` shipped by MCP servers) — same 400 with
-        # the same opaque message; strip those enums too.
-        #
-        # Deep-copy ``tools_for_api`` before sanitizing: the sanitizers
-        # mutate in place (documented contract on ``strip_slash_enum`` /
-        # ``strip_pattern_and_format``), and ``tools_for_api`` is a direct
-        # reference to ``agent.tools``.  Without the copy, the first xAI
-        # request permanently strips constraints from the shared per-agent
-        # tool registry — every subsequent non-xAI call from the same
-        # agent (auxiliary task routed to Anthropic, OpenRouter fallback,
-        # main-model swap) sees the already-stripped schema.  See #27907.
-        if is_xai_responses:
-            try:
-                import copy as _copy
-                from tools.schema_sanitizer import (
-                    strip_pattern_and_format,
-                    strip_slash_enum,
-                )
-                tools_for_api = _copy.deepcopy(tools_for_api)
-                tools_for_api, _ = strip_pattern_and_format(tools_for_api)
-                tools_for_api, _ = strip_slash_enum(tools_for_api)
-            except Exception as exc:
-                logger.warning(
-                    "%s⚠️ Failed to sanitize tool schemas for xAI: %s",
-                    getattr(agent, "log_prefix", ""), exc,
-                )
+    is_codex_backend, is_xai_responses, is_github_responses = classify_responses_route(agent)
+    # Native server-side compaction (gpt-5.6 on direct OpenAI API / ChatGPT
+    # Codex routes only) — None on every other route/model, leaving the
+    # request unchanged from pre-feature behavior.
+    context_management = native_compaction_context_management(
+        agent,
+        is_codex_backend=is_codex_backend,
+        is_xai_responses=is_xai_responses,
+        is_github_responses=is_github_responses,
+    )
+    # xAI's /responses endpoint 400s on ``pattern``/``format`` schema keywords
+    # and on ``enum`` values containing ``/`` (HuggingFace IDs from MCP
+    # servers) — strip them (#27197). Deep-copy first: the sanitizers mutate
+    # in place and tools_for_api aliases agent.tools, so an in-place strip
+    # would permanently degrade the shared registry for every later non-xAI
+    # request (#27907).
+    if is_xai_responses:
+        try:
+            import copy as _copy
+            from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
 
-        return _ct.build_kwargs(
-            model=agent.model,
-            messages=_msgs_for_codex,
-            tools=tools_for_api,
-            reasoning_config=_wire_reasoning_config,
-            session_id=getattr(agent, "session_id", None),
-            cache_scope_id=_cache_scope_id,
-            base_url=agent.base_url,
-            max_tokens=agent.max_tokens,
-            timeout=agent._resolved_api_call_timeout(),
-            request_overrides=_request_overrides,
-            provider=getattr(agent, "provider", None),
-            is_github_responses=is_github_responses,
-            is_codex_backend=is_codex_backend,
-            is_xai_responses=is_xai_responses,
-            github_reasoning_extra=agent._github_models_reasoning_extra_body() if is_github_responses else None,
-            replay_encrypted_reasoning=bool(
-                getattr(agent, "_codex_reasoning_replay_enabled", True)
-            ),
-            context_management=_context_management,
-        )
+            tools_for_api = _copy.deepcopy(tools_for_api)
+            tools_for_api, _ = strip_pattern_and_format(tools_for_api)
+            tools_for_api, _ = strip_slash_enum(tools_for_api)
+        except Exception as exc:
+            logger.warning(
+                "%s⚠️ Failed to sanitize tool schemas for xAI: %s",
+                getattr(agent, "log_prefix", ""), exc,
+            )
+    return agent._get_transport().build_kwargs(
+        model=agent.model,
+        messages=agent._prepare_messages_for_non_vision_model(api_messages),
+        tools=tools_for_api,
+        reasoning_config=reasoning_config,
+        session_id=getattr(agent, "session_id", None),
+        cache_scope_id=cache_scope_id,
+        base_url=agent.base_url,
+        max_tokens=agent.max_tokens,
+        timeout=agent._resolved_api_call_timeout(),
+        request_overrides=request_overrides,
+        provider=getattr(agent, "provider", None),
+        is_github_responses=is_github_responses,
+        is_codex_backend=is_codex_backend,
+        is_xai_responses=is_xai_responses,
+        github_reasoning_extra=agent._github_models_reasoning_extra_body() if is_github_responses else None,
+        replay_encrypted_reasoning=bool(getattr(agent, "_codex_reasoning_replay_enabled", True)),
+        context_management=context_management,
+    )
 
-    # ── chat_completions (default) ─────────────────────────────────────
-    _ct = agent._get_transport()
 
-    tools_for_api = _alias_tool_search_bridge_for_xai(agent, _ct, tools_for_api)
+def _anthropic_max_output_for_model(agent):
+    """Anthropic-compatible max-output fallback (last resort — applied in
+    build_kwargs after ephemeral/user/profile max_tokens, never overriding an
+    explicit value). Model-gated, not URL-gated: any chat-completions proxy
+    serving a Claude/MiniMax/Qwen3 model needs max_tokens because the Messages
+    API treats it as mandatory and proxies that omit it default as low as 4096."""
+    try:
+        from agent.anthropic_adapter import _get_anthropic_max_output, _ANTHROPIC_OUTPUT_LIMITS
 
-    # Provider detection flags
+        model_norm = (agent.model or "").lower().replace(".", "-")
+        if any(key in model_norm for key in _ANTHROPIC_OUTPUT_LIMITS):
+            return _get_anthropic_max_output(agent.model)
+    except Exception:
+        pass
+    return None
+
+
+def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id):
+    transport = agent._get_transport()
+    tools_for_api = _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api)
+
     _is_qwen = agent._is_qwen_portal()
     _is_or = agent._is_openrouter_url()
-    _is_gh = (
-        base_url_host_matches(agent._base_url_lower, "models.github.ai")
-        or base_url_host_matches(agent._base_url_lower, "githubcopilot.com")
-    )
-    _is_nous = base_url_host_matches(agent._base_url_lower, "nousresearch.com")
-    _is_nvidia = base_url_host_matches(agent._base_url_lower, "integrate.api.nvidia.com")
-    _is_kimi = (
-        base_url_host_matches(agent.base_url, "api.kimi.com")
-        or base_url_host_matches(agent.base_url, "moonshot.ai")
-        or base_url_host_matches(agent.base_url, "moonshot.cn")
-    )
-    _is_tokenhub = base_url_host_matches(agent._base_url_lower, "tokenhub.tencentmaas.com")
+    _host = agent._base_url_lower
+    _is_gh = base_url_host_matches(_host, "models.github.ai") or base_url_host_matches(_host, "githubcopilot.com")
     _is_lmstudio = (agent.provider or "").strip().lower() == "lmstudio"
 
-    # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
-    # sentinel (temperature omitted entirely), a numeric override, or None.
+    # _fixed_temperature_for_model may return the OMIT_TEMPERATURE sentinel
+    # (temperature omitted entirely), a numeric override, or None.
     try:
         from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
         _ft = _fixed_temperature_for_model(agent.model, agent.base_url)
@@ -2058,65 +2026,34 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         _omit_temp = False
         _fixed_temp = None
 
-    # Provider preferences (aggregator profile decides whether to emit them).
     _prefs = _provider_preferences_for_agent(agent)
-
-    # Anthropic-compatible max-output fallback (last resort only — applied in
-    # build_kwargs *after* ephemeral/user/profile max_tokens, never overriding
-    # an explicit value).  Model-gated, not URL-gated: any chat-completions
-    # proxy serving a Claude/MiniMax/Qwen3 model needs max_tokens, because the
-    # Anthropic Messages API treats it as mandatory and proxies that omit it
-    # (AWS Bedrock, NVIDIA, LiteLLM, vLLM, corporate gateways) default as low
-    # as 4096 output tokens — easily exhausted by thinking + large tool calls
-    # like write_file/patch.  OpenRouter/Nous were the only routes covered
-    # before; gating on _ANTHROPIC_OUTPUT_LIMITS membership covers them all.
-    _ant_max = None
-    try:
-        from agent.anthropic_adapter import (
-            _get_anthropic_max_output,
-            _ANTHROPIC_OUTPUT_LIMITS,
-        )
-        _model_norm = (agent.model or "").lower().replace(".", "-")
-        if any(key in _model_norm for key in _ANTHROPIC_OUTPUT_LIMITS):
-            _ant_max = _get_anthropic_max_output(agent.model)
-    except Exception:
-        pass
-
-    # Qwen session metadata
-    _qwen_meta = None
-    if _is_qwen:
-        _qwen_meta = {
-            "sessionId": agent.session_id or "hermes",
-            "promptId": str(uuid.uuid4()),
-        }
-
-    # ── Provider profile path (registered providers) vs legacy flag path ──
+    _ant_max = _anthropic_max_output_for_model(agent)
+    _qwen_meta = (
+        {"sessionId": agent.session_id or "hermes", "promptId": str(uuid.uuid4())}
+        if _is_qwen else None
+    )
     try:
         from providers import get_provider_profile
         _profile = get_provider_profile(agent.provider)
     except Exception:
         _profile = None
 
-    # One-shot ephemeral output cap is consumed by whichever path builds the request.
-    _ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
-    if _ephemeral_out is not None:
-        agent._ephemeral_max_output_tokens = None
-    # Strip image parts for non-vision models (no-op when vision-capable) —
-    # on BOTH paths; registered providers with profiles used to bypass it.
-    _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
+    _ephemeral_out = _consume_ephemeral_max_output(agent)
+    # Strip image parts for non-vision models on BOTH paths (registered
+    # providers with profiles used to bypass it).
     _common = dict(
         model=agent.model,
-        messages=_msgs_for_chat,
+        messages=agent._prepare_messages_for_non_vision_model(api_messages),
         tools=tools_for_api,
         base_url=agent.base_url,
         timeout=agent._resolved_api_call_timeout(),
         max_tokens=agent.max_tokens,
         ephemeral_max_output_tokens=_ephemeral_out,
         max_tokens_param_fn=agent._max_tokens_param,
-        reasoning_config=_wire_reasoning_config,
-        request_overrides=_request_overrides,
+        reasoning_config=reasoning_config,
+        request_overrides=request_overrides,
         session_id=getattr(agent, "session_id", None),
-        cache_scope_id=_cache_scope_id,
+        cache_scope_id=cache_scope_id,
         ollama_num_ctx=agent._ollama_num_ctx,
         provider_preferences=_prefs or None,
         openrouter_min_coding_score=agent.openrouter_min_coding_score,
@@ -2124,24 +2061,24 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         supports_reasoning=agent._supports_reasoning_extra_body(),
         qwen_session_metadata=_qwen_meta,
     )
-
     if _profile:
         # Profiles handle per-provider quirks via hooks fed the context above.
-        return _ct.build_kwargs(provider_profile=_profile, **_common)
+        return transport.build_kwargs(provider_profile=_profile, **_common)
 
-    # ── Legacy flag path ────────────────────────────────────────────
-    # Reached only when get_provider_profile() returns None — i.e. a
-    # completely unknown provider not in providers/ registry.
-    return _ct.build_kwargs(
+    # Legacy flag path: only for a provider absent from the providers/ registry.
+    return transport.build_kwargs(
         **_common,
         model_lower=(agent.model or "").lower(),
         is_openrouter=_is_or,
-        is_nous=_is_nous,
+        is_nous=base_url_host_matches(_host, "nousresearch.com"),
         is_qwen_portal=_is_qwen,
         is_github_models=_is_gh,
-        is_nvidia_nim=_is_nvidia,
-        is_kimi=_is_kimi,
-        is_tokenhub=_is_tokenhub,
+        is_nvidia_nim=base_url_host_matches(_host, "integrate.api.nvidia.com"),
+        is_kimi=any(
+            base_url_host_matches(agent.base_url, h)
+            for h in ("api.kimi.com", "moonshot.ai", "moonshot.cn")
+        ),
+        is_tokenhub=base_url_host_matches(_host, "tokenhub.tencentmaas.com"),
         is_lmstudio=_is_lmstudio,
         is_custom_provider=agent.provider == "custom",
         qwen_prepare_fn=agent._qwen_prepare_chat_messages if _is_qwen else None,
@@ -2154,74 +2091,142 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     )
 
 
+def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
+    """Build the keyword arguments dict for the active API mode."""
+    # One-shot continuation override — consumed exactly once, on the FIRST
+    # request this call builds (only one api_mode branch runs per invocation).
+    reasoning_config = _reasoning_config_for_wire(agent)
+    if tools_for_api is None:
+        tools_for_api = agent.tools
+    # The one place request_overrides are consumed: static /fast values are
+    # already pinned in agent.request_overrides; auto/cold windows layer the
+    # fast override here, per request, only while the window is open.
+    request_overrides = effective_request_overrides(agent)
+    if agent.api_mode == "anthropic_messages":
+        return _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides)
+    if agent.api_mode == "bedrock_converse":
+        return _build_bedrock_kwargs(agent, api_messages, tools_for_api)
+    # Rotation-stable logical cache scope shared by every OpenAI-wire branch
+    # (memoized on the agent); anthropic/bedrock above don't use it.
+    cache_scope_id = _prompt_cache_scope_for_agent(agent)
+    builder = (
+        _build_codex_kwargs if agent.api_mode == "codex_responses" else _build_chat_completions_kwargs
+    )
+    return builder(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id)
+
+
+def _model_dump_safe(obj):
+    """``model_dump(warnings=False)`` (avoids pydantic serializer UserWarnings on
+    generic-union SDK models), falling back for shims that reject the kwarg."""
+    try:
+        return obj.model_dump(warnings=False)
+    except TypeError:
+        return obj.model_dump()
+
+
+def _assistant_reasoning_text(agent, assistant_message) -> Optional[str]:
+    """Structured reasoning, else inline ``<think>`` blocks embedded in content."""
+    reasoning_text = agent._extract_reasoning(assistant_message)
+    if not reasoning_text:
+        content = flatten_message_text(getattr(assistant_message, "content", None))
+        think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
+        if think_blocks:
+            reasoning_text = "\n\n".join(b.strip() for b in think_blocks if b.strip()) or None
+    if reasoning_text and agent.verbose_logging:
+        logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
+    # When streaming is active the reasoning was already displayed during the
+    # stream (structured deltas or <think> tag extraction); fire only for
+    # non-streaming modes (gateway, batch, quiet). Anything not shown during
+    # streaming is caught by the CLI post-response fallback.
+    if (
+        reasoning_text
+        and agent.reasoning_callback
+        and not agent.stream_delta_callback
+        and not agent._stream_callback
+    ):
+        try:
+            agent.reasoning_callback(reasoning_text)
+        except Exception:
+            pass
+    return _sanitize_surrogates(reasoning_text) if reasoning_text else reasoning_text
+
+
+def _assistant_content_for_storage(agent, assistant_message):
+    # Sanitize surrogates (Kimi/GLM via Ollama return code points that crash
+    # json.dumps on persist), strip inline <think> tags at the storage boundary
+    # (they leaked to platforms, inflated context, polluted titles), then
+    # redact credentials the model inlined in prose before the message enters
+    # history / state.db / gateway delivery (no-op with HERMES_REDACT_SECRETS off).
+    content = _sanitize_surrogates(flatten_message_text(getattr(assistant_message, "content", None)))
+    if isinstance(content, str) and content:
+        content = agent._strip_think_blocks(content).strip()
+    if isinstance(content, str) and content:
+        from agent.redact import redact_sensitive_text
+        content = redact_sensitive_text(content)
+    return content
+
+
+def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
+    raw_id = getattr(tool_call, "id", None)
+    call_id = getattr(tool_call, "call_id", None)
+    if not isinstance(call_id, str) or not call_id.strip():
+        call_id, _ = agent._split_responses_tool_id(raw_id)
+    if not isinstance(call_id, str) or not call_id.strip():
+        if isinstance(raw_id, str) and raw_id.strip():
+            call_id = raw_id.strip()
+        else:
+            _fn = getattr(tool_call, "function", None)
+            call_id = agent._deterministic_call_id(
+                getattr(_fn, "name", "") if _fn else "",
+                getattr(_fn, "arguments", "{}") if _fn else "{}",
+                index,
+            )
+    call_id = call_id.strip()
+
+    response_item_id = getattr(tool_call, "response_item_id", None)
+    if not isinstance(response_item_id, str) or not response_item_id.strip():
+        _, response_item_id = agent._split_responses_tool_id(raw_id)
+    response_item_id = agent._derive_responses_function_call_id(
+        call_id,
+        response_item_id if isinstance(response_item_id, str) else None,
+    )
+    # Arguments are deliberately NOT redacted: this dict is replayed to the
+    # model every turn, so a ``***`` mask would break every credential-
+    # dependent command (#43083) while protecting nothing (tool OUTPUT leaks).
+    tc_dict = {
+        "id": call_id,
+        "call_id": call_id,
+        "response_item_id": response_item_id,
+        "type": tool_call.type,
+        "function": {
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments
+        },
+    }
+    # Preserve extra_content (Gemini thought_signature) or Gemini 3 thinking
+    # models 400 on the next request.
+    extra = getattr(tool_call, "extra_content", None)
+    if extra is not None:
+        if hasattr(extra, "model_dump"):
+            extra = _model_dump_safe(extra)
+        tc_dict["extra_content"] = extra
+    return tc_dict
+
 
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict from an API response message.
 
     Handles reasoning extraction, reasoning_details, and optional tool_calls
     so both the tool-call path and the final-response path share one builder.
+    Textless turns are NOT padded here: ``repair_empty_non_final_messages``
+    (pre-send chokepoint) is the single owner — write-time padding broke codex
+    commentary turns and cannot survive ``_rows_to_conversation``.
     """
     assistant_tool_calls = getattr(assistant_message, "tool_calls", None)
-    reasoning_text = agent._extract_reasoning(assistant_message)
-    _from_structured = bool(reasoning_text)
-
-    # Fallback: extract inline <think> blocks from content when no structured
-    # reasoning fields are present (some models/providers embed thinking
-    # directly in the content rather than returning separate API fields).
-    if not reasoning_text:
-        content = flatten_message_text(getattr(assistant_message, "content", None))
-        think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
-        if think_blocks:
-            combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
-            reasoning_text = combined or None
-
-    if reasoning_text and agent.verbose_logging:
-        logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
-
-    if reasoning_text and agent.reasoning_callback:
-        # Skip callback when streaming is active — reasoning was already
-        # displayed during the stream via one of two paths:
-        #   (a) _fire_reasoning_delta (structured reasoning_content deltas)
-        #   (b) _stream_delta tag extraction (<think>/<REASONING_SCRATCHPAD>)
-        # When streaming is NOT active, always fire so non-streaming modes
-        # (gateway, batch, quiet) still get reasoning.
-        # Any reasoning that wasn't shown during streaming is caught by the
-        # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
-        if not agent.stream_delta_callback and not agent._stream_callback:
-            try:
-                agent.reasoning_callback(reasoning_text)
-            except Exception:
-                pass
-
-    # Sanitize surrogates from API response — some models (e.g. Kimi/GLM via Ollama)
-    # can return invalid surrogate code points that crash json.dumps() on persist.
-    _raw_content = flatten_message_text(getattr(assistant_message, "content", None))
-    _san_content = _sanitize_surrogates(_raw_content)
-    if reasoning_text:
-        reasoning_text = _sanitize_surrogates(reasoning_text)
-
-    # Strip inline <think> tags at the storage boundary — reasoning is already
-    # in ``reasoning_text``. Left in, they leaked to messaging platforms
-    # (#8878, #9568), inflated context (#9306) and polluted session titles.
-    if isinstance(_san_content, str) and _san_content:
-        _san_content = agent._strip_think_blocks(_san_content).strip()
-
-    # Redact credentials the model inlined in prose BEFORE the message enters
-    # history / state.db / gateway delivery. No-op when HERMES_REDACT_SECRETS
-    # is off (#19798).
-    if isinstance(_san_content, str) and _san_content:
-        from agent.redact import redact_sensitive_text
-        _san_content = redact_sensitive_text(_san_content)
-
-    # Textless turns are NOT padded here: ``repair_empty_non_final_messages``
-    # (inside ``sanitize_api_messages``, the pre-send chokepoint) is the single
-    # owner. Write-time padding was tried and rejected — it broke codex
-    # commentary turns (content:'' is designed there) and cannot survive
-    # ``_rows_to_conversation``'s whitespace strip.
-
+    reasoning_text = _assistant_reasoning_text(agent, assistant_message)
     msg = stamp_message_timestamp({
         "role": "assistant",
-        "content": _san_content,
+        "content": _assistant_content_for_storage(agent, assistant_message),
         "reasoning": reasoning_text,
         "finish_reason": finish_reason,
     })
@@ -2234,125 +2239,53 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if raw_reasoning_content is not None:
         msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
     elif assistant_tool_calls and agent._needs_thinking_reasoning_pad():
-        # DeepSeek v4 / Kimi thinking modes 400 on a replayed tool-call
-        # message without reasoning_content. Pad with a single space (empty
-        # string is rejected too) without fabricating reasoning.
-        # Refs #15250, #17400, #17341.
+        # DeepSeek v4 / Kimi thinking modes 400 on a replayed tool-call message
+        # without reasoning_content; pad with a single space (empty string is
+        # rejected too) without fabricating reasoning.
         msg["reasoning_content"] = reasoning_text or " "
-
-    # Streaming-only providers accumulate reasoning via delta chunks and never
-    # set it on the message, so neither branch above fires; replaying through
-    # a thinking model then 400s (#16844, #16884). Promote streamed reasoning
-    # ONLY when nothing set the field and text was captured: SDK-exposed
-    # reasoning_content and the tool-call pad still win, and reasoning-less
-    # turns leave the field absent so the replay-time leak guard (#15748)
-    # and promotion tiers still apply.
-    if "reasoning_content" not in msg and reasoning_text:
+    elif reasoning_text:
+        # Streaming-only providers accumulate reasoning via deltas and never set
+        # it on the message; replaying through a thinking model then 400s.
+        # Promote ONLY when nothing set the field: SDK reasoning_content and the
+        # tool-call pad win, and reasoning-less turns leave the field absent so
+        # the replay-time leak guard and promotion tiers still apply.
         msg["reasoning_content"] = reasoning_text
 
-    if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
+    if getattr(assistant_message, "reasoning_details", None):
         # Preserve reasoning_details exactly (opaque signature /
         # encrypted_content fields) for cross-turn reasoning continuity.
-        raw_details = assistant_message.reasoning_details
         preserved = []
-        for d in raw_details:
+        for d in assistant_message.reasoning_details:
             if isinstance(d, dict):
                 preserved.append(d)
             elif hasattr(d, "__dict__"):
                 preserved.append(d.__dict__)
             elif hasattr(d, "model_dump"):
-                try:
-                    # warnings=False: avoid pydantic serializer UserWarnings
-                    # on generic-union SDK models leaking to the terminal.
-                    preserved.append(d.model_dump(warnings=False))
-                except TypeError:
-                    preserved.append(d.model_dump())
+                preserved.append(_model_dump_safe(d))
         if preserved:
             msg["reasoning_details"] = preserved
 
-    # Anthropic interleaved thinking: reasoning_details + tool_calls lose the
-    # cross-type order and reconstruction reorders signed blocks (HTTP 400
-    # "thinking blocks ... cannot be modified"). Carry the verbatim ordered
-    # block list so the adapter replays the message unchanged.
-    ordered_blocks = getattr(assistant_message, "anthropic_content_blocks", None)
-    if ordered_blocks:
-        msg["anthropic_content_blocks"] = ordered_blocks
-
-    bedrock_blocks = getattr(assistant_message, "bedrock_content_blocks", None)
-    if bedrock_blocks:
-        msg["bedrock_content_blocks"] = bedrock_blocks
-
-    # Codex Responses API: preserve encrypted reasoning items for
-    # multi-turn continuity. These get replayed as input on the next turn.
-    codex_items = getattr(assistant_message, "codex_reasoning_items", None)
-    if codex_items:
-        msg["codex_reasoning_items"] = codex_items
-
-    # Codex Responses API: preserve exact assistant message items (with
-    # id/phase) so follow-up turns can replay structured items instead of
-    # flattening to plain text. This is required for prefix cache hits.
-    codex_message_items = getattr(assistant_message, "codex_message_items", None)
-    if codex_message_items:
-        msg["codex_message_items"] = codex_message_items
+    # Provider-native carriers replayed verbatim on later turns:
+    # anthropic_content_blocks keeps interleaved thinking + tool_use order
+    # (reconstruction reorders signed blocks -> HTTP 400); codex_* items are
+    # the encrypted reasoning / exact message items Responses prefix caching
+    # needs.
+    for attr in (
+        "anthropic_content_blocks",
+        "bedrock_content_blocks",
+        "codex_reasoning_items",
+        "codex_message_items",
+    ):
+        value = getattr(assistant_message, attr, None)
+        if value:
+            msg[attr] = value
 
     if assistant_tool_calls:
-        tool_calls = []
-        for tool_call in assistant_tool_calls:
-            raw_id = getattr(tool_call, "id", None)
-            call_id = getattr(tool_call, "call_id", None)
-            if not isinstance(call_id, str) or not call_id.strip():
-                embedded_call_id, _ = agent._split_responses_tool_id(raw_id)
-                call_id = embedded_call_id
-            if not isinstance(call_id, str) or not call_id.strip():
-                if isinstance(raw_id, str) and raw_id.strip():
-                    call_id = raw_id.strip()
-                else:
-                    _fn = getattr(tool_call, "function", None)
-                    _fn_name = getattr(_fn, "name", "") if _fn else ""
-                    _fn_args = getattr(_fn, "arguments", "{}") if _fn else "{}"
-                    call_id = agent._deterministic_call_id(_fn_name, _fn_args, len(tool_calls))
-            call_id = call_id.strip()
-
-            response_item_id = getattr(tool_call, "response_item_id", None)
-            if not isinstance(response_item_id, str) or not response_item_id.strip():
-                _, embedded_response_item_id = agent._split_responses_tool_id(raw_id)
-                response_item_id = embedded_response_item_id
-
-            response_item_id = agent._derive_responses_function_call_id(
-                call_id,
-                response_item_id if isinstance(response_item_id, str) else None,
-            )
-
-            tc_dict = {
-                "id": call_id,
-                "call_id": call_id,
-                "response_item_id": response_item_id,
-                "type": tool_call.type,
-                "function": {
-                    "name": tool_call.function.name,
-                    "arguments": tool_call.function.arguments
-                },
-            }
-            # Tool-call arguments are deliberately NOT redacted: this dict is
-            # replayed to the model every turn (and verbatim on resume), so a
-            # `***` mask gets copied into the next call and breaks every
-            # credential-dependent command (#43083). It also protected
-            # nothing — the secret still leaks via tool OUTPUT.
-            # Preserve extra_content (Gemini thought_signature) or Gemini 3
-            # thinking models 400 on the next request.
-            extra = getattr(tool_call, "extra_content", None)
-            if extra is not None:
-                if hasattr(extra, "model_dump"):
-                    try:
-                        extra = extra.model_dump(warnings=False)
-                    except TypeError:
-                        extra = extra.model_dump()
-                tc_dict["extra_content"] = extra
-            tool_calls.append(tc_dict)
-        msg["tool_calls"] = tool_calls
-
+        msg["tool_calls"] = [
+            _assistant_tool_call_dict(agent, tool_call, index)
+            for index, tool_call in enumerate(assistant_tool_calls)
+        ]
     return msg
-
 
 
 def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
