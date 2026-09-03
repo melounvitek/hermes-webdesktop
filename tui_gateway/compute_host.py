@@ -1,8 +1,5 @@
-"""Persistent dashboard compute-host process.
-
-The long-lived child that owns live AIAgent objects when ``dashboard.turn_isolation``
-is enabled; frames are line-JSON over stdin/stdout.
-"""
+"""Persistent dashboard compute-host child: owns live AIAgent objects when
+``dashboard.turn_isolation`` is enabled; frames are line-JSON over stdin/stdout."""
 
 from __future__ import annotations
 
@@ -43,16 +40,18 @@ class _HostTransport:
         return None
 
 
-# Slice of ``ComputeHost.shutdown``'s budget held back for the post-drain finalize.
-# ``HostSupervisor._terminate_pid`` SIGKILLs the host ``_SHUTDOWN_TIMEOUT_SECS`` (10s,
-# same as ``shutdown``'s default ``wait``) after SIGTERM, so a drain allowed to consume
-# the whole budget would leave the flush racing that kill and persist nothing at all.
+# Slice of ``ComputeHost.shutdown``'s budget held back for the post-drain finalize: the
+# supervisor SIGKILLs the host 10s (= default ``wait``) after SIGTERM, so a drain that ate
+# the whole budget would leave the flush racing that kill and persist nothing.
 _FLUSH_RESERVE_SECS = 1.0
+
+# Fallback control.error text when a routed server method returns an error without a message.
+_CONTROL_FAILURES = {
+    "session.save": "session save failed", "session.compress": "session compression failed"}
 
 
 class ComputeHost:
-    # frame ``type`` -> handler method name (resolved per call so instance
-    # monkeypatches of a handler still take effect).
+    # frame ``type`` -> handler method name (resolved per call so monkeypatches take effect).
     _FRAME_HANDLERS: dict[str, str] = {
         "turn.start": "_handle_turn_start", "interrupt": "_handle_interrupt",
         "respond": "_handle_respond", "reload_mcp": "_handle_reload_mcp",
@@ -70,8 +69,7 @@ class ComputeHost:
         self._boot_id = uuid.uuid4().hex
         self._progress_counter = 0
         self._progress_lock = threading.Lock()
-        # Future -> the ``sid`` whose turn it is running.  ``shutdown`` needs to know
-        # *whose* turn is still live so it can leave those sessions unfinalized.
+        # Future -> the ``sid`` whose turn it runs; ``shutdown`` leaves live sids unfinalized.
         self._turn_futures: dict[concurrent.futures.Future, str] = {}
         self._turn_futures_lock = threading.Lock()
         self._transport = _HostTransport(self.emit)
@@ -101,36 +99,25 @@ class ComputeHost:
     def shutdown(self, *, reason: str = "shutdown", wait: float = 10.0) -> None:
         """Drain in-flight turns, then finalize every session.
 
-        Order matters: ``_finalize_session`` is a one-shot latch, so finalizing before
-        the drain would spend the flush's single chance mid-turn, fire
-        ``on_session_end(interrupted=True)`` against a running session and release the
-        active-session lease under a live turn. ``_FLUSH_RESERVE_SECS`` (never more than
-        half of ``wait``) is withheld from the drain so the flush still runs when turns
-        outlast the window. Sessions whose turn is *still running* at the deadline are
-        excluded from the flush (``_executor.shutdown`` does not join them): finalizing
-        one mid-turn would leave it un-finalizable with its lease released, whereas
-        leaving it unfinalized keeps it recoverable. ``server._shutdown_sessions``
-        (atexit) may still re-finalize skipped sessions on the SIGTERM / stdin_closed
-        paths; the orphan path (``os._exit``) bypasses atexit.
+        ``_finalize_session`` is a one-shot latch, so finalizing before the drain would spend
+        it mid-turn and release the lease. ``_FLUSH_RESERVE_SECS`` (at most half of ``wait``)
+        is withheld from the drain so the flush still runs when turns outlast the window.
+        Sessions still running at the deadline are skipped (unfinalized keeps them
+        recoverable; atexit ``server._shutdown_sessions`` may re-finalize them).
         """
         self._closed.set()
         budget = max(0.0, wait)
         deadline = time.monotonic() + budget - min(_FLUSH_RESERVE_SECS, budget / 2.0)
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or not self._live_turns():
                 break
-            with self._turn_futures_lock:
-                pending = [f for f in self._turn_futures if not f.done()]
-            if not pending:
-                break
-            # Bounded by ``remaining``: a flat sleep would overshoot the deadline and
-            # eat the reserve it protects (all of it for small ``wait``).
+            # Bounded by ``remaining``: a flat sleep would eat the reserve it protects.
             time.sleep(min(0.05, remaining))
         with self._turn_futures_lock:
             live_sids = {sid for f, sid in self._turn_futures.items() if sid and not f.done()}
         self.flush_all_sessions(reason=reason, skip_sids=live_sids)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self.close()
 
     def flush_all_sessions(
         self, *, reason: str = "shutdown", skip_sids: Collection[str] | None = None) -> None:
@@ -153,19 +140,16 @@ class ComputeHost:
             self.emit({
                 "type": "error", "request_id": frame.get("request_id"),
                 "message": f"unknown frame type: {kind}"})
-            return
-        getattr(self, handler)(frame)
+        else:
+            getattr(self, handler)(frame)
 
     def _handle_shutdown(self, frame: dict[str, Any]) -> None:
         self.emit({"type": "shutdown.ack", "request_id": frame.get("request_id")})
-        # Explicit supervisor/test shutdown is a clean child-process close;
-        # SIGTERM and orphan paths are the durability flush paths.
-        self._closed.set()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        # Explicit shutdown is a clean close; SIGTERM and orphan paths do the durability flush.
+        self.close()
 
     def _track_turn_future(self, future: concurrent.futures.Future, sid: str) -> None:
-        """Register an in-flight turn against its session; the done callback must pop
-        under the lock or the mapping grows for the host's life."""
+        """Track an in-flight turn; the done callback pops it or the map grows forever."""
         with self._turn_futures_lock:
             self._turn_futures[future] = sid
         future.add_done_callback(self._untrack_turn_future)
@@ -178,41 +162,44 @@ class ComputeHost:
         future = self._executor.submit(self._run_real_turn, dict(frame))
         self._track_turn_future(future, str(frame.get("sid") or ""))
 
-    def _handle_interrupt(self, frame: dict[str, Any]) -> None:
+    def _guarded(
+        self, frame: dict[str, Any], error_kind: str, body: Callable, *,
+        on_error: Callable[[str], None] | None = None, **error_extra: Any) -> None:
+        """Run ``body(server, sid, request_id)``; any exception becomes an ``error_kind`` reply."""
         sid = str(frame.get("sid") or "")
         request_id = frame.get("request_id")
         try:
             from tui_gateway import server
+            body(server, sid, request_id)
+        except Exception as exc:
+            if on_error is not None:
+                on_error(sid)
+            self._reply(error_kind, sid, request_id, **error_extra, message=str(exc))
+
+    def _handle_interrupt(self, frame: dict[str, Any]) -> None:
+        def body(server: Any, sid: str, request_id: Any) -> None:
             session = server._sessions.get(sid)
             if session is None:
                 self._reply("interrupt.ack", sid, request_id, applied=False)
                 return
-            # In the child, `_session_uses_compute_host()` is false, so the shared helper
-            # interrupts the local agent and releases this process's pending clarify
-            # Event; the parent only has a metadata mirror and cannot.
+            # In the child the shared helper interrupts the local agent and releases this
+            # process's pending clarify Event (the parent only has a metadata mirror).
             server._interrupt_session_turn(sid, session)
             self._reply("interrupt.ack", sid, request_id, applied=True, applied_ns=now_ns())
-        except Exception as exc:
-            self._reply("interrupt.ack", sid, request_id, applied=False, message=str(exc))
+        self._guarded(frame, "interrupt.ack", body, applied=False)
 
     def _handle_respond(self, frame: dict[str, Any]) -> None:
         """Resolve an interactive request in the host-owned pending registry."""
-        sid = str(frame.get("sid") or "")
-        request_id = frame.get("request_id")
-        try:
-            from tui_gateway import server
-            if sid not in server._sessions:
-                self._reply("respond.error", sid, request_id, message="session not found")
-                return
+        def body(server: Any, sid: str, request_id: Any) -> None:
             params = frame.get("params")
-            if not isinstance(params, dict):
-                self._reply(
-                    "respond.error", sid, request_id, message="response params must be an object")
+            error = ("session not found" if sid not in server._sessions
+                     else None if isinstance(params, dict) else "response params must be an object")
+            if error:
+                self._reply("respond.error", sid, request_id, message=error)
                 return
             response = server._methods["clarify.respond"](request_id, params)
             self._reply("respond.ack", sid, request_id, response=response)
-        except Exception as exc:
-            self._reply("respond.error", sid, request_id, message=str(exc))
+        self._guarded(frame, "respond.error", body)
 
     def _run_real_turn(self, frame: dict[str, Any]) -> None:
         sid = str(frame.get("sid") or "")
@@ -223,7 +210,8 @@ class ComputeHost:
         try:
             from tui_gateway import server
             session = self._ensure_server_session(server, frame)
-            text = frame.get("text") if "text" in frame else frame.get("prompt", "")
+            text = frame["text"] if "text" in frame else frame.get("prompt", "")
+            inflight = frame["text"] if "text" in frame else frame.get("prompt")
             with session["history_lock"]:
                 queued_gen = frame.get("queued_prompt_generation")
                 current_gen = int(session.get("_queued_prompt_generation", 0))
@@ -233,11 +221,8 @@ class ComputeHost:
                 if session.get("running"):
                     self._reply("turn.error", sid, request_id, message="session busy")
                     return
-                session["running"] = True
-                session["_turn_cancel_requested"] = False
-                session["last_active"] = time.time()
-                server._start_inflight_turn(
-                    session, frame.get("text") if "text" in frame else frame.get("prompt"))
+                session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                server._start_inflight_turn(session, inflight)
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
                 server._ensure_session_db_row(session)
@@ -252,16 +237,14 @@ class ComputeHost:
             if run_thread is not None and hasattr(run_thread, "join"):
                 run_thread.join()
             with session["history_lock"]:
-                history_version = int(session.get("history_version", 0))
-                message_count = len(session.get("history") or [])
+                meta = _history_meta(session)
                 interrupted = bool(session.get("_turn_cancel_requested"))
-                session_key = str(session.get("session_key") or "")
             session_info = server._session_info(session.get("agent"), session)
-            self._bump_progress()
+            with self._progress_lock:
+                self._progress_counter += 1
             self._reply(
-                "turn.end", sid, request_id, history_version=history_version,
-                session_key=session_key, message_count=message_count, interrupted=interrupted,
-                ended_ns=now_ns(), session_info=session_info, session_info_emitted=True)
+                "turn.end", sid, request_id, **meta, interrupted=interrupted, ended_ns=now_ns(),
+                session_info=session_info, session_info_emitted=True)
         except Exception as exc:
             with contextlib.suppress(Exception):
                 from tui_gateway import server
@@ -274,25 +257,27 @@ class ComputeHost:
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
-        key = str(frame.get("session_key") or sid)
         session = server._sessions.get(sid)
         if session is not None:
             session["transport"] = self._transport
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)
-            if frame.get("cwd"):
-                session["cwd"] = str(frame.get("cwd"))
-            if frame.get("profile_home"):
-                session["profile_home"] = str(frame.get("profile_home"))
-            if isinstance(frame.get("attached_images"), list):
-                session["attached_images"] = list(frame.get("attached_images") or [])
-            return session
+            for key in ("cwd", "profile_home"):
+                if frame.get(key):
+                    session[key] = str(frame[key])
+        else:
+            session = self._build_server_session(server, frame, sid)
+        if isinstance(frame.get("attached_images"), list):
+            session["attached_images"] = list(frame.get("attached_images") or [])
+        return session
+
+    def _build_server_session(self, server: Any, frame: dict[str, Any], sid: str) -> dict:
+        """Build the agent under the frame's profile scope and register the session."""
+        key = str(frame.get("session_key") or sid)
         history = frame.get("history") if isinstance(frame.get("history"), list) else []
         profile_home = str(frame.get("profile_home") or "")
-        session_db = None
+        session_db = home_token = secret_token = None
         owns_db = False
-        home_token = None
-        secret_token = None
         try:
             if profile_home:
                 from hermes_constants import set_hermes_home_override
@@ -300,10 +285,8 @@ class ComputeHost:
                 from hermes_state import get_shared_session_db
                 home_token = set_hermes_home_override(profile_home)
                 secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-                # DEDICATED handle — ours only until _make_agent succeeds; after that the
-                # agent (registered in server._sessions[sid] via _init_session or the
-                # fallback dict below) owns it. A RAISING _make_agent is the one path
-                # where nothing takes it, hence ``owns_db``.
+                # DEDICATED handle — ours only until _make_agent succeeds, then the agent owns
+                # it. A RAISING _make_agent is the one path where nothing takes it (``owns_db``).
                 session_db = get_shared_session_db(Path(profile_home) / "state.db")
                 owns_db = True
             agent = server._make_agent(
@@ -338,9 +321,8 @@ class ComputeHost:
             finally:
                 reset_transport(token)
         except Exception:
-            # If _init_session's side machinery (slash worker, approval notify) is
-            # unavailable, keep a minimal host-owned session rather than failing the
-            # turn after the expensive agent build succeeded.
+            # _init_session's side machinery (slash worker, approval notify) unavailable: keep a
+            # minimal host-owned session rather than failing after the expensive agent build.
             server._sessions[sid] = {
                 "agent": agent, "session_key": key, "history": list(history),
                 "history_lock": threading.Lock(),
@@ -356,117 +338,88 @@ class ComputeHost:
         session = server._sessions[sid]
         session["transport"] = self._transport
         session["profile_home"] = profile_home or session.get("profile_home")
-        if isinstance(frame.get("attached_images"), list):
-            session["attached_images"] = list(frame.get("attached_images") or [])
         if frame.get("model_override") is not None:
             session["model_override"] = frame.get("model_override")
         return session
 
     def _handle_reload_mcp(self, frame: dict[str, Any]) -> None:
-        sid = str(frame.get("sid") or "")
-        request_id = frame.get("request_id")
-        try:
-            from tui_gateway import server
+        def body(server: Any, sid: str, request_id: Any) -> None:
             resp = server.handle_request({
                 "id": request_id, "method": "reload.mcp",
                 "params": {"session_id": sid, "confirm": True}})
             self._reply("reload_mcp.ack", sid, request_id, response=resp)
-        except Exception as exc:
-            self._reply("control.error", sid, request_id, message=str(exc))
+        self._guarded(frame, "control.error", body)
 
     def _handle_control(self, frame: dict[str, Any]) -> None:
-        sid = str(frame.get("sid") or "")
-        request_id = frame.get("request_id")
         route_name = str(frame.get("route_name") or "")
 
-        def _error(message: str) -> None:
-            self._reply("control.error", sid, request_id, message=message)
-
-        def _ack(**extra: Any) -> None:
-            self._reply("control.ack", sid, request_id, route_name=route_name, **extra)
-
-        def _call_method(name: str, params: dict[str, Any], failure: str) -> dict | None:
-            """Run a server method; emit control.error and return None on error."""
-            response = server._methods[name](request_id, params)
-            if "error" in response:
-                _error(str(response["error"].get("message") or failure))
-                return None
-            return response
-
-        def _history_meta() -> dict[str, Any]:
-            """Ack metadata read under ``history_lock`` (caller holds it)."""
-            return {
-                "session_key": str(session.get("session_key") or ""),
-                "history_version": int(session.get("history_version", 0)),
-                "message_count": len(session.get("history") or [])}
-        try:
-            from tui_gateway import server
+        def body(server: Any, sid: str, request_id: Any) -> None:
             route = MUTATOR_ROUTE_TABLE.get(route_name)
-            if route is None:
-                _error(f"unclassified route: {route_name}")
-                return
             session = server._sessions.get(sid)
-            if session is None:
-                _error("session not found")
-                return
-            if route == "idle-gated" and session.get("running"):
-                _error("session busy")
-                return
-            if route_name == "reload.mcp":
+            error = (f"unclassified route: {route_name}" if route is None
+                     else "session not found" if session is None
+                     else "session busy" if route == "idle-gated" and session.get("running")
+                     else None)
+            if error:
+                self._reply("control.error", sid, request_id, message=error)
+            elif route_name == "reload.mcp":
                 self._handle_reload_mcp({**frame, "type": "reload_mcp"})
-                return
-            if route_name == "session.save":
-                response = _call_method("session.save", {"session_id": sid}, "session save failed")
-                if response is not None:
-                    _ack(result=response.get("result") or {})
-                return
-            if route_name == "session.compress":
-                focus_topic = str(frame.get("command") or "").removeprefix("/compress").strip()
-                params = {"session_id": sid}
-                if focus_topic:
-                    params["focus_topic"] = focus_topic
-                response = _call_method("session.compress", params, "session compression failed")
-                if response is None:
-                    return
-                with session["history_lock"]:
-                    meta = _history_meta()
-                _ack(
-                    result=response.get("result") or {}, **meta,
-                    session_info=server._session_info(session.get("agent"), session))
-                return
-            command = str(frame.get("command") or "")
-            output = server._mirror_slash_side_effects(sid, session, command) if command else ""
-            with session["history_lock"]:
-                messages = server._history_to_messages(list(session.get("history") or []))
-                meta = _history_meta()
-            _ack(
-                output=output, session_key=meta["session_key"],
-                history_version=meta["history_version"], message_count=meta["message_count"],
-                messages=messages, session_info=server._session_info(session.get("agent"), session))
-        except Exception as exc:
+            else:
+                ack = self._control_ack(server, frame, session)
+                if "error" in ack:
+                    self._reply("control.error", sid, request_id, message=ack["error"])
+                else:
+                    self._reply("control.ack", sid, request_id, route_name=route_name, **ack)
+
+        def on_error(sid: str) -> None:
             if route_name in {"session.compress", "slash.compress"}:
-                # The compress mirror defers the context-engine boundary notification until
-                # the host commits. If anything raises between queueing and finalize (e.g.
-                # building the ack's session_info), discard the pending notification so it
-                # can't fire against a rejected boundary on a later compress. finalize is
-                # exactly-once, so this is a no-op if the mirror already emitted it.
+                # The compress mirror defers the context-engine boundary notification until the
+                # host commits; discard it so it can't fire against a rejected boundary later
+                # (finalize is exactly-once, so a no-op if the mirror already emitted it).
                 with contextlib.suppress(Exception):
                     from tui_gateway import server as _server
                     from agent.conversation_compression import (
-                        finalize_context_engine_compression_notification)
+                        finalize_context_engine_compression_notification as _finalize)
                     _agent = (_server._sessions.get(sid) or {}).get("agent")
                     if _agent is not None:
-                        finalize_context_engine_compression_notification(_agent, committed=False)
-            _error(str(exc))
+                        _finalize(_agent, committed=False)
+        self._guarded(frame, "control.error", body, on_error=on_error)
 
-    def _bump_progress(self) -> None:
-        with self._progress_lock:
-            self._progress_counter += 1
+    def _control_ack(self, server: Any, frame: dict[str, Any], session: dict) -> dict:
+        """control.ack payload for one classified route, or ``{"error": message}``."""
+        sid = str(frame.get("sid") or "")
+        route_name = str(frame.get("route_name") or "")
+        command = str(frame.get("command") or "")
+        if route_name in {"session.save", "session.compress"}:
+            params = {"session_id": sid}
+            if route_name == "session.compress":
+                focus_topic = command.removeprefix("/compress").strip()
+                if focus_topic:
+                    params["focus_topic"] = focus_topic
+            response = server._methods[route_name](frame.get("request_id"), params)
+            if "error" in response:
+                failure = _CONTROL_FAILURES[route_name]
+                return {"error": str(response["error"].get("message") or failure)}
+            ack = {"result": response.get("result") or {}}
+            if route_name == "session.save":
+                return ack
+            with session["history_lock"]:
+                ack.update(_history_meta(session))
+        else:
+            output = server._mirror_slash_side_effects(sid, session, command) if command else ""
+            with session["history_lock"]:
+                messages = server._history_to_messages(list(session.get("history") or []))
+                ack = {"output": output, **_history_meta(session), "messages": messages}
+        ack["session_info"] = server._session_info(session.get("agent"), session)
+        return ack
+
+    def _live_turns(self) -> list[concurrent.futures.Future]:
+        with self._turn_futures_lock:
+            return [f for f in self._turn_futures if not f.done()]
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(self._heartbeat_secs):
-            with self._turn_futures_lock:
-                active_turns = sum(1 for f in self._turn_futures if not f.done())
+            active_turns = len(self._live_turns())
             with self._progress_lock:
                 counter = self._progress_counter
             self.emit({
@@ -480,6 +433,14 @@ class ComputeHost:
                 self.emit({"type": "orphan", "old_ppid": self._parent_pid, "ppid": ppid})
                 self.shutdown(reason="orphan")
                 os._exit(0)
+
+
+def _history_meta(session: dict) -> dict[str, Any]:
+    """Transcript identity for turn.end / control.ack frames; caller holds history_lock."""
+    return {
+        "session_key": str(session.get("session_key") or ""),
+        "history_version": int(session.get("history_version", 0)),
+        "message_count": len(session.get("history") or [])}
 
 
 def _rss_mb(pid: int) -> float:
@@ -547,8 +508,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Dashboard compute-host process")
-    parser.parse_args(argv)
+    argparse.ArgumentParser(description="Dashboard compute-host process").parse_args(argv)
     run_host()
     return 0
 

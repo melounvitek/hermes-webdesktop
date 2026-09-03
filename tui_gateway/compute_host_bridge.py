@@ -1,9 +1,6 @@
-"""Compute-host (turn isolation) bridge: relay prompts/controls to the child process
-and mirror its metadata/clarify/compress acks back into the session.
-
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
-"""
+"""Compute-host (turn isolation) bridge: relay prompts/controls to the child process and
+mirror its metadata/clarify/compress acks back into the session. Bodies are rebound onto
+server.py's globals at install time (method_ctx.bind_module), so they use them bare."""
 
 from __future__ import annotations
 
@@ -14,7 +11,6 @@ from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
 
-
 _compute_host_supervisor = None
 _compute_host_supervisor_lock = threading.Lock()
 # Cap on how long session.compress blocks its RPC on the compute host. Must stay
@@ -23,23 +19,18 @@ _compute_host_supervisor_lock = threading.Lock()
 _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS = 630.0
 
 
-def _inside_compute_host_child() -> bool:
-    return os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1"
-
-
 def _turn_isolation_enabled(cfg: dict | None = None) -> bool:
-    if _inside_compute_host_child():
+    if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
         return False
     return bool((cfg or _load_dashboard_process_isolation_config()).get("turn_isolation"))
 
 
 def _session_uses_compute_host(session: dict, cfg: dict | None = None) -> bool:
-    if not _turn_isolation_enabled(cfg):
-        return False
     # Routes lazy sessions whose AIAgent was never built in-process; already-built
     # sessions keep the in-process path unless a prior isolated turn marked host ownership.
-    return bool(session.get("_compute_host_active")) or (
-        session.get("agent") is None and session.get("agent_ready") is not None)
+    return _turn_isolation_enabled(cfg) and (
+        bool(session.get("_compute_host_active"))
+        or (session.get("agent") is None and session.get("agent_ready") is not None))
 
 
 def _get_compute_host_supervisor(cfg: dict | None = None):
@@ -61,8 +52,7 @@ def _compute_host_turn_frame(
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
-        attached_images = list(
-            image_paths if image_paths is not None else session.get("attached_images", []))
+        attached_images = list(image_paths if image_paths is not None else session.get("attached_images", []))
     return {
         "type": "turn.start", "sid": sid, "request_id": rid,
         "session_key": session.get("session_key") or sid, "text": text,
@@ -97,8 +87,8 @@ def _compute_host_adopt_frame_meta(session: dict, frame: dict) -> None:
         session["session_key"] = str(frame.get("session_key"))
     if frame.get("history_version") is not None:
         with contextlib.suppress(Exception):
-            session["history_version"] = max(
-                int(session.get("history_version", 0)), int(frame.get("history_version") or 0))
+            session["history_version"] = max(int(session.get("history_version", 0)),
+                                             int(frame.get("history_version") or 0))
 
 
 def _relay_compute_host_rpc(message: dict) -> bool:
@@ -110,12 +100,16 @@ def _relay_compute_host_rpc(message: dict) -> bool:
         payload = params.get("payload")
         request_id = payload.get("request_id") if isinstance(payload, dict) else None
         if session is not None and request_id:
-            with session.get("history_lock", threading.Lock()):
+            with _history_lock(session):
                 if kind == "clarify.request":
                     session["_compute_host_pending_clarify"] = dict(payload)
                 elif _pending_clarify_matches(session, request_id):
                     session.pop("_compute_host_pending_clarify", None)
     return write_json(message)
+
+
+def _history_lock(session: dict):
+    return session.get("history_lock", threading.Lock())
 
 
 def _pending_clarify_matches(session: dict, request_id) -> bool:
@@ -127,32 +121,26 @@ def _pending_clarify_matches(session: dict, request_id) -> bool:
 
 def _compute_host_clarify_session(request_id: str) -> tuple[str, dict] | None:
     """Find the parent mirror for one host-owned clarify request."""
-    if not request_id:
-        return None
-    for sid, session in list(_sessions.items()):
-        with session.get("history_lock", threading.Lock()):
+    for sid, session in list(_sessions.items()) if request_id else ():
+        with _history_lock(session):
             if _pending_clarify_matches(session, request_id):
                 return sid, session
     return None
 
 
-def _update_compute_host_clarify_snapshot(
-    sid: str, session: dict, params: dict, result: dict) -> None:
+def _update_compute_host_clarify_snapshot(sid: str, session: dict, params: dict, result: dict) -> None:
     """Keep reconnect snapshots accurate while a batch clarify is answered."""
     request_id = str(params.get("request_id") or "")
-    with session.get("history_lock", threading.Lock()):
+    question_id = str(params.get("question_id") or "")
+    with _history_lock(session):
         if not _pending_clarify_matches(session, request_id):
             return
         pending = session["_compute_host_pending_clarify"]
-        expired = result.get("status") == "expired"
-        if expired or not result.get("remaining") and not params.get("question_id"):
+        if result.get("status") == "expired" or not result.get("remaining") and not question_id:
             session.pop("_compute_host_pending_clarify", None)
-            return
-        question_id = str(params.get("question_id") or "")
-        if question_id and isinstance(result.get("remaining"), list):
-            answers = dict(pending.get("answers") or {})
-            answers[question_id] = str(params.get("answer") or "")
-            pending["answers"] = answers
+        elif question_id and isinstance(result.get("remaining"), list):
+            pending["answers"] = {**(pending.get("answers") or {}),
+                                  question_id: str(params.get("answer") or "")}
             if not result["remaining"]:
                 session.pop("_compute_host_pending_clarify", None)
 
@@ -160,11 +148,9 @@ def _update_compute_host_clarify_snapshot(
 def _respond_compute_host_clarify(rid: str, params: dict) -> dict | None:
     """Proxy a clarify answer into the process that owns its pending Event."""
     located = _compute_host_clarify_session(str(params.get("request_id") or ""))
-    if located is None:
+    if located is None or not _session_uses_compute_host(located[1]):
         return None
     sid, session = located
-    if not _session_uses_compute_host(session):
-        return None
     try:
         ack = _get_compute_host_supervisor().respond(sid, params)
     except Exception as exc:
@@ -176,9 +162,8 @@ def _respond_compute_host_clarify(rid: str, params: dict) -> dict | None:
         return _err(rid, 5019, "compute-host clarify response returned an invalid response")
     if "error" in response:
         error = response["error"] if isinstance(response["error"], dict) else {}
-        return _err(
-            rid, int(error.get("code") or 5000),
-            str(error.get("message") or "clarify response failed"))
+        return _err(rid, int(error.get("code") or 5000),
+                    str(error.get("message") or "clarify response failed"))
     result = response.get("result")
     if not isinstance(result, dict):
         return _err(rid, 5019, "compute-host clarify response returned an invalid result")
@@ -191,7 +176,7 @@ def _apply_compute_host_metadata_mirror(session: dict, frame: dict | None) -> No
     writer of live agent/history state, and UI reads must not build a second agent."""
     if not isinstance(frame, dict):
         return
-    with session.get("history_lock", threading.Lock()):
+    with _history_lock(session):
         _compute_host_adopt_frame_meta(session, frame)
         if frame.get("message_count") is not None:
             with contextlib.suppress(Exception):
@@ -223,17 +208,15 @@ def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None) -> dict:
     cfg = _load_dashboard_process_isolation_config()
-    frame = _compute_host_turn_frame(
-        rid, sid, session, text, image_paths=image_paths,
-        queued_prompt_generation=queued_prompt_generation, display_kind=display_kind)
+    frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
+                                     queued_prompt_generation=queued_prompt_generation,
+                                     display_kind=display_kind)
 
     def _complete(done: dict) -> None:
-        # submit_turn reports a synchronous pipe failure via the callback before
-        # re-raising; leave the session untouched so prompt.submit can fail open
-        # to the in-process path without a duplicate terminal error.
-        if done.get("reason") == "send_failed":
-            return
-        _on_compute_host_turn_done(rid, sid, session, done)
+        # submit_turn reports a synchronous pipe failure via the callback before re-raising;
+        # leave the session untouched so prompt.submit can fail open to the in-process path.
+        if done.get("reason") != "send_failed":
+            _on_compute_host_turn_done(rid, sid, session, done)
     try:
         _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=_complete)
     except Exception as exc:
@@ -271,29 +254,22 @@ def _compute_host_compress_wait_seconds(cfg: dict | None = None) -> float:
     return float(min(max(ceiling + 30.0, 120.0), _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS))
 
 
-def _announce_compute_host_compress_done(sid: str, session: dict, ack: dict) -> None:
-    """Mirror a compress ack and push the ``session.info`` + ``compacted`` edges the
-    in-process /compress path emits, so a client whose RPC wait expired still learns."""
-    _apply_compute_host_metadata_mirror(session, ack)
-    _emit("session.info", sid, _compute_host_session_info(session))
-    _status_update(sid, "compacted", "✓ Context compression complete")
-
-
-def _adopt_late_compute_host_compress_ack(
-    sid: str, session: dict, ack: dict, *, route_name: str) -> None:
-    """Adopt a compress ack that arrived after its RPC waiter answered ``pending``: the
-    only place the rotated session_key / history_version / mirror can land and the
-    client's only signal. A late ``control.error`` goes out via ``error``."""
+def _adopt_late_compute_host_compress_ack(sid: str, session: dict, ack: dict, *, route_name: str) -> None:
+    """Adopt a compress ack that arrived after its RPC waiter answered ``pending``: the only place
+    the rotated session_key / history_version / mirror can land and the client's only signal
+    (the same ``session.info`` + ``compacted`` edges the in-process /compress path emits). A late
+    ``control.error`` goes out via ``error``."""
     with _sessions_lock:
-        live = _sessions.get(sid)
-    if live is not session:
-        return
+        if _sessions.get(sid) is not session:
+            return
     if not isinstance(ack, dict) or ack.get("type") in {"control.error", "error"}:
         message = str((ack or {}).get("message") or f"compute-host {route_name} failed")
         _emit("error", sid, {"message": f"compression failed: {message}"})
         _status_update(sid, "ready")
         return
-    _announce_compute_host_compress_done(sid, session, ack)
+    _apply_compute_host_metadata_mirror(session, ack)
+    _emit("session.info", sid, _compute_host_session_info(session))
+    _status_update(sid, "compacted", "✓ Context compression complete")
 
 
 def register(server) -> None:

@@ -25,13 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 _NOT_ADMITTED_ERRNOS = frozenset(
-    value
-    for name in ("ECONNREFUSED", "ENETDOWN", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH")
+    value for name in ("ECONNREFUSED", "ENETDOWN", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH")
     if (value := getattr(errno, name, None)) is not None)
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-# A replay page may legitimately contain many bounded 64 KiB room events. Keep
-# enough room for the largest normal page while preventing peer-sized responses
-# from scaling memory use without limit.
+# A replay page may legitimately hold many bounded 64 KiB room events; cap it so a peer-sized
+# response cannot scale memory use without limit.
 MAX_PEER_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_PEER_ERROR_RESPONSE_BYTES = 16 * 1024
 _PEER_RESPONSE_CHUNK_BYTES = 64 * 1024
@@ -43,8 +41,8 @@ _RECEIPT_SCOPE_FIELDS = (
 _TERMINAL_RUN_STATES = frozenset({"completed", "failed", "interrupted", "cancelled"})
 _ACTIVE_RUN_STATES = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
 _KNOWN_RUN_STATES = _TERMINAL_RUN_STATES | _ACTIVE_RUN_STATES
-# Older target gateways wrap these conditions inside the generic dispatch
-# error; normalize locally until their wire code becomes specific.
+_RUN_STATUS_KEYS = ("run_id", "status", "output", "error", "approval", "last_event")
+# Older target gateways wrap these inside the generic dispatch error; normalize locally.
 _LEGACY_DISPATCH_MESSAGE_CODES = (
     ("room grant", "invalid_room_grant"),
     ("capability catalog changed", "room_capability_catalog_changed"),
@@ -75,18 +73,9 @@ class _PeerResponseDeadlineExceeded(TimeoutError):
     """A peer response exceeded the request's monotonic wall-clock budget."""
 
 
-def _content_length(response: Any) -> int | None:
-    try:
-        value = int(response.headers.get("Content-Length"))
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return value if value >= 0 else None
-
-
 def _set_response_socket_timeout(response: Any, remaining: float) -> None:
     """Best-effort urllib socket timeout tightened to the remaining budget."""
-    frontier = [response]
-    seen: set[int] = set()
+    frontier, seen = [response], set()
     for _depth in range(5):
         next_frontier = []
         for value in frontier:
@@ -103,12 +92,14 @@ def _set_response_socket_timeout(response: Any, remaining: float) -> None:
 
 
 def _read_bounded_response(response: Any, *, max_bytes: int, deadline: float) -> bytes:
-    declared = _content_length(response)
-    if declared is not None and declared > max_bytes:
+    try:
+        declared = int(response.headers.get("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        declared = -1
+    if declared > max_bytes:
         raise _PeerResponseTooLarge
     reader = getattr(response, "read1", None)
-    if not callable(reader):
-        reader = response.read
+    reader = reader if callable(reader) else response.read
     body = bytearray()
     while len(body) <= max_bytes:
         remaining = deadline - time.monotonic()
@@ -131,14 +122,25 @@ def _read_bounded_response(response: Any, *, max_bytes: int, deadline: float) ->
     raise _PeerResponseTooLarge
 
 
+def _read_body(response: Any, *, max_bytes: int, deadline: float, kind: str, **flags: Any) -> str:
+    """Read a bounded body as text; budget overruns become classified ``PeerRunsHTTPError``."""
+    try:
+        return _read_bounded_response(
+            response, max_bytes=max_bytes, deadline=deadline).decode("utf-8", "replace")
+    except _PeerResponseTooLarge as exc:
+        raise PeerRunsHTTPError(_BUDGET_MESSAGES["size"].format(kind=kind), **flags) from exc
+    except _PeerResponseDeadlineExceeded as exc:
+        raise PeerRunsHTTPError(
+            _BUDGET_MESSAGES["time"].format(kind=kind), retryable=True, **flags) from exc
+
+
 def _is_proven_pre_admission_failure(exc: BaseException) -> bool:
     """Return whether no HTTP connection could have carried the request."""
     reason: Any = exc
     while isinstance(reason, urllib.error.URLError):
         reason = reason.reason
-    if isinstance(reason, socket.gaierror):
-        return True
-    return isinstance(reason, OSError) and reason.errno in _NOT_ADMITTED_ERRNOS
+    return isinstance(reason, socket.gaierror) or (
+        isinstance(reason, OSError) and reason.errno in _NOT_ADMITTED_ERRNOS)
 
 
 def _valid_code(code: Any) -> str | None:
@@ -165,33 +167,18 @@ def _response_error_code(detail: str) -> str | None:
     return _valid_code(payload.get("code"))
 
 
-def _http_error_message(method: str, path: str, status: int, error_code: str | None) -> str:
-    renewal = status in {401, 403} and error_code in _GRANT_RENEWAL_CODES
-    drift = status == 403 and error_code in {_EXECUTION_POLICY_CHANGED[0], _CAPABILITY_CHANGED[0]}
-    if renewal or drift:
-        return _REAUTHORIZATION_MESSAGES[error_code]
-    return f"peer rejected {method} {path} with HTTP {status}"
-
-
 class PeerRunsHTTPError(RuntimeError):
     """Controlled peer HTTP failure."""
 
     def __init__(
         self, message: str, *, retryable: bool = False, ambiguous: bool = False,
         not_admitted: bool = False, status_code: int | None = None, error_code: str | None = None,
-        error_message: str | None = None) -> None:
+    ) -> None:
         super().__init__(message)
-        self.retryable = retryable
-        self.ambiguous = ambiguous
-        self.not_admitted = not_admitted
-        self.status_code = status_code
-        self.error_code = error_code
-        self.error_message = error_message
+        self.retryable, self.ambiguous, self.not_admitted = retryable, ambiguous, not_admitted
+        self.status_code, self.error_code = status_code, error_code
         self.needs_reauthorization = (
             status_code in {401, 403} and error_code in _REAUTHORIZATION_CODES)
-        self.needs_capability_refresh = status_code == 403 and error_code == _CAPABILITY_CHANGED[0]
-        self.needs_execution_policy_refresh = (
-            status_code == 403 and error_code == _EXECUTION_POLICY_CHANGED[0])
 
 
 def digest_reauthorization_error(
@@ -225,15 +212,13 @@ class PeerRunsHTTPClient:
         base_url, self.transport_security = validate_room_link_url(base_url)
         if api_key and len(api_key) < 16:
             raise ValueError("peer API key is missing or too short")
-        self.base_url = base_url
-        self.api_key = api_key
+        self.base_url, self.api_key, self.clock = base_url, api_key, clock
         self.timeout_seconds = float(timeout_seconds)
         self.receipt_db_path = Path(receipt_db_path) if receipt_db_path else None
         if poll_min_seconds <= 0 or poll_max_seconds < poll_min_seconds:
             raise ValueError("peer polling bounds are invalid")
         self.poll_min_seconds = float(poll_min_seconds)
         self.poll_max_seconds = float(poll_max_seconds)
-        self.clock = clock
         self._runs: dict[tuple[str, int], dict[str, Any]] = {}
         self._observation_key: tuple[str, int] | None = None
         self._status_cache: dict[str, dict[str, Any]] = {}
@@ -253,11 +238,9 @@ class PeerRunsHTTPClient:
         authority_epoch: int, member_id: str, target_install_id: str, target_profile: str) -> None:
         """Fence every in-memory and durable receipt to one room authority."""
         epoch = int(authority_epoch or 0)
-        names = [
-            str(value or "")
-            for value in (
-                room_id, home_install_id, authority_gateway_id, member_id, target_install_id,
-                target_profile)]
+        names = [str(v or "") for v in (
+            room_id, home_install_id, authority_gateway_id, member_id, target_install_id,
+            target_profile)]
         if not all(names):
             raise PeerRunsHTTPError("peer room receipt scope is incomplete")
         if epoch < 1:
@@ -265,15 +248,10 @@ class PeerRunsHTTPClient:
         scope = dict(zip(_RECEIPT_SCOPE_FIELDS, names[:3] + [epoch] + names[3:]))
         if self._room_scope == scope:
             return
-        self._room_scope = scope
-        self._runs.clear()
-        self._observation_key = None
-        self._status_cache.clear()
-        self._recovery_backoff.clear()
-        self._terminal_receipts.clear()
-
-    def _bind_dispatch_scope(self, dispatch: HostedMemberDispatch) -> None:
-        self.bind_room_scope(**{field: getattr(dispatch, field) for field in _RECEIPT_SCOPE_FIELDS})
+        self._room_scope, self._observation_key = scope, None
+        for table in (
+                self._runs, self._status_cache, self._recovery_backoff, self._terminal_receipts):
+            table.clear()
 
     def _receipt(self, task_id: str, execution_generation: int) -> dict[str, Any] | None:
         """Return the in-memory receipt, falling back to the durable store."""
@@ -281,7 +259,6 @@ class PeerRunsHTTPClient:
         if record is not None or self.receipt_db_path is None or self._room_scope is None:
             return record
         from gateway import hosted_rooms
-
         identity = {"task_id": task_id, "execution_generation": execution_generation}
         return hosted_rooms.remote_run_receipt(
             self.receipt_db_path, record={**self._room_scope, **identity})
@@ -291,47 +268,33 @@ class PeerRunsHTTPClient:
         key = (str(task_id or ""), int(execution_generation or 0))
         if not key[0] or key[1] < 1:
             raise PeerRunsHTTPError("peer observation identity is invalid")
-        if self._observation_key != key:
-            for terminal_key in self._terminal_receipts - {key}:
-                self._runs.pop(terminal_key, None)
-            self._terminal_receipts.intersection_update({key})
-            self._observation_key = key
-            self._status_cache.clear()
-            self._recovery_backoff.clear()
+        if self._observation_key == key:
+            return
+        for terminal_key in self._terminal_receipts - {key}:
+            self._runs.pop(terminal_key, None)
+        self._terminal_receipts.intersection_update({key})
+        self._observation_key = key
+        self._status_cache.clear()
+        self._recovery_backoff.clear()
 
     def _request(
         self, path: str, *, method: str = "GET", body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None, room_grant: str | None = None) -> dict[str, Any]:
         from hermes_cli.urllib_security import open_credentialed_url
-
-        deadline = time.monotonic() + self.timeout_seconds
-        ambiguous = method == "POST"
+        deadline, ambiguous = time.monotonic() + self.timeout_seconds, method == "POST"
         request = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=(
-                json.dumps(body, separators=(",", ":")).encode("utf-8")
-                if body is not None
-                else None),
-            method=method,
+            f"{self.base_url}{path}", method=method,
+            data=None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8"),
             headers={
                 "Authorization": (
                     f"HermesRoom {room_grant}" if room_grant else f"Bearer {self.api_key}"),
-                "Content-Type": "application/json",
-                "User-Agent": "Hermes-RoomLink/1.0",
+                "Content-Type": "application/json", "User-Agent": "Hermes-RoomLink/1.0",
                 **(headers or {})})
         try:
             with open_credentialed_url(request, timeout=self.timeout_seconds) as response:
-                raw = _read_bounded_response(
-                    response, max_bytes=MAX_PEER_RESPONSE_BYTES, deadline=deadline
-                ).decode("utf-8", "replace")
-        except _PeerResponseTooLarge as exc:
-            raise PeerRunsHTTPError(
-                _BUDGET_MESSAGES["size"].format(kind=""), ambiguous=ambiguous,
-            ) from exc
-        except _PeerResponseDeadlineExceeded as exc:
-            raise PeerRunsHTTPError(
-                _BUDGET_MESSAGES["time"].format(kind=""), retryable=True, ambiguous=ambiguous
-            ) from exc
+                raw = _read_body(
+                    response, max_bytes=MAX_PEER_RESPONSE_BYTES, deadline=deadline, kind="",
+                    ambiguous=ambiguous)
         except urllib.error.HTTPError as exc:
             self._raise_http_error(exc, method=method, path=path, deadline=deadline)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -354,28 +317,25 @@ class PeerRunsHTTPClient:
         """Raise the classified PeerRunsHTTPError for an HTTP error response."""
         # A 4xx on admission proves the peer never admitted the run.
         flags = {
-            "ambiguous": method == "POST" and exc.code >= 500,
-            "not_admitted": method == "POST" and path == "/v1/runs" and 400 <= exc.code < 500,
-            "status_code": exc.code}
+            "ambiguous": method == "POST" and exc.code >= 500, "status_code": exc.code,
+            "not_admitted": method == "POST" and path == "/v1/runs" and 400 <= exc.code < 500}
         try:
-            detail = _read_bounded_response(
-                exc, max_bytes=MAX_PEER_ERROR_RESPONSE_BYTES, deadline=deadline
-            ).decode("utf-8", "replace")[:500]
-        except _PeerResponseTooLarge as body_exc:
-            raise PeerRunsHTTPError(
-                _BUDGET_MESSAGES["size"].format(kind=" error"), **flags,
-            ) from body_exc
-        except _PeerResponseDeadlineExceeded as body_exc:
-            raise PeerRunsHTTPError(
-                _BUDGET_MESSAGES["time"].format(kind=" error"), retryable=True, **flags
-            ) from body_exc
+            detail = _read_body(
+                exc, max_bytes=MAX_PEER_ERROR_RESPONSE_BYTES, deadline=deadline, kind=" error",
+                **flags)[:500]
+        except PeerRunsHTTPError:
+            raise
         except Exception:
             detail = ""
         error_code = _response_error_code(detail)
         logger.debug(
             "Peer RoomLink request returned HTTP %s (%s)", exc.code, error_code or "no-code")
+        renewal = exc.code in {401, 403} and error_code in _GRANT_RENEWAL_CODES
+        drift = exc.code == 403 and error_code in {
+            _EXECUTION_POLICY_CHANGED[0], _CAPABILITY_CHANGED[0]}
         raise PeerRunsHTTPError(
-            _http_error_message(method, path, exc.code, error_code),
+            _REAUTHORIZATION_MESSAGES[error_code] if renewal or drift
+            else f"peer rejected {method} {path} with HTTP {exc.code}",
             retryable=exc.code in {408, 425, 429} or exc.code >= 500,
             error_code=error_code, **flags,
         ) from exc
@@ -386,8 +346,8 @@ class PeerRunsHTTPClient:
         if source != "bot_room":
             raise PeerRunsHTTPError("peer room source must be bot_room")
         self._require_room_grant(grant)
-        logical_session = (
-            "roomlink_" + hashlib.sha256(f"{room_id}\0{profile}".encode("utf-8")).hexdigest()[:32])
+        logical_session = "roomlink_" + hashlib.sha256(
+            f"{room_id}\0{profile}".encode("utf-8")).hexdigest()[:32]
         if expected_session_id and expected_session_id != logical_session:
             raise PeerRunsHTTPError("peer room session identity changed")
         return {"session_id": logical_session, "title": f"Group: {room_id}", "source": source}
@@ -396,7 +356,7 @@ class PeerRunsHTTPClient:
         """Validate a dispatch, its grant, and pin scope + observation to it."""
         checked = HostedMemberDispatch.from_mapping(dispatch)
         self._require_room_grant(grant)
-        self._bind_dispatch_scope(checked)
+        self.bind_room_scope(**{f: getattr(checked, f) for f in _RECEIPT_SCOPE_FIELDS})
         self.bind_observation(
             task_id=checked.task_id, execution_generation=checked.execution_generation)
         return checked
@@ -412,8 +372,8 @@ class PeerRunsHTTPClient:
             if any(existing[field] != getattr(checked, field) for field in _RECEIPT_SCOPE_FIELDS):
                 raise PeerRunsHTTPError("peer run receipt conflicts with the recovered dispatch")
             return self._accepted(
-                checked, run_id=str(existing["run_id"]),
-                session_id=str(existing["session_id"]), replayed=True)
+                checked, run_id=str(existing["run_id"]), session_id=str(existing["session_id"]),
+                replayed=True)
         key, now = (checked.task_id, checked.execution_generation), self.clock()
         backoff = self._recovery_backoff.get(key)
         if backoff is not None and now < float(backoff["next_attempt_at"]):
@@ -434,12 +394,9 @@ class PeerRunsHTTPClient:
         checked: HostedMemberDispatch, *, run_id: str, session_id: str, replayed: bool,
     ) -> dict[str, Any]:
         return {
-            "status": "accepted",
-            "task_id": checked.task_id,
-            "execution_generation": checked.execution_generation,
-            "run_id": run_id,
-            "session_id": session_id,
-            "replayed": replayed}
+            "status": "accepted", "task_id": checked.task_id,
+            "execution_generation": checked.execution_generation, "run_id": run_id,
+            "session_id": session_id, "replayed": replayed}
 
     def _admit_dispatch(self, checked: HostedMemberDispatch, *, grant: str) -> Mapping[str, Any]:
         session_id = self._session_id(checked, grant=grant)
@@ -462,14 +419,11 @@ class PeerRunsHTTPClient:
         if not run_id:
             raise PeerRunsHTTPError("peer did not return a run id")
         receipt = {
-            "run_id": run_id,
-            "session_id": session_id,
+            "run_id": run_id, "session_id": session_id,
             **{field: getattr(checked, field) for field in _RECEIPT_SCOPE_FIELDS},
-            "task_id": checked.task_id,
-            "execution_generation": checked.execution_generation}
+            "task_id": checked.task_id, "execution_generation": checked.execution_generation}
         if self.receipt_db_path is not None:
             from gateway import hosted_rooms
-
             hosted_rooms.upsert_remote_run_receipt(self.receipt_db_path, record=receipt)
         self._runs[(checked.task_id, checked.execution_generation)] = receipt
         self._status_cache.pop(run_id, None)
@@ -490,9 +444,7 @@ class PeerRunsHTTPClient:
 
     def _observation_receipt(
         self, *, room_id: str, profile: str, session_id: str) -> dict[str, Any] | None:
-        if self._observation_key is None:
-            return None
-        record = self._receipt(*self._observation_key)
+        record = None if self._observation_key is None else self._receipt(*self._observation_key)
         if record is None:
             return None
         scope = (record["room_id"], record["target_profile"], record["session_id"])
@@ -500,27 +452,16 @@ class PeerRunsHTTPClient:
             raise PeerRunsHTTPError("peer observation receipt changed scope")
         return record
 
-    @staticmethod
-    def _compact_run_status(status: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            key: status[key]
-            for key in ("run_id", "status", "output", "error", "approval", "last_event")
-            if key in status}
-
     def _next_poll_delay(self, cached: Mapping[str, Any] | None) -> float:
         previous = float(cached["delay"]) if cached is not None else self.poll_min_seconds / 2
         return min(self.poll_max_seconds, max(self.poll_min_seconds, previous * 2))
-
-    @staticmethod
-    def _run_is_terminal(status: Mapping[str, Any]) -> bool:
-        return status.get("status") in _TERMINAL_RUN_STATES
 
     def _poll_receipt(self, record: Mapping[str, Any], *, grant: str) -> dict[str, Any]:
         run_id, now = str(record["run_id"]), self.clock()
         cached = self._status_cache.get(run_id)
         if cached is not None:
             status = cached["status"]
-            if self._run_is_terminal(status):
+            if status.get("status") in _TERMINAL_RUN_STATES:
                 return status
             if now < float(cached["next_poll_at"]):
                 error = cached.get("error")
@@ -530,8 +471,8 @@ class PeerRunsHTTPClient:
         delay = self._next_poll_delay(cached)
         entry = {"delay": delay, "next_poll_at": now + delay}
         try:
-            status = self._compact_run_status(
-                self._request(_run_path(record), room_grant=self._require_room_grant(grant)))
+            full = self._request(_run_path(record), room_grant=self._require_room_grant(grant))
+            status = {key: full[key] for key in _RUN_STATUS_KEYS if key in full}
             if (
                 str(status.get("run_id") or "") != run_id
                 or status.get("status") not in _KNOWN_RUN_STATES):
@@ -541,7 +482,7 @@ class PeerRunsHTTPClient:
             self._status_cache = {run_id: {"status": previous, "error": exc, **entry}}
             raise
         self._status_cache = {run_id: {"status": status, **entry}}
-        if self._run_is_terminal(status):
+        if status.get("status") in _TERMINAL_RUN_STATES:
             self._terminal_receipts.add(
                 (str(record["task_id"]), int(record["execution_generation"])))
         return status
@@ -557,8 +498,7 @@ class PeerRunsHTTPClient:
         if state not in {"completed", "failed", "interrupted"}:
             return []
         return [{
-            "role": "assistant",
-            "task_id": receipt["task_id"],
+            "role": "assistant", "task_id": receipt["task_id"],
             "execution_generation": receipt["execution_generation"],
             "status": "settled" if state == "completed" else "failed",
             "message_id": f"peer-run:{status.get('run_id')}",
@@ -571,11 +511,9 @@ class PeerRunsHTTPClient:
             return {"active": False, "task_id": None}
         status = self._poll_receipt(receipt, grant=grant)
         return {
-            "active": status.get("status") in _ACTIVE_RUN_STATES,
-            "task_id": receipt["task_id"],
+            "active": status.get("status") in _ACTIVE_RUN_STATES, "task_id": receipt["task_id"],
             "execution_generation": receipt["execution_generation"],
-            "status": status.get("status"),
-            "run_id": status.get("run_id"),
+            "status": status.get("status"), "run_id": status.get("run_id"),
             "approval": status.get("approval")}
 
     def approve_receipt(
@@ -602,7 +540,7 @@ class PeerRunsHTTPClient:
 
     def stop(self, *, dispatch: Mapping[str, Any], grant: str) -> Mapping[str, Any] | None:
         checked = HostedMemberDispatch.from_mapping(dispatch)
-        self._bind_dispatch_scope(checked)
+        self.bind_room_scope(**{f: getattr(checked, f) for f in _RECEIPT_SCOPE_FIELDS})
         return self.stop_receipt(
             task_id=checked.task_id, execution_generation=checked.execution_generation, grant=grant)
 
@@ -614,7 +552,7 @@ class PeerRunsHTTPClient:
             return None
         result = self._post_run_action(
             record, "stop", body={}, grant=self._require_room_grant(grant))
-        if self._run_is_terminal(result):
+        if result.get("status") in _TERMINAL_RUN_STATES:
             self._terminal_receipts.add((str(task_id), int(execution_generation)))
         return result
 
@@ -628,17 +566,11 @@ class PeerRunsHTTPClient:
         return self._request(
             "/v1/room-members/invitations", method="POST",
             body={
-                "room_id": room_id,
-                "home_install_id": home_install_id,
-                "authority_gateway_id": authority_gateway_id,
-                "authority_epoch": authority_epoch,
-                "member_id": member_id,
-                "grant_id": grant_id,
-                "ttl_seconds": ttl_seconds,
-                **(
-                    {"status_ttl_seconds": status_ttl_seconds}
-                    if status_ttl_seconds is not None
-                    else {})})
+                "room_id": room_id, "home_install_id": home_install_id,
+                "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch,
+                "member_id": member_id, "grant_id": grant_id, "ttl_seconds": ttl_seconds,
+                **({} if status_ttl_seconds is None else {
+                    "status_ttl_seconds": status_ttl_seconds})})
 
     def refresh_grant(
         self, *, grant: str, ttl_seconds: float = 24 * 60 * 60,
@@ -650,8 +582,7 @@ class PeerRunsHTTPClient:
         replacement = str(refreshed.get("grant") or "")
         if not replacement:
             raise PeerRunsHTTPError("peer returned no refreshed room grant")
-        # Persist only after the target proves the replacement can authorize
-        # the same scoped capability endpoint.
+        # Persist only after the target proves the replacement authorizes the scoped endpoint.
         probe = self.probe(grant=replacement)
         error = digest_reauthorization_error(
             GatewayRoomCatalog.from_mapping(probe.get("catalog")),

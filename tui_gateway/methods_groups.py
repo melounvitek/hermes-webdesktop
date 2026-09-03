@@ -1,17 +1,13 @@
-"""Hosted-room JSON-RPC contract.
+"""Hosted-room JSON-RPC contract: durable room identity, replay, and the process-owned
+same-gateway Discussion driver; ``groups.capabilities`` keeps that boundary machine-readable.
 
-These methods expose durable room identity, replay, and the process-owned
-same-gateway Discussion driver. ``groups.capabilities`` keeps that boundary
-machine-readable so older clients stay on the renderer-owned room path.
-
-Handlers are rebound onto server.py's globals at install (see method_ctx.py), so
-bodies see only server globals plus the names methods_bot_relay.register publishes;
-module-private helpers reach them through keyword defaults. ``_room_method`` wraps
-each handler with the shared service-lookup / error-code envelope.
-"""
+Handlers are rebound onto server.py's globals at install (method_ctx.py); module-private
+helpers reach them through keyword defaults. ``_room_method`` is the shared envelope."""
 
 from .method_ctx import HandlerRegistry
 
+import contextlib
+import importlib
 import os
 import threading
 
@@ -93,6 +89,14 @@ def _current_profile() -> str:
     return str(_bound_server._current_profile_name() or "").strip()
 
 
+def _foreign_profile_home(profile: str):
+    """Home of a routed profile other than the process's own, or ``ValueError``."""
+    home = _bound_server._profile_home(profile)
+    if home is None:
+        raise ValueError(f"profile '{profile}' is unavailable")
+    return home
+
+
 def _requested_profile(params: dict) -> str:
     requested = str(params.get("profile") or "").strip()
     if not requested:
@@ -101,28 +105,24 @@ def _requested_profile(params: dict) -> str:
         raise ValueError("profile routing is unavailable")
     if requested == _current_profile():
         return requested
-    if _bound_server._profile_home(requested) is None:
-        raise ValueError(f"profile '{requested}' is unavailable")
+    _foreign_profile_home(requested)
     return str(_bound_server._response_profile_name(requested) or requested)
 
 
 def _api_server_key(profile: str | None = None) -> str:
+    # Published onto the server by methods_bot_relay.register (an explicit routed profile is
+    # authoritative: never borrow the process profile's key on a multiplexed gateway).
     if profile and _bound_server is not None and profile != _current_profile():
         from agent.secret_scope import build_profile_secret_scope
         home = _bound_server._profile_home(profile)
         if home is None:
             return ""
-        # An explicit routed profile is authoritative. Never borrow the
-        # process/default profile's API key on a multiplexed gateway.
         return str(build_profile_secret_scope(home).get("API_SERVER_KEY") or "").strip()
-    try:
+    scoped = ""
+    with contextlib.suppress(Exception):
         from agent.secret_scope import get_secret
         scoped = (get_secret("API_SERVER_KEY", "") or "").strip()
-        if scoped:
-            return scoped
-    except Exception:
-        pass
-    return (os.getenv("API_SERVER_KEY") or "").strip()
+    return scoped or (os.getenv("API_SERVER_KEY") or "").strip()
 
 
 def _profile_execution_policy(profile: str) -> dict:
@@ -131,10 +131,7 @@ def _profile_execution_policy(profile: str) -> dict:
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     token = None
     if _bound_server is not None and profile not in {_current_profile(), _profile_name()}:
-        home = _bound_server._profile_home(profile)
-        if home is None:
-            raise ValueError(f"profile '{profile}' is unavailable")
-        token = set_hermes_home_override(str(home))
+        token = set_hermes_home_override(str(_foreign_profile_home(profile)))
     try:
         return execution_policy_mapping(target_profile=profile)
     finally:
@@ -145,20 +142,17 @@ def _profile_execution_policy(profile: str) -> dict:
 def _room_link_run_storage_durable() -> bool:
     """Return whether peer-run replay survives this gateway process."""
     if _bound_server is None:
-        # Direct method-contract tests and embedded callers without a bound API
-        # server do not expose peer-run transport; production always binds first.
+        # Embedded callers without a bound server expose no peer-run transport.
         return True
     store = getattr(_bound_server, "_run_idempotency_store", None)
     if store is None:
-        # The dashboard/TUI process owns groups.* but does not construct the API adapter
-        # that owns this store. Open the same shared SQLite-backed store lazily so
-        # capability negotiation reflects the real /v1/runs replay boundary.
+        # This process does not construct the API adapter that owns the store; open the
+        # same shared SQLite store lazily so negotiation reflects the real replay boundary.
         from gateway.platforms.api_server import RunIdempotencyStore
         with _run_store_lock:
             store = getattr(_bound_server, "_run_idempotency_store", None)
             if store is None:
-                store = RunIdempotencyStore()
-                _bound_server._run_idempotency_store = store
+                store = _bound_server._run_idempotency_store = RunIdempotencyStore()
     return bool(getattr(store, "durable", False))
 
 
@@ -175,18 +169,28 @@ def _grant_expiry(claims: dict) -> float:
     return float(claims.get("status_expires_at", claims["expires_at"]))
 
 
+def _include_disbanded(params: dict) -> bool:
+    return params.get("include_disbanded") is True
+
+
+def _room_error_class(replica_only: bool) -> type:
+    if replica_only:
+        from gateway.hosted_room_replicas import ReplicaError
+        return ReplicaError
+    from gateway.hosted_rooms import HostedRoomError
+    return HostedRoomError
+
+
 def _room_method(
     name: str, *, code: int, room_code: int | None = None, replica_only: bool = False,
     with_reason: bool = True, service_code: int | None = None,
     service_message: str = _DRIVER_UNAVAILABLE, db: bool = False):
     """Register ``fn`` under ``name`` with the shared hosted-room error envelope.
-
-    ``service_code`` set: the live service is required and passed as a third argument;
-    when absent the handler fails with that code. ``db``: the default room db path is
-    passed as the next argument. ``room_code`` maps ``HostedRoomError`` (or only
-    ``ReplicaError`` when ``replica_only``) to a 4xxx client error, attaching
-    ``{"reason"}`` data when ``with_reason``; any other exception maps to ``code``.
-    """
+    ``service_code``: the live service is required (else that error) and passed as a third
+    argument; ``db``: the default room db path follows. ``room_code`` maps ``HostedRoomError``
+    (only ``ReplicaError`` when ``replica_only``) to a client error with ``{"reason"}`` data
+    when ``with_reason``; anything else maps to ``code``."""
+    error_class = _room_error_class  # closure cell: handlers run under server.py globals
 
     def dec(fn):
         def handler(rid, params: dict) -> dict:
@@ -202,16 +206,9 @@ def _room_method(
             try:
                 return fn(*args)
             except Exception as exc:
-                if room_code is not None:
-                    from gateway.hosted_rooms import HostedRoomError
-                    klass = HostedRoomError
-                    if replica_only:
-                        from gateway.hosted_room_replicas import ReplicaError
-                        klass = ReplicaError
-                    if isinstance(exc, klass):
-                        reason = getattr(exc, "reason", None) if with_reason else None
-                        data = {"reason": reason} if reason else None
-                        return _err(rid, room_code, str(exc), data)
+                if room_code is not None and isinstance(exc, error_class(replica_only)):
+                    reason = getattr(exc, "reason", None) if with_reason else None
+                    return _err(rid, room_code, str(exc), {"reason": reason} if reason else None)
                 return _err(rid, code, str(exc))
         handler.__doc__ = fn.__doc__
         return method(name)(handler)
@@ -233,26 +230,21 @@ def _(rid, params: dict, _catalog=_local_catalog, _methods=_METHODS) -> dict:
         policy = _profile_execution_policy(profile)
         catalog = _catalog(local_authority_gateway_id(), profile, policy)
         room_link = {
-            "enabled": True, "profile": profile, "catalog": catalog, "endpoint": catalog["endpoint"]
-        }
+            "enabled": True, "profile": profile, "catalog": catalog,
+            "endpoint": catalog["endpoint"]}
     except Exception:
-        room_link = {
-            "enabled": False,
-            "reason": (
-                "durable_run_storage_required" if not _room_link_run_storage_durable()
-                else "gateway_roomlink_secret_unavailable")}
+        room_link = {"enabled": False, "reason": (
+            "durable_run_storage_required" if not _room_link_run_storage_durable()
+            else "gateway_roomlink_secret_unavailable")}
     return _ok(rid, {
-        "protocol_version": PROTOCOL_VERSION,
-        "driver": driver_ready,
+        "protocol_version": PROTOCOL_VERSION, "driver": driver_ready,
         "persistent_process": bool(room_link.get("catalog", {}).get("persistent_process", False)),
-        "authority_gateway_id": local_authority_gateway_id(),
-        "room_link": room_link,
+        "authority_gateway_id": local_authority_gateway_id(), "room_link": room_link,
         "features": [
             "authority_epoch", "coordinator_fencing", "room_identity", "monotonic_log",
             "idempotent_send", "replayable_disband", "typed_events", "actor_identity",
             "log_replication", "authority_takeover"],
-        "methods": list(_methods),
-        "max_log_limit": MAX_LOG_LIMIT})
+        "methods": list(_methods), "max_log_limit": MAX_LOG_LIMIT})
 
 
 @_room_method("groups.peer.invite", code=4120, db=True)
@@ -295,9 +287,8 @@ def _(rid, params: dict, db_path, _expiry=_grant_expiry) -> dict:
     profile = _requested_profile(params)
     claims = decode_room_grant(
         gateway_room_grant_secret(), str(params.get("grant") or ""), permission="status")
-    if (
-        claims["target_profile"] != profile
-        or claims["target_install_id"] != local_authority_gateway_id()):
+    if (claims["target_profile"] != profile
+            or claims["target_install_id"] != local_authority_gateway_id()):
         raise ValueError("room grant target does not match this profile")
     revoke_room_grant_scope(db_path, claims=claims, expires_at=_expiry(claims))
     return _ok(rid, {"revoked": True})
@@ -321,36 +312,29 @@ def _(rid, params: dict, service) -> dict:
     grant = str(params.get("grant") or "")
     client = PeerRunsHTTPClient(base_url=target_url, api_key="", receipt_db_path=service.db_path)
     probe = client.probe(grant=grant)
-    live_catalog = GatewayRoomCatalog.from_mapping(probe.get("catalog"))
-    if live_catalog != catalog:
+    # Frozen dataclass equality: an equal live catalog already passed the checks above.
+    if GatewayRoomCatalog.from_mapping(probe.get("catalog")) != catalog:
         raise ValueError("target capability catalog changed during setup")
-    if (
-        ROOM_LINK_PROTOCOL_VERSION not in live_catalog.protocol_versions
-        or "direct" not in live_catalog.link_modes):
-        raise ValueError("target RoomLink capability is incompatible")
     room_id = str(params.get("room_id") or "")
     member_id = str(params.get("member_id") or "")
     home_install_id = local_authority_gateway_id()
     home_room = room_state(service.db_path, room_id=room_id)
-    if (
-        probe.get("room_id") != room_id
-        or probe.get("home_install_id") != home_install_id
-        or probe.get("authority_gateway_id") != home_room.get("authority_gateway_id")
-        or int(probe.get("authority_epoch") or 0) != int(home_room.get("authority_epoch") or 0)
-        or probe.get("member_id") != member_id
-        or probe.get("target_profile") != target_profile):
+    expected_scope = {
+        "room_id": room_id, "home_install_id": home_install_id,
+        "authority_gateway_id": home_room.get("authority_gateway_id"),
+        "member_id": member_id, "target_profile": target_profile}
+    if (any(probe.get(k) != v for k, v in expected_scope.items())
+            or int(probe.get("authority_epoch") or 0)
+            != int(home_room.get("authority_epoch") or 0)):
         raise ValueError("room grant scope does not match this route")
     route = PeerMemberRoute(
-        home_install_id=home_install_id,
-        member_id=member_id,
-        target_install_id=catalog.installation_id,
-        target_profile=target_profile,
+        home_install_id=home_install_id, member_id=member_id,
+        target_install_id=catalog.installation_id, target_profile=target_profile,
         capability_digest=catalog.catalog_digest,
         execution_policy_digest=catalog.execution_policy.policy_digest,
         cancellation_scope_id=str(
             params.get("cancellation_scope_id") or f"cancel-{params.get('room_id') or ''}"),
-        trace_id=str(params.get("trace_id") or f"trace-{os.urandom(16).hex()}"),
-        grant=grant)
+        trace_id=str(params.get("trace_id") or f"trace-{os.urandom(16).hex()}"), grant=grant)
     service.register_peer_route(
         room_id=room_id, member_id=member_id, route=route, client=client, target_url=target_url,
         catalog=catalog)
@@ -376,11 +360,7 @@ def _(rid, params: dict, db_path) -> dict:
     "groups.create", code=5111, room_code=4110, service_code=4123,
     service_message=_WORKER_UNAVAILABLE)
 def _(rid, params: dict, service) -> dict:
-    """Create a hosted room idempotently.
-
-    Required params: ``room_id``, ``name``, and ``members``. Authority is
-    derived from this gateway's stable install identity, never from the client.
-    """
+    """Create a hosted room idempotently; authority is this gateway's stable install identity."""
     room = service.create_room(
         room_id=params.get("room_id"), name=params.get("name"), members=params.get("members"))
     return _ok(rid, {"room": room})
@@ -401,33 +381,18 @@ def _(rid, params: dict, db_path) -> dict:
 
 
 @_room_method(
-    "groups.send", code=5112, room_code=4111, service_code=4123, service_message=_WORKER_UNAVAILABLE
-)
+    "groups.send", code=5112, room_code=4111, service_code=4123,
+    service_message=_WORKER_UNAVAILABLE)
 def _(rid, params: dict, service) -> dict:
-    """Append one typed event to a hosted room idempotently.
-
-    Required params: ``room_id``, ``event_id``, and object ``payload``. Only
-    inert ``message.user`` events are accepted through this client-facing
-    method; the actor is server-owned rather than trusted from params.
-    """
+    """Append one typed event idempotently (inert ``message.user`` only; actor is server-owned)."""
     from gateway.hosted_rooms import user_event_id
     client_event_id = params.get("event_id")
     event = service.send(
         room_id=params.get("room_id"), event_id=user_event_id(client_event_id),
         payload=params.get("payload"))
     return _ok(rid, {
-        "event": event, "client_event_id": client_event_id, "accepted": True, "driver_started": True
-    })
-
-
-@_room_method("groups.rename", code=5117, room_code=4117, db=True)
-def _(rid, params: dict, db_path) -> dict:
-    """Rename one hosted room atomically with its replay event."""
-    from gateway.hosted_rooms import rename_room
-    renamed = rename_room(
-        db_path, room_id=params.get("room_id"), event_id=params.get("event_id"),
-        name=params.get("name"))
-    return _ok(rid, {"room": renamed})
+        "event": event, "client_event_id": client_event_id, "accepted": True,
+        "driver_started": True})
 
 
 @_room_method(
@@ -491,79 +456,72 @@ def _(rid, params: dict, service) -> dict:
         task = {}
     identity = task.get("identity")
     receipt = {
-        **{
-            field: str(getattr(identity, field, "") or "")
-            for field in ("room_id", "task_id", "thread_id", "turn_id")},
+        **{f: str(getattr(identity, f, "") or "")
+           for f in ("room_id", "task_id", "thread_id", "turn_id")},
         "status": str(task.get("status") or ""),
         "execution_generation": int(task.get("execution_generation") or 0),
         "cancel_generation": int(task.get("cancel_generation") or 0)}
     return _ok(rid, {"retried": True, "task": receipt})
 
 
-@_room_method("groups.log", code=5113, room_code=4112, db=True)
-def _(rid, params: dict, db_path) -> dict:
-    """Return a monotonic room-log delta after ``since_seq``."""
-    from gateway.hosted_rooms import read_events
-    delta = read_events(
-        db_path, room_id=params.get("room_id"), since_seq=params.get("since_seq", 0),
-        limit=params.get("limit", 100), include_disbanded=params.get("include_disbanded") is True)
-    return _ok(rid, delta)
+def _passthrough(
+    name: str, module: str, fn_name: str, doc: str, *, code: int, room_code: int,
+    params: tuple, replica_only: bool = False, wrap: str | None = None) -> None:
+    """Register a method whose result is ``module.fn(db_path, **params)`` verbatim (or under key
+    ``wrap``). ``params`` items are ``key`` (-> ``params.get(key)``) or ``(key, extractor)``."""
+    @_room_method(
+        name, code=code, room_code=room_code, replica_only=replica_only,
+        with_reason=not replica_only, db=True)
+    def handler(rid, params_in: dict, db_path, _import=importlib.import_module) -> dict:
+        kwargs = {
+            (spec if isinstance(spec, str) else spec[0]):
+            (params_in.get(spec) if isinstance(spec, str) else spec[1](params_in))
+            for spec in params}
+        result = getattr(_import(module), fn_name)(db_path, **kwargs)
+        return _ok(rid, {wrap: result} if wrap else result)
+    handler.__doc__ = doc
 
 
-@_room_method(
-    "groups.replicate", code=5116, room_code=4116, replica_only=True, with_reason=False, db=True)
-def _(rid, params: dict, db_path) -> dict:
-    """Persist one authority-stamped replay page into the local replica store.
-
-    ``page`` is the verbatim ``groups.log`` result read from the room's
-    authority gateway; ingest is idempotent and refuses sequence gaps and
-    authority-epoch regressions.
-    """
-    from gateway.hosted_room_replicas import ingest_page
-    result = ingest_page(
-        db_path, room_id=params.get("room_id"), room_name=params.get("room_name"),
-        members=params.get("members"), page=params.get("page"))
-    return _ok(rid, result)
-
-
-@_room_method(
-    "groups.replica_state", code=5117, room_code=4117, replica_only=True, with_reason=False, db=True
-)
-def _(rid, params: dict, db_path) -> dict:
-    """Report the local replica's coverage and authority lineage."""
-    from gateway.hosted_room_replicas import replica_state
-    return _ok(rid, replica_state(db_path, room_id=params.get("room_id")))
+_passthrough(
+    "groups.rename", "gateway.hosted_rooms", "rename_room",
+    """Rename one hosted room atomically with its replay event.""",
+    code=5117, room_code=4117, params=("room_id", "event_id", "name"), wrap="room")
+_passthrough(
+    "groups.log", "gateway.hosted_rooms", "read_events",
+    """Return a monotonic room-log delta after ``since_seq``.""",
+    code=5113, room_code=4112,
+    params=(
+        "room_id", ("since_seq", lambda p: p.get("since_seq", 0)),
+        ("limit", lambda p: p.get("limit", 100)), ("include_disbanded", _include_disbanded)))
+_passthrough(
+    "groups.replicate", "gateway.hosted_room_replicas", "ingest_page",
+    """Persist one authority-stamped replay page (a verbatim ``groups.log`` result) into
+    the local replica store; idempotent, refuses sequence gaps and epoch regressions.""",
+    code=5116, room_code=4116, params=("room_id", "room_name", "members", "page"),
+    replica_only=True)
+_passthrough(
+    "groups.replica_state", "gateway.hosted_room_replicas", "replica_state",
+    """Report the local replica's coverage and authority lineage.""",
+    code=5117, room_code=4117, params=("room_id",), replica_only=True)
 
 
 @_room_method("groups.promote", code=5118, room_code=4118, with_reason=False, db=True)
 def _(rid, params: dict, db_path) -> dict:
-    """Continue a replicated room on THIS gateway at ``epoch + 1``.
-
-    Requires ``confirm: true`` — the caller asserts the previous authority can
-    no longer commit (explicit user action; a lease/quorum driver later).
-    """
+    """Continue a replicated room on THIS gateway at ``epoch + 1``. Requires ``confirm:
+    true`` — the caller asserts the previous authority can no longer commit."""
     from gateway.hosted_room_replicas import promote_replica
     if params.get("confirm") is not True:
-        return _err(
-            rid, 4118,
-            "promotion requires confirm=true acknowledging the previous "
-            "authority can no longer commit")
-    result = promote_replica(
-        db_path, room_id=params.get("room_id"), reason=params.get("reason", "authority-unreachable")
-    )
-    return _ok(rid, result)
+        return _err(rid, 4118, "promotion requires confirm=true acknowledging the previous "
+                    "authority can no longer commit")
+    reason = params.get("reason", "authority-unreachable")
+    return _ok(rid, promote_replica(db_path, room_id=params.get("room_id"), reason=reason))
 
 
-@_room_method(
-    "groups.demote", code=5119, room_code=4119, replica_only=True, with_reason=False, db=True)
-def _(rid, params: dict, db_path) -> dict:
-    """Fence this gateway's stale room authority against a proven newer epoch."""
-    from gateway.hosted_room_replicas import demote_room
-    result = demote_room(
-        db_path, room_id=params.get("room_id"),
-        observed_gateway_id=params.get("observed_gateway_id"),
-        observed_epoch=params.get("observed_epoch"))
-    return _ok(rid, result)
+_passthrough(
+    "groups.demote", "gateway.hosted_room_replicas", "demote_room",
+    """Fence this gateway's stale room authority against a proven newer epoch.""",
+    code=5119, room_code=4119, params=("room_id", "observed_gateway_id", "observed_epoch"),
+    replica_only=True)
 
 
 def register(server) -> None:
