@@ -1302,11 +1302,10 @@ class ProcessRegistry:
                 flags = fcntl.fcntl(fd, fcntl.F_GETFL)
                 fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
                 try:
-                    chunk = stdout.read()
-                    if chunk:
-                        session.append_output(chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace"))
-                except (BlockingIOError, OSError, ValueError):
-                    pass
+                    with suppress(BlockingIOError, OSError, ValueError):
+                        chunk = stdout.read()
+                        if chunk:
+                            session.append_output(chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace"))
                 finally:
                     with suppress(Exception):
                         fcntl.fcntl(fd, fcntl.F_SETFL, flags)
@@ -1322,11 +1321,7 @@ class ProcessRegistry:
 
     @staticmethod
     def _status_head(session: ProcessSession) -> dict:
-        return {
-            "session_id": session.id,
-            "command": session.command,
-            "status": "exited" if session.exited else "running",
-        }
+        return {"session_id": session.id, "command": session.command, "status": "exited" if session.exited else "running"}
 
     def poll(self, session_id: str) -> dict:
         """Check status and get new output for a background process."""
@@ -1337,11 +1332,8 @@ class ProcessRegistry:
         with session._lock:
             output_preview = _output_tail(session, 1000)
         result = {
-            **self._status_head(session),
-            "pid": session.pid,
-            "uptime_seconds": int(time.time() - session.started_at),
-            "output_preview": output_preview,
-        }
+            **self._status_head(session), "pid": session.pid,
+            "uptime_seconds": int(time.time() - session.started_at), "output_preview": output_preview}
         if session.exited:
             result.update(self._exit_fields(session))
             # Read-only: record in _poll_observed (CLI inline dedup) but NOT in
@@ -1374,11 +1366,8 @@ class ProcessRegistry:
             stop = slice(offset, offset + limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
         result = {
-            **self._status_head(session),
-            "output": "\n".join(selected),
-            "total_lines": total_lines,
-            "showing": f"{len(selected)} lines",
-        }
+            **self._status_head(session), "output": "\n".join(selected),
+            "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if session.exited and observed_completion_output:
             self._completion_consumed.add(session_id)
         return result
@@ -1417,11 +1406,8 @@ class ProcessRegistry:
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
-                    "status": "interrupted",
-                    "command": session.command,
-                    "output": _output_tail(session, 1000),
-                    "note": "User sent a new message -- wait interrupted",
-                }
+                    "status": "interrupted", "command": session.command, "output": _output_tail(session, 1000),
+                    "note": "User sent a new message -- wait interrupted"}
             if result is not None:
                 if timeout_note:
                     result["timeout_note"] = timeout_note
@@ -1431,13 +1417,9 @@ class ProcessRegistry:
                 break
             session._completion_event.wait(timeout=min(1.0, remaining))
         result = {
-            "status": "timeout",
-            "command": session.command,
-            "output": _output_tail(session, 1000),
-            # Not a failure — models re-issued identical waits after misreading
-            # this result as an error.
-            "process_running": True,
-        }
+            "status": "timeout", "command": session.command, "output": _output_tail(session, 1000),
+            # Not a failure — models re-issued identical waits after misreading this as an error.
+            "process_running": True}
         base_note = (
             f"Wait window of {effective_timeout}s elapsed — the process is still running. This is not an error.")
         if session.started_at:
@@ -1837,14 +1819,10 @@ process_registry = ProcessRegistry()
 # `from tools.process_registry import format_process_notification` and
 # `patch("tools.process_registry._x")` keep resolving.
 from tools.process_registry_notifications import (  # noqa: F401,E402
-    _delegation_attribution_line,
-    _delegation_config,
-    _delegation_model_not_found,
-    _delegation_model_not_found_notice,
-    _format_age,
-    _format_async_delegation,
-    _model_not_found_patterns,
-    format_process_notification)
+    _delegation_attribution_line, _delegation_config, _delegation_model_not_found,
+    _delegation_model_not_found_notice, _format_age, _format_async_delegation,
+    _model_not_found_patterns, format_process_notification,
+)
 
 
 # --- the "process_manage" tool schema + handler -----------------------------------
