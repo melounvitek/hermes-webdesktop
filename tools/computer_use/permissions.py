@@ -22,11 +22,6 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 _RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})  # mirrors the toolset platform_gate
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
-def _resolve_driver_cmd(override: Optional[str]) -> Optional[str]:
-    """Same runtime resolver as the tool, so status/grant act on the binary computer_use invokes."""
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
-    return resolve_cua_driver_cmd(override)
-
 def _child_env() -> Dict[str, str]:
     """cua-driver child env (telemetry policy + provider secrets stripped); degrades to
     ``os.environ`` on import error so probes never break."""
@@ -50,7 +45,7 @@ def _doctor(binary: str) -> Optional[Dict[str, Any]]:
     try:
         data = _json_out(binary, "doctor", "--json", timeout=12)
     except Exception:
-        return None
+        data = None
     if not isinstance(data, dict):
         return None
     return {"ok": bool(data.get("ok")), "checks": [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
@@ -75,8 +70,8 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     the UI keys off: on macOS it's both TCC grants; elsewhere it's driver health (no TCC model).
     ``None`` means unknown (binary missing / probe failed). ``can_grant`` is macOS-only.
     Key order is an API payload contract."""
-    plat = sys.platform
-    binary = _resolve_driver_cmd(driver_cmd)
+    from tools.computer_use.cua_backend import resolve_cua_driver_cmd  # same resolver as the tool itself
+    plat, binary = sys.platform, resolve_cua_driver_cmd(driver_cmd)
     out: Dict[str, Any] = {"platform": plat, "platform_supported": plat in _RUNTIME_PLATFORMS,
                            "installed": bool(binary), "version": None, "ready": None, "can_grant": plat == "darwin",
                            "checks": [], "source": None, "error": None, **{k: None for k in _BOOLS}}
@@ -103,7 +98,8 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     if sys.platform != "darwin":
         print("Computer Use permissions are a macOS concept; nothing to grant here.")
         return 64
-    binary = _resolve_driver_cmd(driver_cmd)
+    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
+    binary = resolve_cua_driver_cmd(driver_cmd)
     if not binary:
         print("cua-driver: not installed. Run: hermes computer-use install")
         return 2
