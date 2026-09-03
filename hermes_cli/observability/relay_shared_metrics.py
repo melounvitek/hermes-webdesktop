@@ -66,6 +66,12 @@ def _retry_ordinal(event: dict[str, Any]) -> int | None:
     return None
 
 
+def _forget(index: dict[Any, _MetricsSession], key: Any, owner: _MetricsSession) -> None:
+    """Drop ``key`` from ``index`` only while it still points at ``owner``."""
+    if index.get(key) is owner:
+        index.pop(key, None)
+
+
 def _sole(items: Any) -> Any:
     """The single distinct element of ``items`` (identity-deduplicated), else None."""
     unique = {id(item): item for item in items}
@@ -469,8 +475,7 @@ class _Runtime:
         else:
             self._export()
         with self._sessions_lock:
-            if self._sessions.get(session.session_id) is session:
-                self._sessions.pop(session.session_id, None)
+            _forget(self._sessions, session.session_id, session)
 
     def shutdown(self) -> None:
         with self._sessions_lock:
@@ -519,12 +524,11 @@ class _Runtime:
         """
         with self._send_lock:
             thread = self._send_thread
-        if thread is None or not thread.is_alive():
-            return
-        try:
-            thread.join(timeout)
-        except Exception:
-            logger.debug("Shared-metrics send thread join failed", exc_info=True)
+        if thread is not None and thread.is_alive():
+            try:
+                thread.join(timeout)
+            except Exception:
+                logger.debug("Shared-metrics send thread join failed", exc_info=True)
 
     def _session(self, event: dict[str, Any]) -> _MetricsSession | None:
         with self._sessions_lock:
@@ -790,13 +794,9 @@ class _Runtime:
             session.tasks.pop(task_id, None)
             session.retired_turn_ids.extend(task.turn_ids)
             with self._task_sessions_lock:
-                task_key = (session.session_id, task_id)
-                if self._task_sessions.get(task_key) is session:
-                    self._task_sessions.pop(task_key, None)
+                _forget(self._task_sessions, (session.session_id, task_id), session)
                 for turn_id in task.turn_ids:
-                    turn_key = (session.session_id, turn_id)
-                    if self._turn_sessions.get(turn_key) is session:
-                        self._turn_sessions.pop(turn_key, None)
+                    _forget(self._turn_sessions, (session.session_id, turn_id), session)
         return True
 
     def _export(self) -> None:
@@ -831,14 +831,11 @@ class _Runtime:
             # One in-flight pass per process; the next hook fire picks up what is pending.
             if self._send_thread is not None and self._send_thread.is_alive():
                 return
-            thread = threading.Thread(
-                target=self._run_send_pass,
-                args=(resolved.endpoint,),
-                name="hermes-shared-metrics-send",
-                daemon=True,
+            self._send_thread = threading.Thread(
+                target=self._run_send_pass, args=(resolved.endpoint,),
+                name="hermes-shared-metrics-send", daemon=True,
             )
-            self._send_thread = thread
-            thread.start()
+            self._send_thread.start()
 
     def _run_send_pass(self, endpoint: str) -> None:
         from hermes_cli.observability.shared_metrics_sender import SharedMetricsSender
