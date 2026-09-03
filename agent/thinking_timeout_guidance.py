@@ -28,8 +28,9 @@ def is_thinking_timeout(classified: object, model: str, error_msg: str) -> bool:
     """
     from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
 
-    reason = getattr(classified, "reason", None)
-    if getattr(reason, "value", None) != "timeout" or get_reasoning_stale_timeout_floor(model) is None:
+    if getattr(getattr(classified, "reason", None), "value", None) != "timeout":
+        return False
+    if get_reasoning_stale_timeout_floor(model) is None:
         return False
     error_msg_lower = (error_msg or "").lower()
     return any(p in error_msg_lower for p in _THINKING_TIMEOUT_SUBSTRINGS)

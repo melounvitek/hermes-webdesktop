@@ -81,11 +81,10 @@ def render_history_for_side_question(
     kept: List[str] = []
     used = 0
     for line in reversed(lines):
-        cost = len(line) + 1
-        if used + cost > char_budget and kept:
+        if used + len(line) + 1 > char_budget and kept:
             break
         kept.append(line)
-        used += cost
+        used += len(line) + 1
     if not kept:
         return "(no prior conversation)"
     prefix = "[...older conversation omitted...]\n" if len(kept) < len(lines) else ""

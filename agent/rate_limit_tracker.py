@@ -125,8 +125,8 @@ def _fmt_seconds(seconds: float) -> str:
     if s < 3600:
         m, sec = divmod(s, 60)
         return f"{m}m {sec}s" if sec else f"{m}m"
-    h, remainder = divmod(s, 3600)
-    m = remainder // 60
+    h, m = divmod(s, 3600)
+    m //= 60
     return f"{h}h {m}m" if m else f"{h}h"
 
 
@@ -140,7 +140,6 @@ def _bucket_line(label: str, bucket: RateLimitBucket, label_width: int = 14) -> 
     """Format one bucket as a single line."""
     if bucket.limit <= 0:
         return f"  {label:<{label_width}}  (no data)"
-
     pct = bucket.usage_pct
     used, limit, remaining = map(_fmt_count, (bucket.used, bucket.limit, bucket.remaining))
     reset = _fmt_seconds(bucket.remaining_seconds_now)

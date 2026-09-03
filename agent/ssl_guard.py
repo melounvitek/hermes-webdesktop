@@ -40,19 +40,15 @@ def _validate_bundle_path(label: str, value: str, *, require_substantial: bool =
         raise _ssl_err(f"{label} CA bundle at {value} cannot be loaded: {exc}") from exc
     try:
         loaded_certs = ctx.get_ca_certs()
-    except NotImplementedError:
-        # truststore-backed SSLContext (Windows OS trust store) lacks get_ca_certs(); loading above already validated it.
+    except NotImplementedError:  # truststore-backed SSLContext (Windows) lacks get_ca_certs(); loading validated it
         return
     if not loaded_certs:
         raise _ssl_err(f"{label} CA bundle at {value} did not load any certificates")
 
 
 def verify_ca_bundle() -> None:
-    """Verify configured and bundled CA certificates are present and loadable.
-
-    Raises SSLConfigurationError when an explicit CA-bundle env var points at a
-    bad path or certifi's bundled ``cacert.pem`` is missing/corrupt.
-    """
+    """Raise SSLConfigurationError when a CA-bundle env var points at a bad path or certifi's ``cacert.pem``
+    is missing/corrupt."""
     if is_truthy_value(os.getenv("HERMES_SKIP_SSL_GUARD", "")):
         logger.debug("SSL CA bundle guard skipped via HERMES_SKIP_SSL_GUARD")
         return

@@ -21,8 +21,5 @@ def separate_glued_reasoning_blocks(previous: str, delta: str) -> str:
     alone: its deltas carry their own whitespace, and a fragment that merely opens emphasis
     (``**`` alone) is not a part boundary — summary parts carry the whole heading in one delta.
     """
-    if not previous or not delta or previous[-1].isspace():
-        return delta
-    if not delta.startswith("**") or "**" not in delta[2:]:
-        return delta
-    return f"\n\n{delta}"
+    glued = previous and delta and not previous[-1].isspace() and delta.startswith("**") and "**" in delta[2:]
+    return f"\n\n{delta}" if glued else delta

@@ -40,14 +40,14 @@ class TerminalEnvironmentProvider(ProviderBase):
       sandbox identity; opt in when a shared name would let two ephemeral runs destroy each other.
     """
 
+    is_remote: bool = True
+    is_container: bool = True
+    session_isolated_when_nonpersistent: bool = False
+
     @property
     def description(self) -> str:
         """One-line description shown in backend pickers."""
         return f"Run commands in a {self.display_name} environment."
-
-    is_remote: bool = True
-    is_container: bool = True
-    session_isolated_when_nonpersistent: bool = False
 
     @property
     def skip_container_guards(self) -> bool:
@@ -63,30 +63,23 @@ class TerminalEnvironmentProvider(ProviderBase):
 
     @property
     def env_description(self) -> str:
-        """Prompt-builder fallback for where commands run when the live backend probe fails
-        at system-prompt build time (e.g. ``"a Daytona workspace (Linux)"``)."""
+        """Prompt-builder fallback for where commands run when the live probe fails (e.g. ``"a Daytona workspace (Linux)"``)."""
         return f"a {self.display_name} environment (likely Linux)"
-
-    # -- Availability / setup UX -------------------------------------------
 
     @abc.abstractmethod
     def is_available(self) -> bool:
-        """True when this backend can service commands. Cheap check only — must
-        NOT make network calls; runs during requirement checks and UI paints."""
+        """True when this backend can service commands. Cheap, NO network calls: runs during UI paints."""
 
     def check_requirements(self, config: Dict[str, Any]) -> bool:
-        """Full requirements check for :func:`check_terminal_requirements` with the merged
-        terminal env config; log actionable errors before returning False."""
+        """Full requirements check with the merged terminal env config; log actionable errors before returning False."""
         return self.is_available()
 
     def probe(self) -> Tuple[str, str]:
-        """Dashboard picker health probe ``(status, detail)`` with status in
-        ``ready`` / ``needs_setup`` / ``unavailable``. Must never raise; stay fast (<~2s)."""
+        """Dashboard picker health ``(status, detail)``, status in ``ready``/``needs_setup``/``unavailable``. Never raise; <~2s."""
         return ("ready", "") if self.is_available() else ("needs_setup", f"{self.display_name} is not configured.")
 
     def setup_instructions(self) -> List[str]:
-        """Lines printed by ``hermes setup`` after this backend is selected. The wizard
-        persists ``terminal.backend`` itself; interactive flows go in :meth:`post_setup`."""
+        """Lines printed by ``hermes setup`` after selection (the wizard persists ``terminal.backend`` itself)."""
         return []
 
     def post_setup(self) -> None:
@@ -98,20 +91,13 @@ class TerminalEnvironmentProvider(ProviderBase):
             ok = bool(self.is_available())
         except Exception:
             ok = False
-        detail = "(configured)" if ok else "(not configured — see setup instructions)"
-        return [(ok, f"{self.display_name} backend", detail)]
-
-    # -- The factory -------------------------------------------------------
+        return [(ok, f"{self.display_name} backend", "(configured)" if ok else "(not configured — see setup instructions)")]
 
     @abc.abstractmethod
     def create_environment(
         self, *, cwd: str, timeout: int, task_id: str = "default", image: Optional[str] = None,
         container_config: Optional[Dict[str, Any]] = None, **kwargs: Any,
     ):
-        """Create and return an execution environment (``BaseEnvironment`` duck type).
-
-        MUST accept ``**kwargs`` and ignore unknown keys so the factory signature can evolve
-        without breaking older plugins. ``task_id`` keys environment reuse/persistence;
-        ``container_config`` carries ``container_cpu`` / ``container_memory`` /
-        ``container_disk`` / ``container_persistent`` when :attr:`is_container` is True.
-        """
+        """Create an execution environment (``BaseEnvironment`` duck type). MUST accept ``**kwargs`` and ignore
+        unknown keys so the factory can evolve without breaking older plugins. ``task_id`` keys reuse/persistence;
+        ``container_config`` carries ``container_cpu/memory/disk/persistent`` when :attr:`is_container`."""

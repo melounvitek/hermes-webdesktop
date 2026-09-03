@@ -83,18 +83,12 @@ def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
 
 
 def resolve_agent_cwd() -> Path:
-    """Configured cwd, else the launch dir (os.getcwd() — its OSError on a
-    deleted cwd deliberately propagates; the caller owns that guard)."""
-    p = _resolve_configured_cwd(override_is_final=False)
-    return p if p is not None else Path(os.getcwd())
+    """Configured cwd, else the launch dir (os.getcwd()'s OSError on a deleted cwd deliberately propagates)."""
+    return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
 
 
 def resolve_context_cwd() -> Path | None:
-    """Configured cwd for context-file discovery, or None for "no configured cwd".
-
-    None makes build_context_files_prompt fall back to the launch dir (correct for a local CLI
-    launched inside a real project). An existing configured path is honored verbatim —
-    including the Hermes source tree itself, a legitimate workspace when developing Hermes
-    (fallback-directory policy lives in build_context_files_prompt).
-    """
+    """Configured cwd for context-file discovery, or None (build_context_files_prompt then falls back to the
+    launch dir). An existing configured path is honored verbatim — including the Hermes source tree, a
+    legitimate workspace when developing Hermes; fallback-directory policy lives in the caller."""
     return _resolve_configured_cwd(override_is_final=True)
