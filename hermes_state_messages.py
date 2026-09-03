@@ -1005,8 +1005,7 @@ class SessionMessagesMixin:
 
     @staticmethod
     def _find_duplicate_replayed_user_message(
-        messages: List[Dict[str, Any]], msg: Dict[str, Any]
-    ) -> Optional[Tuple[int, bool]]:
+        messages: List[Dict[str, Any]], msg: Dict[str, Any]) -> Optional[Tuple[int, bool]]:
         """Adjacent replay duplicate ``(index, prefer_current)`` or None. Rotation may persist
         the current ask in the parent and again inside a composite child carrier: carriers
         compare by canonical live payload, ordinary users by exact string. The child carrier
