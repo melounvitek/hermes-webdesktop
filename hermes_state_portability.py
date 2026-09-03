@@ -377,57 +377,48 @@ class SessionPortabilityMixin:
         normalized: List[Dict[str, Any]] = []
         errors: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
-        total_messages = 0
-        total_bytes = 0
+        totals = {"messages": 0, "bytes": 0}
         for index, raw in enumerate(sessions):
-            if not isinstance(raw, dict):
-                errors.append(self._import_error(index, "", "session must be an object"))
-                continue
-            session_id = str(raw.get("id") or "").strip()
-            if not session_id:
-                errors.append(self._import_error(index, "", "session id is required"))
-                continue
-
-            def _reject(msg: str) -> None:
-                errors.append(self._import_error(index, session_id, msg))
-
-            if session_id in seen_ids:
-                _reject("duplicate session id")
-                continue
-            messages = raw.get("messages") or []
-            if not isinstance(messages, list):
-                _reject("messages must be a list")
-                continue
-            if len(messages) > self._IMPORT_MAX_MESSAGES_PER_SESSION:
-                _reject("messages exceeds the per-session import limit")
-                continue
-            if any(not isinstance(msg, dict) for msg in messages):
-                _reject("messages must contain only objects")
-                continue
+            session_id = str(raw.get("id") or "").strip() if isinstance(raw, dict) else ""
             try:
-                session_bytes = len(json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            except (TypeError, ValueError):
-                _reject("session must be JSON serializable")
-                continue
-            if session_bytes > self._IMPORT_MAX_SESSION_BYTES:
-                _reject("session exceeds the import size limit")
-                continue
-            total_bytes += session_bytes
-            if total_bytes > self._IMPORT_MAX_TOTAL_BYTES:
-                _reject("import exceeds the total size limit")
-                continue
-            try:
-                item = self._normalize_import_session(raw, session_id, messages)
+                item = self._validate_import_session(raw, session_id, seen_ids, totals)
             except ValueError as exc:
-                _reject(str(exc))
-                continue
-            total_messages += len(item["messages"])
-            if total_messages > self._IMPORT_MAX_TOTAL_MESSAGES:
-                _reject("messages exceeds the total import limit")
+                errors.append(self._import_error(index, session_id, str(exc)))
                 continue
             seen_ids.add(session_id)
             normalized.append({"index": index, **item})
         return normalized, errors
+
+    def _validate_import_session(self, raw: Any, session_id: str, seen_ids: set, totals: Dict[str, int]) -> Dict[str, Any]:
+        """One payload session -> normalized item; ValueError(message) on rejection. *totals*
+        accumulate before their limit check (a rejected oversize entry still counts)."""
+        if not isinstance(raw, dict):
+            raise ValueError("session must be an object")
+        if not session_id:
+            raise ValueError("session id is required")
+        if session_id in seen_ids:
+            raise ValueError("duplicate session id")
+        messages = raw.get("messages") or []
+        if not isinstance(messages, list):
+            raise ValueError("messages must be a list")
+        if len(messages) > self._IMPORT_MAX_MESSAGES_PER_SESSION:
+            raise ValueError("messages exceeds the per-session import limit")
+        if any(not isinstance(msg, dict) for msg in messages):
+            raise ValueError("messages must contain only objects")
+        try:
+            session_bytes = len(json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            raise ValueError("session must be JSON serializable") from None
+        if session_bytes > self._IMPORT_MAX_SESSION_BYTES:
+            raise ValueError("session exceeds the import size limit")
+        totals["bytes"] += session_bytes
+        if totals["bytes"] > self._IMPORT_MAX_TOTAL_BYTES:
+            raise ValueError("import exceeds the total size limit")
+        item = self._normalize_import_session(raw, session_id, messages)
+        totals["messages"] += len(item["messages"])
+        if totals["messages"] > self._IMPORT_MAX_TOTAL_MESSAGES:
+            raise ValueError("messages exceeds the total import limit")
+        return item
 
     def _import_session_row(self, conn, raw: Dict[str, Any], messages: List[Dict[str, Any]], session_id: str) -> None:
         """INSERT one normalized session + its messages; counts fixed up after."""
