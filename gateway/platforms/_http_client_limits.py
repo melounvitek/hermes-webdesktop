@@ -1,15 +1,11 @@
 """Shared HTTP client factory for long-lived platform adapters.
 
-Persistent ``httpx.AsyncClient`` pools amortise TLS setup, but httpx's default
-``keepalive_expiry`` (5s) lets peer-initiated FIN sit in ``CLOSE_WAIT`` behind
-transparent proxies (macOS + Cloudflare Warp) — multiplied across 7 adapters
-plus LLM/MCP clients that walks into the default 256 fd limit (#18451).
-``platform_httpx_limits()`` returns a tighter ``httpx.Limits``:
-``max_keepalive_connections=10`` (platform APIs rarely parallelise beyond
-this), ``keepalive_expiry=2.0`` (close idle sockets aggressively).
-
-Override via ``HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY`` /
-``HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE`` env vars when tuning under load.
+httpx's default ``keepalive_expiry`` (5s) lets peer-initiated FIN sit in
+``CLOSE_WAIT`` behind transparent proxies (macOS + Cloudflare Warp); across 7
+adapters plus LLM/MCP clients that walks into the default 256 fd limit.
+``platform_httpx_limits()`` returns tighter ``httpx.Limits``: 10 keepalive
+connections (platform APIs rarely parallelise beyond this), 2.0s expiry.
+Override via ``HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY`` / ``HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE``.
 """
 
 from __future__ import annotations
@@ -39,19 +35,13 @@ def _positive_env(name: str, default, cast):
 
 
 def platform_httpx_limits() -> "httpx.Limits | None":
-    """``httpx.Limits`` tuned for persistent platform-adapter clients.
-
-    Returns ``None`` when httpx isn't importable so callers can fall back to
-    httpx's built-in default without a hard dependency on this helper.
-    """
+    """``httpx.Limits`` tuned for persistent platform-adapter clients; ``None`` without httpx."""
     if httpx is None:
         return None
+    # max_connections stays at the httpx default (100) — plenty of headroom.
     return httpx.Limits(
         max_keepalive_connections=_positive_env(
-            "HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE", _DEFAULT_MAX_KEEPALIVE, int
-        ),
-        # max_connections stays at the httpx default (100) — plenty of headroom.
+            "HERMES_GATEWAY_HTTPX_MAX_KEEPALIVE", _DEFAULT_MAX_KEEPALIVE, int),
         keepalive_expiry=_positive_env(
-            "HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", _DEFAULT_KEEPALIVE_EXPIRY_S, float
-        ),
+            "HERMES_GATEWAY_HTTPX_KEEPALIVE_EXPIRY", _DEFAULT_KEEPALIVE_EXPIRY_S, float),
     )

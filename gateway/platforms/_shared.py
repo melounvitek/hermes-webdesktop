@@ -39,7 +39,6 @@ def profile_scoped() -> bool:
     """
     try:
         from agent.secret_scope import current_secret_scope, is_multiplex_active
-
         return bool(is_multiplex_active() and current_secret_scope() is not None)
     except Exception:
         return False
