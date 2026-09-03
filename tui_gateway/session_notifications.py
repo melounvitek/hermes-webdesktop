@@ -1,8 +1,6 @@
-"""Per-session notification poller: kanban/loop/delegation events routed to the owning session, desktop UI wiring, HUD surface note.
-
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
-"""
+"""Per-session notification poller: kanban/loop/delegation events routed to the owning session,
+desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals at install time
+(method_ctx.bind_module), so they reference server.py globals bare."""
 
 from __future__ import annotations
 
@@ -15,8 +13,7 @@ _registry = HandlerRegistry()
 
 
 def _notif_locked_sessions(fn, default):
-    """Run ``fn(_sessions)`` under ``_sessions_lock``; ``default`` if that fails (the poller
-    thread must never crash on a lock/enumeration failure)."""
+    """Run ``fn(_sessions)`` under ``_sessions_lock``; ``default`` on failure (poller must never crash)."""
     try:
         with _sessions_lock:
             return fn(_sessions)
@@ -30,6 +27,13 @@ def _notif_current_keys(sid: str, session: dict) -> set:
 
 def _notif_session_matches(s: dict, keys) -> bool:
     return str(s.get("session_key") or "") in keys or _session_lookup_key(s, fallback="") in keys
+
+
+def _notif_live_session_matches(keys) -> bool:
+    """Any non-finalized live session matches ``keys`` (False if the registry can't be read)."""
+    return _notif_locked_sessions(
+        lambda ss: any(not s.get("_finalized") and _notif_session_matches(s, keys) for s in ss.values()), False
+    )
 
 
 def _notif_resolve_event_key(evt_key: str) -> str:
@@ -56,13 +60,10 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
             return True
         # Exact UI tab gone: fall through to durable session_key routing so a
         # resumed continuation with the same key/lineage can still claim it.
-
     evt_key = str(evt.get("session_key") or "")
     if not evt_key:
         return False
-
     current_keys = _notif_current_keys(sid, session)
-
     # Compression can rotate AIAgent.session_id while the detached child is still running: map
     # the event's original key to its continuation tip so it reaches the live session instead of
     # becoming an orphan any poller may consume. A live continuation wins over the compressed
@@ -71,19 +72,13 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
     if resolved_key != evt_key:
         if resolved_key in current_keys:
             return False
-        if _notif_locked_sessions(
-            lambda ss: any(not s.get("_finalized") and _notif_session_matches(s, {resolved_key}) for s in ss.values()),
-            False,
-        ):
+        if _notif_live_session_matches({resolved_key}):
             return True
-
     if evt_key in current_keys:
         return False
-
     snapshot = _notif_locked_sessions(lambda ss: list(ss.values()), None)
     if snapshot is None:
         return False  # can't enumerate: fail open rather than drop the event
-
     keys = {evt_key, resolved_key}
     return any(s is not session and not s.get("_finalized") and _notif_session_matches(s, keys) for s in snapshot)
 
@@ -129,9 +124,9 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt_sid, evt_type)
 
 
-# Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds too so
-# the cursor advances past them and they can't wedge a later completed/blocked
-# event behind an unclaimed row.
+# Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so
+# the cursor advances past them and they can't wedge a later completed/blocked event behind an
+# unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
 _KANBAN_POLL_SECONDS = 5.0
 _LOOP_POLL_SECONDS = 5.0
@@ -155,6 +150,17 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> None:
+    """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure."""
+    try:
+        _emit("message.start", sid)
+        _run_prompt_submit(rid, sid, session, text, **kwargs)
+    except Exception as exc:
+        _notif_log_failure(what, exc)
+        _notif_release_turn(session)
+        raise
+
+
 def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
     """Fire a due /loop wakeup for an idle TUI/Desktop/dashboard session (per-session poller,
     coarse cadence). Claims the session under history_lock (running=True) before dispatching so
@@ -163,56 +169,50 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
         from hermes_cli.loops import LoopManager, goal_blocks_loop_tick
     except Exception:
         return
-
     sid_key = session.get("session_key") or ""
     if not sid_key:
         return
     mgr = LoopManager(session_id=sid_key)
-    if not mgr.is_due() or goal_blocks_loop_tick(sid_key):
-        return
-    if not _notif_claim_turn(session):
+    if not mgr.is_due() or goal_blocks_loop_tick(sid_key) or not _notif_claim_turn(session):
         return  # busy — stays due, next poll retries
-
     wakeup = mgr.fire_tick()
     if not wakeup:
         _notif_release_turn(session)
         return
-
     tick_no = mgr.state.ticks_fired if mgr.state else "?"
     rid = f"__loop__{int(time.time() * 1000)}"
     try:
         _emit("status.update", sid, {"kind": "loop", "text": f"↻ /loop wakeup #{tick_no} firing…"})
-        if wakeup.lstrip().startswith("/"):
-            # Slash-command loop: route through the slash pipeline, not the
-            # model. No model reply to evaluate — complete immediately.
-            _notif_release_turn(session)
-            try:
-                parts = wakeup.lstrip()[1:].split(None, 1)
-                resp = _methods["command.dispatch"](
-                    rid,
-                    {"name": parts[0] if parts else "", "arg": parts[1] if len(parts) > 1 else "", "session_id": sid},
-                )
-                payload = (resp or {}).get("result") or {}
-                out = str(payload.get("output") or "").strip()
-                if out:
-                    _emit("status.update", sid, {"kind": "loop", "text": out})
-                if payload.get("type") == "send" and payload.get("message"):
-                    # Command resolves to a prompt (skill command etc.) — run it
-                    # as a normal turn; the post-turn hook completes the tick.
-                    if not _notif_claim_turn(session):
-                        mgr.abandon_tick()
-                        return
-                    _emit("message.start", sid)
-                    _run_prompt_submit(rid, sid, session, payload["message"])
-                    return
-            except Exception:
-                pass
-            decision = mgr.complete_tick("")
-            if decision.get("message"):
-                _emit("status.update", sid, {"kind": "loop", "text": decision["message"]})
+        if not wakeup.lstrip().startswith("/"):
+            _emit("message.start", sid)
+            _run_prompt_submit(rid, sid, session, wakeup)
             return
-        _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, wakeup)
+        # Slash-command loop: route through the slash pipeline, not the model. No model reply
+        # to evaluate — complete immediately.
+        _notif_release_turn(session)
+        try:
+            parts = wakeup.lstrip()[1:].split(None, 1)
+            resp = _methods["command.dispatch"](
+                rid, {"name": parts[0] if parts else "", "arg": parts[1] if len(parts) > 1 else "", "session_id": sid}
+            )
+            payload = (resp or {}).get("result") or {}
+            out = str(payload.get("output") or "").strip()
+            if out:
+                _emit("status.update", sid, {"kind": "loop", "text": out})
+            if payload.get("type") == "send" and payload.get("message"):
+                # Command resolves to a prompt (skill command etc.) — run it as a normal turn;
+                # the post-turn hook completes the tick.
+                if not _notif_claim_turn(session):
+                    mgr.abandon_tick()
+                    return
+                _emit("message.start", sid)
+                _run_prompt_submit(rid, sid, session, payload["message"])
+                return
+        except Exception:
+            pass
+        decision = mgr.complete_tick("")
+        if decision.get("message"):
+            _emit("status.update", sid, {"kind": "loop", "text": decision["message"]})
     except Exception as exc:
         _notif_log_failure("loop wakeup dispatch failed", exc)
         _notif_release_turn(session)
@@ -228,21 +228,9 @@ def _kb_first_line(value: Any, limit: int) -> str:
 def _kb_completed(task, payload: dict, title: str) -> str:
     if payload.get("summary"):
         handoff = _kb_first_line(payload["summary"], 200)
-    elif getattr(task, "result", None):
-        handoff = _kb_first_line(task.result, 160)
     else:
-        handoff = ""
+        handoff = _kb_first_line(task.result, 160) if getattr(task, "result", None) else ""
     return f" done — {title}{handoff}"
-
-
-def _kb_blocked(task, payload: dict, title: str) -> str:
-    reason = f": {str(payload.get('reason'))[:160]}" if payload.get("reason") else ""
-    return f" blocked{reason}"
-
-
-def _kb_gave_up(task, payload: dict, title: str) -> str:
-    err = f"\n{str(payload.get('error'))[:200]}" if payload.get("error") else ""
-    return f" gave up after repeated spawn failures{err}"
 
 
 def _kb_timed_out(task, payload: dict, title: str) -> str:
@@ -253,20 +241,21 @@ def _kb_timed_out(task, payload: dict, title: str) -> str:
     return f" timed out (max_runtime={limit}s); will retry"
 
 
-# kind -> (glyph, suffix formatter); silent kinds (archived/unblocked) are absent → None.
+# kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 _KANBAN_EVENT_FORMATTERS = {
     "completed": ("✔", _kb_completed),
-    "blocked": ("⏸", _kb_blocked),
-    "gave_up": ("✖", _kb_gave_up),
-    "crashed": ("✖", lambda task, payload, title: " worker crashed (pid gone); dispatcher will retry"),
+    "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
+    "gave_up": ("✖", lambda t, p, title: " gave up after repeated spawn failures"
+                + (f"\n{str(p.get('error'))[:200]}" if p.get("error") else "")),
+    "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
     "timed_out": ("⏱", _kb_timed_out),
-    "status": ("🔄", lambda task, payload, title: f" → {payload.get('status') or ''}"),
+    "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
 }
 
 
 def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[str]:
-    """Single-line notification text for one kanban event; wording mirrors
-    gateway/kanban_watchers.py so it reads the same as on Telegram. None for silent kinds."""
+    """Single-line notification text for one kanban event; wording mirrors gateway/kanban_watchers.py
+    so it reads the same as on Telegram. None for silent kinds."""
     entry = _KANBAN_EVENT_FORMATTERS.get(getattr(ev, "kind", ""))
     if entry is None:
         return None
@@ -276,8 +265,7 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     board_tag = f"[{board_slug}] " if board_slug else ""
     who = getattr(task, "assignee", None) or ""
     tag = f"@{who} " if who else ""
-    payload = getattr(ev, "payload", None) or {}
-    return f"{glyph} {board_tag}{tag}Kanban {task_id}{fmt(task, payload, title)}"
+    return f"{glyph} {board_tag}{tag}Kanban {task_id}{fmt(task, getattr(ev, 'payload', None) or {}, title)}"
 
 
 def _collect_kanban_notifications(session: dict) -> list:
@@ -303,8 +291,8 @@ def _collect_kanban_notifications(session: dict) -> list:
             boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
         except Exception:
             return []
-    # Poll each resolved DB path once — multiple slugs can point at the same
-    # DB when HERMES_KANBAN_DB pins the board path (same guard as the gateway).
+    # Poll each resolved DB path once — multiple slugs can point at the same DB when
+    # HERMES_KANBAN_DB pins the board path (same guard as the gateway).
     seen_db_paths: set = set()
     for board_meta in boards:
         slug = (board_meta or {}).get("slug") or _kb.DEFAULT_BOARD
@@ -316,9 +304,9 @@ def _collect_kanban_notifications(session: dict) -> list:
         if resolved in seen_db_paths:
             continue
         seen_db_paths.add(resolved)
-        # One poller per live session: don't open this board writable unless it
-        # has a subscription owned by this exact session. If the read-only probe
-        # fails (locked/corrupt DB), preserve delivery and fall through.
+        # One poller per live session: don't open this board writable unless it has a subscription
+        # owned by this exact session. If the read-only probe fails (locked/corrupt DB), preserve
+        # delivery and fall through.
         try:
             if _kb.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
                 continue
@@ -345,9 +333,9 @@ def _collect_kanban_notifications(session: dict) -> list:
                     continue
                 task = _kb.get_task(conn, sub["task_id"])
                 texts.extend(t for t in (_format_kanban_event_text(sub, task, ev, slug) for ev in events) if t)
-                # Unsubscribe only on archive: ``done`` is reversible in review/controller flows,
-                # so keeping the sub lets a later reopen notify the same session. The claimed
-                # cursor prevents replay.
+                # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so
+                # keeping the sub lets a later reopen notify the same session. The claimed cursor
+                # prevents replay.
                 if task and getattr(task, "status", "") == "archived":
                     with contextlib.suppress(Exception):
                         _kb.remove_notify_sub(conn, **sub_ident)
@@ -379,12 +367,11 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
             _batch = list(_pending)
             session["_kanban_pending"] = []
     if _batch:
-        try:
-            _emit("message.start", sid)
-            _run_prompt_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch))
-        except Exception as exc:
-            _notif_log_failure("kanban notification dispatch failed", exc)
-            _notif_release_turn(session)
+        with contextlib.suppress(Exception):
+            _notif_submit(
+                f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch),
+                "kanban notification dispatch failed",
+            )
 
 
 def _notif_render_event(sid: str, evt: dict, emitted: set, process_registry, format_process_notification) -> Optional[str]:
@@ -407,22 +394,21 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
 
-    rid = f"__notif__{int(time.time() * 1000)}"
     claim = claim_event_delivery(evt, "tui-poller")
     if claim is None:
         return
+    kwargs = (
+        {"display_kind": "async_delegation_complete", "display_metadata": _async_delegation_display_metadata(evt)}
+        if evt.get("type") == "async_delegation" else {}
+    )
     try:
-        _emit("message.start", sid)
-        kwargs = (
-            {"display_kind": "async_delegation_complete", "display_metadata": _async_delegation_display_metadata(evt)}
-            if evt.get("type") == "async_delegation" else {}
+        _notif_submit(
+            f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs
         )
-        _run_prompt_submit(rid, sid, session, text, **kwargs)
-        complete_event_delivery(evt, claim)
-    except Exception as exc:
+    except Exception:
         release_event_delivery(evt, claim)
-        _notif_log_failure("notification poller dispatch failed", exc)
-        _notif_release_turn(session)
+        return
+    complete_event_delivery(evt, claim)
 
 
 def _notif_classify_event(sid: str, session: dict, evt: dict) -> str:
@@ -433,6 +419,52 @@ def _notif_classify_event(sid: str, session: dict, evt: dict) -> str:
     if _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
         return "unowned"
     return "mine"
+
+
+def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> bool:
+    """Route one dequeued event. ``deferred`` is None in the live loop (foreign events go straight
+    back on the queue) and the shutdown-drain list otherwise (foreign + orphaned delegation
+    payloads are set aside for a resume). Returns False when the drain must stop (session busy)."""
+    queue = registry.completion_queue
+    owner = _notif_classify_event(sid, session, evt)
+    if owner == "foreign":
+        if deferred is None:
+            # Leave foreign events for their owner — otherwise a process started in session A
+            # surfaces its completion in whichever poller wakes first.
+            queue.put(evt)
+            time.sleep(0.1)
+        else:
+            deferred.append(evt)
+        return True
+    if owner == "unowned":
+        is_delegation = evt.get("type") == "async_delegation"
+        origin, key = str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or "")
+        if deferred is None:
+            (logger.warning if is_delegation else logger.debug)(
+                "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
+                evt.get("type", "completion"), origin, key, sid,
+            )
+        elif is_delegation:
+            deferred.append(evt)
+        else:
+            logger.debug(
+                "Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
+                evt.get("type", "completion"), origin, key,
+            )
+        return True
+    text = _notif_render_event(sid, evt, emitted, registry, fmt)
+    if not text:
+        return True
+    if not _notif_claim_turn(session):
+        queue.put(evt)
+        if deferred is not None:
+            return False
+        # Back off: the re-queued event keeps the queue non-empty, so without a sleep this loop
+        # spins at 100% CPU while busy.
+        time.sleep(0.25)
+        return True
+    _notif_dispatch_event(sid, session, evt, text)
+    return True
 
 
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
@@ -446,8 +478,7 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
 
     queue = process_registry.completion_queue
     _emitted = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
-    _last_kanban_poll = 0.0
-    _last_loop_poll = 0.0
+    _last_kanban_poll = _last_loop_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         _now = time.monotonic()
         # /loop wakeup driver: fire a due tick for THIS session while idle (same claim-under-lock
@@ -465,63 +496,18 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
             evt = queue.get(timeout=0.5)
         except Exception:
             continue
+        _notif_handle_event(sid, session, evt, _emitted, process_registry, format_process_notification, None)
 
-        owner = _notif_classify_event(sid, session, evt)
-        if owner == "foreign":
-            # Leave foreign events for their owner — otherwise a process started in
-            # session A surfaces its completion in whichever poller wakes first.
-            queue.put(evt)
-            time.sleep(0.1)
-            continue
-        if owner == "unowned":
-            log = logger.warning if evt.get("type") == "async_delegation" else logger.debug
-            log(
-                "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
-                evt.get("type", "completion"), str(evt.get("origin_ui_session_id") or ""),
-                str(evt.get("session_key") or ""), sid,
-            )
-            continue
-
-        text = _notif_render_event(sid, evt, _emitted, process_registry, format_process_notification)
-        if not text:
-            continue
-        if not _notif_claim_turn(session):
-            # Back off: the re-queued event keeps the queue non-empty, so
-            # without a sleep this loop spins at 100% CPU while busy.
-            queue.put(evt)
-            time.sleep(0.25)
-            continue
-        _notif_dispatch_event(sid, session, evt, text)
-
-    # Drain remaining events after the stop signal so nothing is lost on shutdown. Other live
-    # sessions' events are set aside and re-queued; orphaned events (owner gone) are dropped —
-    # same guard as the main loop, except orphaned delegation payloads are deferred for a resume.
+    # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and
+    # orphaned-delegation events are handed back to the shared queue afterwards.
     deferred: list = []
     while not queue.empty():
         try:
             evt = queue.get_nowait()
         except Exception:
             break
-        owner = _notif_classify_event(sid, session, evt)
-        if owner == "foreign" or (owner == "unowned" and evt.get("type") == "async_delegation"):
-            deferred.append(evt)
-            continue
-        if owner == "unowned":
-            logger.debug(
-                "Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
-                evt.get("type", "completion"), str(evt.get("origin_ui_session_id") or ""),
-                str(evt.get("session_key") or ""),
-            )
-            continue
-        text = _notif_render_event(sid, evt, _emitted, process_registry, format_process_notification)
-        if not text:
-            continue
-        if not _notif_claim_turn(session):
-            queue.put(evt)
+        if not _notif_handle_event(sid, session, evt, _emitted, process_registry, format_process_notification, deferred):
             break
-        _notif_dispatch_event(sid, session, evt, text)
-
-    # Hand any other sessions' events back to the shared queue.
     for evt in deferred:
         queue.put(evt)
 
@@ -561,8 +547,8 @@ def _wire_agent_terminal_output() -> None:
         return ""
 
     def _emit_agent_terminal_close(session, process_id):
-        # session may be None (process already finished/pruned) — the tab can
-        # still linger and be closed; route to the owning window when we can.
+        # session may be None (process already finished/pruned) — the tab can still linger and
+        # be closed; route to the owning window when we can.
         _emit("terminal.close", _owner_sid_for_process(session) if session is not None else "", {"process_id": process_id})
 
     if getattr(process_registry, "on_output", None) is None:
@@ -587,7 +573,6 @@ def _wire_desktop_ui() -> None:
         from tools import desktop_ui
     except Exception:
         return
-
     desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
     _desktop_ui_wired = True
 
@@ -599,11 +584,10 @@ _notification_pollers: list = []
 
 
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
-    """Start the background notification poller for a TUI session."""
+    """Start the background notification poller for a TUI session (thread name is greppable)."""
     _wire_agent_terminal_output()
     _wire_desktop_ui()
     stop = threading.Event()
-    # Thread name is greppable for debuggers/test teardowns.
     t = threading.Thread(
         target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}"
     )
