@@ -1,21 +1,16 @@
 """Symlink-safe creation helpers for spill/cache files.
 
-Spill files (terminal output, hook context, subagent summaries, web_extract
-text) live in predictable directories under ``~/.hermes``; a plain
+Spill files live in predictable directories under ``~/.hermes``; a plain
 ``open(path, "w")`` there would follow a pre-planted symlink and let a local
-process redirect the write onto ``~/.bashrc``, ``authorized_keys``, etc.
-
-Every helper refuses symlinks by construction: new files use
-``O_CREAT | O_EXCL`` (fails on ANY existing path, including a dangling link);
-overwrites ``lstat`` + ``unlink`` the existing path first (removes the link,
-never its target) and then create exclusively, so the pair can't be raced.
-
-Privacy tiers: ``private=True`` (default) forces ``0o700`` dirs / ``0o600``
-files for spills that may hold pre-redaction secrets; ``private=False`` keeps
-umask-default perms for cache dirs bind-mounted into remote terminal backends
-(``credential_files._CACHE_DIRS``), where a non-root container UID must read them.
-
-Disk failures are the caller's concern: helpers raise ``OSError``.
+process redirect the write onto ``~/.bashrc``, ``authorized_keys``, etc. Every
+helper refuses symlinks by construction: new files use ``O_CREAT | O_EXCL``
+(fails on ANY existing path, including a dangling link); overwrites ``lstat`` +
+``unlink`` the existing path first (removes the link, never its target), then
+create exclusively, so the pair can't be raced. ``private=True`` (default)
+forces ``0o700`` dirs / ``0o600`` files for spills that may hold pre-redaction
+secrets; ``private=False`` keeps umask perms for cache dirs bind-mounted into
+remote backends (``credential_files._CACHE_DIRS``) where a non-root container
+UID must read them. Disk failures are the caller's concern: helpers raise ``OSError``.
 """
 
 from __future__ import annotations
@@ -38,10 +33,8 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 def ensure_spill_dir(path: Path, *, private: bool = True) -> Path:
     """Create ``path`` (and parents) as a directory, refusing symlinks.
-
-    ``private=True`` creates the leaf ``0o700`` and tightens an existing leaf to
-    ``0o700``. Raises ``OSError`` if the leaf is not a real directory.
-    """
+    ``private=True`` creates the leaf ``0o700`` and tightens an existing leaf.
+    Raises ``OSError`` if the leaf is not a real directory."""
     path = Path(path)
     path.mkdir(mode=0o700 if private else 0o777, parents=True, exist_ok=True)
     st = os.lstat(path)
@@ -61,11 +54,9 @@ def open_exclusive(
     errors: str = "strict",
 ) -> IO[str]:
     """Open ``path`` for writing via exclusive create; never follows a link.
-
     ``overwrite=True`` first unlinks an existing path (``lstat``-checked, so only
     the link itself is removed and directories are refused), then creates
-    exclusively — the overwrite path cannot be redirected through a symlink either.
-    """
+    exclusively — the overwrite path cannot be redirected through a symlink either."""
     path = Path(path)
     if overwrite:
         try:
