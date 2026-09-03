@@ -4394,21 +4394,28 @@ def _task_minimum_context_length(task: Optional[str]) -> Optional[int]:
     return MINIMUM_CONTEXT_LENGTH if task == "compression" else None
 
 
+def _candidate_context_window(provider: str, model: str, base_url: str = "", api_key: str = "") -> Optional[int]:
+    """Best-effort context window for a fallback candidate; ``None`` = unknown (never raises; callers pass it through)."""
+    if not model:
+        return None
+    try:
+        ctx = get_model_context_length(model, base_url=base_url, api_key=api_key, provider=provider)
+    except Exception as exc:
+        logger.debug("Auxiliary fallback: could not resolve context window for %s/%s: %s", provider, model, exc)
+        return None
+    return ctx if isinstance(ctx, int) and ctx > 0 else None
+
+
 def _context_too_small(
     entry: Dict[str, Any], provider: str, model: str, min_ctx: Optional[int], *,
     task: Optional[str], label: str, name_model: bool = False,
 ) -> Optional[str]:
-    """Screen one fallback candidate by context window; returns the ``tried`` note when it is too small (unknown window passes)."""
-    if min_ctx is None or not model:
+    """Screen one fallback candidate by context window; returns the ``tried`` note when it is too small."""
+    if min_ctx is None:
         return None
-    api_key = _fallback_entry_api_key(entry) or ""
-    try:
-        fb_ctx = get_model_context_length(
-            model, base_url=str(entry.get("base_url") or ""), api_key=api_key, provider=provider)
-    except Exception as exc:
-        logger.debug("Auxiliary fallback: could not resolve context window for %s/%s: %s", provider, model, exc)
-        return None
-    if not (isinstance(fb_ctx, int) and 0 < fb_ctx < min_ctx):
+    fb_ctx = _candidate_context_window(
+        provider, model, base_url=str(entry.get("base_url") or ""), api_key=_fallback_entry_api_key(entry) or "")
+    if fb_ctx is None or fb_ctx >= min_ctx:
         return None
     if name_model:
         logger.info("Auxiliary %s: skipping %s (%s context=%d < min=%d), continuing chain",
