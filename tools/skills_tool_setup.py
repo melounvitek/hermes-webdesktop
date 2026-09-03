@@ -58,34 +58,20 @@ def _clean_str(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
-    setup = frontmatter.get("setup")
-    if not isinstance(setup, dict):
-        return {"help": None, "collect_secrets": []}
-    collect_secrets: List[Dict[str, Any]] = []
-    for item in _as_dict_list(setup.get("collect_secrets")):
-        if not isinstance(item, dict) or not (env_var := str(item.get("env_var") or "").strip()):
-            continue
-        entry: Dict[str, Any] = {
-            "env_var": env_var,
-            "prompt": str(item.get("prompt") or f"Enter value for {env_var}").strip(),
-            "secret": bool(item.get("secret", True))}
-        if provider_url := str(item.get("provider_url") or item.get("url") or "").strip():
-            entry["provider_url"] = provider_url
-        collect_secrets.append(entry)
-    return {"help": _clean_str(setup.get("help")), "collect_secrets": collect_secrets}
-
-
 def _get_required_environment_variables(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Merge required_environment_variables, setup.collect_secrets and legacy
     prerequisites.env_vars into one deduped, validated list (first entry wins)."""
-    setup = _normalize_setup_metadata(frontmatter)
+    setup = frontmatter.get("setup")
+    setup = setup if isinstance(setup, dict) else {}
+    setup_help = _clean_str(setup.get("help"))
     required: Dict[str, Dict[str, Any]] = {}  # env name -> entry, insertion-ordered, first wins
     declared = _as_dict_list(frontmatter.get("required_environment_variables"))
     entries = [{"name": i} if isinstance(i, str) else i for i in declared if isinstance(i, (str, dict))]
+    # collect_secrets entries: env_var is the name; provider_url (or url) doubles as help.
     entries += [
-        {"name": i.get("env_var"), "prompt": i.get("prompt"), "help": i.get("provider_url") or setup.get("help")}
-        for i in setup["collect_secrets"]]
+        {"name": i.get("env_var"), "prompt": i.get("prompt"),
+         "url": str(i.get("provider_url") or i.get("url") or "").strip() or None}
+        for i in _as_dict_list(setup.get("collect_secrets")) if isinstance(i, dict)]
     entries += [{"name": v} for v in _legacy_env_vars(frontmatter)]
     for entry in entries:
         env_name = str(entry.get("name") or entry.get("env_var") or "").strip()
@@ -95,7 +81,7 @@ def _get_required_environment_variables(frontmatter: Dict[str, Any]) -> List[Dic
             "name": env_name,
             "prompt": str(entry.get("prompt") or f"Enter value for {env_name}").strip()}
         if help_text := _clean_str(
-                entry.get("help") or entry.get("provider_url") or entry.get("url") or setup.get("help")):
+                entry.get("help") or entry.get("provider_url") or entry.get("url") or setup_help):
             normalized["help"] = help_text
         if required_for := _clean_str(entry.get("required_for")):
             normalized["required_for"] = required_for
