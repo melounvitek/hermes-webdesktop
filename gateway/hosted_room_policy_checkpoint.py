@@ -151,8 +151,7 @@ class HostedRoomPolicyCheckpoint:
         settled_seq_by_message: dict[str, int] = {}
         for row in conn.execute(
             """SELECT seq, payload_json FROM hosted_room_events
-               WHERE room_id=? AND seq<=? AND kind='turn.settled' ORDER BY seq""",
-            (room_id, through_seq)):
+               WHERE room_id=? AND seq<=? AND kind='turn.settled' ORDER BY seq""", (room_id, through_seq)):
             message_event_id = str(json.loads(row["payload_json"]).get("message_event_id") or "")
             if message_event_id:
                 settled_seq_by_message[message_event_id] = int(row["seq"])
@@ -285,8 +284,7 @@ class HostedRoomPolicyCheckpoint:
         conn.execute(
             """INSERT OR IGNORE INTO hosted_room_policy_cursors(
                    room_id, through_seq, stopped_through_seq, updated_at
-               ) VALUES (?, 0, 0, 0)""",
-            (room_id,))
+               ) VALUES (?, 0, 0, 0)""", (room_id,))
         row = conn.execute("SELECT through_seq FROM hosted_room_policy_cursors WHERE room_id=?", (room_id,)).fetchone()
         cursor = int(row["through_seq"])
         transcript_state = conn.execute(
@@ -338,8 +336,7 @@ class HostedRoomPolicyCheckpoint:
             thread = conn.execute(
                 """SELECT thread_id, discussion_event_id FROM hosted_room_policy_threads
                    WHERE room_id=? AND completed=0 AND latest_user_seq>?
-                   ORDER BY latest_user_seq, thread_id LIMIT 1""",
-                (room_id, stopped_through_seq)).fetchone()
+                   ORDER BY latest_user_seq, thread_id LIMIT 1""", (room_id, stopped_through_seq)).fetchone()
             if thread is None:
                 return PolicySnapshot(
                     through_seq=through_seq, stopped_through_seq=stopped_through_seq,
@@ -351,8 +348,7 @@ class HostedRoomPolicyCheckpoint:
                 bound_error="active room policy projection exceeded its bound")
             watermark_rows = conn.execute(
                 """SELECT member_id, seen_through_seq FROM hosted_room_policy_watermarks
-                   WHERE room_id=? AND thread_id=?""",
-                (room_id, thread_id)).fetchall()
+                   WHERE room_id=? AND thread_id=?""", (room_id, thread_id)).fetchall()
         return PolicySnapshot(
             through_seq=through_seq, stopped_through_seq=stopped_through_seq, events=tuple(events),
             watermarks={(thread_id, str(row["member_id"])): int(row["seen_through_seq"]) for row in watermark_rows})

@@ -616,13 +616,11 @@ def _prune_disbanded_rooms_locked(
         candidates.update(_room_ids(
             conn,
             """SELECT room_id FROM hosted_rooms
-                     WHERE disbanded_at IS NOT NULL AND disbanded_at<=?""",
-            (now - DISBANDED_ROOM_RETENTION_SECONDS,)))
+                     WHERE disbanded_at IS NOT NULL AND disbanded_at<=?""", (now - DISBANDED_ROOM_RETENTION_SECONDS,)))
     candidates.update(_room_ids(
         conn,
         """SELECT room_id FROM hosted_rooms WHERE disbanded_at IS NOT NULL
-                ORDER BY disbanded_at DESC, room_id ASC LIMIT -1 OFFSET ?""",
-        (MAX_DISBANDED_ROOM_TOMBSTONES,)))
+                ORDER BY disbanded_at DESC, room_id ASC LIMIT -1 OFFSET ?""", (MAX_DISBANDED_ROOM_TOMBSTONES,)))
     if max_gateway_event_bytes is not None:
         retained_bytes = _gateway_event_bytes(conn)
         if retained_bytes > max_gateway_event_bytes:
@@ -747,8 +745,7 @@ def revoke_room_grant_scope(
                    expires_at=MAX(hosted_room_revoked_grants.expires_at,
                                   excluded.expires_at),
                    revoked_before=MAX(hosted_room_revoked_grants.revoked_before,
-                                      excluded.revoked_before)""",
-            (scope_key, expiry, timestamp))
+                                      excluded.revoked_before)""", (scope_key, expiry, timestamp))
         conn.execute(
             """UPDATE hosted_room_peer_reservations SET revoked_at=?, updated_at=? WHERE room_id=?
                 AND member_id=? AND target_profile=? AND authority_gateway_id=?
@@ -801,8 +798,7 @@ def reserve_peer_room(
             (timestamp, timestamp, room_id, target_profile, epoch))
         existing = conn.execute(
             """SELECT authority_gateway_id, authority_epoch FROM hosted_room_peer_reservations
-                WHERE room_id=? AND member_id=? AND target_profile=?""",
-            values[:3]).fetchone()
+                WHERE room_id=? AND member_id=? AND target_profile=?""", values[:3]).fetchone()
         if existing is not None and _reservation_superseded(existing, gateway_id, epoch):
             raise AuthorityConflictError("peer room reservation authority changed")
         conn.execute(
@@ -816,8 +812,7 @@ def reserve_peer_room(
                    expires_at=MAX(hosted_room_peer_reservations.expires_at,
                                   excluded.expires_at),
                    revoked_at=NULL,
-                   updated_at=excluded.updated_at""",
-            (*values, expiry, timestamp, timestamp))
+                   updated_at=excluded.updated_at""", (*values, expiry, timestamp, timestamp))
 
 
 def _read_one(db_path: Path | str, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
@@ -840,8 +835,7 @@ def peer_room_grant_is_current(db_path: Path | str, *, claims: Mapping[str, Any]
         db_path,
         """SELECT 1 FROM hosted_room_peer_reservations WHERE room_id=? AND member_id=?
             AND target_profile=? AND authority_gateway_id=? AND authority_epoch=?
-            AND expires_at>? AND revoked_at IS NULL LIMIT 1""",
-        (*values, timestamp))
+            AND expires_at>? AND revoked_at IS NULL LIMIT 1""", (*values, timestamp))
     return row is not None
 
 
@@ -853,8 +847,7 @@ def room_grant_is_revoked(db_path: Path | str, *, claims: Mapping[str, Any], now
     row = _read_one(
         db_path,
         """SELECT revoked_before FROM hosted_room_revoked_grants
-            WHERE scope_key=? AND expires_at>?""",
-        (scope_key, timestamp))
+            WHERE scope_key=? AND expires_at>?""", (scope_key, timestamp))
     return row is not None and issued_at <= float(row["revoked_before"])
 
 
@@ -882,8 +875,7 @@ def upsert_remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any],
                    authority_epoch, member_id, target_install_id,
                    target_profile, task_id, execution_generation, run_id,
                    session_id, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (*immutable, timestamp, timestamp))
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (*immutable, timestamp, timestamp))
 
 
 def list_remote_run_receipts(
@@ -986,8 +978,7 @@ def create_room(
         row = _reload(
             conn,
             """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, revision,
-                created_at, updated_at FROM hosted_rooms WHERE room_id=?""",
-            (room_id,),
+                created_at, updated_at FROM hosted_rooms WHERE room_id=?""", (room_id,),
             "created room could not be reloaded")
     result = _room_from_row(row)
     result["members"] = normalized_members
@@ -1040,8 +1031,7 @@ def rename_room(
         conn.execute(
             """UPDATE hosted_rooms
                 SET name=?, next_seq=?, event_bytes=event_bytes+?, revision=revision+1, updated_at=?
-                WHERE room_id=?""",
-            (name, seq + 1, event_bytes, now, room_id))
+                WHERE room_id=?""", (name, seq + 1, event_bytes, now, room_id))
         conn.execute(_INSERT_EVENT, (room_id, seq, event_id, "room.renamed", actor_json, epoch, payload_json, now))
         updated = conn.execute(_SELECT_ROOM, (room_id,)).fetchone()
         event = _load_event(conn, room_id, event_id)
@@ -1080,8 +1070,7 @@ def append_event(
             return _event_from_row(existing, idempotent=True)
         room = conn.execute(
             """SELECT next_seq, event_bytes, authority_gateway_id, authority_epoch
-                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""",
-            (room_id,)).fetchone()
+                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if room is None:
             _raise_room_not_found(conn, room_id)
         if room["authority_gateway_id"] != authority_gateway_id or int(room["authority_epoch"]) != authority_epoch:
@@ -1092,8 +1081,7 @@ def append_event(
             allow_control=kind in _CONTROL_EVENT_KINDS)
         advanced = conn.execute(
             """UPDATE hosted_rooms SET next_seq=?, event_bytes=event_bytes+?, updated_at=?
-                WHERE room_id=? AND next_seq=?""",
-            (seq + 1, event_bytes, now, room_id, seq))
+                WHERE room_id=? AND next_seq=?""", (seq + 1, event_bytes, now, room_id, seq))
         if advanced.rowcount != 1:
             raise RuntimeError("hosted room sequence advance lost its write fence")
         row = _reload(
@@ -1219,8 +1207,7 @@ def claim_authority(
     with _transaction(db_path, immediate=True) as conn:
         row = conn.execute(
             """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes
-                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""",
-            (room_id,)).fetchone()
+                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             _raise_room_not_found(conn, room_id)
         current_gateway = str(row["authority_gateway_id"])
@@ -1243,8 +1230,7 @@ def claim_authority(
         state_row = _reload(
             conn,
             """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq,
-                revision, created_at, updated_at FROM hosted_rooms WHERE room_id=?""",
-            (room_id,),
+                revision, created_at, updated_at FROM hosted_rooms WHERE room_id=?""", (room_id,),
             "claimed room could not be reloaded")
     state = _room_from_row(state_row, idempotent=idempotent)
     if existing_event is None:  # pragma: no cover - both claim paths set it
@@ -1284,8 +1270,7 @@ def disband_room(
     with _transaction(db_path, immediate=True) as conn:
         room = conn.execute(
             """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes, disbanded_at
-                FROM hosted_rooms WHERE room_id=?""",
-            (room_id,)).fetchone()
+                FROM hosted_rooms WHERE room_id=?""", (room_id,)).fetchone()
         replay = _disband_replay(conn, room_id, room)
         if replay is not None:
             return replay
@@ -1323,8 +1308,7 @@ def read_events(
     with _transaction(db_path) as conn:
         room = conn.execute(
             """SELECT next_seq, authority_gateway_id, authority_epoch FROM hosted_rooms
-                WHERE room_id=? AND (disbanded_at IS NULL OR ?)""",
-            (room_id, int(include_disbanded))).fetchone()
+                WHERE room_id=? AND (disbanded_at IS NULL OR ?)""", (room_id, int(include_disbanded))).fetchone()
         if room is None:
             _raise_room_not_found(conn, room_id)
         latest_seq = int(room["next_seq"]) - 1

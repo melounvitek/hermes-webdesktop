@@ -957,8 +957,7 @@ def prune_published_terminal_tasks(
                   AND EXISTS (SELECT 1 FROM hosted_room_policy_publications p
                               WHERE p.room_id=t.room_id AND p.task_id=t.task_id
                                 AND p.kind IN ('turn.settled', 'turn.failed', 'turn.cancelled'))
-                ORDER BY t.terminal_at DESC, t.task_id ASC""",
-            (room_id,)).fetchall()
+                ORDER BY t.terminal_at DESC, t.task_id ASC""", (room_id,)).fetchall()
         cutoff = now - float(retention_seconds)
         candidates = [
             str(row["task_id"])

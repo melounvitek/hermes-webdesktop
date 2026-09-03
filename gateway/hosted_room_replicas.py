@@ -145,8 +145,7 @@ def _replica_row_state(conn: sqlite3.Connection, room_id: str) -> tuple[sqlite3.
     """Return (row, stored_epoch, last_seq, stored_bytes); a new room is admitted only under the room cap."""
     row = conn.execute(
         """SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
-             FROM hosted_room_replicas WHERE room_id=?""",
-        (room_id,)).fetchone()
+             FROM hosted_room_replicas WHERE room_id=?""", (room_id,)).fetchone()
     if row is None:
         count = conn.execute("SELECT COUNT(*) FROM hosted_room_replicas").fetchone()[0]
         if int(count) >= MAX_REPLICA_ROOMS:
@@ -170,8 +169,7 @@ def _store_replica(
         conn.execute(
             """UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
                 authority_epoch=?, last_seq=?, latest_seq=?, event_bytes=event_bytes+?,
-                updated_at=? WHERE room_id=?""",
-            (*values, added_bytes, now, room_id))
+                updated_at=? WHERE room_id=?""", (*values, added_bytes, now, room_id))
 
 
 def ingest_page(
@@ -324,8 +322,7 @@ def demote_room(
     with _transaction(db_path, immediate=True) as conn:
         row = conn.execute(
             """SELECT authority_gateway_id, authority_epoch, next_seq
-                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""",
-            (room_id,)).fetchone()
+                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             raise ReplicaError("room not found in the local authoritative store")
         current_gateway = str(row["authority_gateway_id"])
