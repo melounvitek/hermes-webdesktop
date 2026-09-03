@@ -26,9 +26,8 @@ from gateway.hosted_room_execution_policy import RoomExecutionPolicy, execution_
 from gateway.hosted_rooms_common import bounded_int, clock, compact_json, exact_fields, identifier, text
 
 
-# v2 adds authority/member lineage to scoped grants and is deliberately not
-# wire-compatible with the unpublished v1 draft; mixed gateways must fall back
-# to Desktop-driven rooms instead of accepting a weaker token shape.
+# v2 adds authority/member lineage to scoped grants and is deliberately not wire-compatible with the
+# unpublished v1 draft; mixed gateways fall back to Desktop-driven rooms rather than accept a weaker token.
 PROTOCOL_VERSION = 2
 MAX_TOKEN_BYTES = 16 * 1024
 MAX_PROMPT_BYTES = 256 * 1024
@@ -47,20 +46,11 @@ class HostedRoomGrantError(HostedRoomPeerError): """Raised when a room-scoped gr
 _ROOM_GRANT_SECRET_FILE = ".room-link-grant-secret"
 
 
-def _fsync_dir(directory: Path) -> None:
-    try:
-        parent_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-    except OSError:
-        pass
-
-
 @lru_cache(maxsize=32)
 def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
     """Load one restart-scoped grant secret for an exact installation root."""
+    from hermes_cli.install_identity import _fsync_directory
+
     home = Path(home_value)
     home.mkdir(parents=True, exist_ok=True)
     path = home / _ROOM_GRANT_SECRET_FILE
@@ -74,8 +64,8 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
     try:
         material = _read()
     except FileNotFoundError:
-        # Atomic create: O_EXCL temp file, hard-link into place (loser re-reads
-        # the winner's secret), fsync the directory, always drop the temp name.
+        # Atomic create: O_EXCL temp file, hard-link into place (loser re-reads the winner's secret),
+        # fsync the directory, always drop the temp name.
         material = os.urandom(32)
         temporary = home / f".{_ROOM_GRANT_SECRET_FILE}.{os.getpid()}.{os.urandom(8).hex()}"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -89,7 +79,7 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
             except FileExistsError:
                 material = _read()
             else:
-                _fsync_dir(home)
+                _fsync_directory(home)
         finally:
             temporary.unlink(missing_ok=True)
     return hmac.new(material, b"hermes-hosted-room-installation-grant-v1", hashlib.sha256).digest()
@@ -99,13 +89,14 @@ def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
     """Load or atomically mint the gateway-only RoomLink signing secret.
 
     API keys are client-known, possibly profile-scoped bearer credentials and must never become
-    grant-signing authority; this secret lives in the installation root, is never exposed by
-    config or capability RPCs, and is shared only by this installation's gateway processes.
+    grant-signing authority; this secret lives in the installation root, is never exposed by config
+    or capability RPCs, and is shared only by this installation's gateway processes.
     """
     if root is None:
         from hermes_constants import get_hermes_home
-        # Profile routing uses a context-local HERMES_HOME override. The process
-        # environment retains the installation root and is the authority here.
+
+        # Profile routing uses a context-local HERMES_HOME override; the process environment
+        # retains the installation root and is the authority here.
         root = os.environ.get("HERMES_HOME") or get_hermes_home()
     return _gateway_room_grant_secret_for_home(str(Path(root).expanduser().resolve()))
 
@@ -113,7 +104,7 @@ def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
 def derive_room_grant_secret(api_key: str) -> bytes:
     """Domain-separate room grants from the configured API key.
 
-    Production key strength is enforced by the API-server startup guard; this floor is for contract tests.
+    The 8-char floor is for contract tests; production key strength is enforced by the API-server startup guard.
     """
     if not isinstance(api_key, str) or len(api_key) < 8:
         raise HostedRoomGrantError("room grants require a strong gateway API key")
@@ -258,22 +249,19 @@ def catalog_mapping(
     attachments: bool = False, endpoint: Mapping[str, Any] | None = None, target_profile: str | None = None,
     execution_policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Build a canonical catalog mapping with its digest."""
-    # A Desktop-managed gateway exits with the app: the caller's flag is only an
-    # upper bound, so call sites that still pass ``True`` stay honest.
+    # A Desktop-managed gateway exits with the app: the caller's flag is only an upper bound.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
     profile = (str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default")
     checked_policy = RoomExecutionPolicy.from_mapping(
         execution_policy or execution_policy_mapping(target_profile=profile))
-    # A RoomLink run is initiated by another installation. Process-wide YOLO
-    # mode bypasses the scoped approval ContextVar, so rewriting the advertised
-    # policy cannot make it safe: refuse until manual or smart approvals are on.
+    # A RoomLink run is initiated by another installation. Process-wide YOLO mode bypasses the scoped
+    # approval ContextVar, so rewriting the advertised policy cannot make it safe: refuse.
     if checked_policy.approval_mode == "off":
         raise HostedRoomPeerError("remote room execution requires manual or smart approvals")
     value = {
         "installation_id": _identifier(installation_id, field="installation_id"),
         "protocol_versions": sorted({_positive_int(item, field="protocol_version") for item in protocol_versions}),
-        # Direct HTTPS/loopback is the only RoomLink transport implemented by
-        # this backend slice. Do not advertise pull/relay placeholders.
+        # Direct HTTPS/loopback is the only implemented RoomLink transport; never advertise pull/relay.
         "link_modes": [mode for mode in dict.fromkeys(link_modes) if mode == "direct"],
         "persistent_process": persistent_process, "text": bool(text), "attachments": bool(attachments),
         "execution_policy": checked_policy.as_mapping(),
@@ -283,15 +271,8 @@ def catalog_mapping(
     return value
 
 
-def local_catalog_mapping(
-    *, installation_id: str, protocol_versions: Iterable[int] = (PROTOCOL_VERSION,),
-    link_modes: Iterable[LinkMode] = ("direct", "pull"), text: bool = True, attachments: bool = False,
-    target_profile: str | None = None, execution_policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Build the one truthful catalog advertised by this local process."""
-    return catalog_mapping(
-        installation_id=installation_id, protocol_versions=protocol_versions, link_modes=link_modes,
-        persistent_process=True, text=text, attachments=attachments, target_profile=target_profile,
-        execution_policy=execution_policy)
+# The one truthful catalog advertised by this local process (keyword arguments as for catalog_mapping).
+local_catalog_mapping = partial(catalog_mapping, persistent_process=True)
 
 
 def local_room_link_endpoint(value: Any | None = None) -> dict[str, Any]:
@@ -332,9 +313,8 @@ def _configured_room_link_url() -> str | None:
     configured = _room_link_url_from_config(str(home))
     if configured:
         return configured
-    # RoomLink is a gateway reachability property, not a Bot personality
-    # setting: named profiles may override it but otherwise inherit the process
-    # gateway's root endpoint, so adding a Bot needs no repeated network config.
+    # RoomLink is a gateway reachability property, not a Bot personality setting: named profiles may
+    # override it but otherwise inherit the process gateway's root endpoint.
     root = get_default_hermes_root()
     return _room_link_url_from_config(str(root)) if root != home else None
 
@@ -368,8 +348,7 @@ def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
     return raw, "loopback"
 
 
-# Validator per dispatch field, in validation order. ``prompt`` and
-# ``prompt_digest`` are checked together against each other in from_mapping.
+# Validator per dispatch field, in validation order (prompt/prompt_digest are cross-checked in from_mapping).
 _DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
     protocol_version=_positive_int, room_id=_identifier, home_install_id=_identifier, authority_gateway_id=_identifier,
     authority_epoch=_positive_int, member_id=_identifier, target_install_id=_identifier, target_profile=_identifier,
@@ -419,8 +398,7 @@ class HostedMemberDispatch:
             **{name: check(value[name], field=name) for name, check in _DISPATCH_FIELDS.items()})
 
 
-# Grant scope fields, in issue-time validation order; each is validated with
-# the same checker as the matching dispatch field (``grant_id`` is an identifier).
+# Grant scope fields in issue-time validation order; each uses the matching dispatch checker (grant_id: identifier).
 _GRANT_SCOPE = (
     "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id",
     "target_install_id", "target_profile")
