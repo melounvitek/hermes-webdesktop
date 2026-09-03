@@ -1,12 +1,9 @@
-"""Custom-provider resolution: ``providers:`` / ``custom_providers:`` lookup, identity
-recovery, custom credential pools, and the named-custom runtime builder.
-
-Extracted from :mod:`hermes_cli.runtime_provider`; every name here is re-exported there.
-Origin-internal collaborators (``load_config``, ``_get_model_config``, ``load_pool``,
-``has_usable_secret``, ``custom_provider_pool_key_candidates``, …) are looked up on the origin
-module AT CALL TIME via :func:`_rp` so ``monkeypatch.setattr(runtime_provider, name, …)`` keeps
-working for moved bodies.
-"""
+"""Custom-provider resolution: ``providers:`` / ``custom_providers:`` lookup, identity recovery,
+custom credential pools, and the named-custom runtime builder. Extracted from
+:mod:`hermes_cli.runtime_provider` (every name re-exported there); origin-internal collaborators
+(``load_config``, ``_get_model_config``, ``load_pool``, ``has_usable_secret``, …) are looked up on
+the origin module AT CALL TIME via :func:`_rp` so ``monkeypatch.setattr(runtime_provider, name, …)``
+keeps working for moved bodies."""
 
 from __future__ import annotations
 
@@ -98,23 +95,19 @@ def _lift_common_custom_fields(
     if api_mode:
         result["api_mode"] = api_mode
     _lift_max_output_tokens(entry, result)
-    capabilities = _filter_capabilities(entry.get("capabilities"))
-    if capabilities:
-        result["capabilities"] = capabilities
+    _lift_model_capabilities(entry, None, result)
 
 
 # ── config lookup ──────────────────────────────────────────────────────────────────────────
 
 
 def _shadowed_by_builtin(requested_norm: str) -> bool:
-    """Raw names map to custom providers only when they are not canonical built-ins.
-
-    Explicit ``custom:<name>`` keys always target the saved entry, and bare ``custom`` is exempt: a
-    user may literally name a ``providers:`` entry "custom" (returning None before the config scan
-    made such cron jobs fail with ``auth_unavailable``). Defer to the built-in only when the raw
-    name IS the canonical provider (``nous``); an entry matching merely an alias (``kimi`` →
-    ``kimi-coding``) is the user's target.
-    """
+    """Raw names map to custom providers only when they are not canonical built-ins. Explicit
+    ``custom:<name>`` keys always target the saved entry, and bare ``custom`` is exempt: a user may
+    literally name a ``providers:`` entry "custom" (returning None before the config scan made such
+    cron jobs fail with ``auth_unavailable``). Defer to the built-in only when the raw name IS the
+    canonical provider (``nous``); an entry matching merely an alias (``kimi`` → ``kimi-coding``)
+    is the user's target."""
     if requested_norm == "custom" or requested_norm.startswith("custom:"):
         return False
     rp = _rp()
@@ -288,15 +281,13 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
 def canonical_custom_identity(
     *, base_url: Optional[str] = None, config_provider: Optional[str] = None, model: Optional[str] = None
 ) -> Optional[str]:
-    """Recover a routable ``custom:<name>`` identity for a bare custom provider.
-
-    Every path that persists or restores a session's provider override must run the resolved
-    provider through this so a bare ``"custom"`` is upgraded back to its durable ``custom:<name>``
-    menu key. Sources in priority order: (1) ``base_url`` reverse lookup — the one fact that always
-    survives the round-trip when a URL was recorded; (2) ``model`` reverse lookup
-    (``model``/``default_model``/``models`` catalog); (3) the configured provider (arg, then
-    ``model.provider``, then ``HERMES_INFERENCE_PROVIDER``) when it names a real entry.
-    """
+    """Recover a routable ``custom:<name>`` identity for a bare custom provider. Every path that
+    persists or restores a session's provider override must run the resolved provider through this
+    so a bare ``"custom"`` is upgraded back to its durable menu key. Sources in priority order:
+    (1) ``base_url`` reverse lookup — the one fact that always survives the round-trip when a URL
+    was recorded; (2) ``model`` reverse lookup (``model``/``default_model``/``models`` catalog);
+    (3) the configured provider (arg, ``model.provider``, ``HERMES_INFERENCE_PROVIDER``) when it
+    names a real entry."""
     rp = _rp()
     if base_url:
         identity = find_custom_provider_identity(base_url)
@@ -336,14 +327,11 @@ def canonical_custom_identity(
 
 
 def is_routable_provider(provider: Optional[str]) -> bool:
-    """Whether a provider name currently resolves to a routable route.
-
-    Empty/None/``auto`` is vacuously routable (agent build falls back to the configured default).
-    Bare ``custom`` is the resolved billing class shared by every named entry — not a routable
-    identity; restore paths must heal it (:func:`canonical_custom_identity`) or fall back. Anything
-    else is routable iff the full chain (built-in -> ``providers:`` -> ``custom_providers:`` ->
-    models.dev) resolves it.
-    """
+    """Whether a provider name currently resolves to a routable route. Empty/None/``auto`` is
+    vacuously routable (agent build falls back to the configured default). Bare ``custom`` is the
+    resolved billing class shared by every named entry — not a routable identity; restore paths
+    must heal it (:func:`canonical_custom_identity`) or fall back. Anything else is routable iff the
+    full chain (built-in -> ``providers:`` -> ``custom_providers:`` -> models.dev) resolves it."""
     name = str(provider or "").strip()
     if not name or name.lower() == "auto":
         return True
@@ -426,11 +414,9 @@ def _apply_custom_provider_extras(
 
 def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
     """Managed llama.cpp runtime: the supervised (or detected external) server, or a typed error.
-
     No server => say so and stop; falling through to the generic custom path would surface "local
     server is off" as OpenRouter's baffling "401 Invalid API key". The switch's state picks the
-    message (server off → point at the switch; else the setup pane).
-    """
+    message (server off → point at the switch; else the setup pane)."""
     rp = _rp()
     try:
         from hermes_cli.local_runtime.endpoint import resolve_llamacpp_endpoint
@@ -506,11 +492,9 @@ def _resolve_named_custom_runtime(
     target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Runtime for a llamacpp alias, a bare-custom direct alias, or a configured custom entry.
-
-    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``.
-    A llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
-    base_url always wins.
-    """
+    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``. A
+    llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
+    base_url always wins."""
     rp = _rp()
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm in _LLAMACPP_ALIASES and not explicit_base_url:

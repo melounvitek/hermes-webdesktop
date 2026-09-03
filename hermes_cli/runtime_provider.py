@@ -1,10 +1,9 @@
-"""Shared runtime provider resolution for CLI, gateway, cron, and helpers.
-
-This module owns the resolution ORDER (:func:`resolve_runtime_provider`), the api_mode / base_url
-helpers and the pool / OAuth / explicit paths. Custom-provider lookup lives in
-:mod:`hermes_cli.runtime_provider_custom`; Azure Foundry, OpenRouter/bare-custom, Bedrock and
-external-process builders in :mod:`hermes_cli.runtime_provider_backends`. Both are re-exported
-here so ``hermes_cli.runtime_provider.<name>`` imports and test patches keep working."""
+"""Shared runtime provider resolution for CLI, gateway, cron, and helpers: the resolution ORDER
+(:func:`resolve_runtime_provider`), api_mode / base_url helpers and the pool / OAuth / explicit paths.
+Custom-provider lookup lives in :mod:`hermes_cli.runtime_provider_custom`; Azure Foundry,
+OpenRouter/bare-custom, Bedrock and external-process builders in
+:mod:`hermes_cli.runtime_provider_backends` — both re-exported here so
+``hermes_cli.runtime_provider.<name>`` imports and test patches keep working."""
 
 from __future__ import annotations
 
@@ -72,12 +71,11 @@ def _resolves_to_custom(name: str) -> bool:
 
 
 def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider: str) -> bool:
-    """Whether ``model.base_url`` may back bare ``custom`` runtime resolution.
-
-    The model picker can select Custom while ``model.provider`` still reflects a previous provider.
-    Non-loopback URLs are rejected unless the YAML provider is already ``custom`` or a local-server
-    alias (ollama/vllm/llamacpp — else a legit LAN ollama endpoint silently falls through to
-    OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions."""
+    """Whether ``model.base_url`` may back bare ``custom`` runtime resolution. The picker can select
+    Custom while ``model.provider`` still names a previous provider, so non-loopback URLs are rejected
+    unless the YAML provider is already ``custom`` or a local-server alias (ollama/vllm/llamacpp —
+    else a legit LAN ollama endpoint falls through to OpenRouter): a stale OpenRouter/Z.ai base_url
+    cannot hijack local sessions."""
     cfg_provider_norm = (cfg_provider or "").strip().lower()
     bu = (cfg_base_url or "").strip()
     if not bu:
@@ -105,11 +103,10 @@ _VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages",
 
 
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
-    """Auto-detect api_mode from the resolved base URL, or None.
-
-    Exact-hostname matches reject lookalike subdomains (api.anthropic.com.attacker.test) and
-    path-segment spoofing (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. the
-    data-residency us./eu. regional hosts) need Responses for GPT-5.x tool calls with reasoning."""
+    """Auto-detect api_mode from the resolved base URL, or None. Exact-hostname matches reject
+    lookalike subdomains (api.anthropic.com.attacker.test) and path-segment spoofing
+    (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. us./eu. data-residency hosts)
+    need Responses for GPT-5.x tool calls with reasoning."""
     normalized = (base_url or "").strip().lower().rstrip("/")
     hostname = base_url_hostname(base_url)
     mandated = _HOST_MANDATED_API_MODES.get(hostname)
@@ -214,7 +211,6 @@ def _configured_or_fallback_api_mode(
     provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *, opencode_by_model: bool
 ) -> str:
     """Persisted ``model.api_mode`` when it belongs to this provider, else URL/transport fallback.
-
     OpenCode Zen/Go serve both anthropic_messages and chat_completions models, so (when
     ``opencode_by_model``) their mode is always re-derived from the effective model."""
     if opencode_by_model and _models.opencode_provider_family(provider) is not None:
@@ -320,10 +316,9 @@ def _host_derived_api_key(base_url: str) -> str:
 
 def _host_gated_env_key_candidates(base_url: str, *, ollama: bool) -> list:
     """Env API keys gated on their authoritative hosts, then the host-derived ``<VENDOR>_API_KEY``.
-
     Sending OPENAI/OPENROUTER/OLLAMA keys to an unrelated endpoint leaks credentials
-    (GHSA-76xc-57q6-vm5m); match on HOST, not substring. ``_host_derived_api_key`` skips OLLAMA,
-    so callers that want it opt in via ``ollama``."""
+    (GHSA-76xc-57q6-vm5m); match on HOST, not substring. ``_host_derived_api_key`` skips OLLAMA, so
+    callers that want it opt in via ``ollama``."""
     is_openai = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
     candidates = []
     if ollama:
@@ -570,14 +565,12 @@ def _resolve_from_pool(
     if not (pool and pool.has_credentials()):
         return None
     entry = pool.select()
-    pool_api_key = _pool_entry_api_key(entry) if entry is not None else ""
-    if provider == "nous" and entry is not None:
+    if entry is None:
+        return None
+    pool_api_key = _pool_entry_api_key(entry)
+    if provider == "nous":
         entry, pool_api_key = _refresh_nous_pool_entry(pool, entry, pool_api_key)
-    if (
-        entry is not None
-        and pool_api_key
-        and credential_pool_matches_provider(pool, provider, base_url=_pool_entry_base_url(entry))
-    ):
+    if pool_api_key and credential_pool_matches_provider(pool, provider, base_url=_pool_entry_base_url(entry)):
         return _resolve_runtime_from_pool_entry(
             provider=provider, entry=entry, requested_provider=requested_provider,
             model_cfg=model_cfg, pool=pool, target_model=target_model,
@@ -939,9 +932,8 @@ def resolve_runtime_provider(
     *, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve runtime provider credentials for agent execution.
-
-    Ladder (order is behavior — each rung returns or raises, else falls to the next):
+    """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
+    rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
       2. requested-name shortcuts: moa, anthropic@azure, azure-foundry, vertex
       3. named custom provider / llamacpp alias / bare-custom direct alias
@@ -951,9 +943,8 @@ def resolve_runtime_provider(
       7. OAuth specs (nous/codex/xai/qwen; "auto" swallows AuthError and logs) → minimax-oauth
          → external-process → anthropic env → bedrock → registry api_key providers
       8. OpenRouter / bare-custom fallback
-
-    target_model: overrides model_cfg["default"] when computing provider-specific api_mode
-    (e.g. OpenCode Zen/Go where different models route through different API surfaces)."""
+    target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
+    OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
     runtime = _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)

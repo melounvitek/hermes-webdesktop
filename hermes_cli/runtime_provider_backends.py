@@ -1,10 +1,8 @@
 """Provider-specific runtime builders for :mod:`hermes_cli.runtime_provider`: Azure Foundry, the
-OpenRouter / bare-custom fallback resolver, Bedrock, and external-process providers.
-
-Origin-internal collaborators are resolved on the origin module at call time via :func:`_rp` so
-test patches on ``hermes_cli.runtime_provider.*`` (``_get_model_config``, ``load_config``,
-``has_usable_secret``, ``_try_resolve_from_custom_pool``, …) still apply.
-"""
+OpenRouter / bare-custom fallback resolver, Bedrock, and external-process providers. Origin-internal
+collaborators are resolved on the origin module at call time via :func:`_rp` so test patches on
+``hermes_cli.runtime_provider.*`` (``_get_model_config``, ``load_config``, ``has_usable_secret``,
+``_try_resolve_from_custom_pool``, …) still apply."""
 
 from __future__ import annotations
 
@@ -120,13 +118,11 @@ def _resolve_azure_foundry_runtime(
 def _resolve_openrouter_runtime(
     *, requested_provider: str, explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Terminal resolver: OpenRouter, or a bare/aliased ``custom`` endpoint.
-
-    base_url precedence: explicit > CUSTOM_BASE_URL > trusted ``model.base_url`` > OPENROUTER_BASE_URL
-    > default. OPENAI_BASE_URL is deliberately NOT consulted — config.yaml is the single source of
-    truth for endpoint URLs. OpenRouter contexts prefer OPENROUTER_API_KEY; custom endpoints never
-    receive the OpenRouter key and only get env keys gated on their authoritative hosts.
-    """
+    """Terminal resolver: OpenRouter, or a bare/aliased ``custom`` endpoint. base_url precedence:
+    explicit > CUSTOM_BASE_URL > trusted ``model.base_url`` > OPENROUTER_BASE_URL > default.
+    OPENAI_BASE_URL is deliberately NOT consulted — config.yaml is the single source of truth for
+    endpoint URLs. OpenRouter contexts prefer OPENROUTER_API_KEY; custom endpoints never receive the
+    OpenRouter key and only get env keys gated on their authoritative hosts."""
     rp = _rp()
     model_cfg = rp._get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""

@@ -177,12 +177,17 @@ def _models_dev_info(canonical: str, allow_network: bool = True):
         return None
 
 
-def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderDef]:
-    """Look up a built-in provider by id or alias.
+def _overlay_pdef(canonical, ov: HermesOverlay, name, env_vars, base_url, doc, source) -> ProviderDef:
+    return ProviderDef(
+        id=canonical, name=name, transport=ov.transport, api_key_env_vars=env_vars, base_url=base_url,
+        base_url_env_var=ov.base_url_env_var, is_aggregator=ov.is_aggregator, auth_type=ov.auth_type, doc=doc,
+        source=source,
+    )
 
-    Order: models.dev catalog merged with the Hermes overlay; Hermes-only overlay (nous,
-    openai-codex, …); plugin provider profiles with a concrete endpoint.
-    """
+
+def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderDef]:
+    """Look up a built-in provider by id or alias: models.dev catalog merged with the Hermes overlay;
+    Hermes-only overlay (nous, openai-codex, …); plugin provider profiles with a concrete endpoint."""
     canonical = normalize_provider(name)
     mdev_info = _models_dev_info(canonical, allow_network)
     overlay = HERMES_OVERLAYS.get(canonical)
@@ -192,17 +197,14 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
         for ev in ov.extra_env_vars:
             if ev not in env_vars:
                 env_vars.append(ev)
-        return ProviderDef(
-            id=canonical, name=mdev_info.name, transport=ov.transport, api_key_env_vars=tuple(env_vars),
-            base_url=ov.base_url_override or mdev_info.api, base_url_env_var=ov.base_url_env_var,
-            is_aggregator=ov.is_aggregator, auth_type=ov.auth_type, doc=mdev_info.doc, source="models.dev",
+        return _overlay_pdef(
+            canonical, ov, mdev_info.name, tuple(env_vars), ov.base_url_override or mdev_info.api, mdev_info.doc,
+            "models.dev",
         )
     if overlay is not None:
-        return ProviderDef(
-            id=canonical, name=_LABEL_OVERRIDES.get(canonical, canonical), transport=overlay.transport,
-            api_key_env_vars=overlay.extra_env_vars, base_url=overlay.base_url_override,
-            base_url_env_var=overlay.base_url_env_var, is_aggregator=overlay.is_aggregator,
-            auth_type=overlay.auth_type, source="hermes",
+        return _overlay_pdef(
+            canonical, overlay, _LABEL_OVERRIDES.get(canonical, canonical), overlay.extra_env_vars,
+            overlay.base_url_override, "", "hermes",
         )
     # Plugin-registered profiles (plugins/model-providers/<name>/) absent from models.dev and
     # HERMES_OVERLAYS would otherwise be "Unknown provider" in /model, --provider and model-switch
@@ -264,12 +266,10 @@ def is_routing_aggregator(provider: str) -> bool:
 
 
 def is_official_openai_host(base_url: str) -> bool:
-    """True when *base_url* points at OpenAI's official API host family.
-
-    Hostname-parsed matching only — never substring — so lookalike hosts
-    (``api.openai.com.attacker.test``) and path-segment spoofs (``proxy.test/api.openai.com/v1``)
-    are rejected. A genuine ``*.api.openai.com`` subdomain requires control of openai.com DNS.
-    """
+    """True when *base_url* points at OpenAI's official API host family. Hostname-parsed matching
+    only — never substring — so lookalike hosts (``api.openai.com.attacker.test``) and path-segment
+    spoofs (``proxy.test/api.openai.com/v1``) are rejected; a genuine ``*.api.openai.com``
+    subdomain requires control of openai.com DNS."""
     return base_url_host_matches(base_url, "api.openai.com")
 
 
@@ -281,14 +281,12 @@ _RESPONSES_NATIVE_HOSTS: frozenset[str] = frozenset({"api.meta.ai", "api.router.
 
 
 def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
-    """Return the wire protocol a specific endpoint *requires*, or None.
-
-    Some hosts accept exactly one API mode (api.openai.com 400s chat/completions for reasoning
-    models with tools). These are *mandatory*: a session carrying a stale api_mode (a /model switch
-    that kept the previous provider's ``chat_completions``) must be overridden, not merely filled
-    in when empty. Exact-hostname matching only — never substring — so lookalike hosts and
-    path-segment spoofs are not treated as the real endpoint.
-    """
+    """Return the wire protocol a specific endpoint *requires*, or None. Some hosts accept exactly
+    one API mode (api.openai.com 400s chat/completions for reasoning models with tools); these are
+    *mandatory*: a session carrying a stale api_mode (a /model switch that kept the previous
+    provider's ``chat_completions``) must be overridden, not merely filled in when empty.
+    Exact-hostname matching only — never substring — so lookalike hosts and path-segment spoofs are
+    not treated as the real endpoint."""
     if not base_url:
         return None
     url_lower = base_url.rstrip("/").lower()
@@ -383,11 +381,9 @@ def custom_provider_aliases(display_name: str, provider_key: str = "") -> frozen
 
 
 def resolve_custom_provider(name: str, custom_providers: Optional[List[Dict[str, Any]]]) -> Optional[ProviderDef]:
-    """Resolve a provider from the user's config.yaml ``custom_providers`` list.
-
-    A stored bare ``"custom"`` (corrupt state from a prior model-switch bug) falls back to the first
-    valid entry so existing configs self-heal.
-    """
+    """Resolve a provider from the user's config.yaml ``custom_providers`` list. A stored bare
+    ``"custom"`` (corrupt state from a prior model-switch bug) falls back to the first valid entry
+    so existing configs self-heal."""
     if not custom_providers or not isinstance(custom_providers, list):
         return None
     requested = (name or "").strip().lower()
@@ -459,12 +455,9 @@ def resolve_provider_full(
 ) -> Optional[ProviderDef]:
     """Full resolution chain: user ``providers.<raw name>`` -> lossy-alias registry id -> built-in
     (models.dev + overlays) -> user providers (canonical, then raw) -> ``custom_providers`` ->
-    managed llamacpp -> models.dev directly.
-
-    User-defined ``providers.<name>`` is tried FIRST on the raw (pre-alias) name: a configured
-    ``providers.openai`` pointing at api.openai.com must not be hijacked by the legacy
-    "openai" -> "openrouter" alias.
-    """
+    managed llamacpp -> models.dev directly. User-defined ``providers.<name>`` is tried FIRST on
+    the raw (pre-alias) name: a configured ``providers.openai`` pointing at api.openai.com must not
+    be hijacked by the legacy "openai" -> "openrouter" alias."""
     canonical = normalize_provider(name)
     raw = name.strip().lower()
     if user_providers:
