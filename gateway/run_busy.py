@@ -417,21 +417,12 @@ class GatewayBusySessionMixin:
             effective_mode == "interrupt" and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
-            logger.info(
-                "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
-                "because the running agent has active subagents (#30170)", session_key,
-            )
-            effective_mode = "queue"
+            effective_mode = self._demote_interrupt(session_key, "the running agent has active subagents (#30170)")
         demoted_for_compression = (
-            effective_mode == "interrupt"
-            and await self._session_has_compression_in_flight(session_key)
+            effective_mode == "interrupt" and await self._session_has_compression_in_flight(session_key)
         )
         if demoted_for_compression:
-            logger.info(
-                "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
-                "because context compression is in flight (#56391)", session_key,
-            )
-            effective_mode = "queue"
+            effective_mode = self._demote_interrupt(session_key, "context compression is in flight (#56391)")
         steered = redirected = False
         agent_live = running_agent is not None and running_agent is not _AGENT_PENDING_SENTINEL
         plain_text = (
@@ -460,6 +451,11 @@ class GatewayBusySessionMixin:
             effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
             demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
         )
+
+    @staticmethod
+    def _demote_interrupt(session_key: str, why: str) -> str:
+        logger.info("Demoting busy_input_mode 'interrupt' to 'queue' for session %s because %s", session_key, why)
+        return "queue"
 
     @staticmethod
     def _try_agent_verb(running_agent, verb: str, text: str, session_key: str) -> bool:

@@ -391,39 +391,36 @@ class GatewayAdapterLifecycleMixin:
                 # Clean return = deliberate shutdown or a self-disabling watcher; NEVER respawn.
                 return
             logger.error("Supervised task %s died: %r", name, exc, exc_info=exc)
-            if restart and self._running:
-                ran_for = time.monotonic() - _started
-                # A healthy run before the crash is a FRESH failure, not a crash-loop: reset so a
-                # daemon crashing a few times over days is never abandoned.
-                effective_attempt = 0 if ran_for >= self._SUPERVISED_HEALTHY_SECS else _attempt
-                if effective_attempt >= self._MAX_SUPERVISED_RESTARTS:
-                    logger.error(
-                        "Supervised task %s died %d times in rapid succession "
-                        "(each within %ds of restart) — giving up restarts", name,
-                        effective_attempt, self._SUPERVISED_HEALTHY_SECS,
+            if not (restart and self._running):
+                return
+            # A healthy run before the crash is a FRESH failure, not a crash-loop: reset so a
+            # daemon crashing a few times over days is never abandoned.
+            healthy = time.monotonic() - _started >= self._SUPERVISED_HEALTHY_SECS
+            effective_attempt = 0 if healthy else _attempt
+            if effective_attempt >= self._MAX_SUPERVISED_RESTARTS:
+                logger.error(
+                    "Supervised task %s died %d times in rapid succession "
+                    "(each within %ds of restart) — giving up restarts", name,
+                    effective_attempt, self._SUPERVISED_HEALTHY_SECS,
+                )
+                if on_give_up is not None:
+                    try:
+                        on_give_up(name)
+                    except Exception:  # pragma: no cover - defensive
+                        logger.debug("on_give_up callback for %s raised", name, exc_info=True)
+                return
+            backoff = self._supervised_backoff(effective_attempt)
+
+            async def _respawn():
+                await asyncio.sleep(backoff)
+                if self._running:
+                    self._spawn_supervised(
+                        coro_factory, name, restart=restart, _attempt=effective_attempt + 1,
+                        on_spawn=on_spawn, on_give_up=on_give_up,  # only the LAST give-up matters
                     )
-                    if on_give_up is not None:
-                        try:
-                            on_give_up(name)
-                        except Exception:  # pragma: no cover - defensive
-                            logger.debug("on_give_up callback for %s raised", name, exc_info=True)
-                    return
-                backoff = self._supervised_backoff(effective_attempt)
 
-                async def _respawn():
-                    await asyncio.sleep(backoff)
-                    if self._running:
-                        self._spawn_supervised(
-                            coro_factory,
-                            name,
-                            restart=restart,
-                            _attempt=effective_attempt + 1,
-                            on_spawn=on_spawn,
-                            on_give_up=on_give_up,  # only the LAST respawn's give-up matters
-                        )
-
-                # The done callback runs in its registration context; isolate the backoff task too.
-                self._retain_background_task(Context().run(lambda: asyncio.create_task(_respawn())))
+            # The done callback runs in its registration context; isolate the backoff task too.
+            self._retain_background_task(Context().run(lambda: asyncio.create_task(_respawn())))
 
         task.add_done_callback(_done)
         return task
@@ -451,10 +448,7 @@ class GatewayAdapterLifecycleMixin:
         async def _dispatch(row, session_id, session_db, profile_name) -> None:
             """Run one claimed handoff to a terminal state, off the poll path."""
             try:
-                if _process_takes_profile:
-                    await self._process_handoff(row, profile_name)
-                else:
-                    await self._process_handoff(row)
+                await self._process_handoff(*((row, profile_name) if _process_takes_profile else (row,)))
                 await session_db.complete_handoff(session_id)
             except asyncio.CancelledError:
                 # Gateway shutting down: leave the row 'running' so the next
@@ -914,14 +908,12 @@ class GatewayAdapterLifecycleMixin:
         port_binding_platforms = sorted(
             platform.value
             for platform, platform_config in profile_cfg.platforms.items()
-            if platform_config.enabled
-            and _platform_binds_port(platform.value, platform_config.extra)
+            if platform_config.enabled and _platform_binds_port(platform.value, platform_config.extra)
         )
         if port_binding_platforms:
-            joined = ", ".join(port_binding_platforms)
             raise SecondaryPortBindingConfigError(
                 f"Profile '{profile_name}' enables port-binding platform(s) "
-                f"{joined}, but gateway.multiplex_profiles is on. The default "
+                f"{', '.join(port_binding_platforms)}, but gateway.multiplex_profiles is on. The default "
                 f"profile owns the single shared HTTP listener and serves every "
                 f"profile through the /p/{profile_name}/ URL prefix. Remove "
                 f"these platform entries from profile '{profile_name}'s config.yaml "
@@ -1009,19 +1001,14 @@ class GatewayAdapterLifecycleMixin:
                     profile_name, platform.value,
                 )
                 continue
-
             # Same-token / same-listener conflict detection — refuse a duplicate poll or bind.
             credential_claim = self._adapter_credential_claim(platform, adapter)
+            listener_claim = self._adapter_listener_claim(platform, adapter)
             if self._refuse_duplicate_claim(
                 credential_claim, claimed, profile_name, platform, "credential"
-            ):
+            ) or self._refuse_duplicate_claim(listener_claim, claimed, profile_name, platform, "listener"):
                 continue
-            listener_claim = self._adapter_listener_claim(platform, adapter)
-            if self._refuse_duplicate_claim(listener_claim, claimed, profile_name, platform, "listener"):
-                continue
-
             self._configure_profile_adapter(adapter, profile_name, platform)
-
             try:
                 with _profile_runtime_scope(profile_home, hydrate_secrets=False):
                     success = await self._connect_initial_adapter_with_timeout(adapter, platform)
