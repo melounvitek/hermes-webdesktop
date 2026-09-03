@@ -1,13 +1,11 @@
 """Global emergency stop (ESTOP) — a resumable pause for NEW work only.
 
 ``hermes pause`` writes a sentinel at ``$HERMES_HOME/ESTOP``; ``hermes resume``
-removes it. While it exists the cron scheduler, kanban dispatcher and new
-gateway turns skip work; in-flight work is never killed. The check is one or
-two ``os.stat`` calls (process home + fleet root when they differ), uncached,
-so engaging/disengaging binds on the next check. The sentinel body is optional
+removes it. While it exists the cron scheduler, kanban dispatcher and new gateway
+turns skip work; in-flight work is never killed. The check is one or two uncached
+``os.stat`` calls (process home + fleet root when they differ). The body is optional
 JSON ``{"reason", "engaged_at"}``; a corrupt/empty file still counts as engaged
-(fail safe, e.g. ``touch ~/.hermes/ESTOP``). Ported from gastownhall/gastown
-estop.go (MIT).
+(fail safe, e.g. ``touch ~/.hermes/ESTOP``). Ported from gastownhall/gastown estop.go (MIT).
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -24,8 +23,7 @@ from agent.file_safety import _hermes_home_path as _hermes_home, _hermes_root_pa
 
 SENTINEL_NAME = "ESTOP"
 
-# Per-component "logged already for this engagement" flags: log once per
-# engagement, not once per tick.
+# Per-component "logged already for this engagement" flags: log once per engagement, not per tick.
 _log_lock = threading.Lock()
 _logged_components: set[str] = set()
 
@@ -39,19 +37,16 @@ def _candidate_sentinel_paths() -> list:
     """Profile home first, then the fleet root if it is a different directory: a profile
     gateway (HERMES_HOME=~/.hermes/profiles/<n>) must still honor an operator's ~/.hermes/ESTOP."""
     primary = sentinel_path()
-    paths = [primary]
     try:
         root = _canonical_root() / SENTINEL_NAME
     except Exception:
-        return paths
+        return [primary]
     try:
-        if root.resolve() != primary.resolve():
-            paths.append(root)
+        distinct = root.resolve() != primary.resolve()
     except Exception:
         # Non-Path test doubles fail .resolve(); plain equality still dedupes.
-        if root != primary:
-            paths.append(root)
-    return paths
+        distinct = root != primary
+    return [primary, root] if distinct else [primary]
 
 
 def is_engaged() -> bool:
@@ -74,11 +69,8 @@ def engage(reason: Optional[str] = None) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:
-        # Best effort: an empty/partial sentinel still pauses (fail safe).
-        try:
+        with suppress(OSError):  # Best effort: an empty/partial sentinel still pauses (fail safe).
             path.touch(exist_ok=True)
-        except OSError:
-            pass
     return path
 
 
@@ -95,35 +87,27 @@ def disengage() -> bool:
 
 
 def get_state() -> Optional[dict]:
-    """Return ``{"reason", "engaged_at"}`` or None when not engaged.
-
-    An unreadable/corrupt body still reports engaged with both fields None.
-    """
+    """Return ``{"reason", "engaged_at"}`` or None when not engaged; an unreadable/corrupt
+    body still reports engaged with both fields None."""
     if not is_engaged():
         return None
-    reason = engaged_at = None
+    state = {"reason": None, "engaged_at": None}
     found = False
     for path in _candidate_sentinel_paths():
         try:
-            exists = path.exists()
+            if not path.exists():
+                continue
         except OSError:
-            return {"reason": None, "engaged_at": None}
+            return state
         except AttributeError:
             continue
-        if not exists:
-            continue
         found = True
-        try:
+        with suppress(OSError, ValueError, AttributeError):
             raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                reason = raw.get("reason") or None
-                engaged_at = raw.get("engaged_at") or None
+                state = {"reason": raw.get("reason") or None, "engaged_at": raw.get("engaged_at") or None}
                 break
-        except (OSError, ValueError, AttributeError):
-            continue
-    if not found:
-        return None
-    return {"reason": reason, "engaged_at": engaged_at}
+    return state if found else None
 
 
 def paused_reply() -> Optional[str]:
@@ -131,31 +115,24 @@ def paused_reply() -> Optional[str]:
     state = get_state()
     if state is None:
         return None
-    reason = state.get("reason")
-    tag = f" ({reason})" if reason else ""
+    tag = f" ({state['reason']})" if state.get("reason") else ""
     return f"⏸️ Hermes is paused{tag}. New work is on hold; run `hermes resume` to pick things back up."
 
 
 def check_paused(component: str, logger: logging.Logger) -> bool:
-    """Return True when engaged, logging once per engagement per component
-    (re-armed after a resume)."""
+    """Return True when engaged, logging once per engagement per component (re-armed after a resume)."""
     if not is_engaged():
         with _log_lock:
             _logged_components.discard(component)
         return False
     with _log_lock:
         first = component not in _logged_components
-        if first:
-            _logged_components.add(component)
+        _logged_components.add(component)
     if first:
-        state = get_state() or {}
-        reason = state.get("reason")
+        reason = (get_state() or {}).get("reason")
         suffix = f" (reason: {reason})" if reason else ""
         logger.info(
-            "%s dispatch paused by global emergency stop%s — remove with "
-            "`hermes resume` (%s)",
-            component,
-            suffix,
-            sentinel_path(),
+            "%s dispatch paused by global emergency stop%s — remove with `hermes resume` (%s)",
+            component, suffix, sentinel_path(),
         )
     return True

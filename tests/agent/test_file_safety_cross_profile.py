@@ -1,4 +1,4 @@
-"""Tests for the (retired) cross-Hermes-profile write guard in agent/file_safety."""
+"""Tests for the active-profile resolver in agent/file_safety."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -88,26 +88,3 @@ class TestResolveActiveProfileName:
         monkeypatch.setattr(fs, "_hermes_home_path", _boom)
         # Should not raise — falls back to "default"
         assert fs._resolve_active_profile_name() == "default"
-
-
-# ---------------------------------------------------------------------------
-# get_cross_profile_warning
-# ---------------------------------------------------------------------------
-
-
-class TestGetCrossProfileWarning:
-    """The guard is RETIRED (maintainer decision): profiles are not
-    isolated, so the warning helper is a permanent None stub — kept only
-    so external callers fail soft. The classifier itself survives for
-    the system-prompt hint and diagnostics."""
-
-    def test_in_profile_returns_none(self, fake_hermes, monkeypatch):
-        from agent.file_safety import get_cross_profile_warning
-        assert get_cross_profile_warning(
-            str(fake_hermes["root"] / "skills" / "a" / "SKILL.md")) is None
-
-    def test_cross_profile_returns_none_guard_retired(self, fake_hermes, monkeypatch):
-        from agent.file_safety import get_cross_profile_warning
-        target = fake_hermes["root"] / "profiles" / "security" / "skills" / "x" / "SKILL.md"
-        assert get_cross_profile_warning(str(target)) is None
-
