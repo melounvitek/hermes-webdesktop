@@ -25,11 +25,9 @@ def ensure_install_id(config: Dict[str, Any]) -> str:
     existing = (mon or {}).get("install_id") if isinstance(mon, dict) else None
     if isinstance(existing, str) and existing.strip():
         return existing
-
     minted = str(uuid.uuid4())
     try:
         from hermes_cli.config import load_config, save_config
-
         fresh = load_config()
         if isinstance(fresh, dict):
             slot = fresh.setdefault("monitoring", {})

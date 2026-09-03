@@ -29,25 +29,23 @@ class OTLPUnavailable(RuntimeError):
 
 
 # ── SDK loading ──────────────────────────────────────────────────────────────
-_SDK_SYMBOLS: Dict[str, str] = {
-    "TracerProvider": "opentelemetry.sdk.trace",
-    "BatchSpanProcessor": "opentelemetry.sdk.trace.export",
-    "Resource": "opentelemetry.sdk.resources",
-    "OTLPSpanExporter": "opentelemetry.exporter.otlp.proto.http.trace_exporter",
-    "SpanKind": "opentelemetry.trace",
-    "OTLPLogExporter": "opentelemetry.exporter.otlp.proto.http._log_exporter",
-    "OTLPMetricExporter": "opentelemetry.exporter.otlp.proto.http.metric_exporter",
-    "Observation": "opentelemetry.metrics",
-    "INVALID_SPAN_ID": "opentelemetry.trace",
-    "INVALID_TRACE_ID": "opentelemetry.trace",
-    "TraceFlags": "opentelemetry.trace",
-    "LogRecord": "opentelemetry._logs",
-    "SeverityNumber": "opentelemetry._logs.severity",
-    "LoggerProvider": "opentelemetry.sdk._logs",
-    "BatchLogRecordProcessor": "opentelemetry.sdk._logs.export",
-    "MeterProvider": "opentelemetry.sdk.metrics",
-    "PeriodicExportingMetricReader": "opentelemetry.sdk.metrics.export",
+_SDK_MODULES: Dict[str, tuple[str, ...]] = {
+    "opentelemetry.sdk.trace": ("TracerProvider",),
+    "opentelemetry.sdk.trace.export": ("BatchSpanProcessor",),
+    "opentelemetry.sdk.resources": ("Resource",),
+    "opentelemetry.exporter.otlp.proto.http.trace_exporter": ("OTLPSpanExporter",),
+    "opentelemetry.exporter.otlp.proto.http._log_exporter": ("OTLPLogExporter",),
+    "opentelemetry.exporter.otlp.proto.http.metric_exporter": ("OTLPMetricExporter",),
+    "opentelemetry.trace": ("SpanKind", "INVALID_SPAN_ID", "INVALID_TRACE_ID", "TraceFlags"),
+    "opentelemetry.metrics": ("Observation",),
+    "opentelemetry._logs": ("LogRecord",),
+    "opentelemetry._logs.severity": ("SeverityNumber",),
+    "opentelemetry.sdk._logs": ("LoggerProvider",),
+    "opentelemetry.sdk._logs.export": ("BatchLogRecordProcessor",),
+    "opentelemetry.sdk.metrics": ("MeterProvider",),
+    "opentelemetry.sdk.metrics.export": ("PeriodicExportingMetricReader",),
 }
+_SDK_SYMBOLS: Dict[str, str] = {name: module for module, names in _SDK_MODULES.items() for name in names}
 _SPAN_SDK = ("TracerProvider", "BatchSpanProcessor", "Resource", "OTLPSpanExporter", "SpanKind")
 
 
@@ -172,16 +170,12 @@ def _make_provider(config: Dict[str, Any]):
 # ── event -> span attribute mapping ──────────────────────────────────────────
 # Per-kind attribute allowlists: everything else (profile, install_id, ...) never egresses.
 _KEEP_BY_KIND: Dict[str, tuple[str, ...]] = {
-    "gateway_health": ("name", "gateway_state", "old_state", "new_state",
-                       "exit_reason", "restart_requested", "active_agents",
-                       "gateway_busy", "gateway_drainable", "platform_count",
-                       "fatal_platform_count", "version",
-                       "supervision_mode", "pid"),
-    "gateway_diagnostic": ("name", "subsystem", "error_class", "error_code",
-                           "platform", "old_state", "new_state",
-                           "version", "severity"),
-    "cron_execution": ("status", "job_key", "source", "duration_ms",
-                       "delivery_outcome", "error_class"),
+    "gateway_health": (
+        "name", "gateway_state", "old_state", "new_state", "exit_reason", "restart_requested", "active_agents",
+        "gateway_busy", "gateway_drainable", "platform_count", "fatal_platform_count", "version", "supervision_mode", "pid",
+    ),
+    "gateway_diagnostic": ("name", "subsystem", "error_class", "error_code", "platform", "old_state", "new_state", "version", "severity"),
+    "cron_execution": ("status", "job_key", "source", "duration_ms", "delivery_outcome", "error_class"),
 }
 
 
@@ -220,7 +214,6 @@ def export_batch(provider, batch: List[Dict[str, Any]]) -> int:
 class EmitterStreamer:
     """Base for emitter subscribers owning an OTel provider + batch processor.
     Register with ``emitter.subscribe(streamer)``. Fail-isolated by the emitter."""
-
     _provider: Any
     _processor: Any
     exported: int = 0

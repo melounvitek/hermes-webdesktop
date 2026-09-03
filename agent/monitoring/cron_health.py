@@ -100,7 +100,6 @@ def emit_execution_state(record: Optional[dict[str, Any]], *, delivery_outcome: 
         return
     try:
         from agent.monitoring import emitter
-
         event = project_execution_event(record, delivery_outcome=delivery_outcome)
         target = emitter.get_emitter()
         target.emit(event)
@@ -136,6 +135,7 @@ def _freshness_metric(name: str, reader: Callable[[], Optional[float]]) -> Calla
         value = reader()
         if value is not None:
             metrics.append(GatewayMetric(name, max(0.0, float(value)), {}))
+
     return build
 
 

@@ -59,9 +59,7 @@ _worker: Optional[threading.Thread] = None
 @dataclass
 class WebhookTarget(_ToolMatcherMixin):
     """Parsed and validated representation of one ``hooks.outbound`` entry."""
-
     _MATCHER_KIND = "outbound webhook"
-
     url: str
     events: List[str]
     name: str = ""
@@ -86,7 +84,6 @@ def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     if not isinstance(cfg, dict):
         return []
     from utils import env_var_enabled
-
     if env_var_enabled("HERMES_SAFE_MODE"):
         logger.info("HERMES_SAFE_MODE=1 — outbound webhook registration skipped")
         return []
@@ -94,7 +91,6 @@ def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     if not targets:
         return []
     from hermes_cli.plugins import get_plugin_manager
-
     manager = get_plugin_manager()
     home_key = _home_key()
     registered: List[WebhookTarget] = []
@@ -149,7 +145,6 @@ def re_register_config_hooks() -> None:
     current home's idempotence keys are cleared so a force-reload in one profile cannot
     invalidate another profile's still-live registration."""
     from hermes_cli.config import load_config
-
     _forget_home_registrations(_registered, _registered_lock)
     register_from_config(load_config())
 
@@ -177,7 +172,6 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     if not isinstance(raw, dict):
         warn(" must be a mapping with 'url' and 'events' keys; got %s", type(raw).__name__)
         return None
-
     url = raw.get("url")
     if not isinstance(url, str) or not url.strip():
         warn(" is missing a non-empty 'url'")
@@ -188,7 +182,6 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
         return None
     if url.lower().startswith("http://"):
         warn(".url uses plain http:// — payloads (including tool inputs) travel unencrypted. Prefer https.")
-
     events_raw = raw.get("events")
     valid_list = ", ".join(sorted(VALID_HOOKS))
     if not isinstance(events_raw, list) or not events_raw:
@@ -203,7 +196,6 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     if not events:
         warn(" has no valid events — skipped")
         return None
-
     matcher = raw.get("matcher")
     if matcher is not None and not isinstance(matcher, str):
         warn(".matcher must be a string regex; ignoring")
@@ -211,14 +203,12 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     if matcher is not None and not any(e in _TOOL_SCOPED_EVENTS for e in events):
         warn(".matcher=%r will be ignored — matcher is only honored for pre_tool_call / post_tool_call.", matcher)
         matcher = None
-
     timeout_raw = raw.get("timeout", DEFAULT_TIMEOUT_SECONDS)
     try:
         timeout = int(timeout_raw)
     except (TypeError, ValueError):
         warn(".timeout must be an int (got %r); using default %ds", timeout_raw, DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
-
     name = raw.get("name")
     return WebhookTarget(
         url=url,
@@ -276,7 +266,6 @@ def _serialize_payload(event: str, kwargs: Dict[str, Any], delivery_id: str) -> 
     body, so they double as replay protection."""
     # Profile resolved at fire time so a multiplexed gateway's receivers can tell which profile emitted.
     from hermes_cli.profiles import get_active_profile_name
-
     payload = {
         "hook_event_name": event,
         "profile": get_active_profile_name(),
@@ -383,7 +372,6 @@ def _deliver(delivery: Dict[str, Any]) -> None:
             last_error = str(exc) or type(exc).__name__
         if attempt < MAX_DELIVERY_ATTEMPTS:
             time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-
     logger.warning(
         "outbound webhook delivery failed after %d attempt(s) (event=%s target=%s): %s",
         MAX_DELIVERY_ATTEMPTS, event, label, last_error,

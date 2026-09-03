@@ -80,7 +80,6 @@ class GatewayHealthExportRuntime:
         if self.log_handler is not None:
             with suppress(Exception):
                 logging.getLogger().removeHandler(self.log_handler)
-
         # Producers are stopped; drain queued/in-flight events BEFORE detaching subscribers
         # so the terminal lifecycle event cannot race exporter shutdown. Bounded, fail-open.
         subscribers = [item for item in (self.streamer, self.log_streamer) if item is not None]
@@ -89,7 +88,6 @@ class GatewayHealthExportRuntime:
             bus.flush(timeout=1.0)
             for sub in subscribers:
                 bus.unsubscribe(sub)
-
         # Network flush/close runs under one bounded daemon-thread deadline so it can
         # never delay gateway teardown indefinitely.
         closeables = subscribers + ([self.metric_provider] if self.metric_provider is not None else [])
@@ -103,7 +101,6 @@ class GatewayHealthExportRuntime:
             worker = threading.Thread(target=_close, name="hermes-gateway-health-export-shutdown", daemon=True)
             worker.start()
             worker.join(timeout=2.0)
-
         self.streamer = self.log_streamer = self.metric_provider = self.thread = self.stop_event = None
 
 
@@ -161,7 +158,6 @@ def _read_gateway_snapshot(config: Dict[str, Any]):
 
 def _read_cron_snapshot():
     from agent.monitoring.cron_health import build_cron_health_snapshot
-
     return build_cron_health_snapshot()
 
 
@@ -242,11 +238,11 @@ def _start_metric_provider(config: Dict[str, Any], sdk: Dict[str, Any]) -> Any:
     def callback(name: str):
         def _cb(_options=None):
             try:
-                snapshot = _read_runtime_snapshot(config)
-                return [Observation(m.value, m.attributes) for m in snapshot.metrics if m.name == name]
+                return [Observation(m.value, m.attributes) for m in _read_runtime_snapshot(config).metrics if m.name == name]
             except Exception:
                 logger.debug("gateway metric callback failed", exc_info=True)
                 return []
+
         return _cb
 
     for metric_name in _OBSERVABLE_METRIC_NAMES:
@@ -286,13 +282,9 @@ class GatewayDiagnosticLogStreamer(EmitterStreamer):
             source_logger = source_logger_for_export(ev.get("source_logger"))
             otel_logger = self._provider.get_logger(source_logger) if source_logger is not None else self._logger
             otel_logger.emit(sdk["LogRecord"](
-                timestamp=ev.get("ts_ns"),
-                trace_id=sdk["INVALID_TRACE_ID"],
-                span_id=sdk["INVALID_SPAN_ID"],
-                trace_flags=sdk["TraceFlags"].DEFAULT,
-                severity_text=str(ev.get("severity") or "warning").upper(),
-                severity_number=_severity_number(sdk, ev.get("severity")),
-                body=redact_bounded("gateway diagnostic"),
+                timestamp=ev.get("ts_ns"), trace_id=sdk["INVALID_TRACE_ID"], span_id=sdk["INVALID_SPAN_ID"],
+                trace_flags=sdk["TraceFlags"].DEFAULT, severity_text=str(ev.get("severity") or "warning").upper(),
+                severity_number=_severity_number(sdk, ev.get("severity")), body=redact_bounded("gateway diagnostic"),
                 attributes=_diagnostic_log_attributes(ev),
             ))
             self.exported += 1
@@ -334,17 +326,12 @@ def start_gateway_health_export(config: Dict[str, Any]) -> GatewayHealthExportRu
     diagnostics_on = gh.get("diagnostic_events_enabled", True)
     runtime = GatewayHealthExportRuntime(enabled=True, reason="enabled")
     sdk: Optional[Dict[str, Any]] = None
-
     if metrics_on or diagnostics_on:
         try:
             sdk = _require_metrics_sdk(prompt=False)
         except Exception:
-            logger.warning(
-                "monitoring.gateway_health_export.enabled but OTLP SDK is unavailable; install 'hermes-agent[otlp]'",
-                exc_info=True,
-            )
+            logger.warning("monitoring.gateway_health_export.enabled but OTLP SDK is unavailable; install 'hermes-agent[otlp]'", exc_info=True)
             return GatewayHealthExportRuntime(enabled=False, reason="otlp_unavailable")
-
     if metrics_on and sdk is not None:
         try:
             runtime.metric_provider = _start_metric_provider(config, sdk)
@@ -352,7 +339,6 @@ def start_gateway_health_export(config: Dict[str, Any]) -> GatewayHealthExportRu
             logger.warning("gateway health OTLP metrics failed to start", exc_info=True)
             runtime.shutdown()
             return GatewayHealthExportRuntime(enabled=False, reason="metrics_start_failed")
-
     if diagnostics_on and sdk is not None:
         try:
             runtime.streamer = otlp_exporter.start_streaming(config, event_filter=_gateway_health_event)
@@ -365,7 +351,6 @@ def start_gateway_health_export(config: Dict[str, Any]) -> GatewayHealthExportRu
             logger.debug("gateway diagnostic OTLP export failed to start", exc_info=True)
             runtime.shutdown()
             return GatewayHealthExportRuntime(enabled=False, reason="diagnostics_start_failed")
-
     try:
         runtime.log_handler = _attach_log_handler(config)
     except Exception:
