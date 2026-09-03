@@ -64,9 +64,7 @@ class Diagnostic:
         return asdict(self)
 
 
-# ---------------------------------------------------------------------------
-# Rule helpers
-# ---------------------------------------------------------------------------
+# --- Rule helpers ---
 
 def _task_field(task, name, default=None):
     """Read a field from a sqlite3.Row, a kanban_db.Task dataclass, or a dict."""
@@ -173,9 +171,7 @@ def _runs_newest_first(runs) -> list[Any]:
     return list(reversed(sorted(runs, key=lambda r: _task_field(r, "id", 0))))
 
 
-# ---------------------------------------------------------------------------
-# Rule implementations
-# ---------------------------------------------------------------------------
+# --- Rule implementations ---
 
 # Each rule: (task, events, runs, now_ts, config) -> list[Diagnostic].
 # ``events``/``runs`` are kanban_db rows/dataclasses or same-shaped dicts.
@@ -293,10 +289,9 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
     if status is None:
         return []
 
-    auto_decompose = bool(status.get("auto_decompose"))
+    auto_decompose, main_visible = bool(status.get("auto_decompose")), bool(status.get("main_model_visible"))
     decomposer_explicit = bool(status.get("decomposer_explicit"))
     specifier_explicit = bool(status.get("specifier_explicit"))
-    main_visible = bool(status.get("main_model_visible"))
     primary_slot, fallback_slot, primary_desc, detail_path = _TRIAGE_SLOTS[auto_decompose]
     primary_explicit, fallback_explicit = (
         (decomposer_explicit, specifier_explicit) if auto_decompose
@@ -328,12 +323,8 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
         ),
         actions=actions,
         first_seen_at=now, last_seen_at=now, count=1,
-        data={
-            "task_id": task_id,
-            "auto_decompose": auto_decompose,
-            "primary_slot": primary_slot,
-            "main_model_visible": main_visible,
-        },
+        data={"task_id": task_id, "auto_decompose": auto_decompose,
+              "primary_slot": primary_slot, "main_model_visible": main_visible},
     )]
 
 
@@ -540,11 +531,7 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
         ),
         actions=actions,
         first_seen_at=blocked_at, last_seen_at=blocked_at, count=len(child_ids),
-        data={
-            "blocked_parent_id": task_id,
-            "waiting_child_ids": child_ids,
-            "block_reason": reason,
-        },
+        data={"blocked_parent_id": task_id, "waiting_child_ids": child_ids, "block_reason": reason},
     )]
 
 
@@ -688,12 +675,8 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         ),
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
-        data={
-            "ready_since": last_ready_ts,
-            "age_seconds": int(age_seconds),
-            "assignee": assignee,
-            "threshold_seconds": int(threshold_seconds),
-        },
+        data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
+              "assignee": assignee, "threshold_seconds": int(threshold_seconds)},
     )]
 
 
