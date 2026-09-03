@@ -173,30 +173,29 @@ def _dump_subagent_timeout_diagnostic(
         _goal_preview = (goal or "").strip()
         if len(_goal_preview) > 1000:
             _goal_preview = _goal_preview[:1000] + " ...[truncated]"
+        def _attr_line(attr):
+            try:
+                return f"  {attr}: {getattr(child, attr, None)!r}"
+            except Exception:
+                return f"  {attr}: <unreadable>"
+
+        tool_names = getattr(child, "valid_tool_names", None)
         lines: List[str] = [
             "# Subagent timeout diagnostic — issue #14726", f"# Generated: {_dt.datetime.now().isoformat()}", "",
             "## Timeout", f"  task_index:        {task_index}", f"  subagent_id:       {subagent_id}",
             f"  configured_timeout: {timeout_seconds}s", f"  actual_duration:   {duration_seconds:.2f}s", "", "## Goal",
-            _goal_preview or "(empty)", "", "## Child config",
+            _goal_preview or "(empty)", "", "## Child config", *map(_attr_line, _DIAG_CHILD_ATTRS),
+            "", "## Toolsets", f"  enabled_toolsets:  {getattr(child, 'enabled_toolsets', None)!r}",
         ]
-        for attr in _DIAG_CHILD_ATTRS:
-            try:
-                lines.append(f"  {attr}: {getattr(child, attr, None)!r}")
-            except Exception:
-                lines.append(f"  {attr}: <unreadable>")
-        lines += ["", "## Toolsets", f"  enabled_toolsets:  {getattr(child, 'enabled_toolsets', None)!r}"]
-        tool_names = getattr(child, "valid_tool_names", None)
         if tool_names:
             lines.append(f"  loaded tool count: {len(tool_names)}")
             with _quiet(None):
                 lines.append(f"  loaded tools:      {sorted(tool_names)}")
-        lines += [""] + _diag_sizes(child) + ["", "## Activity summary"]
+        lines += ["", *_diag_sizes(child), "", "## Activity summary"]
         lines += _diag_section(
             "<get_activity_summary failed: ", lambda: [f"  {k}: {v!r}" for k, v in child.get_activity_summary().items()],
         )
-        lines += [""] + _diag_threads(worker_thread) + [
-            "",
-            "## Notes",
+        lines += ["", *_diag_threads(worker_thread), "", "## Notes",
             "  This file is written ONLY when a subagent times out with 0 API calls.",
             "  0-API-call timeouts mean the child never reached its first LLM request.",
             "  Common causes: oversized prompt rejected by provider, transport hang,",
@@ -277,34 +276,27 @@ def _register_child(
     if owner_session_id and (owner_transport is None or owner_session_record is None):
         owner_transport, owner_session_record = _capture_gateway_steer_authority(owner_session_id)
     _raw_depth = getattr(child, "_delegate_depth", 1)
-    _register_subagent(
-        {
-            "subagent_id": _subagent_id,
-            "parent_id": _str_or_none(getattr(child, "_parent_subagent_id", None)),
-            "depth": max(0, _raw_depth - 1) if isinstance(_raw_depth, int) else 0,
-            "goal": goal,
-            "delegation_id": _str_or_none(getattr(child, "_delegation_id", None)),
-            "model": _str_or_none(getattr(child, "model", None)),
-            "started_at": time.time(),
-            "status": "running",
-            "tool_count": 0,
-            "agent": child,
-            # Owning conversation's durable session id (same lineage completion
-            # delivery routes by), sourced from the child's stamp so it survives
-            # a parent_agent rebuild between dispatch and run; used for
-            # list/steer/stop ownership when the weakref chain breaks.
-            "owner_agent_session_id": (
-                str(getattr(child, "_parent_session_id", "") or "")
-                or str(getattr(parent_agent, "session_id", "") or "")
-                or None
-            ),
-            # Immutable live gateway/TUI session that commissioned this child.
-            # Empty outside those hosts; RPC authority fails closed.
-            "owner_session_id": owner_session_id,
-            "owner_transport": owner_transport,
-            "owner_session_record": owner_session_record,
-        }
-    )
+    _register_subagent({
+        "subagent_id": _subagent_id,
+        "parent_id": _str_or_none(getattr(child, "_parent_subagent_id", None)),
+        "depth": max(0, _raw_depth - 1) if isinstance(_raw_depth, int) else 0,
+        "goal": goal,
+        "delegation_id": _str_or_none(getattr(child, "_delegation_id", None)),
+        "model": _str_or_none(getattr(child, "model", None)),
+        "started_at": time.time(), "status": "running", "tool_count": 0, "agent": child,
+        # Owning conversation's durable session id (same lineage completion
+        # delivery routes by), sourced from the child's stamp so it survives
+        # a parent_agent rebuild between dispatch and run; used for
+        # list/steer/stop ownership when the weakref chain breaks.
+        "owner_agent_session_id": (
+            str(getattr(child, "_parent_session_id", "") or "") or str(getattr(parent_agent, "session_id", "") or "") or None
+        ),
+        # Immutable live gateway/TUI session that commissioned this child.
+        # Empty outside those hosts; RPC authority fails closed.
+        "owner_session_id": owner_session_id,
+        "owner_transport": owner_transport,
+        "owner_session_record": owner_session_record,
+    })
     return _subagent_id
 
 def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_id: Optional[str]):
@@ -314,7 +306,7 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
     from tools.delegate_tool import _get_worktree_isolation, _resolve_workspace_hint
     if not _get_worktree_isolation():
         return None
-    try:
+    with _quiet("worktree isolation setup failed: %s"):
         from tools import subagent_worktree
         if not subagent_worktree.local_backend_active():
             logger.debug("worktree isolation skipped: non-local terminal backend")
@@ -326,9 +318,7 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
         return subagent_worktree.create_subagent_worktree(
             _parent_cwd or _resolve_workspace_hint(parent_agent), subagent_id=subagent_id,
         )
-    except Exception as e:
-        logger.debug("worktree isolation setup failed: %s", e)
-        return None
+    return None
 
 def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     """Hand ``child.close()`` to a Future done-callback and drain its transports.
