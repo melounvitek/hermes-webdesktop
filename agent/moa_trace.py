@@ -1,12 +1,9 @@
 """Full MoA turn trace persistence (opt-in via config ``moa.save_traces``).
 
-When enabled, every Mixture-of-Agents turn that runs the reference fan-out (a
-cache MISS in ``MoAChatCompletions.create``) appends one JSON line to
-``<hermes_home>/moa-traces/<session_id>.jsonl``: the exact messages each
-reference received, each reference's full output, and the exact aggregator input
-plus its output when available — what every model saw, said, and cost.
-
-Side-channel only: never enters the ``messages`` table, history or replay
+Every MoA turn that runs the reference fan-out (a cache MISS in
+``MoAChatCompletions.create``) appends one JSON line to
+``<hermes_home>/moa-traces/<session_id>.jsonl``: what every model saw, said, and
+cost. Side-channel only: never enters the ``messages`` table, history or replay
 (references are advisory side-calls whose rows would corrupt role alternation).
 Off by default; when off the only overhead is the config read.
 """
@@ -30,9 +27,8 @@ def _traces_enabled_and_dir() -> Optional[Path]:
     call (once per cache-MISS turn); ``moa.trace_dir`` overrides the default."""
     try:
         from hermes_cli.config import load_config
-
         moa_cfg = (load_config() or {}).get("moa") or {}
-    except Exception:  # pragma: no cover - defensive: never break a turn over tracing
+    except Exception:  # pragma: no cover - never break a turn over tracing
         return None
     if not moa_cfg.get("save_traces"):
         return None
@@ -54,14 +50,12 @@ _COST_FIELDS = ("cost_usd", "cost_status", "cost_source")
 
 
 def _slot_trace(acct: Any, label: str) -> dict[str, Any]:
-    """Render one reference's _RefAccounting into a full trace dict, including
-    the FULL input messages and output (not the truncated display preview)."""
+    """One reference's _RefAccounting as a full trace dict, including the FULL
+    input messages and output (not the truncated display preview)."""
     usage = getattr(acct, "usage", None)
     return {
-        "label": label,
-        **{f: getattr(acct, f, None) for f in _ACCT_FIELDS},
-        "input_messages": getattr(acct, "messages", None),
-        "output": getattr(acct, "output", None),
+        "label": label, **{f: getattr(acct, f, None) for f in _ACCT_FIELDS},
+        "input_messages": getattr(acct, "messages", None), "output": getattr(acct, "output", None),
         "usage": {f: getattr(usage, f, 0) for f in _USAGE_FIELDS} if usage is not None else {},
         **{f: getattr(acct, f, None) for f in _COST_FIELDS},
     }
@@ -79,16 +73,9 @@ def slot_metrics(acct: Any, label: str, output: Any = None) -> dict[str, Any]:
 
 
 def save_moa_turn(
-    *,
-    session_id: Optional[str],
-    preset_name: str,
-    reference_outputs: list[tuple[str, str, Any]],
-    aggregator_label: str,
-    aggregator_model: Optional[str],
-    aggregator_provider: Optional[str],
-    aggregator_temperature: Any,
-    aggregator_input_messages: Any,
-    aggregator_output: Optional[str],
+    *, session_id: Optional[str], preset_name: str, reference_outputs: list[tuple[str, str, Any]],
+    aggregator_label: str, aggregator_model: Optional[str], aggregator_provider: Optional[str],
+    aggregator_temperature: Any, aggregator_input_messages: Any, aggregator_output: Optional[str],
     aggregator_streamed: bool,
 ) -> None:
     """Append one full MoA turn record to the session's trace JSONL, if enabled.
@@ -116,14 +103,10 @@ def save_moa_turn(
             "preset": preset_name,
             "references": [_slot_trace(acct, label) for label, _text, acct in reference_outputs],
             "aggregator": {
-                "label": aggregator_label,
-                "model": aggregator_model,
-                "provider": aggregator_provider,
-                "temperature": aggregator_temperature,
-                "input_messages": aggregator_input_messages,
-                "output": aggregator_output,
-                "streamed": aggregator_streamed,
-                "output_location": output_location,
+                "label": aggregator_label, "model": aggregator_model,
+                "provider": aggregator_provider, "temperature": aggregator_temperature,
+                "input_messages": aggregator_input_messages, "output": aggregator_output,
+                "streamed": aggregator_streamed, "output_location": output_location,
             },
         }
         with path.open("a", encoding="utf-8") as f:
