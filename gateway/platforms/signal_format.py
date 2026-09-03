@@ -1,8 +1,5 @@
-"""Shared Signal formatting helpers.
-
-Markdown → Signal native formatting lives here so both the live adapter and the
-standalone send paths emit the same bodyRanges.
-"""
+"""Shared Signal formatting helpers: Markdown → Signal native formatting lives here so both the live
+adapter and the standalone send paths emit the same bodyRanges."""
 
 from __future__ import annotations
 
@@ -25,32 +22,24 @@ def _utf16_len(s: str) -> int:
 
 
 def _normalize_bullet_markers(source: str) -> str:
-    """Replace Markdown bullet markers with plain Unicode bullets.
-
-    Signal renders ``- item`` / ``* item`` literally. Fenced code blocks are kept
-    byte-for-byte; list-looking lines inside code are code, not prose bullets."""
+    """Replace Markdown bullet markers with plain Unicode bullets (Signal renders ``- item`` literally).
+    Fenced code blocks are kept byte-for-byte: list-looking lines inside code are code, not bullets."""
     parts = re.split(r"(```.*?```)", source, flags=re.DOTALL)
-    for idx, part in enumerate(parts):
-        if idx % 2 == 0:
-            parts[idx] = re.sub(r"(?m)^([ \t]{0,3})[-*+]\s+", r"\1• ", part)
-    return "".join(parts)
+    return "".join(re.sub(r"(?m)^([ \t]{0,3})[-*+]\s+", r"\1• ", part) if idx % 2 == 0 else part
+                   for idx, part in enumerate(parts))
 
 
 def markdown_to_signal(text: str) -> tuple[str, list[str]]:
-    """Convert markdown to plain text + Signal textStyles list.
-
-    Signal uses ``bodyRanges`` (signal-cli ``textStyle`` / ``textStyles`` params) in
-    the form ``start:length:STYLE``, positions in UTF-16 code units.
+    """Convert markdown to plain text + Signal textStyles list. Signal uses ``bodyRanges`` (signal-cli
+    ``textStyle`` / ``textStyles`` params) as ``start:length:STYLE`` with positions in UTF-16 code units.
     Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE."""
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    text = _normalize_bullet_markers(text)
+    text = _normalize_bullet_markers(re.sub(r"\n{3,}", "\n\n", text).strip())
     styles: list[tuple[int, int, str]] = []
     while match := _CODE_BLOCK_RE.search(text):
         inner = match.group(1).rstrip("\n")
         styles.append((match.start(), len(inner), "MONOSPACE"))
         text = text[: match.start()] + inner + text[match.end() :]
-    new_text = ""
-    last_end = 0
+    new_text, last_end = "", 0
     for match in _HEADING_RE.finditer(text):
         new_text += text[last_end : match.start()]
         eol = text.find("\n", match.end())
@@ -71,10 +60,9 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
                 all_matches.append((ms, me, match.start(1), match.end(1), style))
                 occupied.append((ms, me))
     all_matches.sort()
-    # Strip the markers, recording (pos, len) removals so earlier block/heading
-    # ranges can be shifted, and capturing inline ranges in the stripped text.
-    result = ""
-    last_end = 0
+    # Strip the markers, recording (pos, len) removals so earlier block/heading ranges can be
+    # shifted, and capturing inline ranges in the stripped text.
+    result, last_end = "", 0
     removals: list[tuple[int, int]] = []
     inline_styles: list[tuple[int, int, str]] = []
     for ms, me, g1s, g1e, style in all_matches:
@@ -97,16 +85,12 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
             shift += min(remove_len, pos - remove_pos)
         return pos - shift
 
-    adjusted_prior = [
-        (_adjust(start), _adjust(start + length) - _adjust(start), style)
-        for start, length, style in styles
-        if _adjust(start + length) > _adjust(start)]
+    adjusted_prior = [(_adjust(start), _adjust(start + length) - _adjust(start), style)
+                      for start, length, style in styles if _adjust(start + length) > _adjust(start)]
     text = result + text[last_end:]
     style_strings: list[str] = []
     for cp_start, cp_len, style_type in sorted(adjusted_prior + inline_styles):
-        if cp_start < 0 or cp_start + cp_len > len(text):
-            continue
-        u16_start = _utf16_len(text[:cp_start])
-        u16_len = _utf16_len(text[cp_start : cp_start + cp_len])
-        style_strings.append(f"{u16_start}:{u16_len}:{style_type}")
+        if 0 <= cp_start and cp_start + cp_len <= len(text):
+            u16_start, u16_len = _utf16_len(text[:cp_start]), _utf16_len(text[cp_start : cp_start + cp_len])
+            style_strings.append(f"{u16_start}:{u16_len}:{style_type}")
     return text, style_strings
