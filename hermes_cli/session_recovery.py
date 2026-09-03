@@ -111,10 +111,9 @@ def _source_fingerprint(source: Path) -> dict[str, dict[str, int]]:
     fingerprint: dict[str, dict[str, int]] = {}
     for suffix in _SIDECAR_SUFFIXES:
         path = _sidecar_path(source, suffix)
-        if not path.exists():
-            continue
-        stat = path.stat()
-        fingerprint[suffix or "main"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        if path.exists():
+            stat = path.stat()
+            fingerprint[suffix or "main"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     return fingerprint
 
 
@@ -137,11 +136,7 @@ def _same_filesystem(left: Path, right: Path) -> bool:
 
 def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional[Path]) -> dict[str, Any]:
     """Require space for the disposable bundle, output, and safety headroom."""
-    bundle_bytes = sum(
-        _sidecar_path(source, suffix).stat().st_size
-        for suffix in _SIDECAR_SUFFIXES
-        if _sidecar_path(source, suffix).exists()
-    )
+    bundle_bytes = sum(info["size"] for info in _source_fingerprint(source).values())
     # The v23 external-content rebuild is usually much smaller than a legacy database, but estimating
     # with the complete bundle avoids betting the user's disk on that.
     output_allowance = bundle_bytes if output_parent is not None else 0
@@ -178,9 +173,8 @@ def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional
     ]
     if shortages:
         raise SessionRecoverySafetyError(
-            "Not enough free disk space for safe recovery: "
-            + "; ".join(shortages)
-            + ". Choose work/output filesystems with more free space."
+            f"Not enough free disk space for safe recovery: {'; '.join(shortages)}. "
+            "Choose work/output filesystems with more free space."
         )
     return report
 
@@ -290,8 +284,7 @@ def _table_inventory(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
         columns = _table_columns(conn, table)
         if not columns:
             return result
-        result["available"] = True
-        result["columns"] = columns
+        result.update(available=True, columns=columns)
         result["rows"] = _count_rows(conn, table)
     except sqlite3.DatabaseError as exc:
         result["error"] = str(exc)
