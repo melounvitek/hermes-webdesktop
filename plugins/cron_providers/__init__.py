@@ -1,11 +1,7 @@
-"""Cron scheduler provider plugin discovery.
-
-Scans bundled ``plugins/cron_providers/<name>/`` then user ``$HERMES_HOME/plugins/<name>/``
-for ``CronScheduler`` implementations (bundled wins on name collision). The built-in
-``InProcessCronScheduler`` is core (``cron/scheduler_provider.py``), not discovered here,
-so the fallback can never be accidentally removed; only one provider is active
-(``cron.provider`` in config.yaml, empty = built-in).
-"""
+"""Cron scheduler provider discovery: bundled ``plugins/cron_providers/<name>/`` then user
+``$HERMES_HOME/plugins/<name>/`` (bundled wins on collision). The built-in InProcessCronScheduler
+is core, not discovered here, so the fallback can't be removed; one provider is active
+(``cron.provider`` in config.yaml, empty = built-in)."""
 
 from __future__ import annotations
 
@@ -20,7 +16,6 @@ logger = logging.getLogger(__name__)
 _CRON_PLUGINS_DIR = Path(__file__).parent
 # Synthetic parent package for user-installed providers (keeps them out of the bundled namespace).
 _USER_NAMESPACE = "_hermes_user_cron"
-
 
 
 def _is_cron_provider_dir(path: Path) -> bool:
@@ -40,10 +35,8 @@ def _user_provider_dirs() -> List[Path]:
     user_dir = _loader.user_plugins_dir()
     if not user_dir:
         return []
-    return [
-        child for child in sorted(user_dir.iterdir())
-        if child.is_dir() and not child.name.startswith(("_", ".")) and _is_cron_provider_dir(child)
-    ]
+    return [child for child in sorted(user_dir.iterdir())
+            if child.is_dir() and not child.name.startswith(("_", ".")) and _is_cron_provider_dir(child)]
 
 
 def _iter_provider_dirs() -> List[Tuple[str, Path]]:
@@ -67,12 +60,9 @@ def find_provider_dir(name: str) -> Optional[Path]:
 
 def discover_cron_schedulers() -> List[Tuple[str, str, bool]]:
     """Return ``[(name, description, is_available), ...]`` for all discovered providers."""
-    return [
-        (
-            name,
-            _loader.read_plugin_description(child),
-            _loader.probe_availability(lambda c=child: _load_provider_from_dir(c)))
-        for name, child in _iter_provider_dirs()]
+    return [(name, _loader.read_plugin_description(child),
+             _loader.probe_availability(lambda c=child: _load_provider_from_dir(c)))
+            for name, child in _iter_provider_dirs()]
 
 
 def load_cron_scheduler(name: str) -> Optional["CronScheduler"]:  # noqa: F821
@@ -94,9 +84,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  #
     is_bundled = _CRON_PLUGINS_DIR in provider_dir.parents or provider_dir.parent == _CRON_PLUGINS_DIR
     module_name = f"plugins.cron_providers.{name}" if is_bundled else f"{_USER_NAMESPACE}.{name}"
     mod = _loader.load_plugin_module(
-        module_name, provider_dir,
-        parents=("plugins", "plugins.cron_providers"),
-        logger=logger,
+        module_name, provider_dir, parents=("plugins", "plugins.cron_providers"), logger=logger,
         synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
     if mod is None:
         return None

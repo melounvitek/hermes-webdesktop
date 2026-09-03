@@ -1,10 +1,6 @@
-"""Context engine plugin discovery.
-
-Scans ``plugins/context_engine/<name>/`` for ``ContextEngine`` implementations. Engines live
-in the repo (always available, no user install) and are separate from the general plugin
-system. Only one is active (``context.engine`` in config.yaml; default ``"compressor"``,
-the built-in ContextCompressor).
-"""
+"""Context engine plugin discovery: ``plugins/context_engine/<name>/`` → ``ContextEngine``.
+Engines ship in the repo, separate from the general plugin system; only one is active
+(``context.engine`` in config.yaml; default ``"compressor"``, the built-in ContextCompressor)."""
 
 from __future__ import annotations
 
@@ -21,12 +17,9 @@ _CONTEXT_ENGINE_PLUGINS_DIR = Path(__file__).parent
 
 def discover_context_engines() -> List[Tuple[str, str, bool]]:
     """Return ``[(name, description, is_available), ...]`` for every bundled engine."""
-    return [
-        (
-            child.name,
-            _loader.read_plugin_description(child),
-            _loader.probe_availability(lambda c=child: _load_engine_from_dir(c)))
-        for child in _loader.iter_plugin_dirs(_CONTEXT_ENGINE_PLUGINS_DIR)]
+    return [(child.name, _loader.read_plugin_description(child),
+             _loader.probe_availability(lambda c=child: _load_engine_from_dir(c)))
+            for child in _loader.iter_plugin_dirs(_CONTEXT_ENGINE_PLUGINS_DIR)]
 
 
 def load_context_engine(name: str) -> Optional["ContextEngine"]:  # noqa: F821
@@ -56,8 +49,8 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:  # noq
 
 
 class _EngineCollector(_loader.NoopPluginContext):
-    """Fake plugin context capturing register_context_engine; forwards register_command
-    to the global plugin command registry so engine slash commands behave like plugin ones."""
+    """Captures register_context_engine; forwards register_command to the global plugin command
+    registry so engine slash commands behave like plugin ones."""
 
     def __init__(self, engine_name: str = ""):
         self.engine = None
@@ -70,9 +63,8 @@ class _EngineCollector(_loader.NoopPluginContext):
     def register_command(self, name: str, handler, description: str = "", args_hint: str = "") -> None:
         clean = (name or "").lower().strip().lstrip("/").replace(" ", "-")
         if not clean:
-            logger.warning(
-                "Context engine '%s' tried to register a command with an empty name.",
-                self._engine_name)
+            logger.warning("Context engine '%s' tried to register a command with an empty name.",
+                           self._engine_name)
             return
 
         conflict = "Context engine '%s' tried to register command '/%s' which %s Skipping."
@@ -91,12 +83,9 @@ class _EngineCollector(_loader.NoopPluginContext):
                 logger.warning(conflict, self._engine_name, clean, "is already registered by a plugin.")
                 return
             manager._plugin_commands[clean] = {
-                "handler": handler,
-                "description": description or "Context engine command",
-                "plugin": f"context-engine:{self._engine_name}",
-                "args_hint": (args_hint or "").strip()}
+                "handler": handler, "description": description or "Context engine command",
+                "plugin": f"context-engine:{self._engine_name}", "args_hint": (args_hint or "").strip()}
             self._registered_commands.append(clean)
             logger.debug("Context engine '%s' registered command: /%s", self._engine_name, clean)
         except Exception as exc:
-            logger.debug(
-                "Context engine '%s' could not register /%s: %s", self._engine_name, clean, exc)
+            logger.debug("Context engine '%s' could not register /%s: %s", self._engine_name, clean, exc)

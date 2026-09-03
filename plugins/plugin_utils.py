@@ -1,15 +1,8 @@
-"""Shared concurrency helpers for plugin authors.
+"""Thread-safe lazy singletons for plugin authors (stdlib-only).
 
-The common plugin footgun is the lazy process-wide singleton (``if _client is None:
-_client = Expensive()``): two threads both pass the guard, both build, and the second
-write leaks the first's connections/threads. Multi-threaded agent sessions (delegated
-tool calls, background workers) make this reachable, so use these instead of hand-rolling
-double-checked locking:
-
-* :func:`lazy_singleton` — decorator for the zero-arg accessor case.
-* :class:`SingletonSlot` — manual slot when the instance depends on a config/key argument.
-
-Both are stdlib-only (``threading``) so any plugin can import them cheaply.
+The ``if _client is None: _client = Expensive()`` footgun: two threads pass the guard, both
+build, the second leaks the first's connections. :func:`lazy_singleton` decorates a zero-arg
+accessor; :class:`SingletonSlot` is the manual slot when the instance depends on an argument.
 """
 
 from __future__ import annotations
@@ -24,18 +17,9 @@ T = TypeVar("T")
 
 
 class SingletonSlot(Generic[T]):
-    """Thread-safe lazy slot for accessors that take a build argument.
-
-    Caches the first successfully-built instance and ignores the argument afterwards
-    ("first config wins", the semantics most plugins rely on). The factory runs at most
-    once under concurrent first calls; if it raises, nothing is cached and the next call
-    retries. Example::
-
-        _slot: SingletonSlot[Honcho] = SingletonSlot()
-
-        def get_honcho_client(config=None):
-            return _slot.get(lambda: Honcho(**resolve(config)))
-    """
+    """Thread-safe lazy slot: caches the first successfully-built instance ("first config wins").
+    The factory runs at most once under concurrent first calls; if it raises, nothing is cached
+    and the next call retries. ``_slot.get(lambda: Honcho(**resolve(config)))``."""
 
     __slots__ = ("_lock", "_value", "_set")
 
@@ -68,15 +52,8 @@ class SingletonSlot(Generic[T]):
 
 
 def lazy_singleton(factory: Callable[[], T]) -> Callable[[], T]:
-    """Wrap a zero-argument factory into a thread-safe lazy singleton accessor.
-
-    The factory runs exactly once even under concurrent first calls (if it raises, the
-    next call retries). A ``.reset()`` attribute drops the instance for tests/teardown::
-
-        @lazy_singleton
-        def get_client():
-            return ExpensiveClient(load_config())
-    """
+    """Wrap a zero-argument factory into a thread-safe lazy singleton accessor (factory runs once
+    even under concurrent first calls; on raise the next call retries). ``.reset()`` drops it."""
     slot: SingletonSlot[T] = SingletonSlot()
 
     @functools.wraps(factory)
