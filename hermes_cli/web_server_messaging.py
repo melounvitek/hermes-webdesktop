@@ -1,8 +1,9 @@
-"""Messaging-platform catalog and onboarding helpers: platform overrides/env discovery, WhatsApp and Telegram onboarding state.
+"""Messaging-platform catalog and onboarding helpers: platform overrides/env discovery, WhatsApp
+and Telegram onboarding state.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
+``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
+``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -36,10 +37,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "name": "Discord",
         "description": "Connect Hermes to Discord DMs, channels, and threads.",
         "docs_url": "https://discord.com/developers/applications",
-        "env_vars": (
-            "DISCORD_BOT_TOKEN",
-            "DISCORD_ALLOWED_USERS",
-        ),
+        "env_vars": ("DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USERS"),
         "required_env": ("DISCORD_BOT_TOKEN",),
     },
     "slack": {
@@ -98,18 +96,8 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "name": "Email",
         "description": "Talk to Hermes through an IMAP/SMTP mailbox.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
-        "env_vars": (
-            "EMAIL_ADDRESS",
-            "EMAIL_PASSWORD",
-            "EMAIL_IMAP_HOST",
-            "EMAIL_SMTP_HOST",
-        ),
-        "required_env": (
-            "EMAIL_ADDRESS",
-            "EMAIL_PASSWORD",
-            "EMAIL_IMAP_HOST",
-            "EMAIL_SMTP_HOST",
-        ),
+        "env_vars": ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"),
+        "required_env": ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"),
     },
     "sms": {
         "name": "SMS (Twilio)",
@@ -273,59 +261,31 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
 # Display order: well-known platforms surface first; unknown plugins fall to
 # the end alphabetically.
 _PLATFORM_ORDER: tuple[str, ...] = (
-    "telegram",
-    "discord",
-    "slack",
-    "mattermost",
-    "matrix",
-    "whatsapp",
-    "signal",
-    "bluebubbles",
-    "homeassistant",
-    "email",
-    "sms",
-    "dingtalk",
-    "feishu",
-    "google_chat",
-    "wecom",
-    "wecom_callback",
-    "weixin",
-    "qqbot",
-    "yuanbao",
-    "api_server",
-    "webhook",
+    "telegram", "discord", "slack", "mattermost", "matrix", "whatsapp", "signal", "bluebubbles",
+    "homeassistant", "email", "sms", "dingtalk", "feishu", "google_chat", "wecom", "wecom_callback",
+    "weixin", "qqbot", "yuanbao", "api_server", "webhook",
 )
 
 
 def _messaging_platform_catalog() -> tuple[dict[str, Any], ...]:
     """Build the messaging catalog from the gateway's Platform enum + plugin registry.
 
-    Built-in platforms come from ``gateway.config.Platform`` (LOCAL is excluded).
-    Plugin platforms come from ``gateway.platform_registry.plugin_entries()``,
-    which lets newly installed adapters (e.g. IRC) appear without a code change
-    here. Per-platform UI metadata (description, docs URL, env-var picks) lives
-    in :data:`_PLATFORM_OVERRIDES`; anything not overridden gets reasonable
-    defaults derived from the platform id and required_env.
+    Built-ins come from ``gateway.config.Platform`` (LOCAL excluded); plugin platforms from
+    ``platform_registry.plugin_entries()`` so new adapters appear without a code change here.
+    UI metadata lives in :data:`_PLATFORM_OVERRIDES`; the rest is derived from id/required_env.
     """
     from gateway.config import Platform
 
-    # Resolve plugin entries FIRST. Plugin platforms (irc, ntfy, photon, …)
-    # leak into ``Platform.__members__`` as pseudo-members the moment any
-    # earlier code path calls ``Platform("<plugin id>")`` — and iterating the
-    # enum first would then claim them with no plugin metadata, rendering
-    # nameless "Irc"/"Ntfy" cards with empty descriptions on the Channels
-    # page while the real label/install-hint sat unused in the registry.
+    # Resolve plugin entries FIRST: plugin platforms leak into ``Platform.__members__`` as
+    # pseudo-members once anything calls ``Platform("<plugin id>")``, and iterating the enum
+    # first would claim them with no plugin metadata (nameless "Irc"/"Ntfy" cards).
     plugin_map: dict[str, Any] = {}
     try:
-        # Plugin discovery only runs as a side effect of importing
-        # model_tools; this server process doesn't do that, so trigger it
-        # explicitly (idempotent) or plugin_entries() is empty here and
-        # every plugin platform renders nameless.
+        # Plugin discovery normally runs as a side effect of importing model_tools, which this
+        # server process doesn't do — trigger it explicitly (idempotent).
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()
         from gateway.platform_registry import platform_registry
-
         for plugin_entry in platform_registry.plugin_entries():
             plugin_map[plugin_entry.name] = plugin_entry
     except Exception:
@@ -333,39 +293,21 @@ def _messaging_platform_catalog() -> tuple[dict[str, Any], ...]:
 
     seen: set[str] = set()
     entries: list[dict[str, Any]] = []
-
-    for member in Platform.__members__.values():
-        if member.value == "local":
+    builtin = [m.value for m in Platform.__members__.values() if m.value != "local"]
+    for pid in builtin + list(plugin_map):
+        if pid in seen:
             continue
-        if member.value in seen:
-            continue
-        seen.add(member.value)
-        entries.append(
-            _build_catalog_entry(member.value, plugin_map.get(member.value))
-        )
-
-    for name, plugin_entry in plugin_map.items():
-        if name in seen:
-            continue
-        seen.add(name)
-        entries.append(_build_catalog_entry(name, plugin_entry))
+        seen.add(pid)
+        entries.append(_build_catalog_entry(pid, plugin_map.get(pid)))
 
     order = {pid: idx for idx, pid in enumerate(_PLATFORM_ORDER)}
-    entries.sort(
-        key=lambda e: (order.get(e["id"], len(_PLATFORM_ORDER)), e["name"].lower())
-    )
+    entries.sort(key=lambda e: (order.get(e["id"], len(_PLATFORM_ORDER)), e["name"].lower()))
     return tuple(entries)
 
 
 def _channel_managed_env_keys() -> frozenset[str]:
-    """Env-var keys owned by a Channels page platform card.
-
-    The Channels page is the canonical surface for configuring messaging
-    platform credentials (with connection status, test, enable toggle and
-    gateway restart). The Keys/Env page consults this set to hide those vars
-    so the same fields aren't duplicated in a plainer UI. Best-effort: if the
-    gateway catalog can't be built, nothing is flagged and Keys shows it all.
-    """
+    """Env-var keys owned by a Channels page platform card; the Keys/Env page hides them so the
+    same fields aren't duplicated. Best-effort: if the catalog can't be built, nothing is hidden."""
     try:
         keys: set[str] = set()
         for entry in _messaging_platform_catalog():
@@ -380,99 +322,70 @@ def _channel_managed_env_keys() -> frozenset[str]:
 # they use the ``messaging`` category in OPTIONAL_ENV_VARS. Platform-scoped vars
 # (``DISCORD_*``, ``MATRIX_*``, …) are owned by the Messaging UI instead.
 _MESSAGING_KEYS_PAGE_KEYS = frozenset({
-    "GATEWAY_ALLOW_ALL_USERS",
-    "GATEWAY_PROXY_KEY",
-    "GATEWAY_PROXY_URL",
-})
+    "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_PROXY_KEY", "GATEWAY_PROXY_URL"})
+
+
+_PLATFORM_ENV_PREFIX_ALIASES: dict[str, tuple[str, ...]] = {
+    "email": ("EMAIL_",),
+    "homeassistant": ("HASS_",),
+    "qqbot": ("QQ_", "QQBOT_"),
+    "sms": ("TWILIO_",),
+    "wecom": ("WECOM_BOT_", "WECOM_SECRET"),
+    "wecom_callback": ("WECOM_CALLBACK_",)}
 
 
 def _platform_env_prefixes(platform_id: str) -> tuple[str, ...]:
     """Env-var prefixes owned by a messaging platform card."""
-    aliases: dict[str, tuple[str, ...]] = {
-        "email": ("EMAIL_",),
-        "homeassistant": ("HASS_",),
-        "qqbot": ("QQ_", "QQBOT_"),
-        "sms": ("TWILIO_",),
-        "wecom": ("WECOM_BOT_", "WECOM_SECRET"),
-        "wecom_callback": ("WECOM_CALLBACK_",),
-    }
-    if platform_id in aliases:
-        return aliases[platform_id]
-    return (platform_id.upper().replace("-", "_") + "_",)
+    return _PLATFORM_ENV_PREFIX_ALIASES.get(platform_id, (platform_id.upper().replace("-", "_") + "_",))
 
 
 def _discover_platform_env_vars(platform_id: str) -> tuple[str, ...]:
     """All messaging-category env vars for a platform (override + plugin + prefix)."""
     prefixes = _platform_env_prefixes(platform_id)
-    keys: list[str] = []
-    for name, info in OPTIONAL_ENV_VARS.items():
-        if info.get("category") != "messaging":
-            continue
-        if name in _MESSAGING_KEYS_PAGE_KEYS:
-            continue
-        if _is_setup_hidden_env(name):
-            continue
-        if not any(name.startswith(prefix) for prefix in prefixes):
-            continue
-        keys.append(name)
-    return tuple(sorted(set(keys)))
+    return tuple(sorted({
+        name for name, info in OPTIONAL_ENV_VARS.items()
+        if info.get("category") == "messaging"
+        and name not in _MESSAGING_KEYS_PAGE_KEYS
+        and not _is_setup_hidden_env(name)
+        and any(name.startswith(prefix) for prefix in prefixes)}))
 
 
-def _merge_platform_env_vars(
-    platform_id: str,
-    override: dict[str, Any],
-    plugin_entry: Any | None,
-) -> tuple[str, ...]:
-    """Canonical env-var list for a messaging platform card.
-
-    Required credentials always survive: a platform that genuinely needs one of
-    the hidden-suffix vars to connect keeps it, since hiding a required field
-    would make the platform unconfigurable.
-    """
+def _merge_platform_env_vars(platform_id: str, override: dict[str, Any], plugin_entry: Any | None) -> tuple[str, ...]:
+    """Canonical env-var list for a platform card. Required credentials always survive: hiding a
+    required field would make the platform unconfigurable."""
     discovered = _discover_platform_env_vars(platform_id)
     if "env_vars" in override:
-        explicit = tuple(
-            key for key in override["env_vars"] if not _is_setup_hidden_env(key)
-        )
+        explicit = tuple(key for key in override["env_vars"] if not _is_setup_hidden_env(key))
         return tuple(dict.fromkeys((*explicit, *discovered)))
     if plugin_entry is not None and plugin_entry.required_env:
         return tuple(dict.fromkeys((*tuple(plugin_entry.required_env), *discovered)))
     return discovered
 
 
-def _build_catalog_entry(
-    platform_id: str, plugin_entry: Any | None = None
-) -> dict[str, Any]:
+def _build_catalog_entry(platform_id: str, plugin_entry: Any | None = None) -> dict[str, Any]:
     override = _PLATFORM_OVERRIDES.get(platform_id, {})
-
-    env_vars = _merge_platform_env_vars(platform_id, override, plugin_entry)
-
     if "required_env" in override:
         required_env = tuple(override["required_env"])
     elif plugin_entry is not None:
         required_env = tuple(plugin_entry.required_env or ())
     else:
         required_env = ()
-
     if override.get("name"):
         name = override["name"]
     elif plugin_entry is not None and plugin_entry.label:
         name = plugin_entry.label
     else:
         name = platform_id.replace("_", " ").title()
-
     description = override.get("description")
     if not description and plugin_entry is not None:
         description = plugin_entry.install_hint or ""
-
     return {
         "id": platform_id,
         "name": name,
         "description": description or "",
         "docs_url": override.get("docs_url", ""),
-        "env_vars": env_vars,
-        "required_env": required_env,
-    }
+        "env_vars": _merge_platform_env_vars(platform_id, override, plugin_entry),
+        "required_env": required_env}
 
 
 def _write_platform_enabled(platform_id: str, enabled: bool) -> None:
@@ -516,8 +429,7 @@ def _whatsapp_onboarding_payload(pairing_id: str, record: _WhatsAppOnboardingSes
         "account_id": record.account_id,
         "account_name": record.account_name,
         "account_phone": record.account_phone,
-        "error": record.error,
-    }
+        "error": record.error}
 
 
 def _restart_gateway_after_whatsapp_onboarding(profile: Optional[str] = None) -> dict[str, Any]:
@@ -544,11 +456,7 @@ _telegram_onboarding_lock = threading.RLock()
 
 
 def _telegram_onboarding_base_url() -> str:
-    return (
-        os.getenv("TELEGRAM_ONBOARDING_URL", _TELEGRAM_ONBOARDING_DEFAULT_URL)
-        .strip()
-        .rstrip("/")
-    )
+    return os.getenv("TELEGRAM_ONBOARDING_URL", _TELEGRAM_ONBOARDING_DEFAULT_URL).strip().rstrip("/")
 
 
 def _telegram_onboarding_error_message(error: str, fallback: str) -> str:
@@ -562,19 +470,16 @@ def _telegram_onboarding_error_message(error: str, fallback: str) -> str:
     }.get(error, fallback)
 
 
+_TELEGRAM_UNAVAILABLE = "Telegram setup service is unavailable. Try again shortly."
+_TELEGRAM_INVALID = "Telegram setup service returned an invalid response."
+
+
 def _telegram_onboarding_request_sync(
-    method: str,
-    path: str,
-    *,
-    body: dict[str, Any] | None = None,
-    bearer_token: str | None = None,
+    method: str, path: str, *, body: dict[str, Any] | None = None, bearer_token: str | None = None
 ) -> dict[str, Any]:
     import httpx
 
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": _TELEGRAM_ONBOARDING_USER_AGENT,
-    }
+    headers = {"Accept": "application/json", "User-Agent": _TELEGRAM_ONBOARDING_USER_AGENT}
     request_kwargs: dict[str, Any] = {}
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -585,12 +490,7 @@ def _telegram_onboarding_request_sync(
     url = f"{_telegram_onboarding_base_url()}{path}"
     try:
         with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
-            response = client.request(
-                method,
-                url,
-                headers=headers,
-                **request_kwargs,
-            )
+            response = client.request(method, url, headers=headers, **request_kwargs)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         try:
@@ -598,35 +498,19 @@ def _telegram_onboarding_request_sync(
         except Exception:
             parsed = {}
         error = str(parsed.get("error") or parsed.get("status") or "")
-        detail = _telegram_onboarding_error_message(
-            error,
-            "Telegram setup service returned an error.",
-        )
-        status_code = 404 if exc.response.status_code == 404 else 502
+        detail = _telegram_onboarding_error_message(error, "Telegram setup service returned an error.")
         if error in {"expired", "claimed"}:
             status_code = 410
+        else:
+            status_code = 404 if exc.response.status_code == 404 else 502
         raise HTTPException(status_code=status_code, detail=detail) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram setup service is unavailable. Try again shortly.",
-        ) from exc
     except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram setup service is unavailable. Try again shortly.",
-        ) from exc
+        raise HTTPException(status_code=502, detail=_TELEGRAM_UNAVAILABLE) from exc
 
     try:
         parsed = response.json()
     except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram setup service returned an invalid response.",
-        ) from exc
+        raise HTTPException(status_code=502, detail=_TELEGRAM_INVALID) from exc
     if not isinstance(parsed, dict):
-        raise HTTPException(
-            status_code=502,
-            detail="Telegram setup service returned an invalid response.",
-        )
+        raise HTTPException(status_code=502, detail=_TELEGRAM_INVALID)
     return parsed

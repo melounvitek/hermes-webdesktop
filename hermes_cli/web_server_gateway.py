@@ -1,8 +1,9 @@
-"""Gateway/process helpers for the dashboard: per-profile gateway topology (+cache), action subprocess spawning, gateway restart plumbing, system platform display.
+"""Gateway/process helpers for the dashboard: per-profile gateway topology (+cache), action
+subprocess spawning, gateway restart plumbing, system platform display.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
+``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
+``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -23,62 +24,35 @@ from hermes_cli.config import get_hermes_home
 _log = logging.getLogger("hermes_cli.web_server")
 
 
-# DEPRECATED (scheduled for removal): GATEWAY_HEALTH_URL / GATEWAY_HEALTH_TIMEOUT.
-# Cross-container / cross-host gateway liveness detection will be folded into a
-# first-class dashboard config key so it's no longer Docker-adjacent lore buried
-# in env vars.  The env vars still work for now so existing Compose deployments
-# don't break.  Do not add new callers — wire new uses through the planned
-# config surface.
-
-
 def _probe_gateway_health() -> tuple[bool, dict | None]:
-    """Probe the gateway via its HTTP health endpoint (cross-container).
+    """Probe the gateway's HTTP health endpoint (cross-container). Blocking — run in an executor.
 
-    .. deprecated::
-        Driven by the deprecated ``GATEWAY_HEALTH_URL`` /
-        ``GATEWAY_HEALTH_TIMEOUT`` env vars.  Scheduled for removal alongside
-        a move to a first-class dashboard config key.  See
-        :data:`_GATEWAY_HEALTH_URL` for context.
-
-    Uses ``/health/detailed`` first (returns full state), falling back to
-    the simpler ``/health`` endpoint.  Returns ``(is_alive, body_dict)``.
-
-    Accepts any of these as ``GATEWAY_HEALTH_URL``:
-    - ``http://gateway:8642``                (base URL — recommended)
-    - ``http://gateway:8642/health``         (explicit health path)
-    - ``http://gateway:8642/health/detailed`` (explicit detailed path)
-
-    This is a **blocking** call — run via ``run_in_executor`` from async code.
+    DEPRECATED: driven by the ``GATEWAY_HEALTH_URL`` / ``GATEWAY_HEALTH_TIMEOUT`` env vars,
+    to be replaced by a dashboard config key; do not add callers. Accepts a base URL or an
+    explicit ``/health`` / ``/health/detailed`` path; tries ``/health/detailed`` first.
     """
     from hermes_cli.web_server import _GATEWAY_HEALTH_TIMEOUT, _GATEWAY_HEALTH_URL
     if not _GATEWAY_HEALTH_URL:
         return False, None
-
-    # Normalise to base URL so we always probe the right paths regardless of
-    # whether the user included /health or /health/detailed in the env var.
     base = _GATEWAY_HEALTH_URL.rstrip("/")
     if base.endswith("/health/detailed"):
         base = base[: -len("/health/detailed")]
     elif base.endswith("/health"):
         base = base[: -len("/health")]
-
     for path in (f"{base}/health/detailed", f"{base}/health"):
         try:
             req = urllib.request.Request(path, method="GET")
             with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
                 if resp.status == 200:
-                    body = json.loads(resp.read())
-                    return True, body
+                    return True, json.loads(resp.read())
         except Exception:
             continue
     return False, None
 
 
-# Host TCP ports each port-binding gateway platform listens on, as
-# ``platform-name -> (config port key, adapter default)``.  Mirrors
-# ``PORT_BINDING_PLATFORM_VALUES`` in gateway/config.py and each adapter's
-# DEFAULT_PORT / DEFAULT_WEBHOOK_PORT constant.  Used only for the dashboard's
-# gateway-topology readout — best-effort display data, not a bind source.
+# ``platform-name -> (config port key, adapter default)`` for port-binding gateway platforms.
+# Mirrors PORT_BINDING_PLATFORM_VALUES (gateway/config.py) and each adapter's DEFAULT_PORT /
+# DEFAULT_WEBHOOK_PORT. Display-only data for the topology readout, not a bind source.
 _PORT_BINDING_PLATFORM_PORTS: Dict[str, Tuple[str, int]] = {
     "webhook": ("port", 8644),
     "api_server": ("port", 8642),
@@ -89,42 +63,34 @@ _PORT_BINDING_PLATFORM_PORTS: Dict[str, Tuple[str, int]] = {
     "sms": ("webhook_port", 8080),
     "whatsapp_cloud": ("webhook_port", 8090),
     "line": ("port", 8646),
-    "teams": ("port", 3978),
-}
+    "teams": ("port", 3978)}
 
 # Platform states that mean the adapter is NOT serving its port right now.
 _PLATFORM_DEAD_STATES = frozenset({"fatal", "disconnected", "stopped"})
 
 
 def _profile_platform_ports(profile_home: Path, runtime: Optional[dict]) -> Dict[str, int]:
-    """Best-effort map of ``platform -> host TCP port`` for one profile's gateway.
+    """Best-effort ``platform -> host TCP port`` for one profile's live gateway.
 
-    Reads the platforms the running gateway reported in its
-    ``gateway_state.json`` and resolves each port-binding platform's port from
-    the profile's ``config.yaml`` (top-level ``platforms:`` wins over
-    ``gateway.platforms:``, matching ``load_gateway_config`` precedence),
-    falling back to the adapter default.  Display-only: env-var port overrides
-    (e.g. ``WEBHOOK_PORT`` in that profile's .env) are not resolved here.
+    Ports come from the profile's own config.yaml (``gateway.platforms`` then top-level
+    ``platforms`` — later wins, matching load_gateway_config precedence), falling back to the
+    adapter default. Env-var overrides (e.g. WEBHOOK_PORT in that profile's .env) are not resolved.
     """
     platforms = (runtime or {}).get("platforms") or {}
     active = [
         name for name, state in platforms.items()
         if name in _PORT_BINDING_PLATFORM_PORTS
         and isinstance(state, dict)
-        and state.get("state") not in _PLATFORM_DEAD_STATES
-    ]
+        and state.get("state") not in _PLATFORM_DEAD_STATES]
     if not active:
         return {}
 
     blocks: Dict[str, dict] = {}
     try:
-        # Multi-profile probe: load_config() targets the ACTIVE profile's
-        # home, so read the probed profile's file via the raw primitive.
+        # load_config() targets the ACTIVE profile's home; read the probed profile's file raw.
         from hermes_cli.config import read_user_config_raw
         cfg = read_user_config_raw(profile_home / "config.yaml")
         gateway_cfg = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
-        # gateway.platforms first, top-level platforms second — later wins,
-        # matching the precedence in gateway.config.load_gateway_config().
         for src in ((gateway_cfg or {}).get("platforms"), cfg.get("platforms")):
             if not isinstance(src, dict):
                 continue
@@ -147,97 +113,50 @@ def _profile_platform_ports(profile_home: Path, runtime: Optional[dict]) -> Dict
     return ports
 
 
-def _profile_gateway_writer_identity(
-    profile_home: Path, runtime: Optional[dict]
-) -> Optional[tuple]:
-    """``(pid, start_time)`` identity of the profile's LIVE gateway, or None.
+def _profile_gateway_writer_identity(profile_home: Path, runtime: Optional[dict]) -> Optional[tuple]:
+    """``(pid, start_time)`` of the profile's LIVE gateway, or None.
 
-    Reuses the validated-liveness helper — recorded PID checked against the
-    live process table, the start-time PID-reuse fingerprint, and the
-    profile's home — then reads the live process's fingerprint via the same
-    ``_get_process_start_time`` that stamped it, so equality is exact (no
-    unit or clock-source mismatch).  None when the record doesn't belong to
-    a live gateway; nothing in it is current by definition then.
+    Uses the same validated-liveness helper and the same ``_get_process_start_time`` that stamped
+    the record, so equality is exact (no unit/clock-source mismatch).
     """
     try:
-        from gateway.status import (
-            _get_process_start_time,
-            get_runtime_status_running_pid,
-        )
-
+        from gateway.status import _get_process_start_time, get_runtime_status_running_pid
         pid = get_runtime_status_running_pid(runtime, expected_home=profile_home)
         if pid is None:
             return None
         start_time = _get_process_start_time(pid)
-        if start_time is None:
-            return None
-        return (pid, start_time)
+        return None if start_time is None else (pid, start_time)
     except Exception:
         return None
 
 
-def _owned_profile_platforms(
-    writer_identity: Optional[tuple], platforms: dict
-) -> dict:
-    """Keep only platform entries the profile's CURRENT process wrote.
+def _owned_profile_platforms(writer_identity: Optional[tuple], platforms: dict) -> dict:
+    """Keep only platform entries stamped by the profile's CURRENT gateway process.
 
-    Gateway startup deliberately preserves plain platform entries in
-    ``gateway_state.json`` across restarts (the dashboard keeps showing
-    last-known state while adapters reconnect), and the active-profile
-    endpoint compensates by filtering them against the current
-    configuration.  The cross-profile aggregation has no equivalent config
-    context (a profile's platform set depends on tokens in that profile's
-    ``.env`` behind its secret scope), so it demands strict process
-    ownership instead: ``write_runtime_status`` stamps every platform write
-    with the writer's ``(pid, start_time)`` identity, and an entry is
-    aggregatable only when that identity equals the profile's live gateway
-    process — exact match, no clock heuristics, so an entry written moments
-    before a fast restart can never masquerade as current.  A fatal entry
-    left behind by a platform the operator has since disabled/removed thus
-    stops degrading fleet health as soon as that profile's gateway restarts
-    (a config change requires that restart to take effect anyway).  Fail
-    closed: entries without a writer identity (legacy records) or records
-    with no live process are excluded — aggregation is a supplement, and a
-    false "degraded forever" is the worse failure mode.
+    Gateway startup preserves plain platform entries in gateway_state.json across restarts, so the
+    raw map can carry fatal state for platforms since disabled/removed. Cross-profile aggregation
+    has no config context to filter against, so it demands exact ``(pid, start_time)`` writer
+    identity instead. Fail closed: legacy entries without identity, or no live process, yield {} —
+    a false "degraded forever" is the worse failure mode.
     """
     if writer_identity is None:
         return {}
     live_pid, live_start = writer_identity
-    owned: Dict[str, dict] = {}
-    for key, value in platforms.items():
-        if not isinstance(value, dict):
-            continue
-        if (
-            value.get("writer_pid") == live_pid
-            and value.get("writer_start_time") == live_start
-        ):
-            owned[key] = value
-    return owned
+    return {
+        key: value for key, value in platforms.items()
+        if isinstance(value, dict)
+        and value.get("writer_pid") == live_pid
+        and value.get("writer_start_time") == live_start}
 
 
 def _collect_profile_gateway_topology() -> Dict[str, Any]:
     """Enumerate profiles and the gateways serving them for ``/api/status``.
 
-    Returns ``{"profiles": [...], "gateway_mode": ..., "gateways": [...]}``:
-
-    * ``profiles`` — every profile on the host (default + named), from
-      ``profiles_to_serve(True)`` (the cheap enumeration chokepoint — no
-      per-profile config reads or skill counts).
-    * ``gateways`` — one entry per profile with a LIVE gateway process:
-      ``{"profile", "ports", "served_profiles"?}``.  Liveness reuses
-      ``_check_gateway_running`` so this agrees with the profiles sidebar.
-    * ``gateway_mode`` — ``"multiplex"`` when the default gateway serves
-      multiple profiles (gateway.multiplex_profiles), ``"single"`` for one
-      live gateway, ``"multiple"`` for independent per-profile gateways,
-      ``"none"`` when nothing is running.
-    * ``profile_platforms`` — ``{profile: platforms}`` runtime platform maps
-      for each LIVE gateway, ownership-filtered to entries stamped by that
-      profile's current process (stale preserved entries for since-removed
-      platforms are excluded — see ``_owned_profile_platforms``).  Internal
-      aggregation input for ``/api/status`` (independent per-profile gateways
-      write failures to their own ``gateway_state.json``, which the
-      unparameterized endpoint would otherwise never see).  Never exposed
-      directly.
+    Returns ``profiles`` (all profile names via the cheap ``profiles_to_serve(True)`` chokepoint),
+    ``gateways`` (one ``{"profile", "ports", "served_profiles"?}`` per LIVE gateway; liveness via
+    ``_check_gateway_running`` so it agrees with the sidebar), ``gateway_mode``
+    (multiplex / single / multiple / none) and ``profile_platforms`` — ownership-filtered runtime
+    platform maps per live gateway, an internal aggregation input never exposed directly.
     """
     from hermes_cli.web_server import _profile_gateway_writer_identity
     try:
@@ -246,14 +165,8 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
         homes = profiles_to_serve(True)
     except Exception:
         _log.debug("profile/gateway topology enumeration failed", exc_info=True)
-        return {
-            "profiles": [],
-            "gateway_mode": "unknown",
-            "gateways": [],
-            "profile_platforms": {},
-        }
+        return {"profiles": [], "gateway_mode": "unknown", "gateways": [], "profile_platforms": {}}
 
-    profile_names = [name for name, _home in homes]
     gateways: List[Dict[str, Any]] = []
     profile_platforms: Dict[str, dict] = {}
     multiplex = False
@@ -272,53 +185,31 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
             multiplex = True
         plats = (runtime or {}).get("platforms")
         if isinstance(plats, dict) and plats:
-            # Ownership filter: gateway startup preserves plain platform
-            # entries across restarts, so the raw map can carry fatal state
-            # for platforms the operator has since disabled/removed.  Only
-            # entries stamped with the profile's current live process's
-            # writer identity are aggregation candidates (see
-            # _owned_profile_platforms).
-            owned = _owned_profile_platforms(
-                _profile_gateway_writer_identity(home, runtime), plats
-            )
+            owned = _owned_profile_platforms(_profile_gateway_writer_identity(home, runtime), plats)
             if owned:
                 profile_platforms[name] = owned
-        entry: Dict[str, Any] = {
-            "profile": name,
-            "ports": _profile_platform_ports(home, runtime),
-        }
+        entry: Dict[str, Any] = {"profile": name, "ports": _profile_platform_ports(home, runtime)}
         if served:
             entry["served_profiles"] = served
         gateways.append(entry)
 
     if multiplex:
         mode = "multiplex"
-    elif len(gateways) > 1:
-        mode = "multiple"
-    elif len(gateways) == 1:
-        mode = "single"
     else:
-        mode = "none"
-
+        mode = {0: "none", 1: "single"}.get(len(gateways), "multiple")
     return {
-        "profiles": profile_names,
+        "profiles": [name for name, _home in homes],
         "gateway_mode": mode,
         "gateways": gateways,
-        "profile_platforms": profile_platforms,
-    }
+        "profile_platforms": profile_platforms}
 
 
-# /api/status is polled ~1/s by the desktop app while it waits for the backend
-# (and again by the dashboard badge). Each uncached call above walks 7+ profile
-# homes (yaml.safe_load with the pure-Python loader + psutil process-table
-# probes + realpath walks) inside the default executor; concurrent polls pile
-# up and hold the GIL for 14-16s, starving the event loop — the desktop WS
-# never receives gateway.ready and boot fails ("event loop stalled ... GIL
-# pressure suspected"). Topology changes on gateway start/stop, so a short TTL
-# cache with a collapse lock keeps the scan to one per window. The cache also
-# remembers which collector produced the entry: tests monkeypatch
-# _collect_profile_gateway_topology per case, and the identity check keeps
-# them hermetic without needing a reset hook (a swapped collector is a miss).
+# /api/status is polled ~1/s by the desktop app while it waits for the backend. Each uncached
+# collect walks 7+ profile homes (pure-Python yaml + psutil + realpath) in the default executor;
+# concurrent polls pile up and hold the GIL for 14-16s, starving the loop so the desktop WS never
+# gets gateway.ready. A short TTL cache with a collapse lock keeps the scan to one per window.
+# The cache remembers which collector produced the entry: tests monkeypatch
+# _collect_profile_gateway_topology per case, and a swapped collector is a miss (no reset hook).
 _TOPOLOGY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "fn": None}
 _TOPOLOGY_CACHE_LOCK = threading.Lock()
 _TOPOLOGY_CACHE_TTL = 10.0
@@ -328,8 +219,7 @@ def _topology_cache_get(fn: Any) -> Optional[Dict[str, Any]]:
     if (
         _TOPOLOGY_CACHE["data"] is not None
         and _TOPOLOGY_CACHE["fn"] is fn
-        and time.monotonic() - _TOPOLOGY_CACHE["ts"] < _TOPOLOGY_CACHE_TTL
-    ):
+        and time.monotonic() - _TOPOLOGY_CACHE["ts"] < _TOPOLOGY_CACHE_TTL):
         return _TOPOLOGY_CACHE["data"]
     return None
 
@@ -345,24 +235,16 @@ def _collect_profile_gateway_topology_cached() -> Dict[str, Any]:
         if cached is not None:
             return cached
         data = fn()
-        _TOPOLOGY_CACHE["data"] = data
-        _TOPOLOGY_CACHE["fn"] = fn
-        _TOPOLOGY_CACHE["ts"] = time.monotonic()
+        _TOPOLOGY_CACHE.update(data=data, fn=fn, ts=time.monotonic())
         return data
 
 
 def _load_configured_gateway_platforms() -> set[str]:
-    """Load connected platform names away from the asyncio event loop.
-
-    The first ``load_gateway_config()`` call performs platform discovery and
-    can take longer than Desktop's WebSocket connect timeout on Windows.  This
-    helper is synchronous by design; ``get_status`` runs it in Starlette's
-    worker pool so a concurrent ``/api/ws`` handshake can still complete.
-    """
+    """Connected platform names; synchronous by design — the first ``load_gateway_config()`` does
+    platform discovery and can outlast Desktop's WS connect timeout on Windows, so ``get_status``
+    runs this in Starlette's worker pool."""
     from gateway.config import load_gateway_config
-
-    gateway_config = load_gateway_config()
-    return {platform.value for platform in gateway_config.get_connected_platforms()}
+    return {platform.value for platform in load_gateway_config().get_connected_platforms()}
 
 
 _WINDOWS_11_MIN_BUILD = 22000
@@ -372,83 +254,47 @@ def _windows_build_number(version: str, platform_label: str) -> Optional[int]:
     """Extract the Windows NT build number from stdlib platform strings."""
     for value in (version or "", platform_label or ""):
         match = re.search(r"(?:^|[^\d])10\.0\.(\d{5,})(?:[^\d]|$)", value)
-        if not match:
-            continue
-        try:
+        if match:
             return int(match.group(1))
-        except ValueError:
-            continue
     return None
 
 
-def _display_system_platform(
-    *,
-    system: str,
-    release: str,
-    version: str,
-    platform_label: str,
-) -> Dict[str, str]:
-    """Return host OS fields for display while preserving stdlib detail."""
+def _display_system_platform(*, system: str, release: str, version: str, platform_label: str) -> Dict[str, str]:
+    """Host OS fields for display; Windows 10 builds >= 22000 are relabelled Windows 11."""
     if system == "Windows" and release == "10":
         build = _windows_build_number(version, platform_label)
         if build is not None and build >= _WINDOWS_11_MIN_BUILD:
-            platform_label = re.sub(
-                r"^Windows-10(?=-)",
-                "Windows-11",
-                platform_label,
-                count=1,
-            )
+            platform_label = re.sub(r"^Windows-10(?=-)", "Windows-11", platform_label, count=1)
             release = "11"
-
-    return {
-        "os": system,
-        "os_release": release,
-        "os_version": version,
-        "platform": platform_label,
-    }
+    return {"os": system, "os_release": release, "os_version": version, "platform": platform_label}
 
 
 # ---------------------------------------------------------------------------
-# Gateway + update actions (invoked from the Status page).
-#
-# Both commands are spawned as detached subprocesses so the HTTP request
-# returns immediately.  stdin is closed (``DEVNULL``) so any stray ``input()``
-# calls fail fast with EOF rather than hanging forever.  stdout/stderr are
-# streamed to a per-action log file under ``~/.hermes/logs/<action>.log`` so
-# the dashboard can tail them back to the user.
+# Gateway + update actions (invoked from the Status page). Spawned detached so the request
+# returns immediately; stdin is DEVNULL so stray input() fails fast; stdout/stderr stream to
+# ~/.hermes/logs/<action>.log which the dashboard tails.
 # ---------------------------------------------------------------------------
 
 _ACTION_LOG_DIR: Path = get_hermes_home() / "logs"
 
-# Short ``name`` (from the URL) → absolute log file path.
+# Short ``name`` (from the URL) → log file name under _ACTION_LOG_DIR.
 _ACTION_LOG_FILES: Dict[str, str] = {
     "gateway-restart": "gateway-restart.log",
     "gateway-start": "gateway-start.log",
     "gateway-stop": "gateway-stop.log",
     "hermes-update": "hermes-update.log",
-    "doctor": "action-doctor.log",
-    "security-audit": "action-security-audit.log",
-    "backup": "action-backup.log",
-    "import": "action-import.log",
-    "checkpoints-prune": "action-checkpoints-prune.log",
-    "skills-install": "action-skills-install.log",
-    "skills-uninstall": "action-skills-uninstall.log",
-    "skills-update": "action-skills-update.log",
-    "curator-run": "action-curator-run.log",
-    "prompt-size": "action-prompt-size.log",
-    "dump": "action-dump.log",
-    "config-migrate": "action-config-migrate.log",
-    "tools-post-setup": "action-tools-post-setup.log",
+    **{name: f"action-{name}.log" for name in (
+        "doctor", "security-audit", "backup", "import", "checkpoints-prune", "skills-install",
+        "skills-uninstall", "skills-update", "curator-run", "prompt-size", "dump", "config-migrate",
+        "tools-post-setup",
+    )},
 }
 
-# ``name`` → most recently spawned Popen handle.  Used so ``status`` can
-# report liveness and exit code without shelling out to ``ps``.
+# ``name`` → most recent Popen handle / argv / action id, so ``status`` needs no ``ps``.
 _ACTION_PROCS: Dict[str, subprocess.Popen] = {}
 _ACTION_COMMANDS: Dict[str, Tuple[str, ...]] = {}
 _ACTION_IDS: Dict[str, str] = {}
-
-# ``name`` → completed synthetic action result for actions the server handled
-# without spawning a subprocess (for example, unsupported Docker updates).
+# ``name`` → synthetic result for actions handled without a subprocess (e.g. unsupported Docker updates).
 _ACTION_RESULTS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -462,31 +308,21 @@ def _terminate_desktop_managed_gateway() -> None:
         if proc.poll() is None:
             proc.terminate()
     except OSError:
-        # The child may have exited between poll() and terminate().
-        pass
+        pass  # exited between poll() and terminate()
 
 
 def _dashboard_spawn_executable() -> str:
-    """Interpreter for detached dashboard actions.
+    """Interpreter for detached dashboard actions: the install's venv python when it differs
+    from ``sys.executable``, else ``sys.executable``.
 
-    Prefers the install's own venv interpreter over ``sys.executable`` when
-    they differ. Under an SSH remote backend the web server is launched by
-    running the **uv base interpreter** with the venv's site-packages
-    injected into ``sys.path`` at startup (``-c "sys.path[:0]=[...];
-    runpy.run_module('hermes_cli.main', ...)"``) — so ``sys.executable`` is
-    the dependency-less base python and a detached action spawned from it
-    dies on the first third-party import (``ModuleNotFoundError: yaml``),
-    because the injected path is a startup artifact of the parent and is
-    not inherited (#90026). The venv launcher resolves the same dependency
-    set on its own.
-
-    Falls back to ``sys.executable`` when no venv interpreter exists next
-    to the install (in-process dev runs, exotic layouts). On Windows the
-    spawn below carries ``windows_detach_flags()`` (CREATE_NO_WINDOW), so
-    the console python owns a single hidden console that its own subprocess
-    spawns inherit — the action stays invisible without resorting to
-    console-less pythonw.exe, which would make every console-subsystem
-    descendant flash its own conhost (#54220/#56747).
+    Under an SSH remote backend the server runs on the uv BASE interpreter with the venv's
+    site-packages injected into sys.path at startup, so ``sys.executable`` is dependency-less and
+    a detached child dies on its first third-party import; the venv launcher resolves the same
+    dependency set on its own. Paths are compared UNRESOLVED: the venv python is typically a
+    symlink to the base interpreter, so resolving would make them compare equal (exactly the
+    case this fixes), and pyvenv.cfg discovery keys off argv0's unresolved location. On Windows
+    the console python plus ``windows_detach_flags()`` keeps the action invisible without
+    pythonw.exe (which makes every console descendant flash its own conhost).
     """
     from hermes_cli.web_server import PROJECT_ROOT
     exe = Path(sys.executable)
@@ -494,21 +330,9 @@ def _dashboard_spawn_executable() -> str:
         for rel in ("venv/bin/python", "venv/Scripts/python.exe"):
             candidate = PROJECT_ROOT / rel
             if candidate.is_file():
-                # Same interpreter → keep sys.executable (preserves the
-                # docstring's console-ownership behavior verbatim). Compare
-                # UNRESOLVED normalized paths: a venv's bin/python is
-                # typically a SYMLINK to the base interpreter, so resolving
-                # both sides makes the venv python and the dependency-less
-                # base compare equal — exactly the SSH-runtime case this
-                # function exists to fix. The unresolved path IS the venv's
-                # identity (pyvenv.cfg discovery keys off argv0's location).
                 if os.path.normcase(os.path.normpath(str(candidate))) == (
-                    os.path.normcase(os.path.normpath(str(exe)))
-                ):
+                    os.path.normcase(os.path.normpath(str(exe)))):
                     return sys.executable
-                # Return the candidate UNRESOLVED for the same reason:
-                # invoking the resolved target would bypass pyvenv.cfg and
-                # run the bare base interpreter again.
                 return str(candidate)
     except OSError:
         pass
@@ -516,59 +340,35 @@ def _dashboard_spawn_executable() -> str:
 
 
 def _spawn_hermes_action(
-    subcommand: List[str],
-    name: str,
-    *,
-    env_overrides: Optional[Dict[str, str]] = None,
+    subcommand: List[str], name: str, *, env_overrides: Optional[Dict[str, str]] = None
 ) -> subprocess.Popen:
-    """Spawn ``hermes <subcommand>`` detached and record the Popen handle.
-
-    Uses the running interpreter's ``hermes_cli.main`` module so the action
-    inherits the same venv/PYTHONPATH the web server is using.
-    """
+    """Spawn ``hermes <subcommand>`` detached (via ``hermes_cli.main``) and record the handle."""
     from hermes_cli.web_server import (
-        PROJECT_ROOT,
-        _ACTION_COMMANDS,
-        _ACTION_IDS,
-        _ACTION_LOG_DIR,
-        _ACTION_PROCS,
-        _ACTION_RESULTS,
+        PROJECT_ROOT, _ACTION_COMMANDS, _ACTION_IDS, _ACTION_LOG_DIR, _ACTION_PROCS, _ACTION_RESULTS,
     )
-    log_file_name = _ACTION_LOG_FILES[name]
     _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = _ACTION_LOG_DIR / log_file_name
-    log_file = open(log_path, "ab", buffering=0)
-    log_file.write(
-        f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
-    )
+    log_file = open(_ACTION_LOG_DIR / _ACTION_LOG_FILES[name], "ab", buffering=0)
+    log_file.write(f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
 
     cmd = [_dashboard_spawn_executable(), "-m", "hermes_cli.main", *subcommand]
-
-    # The dashboard runs *inside* the gateway process, so os.environ carries
-    # _HERMES_GATEWAY=1. Inheriting it makes a spawned `hermes gateway restart`
-    # trip the in-process restart-loop guard and exit 1 — silently failing the
-    # dashboard's auto-restart paths. The gateway's own restart watcher already
-    # drops it (gateway/run.py); mirror that here (#52470).
+    # The dashboard runs inside the gateway process, so os.environ carries _HERMES_GATEWAY=1;
+    # inheriting it trips the child's in-process restart-loop guard (exit 1). Drop it, like
+    # the gateway's own restart watcher does.
     action_env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
     action_env.pop("_HERMES_GATEWAY", None)
-
     popen_kwargs: Dict[str, Any] = {
         "cwd": str(PROJECT_ROOT),
         "stdin": subprocess.DEVNULL,
         "stdout": log_file,
         "stderr": subprocess.STDOUT,
-        "env": {**action_env, **(env_overrides or {})},
-    }
+        "env": {**action_env, **(env_overrides or {})}}
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = windows_detach_flags()
     else:
         popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen(cmd, **popen_kwargs)
-    # The child inherits its own duplicated fd for stdout/stderr, so the
-    # parent's handle can be released immediately — otherwise we leak one
-    # fd per spawned action.
-    log_file.close()
+    log_file.close()  # child holds its own dup'd fd; keeping ours leaks one per action
     _ACTION_RESULTS.pop(name, None)
     _ACTION_COMMANDS[name] = tuple(subcommand)
     _ACTION_PROCS[name] = proc
@@ -586,12 +386,9 @@ def _gateway_subcommand(profile: Optional[str], verb: str) -> List[str]:
 
 
 def _restart_gateway_after(profile: Optional[str], *, what: str, label: str) -> dict[str, Any]:
-    """Best-effort gateway restart after a config change (webhooks, onboarding).
-
-    The config save stays authoritative; a failed spawn is reported in the
-    result (``restart_started: False`` + ``restart_error``) so the UI can fall
-    back to its manual restart banner instead of failing the request.
-    """
+    """Best-effort gateway restart after a config change. The save stays authoritative: a failed
+    spawn is reported (``restart_started: False`` + ``restart_error``) so the UI can fall back to
+    its manual restart banner instead of failing the request."""
     from hermes_cli.web_server import _spawn_gateway_restart
     try:
         proc, reused = _spawn_gateway_restart(profile)
@@ -606,10 +403,8 @@ def _restart_gateway_after(profile: Optional[str], *, what: str, label: str) -> 
 def _split_text_for_speak_stream(text: str, cap: int) -> list:
     """Split *text* into provider-cap-sized pieces on sentence boundaries.
 
-    Deliberately NOT unified with gateway.platforms.helpers'
-    split_text_fence_aware: this splitter reflows whitespace (sentences are
-    re-joined with single spaces) and has no fence/markdown semantics, so
-    expressing it as knobs on the fence-aware core would change behavior.
+    Deliberately NOT unified with gateway.platforms.helpers' split_text_fence_aware: this
+    reflows whitespace (sentences re-joined with single spaces) and has no fence semantics.
     """
     from tools.tts_streaming import SENTENCE_BOUNDARY_RE as _SENTENCE_BOUNDARY_RE
 
@@ -629,13 +424,9 @@ def _split_text_for_speak_stream(text: str, cap: int) -> list:
     return pieces
 
 
-# Per-row fields that no session LIST consumer reads but that dominate the
-# payload. ``system_prompt`` is the fully rendered prompt — tens of KB per
-# row — and made a 21-row /api/sessions response 528KB (96% dead weight),
-# re-fetched by the desktop sidebar on every refresh. The desktop's
-# SessionInfo type doesn't declare either field and the web UI never touches
-# them; ``GET /api/sessions/{id}`` detail reads stay complete. List callers
-# that genuinely need the full rows can pass ``?full=1``.
+# Per-row fields no session LIST consumer reads but that dominate the payload (``system_prompt``
+# is the fully rendered prompt, tens of KB per row — 96% of a 528KB /api/sessions response).
+# Detail reads stay complete; list callers that need full rows pass ``?full=1``.
 _SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
 
 

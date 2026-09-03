@@ -1,15 +1,13 @@
 """On-demand worktree + branch reclaim (``hermes worktree`` / ``/worktree prune``).
 
-The startup pruner in ``cli._prune_stale_worktrees`` is deliberately conservative and silent: it
-runs before the banner on every ``hermes -w`` launch, so it only reaps clean, fully-merged scratch
-trees past an age tier and preserves everything else.
-
-- **Preserved trees** whose only "dirt" is untracked scratch (PR body drafts, logs) on an otherwise
-merged branch — preserved forever by the dirty guard.
+The startup pruner (``cli._prune_stale_worktrees``) is conservative and silent — clean, fully
+merged scratch past an age tier only. This module also reclaims trees whose only "dirt" is
+untracked scratch (archived first) and branches whose content is on upstream.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -52,44 +50,33 @@ class BranchRecord:
     reason: str
 
 
-def _git(args: list, cwd: str, timeout: int = 15) -> subprocess.CompletedProcess:
-    """Run git, translating timeouts into a nonzero returncode.
+def _run(cmd: list, timeout: int, cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout, cwd=cwd)
 
-    Every verdict in this module fails safe toward "keep" on a nonzero returncode, so a hung/slow
-    git call (large repos make ``git cherry`` genuinely slow) must degrade to keep — never crash the
-    whole audit (live-verified failure on a 746MB .git: TimeoutExpired escaped and aborted the
-    branch audit mid-list).
-    """
+
+def _git(args: list, cwd: str, timeout: int = 15) -> subprocess.CompletedProcess:
+    """Run git, translating timeouts into returncode 124. Every verdict fails safe toward "keep"
+    on nonzero, so a slow ``git cherry`` on a huge repo degrades to keep instead of aborting the
+    audit mid-list."""
     try:
-        return subprocess.run(
-            ["git", *args],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, cwd=cwd,
-        )
+        return _run(["git", *args], timeout, cwd)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=["git", *args], returncode=124,
-            stdout="", stderr=f"timeout after {timeout}s",
-        )
+        return subprocess.CompletedProcess(args=["git", *args], returncode=124, stdout="",
+                                           stderr=f"timeout after {timeout}s")
 
 
 def _tree_size_mb(path: Path, timeout: int = 30) -> Optional[int]:
     """Cheap directory size via ``du -sm`` — best-effort, None on failure."""
     try:
-        result = subprocess.run(
-            ["du", "-sm", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-        )
+        result = _run(["du", "-sm", str(path)], timeout)
         return int(result.stdout.split()[0]) if result.returncode == 0 and result.stdout.strip() else None
     except Exception:
         return None
 
 
 def _dirty_split(path: str) -> tuple[bool, List[str]]:
-    """Return (has_tracked_modifications, untracked_paths).
-
-    ``git status --porcelain`` counts untracked scratch the same as real edits, but the reclaim
-    policy treats them differently (tracked = real work, untracked = archivable scratch).
-    """
+    """(has_tracked_modifications, untracked_paths) — tracked = real work, untracked = archivable."""
     try:
         result = _git(["status", "--porcelain"], cwd=path, timeout=10)
         if result.returncode != 0:
@@ -102,11 +89,7 @@ def _dirty_split(path: str) -> tuple[bool, List[str]]:
 
 
 def _archive_untracked(tree: Path, untracked: List[str]) -> Optional[Path]:
-    """Copy untracked files out of a doomed tree. Returns the archive dir.
-
-    Never destroys: on any copy failure the caller must treat the tree as keep. Costs almost nothing
-    and removes the "did I just delete something?" question.
-    """
+    """Copy untracked files out of a doomed tree; None on any failure (caller must then keep)."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = Path.home() / ".hermes" / "archive" / "worktree-prune" / f"{tree.name}-{stamp}"
     try:
@@ -138,12 +121,10 @@ def _classify_tree(_cli, repo_root: str, entry: Path, merge_cache, remote_heads)
         return "keep", "uncommitted tracked changes (real work)", []
     archive_note = f"{len(untracked)} untracked file(s) will be archived"
     if _cli._worktree_has_unpushed_commits(path, timeout=5) and not _cli._worktree_commits_all_merged_upstream(
-        path, timeout=30, cache=merge_cache, max_ahead=_MAX_CHERRY_AHEAD
-    ):
-        # Pushed-branch tier: single-branch fetch refspecs (the managed-install default) leave
-        # pushed PR branches with no refs/remotes/* entry, so `git log HEAD --not --remotes`
-        # reads them as unpushed forever. A local head that EXACTLY matches the remote branch
-        # has nothing origin lacks — the checkout is redundant; only the branch ref stays.
+        path, timeout=30, cache=merge_cache, max_ahead=_MAX_CHERRY_AHEAD):
+        # Pushed-branch tier: single-branch fetch refspecs (managed-install default) leave pushed
+        # PR branches with no refs/remotes/* entry, so `git log HEAD --not --remotes` reads them
+        # as unpushed forever. A head EXACTLY matching the remote branch has nothing origin lacks.
         if not _cli._worktree_branch_pushed_exact(path, remote_heads, timeout=10):
             return "keep", "unpushed commits not found upstream", []
         if untracked:
@@ -167,9 +148,7 @@ def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeReco
 
     merge_cache = _cli._load_worktree_merge_cache()
     cache_size_before = len(merge_cache)
-
-    # One ls-remote resolves "is this branch pushed as-is?" for the whole
-    # sweep. None (offline) degrades every pushed-tier verdict to keep.
+    # One ls-remote for the whole sweep; None (offline) degrades pushed-tier verdicts to keep.
     remote_heads = _cli._fetch_remote_branch_heads(repo_root)
 
     now = time.time()
@@ -185,13 +164,11 @@ def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeReco
             branch = _git(["branch", "--show-current"], cwd=str(entry), timeout=5).stdout.strip()
         except Exception:
             branch = ""
-
         verdict, reason, untracked = _classify_tree(_cli, repo_root, entry, merge_cache, remote_heads)
         records.append(TreeRecord(
             name=entry.name, path=str(entry), branch=branch,
             age_days=age_days, size_mb=_tree_size_mb(entry) if with_sizes else None,
-            verdict=verdict, reason=reason, untracked=untracked,
-        ))
+            verdict=verdict, reason=reason, untracked=untracked))
 
     if len(merge_cache) != cache_size_before:
         _cli._save_worktree_merge_cache(merge_cache)
@@ -202,17 +179,10 @@ _REAP_VERDICTS = {"reap", "reap-archive", "reap-keep-branch"}
 
 
 def reclaim_worktrees(
-    repo_root: str,
-    *,
-    dry_run: bool = False,
-    records: Optional[List[TreeRecord]] = None,
+    repo_root: str, *, dry_run: bool = False, records: Optional[List[TreeRecord]] = None
 ) -> List[str]:
-    """Remove every reap-verdict tree from a frozen audit list.
-
-    Operates ONLY on the provided (or freshly computed) audit records — never re-globs inside the
-    destructive loop, so trees created by concurrent sessions after the audit are out of scope by
-    construction.
-    """
+    """Remove every reap-verdict tree from a frozen audit list — never re-globs inside the
+    destructive loop, so trees created by concurrent sessions after the audit are out of scope."""
     if records is None:
         records = audit_worktrees(repo_root, with_sizes=False)
     actions: List[str] = []
@@ -232,11 +202,8 @@ def reclaim_worktrees(
             actions.append(f"archived {len(record.untracked)} untracked file(s) → {archive}")
 
         # Dead-pid locks must be unlocked or `remove --force` refuses.
-        try:
+        with contextlib.suppress(Exception):
             _git(["worktree", "unlock", record.path], cwd=repo_root, timeout=10)
-        except Exception:
-            pass
-
         try:
             remove_result = _git(["worktree", "remove", record.path, "--force"], cwd=repo_root, timeout=30)
             if remove_result.returncode != 0:
@@ -252,20 +219,14 @@ def reclaim_worktrees(
             actions.append(f"failed to remove {record.name}: {exc}")
 
     if not dry_run:
-        try:
+        with contextlib.suppress(Exception):
             _git(["worktree", "prune"], cwd=repo_root, timeout=15)
-        except Exception:
-            pass
     return actions
 
 
 def audit_branches(repo_root: str) -> List[BranchRecord]:
-    """Classify local branches: deletable when their content is on upstream and not checked out.
-
-    "On upstream" means fully merged OR every commit patch-equivalent via ``git cherry``. Applies
-    to EVERY local branch, not just the startup pass's prefix list, because the gate is content
-    reachability rather than name. Checked-out, protected, and unique-commit branches are kept.
-    """
+    """Classify EVERY local branch: deletable when fully merged OR every commit is patch-equivalent
+    upstream (``git cherry``) and not checked out. The gate is content reachability, not name."""
     import cli as _cli
 
     if _cli._repo_is_shallow(repo_root):
@@ -277,8 +238,7 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
     upstream = next(
         (c for c in ("origin/HEAD", "origin/main", "origin/master")
          if _git(["rev-parse", "--verify", "--quiet", c], cwd=repo_root, timeout=5).returncode == 0),
-        None,
-    )
+        None)
     if upstream is None:
         return []
 
@@ -290,8 +250,7 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
     wt = _git(["worktree", "list", "--porcelain"], cwd=repo_root, timeout=10)
     active = {
         line.removeprefix("branch refs/heads/").strip()
-        for line in wt.stdout.splitlines() if line.startswith("branch refs/heads/")
-    }
+        for line in wt.stdout.splitlines() if line.startswith("branch refs/heads/")}
     merged = set(_lines(_git(["branch", "--merged", upstream, "--format=%(refname:short)"], cwd=repo_root, timeout=15)))
 
     def _classify_branch(branch: str) -> BranchRecord:
@@ -299,9 +258,8 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
             return BranchRecord(branch, "keep", "protected or checked out")
         if branch in merged:
             return BranchRecord(branch, "delete", "fully merged into " + upstream)
-        # Rebase merges rewrite SHAs, so --merged misses them; cherry
-        # patch-equivalence catches the dominant leak. Bounded: a branch
-        # far ahead is a stale-base lane, keep it.
+        # Rebase merges rewrite SHAs, so --merged misses them; cherry patch-equivalence catches
+        # the dominant leak. Bounded: a branch far ahead is a stale-base lane, keep it.
         ahead = _git(["rev-list", "--count", f"{upstream}..{branch}"], cwd=repo_root, timeout=10)
         try:
             ahead_count = int(ahead.stdout.strip() or "0")
@@ -320,17 +278,13 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
         unique = sum(1 for ln in lines if ln.startswith("+"))
         return BranchRecord(branch, "keep", f"{unique} unique commit(s) not upstream")
 
-    # Read-only classification — parallel, like the tree audit (a busy
-    # multi-agent box carries hundreds of local branches; serial cherry
-    # probes at ~0.2-1s each make the audit minutes long).
+    # Read-only, so parallel: hundreds of local branches × ~0.2-1s cherry probes would be minutes.
     import concurrent.futures
 
     workers = max(1, min(8, (os.cpu_count() or 4), len(branches)))
     if workers > 1:
         try:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="hermes-branch-gc"
-            ) as pool:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hermes-branch-gc") as pool:
                 return list(pool.map(_classify_branch, branches))
         except Exception:
             pass
@@ -338,10 +292,7 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
 
 
 def reclaim_branches(
-    repo_root: str,
-    *,
-    dry_run: bool = False,
-    records: Optional[List[BranchRecord]] = None,
+    repo_root: str, *, dry_run: bool = False, records: Optional[List[BranchRecord]] = None
 ) -> List[str]:
     """Delete every delete-verdict branch from a frozen audit list."""
     if records is None:
@@ -356,14 +307,12 @@ def reclaim_branches(
         result = _git(["branch", "-D", record.name], cwd=repo_root, timeout=10)
         actions.append(
             f"deleted branch {record.name}" if result.returncode == 0
-            else f"failed to delete {record.name}: {result.stderr.strip()}"
-        )
+            else f"failed to delete {record.name}: {result.stderr.strip()}")
     return actions
 
 
 def worktrees_summary(repo_root: str) -> tuple[int, Optional[int]]:
-    """(tree_count, total_size_mb) for the escalation notice. Size is
-    best-effort with a hard timeout so the startup path never stalls."""
+    """(tree_count, total_size_mb) for the escalation notice; size is best-effort with a timeout."""
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
         return 0, None
