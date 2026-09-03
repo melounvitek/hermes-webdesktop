@@ -92,145 +92,106 @@ AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
 )
 
 
+_TRAJECTORY_SYSTEM_PROMPT = (
+    "You are a function calling AI model. You are provided with function signatures within <tools> </tools> XML tags. "
+    "You may call one or more functions to assist with the user query. If available tools are not relevant in assisting "
+    "with user query, just respond in natural conversational language. Don't make assumptions about what values to plug "
+    "into functions. After calling & executing the functions, you will be provided with function results within "
+    "<tool_response> </tool_response> XML tags. Here are the available tools:\n"
+    "<tools>\n{tools}\n</tools>\n"
+    "For each function call return a JSON object, with the following pydantic model json schema for each:\n"
+    "{{'title': 'FunctionCall', 'type': 'object', 'properties': {{'name': {{'title': 'Name', 'type': 'string'}}, "
+    "'arguments': {{'title': 'Arguments', 'type': 'object'}}}}, 'required': ['name', 'arguments']}}\n"
+    "Each function call should be enclosed within <tool_call> </tool_call> XML tags.\n"
+    "Example:\n<tool_call>\n{{'name': <function-name>,'arguments': <args-dict>}}\n</tool_call>"
+)
+
+
+def _trajectory_gpt_prefix(msg: Dict[str, Any]) -> str:
+    """Leading ``<think>`` block from native reasoning tokens, if any."""
+    if msg.get("reasoning") and msg["reasoning"].strip():
+        return f"<think>\n{msg['reasoning']}\n</think>\n"
+    return ""
+
+
+def _with_think_block(content: str) -> str:
+    """Every gpt turn gets a <think> block (empty if none) for a consistent training format."""
+    return content if "<think>" in content else "<think>\n</think>\n" + content
+
+
+def _trajectory_tool_call_turn(msg: Dict[str, Any]) -> str:
+    content = _trajectory_gpt_prefix(msg)
+    if msg.get("content") and msg["content"].strip():
+        # <REASONING_SCRATCHPAD> -> <think> (model reasons via XML when native thinking is off)
+        content += convert_scratchpad_to_think(msg["content"]) + "\n"
+    for tool_call in msg["tool_calls"]:
+        if not tool_call or not isinstance(tool_call, dict):
+            continue
+        raw_args = tool_call["function"]["arguments"]
+        # Arguments were validated during conversation; degrade to {} rather than abort.
+        try:
+            arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except json.JSONDecodeError:
+            logger.warning("Unexpected invalid JSON in trajectory conversion: %s", raw_args[:100])
+            arguments = {}
+        tool_call_json = {"name": tool_call["function"]["name"], "arguments": arguments}
+        content += f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>\n"
+    return _with_think_block(content).rstrip()
+
+
+def _trajectory_tool_responses(msg: Dict[str, Any], messages: List[Dict[str, Any]], start: int) -> Tuple[List[str], int]:
+    """Collect the ``<tool_response>`` blocks for the tool run starting at ``start``; returns ``(blocks, next_index)``."""
+    tool_responses = []
+    j = start
+    while j < len(messages) and messages[j]["role"] == "tool":
+        tool_msg = messages[j]
+        tool_content = tool_msg["content"]
+        try:  # pretty-print tool content if it looks like JSON
+            if tool_content.strip().startswith(("{", "[")):
+                tool_content = json.loads(tool_content)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        tool_index = len(tool_responses)
+        tool_name = (
+            msg["tool_calls"][tool_index]["function"]["name"]
+            if tool_index < len(msg["tool_calls"])
+            else "unknown"
+        )
+        payload = json.dumps(
+            {"tool_call_id": tool_msg.get("tool_call_id", ""), "name": tool_name, "content": tool_content},
+            ensure_ascii=False,
+        )
+        tool_responses.append(f"<tool_response>\n{payload}\n</tool_response>")
+        j += 1
+    return tool_responses, j
+
+
 def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
     """Convert internal message history to trajectory format for saving."""
     # Trajectories are text-only: swap image-bearing tool messages for their
     # text_summary so ~1MB base64 blobs are not embedded.
     messages = [_trajectory_normalize_msg(m) for m in messages]
-    trajectory = []
-    
-    system_msg = (
-        "You are a function calling AI model. You are provided with function signatures within <tools> </tools> XML tags. "
-        "You may call one or more functions to assist with the user query. If available tools are not relevant in assisting "
-        "with user query, just respond in natural conversational language. Don't make assumptions about what values to plug "
-        "into functions. After calling & executing the functions, you will be provided with function results within "
-        "<tool_response> </tool_response> XML tags. Here are the available tools:\n"
-        f"<tools>\n{agent._format_tools_for_system_message()}\n</tools>\n"
-        "For each function call return a JSON object, with the following pydantic model json schema for each:\n"
-        "{'title': 'FunctionCall', 'type': 'object', 'properties': {'name': {'title': 'Name', 'type': 'string'}, "
-        "'arguments': {'title': 'Arguments', 'type': 'object'}}, 'required': ['name', 'arguments']}\n"
-        "Each function call should be enclosed within <tool_call> </tool_call> XML tags.\n"
-        "Example:\n<tool_call>\n{'name': <function-name>,'arguments': <args-dict>}\n</tool_call>"
-    )
-    
-    trajectory.append({
-        "from": "system",
-        "value": system_msg
-    })
-    
-    trajectory.append({
-        "from": "human",
-        "value": user_query
-    })
-    
-    # Skip messages[0] (already added). Prefill is injected at API-call time
-    # only, so no offset adjustment is needed.
+    trajectory = [
+        {"from": "system", "value": _TRAJECTORY_SYSTEM_PROMPT.format(tools=agent._format_tools_for_system_message())},
+        {"from": "human", "value": user_query},
+    ]
+    # Skip messages[0] (already added). Prefill is injected at API-call time only, so no offset adjustment is needed.
     i = 1
-    
     while i < len(messages):
         msg = messages[i]
-        
         if msg["role"] == "assistant":
-            if "tool_calls" in msg and msg["tool_calls"]:
-                content = ""
-                
-                # Prepend reasoning in <think> tags if available (native thinking tokens)
-                if msg.get("reasoning") and msg["reasoning"].strip():
-                    content = f"<think>\n{msg['reasoning']}\n</think>\n"
-                
-                if msg.get("content") and msg["content"].strip():
-                    # <REASONING_SCRATCHPAD> -> <think> (model reasons via XML when native thinking is off)
-                    content += convert_scratchpad_to_think(msg["content"]) + "\n"
-                
-                for tool_call in msg["tool_calls"]:
-                    if not tool_call or not isinstance(tool_call, dict): continue
-                    # Arguments were validated during conversation; try/except is a safety net
-                    try:
-                        arguments = json.loads(tool_call["function"]["arguments"]) if isinstance(tool_call["function"]["arguments"], str) else tool_call["function"]["arguments"]
-                    except json.JSONDecodeError:
-                        # Should not happen (validated during the conversation); degrade to {} rather than abort.
-                        logger.warning("Unexpected invalid JSON in trajectory conversion: %s", tool_call['function']['arguments'][:100])
-                        arguments = {}
-                    
-                    tool_call_json = {
-                        "name": tool_call["function"]["name"],
-                        "arguments": arguments
-                    }
-                    content += f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>\n"
-                
-                # Every gpt turn gets a <think> block (empty if none) for a consistent training format
-                if "<think>" not in content:
-                    content = "<think>\n</think>\n" + content
-                
-                trajectory.append({
-                    "from": "gpt",
-                    "value": content.rstrip()
-                })
-                
-                tool_responses = []
-                j = i + 1
-                while j < len(messages) and messages[j]["role"] == "tool":
-                    tool_msg = messages[j]
-                    tool_response = "<tool_response>\n"
-                    
-                    # Pretty-print tool content if it looks like JSON
-                    tool_content = tool_msg["content"]
-                    try:
-                        if tool_content.strip().startswith(("{", "[")):
-                            tool_content = json.loads(tool_content)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass  # Keep as string if not valid JSON
-                    
-                    tool_index = len(tool_responses)
-                    tool_name = (
-                        msg["tool_calls"][tool_index]["function"]["name"]
-                        if tool_index < len(msg["tool_calls"])
-                        else "unknown"
-                    )
-                    tool_response += json.dumps({
-                        "tool_call_id": tool_msg.get("tool_call_id", ""),
-                        "name": tool_name,
-                        "content": tool_content
-                    }, ensure_ascii=False)
-                    tool_response += "\n</tool_response>"
-                    tool_responses.append(tool_response)
-                    j += 1
-                
+            if msg.get("tool_calls"):
+                trajectory.append({"from": "gpt", "value": _trajectory_tool_call_turn(msg)})
+                tool_responses, j = _trajectory_tool_responses(msg, messages, i + 1)
                 if tool_responses:
-                    trajectory.append({
-                        "from": "tool",
-                        "value": "\n".join(tool_responses)
-                    })
-                    i = j - 1  # Skip the tool messages we just processed
-            
+                    trajectory.append({"from": "tool", "value": "\n".join(tool_responses)})
+                    i = j - 1  # skip the tool messages just processed
             else:
-                content = ""
-                
-                # Prepend reasoning in <think> tags if available (native thinking tokens)
-                if msg.get("reasoning") and msg["reasoning"].strip():
-                    content = f"<think>\n{msg['reasoning']}\n</think>\n"
-                
-                # <REASONING_SCRATCHPAD> -> <think> (model reasons via XML when native thinking is off)
-                raw_content = msg["content"] or ""
-                content += convert_scratchpad_to_think(raw_content)
-                
-                # Every gpt turn gets a <think> block (empty if none) for a consistent training format
-                if "<think>" not in content:
-                    content = "<think>\n</think>\n" + content
-                
-                trajectory.append({
-                    "from": "gpt",
-                    "value": content.strip()
-                })
-        
+                content = _trajectory_gpt_prefix(msg) + convert_scratchpad_to_think(msg["content"] or "")
+                trajectory.append({"from": "gpt", "value": _with_think_block(content).strip()})
         elif msg["role"] == "user":
-            trajectory.append({
-                "from": "human",
-                "value": msg["content"]
-            })
-        
+            trajectory.append({"from": "human", "value": msg["content"]})
         i += 1
-    
     return trajectory
 
 
@@ -706,60 +667,62 @@ def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
 
 
 
+def _flatten_content_text(content: Any) -> str:
+    """Flatten list/dict content (e.g. Anthropic-via-OpenRouter block lists) to text.
+
+    A raw list hitting ``re.sub`` raises TypeError and the conversation loop retries forever.
+    Thinking/reasoning blocks are dropped outright; their text key varies per provider.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if str(part.get("type") or "").strip().lower() in {"thinking", "reasoning", "redacted_thinking"}:
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        return "".join(parts)
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("content") or "")
+    return str(content)
+
+
+# Order matters: closed pairs first (case-insensitive so mixed-case tags don't fall through
+# to the unterminated pass and eat trailing content), then tool-call XML blocks, the
+# boundary+name-gated <function> block, the unterminated reasoning block, stray orphan
+# reasoning tags, and finally stray tool-call CLOSERS only (bare/unterminated <function>
+# is kept: a truncated streaming tail may still be valuable, matching OpenClaw's asymmetry).
+_THINK_STRIP_PATTERNS = (
+    *_REASONING_BLOCK_PATTERNS,
+    *_TOOL_CALL_BLOCK_PATTERNS,
+    _NAMED_FUNCTION_BLOCK_PATTERN,
+    _UNTERMINATED_REASONING_BLOCK_PATTERN,
+    _ORPHAN_REASONING_TAG_PATTERN,
+    _STRAY_TOOL_CALL_CLOSER_PATTERN,
+)
+
+
 def strip_think_blocks(agent, content: str) -> str:
     """Remove reasoning/thinking blocks from content, returning only visible text.
 
     Strips closed tag pairs, unterminated open tags at a block boundary (mirrors
-    ``gateway/stream_consumer.py``), stray orphan tags, and all case-insensitive
-    variants (think/thinking/reasoning/REASONING_SCRATCHPAD/thought). Also strips
-    standalone tool-call XML blocks some open models emit in content (ported from
-    openclaw/openclaw#67318); the ``<function>`` variant is boundary- and
+    ``gateway/stream_consumer.py``), stray orphan tags, all case-insensitive variants
+    (think/thinking/reasoning/REASONING_SCRATCHPAD/thought), and standalone tool-call XML
+    blocks some open models emit; the ``<function>`` variant is boundary- and
     ``name=``-gated so prose mentions survive.
     """
     if not content:
         return ""
-    # Flatten list/dict content (e.g. Anthropic-via-OpenRouter block lists from
-    # stored history) before regex: a raw list hits re.sub, raises TypeError,
-    # and the conversation loop retries forever.
-    if not isinstance(content, str):
-        if isinstance(content, list):
-            _parts: list[str] = []
-            for _part in content:
-                if isinstance(_part, str):
-                    _parts.append(_part)
-                elif isinstance(_part, dict):
-                    _ptype = str(_part.get("type") or "").strip().lower()
-                    # Drop thinking/reasoning blocks outright; their text key varies per provider.
-                    if _ptype in {"thinking", "reasoning", "redacted_thinking"}:
-                        continue
-                    _text = _part.get("text")
-                    if isinstance(_text, str) and _text:
-                        _parts.append(_text)
-            content = "".join(_parts)
-        elif isinstance(content, dict):
-            content = str(content.get("text") or content.get("content") or "")
-        else:
-            content = str(content)
-        if not content:
-            return ""
-    # 1. Closed tag pairs, case-insensitive so mixed-case tags do not fall
-    #    through to the unterminated pass and eat trailing content.
-    for _pattern in _REASONING_BLOCK_PATTERNS:
-        content = _pattern.sub('', content)
-    # 1b. Tool-call XML blocks (openclaw/openclaw#67318); generic tags need no attribute gating.
-    for _pattern in _TOOL_CALL_BLOCK_PATTERNS:
-        content = _pattern.sub('', content)
-    # 1c. Gemma-style <function name="..."> block: strip only at a block boundary
-    #     AND with a name attribute so prose mentions of <function> survive.
-    content = _NAMED_FUNCTION_BLOCK_PATTERN.sub('', content)
-    # 2. Unterminated reasoning block at a block boundary: strip to end of
-    #    string (#8878, #9568: MiniMax M2.7 leaking raw reasoning).
-    content = _UNTERMINATED_REASONING_BLOCK_PATTERN.sub('', content)
-    # 3. Stray orphan open/close tags that slipped through.
-    content = _ORPHAN_REASONING_TAG_PATTERN.sub('', content)
-    # 3b. Stray tool-call closers only; bare/unterminated <function> is kept since a
-    #     truncated streaming tail may still be valuable (matches OpenClaw asymmetry).
-    content = _STRAY_TOOL_CALL_CLOSER_PATTERN.sub('', content)
+    content = _flatten_content_text(content)
+    if not content:
+        return ""
+    for pattern in _THINK_STRIP_PATTERNS:
+        content = pattern.sub('', content)
     return content
 
 
@@ -1406,64 +1369,43 @@ _TRANSIENT_TRANSPORT_ERRORS = frozenset({
 
 
 
+_INLINE_REASONING_PATTERNS = tuple(
+    re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL | re.IGNORECASE)
+    for tag in ("think", "thinking", "thought", "reasoning", "REASONING_SCRATCHPAD")
+)
+
+
 def extract_reasoning(agent, assistant_message) -> Optional[str]:
     """Extract reasoning text from an assistant message, or None.
 
     Checks ``reasoning``, ``reasoning_content``, ``reasoning_details`` (OpenRouter unified),
     then inline thinking blocks in list content.
     """
-    reasoning_parts = []
-    
-    if hasattr(assistant_message, 'reasoning') and assistant_message.reasoning:
-        reasoning_parts.append(assistant_message.reasoning)
-    
-    if hasattr(assistant_message, 'reasoning_content') and assistant_message.reasoning_content:
-        if assistant_message.reasoning_content not in reasoning_parts:
-            reasoning_parts.append(assistant_message.reasoning_content)
-    
-    # reasoning_details: [{"type": "reasoning.summary", "summary": "...", ...}, ...]
-    if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
-        for detail in assistant_message.reasoning_details:
-            if isinstance(detail, dict):
-                summary = (
-                    detail.get('summary')
-                    or detail.get('thinking')
-                    or detail.get('content')
-                    or detail.get('text')
-                )
-                if summary and summary not in reasoning_parts:
-                    reasoning_parts.append(summary)
+    parts: List[str] = []
 
+    def _add(text) -> None:
+        if text and text not in parts:
+            parts.append(text)
+
+    _add(getattr(assistant_message, "reasoning", None))
+    _add(getattr(assistant_message, "reasoning_content", None))
+    # reasoning_details: [{"type": "reasoning.summary", "summary": "...", ...}, ...]
+    for detail in getattr(assistant_message, "reasoning_details", None) or []:
+        if isinstance(detail, dict):
+            _add(detail.get('summary') or detail.get('thinking') or detail.get('content') or detail.get('text'))
     # Fall back to reasoning embedded in content only when no structured field was found.
     content = getattr(assistant_message, "content", None)
-    if not reasoning_parts and isinstance(content, list):
+    if not parts and isinstance(content, list):
         # DeepSeek V4 Pro returns typed content blocks ({"type": "thinking", ...}); dropping
-        # them makes the next turn fail with HTTP 400 "thinking must be passed back" (#21944).
+        # them makes the next turn fail with HTTP 400 "thinking must be passed back".
         for block in content:
             if isinstance(block, dict) and block.get("type") == "thinking":
-                thinking_text = block.get("thinking") or block.get("text") or ""
-                thinking_text = thinking_text.strip()
-                if thinking_text and thinking_text not in reasoning_parts:
-                    reasoning_parts.append(thinking_text)
-    if not reasoning_parts and isinstance(content, str) and content:
-        inline_patterns = (
-            r"<think>(.*?)</think>",
-            r"<thinking>(.*?)</thinking>",
-            r"<thought>(.*?)</thought>",
-            r"<reasoning>(.*?)</reasoning>",
-            r"<REASONING_SCRATCHPAD>(.*?)</REASONING_SCRATCHPAD>",
-        )
-        for pattern in inline_patterns:
-            flags = re.DOTALL | re.IGNORECASE
-            for block in re.findall(pattern, content, flags=flags):
-                cleaned = block.strip()
-                if cleaned and cleaned not in reasoning_parts:
-                    reasoning_parts.append(cleaned)
-    
-    if reasoning_parts:
-        return "\n\n".join(reasoning_parts)
-    
-    return None
+                _add((block.get("thinking") or block.get("text") or "").strip())
+    if not parts and isinstance(content, str) and content:
+        for pattern in _INLINE_REASONING_PATTERNS:
+            for block in pattern.findall(content):
+                _add(block.strip())
+    return "\n\n".join(parts) if parts else None
 
 
 
@@ -1707,18 +1649,14 @@ def _is_litellm_route(provider_lower: str, base_url: str) -> bool:
     ``litellm`` must match as a whole delimited token (not substring) in provider or host;
     a path segment never qualifies.
     """
-    if _has_litellm_token(provider_lower, ":-_/"):
-        return True
-    return _has_litellm_token(base_url_hostname(base_url), ".-")
+    return _has_litellm_token(provider_lower, ":-_/") or _has_litellm_token(base_url_hostname(base_url), ".-")
 
 
 def _has_litellm_token(value: str, delimiters: str) -> bool:
     """True when ``value`` contains ``litellm`` as a whole delimited token."""
     if not value:
         return False
-    for delimiter in delimiters:
-        value = value.replace(delimiter, " ")
-    return "litellm" in value.split()
+    return "litellm" in value.translate(str.maketrans(delimiters, " " * len(delimiters))).split()
 
 
 def _moa_aggregator_cache_policy(agent, eff_model: str) -> tuple[bool, bool]:
@@ -2741,15 +2679,6 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
         return matches[0]
 
     return None
-
-
-def _tool_call_id_variants(tc: Any) -> set:
-    """Return every id a tool result might match this tool_call on.
-
-    Thin backward-compatible forwarder; policy owner is
-    ``agent.message_sanitization.tool_call_id_variants``.
-    """
-    return set(tool_call_id_variants(tc))
 
 
 # Placeholder for an empty non-final message the provider would reject. Kept identical to
