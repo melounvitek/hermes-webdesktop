@@ -1,17 +1,10 @@
 """QQ Bot inline keyboards + approval / update-prompt helpers.
 
-QQ Bot v2 attaches inline keyboards to outbound messages. A button click
-dispatches an ``INTERACTION_CREATE`` gateway event carrying the button's
-``data`` payload; the bot must ACK promptly via ``PUT /interactions/{id}`` or
-the user sees an error indicator on the button.
-
-``button_data`` formats::
-
-    approve:<session_key>:<decision>      # decision = allow-once|allow-always|deny
-    update_prompt:<answer>                # answer = y|n
-
-Ported from WideLee's qqbot-agent-sdk v1.2.2 (``approval.py`` + ``dto.py``
-keyboard types). Authorship preserved via Co-authored-by.
+A button click dispatches an ``INTERACTION_CREATE`` event carrying the button's
+``data``; the bot must ACK promptly via ``PUT /interactions/{id}`` or the user
+sees an error indicator. ``button_data`` formats: ``approve:<session_key>:<decision>``
+(decision = allow-once|allow-always|deny) and ``update_prompt:<answer>`` (y|n).
+Ported from WideLee's qqbot-agent-sdk v1.2.2 (authorship via Co-authored-by).
 """
 
 from __future__ import annotations
@@ -28,16 +21,13 @@ UPDATE_PROMPT_PREFIX = "update_prompt:"
 _APPROVAL_DATA_RE = re.compile(r"^approve:(.+):(allow-once|allow-always|deny)$")
 _UPDATE_PROMPT_RE = re.compile(r"^update_prompt:(y|n)$")
 
-
-# ── Keyboard dataclasses ─────────────────────────────────────────────
+# ── Keyboard dataclasses ──
 
 def _to_dict(value: Any) -> Any:
     """Serialize a dataclass tree in field-declaration order (the wire shape)."""
     if is_dataclass(value):
         return {f.name: _to_dict(getattr(value, f.name)) for f in fields(value)}
-    if isinstance(value, list):
-        return [_to_dict(v) for v in value]
-    return value
+    return [_to_dict(v) for v in value] if isinstance(value, list) else value
 
 
 class _Serializable:
@@ -53,9 +43,8 @@ class KeyboardButtonPermission(_Serializable):
 
 @dataclass
 class KeyboardButtonAction(_Serializable):
-    """Click behaviour: ``type`` 1 = Callback (INTERACTION_CREATE with ``data``), 2 = Link.
-    ``click_limit=1`` = single-use.
-    """
+    """Click behaviour: ``type`` 1 = Callback (INTERACTION_CREATE with ``data``), 2 = Link;
+    ``click_limit=1`` = single-use."""
     type: int
     data: str
     permission: KeyboardButtonPermission = field(default_factory=KeyboardButtonPermission)
@@ -95,12 +84,12 @@ class InlineKeyboard(_Serializable):
     content: KeyboardContent = field(default_factory=KeyboardContent)
 
 
-# ── INTERACTION_CREATE parsing ───────────────────────────────────────
+# ── INTERACTION_CREATE parsing ──
 
 def parse_approval_button_data(button_data: str) -> Optional[tuple[str, str]]:
     """Parse approval ``button_data`` into ``(session_key, decision)`` or ``None``."""
     m = _APPROVAL_DATA_RE.match(button_data or "")
-    return (m.group(1), m.group(2)) if m else None
+    return m.groups() if m else None
 
 
 def parse_update_prompt_button_data(button_data: str) -> Optional[str]:
@@ -109,54 +98,44 @@ def parse_update_prompt_button_data(button_data: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-# ── Keyboard builders ────────────────────────────────────────────────
+# ── Keyboard builders ──
 
-def _make_callback_button(
-    btn_id: str, label: str, visited_label: str, data: str, style: int, group_id: str,
-) -> KeyboardButton:
-    return KeyboardButton(
-        id=btn_id,
-        render_data=KeyboardButtonRenderData(label=label, visited_label=visited_label, style=style),
-        action=KeyboardButtonAction(type=1, data=data),
-        group_id=group_id,
-    )
-
-
-def _single_row_keyboard(buttons: List[KeyboardButton]) -> InlineKeyboard:
-    return InlineKeyboard(content=KeyboardContent(rows=[KeyboardRow(buttons=buttons)]))
+def _single_row_keyboard(group_id: str, *buttons: tuple) -> InlineKeyboard:
+    """One row of callback buttons from ``(id, label, visited_label, data, style)`` tuples."""
+    row = KeyboardRow(buttons=[
+        KeyboardButton(
+            id=btn_id, group_id=group_id, action=KeyboardButtonAction(type=1, data=data),
+            render_data=KeyboardButtonRenderData(label=label, visited_label=visited, style=style))
+        for btn_id, label, visited, data, style in buttons])
+    return InlineKeyboard(content=KeyboardContent(rows=[row]))
 
 
 def build_approval_keyboard(session_key: str, *, allow_permanent: bool = True) -> InlineKeyboard:
     """Build ``[✅ 允许一次] [⭐ 始终允许] [❌ 拒绝]`` (one group, so a click greys the rest).
-
-    The ⭐ button is hidden when persistent scope is unavailable. *session_key*
-    is embedded in ``button_data`` so the decision routes to the right approval.
-    """
+    ⭐ is hidden when persistent scope is unavailable; *session_key* is embedded in
+    ``button_data`` so the decision routes to the right approval."""
     prefix = f"{APPROVAL_BUTTON_PREFIX}{session_key}"
-    buttons = [_make_callback_button("allow", "✅ 允许一次", "已允许", f"{prefix}:allow-once", 1, "approval")]
+    buttons = [("allow", "✅ 允许一次", "已允许", f"{prefix}:allow-once", 1)]
     if allow_permanent:
-        buttons.append(_make_callback_button("always", "⭐ 始终允许", "已始终允许", f"{prefix}:allow-always", 1, "approval"))
-    buttons.append(_make_callback_button("deny", "❌ 拒绝", "已拒绝", f"{prefix}:deny", 0, "approval"))
-    return _single_row_keyboard(buttons)
+        buttons.append(("always", "⭐ 始终允许", "已始终允许", f"{prefix}:allow-always", 1))
+    buttons.append(("deny", "❌ 拒绝", "已拒绝", f"{prefix}:deny", 0))
+    return _single_row_keyboard("approval", *buttons)
 
 
 def build_update_prompt_keyboard() -> InlineKeyboard:
     """Build a Yes/No keyboard for update confirmation prompts."""
-    return _single_row_keyboard([
-        _make_callback_button("yes", "✓ 确认", "已确认", f"{UPDATE_PROMPT_PREFIX}y", 1, "update_prompt"),
-        _make_callback_button("no", "✗ 取消", "已取消", f"{UPDATE_PROMPT_PREFIX}n", 0, "update_prompt"),
-    ])
+    return _single_row_keyboard(
+        "update_prompt",
+        ("yes", "✓ 确认", "已确认", f"{UPDATE_PROMPT_PREFIX}y", 1),
+        ("no", "✗ 取消", "已取消", f"{UPDATE_PROMPT_PREFIX}n", 0))
 
 
-# ── ApprovalRequest + text builder ───────────────────────────────────
+# ── ApprovalRequest + text builder ──
 
 @dataclass
 class ApprovalRequest:
-    """Approval-request display data.
-
-    ``command_preview`` / ``cwd`` are set for exec approvals, ``tool_name`` for
-    plugin approvals; ``severity`` is ``'critical' | 'info' | ''``.
-    """
+    """Approval-request display data. ``command_preview`` / ``cwd`` are set for exec
+    approvals, ``tool_name`` for plugin approvals; ``severity`` is ``'critical' | 'info' | ''``."""
     session_key: str
     title: str
     description: str = ""
@@ -193,14 +172,11 @@ def build_approval_text(req: ApprovalRequest) -> str:
     return "\n".join(lines)
 
 
-# ── INTERACTION_CREATE event shape ───────────────────────────────────
+# ── INTERACTION_CREATE event shape ──
 
 @dataclass
 class InteractionEvent:
-    """Parsed ``INTERACTION_CREATE`` payload.
-
-    See https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html
-    """
+    """Parsed ``INTERACTION_CREATE`` payload (api-v2 event-emit docs)."""
     id: str = ""            # required for the ``PUT /interactions/{id}`` ACK
     type: int = 0           # event type code (11 = message button)
     chat_type: int = 0      # 0 = guild, 1 = group, 2 = c2c
@@ -229,16 +205,11 @@ def parse_interaction_event(raw: Dict[str, Any]) -> InteractionEvent:
     resolved = data_raw.get("resolved") or {}
     scene_code = int(raw.get("chat_type", 0) or 0)
     return InteractionEvent(
-        id=str(raw.get("id", "")),
-        type=int(data_raw.get("type", 0) or 0),
-        chat_type=scene_code,
-        scene=_SCENE_NAMES.get(scene_code, ""),
-        group_openid=str(raw.get("group_openid", "")),
+        id=str(raw.get("id", "")), type=int(data_raw.get("type", 0) or 0), chat_type=scene_code,
+        scene=_SCENE_NAMES.get(scene_code, ""), group_openid=str(raw.get("group_openid", "")),
         group_member_openid=str(raw.get("group_member_openid", "")),
-        user_openid=str(raw.get("user_openid", "")),
-        channel_id=str(raw.get("channel_id", "")),
-        guild_id=str(raw.get("guild_id", "")),
-        button_data=str(resolved.get("button_data", "")),
+        user_openid=str(raw.get("user_openid", "")), channel_id=str(raw.get("channel_id", "")),
+        guild_id=str(raw.get("guild_id", "")), button_data=str(resolved.get("button_data", "")),
         button_id=str(resolved.get("button_id", "")),
         resolver_user_id=str(resolved.get("user_id", "")),
     )
