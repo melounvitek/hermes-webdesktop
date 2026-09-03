@@ -517,17 +517,16 @@ class GatewayShutdownMixin:
         error_code: Optional[str] = None, error_message: Optional[str] = None,
         needs_attention: Optional[bool] = None, retrying_since: Any = _UNSET,
     ) -> None:
-        with suppress(Exception):
-            from gateway.status import write_runtime_status
-            extra: Dict[str, Any] = {}
-            if needs_attention is not None:
-                extra["needs_attention"] = needs_attention
-            if retrying_since is not _UNSET:
-                extra["retrying_since"] = retrying_since
-            write_runtime_status(
-                platform=platform, platform_state=platform_state, error_code=error_code,
-                error_message=error_message, **extra,
-            )
+        from gateway.run import _write_runtime_status_quiet
+        extra: Dict[str, Any] = {}
+        if needs_attention is not None:
+            extra["needs_attention"] = needs_attention
+        if retrying_since is not _UNSET:
+            extra["retrying_since"] = retrying_since
+        _write_runtime_status_quiet(
+            platform=platform, platform_state=platform_state, error_code=error_code,
+            error_message=error_message, **extra,
+        )
 
     # Per-platform circuit breaker (pause/resume): reconnect watcher + /platform pause|resume.
     def _pause_failed_platform(self, platform, *, reason: str = "") -> None:

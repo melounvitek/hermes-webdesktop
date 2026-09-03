@@ -657,6 +657,7 @@ class GatewayStartupMixin:
 
     def _start_log_startup_environment(self) -> None:
         """Bind the gateway loop, disarm the startup watchdog, and log the startup environment."""
+        from gateway.run import _write_runtime_status_quiet
         try:
             self._gateway_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -700,9 +701,7 @@ class GatewayStartupMixin:
             _profile = get_active_profile_name()
             if _profile and _profile != "default":
                 logger.info("Active profile: %s", _profile)
-        with suppress(Exception):
-            from gateway.status import write_runtime_status
-            write_runtime_status(gateway_state="starting", exit_reason=None, clear_profile_platforms=True)
+        _write_runtime_status_quiet(gateway_state="starting", exit_reason=None, clear_profile_platforms=True)
         with _log_suppressed(logging.DEBUG, "gateway health OTLP export startup failed", exc_info=True):
             from hermes_cli.config import load_config
             from agent.monitoring.gateway_health_export import start_gateway_health_export
@@ -1082,6 +1081,7 @@ class GatewayStartupMixin:
         startup_nonretryable_errors: list,
     ) -> bool:
         """Log/degrade when nothing connected; return True when startup must exit."""
+        from gateway.run import _write_runtime_status_quiet
         if connected_count != 0:
             return False
         if startup_nonretryable_errors and not startup_retryable_errors:
@@ -1109,9 +1109,7 @@ class GatewayStartupMixin:
                 "Gateway started with no connected platforms — %d platform(s) queued for retry: %s",
                 len(self._failed_platforms), "; ".join(startup_retryable_errors),
             )
-            with suppress(Exception):
-                from gateway.status import write_runtime_status
-                write_runtime_status(gateway_state="degraded", exit_reason=None)
+            _write_runtime_status_quiet(gateway_state="degraded", exit_reason=None)
         # (Or: no adapter for any enabled platform — missing library or credentials.) Fleet nodes
         # share one config.yaml but hold credentials for only a subset, so degrade gracefully.
         logger.warning(
