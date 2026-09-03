@@ -102,8 +102,7 @@ def _text_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
 def _decorated_text_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
     decorated: Dict[str, Any] = {
         "text": format_message(_required_str(widget, "text", "widget")),
-        "wrapText": bool(widget.get("wrap_text", True)),
-    }
+        "wrapText": bool(widget.get("wrap_text", True))}
     return {"decoratedText": _copy_opt(decorated, widget, ("top_label", "topLabel"), ("bottom_label", "bottomLabel"))}
 
 
@@ -123,8 +122,7 @@ def _selection_item(item: Any) -> Dict[str, Any]:
     return {
         "text": _required_str(item, "text", "selection item"),
         "value": _required_str(item, "value", "selection item"),
-        "selected": bool(item.get("selected", False)),
-    }
+        "selected": bool(item.get("selected", False))}
 
 
 def _selection_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,9 +133,7 @@ def _selection_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
             "name": name,
             "label": str(widget.get("label") or name),
             "type": str(widget.get("selection_type") or "CHECK_BOX"),
-            "items": [_selection_item(item) for item in raw_items],
-        }
-    }
+            "items": [_selection_item(item) for item in raw_items]}}
 
 
 _WIDGET_RENDERERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {

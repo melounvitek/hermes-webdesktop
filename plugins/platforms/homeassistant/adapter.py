@@ -122,8 +122,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
                     "[%s] No watch_domains, watch_entities, or watch_all configured. "
                     "All state_changed events will be dropped. Configure filters in "
                     "your HA platform config to receive events.",
-                    self.name,
-                )
+                    self.name)
             self._listen_task = asyncio.create_task(self._listen_loop())
             self._running = True
             logger.info("[%s] Connected to %s", self.name, self._hass_url)
@@ -242,18 +241,15 @@ class HomeAssistantAdapter(BasePlatformAdapter):
             return
         self._last_event_time[entity_id] = now
         message = self._format_state_change(
-            entity_id, event_data.get("old_state", {}), event_data.get("new_state", {}),
-        )
+            entity_id, event_data.get("old_state", {}), event_data.get("new_state", {}))
         if not message:
             return
         source = self.build_source(
             chat_id="ha_events", chat_name="Home Assistant Events", chat_type="channel",
-            user_id="homeassistant", user_name="Home Assistant",
-        )
+            user_id="homeassistant", user_name="Home Assistant")
         await self.handle_message(MessageEvent(
             text=message, message_type=MessageType.TEXT, source=source,
-            message_id=f"ha_{entity_id}_{int(now)}", timestamp=datetime.now(),
-        ))
+            message_id=f"ha_{entity_id}_{int(now)}", timestamp=datetime.now()))
 
     @staticmethod
     def _format_state_change(entity_id: str, old_state: Dict[str, Any], new_state: Dict[str, Any]) -> Optional[str]:
@@ -270,8 +266,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
             name=attrs.get("friendly_name", entity_id), entity_id=entity_id, old=old_val, new=new_val,
             temp=attrs.get("current_temperature", "?"), target=attrs.get("temperature", "?"),
             unit=attrs.get("unit_of_measurement", ""), on_off=_on_off(new_val),
-            triggered=_triggered(new_val), was_triggered=_triggered(old_val),
-        )
+            triggered=_triggered(new_val), was_triggered=_triggered(old_val))
 
     # -- Outbound messaging -------------------------------------------------
 
@@ -370,5 +365,4 @@ def register(ctx) -> None:
         standalone_sender_fn=_standalone_send,  # out-of-process cron delivery via notify.notify
         max_message_length=HomeAssistantAdapter.MAX_MESSAGE_LENGTH,
         emoji="🏠",
-        allow_update_command=True,
-    )
+        allow_update_command=True)

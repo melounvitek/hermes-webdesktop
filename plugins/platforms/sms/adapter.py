@@ -120,8 +120,7 @@ class SmsAdapter(BasePlatformAdapter):
                 "[sms] SMS_INSECURE_NO_SIGNATURE=true — Twilio signature validation "
                 "is DISABLED. Any client that can reach port %d can inject messages. "
                 "Do NOT use this in production.",
-                self._webhook_port,
-            )
+                self._webhook_port)
         # client_max_size bounds every read path (incl. chunked bodies with no
         # Content-Length) before the handler's own 413 checks run.
         app = web.Application(client_max_size=_TWILIO_WEBHOOK_MAX_BODY_BYTES)
@@ -135,8 +134,7 @@ class SmsAdapter(BasePlatformAdapter):
         self._running = True
         logger.info(
             "[sms] Twilio webhook server listening on %s:%d, from: %s",
-            self._webhook_host, self._webhook_port, redact_phone(self._from_number),
-        )
+            self._webhook_host, self._webhook_port, redact_phone(self._from_number))
         self._wire_plugin_handlers(None)
         return True
 
@@ -224,8 +222,7 @@ class SmsAdapter(BasePlatformAdapter):
         else:
             return None
         return urllib.parse.urlunparse(
-            (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
-        )
+            (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
     # -- Inbound webhook -----------------------------------------------------
 
@@ -253,8 +250,7 @@ class SmsAdapter(BasePlatformAdapter):
                 return _twiml_response(403)
         # parse_qs returns lists
         from_number, to_number, text, message_sid = (
-            form.get(key, [""])[0].strip() for key in ("From", "To", "Body", "MessageSid")
-        )
+            form.get(key, [""])[0].strip() for key in ("From", "To", "Body", "MessageSid"))
         if not from_number or not text:
             return _twiml_response()
         if from_number == self._from_number:  # echo prevention
@@ -281,16 +277,11 @@ class SmsAdapter(BasePlatformAdapter):
 # Standalone-send markdown stripping: looser than helpers.strip_markdown (no
 # word-boundary guards on underscores, ``[a-z]*`` fence tags) — kept for parity.
 _SMS_MARKDOWN_SUBS = (
-    (re.compile(r"\*\*(.+?)\*\*", re.DOTALL), r"\1"),
-    (re.compile(r"\*(.+?)\*", re.DOTALL), r"\1"),
-    (re.compile(r"__(.+?)__", re.DOTALL), r"\1"),
-    (re.compile(r"_(.+?)_", re.DOTALL), r"\1"),
-    (re.compile(r"```[a-z]*\n?"), ""),
-    (re.compile(r"`(.+?)`"), r"\1"),
-    (re.compile(r"^#{1,6}\s+", re.MULTILINE), ""),
-    (re.compile(r"\[([^\]]+)\]\([^\)]+\)"), r"\1"),
-    (re.compile(r"\n{3,}"), "\n\n"),
-)
+    (re.compile(r"\*\*(.+?)\*\*", re.DOTALL), r"\1"), (re.compile(r"\*(.+?)\*", re.DOTALL), r"\1"),
+    (re.compile(r"__(.+?)__", re.DOTALL), r"\1"), (re.compile(r"_(.+?)_", re.DOTALL), r"\1"),
+    (re.compile(r"```[a-z]*\n?"), ""), (re.compile(r"`(.+?)`"), r"\1"),
+    (re.compile(r"^#{1,6}\s+", re.MULTILINE), ""), (re.compile(r"\[([^\]]+)\]\([^\)]+\)"), r"\1"),
+    (re.compile(r"\n{3,}"), "\n\n"))
 
 
 def _strip_markdown_for_sms(message: str) -> str:
@@ -346,19 +337,10 @@ def _is_connected(config) -> bool:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
-        name="sms",
-        label="SMS (Twilio)",
-        adapter_factory=SmsAdapter,
-        check_fn=check_sms_requirements,
-        is_connected=_is_connected,
+        name="sms", label="SMS (Twilio)", adapter_factory=SmsAdapter,
+        check_fn=check_sms_requirements, is_connected=_is_connected,
         required_env=["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"],
-        install_hint="pip install aiohttp",
-        allowed_users_env="SMS_ALLOWED_USERS",
-        allow_all_env="SMS_ALLOW_ALL_USERS",
-        cron_deliver_env_var="SMS_HOME_CHANNEL",
-        standalone_sender_fn=_standalone_send,
-        max_message_length=MAX_SMS_LENGTH,
-        pii_safe=True,
-        emoji="📱",
-        allow_update_command=True,
-    )
+        install_hint="pip install aiohttp", allowed_users_env="SMS_ALLOWED_USERS",
+        allow_all_env="SMS_ALLOW_ALL_USERS", cron_deliver_env_var="SMS_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send, max_message_length=MAX_SMS_LENGTH, pii_safe=True,
+        emoji="📱", allow_update_command=True)

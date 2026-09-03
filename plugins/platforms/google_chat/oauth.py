@@ -278,8 +278,7 @@ def store_client_secret(path: str) -> None:
     if "installed" not in data and "web" not in data:
         _fail(
             "ERROR: Not a Google OAuth client secret file (missing 'installed' or 'web' key).",
-            "Download from: https://console.cloud.google.com/apis/credentials",
-        )
+            "Download from: https://console.cloud.google.com/apis/credentials")
     target = _client_secret_path()
     _write_private_json(target, data)
     print(f"OK: Client secret saved to {target}")
@@ -362,12 +361,9 @@ def exchange_auth_code(code: str, email: Optional[str] = None) -> None:
     if scope_val:
         granted_scopes = scope_val.split()
     flow = Flow.from_client_secrets_file(
-        str(_client_secret_path()),
-        scopes=granted_scopes,
-        redirect_uri=pending_auth.get("redirect_uri", _REDIRECT_URI),
-        state=pending_auth["state"],
-        code_verifier=pending_auth["code_verifier"],
-    )
+        str(_client_secret_path()), scopes=granted_scopes,
+        redirect_uri=pending_auth.get("redirect_uri", _REDIRECT_URI), state=pending_auth["state"],
+        code_verifier=pending_auth["code_verifier"])
     try:
         # Accept partial scopes — user may deselect items in the consent screen.
         os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
@@ -407,10 +403,8 @@ def revoke(email: Optional[str] = None) -> None:
             urllib.request.Request(
                 f"https://oauth2.googleapis.com/revoke?token={creds.token}",
                 method="POST",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            ),
-            timeout=15,
-        )
+                headers={"Content-Type": "application/x-www-form-urlencoded"}),
+            timeout=15)
         print("Token revoked with Google.")
     except Exception as exc:
         print(f"Remote revocation failed (token may already be invalid): {exc}")
@@ -432,8 +426,7 @@ def main() -> None:
     group.add_argument("--install-deps", action="store_true", help="Install Python dependencies")
     parser.add_argument(
         "--email", metavar="EMAIL", default=None,
-        help="Scope operation to a specific user's token (default: legacy single-user path)",
-    )
+        help="Scope operation to a specific user's token (default: legacy single-user path)")
     args = parser.parse_args()
     email = args.email or None
     if args.check:

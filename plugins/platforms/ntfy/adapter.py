@@ -84,8 +84,7 @@ def _truncate_body(message: str, *, context: str) -> bytes:
     if len(message) > MAX_MESSAGE_LENGTH:
         logger.warning(
             "%s: truncating message from %d to %d chars (ntfy limit)",
-            context, len(message), MAX_MESSAGE_LENGTH,
-        )
+            context, len(message), MAX_MESSAGE_LENGTH)
     return message[:MAX_MESSAGE_LENGTH].encode("utf-8")
 
 
@@ -200,8 +199,7 @@ class NtfyAdapter(BasePlatformAdapter):
             self._set_fatal_error(
                 "ntfy_topic_not_found",
                 f"ntfy topic '{self._topic}' returned 404. Check NTFY_TOPIC.",
-                retryable=False,
-            )
+                retryable=False)
             raise _FatalStreamError("404 Not Found")
 
     async def _consume_stream(self, url: str, headers: Dict[str, str]) -> None:
@@ -262,20 +260,17 @@ class NtfyAdapter(BasePlatformAdapter):
         # NOT drive authorization, so user_id is fixed to the topic name.
         topic = event.get("topic") or self._topic
         source = self.build_source(
-            chat_id=topic, chat_name=topic, chat_type="dm", user_id=topic, user_name=topic,
-        )
+            chat_id=topic, chat_name=topic, chat_type="dm", user_id=topic, user_name=topic)
         unix_ts = event.get("time")
         try:
             timestamp = (
                 datetime.fromtimestamp(int(unix_ts), tz=timezone.utc)
-                if unix_ts else datetime.now(tz=timezone.utc)
-            )
+                if unix_ts else datetime.now(tz=timezone.utc))
         except (ValueError, OSError, TypeError):
             timestamp = datetime.now(tz=timezone.utc)
         message_event = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=source, message_id=msg_id,
-            raw_message=event, timestamp=timestamp,
-        )
+            raw_message=event, timestamp=timestamp)
         logger.debug("[%s] Message on topic %s: %s", self.name, topic, text[:80])
         await self.handle_message(message_event)
 
@@ -305,13 +300,11 @@ class NtfyAdapter(BasePlatformAdapter):
         if len(content) > self.MAX_MESSAGE_LENGTH:
             logger.warning(
                 "[%s] Message truncated from %d to %d chars (ntfy limit)",
-                self.name, len(content), self.MAX_MESSAGE_LENGTH,
-            )
+                self.name, len(content), self.MAX_MESSAGE_LENGTH)
         body = content[:self.MAX_MESSAGE_LENGTH]
         try:
             resp = await self._http_client.post(
-                url, content=body.encode("utf-8"), headers=headers, timeout=15.0,
-            )
+                url, content=body.encode("utf-8"), headers=headers, timeout=15.0)
             if resp.status_code < 300:
                 return SendResult(success=True, message_id=_response_message_id(resp))
             body_text = resp.text
@@ -345,9 +338,7 @@ def _env_enablement() -> dict | None:
     if not topic:
         return None
     seed: dict = {
-        "topic": topic,
-        "server": _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER).rstrip("/"),
-    }
+        "topic": topic, "server": _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER).rstrip("/")}
     for key, env in (("publish_topic", "NTFY_PUBLISH_TOPIC"), ("token", "NTFY_TOKEN")):
         value = _get_scoped_secret(env, "").strip()
         if value:
@@ -380,15 +371,13 @@ async def _standalone_send(
         or extra.get("publish_topic")
         or _get_scoped_secret("NTFY_PUBLISH_TOPIC", "").strip()
         or extra.get("topic")
-        or _get_scoped_secret("NTFY_TOPIC", "").strip()
-    )
+        or _get_scoped_secret("NTFY_TOPIC", "").strip())
     if not publish_topic:
         return {"error": "ntfy standalone send: NTFY_TOPIC not configured"}
     token = extra.get("token") or _get_scoped_secret("NTFY_TOKEN", "")
     markdown_env = _get_scoped_secret("NTFY_MARKDOWN", "").strip().lower()
     headers = _publish_headers(
-        token, bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY, auth_first=False,
-    )
+        token, bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY, auth_first=False)
     body = _truncate_body(message, context="ntfy standalone")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -428,5 +417,4 @@ def register(ctx) -> None:
             "(set markdown: true in config or NTFY_MARKDOWN=true). "
             "Keep responses concise; ntfy is a push notification service "
             "with a 4096-character per-message limit."
-        ),
-    )
+        ))

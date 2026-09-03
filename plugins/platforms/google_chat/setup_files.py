@@ -50,12 +50,8 @@ async def _run_captured(fn: Callable[..., Any], *args: Any) -> str:
 
 
 async def handle_setup_files_command(
-    adapter: Any,
-    chat_id: str,
-    thread_id: Optional[str],
-    raw_text: str,
-    sender_email: Optional[str] = None,
-) -> bool:
+    adapter: Any, chat_id: str, thread_id: Optional[str], raw_text: str,
+    sender_email: Optional[str] = None) -> bool:
     """Run the in-chat OAuth setup flow. Returns True when the message was consumed.
 
     ``sender_email`` is the per-user OAuth key; ``None`` falls back to the legacy
@@ -114,8 +110,7 @@ async def handle_setup_files_command(
             who = sender_key or "shared (legacy)"
             await _reply(
                 f"✅ Native attachment delivery is **active** for `{who}`.\n"
-                f"Token: `{token_path}`\nSend `/setup-files revoke` to disable."
-            )
+                f"Token: `{token_path}`\nSend `/setup-files revoke` to disable.")
         elif not client_secret_present:
             await _reply(_NOT_CONFIGURED_TEXT)
         else:
@@ -163,6 +158,5 @@ async def handle_setup_files_command(
     await _reply(
         "⚠️ Token exchanged but the gateway couldn't load the new credentials in-memory. "
         f"Restart the gateway and the token at `{oauth_helper._token_path(sender_key)}` will be picked up.\n"
-        f"Helper output:\n```\n{output.strip()}\n```"
-    )
+        f"Helper output:\n```\n{output.strip()}\n```")
     return True
