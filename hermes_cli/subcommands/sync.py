@@ -1,25 +1,9 @@
 """``hermes sync`` subcommand parser — Skill Sync.
 
-Cloned from ``hermes_cli/subcommands/cron.py`` — same injected-handler shape
-(``func=cmd_sync``) so this module does not import ``main`` (cycle avoidance).
-
-Skill Sync covers two surfaces, both under this one command for launch:
-
-  Personal — your own skills, across your own devices:
-    hermes sync status                 show gate/opt-in/head state
-    hermes sync pull                   pull and materialize opted-in skills
-    hermes sync push                   push opted-in skills
-    hermes sync now                    reconcile: pull then push
-    hermes sync enable <skill>         opt a skill into sync
-    hermes sync disable <skill>        opt a skill out of sync
-    hermes sync device [--name]        show or set this device's label
-
-  Organisation — skills shared with your team:
-    hermes sync propose <skill>        share a skill with your organisation
-
-Sync is INERT unless the resolved Nous token carries the access-gate claim
-AND a sync base URL is configured. The commands report that state rather than
-failing opaquely.
+Personal sync (status/pull/push/now/enable/disable/device) moves your own skills across
+your devices; ``propose`` shares a skill with your organisation. Sync is INERT unless the
+resolved Nous token carries the access-gate claim AND a sync base URL is configured — the
+commands report that state rather than failing opaquely.
 """
 
 from __future__ import annotations

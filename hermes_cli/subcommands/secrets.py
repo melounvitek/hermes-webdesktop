@@ -19,12 +19,9 @@ def build_secrets_parser(subparsers) -> None:
     secrets_op = secrets_subparsers.add_parser(
         "onepassword", aliases=["op", "1password"], help="1Password (op:// references) integration")
 
-    # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
-    # which loads cryptography._rust.pyd.  On Windows this maps the native
-    # extension into the updater process, causing the self-lock preflight to
-    # defer (#86781).  secrets_cli defers its backend import to first use
-    # (module-level __getattr__ + handler-level _load_bw()), so register_cli
-    # at parse time only wires argparse structure with no crypto cost.
+    # Lazy import: secrets_cli pulls cryptography's native extension, which on Windows
+    # maps into the updater process and defers its self-lock preflight. secrets_cli
+    # defers its backend import to first use, so register_cli here costs no crypto load.
     from hermes_cli import secrets_cli as _secrets_cli
     from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
 

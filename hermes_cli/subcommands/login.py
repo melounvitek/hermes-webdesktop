@@ -6,24 +6,12 @@ from typing import Callable
 
 
 def build_login_parser(subparsers, *, cmd_login: Callable) -> None:
-    """Attach the deprecated ``login`` subcommand to ``subparsers``.
+    """Attach the deprecated ``login`` subcommand (handler only prints a deprecation notice).
 
-    ``hermes login`` was removed in favor of ``hermes auth`` / ``hermes model``
-    (the runtime handler in ``hermes_cli/auth.py::login_command`` just prints a
-    deprecation message and exits).  The subparser is kept registered so that
-    old scripts/aliases invoking ``hermes login [--flags]`` still receive the
-    actionable deprecation message rather than an argparse ``invalid choice:
-    'login'`` error — but:
-
-    - The subparser is registered WITHOUT a ``help=`` kwarg so the row is
-      omitted from ``hermes --help`` (argparse only lists subcommands that
-      have a help string).  This hides a command that no longer works (#24756)
-      without the ``help=argparse.SUPPRESS`` ``==SUPPRESS==`` leak that
-      argparse emits for a top-level subparser on Python 3.12+.
-    - ``--provider`` accepts ANY value (no ``choices=``) so that, e.g.,
-      ``hermes login --provider anthropic`` reaches the deprecation handler and
-      gets pointed at ``hermes model`` instead of crashing in argparse with
-      ``invalid choice: 'anthropic'`` before the handler can run.
+    Kept registered so old scripts get the actionable message instead of argparse's
+    ``invalid choice``. Registered WITHOUT ``help=`` so it is omitted from ``hermes --help``
+    (``help=SUPPRESS`` leaks ``==SUPPRESS==`` for top-level subparsers on 3.12+). ``--provider``
+    takes ANY value (no ``choices=``) so the handler is reached rather than argparse erroring.
     """
     login_parser = subparsers.add_parser(
         "login",

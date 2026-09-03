@@ -5,9 +5,8 @@ from __future__ import annotations
 
 def build_egress_parser(subparsers) -> None:
     """Attach the ``egress`` subcommand to ``subparsers``."""
-    # NOTE: this is the OUTBOUND egress firewall (ironsh/iron-proxy).
-    # `hermes proxy` (defined elsewhere in this file) is a separate INBOUND
-    # OAuth-aggregator reverse proxy.  Different direction, different purpose.
+    # OUTBOUND egress firewall (iron-proxy); `hermes proxy` is the separate INBOUND
+    # OAuth-aggregator reverse proxy.
     egress_parser = subparsers.add_parser(
         "egress", help="Manage the iron-proxy egress credential-injection firewall",
         description="Manage iron-proxy, the optional TLS-intercepting egress firewall "
@@ -19,8 +18,7 @@ def build_egress_parser(subparsers) -> None:
     _proxy_cli.register_cli(egress_parser)
 
     def _dispatch_egress(args):  # noqa: ANN001
-        # The egress subparser uses dest='egress_command' to stay disjoint
-        # from the inbound OAuth ``hermes proxy`` subparser (dest='proxy_command').
+        # dest='egress_command' stays disjoint from ``hermes proxy`` (dest='proxy_command').
         sub = getattr(args, "egress_command", None)
         if sub is not None and hasattr(args, "func") and args.func is not _dispatch_egress:
             return args.func(args)

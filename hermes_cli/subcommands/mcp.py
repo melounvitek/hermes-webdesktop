@@ -27,12 +27,8 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
     mcp_add_p = mcp_sub.add_parser("add", help="Add an MCP server (discovery-first install)")
     mcp_add_p.add_argument("name", help="Server name (used as config key)")
     mcp_add_p.add_argument("--url", help="HTTP/SSE endpoint URL")
-    # dest="mcp_command" so this flag does not clobber the top-level
-    # subparser's args.command attribute, which the dispatcher reads to
-    # route to cmd_mcp.  Without an explicit dest, argparse derives
-    # dest="command" from the flag name and sets it to None when the
-    # flag is omitted, causing `hermes mcp add ...` to fall through to
-    # interactive chat.
+    # dest="mcp_command": the default dest="command" would clobber the top-level
+    # subcommand name the dispatcher routes on (None when omitted → falls into chat).
     mcp_add_p.add_argument("--command", dest="mcp_command", help="Stdio command (e.g. npx)")
     mcp_add_p.add_argument(
         "--args", nargs=argparse.REMAINDER, default=[],
@@ -68,7 +64,7 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         "--all", action="store_true",
         help="Re-authenticate every OAuth server in config, one at a time")
 
-    # ── Catalog (Nous-approved MCPs shipped with the repo) ─────────────────
+    # Catalog (Nous-approved MCPs shipped with the repo)
     mcp_sub.add_parser(
         "picker", help="Interactive catalog picker (also the default for `hermes mcp`)")
     mcp_sub.add_parser("catalog", help="List Nous-approved MCPs available for one-click install")

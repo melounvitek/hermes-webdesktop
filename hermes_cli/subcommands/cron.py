@@ -13,11 +13,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "cron", help="Cron job management", description="Manage scheduled tasks")
     cron_subparsers = cron_parser.add_subparsers(dest="cron_command")
 
-    # cron list
     cron_list = cron_subparsers.add_parser("list", help="List scheduled jobs")
     cron_list.add_argument("--all", action="store_true", help="Include disabled jobs")
 
-    # cron create/add
     cron_create = cron_subparsers.add_parser(
         "create", aliases=["add"], help="Create a scheduled job")
     cron_create.add_argument("schedule", help="Schedule like '30m', 'every 2h', or '0 9 * * *'")
@@ -90,7 +88,6 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "reported and continue where the last run left off (scouts, "
             "monitors, incremental digests). First run is unchanged.")
 
-    # cron edit
     cron_edit = cron_subparsers.add_parser("edit", help="Edit an existing scheduled job")
     cron_edit.add_argument("job_id", help="Job ID to edit")
     cron_edit.add_argument("--schedule", help="New schedule")
@@ -174,7 +171,6 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "remove", aliases=["rm", "delete"], help="Remove a scheduled job")
     cron_remove.add_argument("job_id", help="Job ID to remove")
 
-    # cron status
     cron_subparsers.add_parser("status", help="Check if cron scheduler is running")
 
     cron_runs = cron_subparsers.add_parser(
@@ -193,8 +189,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Action (default: list)")
     cron_incidents.add_argument("incident_id", nargs="?", help="Incident ID to acknowledge (ack)")
 
-    # cron notepad — per-job durable KV scratchpad (injected into the job
-    # prompt each run; the running agent writes it via this CLI).
+    # notepad: per-job durable KV, injected into the job prompt each run.
     cron_notepad = cron_subparsers.add_parser(
         "notepad", help="Read/write a job's durable notepad (persistent KV across runs)")
     cron_notepad.add_argument("job_id", help="Job ID the notepad belongs to")
@@ -204,10 +199,8 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_notepad.add_argument("key", nargs="?", help="Notepad key (get/set/delete)")
     cron_notepad.add_argument("value", nargs="?", help="Value to store (set)")
 
-    # cron doctor
     cron_subparsers.add_parser("doctor", help="Check scheduled jobs for common health issues")
 
-    # cron tick (mostly for debugging)
     cron_tick = cron_subparsers.add_parser("tick", help="Run due jobs once and exit")
     add_accept_hooks_flag(cron_tick)
     add_accept_hooks_flag(cron_parser)

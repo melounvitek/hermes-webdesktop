@@ -1,12 +1,4 @@
-"""``hermes monitoring`` subcommand parser.
-
-Gateway monitoring control and inspection. ``status`` shows whether the
-gateway health & diagnostics export is enabled, where it points, and the
-redaction posture.
-
-The handler is injected to avoid importing ``main`` (mirrors the insights
-subcommand).
-"""
+"""``hermes monitoring`` subcommand parser (gateway health/diagnostics export control)."""
 
 from __future__ import annotations
 

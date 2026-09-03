@@ -31,7 +31,6 @@ def build_gateway_parser(
         description="Manage the messaging gateway (Telegram, Discord, WhatsApp, Weixin, and more)")
     gateway_subparsers = gateway_parser.add_subparsers(dest="gateway_command")
 
-    # gateway run (default)
     gateway_run = gateway_subparsers.add_parser(
         "run", help="Run gateway in foreground (recommended for WSL, Docker, Termux)")
     gateway_run.add_argument(
@@ -66,7 +65,6 @@ def build_gateway_parser(
     add_accept_hooks_flag(gateway_run)
     add_accept_hooks_flag(gateway_parser)
 
-    # gateway start
     gateway_start = gateway_subparsers.add_parser(
         "start", help="Start the installed systemd/launchd background service")
     _add_system_flag(gateway_start)
@@ -75,13 +73,11 @@ def build_gateway_parser(
         help="Kill ALL stale gateway processes across all profiles before starting")
     _add_compat_platform_flag(gateway_start)
 
-    # gateway stop
     gateway_stop = gateway_subparsers.add_parser("stop", help="Stop gateway service")
     _add_system_flag(gateway_stop)
     gateway_stop.add_argument(
         "--all", action="store_true", help="Stop ALL gateway processes across all profiles")
 
-    # gateway restart
     gateway_restart = gateway_subparsers.add_parser("restart", help="Restart gateway service")
     _add_system_flag(gateway_restart)
     gateway_restart.add_argument(
@@ -89,7 +85,6 @@ def build_gateway_parser(
         help="Kill ALL gateway processes across all profiles before restarting")
     _add_compat_platform_flag(gateway_restart)
 
-    # gateway status
     gateway_status = gateway_subparsers.add_parser("status", help="Show gateway status")
     gateway_status.add_argument("--deep", action="store_true", help="Deep status check")
     gateway_status.add_argument(
@@ -98,7 +93,6 @@ def build_gateway_parser(
     _add_system_flag(gateway_status)
     _add_compat_platform_flag(gateway_status)
 
-    # gateway install
     gateway_install = gateway_subparsers.add_parser(
         "install", help="Install gateway as a systemd/launchd background service")
     gateway_install.add_argument("--force", action="store_true", help="Force reinstall")
@@ -123,17 +117,13 @@ def build_gateway_parser(
     gateway_install.add_argument(
         "--elevated-handoff", dest="elevated_handoff", action="store_true", help=argparse.SUPPRESS)
 
-    # gateway uninstall
     gateway_uninstall = gateway_subparsers.add_parser("uninstall", help="Uninstall gateway service")
     _add_system_flag(gateway_uninstall)
 
-    # gateway list
     gateway_subparsers.add_parser("list", help="List all profiles and their gateway status")
 
-    # gateway setup
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
-    # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(
         "migrate-legacy", help="Remove legacy hermes.service units from pre-rename installs",
         description="Stop, disable, and remove legacy Hermes gateway unit files "
@@ -146,11 +136,8 @@ def build_gateway_parser(
     gateway_migrate_legacy.add_argument(
         "-y", "--yes", dest="yes", action="store_true", help="Skip the confirmation prompt")
 
-    # gateway enroll — enroll a self-hosted gateway with a relay connector
-    # (connector⇄gateway auth). Redeems a single-use enrollment token for the
-    # per-gateway secret + per-tenant delivery key and writes them to .env.
-    # See docs/relay-connector-contract.md (and the connector repo's
-    # docs/connector-gateway-auth-design.md). EXPERIMENTAL.
+    # enroll: redeem a single-use connector token for the per-gateway secret + per-tenant
+    # delivery key, written to .env. See docs/relay-connector-contract.md. EXPERIMENTAL.
     gateway_enroll = gateway_subparsers.add_parser(
         "enroll",
         help="Enroll this gateway with a relay connector (writes relay auth creds to .env)",
@@ -183,10 +170,8 @@ def build_gateway_parser(
             "reconnects on its own.")
     gateway_enroll.set_defaults(func=cmd_gateway_enroll)
 
-    # proxy command — local OpenAI-compatible proxy that attaches the user's
-    # OAuth-authenticated provider credentials to outbound requests. Lets
-    # external apps (OpenViking, Karakeep, Open WebUI, ...) ride a logged-in
-    # subscription without copy-pasting static API keys.
+    # proxy: local OpenAI-compatible proxy attaching the user's OAuth provider credentials,
+    # so external apps (Open WebUI, Karakeep, ...) ride a logged-in subscription.
     proxy_parser = subparsers.add_parser(
         "proxy", help="Local OpenAI-compatible proxy to OAuth providers",
         description="Run a local HTTP server that forwards OpenAI-compatible requests "
