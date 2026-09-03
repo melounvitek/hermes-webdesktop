@@ -8,7 +8,10 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
-from tools.mcp_tool_common import _core
+from tools.mcp_tool_common import _core, _get_lifecycle_seconds, _jittered, _resolve_tool_timeout
+from tools import mcp_tool_errors as _errors
+from tools import mcp_tool_registration as _registration
+from tools import mcp_tool_sampling as _sampling
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -86,7 +89,7 @@ class MCPServerRunMixin:
                         async with self._rpc_lock:
                             await self._keepalive_probe()
                     except Exception as exc:
-                        root = _core._unwrap_exception_group(exc)
+                        root = _errors._unwrap_exception_group(exc)
                         logger.warning("MCP server '%s' keepalive failed, triggering reconnect (state: connected → "
                                        "degraded): %s: %s", self.name, type(root).__name__, root)
                         self.mark_suspect(f"keepalive failed: {type(root).__name__}: {root}")
@@ -146,19 +149,19 @@ class MCPServerRunMixin:
         must not start (bad remote URL / non-MCP endpoint: fail fast with ``_error`` set and
         ``_ready`` fired instead of burning the reconnect ladder inside the SDK's httpx layer)."""
         self._config = config
-        self.tool_timeout = _core._resolve_tool_timeout(config)
+        self.tool_timeout = _resolve_tool_timeout(config)
         self._auth_type = (config.get("auth") or "").lower().strip()
-        self._idle_timeout_seconds = _core._get_lifecycle_seconds(config, "idle_timeout_seconds")
-        self._max_lifetime_seconds = _core._get_lifecycle_seconds(config, "max_lifetime_seconds")
+        self._idle_timeout_seconds = _get_lifecycle_seconds(config, "idle_timeout_seconds")
+        self._max_lifetime_seconds = _get_lifecycle_seconds(config, "max_lifetime_seconds")
         # The _MCP_*_TYPES flags are False until the lazy SDK import runs.
         _core._ensure_mcp_sdk()
         sampling_config = config.get("sampling", {})
-        self._sampling = (_core.SamplingHandler(self.name, sampling_config)
+        self._sampling = (_sampling.SamplingHandler(self.name, sampling_config)
                           if sampling_config.get("enabled", True) and _core._MCP_SAMPLING_TYPES else None)
         # elicitation/create lets a server ask for structured input mid-call; the handler
         # routes it through Hermes' approval system.
         elicitation_config = config.get("elicitation", {})
-        self._elicitation = (_core.ElicitationHandler(self.name, elicitation_config, owner=self)
+        self._elicitation = (_sampling.ElicitationHandler(self.name, elicitation_config, owner=self)
                              if elicitation_config.get("enabled", True) and _core._MCP_ELICITATION_TYPES else None)
         if "url" in config and "command" in config:
             logger.warning("MCP server '%s' has both 'url' and 'command' in config. Using HTTP transport "
@@ -166,7 +169,7 @@ class MCPServerRunMixin:
         if not self._is_http():
             return True
         try:
-            _core._validate_remote_mcp_url(self.name, config.get("url"))
+            _errors._validate_remote_mcp_url(self.name, config.get("url"))
             # Content-type preflight (Streamable HTTP only; SSE serves text/event-stream): a
             # web-app root returns HTML and would hang the SDK for connect_timeout. Skipped once
             # _ready was ever set and for OAuth servers (a token-less probe sees HTML/401).
@@ -175,8 +178,8 @@ class MCPServerRunMixin:
                 await self._preflight_content_type(
                     config["url"], headers=dict(config.get("headers") or {}),
                     ssl_verify=config.get("ssl_verify", True),
-                    client_cert=_core._resolve_client_cert(self.name, config))
-        except (_core.InvalidMcpUrlError, _core.NonMcpEndpointError) as exc:
+                    client_cert=_errors._resolve_client_cert(self.name, config))
+        except (_errors.InvalidMcpUrlError, _errors.NonMcpEndpointError) as exc:
             logger.warning("%s", exc)
             self._publish_error(exc)  # fail fast and non-retryably
             return False
@@ -280,14 +283,14 @@ class MCPServerRunMixin:
         return True
 
     async def _backoff_sleep(self, budget: "_RetryBudget") -> None:
-        await asyncio.sleep(_core._jittered(budget.backoff))
+        await asyncio.sleep(_jittered(budget.backoff))
         budget.backoff = min(budget.backoff * 2, _core._MAX_BACKOFF_SECONDS)
 
     async def _on_transport_error(self, exc: Exception, budget: "_RetryBudget") -> bool:
         """Transport raised: classify, then run the initial-connect or reconnect ladder. False = exit."""
         # Unwrap anyio TaskGroup wrappers: the group's str() hides the root cause.
-        root = _core._unwrap_exception_group(exc)
-        failure_class = _core._classify_mcp_failure(root)
+        root = _errors._unwrap_exception_group(exc)
+        failure_class = _errors._classify_mcp_failure(root)
         if self._is_recycled_stdio():
             logger.warning("MCP server '%s': lazy reconnect after stdio recycle failed, marking unavailable "
                            "while retrying: %s: %s", self.name, type(root).__name__, root)
@@ -327,7 +330,7 @@ class MCPServerRunMixin:
             # Deterministic failure (bad command, non-MCP URL, 401/403): park at once; auth
             # failures park (not return) so the task can pick up fresh tokens later.
             detail = (f"authentication, parking until credentials change; re-authenticate with "
-                      f"`hermes mcp login {self.name}`" if _core._is_auth_error(root)
+                      f"`hermes mcp login {self.name}`" if _errors._is_auth_error(root)
                       else "connection with a permanent error, parking without retries")
             logger.warning("MCP server '%s' failed initial %s (state: connecting → parked): %s: %s",
                            self.name, detail, type(root).__name__, root)
@@ -351,7 +354,7 @@ class MCPServerRunMixin:
     async def _on_permanent_error(self, root: BaseException, budget: "_RetryBudget") -> bool:
         # Auth failure on a PROVEN session is often a raced-teardown OAuth lock, not revoked
         # credentials: grant ONE suspect+reconnect cycle first.
-        if _core._is_auth_error(root) and self._session_proven and not self._permanent_grace_used:
+        if _errors._is_auth_error(root) and self._session_proven and not self._permanent_grace_used:
             self._permanent_grace_used = True
             self.mark_suspect(f"auth error on proven session: {root}")
             logger.warning(
@@ -359,7 +362,7 @@ class MCPServerRunMixin:
                 "one reconnect instead of parking (state: connected → suspect): %s: %s",
                 self.name, type(root).__name__, root)
             self._reconnect_retries, budget.backoff = 0, 1.0
-            await asyncio.sleep(_core._jittered(1.0))
+            await asyncio.sleep(_jittered(1.0))
             return not self._shutdown_event.is_set()
         # Deterministic failure on a working server: park now.
         logger.warning(
@@ -412,5 +415,5 @@ class MCPServerRunMixin:
         from tools.registry import registry
         for tool_name in list(getattr(self, "_registered_tool_names", [])):
             registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
-            _core._forget_mcp_tool_server(tool_name)
+            _registration._forget_mcp_tool_server(tool_name)
         self._registered_tool_names = []

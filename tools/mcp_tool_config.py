@@ -11,7 +11,7 @@ import sys
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
-from tools.mcp_tool_common import _env_ref_name, _prepend_path, _core
+from tools.mcp_tool_common import _env_ref_name, _prepend_path
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -45,7 +45,7 @@ def _get_mcp_stderr_log() -> Any:
 def _write_stderr_log_header(server_name: str) -> None:
     """Session marker so operators can find each server's output in the shared log
     (per-line prefixes would need a pipe + reader thread)."""
-    fh = _core._get_mcp_stderr_log()
+    fh = _get_mcp_stderr_log()
     try:
         fh.write(f"\n===== [{datetime.now():%Y-%m-%d %H:%M:%S}] starting MCP server '{server_name}' =====\n")
         fh.flush()
@@ -81,13 +81,13 @@ def _workspace_folder() -> str:
 
 
 def _workspace_basename() -> str:
-    root = _core._workspace_folder()
+    root = _workspace_folder()
     return os.path.basename(root.rstrip("/\\")) or root
 
 
 # Cursor's case-sensitive context vars -> resolver.
 _CONTEXT_VAR_RESOLVERS = {
-    "userHome": lambda: os.path.expanduser("~"), "workspaceFolder": lambda: _core._workspace_folder(),
+    "userHome": lambda: os.path.expanduser("~"), "workspaceFolder": lambda: _workspace_folder(),
     "workspaceFolderBasename": _workspace_basename, "pathSeparator": lambda: os.sep, "/": lambda: os.sep}
 
 
@@ -300,7 +300,7 @@ def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
         discover_plugins()
         portable = get_plugin_manager().get_portable_mcp_servers()
-        for name, cfg in _core._filter_suspicious_mcp_servers(portable).items():
+        for name, cfg in _filter_suspicious_mcp_servers(portable).items():
             if name in safe_servers:
                 logger.warning("Portable MCP server '%s' conflicts with native config; skipping", name)
             else:
@@ -323,7 +323,7 @@ def _load_mcp_config() -> Dict[str, dict]:
         except Exception:
             pass
         safe_servers: Dict[str, dict] = {}
-        for name, cfg in _core._filter_suspicious_mcp_servers(servers if isinstance(servers, dict) else {}).items():
+        for name, cfg in _filter_suspicious_mcp_servers(servers if isinstance(servers, dict) else {}).items():
             interpolated = _interpolate_env_vars(cfg)
             if isinstance(interpolated, dict):
                 _warn_hidden_whitespace(name, interpolated)

@@ -7,7 +7,7 @@ import logging
 import mimetypes
 from typing import Any, Dict, Optional, Tuple
 from tools.ansi_strip import strip_unicode_tags
-from tools.mcp_tool_common import mcp_field, _core
+from tools.mcp_tool_common import mcp_field
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -83,14 +83,14 @@ def _decode_block_b64(data, what: str, label: str, *, cap_what: Optional[str] = 
     """Base64-decode one block payload: ``(bytes, "")`` or ``(None, inline_marker)``. With
     ``cap_what`` the payload is rejected on b64 length BEFORE decoding and on decoded size
     after. Decode failures warn and return ``decode_fail`` ("" = drop the block)."""
-    if cap_what and len(data) > _core._MCP_RESOURCE_MAX_B64_CHARS:
+    if cap_what and len(data) > _MCP_RESOURCE_MAX_B64_CHARS:
         return None, f"[MCP {cap_what} too large to cache: ~{len(data) * 3 // 4} bytes{cap_suffix}]"
     try:
         raw_bytes = base64.b64decode(data)
     except (TypeError, ValueError) as exc:
         logger.warning("MCP %s decode failed (%s): %s", what, label, exc)
         return None, decode_fail
-    if cap_what and len(raw_bytes) > _core._MCP_RESOURCE_MAX_BYTES:
+    if cap_what and len(raw_bytes) > _MCP_RESOURCE_MAX_BYTES:
         return None, f"[MCP {cap_what} too large to cache: {len(raw_bytes)} bytes{cap_suffix}]"
     return raw_bytes, ""
 

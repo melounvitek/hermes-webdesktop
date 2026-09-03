@@ -87,7 +87,7 @@ def _classify_mcp_failure(exc: BaseException) -> str:
     """``'permanent'`` (``run()`` parks instead of burning the retry ladder: auth 401/403,
     NonMcpEndpointError, InvalidMcpUrlError, missing stdio command) or ``'transient'`` (backoff retry)."""
     root = _unwrap_exception_group(exc)
-    permanent = (_core._is_auth_error(root)
+    permanent = (_is_auth_error(root)
                  or isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError, FileNotFoundError))
                  or (isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT)
                  # 401/403 HTTPStatusError that _is_auth_error's type-gate missed (auth types not importable here)

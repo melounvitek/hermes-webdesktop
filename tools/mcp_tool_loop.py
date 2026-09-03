@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any, Coroutine, Optional
 from tools.mcp_tool_common import _core
+from tools import mcp_tool_lifecycle as _lifecycle
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -75,12 +76,12 @@ def _try_acquire_mcp_discovery_lock() -> Any:
     except Exception:
         return _core._LOCK_UNAVAILABLE
     try:
-        acquired = _core._acquire_lock_on_fh(fh)
+        acquired = _acquire_lock_on_fh(fh)
     except Exception:
         fh.close()
         return _core._LOCK_UNAVAILABLE
     if acquired:
-        return _core._LockCookie(fh)
+        return _LockCookie(fh)
     fh.close()
     return None
 
@@ -151,7 +152,7 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         raise RuntimeError("MCP event loop is not running")
     # run_coroutine_threadsafe copies the LOOP thread's context, so a per-request profile scope
     # would vanish here; re-establish it inside the task's own context.
-    coro = _core._wrap_with_dashboard_oauth_flow(_core._wrap_with_home_override(
+    coro = _wrap_with_dashboard_oauth_flow(_wrap_with_home_override(
         coro_or_factory() if callable(coro_or_factory) else coro_or_factory))
     future = safe_schedule_threadsafe(coro, loop, logger=logger, log_message="MCP scheduling failed")
     if future is None:
@@ -195,7 +196,7 @@ def reconnect_mcp_server(server_name: str) -> bool:
     """Ask a currently-live MCP server to rebuild after external re-auth."""
     with _core._lock:
         server = _core._servers.get(server_name)
-    return server is not None and _core._signal_reconnect(server)
+    return server is not None and _signal_reconnect(server)
 
 
 def _wait_for_server_session_ready(srv: Any, *, old_session: Any = None, timeout: float = 15.0) -> bool:
@@ -234,7 +235,7 @@ def _signal_reconnect_and_wait(server_name: str, srv: Any, *, op_description: st
     old_session = getattr(srv, "session", None)
     logger.info("MCP server '%s': %s requesting transport reconnect", server_name, op_description)
     loop.call_soon_threadsafe(_request_reconnect)
-    return _core._wait_for_server_session_ready(srv, old_session=old_session, timeout=timeout)
+    return _wait_for_server_session_ready(srv, old_session=old_session, timeout=timeout)
 
 
 def _ensure_mcp_loop():
@@ -245,7 +246,7 @@ def _ensure_mcp_loop():
         if _origin._mcp_loop is not None and _origin._mcp_loop.is_running():
             return
         loop = _origin._mcp_loop = asyncio.new_event_loop()
-        loop.set_exception_handler(_core._mcp_loop_exception_handler)
+        loop.set_exception_handler(_mcp_loop_exception_handler)
         _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
         _origin._mcp_thread.start()
 
@@ -271,7 +272,7 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
         from agent.async_utils import safe_schedule_threadsafe
 
         future = safe_schedule_threadsafe(
-            _core._drain_and_stop_mcp_loop(), loop, logger=logger,
+            _lifecycle._drain_and_stop_mcp_loop(), loop, logger=logger,
             log_message="MCP loop drain: failed to schedule", log_level=logging.WARNING)
         if future is not None:
             try:
@@ -282,7 +283,7 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
                 logger.warning("Error draining MCP loop tasks: %s", exc)
     elif not loop.is_closed():
         try:
-            loop.run_until_complete(_core._drain_mcp_loop_tasks(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT))
+            loop.run_until_complete(_lifecycle._drain_mcp_loop_tasks(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT))
         except BaseException as exc:
             logger.warning("Error draining stopped MCP loop tasks: %s", exc)
     if future is None and loop.is_running():  # drain-and-stop wasn't scheduled: stop it ourselves
@@ -296,5 +297,5 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
     except Exception as exc:
         logger.warning("Unable to close MCP event loop cleanly: %s", exc)
     # The loop is gone, so no session can be in flight: reap active too.
-    _core._kill_orphaned_mcp_children(include_active=True)
+    _lifecycle._kill_orphaned_mcp_children(include_active=True)
     return True

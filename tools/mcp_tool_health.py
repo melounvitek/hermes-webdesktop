@@ -11,6 +11,7 @@ from tools.mcp_tool_errors import _is_method_not_found_error, _unwrap_exception_
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
 from tools.mcp_tool_registration import _forget_mcp_tool_server
 from tools.mcp_tool_common import _core
+from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -145,7 +146,7 @@ class MCPServerHealthMixin:
             # Re-register; a raw name can become ambiguous after normalization without changing
             # its normalized name, so also drop old entries the final registration no longer owns.
             self._tools = new_mcp_tools
-            registered_names = _core._register_server_tools(self.name, self, self._config)
+            registered_names = _registration._register_server_tools(self.name, self, self._config)
             self._deregister_owned(old_tool_names - set(registered_names))
             self._registered_tool_names = registered_names
             new_tool_names = set(registered_names)

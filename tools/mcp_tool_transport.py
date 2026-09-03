@@ -10,6 +10,9 @@ from typing import Dict, Optional, Set
 from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _handshake_rejected_as_modern, _make_redirect_header_stripper, _resolve_client_cert
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids
 from tools.mcp_tool_common import _core
+from tools import mcp_tool_config as _config
+from tools import mcp_tool_lifecycle as _lifecycle
+from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -210,7 +213,7 @@ class MCPServerTransportMixin:
         command = config.get("command")
         if not command:
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
-        command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
+        command, safe_env = _config._resolve_stdio_command(command, _config._build_safe_env(config.get("env")))
         # OSV malware preflight, then the cached-npx swap (ordering enforced there).
         command, args = await _core._preflight_stdio_command(self.name, command, config.get("args", []))
         server_params = _core.StdioServerParameters(
@@ -219,8 +222,8 @@ class MCPServerTransportMixin:
             encoding_error_handler="replace")
         # Reap orphans of prior attempts first (else retries pile up zombie pairs); unscoped on purpose;
         # off-loop because the reaper blocks up to 2s.
-        await asyncio.to_thread(_core._kill_orphaned_mcp_children)
-        pids_before = _core._snapshot_child_pids()  # so the new child can be identified after spawn
+        await asyncio.to_thread(_lifecycle._kill_orphaned_mcp_children)
+        pids_before = _lifecycle._snapshot_child_pids()  # so the new child can be identified after spawn
         # Reap any orphaned subprocesses from prior failed connection attempts before spawning a new one.
         # Without this, each retry in the run() reconnect loop spawns a fresh process pair while the
         # previous failed pair lingers — leading to rapid zombie accumulation (see #57355, #57228). The
@@ -230,13 +233,13 @@ class MCPServerTransportMixin:
         # otherwise stall the shared MCP event loop.
         new_pids: set = set()
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
-        _core._write_stderr_log_header(self.name)
+        _config._write_stderr_log_header(self.name)
         try:
-            errlog = _core._get_mcp_stderr_log()
+            errlog = _config._get_mcp_stderr_log()
             async with _core.stdio_client(server_params, errlog=errlog) as (read_stream, write_stream):
                 # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
                 # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
-                new_pids = _filter_mcp_children(_core._snapshot_child_pids() - pids_before)
+                new_pids = _filter_mcp_children(_lifecycle._snapshot_child_pids() - pids_before)
                 if new_pids:
                     self._track_spawned_children(new_pids)
                 self._stdio_child_pids = set(new_pids)  # so in-flight calls fail fast when the child dies
@@ -449,7 +452,7 @@ class MCPServerTransportMixin:
             owned = _core._servers.get(self.name) is self
         if not owned and not self._ready.is_set():
             return
-        self._registered_tool_names = _core._register_server_tools(self.name, self, self._config)
+        self._registered_tool_names = _registration._register_server_tools(self.name, self, self._config)
         with _core._lock:  # a retained initial-failure server that just published tools has recovered
             if _core._servers.get(self.name) is self:
                 _core._server_connect_errors.pop(self.name, None)

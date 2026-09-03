@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout, mcp_field
+from tools import mcp_tool_handlers as _handlers
+from tools import mcp_tool_schema as _schema
 from tools.mcp_tool_handlers import (
     _make_check_fn, _make_get_prompt_handler, _make_list_prompts_handler,
     _make_list_resources_handler, _make_read_resource_handler)
@@ -100,7 +102,7 @@ def _existing_tool_names() -> List[str]:
     names: List[str] = []
     for server in _core._servers.values():
         names.extend(server._registered_tool_names if hasattr(server, "_registered_tool_names")
-                     else (_core._convert_mcp_schema(server.name, t)["name"] for t in server._tools))
+                     else (_schema._convert_mcp_schema(server.name, t)["name"] for t in server._tools))
     with _core._lock:
         names.extend(n for sname, tool_names in _core._lazy_server_tool_names.items()
                      if sname not in _core._servers for n in tool_names)
@@ -157,9 +159,9 @@ def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[
         if not should_register(t.name):
             logger.debug("MCP server '%s': skipping tool '%s' (filtered by config)", name, t.name)
             continue
-        _core._scan_mcp_description(name, t.name, t.description or "")
-        schema = _core._convert_mcp_schema(name, t)
-        handler = _core._make_tool_handler(name, t.name, tool_timeout)
+        _schema._scan_mcp_description(name, t.name, t.description or "")
+        schema = _schema._convert_mcp_schema(name, t)
+        handler = _handlers._make_tool_handler(name, t.name, tool_timeout)
         out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, handler))
     return out
 
@@ -244,7 +246,7 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
             name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,
             is_async=False, description=c.schema.get("description") or "", scope=scope())
         if registry.get_toolset_for_tool(c.registry_name) == toolset_name:
-            _core._track_mcp_tool_server(c.registry_name, name)
+            _track_mcp_tool_server(c.registry_name, name)
             registered.append(c.registry_name)
         elif not lazy:
             logger.error("MCP server '%s': registration of %s as '%s' was rejected by the registry; "

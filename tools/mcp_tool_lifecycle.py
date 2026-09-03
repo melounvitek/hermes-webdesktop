@@ -7,6 +7,7 @@ import os
 import time
 from typing import Dict, Optional
 from tools.mcp_tool_common import _core
+from tools import mcp_tool_loop as _loop
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -132,7 +133,7 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
     # stale backoff entries), no connect-cooldown state may survive shutdown.
     with _core._lock:
         _clear_connect_cooldowns()
-    _core._stop_mcp_loop(only_if_idle=scope is not None)
+    _loop._stop_mcp_loop(only_if_idle=scope is not None)
 
 
 def _take_reapable_pids(include_active: bool, server_name: Optional[str]) -> tuple[Dict[int, str], Dict[int, int]]:
@@ -219,7 +220,7 @@ def _stop_mcp_loop_if_idle() -> bool:
     """Stop the MCP loop only when no registered server still owns it. Probe paths create
     temporary MCPServerTasks not placed in ``_servers``; they may clean up an idle loop but
     must not tear down the process-global loop under live agent tools."""
-    return _core._stop_mcp_loop(only_if_idle=True)
+    return _loop._stop_mcp_loop(only_if_idle=True)
 
 
 async def _drain_mcp_loop_tasks(*, timeout: Optional[float] = None) -> None:
