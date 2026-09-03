@@ -115,6 +115,7 @@ def _run_under_progress_timeout(
     rewrite it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort
     returns the snapshot unchanged, so the ORIGINAL list is handed back to keep identity semantics."""
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
+
     def _snapshot_worker(fence=None):
         snapshot = copy.deepcopy(messages)
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
