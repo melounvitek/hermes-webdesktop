@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 from agent.reasoning_effort import (
     ACTUAL_RELAY_EFFORTS, XAI_GROK46_EFFORTS, XAI_LEGACY_EFFORTS, clamp_effort,
@@ -36,9 +36,7 @@ def _bounded_prompt_cache_key(value: Any) -> Optional[str]:
     key = "" if value is None else str(value).strip()
     if not key:
         return None
-    if len(key) <= 64:
-        return key
-    return "pck_" + hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return key if len(key) <= 64 else "pck_" + hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:24]
 
 
 def _bound_prompt_cache_key_field(container: Any) -> None:
@@ -51,9 +49,12 @@ def _bound_prompt_cache_key_field(container: Any) -> None:
             container.pop("prompt_cache_key", None)
 
 
-def _str_headers(existing: Any) -> Dict[str, str]:
-    """Copy an ``extra_headers`` dict with str-coerced keys/values."""
-    return {str(k): str(v) for k, v in existing.items() if k and v is not None} if isinstance(existing, dict) else {}
+def _merge_extra_headers(kwargs: dict[str, Any], **headers: str) -> None:
+    """Merge ``headers`` into a str-coerced copy of ``kwargs['extra_headers']`` (SDK kwarg -> HTTP headers)."""
+    existing = kwargs.get("extra_headers")
+    merged = {str(k): str(v) for k, v in existing.items() if k and v is not None} if isinstance(existing, dict) else {}
+    merged.update(headers)
+    kwargs["extra_headers"] = merged
 
 
 # Client-side ``web_search`` on xAI Responses collides with Grok's native
@@ -62,8 +63,8 @@ def _str_headers(existing: Any) -> Dict[str, str]:
 _XAI_CLIENT_WEB_SEARCH_ALIAS = "hermes_web_search"
 
 # OpenCode /v1/responses rejects client tools using these names (HTTP 400
-# "custom function name 'X' is reserved", #85589); xAI rejects ``tool_search``
-# (reserved for Grok's native Tool Search, #95003). Aliased as hermes_<name>.
+# "custom function name 'X' is reserved"); xAI rejects ``tool_search``
+# (reserved for Grok's native Tool Search). Aliased as hermes_<name>.
 _OPENCODE_RESERVED_TOOL_NAMES = ("web_search", "search_files")
 _XAI_RESERVED_TOOL_NAMES = ("tool_search",)
 _RESERVED_TOOL_ALIAS_PREFIX = "hermes_"
@@ -78,7 +79,7 @@ _LEGACY_ALIAS_FALLBACK = {
 _LEGACY_ALIAS_FALLBACK[_XAI_CLIENT_WEB_SEARCH_ALIAS] = "web_search"
 
 
-def _is_opencode_responses_backend(params: Dict[str, Any]) -> bool:
+def _is_opencode_responses_backend(params: dict[str, Any]) -> bool:
     """True for opencode-zen/go providers, ``opencode-*`` families, or opencode.ai hosts."""
     try:
         from hermes_cli.models import opencode_provider_family
@@ -96,10 +97,10 @@ def _is_opencode_responses_backend(params: Dict[str, Any]) -> bool:
 
 
 def _alias_reserved_tools(
-    response_tools: List[Dict[str, Any]], reserved_names: Tuple[str, ...],
+    response_tools: list[dict[str, Any]], reserved_names: tuple[str, ...],
     name_of: Callable[[dict], Any] = lambda t: t.get("name"),
     rename: Callable[[dict, str], dict] = lambda t, alias: {**t, "name": alias},
-) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Alias provider-reserved function names on the wire.
 
     Returns ``(rewritten_tools, {alias: original_name})``. An alias that is
@@ -107,8 +108,8 @@ def _alias_reserved_tools(
     duplicating a wire name. ``name_of``/``rename`` adapt the tool shape
     (Responses ``{name}`` by default; chat_completions passes ``function.name``).
     """
-    rewritten: List[Dict[str, Any]] = []
-    alias_map: Dict[str, str] = {}
+    rewritten: list[dict[str, Any]] = []
+    alias_map: dict[str, str] = {}
     taken = {name_of(tool) for tool in response_tools if isinstance(tool, dict) and name_of(tool)}
     for tool in response_tools:
         name = name_of(tool) if isinstance(tool, dict) else None
@@ -131,7 +132,7 @@ def _xai_prefers_native_web_search() -> bool:
 
     Resolves via the web-search registry (config ``web.search_backend`` /
     ``web.backend``), falling back to the legacy ``_get_search_backend`` probe.
-    Fails closed to native (True) on any error — preserves the #48108 fix.
+    Fails closed to native (True) on any error.
     """
     try:
         from agent.web_search_registry import get_active_search_provider
@@ -147,17 +148,16 @@ def _xai_prefers_native_web_search() -> bool:
         return True
 
 
-def _alias_wire_tools(
-    response_tools: Any, params: Dict[str, Any], is_xai_responses: bool
-) -> Tuple[Any, Dict[str, str]]:
+def _alias_wire_tools(response_tools: Any, params: dict[str, Any], is_xai_responses: bool) -> tuple[Any, dict[str, str]]:
     """Apply provider-reserved tool-name aliasing; returns ``(tools, {alias: original})``.
 
     The alias map is wire provenance for THIS request — normalize_response
     reverses only these. xAI: a client function named ``web_search`` collides
-    with Grok's native search (#48108); native mode swaps it 1:1 for the
-    built-in, client mode keeps Hermes dispatch under an alias.
+    with Grok's native search; native mode swaps it 1:1 for the built-in,
+    client mode keeps Hermes dispatch under an alias.
     """
-    wire_aliases: Dict[str, str] = {}
+    wire_aliases: dict[str, str] = {}
+
     def is_client_web_search(t: Any) -> bool:
         return isinstance(t, dict) and t.get("name") == "web_search"
 
@@ -178,7 +178,7 @@ def _alias_wire_tools(
     return response_tools, wire_aliases
 
 
-def _resolve_reasoning(model: str, params: Dict[str, Any]) -> Tuple[Any, bool]:
+def _resolve_reasoning(model: str, params: dict[str, Any]) -> tuple[Any, bool]:
     """``(effort, enabled)`` for the request, effort clamped to the endpoint's vocabulary.
 
     Wire vocabularies live in agent.reasoning_effort; clamp_effort picks the
@@ -209,13 +209,6 @@ def _resolve_reasoning(model: str, params: Dict[str, Any]) -> Tuple[Any, bool]:
     return clamp_effort(reasoning_effort, supported), reasoning_enabled
 
 
-def _merge_extra_headers(kwargs: Dict[str, Any], **headers: str) -> None:
-    """Merge str-coerced ``headers`` into ``kwargs['extra_headers']`` (SDK kwarg -> HTTP headers)."""
-    merged = _str_headers(kwargs.get("extra_headers"))
-    merged.update(headers)
-    kwargs["extra_headers"] = merged
-
-
 _EXTENDED_PROMPT_CACHE_MODELS = (
     "gpt-5.5-pro", "gpt-5.5", "gpt-5.4", "gpt-5.2",
     "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest", "gpt-5.1-codex", "gpt-5.1",
@@ -243,9 +236,7 @@ def _default_prompt_cache_retention_for_request(model: str, base_url: Any) -> Op
     return "24h" if _EXTENDED_PROMPT_CACHE_MODEL_RE.search(normalized) else None
 
 
-def _content_cache_key(
-    instructions: str, tools: Optional[List[Dict[str, Any]]], scope_id: str = ""
-) -> Optional[str]:
+def _content_cache_key(instructions: str, tools: Optional[list[dict[str, Any]]], scope_id: str = "") -> Optional[str]:
     """``pck_<sha256[:24]>`` of (scope_id, instructions, name-sorted tools), or None if nothing static.
 
     The key is a routing hint only. ``scope_id`` keeps unrelated sessions off one
@@ -256,14 +247,12 @@ def _content_cache_key(
     tools_part = ""
     if tools:
         sorted_tools = sorted(
-            (t for t in tools if isinstance(t, dict)),
-            key=lambda t: str(t.get("name") or t.get("type") or ""),
+            (t for t in tools if isinstance(t, dict)), key=lambda t: str(t.get("name") or t.get("type") or ""),
         )
         tools_part = json.dumps(sorted_tools, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     # \x00 separators so a boundary can't be forged by content containing the same bytes.
     content = f"{scope_id}\x00{instructions or ''}\x00{tools_part}"
-    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:24]
-    return f"pck_{digest}"
+    return "pck_" + hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:24]
 
 
 def _profile_declared_efforts(provider: Any, model: Optional[str], base_url: Any = None) -> Optional[tuple]:
@@ -293,7 +282,7 @@ def _profile_declared_efforts(provider: Any, model: Optional[str], base_url: Any
     return None if declared is None else tuple(declared)
 
 
-def _is_azure_foundry_responses(params: Dict[str, Any]) -> bool:
+def _is_azure_foundry_responses(params: dict[str, Any]) -> bool:
     """True for Microsoft Foundry's Responses API (provider id, else host match — not substring)."""
     from utils import base_url_host_matches
 
@@ -302,7 +291,7 @@ def _is_azure_foundry_responses(params: Dict[str, Any]) -> bool:
     return base_url_host_matches(str(params.get("base_url") or ""), "services.ai.azure.com")
 
 
-def _is_post_tool_replay(messages: Optional[List[Dict[str, Any]]]) -> bool:
+def _is_post_tool_replay(messages: Optional[list[dict[str, Any]]]) -> bool:
     """True when ``messages`` end on a tool-result run issued by the preceding assistant turn.
 
     Azure Foundry rejects only this post-tool follow-up shape when encrypted
@@ -356,6 +345,13 @@ def _native_compaction_active(context_management: Any) -> bool:
     return isinstance(context_management, list) and bool(context_management)
 
 
+def _coerce_timeout(timeout: Any) -> Optional[float]:
+    """Finite positive number -> float; anything else (None, bool, str, inf) -> None."""
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and 0 < float(timeout) < float("inf"):
+        return float(timeout)
+    return None
+
+
 class ResponsesApiTransport(ProviderTransport):
     """Transport for api_mode='codex_responses'."""
 
@@ -367,44 +363,45 @@ class ResponsesApiTransport(ProviderTransport):
     _last_issuer_kind: Optional[str] = None
     # ``{wire_alias: original_name}`` of the most recent build_kwargs call. None
     # = no request built (use legacy map); {} = no aliases sent, no reverse rewrite.
-    _last_wire_aliases: Optional[Dict[str, str]] = None
+    _last_wire_aliases: Optional[dict[str, str]] = None
 
     @property
     def api_mode(self) -> str:
         return "codex_responses"
 
-    def _resolve_issuer_kind(self, params: Dict[str, Any]) -> str:
-        """Classify the current Responses endpoint from transport params."""
+    def _resolve_issuer_kind(self, params: dict[str, Any]) -> str:
+        """Classify the current Responses endpoint from transport params (stashed for normalize_response)."""
         from agent.codex_responses_adapter import _classify_responses_issuer
-        return _classify_responses_issuer(
+
+        self._last_issuer_kind = _classify_responses_issuer(
             is_xai_responses=params.get("is_xai_responses") is True,
             is_github_responses=params.get("is_github_responses") is True,
             is_codex_backend=params.get("is_codex_backend") is True,
             base_url=params.get("base_url"),
         )
+        return self._last_issuer_kind
 
-    def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
+    def convert_messages(self, messages: list[dict[str, Any]], **kwargs) -> Any:
         """Convert OpenAI chat messages to Responses API input items."""
         from agent.codex_responses_adapter import _chat_messages_to_responses_input
-        issuer = self._resolve_issuer_kind(kwargs)
-        self._last_issuer_kind = issuer
+
         return _chat_messages_to_responses_input(
             messages, is_xai_responses=kwargs.get("is_xai_responses") is True,
             is_github_responses=kwargs.get("is_github_responses") is True,
             replay_encrypted_reasoning=bool(kwargs.get("replay_encrypted_reasoning", True)),
-            current_issuer_kind=issuer,
+            current_issuer_kind=self._resolve_issuer_kind(kwargs),
             native_compaction_eligible=_native_compaction_active(kwargs.get("context_management")),
         )
 
-    def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
+    def convert_tools(self, tools: Optional[list[dict[str, Any]]]) -> Any:
         """Convert OpenAI tool schemas to Responses API function definitions."""
         from agent.codex_responses_adapter import _responses_tools
+
         return _responses_tools(tools)
 
     def build_kwargs(
-        self, model: str, messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None, **params,
-    ) -> Dict[str, Any]:
+        self, model: str, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None, **params,
+    ) -> dict[str, Any]:
         """Build Responses API kwargs (calls convert_messages/convert_tools internally).
 
         params: instructions, reasoning_config ({effort, enabled}), session_id
@@ -414,7 +411,6 @@ class ResponsesApiTransport(ProviderTransport):
         base_url, is_github_responses, is_codex_backend, is_xai_responses,
         github_reasoning_extra, context_management, replay_encrypted_reasoning.
         """
-        from agent.codex_responses_adapter import _chat_messages_to_responses_input, _responses_tools
         from run_agent import DEFAULT_AGENT_IDENTITY
 
         instructions = params.get("instructions", "")
@@ -422,26 +418,23 @@ class ResponsesApiTransport(ProviderTransport):
         if not instructions and messages and messages[0].get("role") == "system":
             instructions = str(messages[0].get("content") or "").strip()
             payload_messages = messages[1:]
-        if not instructions:
-            instructions = DEFAULT_AGENT_IDENTITY
+        instructions = instructions or DEFAULT_AGENT_IDENTITY
 
         is_github_responses = params.get("is_github_responses") is True
         is_codex_backend = params.get("is_codex_backend") is True
         is_xai_responses = params.get("is_xai_responses") is True
-        replay_encrypted_reasoning = bool(params.get("replay_encrypted_reasoning", True))
         # Foundry 400s on encrypted-reasoning replay only in the post-tool
         # follow-up turn; suppress replay for exactly that shape.
-        if replay_encrypted_reasoning and _is_azure_foundry_responses(params) and _is_post_tool_replay(payload_messages):
-            replay_encrypted_reasoning = False
+        replay_encrypted_reasoning = bool(params.get("replay_encrypted_reasoning", True)) and not (
+            _is_azure_foundry_responses(params) and _is_post_tool_replay(payload_messages)
+        )
         # Single source of truth: the same predicate decides whether
         # context_management goes out AND whether the converter may replay a checkpoint.
         context_management = params.get("context_management")
         native_compaction_active = _native_compaction_active(context_management)
 
-        issuer_kind = self._resolve_issuer_kind(params)
-        self._last_issuer_kind = issuer_kind
         reasoning_effort, reasoning_enabled = _resolve_reasoning(model, params)
-        response_tools, self._last_wire_aliases = _alias_wire_tools(_responses_tools(tools), params, is_xai_responses)
+        response_tools, self._last_wire_aliases = _alias_wire_tools(self.convert_tools(tools), params, is_xai_responses)
 
         # Lazy: provider plugins import this transport during model_metadata init.
         from agent.model_metadata import strip_codex_context_variant_suffix as _strip_ctx_variant
@@ -449,17 +442,15 @@ class ResponsesApiTransport(ProviderTransport):
             # ``-900k`` picker variants are Hermes-side aliases; the backend knows only the base slug.
             "model": _strip_ctx_variant(model),
             "instructions": instructions,
-            "input": _chat_messages_to_responses_input(
-                payload_messages, is_xai_responses=is_xai_responses,
-                is_github_responses=is_github_responses,
-                replay_encrypted_reasoning=replay_encrypted_reasoning,
-                current_issuer_kind=issuer_kind,
-                native_compaction_eligible=native_compaction_active,
+            "input": self.convert_messages(
+                payload_messages, is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
+                replay_encrypted_reasoning=replay_encrypted_reasoning, base_url=params.get("base_url"),
+                is_codex_backend=is_codex_backend, context_management=context_management,
             ),
             "store": False,
         }
         # ``tools`` MUST be omitted when empty: the openai SDK iterates it without
-        # a None guard before any HTTP request (#32892).
+        # a None guard before any HTTP request.
         if response_tools:
             kwargs["tools"] = response_tools
             kwargs["tool_choice"] = "auto"
@@ -469,9 +460,9 @@ class ResponsesApiTransport(ProviderTransport):
 
         session_id = params.get("session_id")
         # Cache key is content-addressed (instructions + tools) within a logical
-        # scope — cache_scope_id survives compression rotation (#79017), and the
-        # cron per-fire timestamp is stripped. session_id itself stays untouched
-        # for transcript isolation (Codex ``session_id`` header below).
+        # scope — cache_scope_id survives compression rotation, and the cron
+        # per-fire timestamp is stripped. session_id itself stays untouched for
+        # transcript isolation (Codex ``session_id`` header below).
         _cache_scope = _cache_scope_from_session_id(params.get("cache_scope_id") or session_id)
         cache_key = _content_cache_key(instructions, response_tools, _cache_scope) or _cache_scope
         # xAI takes prompt_cache_key in extra_body (below); GitHub Models opts out entirely.
@@ -482,32 +473,31 @@ class ResponsesApiTransport(ProviderTransport):
         if cache_retention:
             kwargs.setdefault("prompt_cache_retention", cache_retention)
 
+        include = ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
         if reasoning_enabled and is_xai_responses:
             from agent.model_metadata import grok_supports_reasoning_effort
 
-            kwargs["include"] = ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
+            kwargs["include"] = include
             # xAI 400s on ``reasoning.effort`` for models outside the allowlist.
             if grok_supports_reasoning_effort(model):
                 kwargs["reasoning"] = {"effort": reasoning_effort}
         elif reasoning_enabled:
             if is_github_responses:
-                github_reasoning = params.get("github_reasoning_extra")
-                if github_reasoning is not None:
-                    kwargs["reasoning"] = github_reasoning
+                if params.get("github_reasoning_extra") is not None:
+                    kwargs["reasoning"] = params["github_reasoning_extra"]
             else:
                 kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-                kwargs["include"] = ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
+                kwargs["include"] = include
         elif not is_github_responses and not is_xai_responses:
             kwargs["include"] = []
 
-        request_overrides = params.get("request_overrides")
-        if request_overrides:
-            kwargs.update(request_overrides)
+        if params.get("request_overrides"):
+            kwargs.update(params["request_overrides"])
 
         _bound_prompt_cache_key_field(kwargs)
 
         # Older xAI models reject ``service_tier`` (HTTP 400); only Grok 4.6
-        # accepts Priority Processing (#28490, #84799).
+        # accepts Priority Processing.
         if is_xai_responses:
             from agent.model_metadata import is_grok_46_family
 
@@ -515,16 +505,16 @@ class ResponsesApiTransport(ProviderTransport):
                 kwargs.pop("service_tier", None)
 
         # Forward per-request timeout to the SDK (providers.<id>.request_timeout_seconds).
-        timeout = kwargs.get("timeout", params.get("timeout"))
-        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and 0 < float(timeout) < float("inf"):
-            kwargs["timeout"] = float(timeout)
+        timeout = _coerce_timeout(kwargs.get("timeout", params.get("timeout")))
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         else:
             kwargs.pop("timeout", None)
 
         if is_codex_backend:
             # Codex rejects body-level extra_headers, but the SDK kwarg maps to
             # HTTP headers. ``session_id`` = raw physical id (transcript identity);
-            # ``x-client-request-id`` mirrors the body cache key so both agree (#78941).
+            # ``x-client-request-id`` mirrors the body cache key so both agree.
             final_cache_key = kwargs.get("prompt_cache_key") or _bounded_prompt_cache_key(_cache_scope)
             headers = {}
             if session_id:
@@ -533,14 +523,12 @@ class ResponsesApiTransport(ProviderTransport):
                 headers["x-client-request-id"] = final_cache_key
             if headers:
                 _merge_extra_headers(kwargs, **headers)
-
-        max_tokens = params.get("max_tokens")
-        if max_tokens is not None and not is_codex_backend:
-            kwargs["max_output_tokens"] = max_tokens
+        elif params.get("max_tokens") is not None:
+            kwargs["max_output_tokens"] = params["max_tokens"]
 
         if is_xai_responses and session_id:
             # Scoped like the body key so cron's per-fire timestamp doesn't pin
-            # each fire to a different xAI backend server (#78941).
+            # each fire to a different xAI backend server.
             _merge_extra_headers(kwargs, **{"x-grok-conv-id": _cache_scope})
             # xAI reads prompt_cache_key from the body; sent via extra_body so it
             # survives SDK builds whose Responses.stream() dropped the typed kwarg.
