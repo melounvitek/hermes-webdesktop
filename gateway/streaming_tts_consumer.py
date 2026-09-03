@@ -110,17 +110,24 @@ class StreamingTTSConsumer:
         self._enqueue_clauses(
             self._chunker.flush(), "streaming TTS queue full while flushing tail", log_errors=False
         )
-        # The load-bearing _DONE sentinel must never be lost: evict a clause if full.
-        while True:
+        # The load-bearing _DONE sentinel must never be lost: evict clauses until it fits.
+        while not self._put_sentinel(_DONE, mark_dropped=True):
+            pass
+
+    def _put_sentinel(self, sentinel, *, mark_dropped: bool) -> bool:
+        """Try to enqueue a sentinel, evicting one queued item when the queue is full. Returns True
+        when the caller should stop retrying: enqueued, or (abort path) nothing left to evict."""
+        try:
+            self._queue.put_nowait(sentinel)
+            return True
+        except queue.Full:
             try:
-                self._queue.put_nowait(_DONE)
-                return
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
+                self._queue.get_nowait()
+                if mark_dropped:
                     self._dropped = True
-                except queue.Empty:
-                    continue
+            except queue.Empty:
+                return not mark_dropped
+            return False
 
     def start(self) -> asyncio.Task:
         """Create (once) and return the async drain task on the gateway loop."""
@@ -240,14 +247,8 @@ class StreamingTTSConsumer:
             self._aborted = True
         # The load-bearing _ABORT sentinel must reach the queue even when full: evict to make room.
         for _attempt in range(3):
-            try:
-                self._queue.put_nowait(_ABORT)
+            if self._put_sentinel(_ABORT, mark_dropped=False):
                 break
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
         else:
             logger.debug("streaming TTS _ABORT sentinel could not be enqueued")
         if self._handle is not None and not self._handle.aborted:

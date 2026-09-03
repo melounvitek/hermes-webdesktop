@@ -163,8 +163,9 @@ class GatewayVoiceMixin:
         self._bind_voice_input_callback(adapter)
         voice_profile = self._adapter_profile_for_source(event.source)
         if hasattr(adapter, "_on_voice_disconnect"):
-            cb = functools.partial(self._handle_voice_timeout_cleanup, adapter=adapter)
-            adapter._on_voice_disconnect = cb
+            adapter._on_voice_disconnect = functools.partial(
+                self._handle_voice_timeout_cleanup, adapter=adapter
+            )
         # Let the adapter's inactivity timer see the live voice-reply mode so it doesn't
         # disconnect a deliberately text-only (/voice off) session.
         if hasattr(adapter, "_voice_mode_getter"):
@@ -176,22 +177,19 @@ class GatewayVoiceMixin:
         except Exception as e:
             logger.warning("Failed to join voice channel: %s", e)
             adapter._voice_input_callback = None
-            err_lower = str(e).lower()
-            if any(tok in err_lower for tok in ("pynacl", "nacl", "davey")):
+            if any(tok in str(e).lower() for tok in ("pynacl", "nacl", "davey")):
                 return (
                     "Voice dependencies are missing (PyNaCl / davey). "
                     f"Install with: `{sys.executable} -m pip install PyNaCl`"
                 )
             return f"Failed to join voice channel: {e}"
-
         if not success:
             adapter._voice_input_callback = None
             return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
         adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
         if hasattr(adapter, "_voice_sources"):
             adapter._voice_sources[guild_id] = event.source.to_dict()
-        self._voice_mode[self._voice_key_for_source(event.source)] = "all"
-        self._save_voice_modes()
+        self._set_voice_mode(self._voice_key_for_source(event.source), "all")
         self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
         return (
             f"Joined voice channel **{voice_channel.name}**.\n"
@@ -214,8 +212,7 @@ class GatewayVoiceMixin:
         except Exception as e:
             logger.warning("Error leaving voice channel: %s", e)
         # Always clean up state even if leave raised an exception
-        self._voice_mode[self._voice_key_for_source(event.source)] = "off"
-        self._save_voice_modes()
+        self._set_voice_mode(self._voice_key_for_source(event.source), "off")
         self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = None
@@ -230,9 +227,13 @@ class GatewayVoiceMixin:
         if adapter is None:
             adapter = self.adapters.get(Platform.DISCORD)
         profile = getattr(adapter, "_owner_profile", None)
-        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id, profile=profile)] = "off"
-        self._save_voice_modes()
+        self._set_voice_mode(self._voice_key(Platform.DISCORD, chat_id, profile=profile), "off")
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+
+    def _set_voice_mode(self, voice_key: str, mode: str) -> None:
+        """Record ``mode`` for ``voice_key`` and persist the voice-mode file."""
+        self._voice_mode[voice_key] = mode
+        self._save_voice_modes()
 
     def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
         """Suppress repeated STT outputs for the same recent utterance (voice capture can emit an
