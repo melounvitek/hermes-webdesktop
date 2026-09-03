@@ -44,15 +44,11 @@ def _state_file() -> Path:
     return get_hermes_home() / "skills" / ".curator_state"
 
 
-def _default_state() -> Dict[str, Any]:
-    return {
+def load_state() -> Dict[str, Any]:
+    base: Dict[str, Any] = {
         "last_run_at": None, "last_run_duration_seconds": None, "last_run_summary": None,
         "last_run_summary_shown_at": None, "last_report_path": None, "paused": False, "run_count": 0,
     }
-
-
-def load_state() -> Dict[str, Any]:
-    base = _default_state()
     path = _state_file()
     if not path.exists():
         return base
@@ -136,8 +132,8 @@ def get_archive_after_days() -> int:
 
 
 def get_prune_builtins() -> bool:
-    """Bundled built-ins are curation candidates (ON by default); a suppression
-    list keeps them archived across `hermes update` re-seeds. Hub skills never."""
+    """Bundled built-ins are curation candidates (ON by default); a suppression list
+    keeps them archived across `hermes update` re-seeds. Hub skills are never pruned."""
     return bool(_load_config().get("prune_builtins", True))
 
 
@@ -163,11 +159,9 @@ def should_run_now(now: Optional[datetime] = None) -> bool:
     tick. ``hermes curator run`` bypasses this; the idle check is the caller's."""
     if not is_enabled() or is_paused():
         return False
-
     state = load_state()
     last = _parse_iso(state.get("last_run_at"))
-    if now is None:
-        now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     if last is None:
         try:
             state["last_run_at"] = now.isoformat()
@@ -203,18 +197,17 @@ def _archive_as_curator(_u, name: str) -> bool:
     ledger entry reads as an autonomous transition, not a foreground call."""
     try:
         from tools.skill_ledger import reset_ledger_actor, set_ledger_actor
-        _tok = set_ledger_actor("curator")
+        tok = set_ledger_actor("curator")
     except Exception:
-        _tok = reset_ledger_actor = None  # type: ignore[assignment]
+        tok = reset_ledger_actor = None  # type: ignore[assignment]
     try:
-        ok, _msg = _u.archive_skill(name)
+        return _u.archive_skill(name)[0]
     finally:
-        if _tok is not None:
+        if tok is not None:
             try:
-                reset_ledger_actor(_tok)
+                reset_ledger_actor(tok)
             except Exception:
                 pass
-    return ok
 
 
 def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int]:
@@ -224,8 +217,7 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
     starts NOW, not at epoch. Returns a counter dict."""
     from tools import skill_usage as _u
 
-    if now is None:
-        now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     stale_cutoff = now - timedelta(days=get_stale_after_days())
     archive_cutoff = now - timedelta(days=get_archive_after_days())
     # Cron-referenced skills are in use by definition (usage only bumps when a
@@ -542,10 +534,7 @@ def _find_reference(args: Dict[str, Any], needles: Set[str]) -> Optional[str]:
 
 
 def _classify_removed_skills(
-    removed: List[str],
-    added: List[str],
-    after_names: Set[str],
-    tool_calls: List[Dict[str, Any]],
+    removed: List[str], added: List[str], after_names: Set[str], tool_calls: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Split ``removed`` into consolidated vs pruned. Heuristic: a ``skill_manage``
     call on a DIFFERENT, surviving-or-new skill whose file_path/content arguments
@@ -600,18 +589,13 @@ def _parse_structured_summary(llm_final: str) -> Dict[str, List[Dict[str, str]]]
     if not isinstance(data, dict):
         return out
 
-    def _entries(key: str) -> List[Dict[str, Any]]:
+    def _entries(key: str, *fields: str) -> List[Dict[str, str]]:
         raw = data.get(key) or []
-        return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+        cleaned = ({f: _clean_str(e.get(f)) for f in (*fields, "reason")} for e in raw if isinstance(e, dict)) if isinstance(raw, list) else ()
+        return [e for e in cleaned if all(e[f] for f in fields)]
 
-    for entry in _entries("consolidations"):
-        frm, into = _clean_str(entry.get("from")), _clean_str(entry.get("into"))
-        if frm and into:
-            out["consolidations"].append({"from": frm, "into": into, "reason": _clean_str(entry.get("reason"))})
-    for entry in _entries("prunings"):
-        name = _clean_str(entry.get("name"))
-        if name:
-            out["prunings"].append({"name": name, "reason": _clean_str(entry.get("reason"))})
+    out["consolidations"] = _entries("consolidations", "from", "into")
+    out["prunings"] = _entries("prunings", "name")
     return out
 
 
@@ -633,11 +617,8 @@ def _extract_absorbed_into_declarations(tool_calls: List[Dict[str, Any]]) -> Dic
 
 
 def _reconcile_classification(
-    removed: List[str],
-    heuristic: Dict[str, List[Dict[str, Any]]],
-    model_block: Dict[str, List[Dict[str, str]]],
-    destinations: Set[str],
-    absorbed_declarations: Optional[Dict[str, Dict[str, Any]]] = None,
+    removed: List[str], heuristic: Dict[str, List[Dict[str, Any]]], model_block: Dict[str, List[Dict[str, str]]],
+    destinations: Set[str], absorbed_declarations: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Merge heuristic (tool-call evidence) with the model's structured block.
     First match wins; every removed skill lands in exactly one bucket:
@@ -792,15 +773,8 @@ def _new_run_dir(started_at: datetime) -> Optional[Path]:
 
 
 def _write_run_report(
-    *,
-    started_at: datetime,
-    elapsed_seconds: float,
-    auto_counts: Dict[str, int],
-    auto_summary: str,
-    before_report: List[Dict[str, Any]],
-    before_names: Set[str],
-    after_report: List[Dict[str, Any]],
-    llm_meta: Dict[str, Any],
+    *, started_at: datetime, elapsed_seconds: float, auto_counts: Dict[str, int], auto_summary: str,
+    before_report: List[Dict[str, Any]], before_names: Set[str], after_report: List[Dict[str, Any]], llm_meta: Dict[str, Any],
 ) -> Optional[Path]:
     """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}/. Returns
     the report dir, or None if it couldn't be created (reporting is best-effort)."""
@@ -812,47 +786,31 @@ def _write_run_report(
     after_by_name, before_by_name = _by_name(after_report), _by_name(before_report)
     diff = _diff_and_classify(before_names, set(after_by_name), tool_calls, llm_meta.get("final", "") or "")
 
-    transitions: List[Dict[str, str]] = []
-    for name in sorted(diff.after_names & before_names):
-        s_before = (before_by_name.get(name) or {}).get("state")
-        s_after = (after_by_name.get(name) or {}).get("state")
-        if s_before and s_after and s_before != s_after:
-            transitions.append({"name": name, "from": s_before, "to": s_after})
+    states = ((n, (before_by_name.get(n) or {}).get("state"), (after_by_name.get(n) or {}).get("state")) for n in sorted(diff.after_names & before_names))
+    transitions = [{"name": n, "from": b, "to": a} for n, b, a in states if b and a and b != a]
 
     tc_counts: Dict[str, int] = dict(Counter(tc.get("name", "unknown") for tc in tool_calls))
     cron_rewrites = _rewrite_cron_refs(diff.consolidated, diff.pruned)
     jobs_updated = int(cron_rewrites.get("jobs_updated", 0))
 
     payload = {
-        "started_at": started_at.isoformat(),
-        "duration_seconds": round(elapsed_seconds, 2),
-        "model": llm_meta.get("model", ""),
-        "provider": llm_meta.get("provider", ""),
+        "started_at": started_at.isoformat(), "duration_seconds": round(elapsed_seconds, 2),
+        "model": llm_meta.get("model", ""), "provider": llm_meta.get("provider", ""),
         "auto_transitions": auto_counts,
         "counts": {
-            "before": len(before_names),
-            "after": len(diff.after_names),
+            "before": len(before_names), "after": len(diff.after_names),
             "delta": len(diff.after_names) - len(before_names),
-            "archived_this_run": len(diff.removed),
-            "added_this_run": len(diff.added),
-            "consolidated_this_run": len(diff.consolidated),
-            "pruned_this_run": len(diff.pruned),
-            "state_transitions": len(transitions),
-            "cron_jobs_rewritten": jobs_updated,
+            "archived_this_run": len(diff.removed), "added_this_run": len(diff.added),
+            "consolidated_this_run": len(diff.consolidated), "pruned_this_run": len(diff.pruned),
+            "state_transitions": len(transitions), "cron_jobs_rewritten": jobs_updated,
             "tool_calls_total": sum(tc_counts.values()),
         },
         "tool_call_counts": tc_counts,
-        "archived": diff.removed,
-        "consolidated": diff.consolidated,
-        "pruned": diff.pruned,
-        "pruned_names": [p["name"] for p in diff.pruned],
-        "added": diff.added,
-        "state_transitions": transitions,
-        "cron_rewrites": cron_rewrites,
-        "llm_final": llm_meta.get("final", ""),
-        "llm_summary": llm_meta.get("summary", ""),
-        "llm_error": llm_meta.get("error"),
-        "tool_calls": llm_meta.get("tool_calls", []),
+        "archived": diff.removed, "consolidated": diff.consolidated, "pruned": diff.pruned,
+        "pruned_names": [p["name"] for p in diff.pruned], "added": diff.added,
+        "state_transitions": transitions, "cron_rewrites": cron_rewrites,
+        "llm_final": llm_meta.get("final", ""), "llm_summary": llm_meta.get("summary", ""),
+        "llm_error": llm_meta.get("error"), "tool_calls": llm_meta.get("tool_calls", []),
     }
 
     _write_json(run_dir / "run.json", payload, "run.json")
@@ -1029,6 +987,9 @@ def _safe_curated_report() -> List[Dict[str, Any]]:
         return []
 
 
+_AUTO_LABELS = (("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated"))
+
+
 def _consolidation_pass(prefix: str, auto_summary: str, dry_run: bool, before_names: Set[str]) -> tuple:
     """The LLM half of a run: fork (unless no candidates), then append the rename
     map (`old-name → umbrella`) so users needn't dig into REPORT.md.
@@ -1067,10 +1028,8 @@ def _consolidation_pass(prefix: str, auto_summary: str, dry_run: bool, before_na
 
 
 def run_curator_review(
-    on_summary: Optional[Callable[[str], None]] = None,
-    synchronous: bool = False,
-    dry_run: bool = False,
-    consolidate: Optional[bool] = None,
+    on_summary: Optional[Callable[[str], None]] = None, synchronous: bool = False,
+    dry_run: bool = False, consolidate: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Execute a single curator review pass: (1) automatic state transitions (no
     LLM); (2) if *consolidate* and there are candidates, fork an AIAgent on the
@@ -1086,8 +1045,7 @@ def run_curator_review(
     if consolidate is None:
         consolidate = get_consolidate()
     start = datetime.now(timezone.utc)
-    if dry_run:
-        # Count candidates without mutating state.
+    if dry_run:  # count candidates without mutating state
         counts = {"checked": len(_safe_curated_report()), "marked_stale": 0, "archived": 0, "reactivated": 0}
     else:
         # Pre-mutation snapshot — best-effort, never blocks the run: a transient
@@ -1102,9 +1060,7 @@ def run_curator_review(
         counts = apply_automatic_transitions(now=start)
 
     auto_summary = ", ".join(
-        f"{counts[key]} {label}"
-        for key, label in (("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated"))
-        if counts[key]
+        f"{counts[key]} {label}" for key, label in _AUTO_LABELS if counts[key]
     ) or "no changes"
 
     # Persist before the LLM pass so a crash mid-review still records the run.
@@ -1139,14 +1095,12 @@ def run_curator_review(
         try:
             report_path = _write_run_report(
                 started_at=start, elapsed_seconds=elapsed, auto_counts=counts, auto_summary=auto_summary,
-                before_report=before_report, before_names=before_names,
-                after_report=_safe_curated_report(), llm_meta=llm_meta,
+                before_report=before_report, before_names=before_names, after_report=_safe_curated_report(), llm_meta=llm_meta,
             )
             if report_path is not None:
                 state2["last_report_path"] = str(report_path)
         except Exception as e:
             logger.debug("Curator report write failed: %s", e, exc_info=True)
-
         save_state(state2)
         _notify(on_summary, f"curator: {final_summary}")
 
@@ -1284,14 +1238,9 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
             agent_kwargs["acp_command"] = acp_command
             agent_kwargs["acp_args"] = list(rp.get("args") or [])
         review_agent = AIAgent(
-            model=model_name,
-            provider=provider,
-            api_key=rp.get("api_key"),
-            base_url=rp.get("base_url"),
-            api_mode=rp.get("api_mode"),
-            credential_pool=rp.get("credential_pool"),
-            request_overrides=request_overrides,
-            **agent_kwargs,
+            model=model_name, provider=provider, api_key=rp.get("api_key"), base_url=rp.get("base_url"),
+            api_mode=rp.get("api_mode"), credential_pool=rp.get("credential_pool"),
+            request_overrides=request_overrides, **agent_kwargs,
             # No ``terminal``: a shell mv/cp/rm under the skills tree writes bytes
             # with NO ledger entry, so rollback would restore a hollow skill. Every
             # mutation goes through ledgered skill_manage; dropping the toolset
@@ -1299,10 +1248,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
             enabled_toolsets=["skills"],
             # Umbrella-building over hundreds of skills takes 50-100 API calls.
             max_iterations=9999,
-            quiet_mode=True,
-            platform="curator",
-            skip_context_files=True,
-            skip_memory=True,
+            quiet_mode=True, platform="curator", skip_context_files=True, skip_memory=True,
         )
         # Disable recursive nudges — the curator must never spawn its own review.
         review_agent._memory_nudge_interval = 0
@@ -1335,17 +1281,13 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
 # --- Public entrypoint for the session-start hook ---
 
 def maybe_run_curator(
-    *,
-    idle_for_seconds: Optional[float] = None,
-    on_summary: Optional[Callable[[str], None]] = None,
+    *, idle_for_seconds: Optional[float] = None, on_summary: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Best-effort: run a curator pass if all gates pass. Returns the result
     dict if a pass was started, else None. Never raises."""
     try:
         # Idle gating: only enforce when the caller provided a measurement.
-        if not should_run_now() or (
-            idle_for_seconds is not None and idle_for_seconds < get_min_idle_hours() * 3600.0
-        ):
+        if not should_run_now() or (idle_for_seconds is not None and idle_for_seconds < get_min_idle_hours() * 3600.0):
             return None
         return run_curator_review(on_summary=on_summary)
     except Exception as e:
