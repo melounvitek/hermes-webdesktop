@@ -1,6 +1,7 @@
 """Terminal-backend setup wizard (local/docker/singularity/modal/daytona/vercel/ssh/plugin).
 
-Extracted from hermes_cli/setup.py; setup.py re-exports the public entry points.
+Names from setup.py are imported lazily inside bodies so test patches on
+``hermes_cli.setup.<name>`` take effect; setup.py re-exports the public entry points.
 """
 
 import json
@@ -13,13 +14,13 @@ from pathlib import Path
 logger = logging.getLogger("hermes_cli.setup")
 
 _SANDBOX_IMAGE = "nikolaik/python-nodejs:python3.11-nodejs20"
+_RUN_KW = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _prompt_vercel_sandbox_settings(config: dict):
     """Prompt for Vercel Sandbox settings without exposing unsupported disk sizing."""
     from hermes_cli.setup import (
-        get_env_value, _info, print_info, print_warning, prompt, remove_env_value, save_env_value,
-    )
+        get_env_value, _info, print_info, print_warning, prompt, remove_env_value, save_env_value)
     terminal = config.setdefault("terminal", {})
     _info(None, "Vercel Sandbox settings:", "  Filesystem persistence uses Vercel snapshots.",
           "  Snapshots restore files only; live processes do not continue after sandbox recreation.")
@@ -39,7 +40,6 @@ def _prompt_vercel_sandbox_settings(config: dict):
     terminal["container_persistent"] = (
         prompt("  Persist filesystem with snapshots? (yes/no)", persist_label).lower() in {"yes", "true", "y", "1"}
     )
-
     # (key, prompt label, default, parser) — unparseable input leaves the value untouched.
     for key, label, default, parse in (
         ("container_cpu", "  CPU cores", 1, float),
@@ -49,7 +49,6 @@ def _prompt_vercel_sandbox_settings(config: dict):
             terminal[key] = parse(prompt(label, str(terminal.get(key, default))))
         except ValueError:
             pass
-
     if terminal.get("container_disk", 51200) not in {0, 51200}:
         print_warning("Vercel Sandbox does not support custom disk sizing; resetting container_disk to 51200.")
     terminal["container_disk"] = 51200
@@ -58,14 +57,12 @@ def _prompt_vercel_sandbox_settings(config: dict):
     linked = _read_nearest_vercel_project()
     if linked:
         print_info("  Found defaults in nearest .vercel/project.json.")
-
     remove_env_value("VERCEL_OIDC_TOKEN")
     # (label, env var, linked-project fallback key, secret) — prompted in order, saved when non-empty.
     for label, env_var, linked_key, secret in (
         ("    Vercel access token", "VERCEL_TOKEN", None, True),
         ("    Vercel project ID", "VERCEL_PROJECT_ID", "projectId", False),
-        ("    Vercel team ID", "VERCEL_TEAM_ID", "orgId", False),
-    ):
+        ("    Vercel team ID", "VERCEL_TEAM_ID", "orgId", False)):
         default = get_env_value(env_var) or (linked.get(linked_key, "") if linked_key else "")
         value = prompt(label, default, password=secret)
         if value:
@@ -88,10 +85,8 @@ def _read_nearest_vercel_project(start: Path | None = None) -> dict[str, str]:
         if not isinstance(data, dict):
             return {}
         return {
-            key: value
-            for key, value in {"projectId": data.get("projectId"), "orgId": data.get("orgId")}.items()
-            if isinstance(value, str) and value.strip()
-        }
+            key: value for key, value in {"projectId": data.get("projectId"), "orgId": data.get("orgId")}.items()
+            if isinstance(value, str) and value.strip()}
     return {}
 
 
@@ -105,16 +100,29 @@ def _prompt_secret_env(label: str, env_var: str, *, confirm_msg: str = "") -> No
             print_success(confirm_msg)
 
 
-def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False) -> None:
-    """Import *package*; if missing, install it via the venv pip helper."""
+def _pip_install_vercel(package):
+    """uv when Hermes has one ($HERMES_HOME/bin is never on PATH, so which() misses it and
+    bootstrapping mid-wizard is fine), else pip — a `uv venv` venv may not even have pip."""
+    import subprocess
+    from hermes_cli.managed_uv import ensure_uv
+
+    uv_bin = ensure_uv()
+    cmd = ([uv_bin, "pip", "install", "--python", sys.executable, package] if uv_bin
+           else [sys.executable, "-m", "pip", "install", package])
+    return subprocess.run(cmd, **_RUN_KW)
+
+
+def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False, install=None) -> None:
+    """Import *package*; if missing, install it (default: the venv pip ladder)."""
     from hermes_cli.setup import print_info, print_success, print_warning
     try:
         __import__(package)
     except ImportError:
         print_info(f"Installing {package} SDK...")
-        from hermes_cli.tools_config import _pip_install
-
-        result = _pip_install([package])
+        if install is None:
+            from hermes_cli.tools_config import _pip_install
+            install = lambda pkg: _pip_install([pkg])  # noqa: E731
+        result = install(package)
         if result.returncode == 0:
             print_success(f"{package} SDK installed")
         else:
@@ -123,30 +131,33 @@ def _ensure_sdk(package: str, manual_hint: str, *, show_stderr: bool = False) ->
                 print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
 
 
+def _report_binary(found: str | None, missing: str, install_hint: str, found_prefix: str = "Found: ") -> None:
+    from hermes_cli.setup import print_info, print_warning
+    if found:
+        print_info(f"{found_prefix}{found}")
+    else:
+        print_warning(missing)
+        print_info(install_hint)
+
+
 def _setup_backend_local(config: dict) -> None:
     from hermes_cli.setup import print_info, print_success
     print_success("Terminal backend: Local")
     print_info("Commands run directly on this machine.")
-    # Gateway working directory defaults to home; sudo stays off. Both are
-    # configurable later via `hermes setup terminal` / config.yaml.
+    # Gateway cwd defaults to home; sudo stays off. Both configurable via `hermes setup terminal`.
     config["terminal"].setdefault("cwd", str(Path.home()))
 
 
 def _setup_backend_docker(config: dict) -> None:
-    from hermes_cli.setup import _info, print_info, print_success, print_warning, prompt_yes_no
+    from hermes_cli.setup import _info, print_info, print_success, prompt_yes_no
     print_success("Terminal backend: Docker")
-    docker_bin = shutil.which("docker")
-    if docker_bin:
-        print_info(f"Docker found: {docker_bin}")
-    else:
-        print_warning("Docker not found in PATH!")
-        print_info("Install Docker: https://docs.docker.com/get-docker/")
-
+    _report_binary(shutil.which("docker"), "Docker not found in PATH!",
+                   "Install Docker: https://docs.docker.com/get-docker/", "Docker found: ")
     # Image and resource limits use defaults; tune via `hermes setup terminal`.
     config["terminal"].setdefault("docker_image", _SANDBOX_IMAGE)
     _info(None, "Docker sandboxes can be protected with the egress credential firewall.",
           "It routes sandbox traffic through iron-proxy so containers receive "
-        "proxy tokens instead of real API keys.",
+          "proxy tokens instead of real API keys.",
           "   Docker only for now; Modal, SSH, Daytona, and Singularity are not wired yet.")
     if prompt_yes_no("  Enable egress firewall for Docker sandboxes?", False):
         proxy_cfg = config.setdefault("proxy", {})
@@ -159,23 +170,18 @@ def _setup_backend_docker(config: dict) -> None:
 
 
 def _setup_backend_singularity(config: dict) -> None:
-    from hermes_cli.setup import print_info, print_success, print_warning
+    from hermes_cli.setup import print_success
     print_success("Terminal backend: Singularity/Apptainer")
-    sing_bin = shutil.which("apptainer") or shutil.which("singularity")
-    if sing_bin:
-        print_info(f"Found: {sing_bin}")
-    else:
-        print_warning("Singularity/Apptainer not found in PATH!")
-        print_info("Install: https://apptainer.org/docs/admin/main/installation.html")
-    # Image and resource limits use defaults; tune via `hermes setup terminal`.
-    config["terminal"].setdefault("singularity_image", "docker://nikolaik/python-nodejs:python3.11-nodejs20")
+    _report_binary(shutil.which("apptainer") or shutil.which("singularity"),
+                   "Singularity/Apptainer not found in PATH!",
+                   "Install: https://apptainer.org/docs/admin/main/installation.html")
+    config["terminal"].setdefault("singularity_image", f"docker://{_SANDBOX_IMAGE}")
 
 
 def _setup_backend_modal(config: dict) -> None:
     from hermes_cli.setup import (
         cfg_get, get_env_value, get_nous_subscription_features, _info, managed_nous_tools_enabled,
-        print_info, print_success, prompt_choice, prompt_yes_no,
-    )
+        print_info, print_success, prompt_choice, prompt_yes_no)
     print_success("Terminal backend: Modal")
     print_info("Serverless cloud sandboxes. Each session gets its own container.")
     from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -184,8 +190,7 @@ def _setup_backend_modal(config: dict) -> None:
     managed_modal_available = bool(
         managed_nous_tools_enabled()
         and get_nous_subscription_features(config).nous_auth_present
-        and is_managed_tool_gateway_ready("modal")
-    )
+        and is_managed_tool_gateway_ready("modal"))
     modal_mode = normalize_modal_mode(cfg_get(config, "terminal", "modal_mode"))
     use_managed_modal = False
     if managed_modal_available:
@@ -231,35 +236,15 @@ def _setup_backend_daytona(config: dict) -> None:
             _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Updated")
     else:
         _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Configured")
-    # Image and resource limits use defaults; tune via `hermes setup terminal`.
     config["terminal"].setdefault("daytona_image", _SANDBOX_IMAGE)
 
 
 def _setup_backend_vercel(config: dict) -> None:
-    from hermes_cli.setup import _info, print_info, print_success, print_warning
+    from hermes_cli.setup import _info, print_success
     print_success("Terminal backend: Vercel Sandbox")
     _info("Cloud microVM sandboxes with snapshot-backed filesystem persistence.",
           "Requires the optional SDK: pip install 'hermes-agent[vercel]'")
-    try:
-        __import__("vercel")
-    except ImportError:
-        print_info("Installing vercel SDK...")
-        import subprocess
-
-        # Managed uv first: $HERMES_HOME/bin is never on PATH so which() misses Hermes' uv;
-        # bootstrapping one mid-wizard is fine, and a `uv venv` venv may not even have pip.
-        from hermes_cli.managed_uv import ensure_uv
-
-        uv_bin = ensure_uv()
-        cmd = [uv_bin, "pip", "install", "--python", sys.executable, "vercel"] if uv_bin else [
-            sys.executable, "-m", "pip", "install", "vercel"]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if result.returncode == 0:
-            print_success("vercel SDK installed")
-        else:
-            print_warning("Install failed — run manually: pip install 'hermes-agent[vercel]'")
-            if result.stderr:
-                print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+    _ensure_sdk("vercel", "pip install 'hermes-agent[vercel]'", show_stderr=True, install=_pip_install_vercel)
     _prompt_vercel_sandbox_settings(config)
 
 
@@ -275,8 +260,7 @@ def _setup_backend_ssh(config: dict) -> None:
         ("  SSH host (hostname or IP)", "TERMINAL_SSH_HOST", ""),
         ("  SSH user", "TERMINAL_SSH_USER", os.getenv("USER", "")),
         ("  SSH port", "TERMINAL_SSH_PORT", "22"),
-        ("  SSH private key path", "TERMINAL_SSH_KEY", str(Path.home() / ".ssh" / "id_rsa")),
-    )
+        ("  SSH private key path", "TERMINAL_SSH_KEY", str(Path.home() / ".ssh" / "id_rsa")))
     values = []
     for label, env_var, default in fields:
         value = prompt(label, (get_env_value(env_var) or "") or default)
@@ -295,7 +279,7 @@ def _setup_backend_ssh(config: dict) -> None:
         if port and port != "22":
             ssh_cmd.extend(["-p", port])
         ssh_cmd += [f"{user}@{host}" if user else host, "echo ok"]
-        result = subprocess.run(ssh_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        result = subprocess.run(ssh_cmd, timeout=10, **_RUN_KW)
         if result.returncode == 0:
             print_success("  SSH connection successful!")
         else:
@@ -323,21 +307,22 @@ _BUILTIN_TERMINAL_BACKENDS = [
     ("modal", "Modal - serverless cloud sandbox"),
     ("ssh", "SSH - run on a remote machine"),
     ("daytona", "Daytona - persistent cloud development environment"),
-    ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence"),
-]
+    ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence")]
 _TERMINAL_BACKEND_SETUP = {
     "local": _setup_backend_local, "docker": _setup_backend_docker, "singularity": _setup_backend_singularity,
     "modal": _setup_backend_modal, "daytona": _setup_backend_daytona, "vercel_sandbox": _setup_backend_vercel,
-    "ssh": _setup_backend_ssh,
-}
+    "ssh": _setup_backend_ssh}
+# Backend -> env var mirrored from config after setup (config.yaml is the source of truth, but
+# terminal_tool reads these from .env).
+_BACKEND_ENV_MIRROR = {"modal": ("TERMINAL_MODAL_MODE", "modal_mode", "auto"),
+                       "vercel_sandbox": ("TERMINAL_VERCEL_RUNTIME", "vercel_runtime", "node24")}
 
 
 def setup_terminal_backend(config: dict):
     """Configure the terminal execution backend."""
     from hermes_cli.setup import (
         cfg_get, _DOCS_BASE, _info, print_header, print_info, print_success, prompt_choice, save_config,
-        save_env_value,
-    )
+        save_env_value)
     import platform as _platform
     print_header("Terminal Backend")
     _info("Choose where Hermes runs shell commands and code.",
@@ -381,13 +366,10 @@ def setup_terminal_backend(config: dict):
     elif selected_backend in plugin_backend_names:
         _setup_backend_plugin(config, selected_backend)
 
-    # config.yaml is the source of truth, but terminal_tool reads TERMINAL_ENV from .env — sync.
     save_env_value("TERMINAL_ENV", selected_backend)
-    if selected_backend == "modal":
-        save_env_value("TERMINAL_MODAL_MODE", config["terminal"].get("modal_mode", "auto"))
-    if selected_backend == "vercel_sandbox":
-        save_env_value("TERMINAL_VERCEL_RUNTIME", config["terminal"].get("vercel_runtime", "node24"))
+    if selected_backend in _BACKEND_ENV_MIRROR:
+        env_var, key, default = _BACKEND_ENV_MIRROR[selected_backend]
+        save_env_value(env_var, config["terminal"].get(key, default))
     save_config(config)
     print()
     print_success(f"Terminal backend set to: {selected_backend}")
-
