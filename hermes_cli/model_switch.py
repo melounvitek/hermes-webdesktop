@@ -356,10 +356,7 @@ class StartupModelRoute(NamedTuple):
 
 
 def resolve_startup_model_route(
-    raw_model: str,
-    *,
-    explicit_provider: str = "",
-    current_provider: str = "",
+    raw_model: str, *, explicit_provider: str = "", current_provider: str = "",
     user_providers: Optional[dict] = None,
     custom_providers: Optional[list] = None) -> Optional[StartupModelRoute]:
     """Resolve aliases and configured ``provider/model`` input at startup.
@@ -477,18 +474,15 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
     # require shell quoting.
     flags = dict.fromkeys(_BOOL_FLAGS.values(), False)
     explicit_provider = ""
-    parts = raw_args.split()
-    i = 0
     filtered: list[str] = []
-    while i < len(parts):
-        if parts[i] in _BOOL_FLAGS:
-            flags[_BOOL_FLAGS[parts[i]]] = True
-        elif parts[i] == "--provider" and i + 1 < len(parts):
-            explicit_provider = parts[i + 1]
-            i += 1
+    tokens = iter(raw_args.split())
+    for tok in tokens:
+        if tok in _BOOL_FLAGS:
+            flags[_BOOL_FLAGS[tok]] = True
+        elif tok == "--provider" and (value := next(tokens, None)) is not None:
+            explicit_provider = value
         else:
-            filtered.append(parts[i])
-        i += 1
+            filtered.append(tok)  # a trailing bare ``--provider`` stays part of the model text
     return ModelFlagParseResult(model_input=" ".join(filtered).strip(), explicit_provider=explicit_provider, **flags)
 
 
@@ -796,14 +790,9 @@ def _resolve_alias_fallback(
 
 
 def resolve_display_context_length(
-    model: str,
-    provider: str,
-    base_url: str = "",
-    api_key: str = "",
-    model_info: Optional[ModelInfo] = None,
-    custom_providers: list | None = None,
-    config_context_length: int | None = None,
-    configured_model: str | None = None,
+    model: str, provider: str, base_url: str = "", api_key: str = "",
+    model_info: Optional[ModelInfo] = None, custom_providers: list | None = None,
+    config_context_length: int | None = None, configured_model: str | None = None,
     configured_provider: str | None = None,
     configured_base_url: str | None = None) -> Optional[int]:
     """Context length to show in /model output.
@@ -867,12 +856,10 @@ def _configured_provider_matches(
 
     matches: dict[str, str] = {}
     for slug, cfg in candidates:
-        if slug in matches:
-            continue
         hit = next((mid for key in ("models", "model", "default_model")
                     for mid in _declared_model_ids(cfg.get(key)) if mid.lower() == target), None)
         if hit:
-            matches[slug] = hit
+            matches.setdefault(slug, hit)  # first declaration wins
     return matches
 
 

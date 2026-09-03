@@ -93,12 +93,8 @@ class _NativePickerModelList(list[str]):
 
 
 def _fetch_picker_live_models(
-    api_key: str,
-    api_url: str,
-    native_catalog_provider: str,
-    preserve_native_models: bool,
-    headers: dict[str, str] | None = None,
-    timeout: float = 5.0,
+    api_key: str, api_url: str, native_catalog_provider: str, preserve_native_models: bool,
+    headers: dict[str, str] | None = None, timeout: float = 5.0,
     api_mode: str | None = None) -> list[str] | None:
     """Fetch picker models with native Ollama and cached generic discovery."""
     from hermes_cli.models import (
