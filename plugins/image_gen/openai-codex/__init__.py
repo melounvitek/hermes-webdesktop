@@ -90,6 +90,14 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
+def _httpx_available() -> bool:
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _sniff_image_mime(raw: bytes) -> Optional[str]:
     from agent.image_routing import _sniff_mime_from_bytes
 
@@ -202,18 +210,14 @@ def _extract_image_candidates(value: Any) -> Tuple[Optional[str], Optional[str]]
     def walk(node: Any) -> None:
         nonlocal result_b64, partial_b64
         if isinstance(node, dict):
-            if node.get("type") == "image_generation_call":
-                result = node.get("result")
-                if isinstance(result, str) and result:
-                    result_b64 = result
+            result = node.get("result") if node.get("type") == "image_generation_call" else None
+            if isinstance(result, str) and result:
+                result_b64 = result
             partial = node.get("partial_image_b64")
             if isinstance(partial, str) and partial:
                 partial_b64 = partial
-            for child in node.values():
-                walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
+        for child in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
+            walk(child)
 
     walk(value)
     return result_b64, partial_b64
@@ -312,9 +316,7 @@ def _collect_image_b64(
                 partial_b64 = event_partial or partial_b64
     if final_b64:
         return {"b64": final_b64, "source": "final"}
-    if partial_b64:
-        return {"b64": partial_b64, "source": "partial"}
-    return None
+    return {"b64": partial_b64, "source": "partial"} if partial_b64 else None
 
 
 class OpenAICodexImageGenProvider(StaticImageGenProvider):
@@ -327,13 +329,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
     price = "varies"
 
     def is_available(self) -> bool:
-        if not _read_codex_access_token():
-            return False
-        try:
-            import httpx  # noqa: F401
-        except ImportError:
-            return False
-        return True
+        return bool(_read_codex_access_token()) and _httpx_available()
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -361,9 +357,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
         token = _read_codex_access_token()
         if not token:
             return error_factory("openai-codex", aspect)(_NO_AUTH, "auth_required")
-        try:
-            import httpx  # noqa: F401
-        except ImportError:
+        if not _httpx_available():
             return error_factory("openai-codex", aspect)(
                 "httpx Python package not installed (pip install httpx)", "missing_dependency")
 
@@ -385,14 +379,12 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
                 if collected and collected.get("source") == "final" and collected.get("b64"):
                     break
                 if attempt < _NONFINAL_RETRIES:
-                    kind = (
-                        "progressive-only partial frame"
-                        if collected and collected.get("source") == "partial"
-                        else "no image_generation_call result")
+                    partial = collected and collected.get("source") == "partial"
                     logger.warning(
                         "Codex image stream ended with %s (attempt %s/%s); "
                         "retrying once before failing closed.",
-                        kind, attempt + 1, attempts)
+                        "progressive-only partial frame" if partial else "no image_generation_call result",
+                        attempt + 1, attempts)
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
             return fail(f"OpenAI image generation via Codex auth failed: {exc}", "api_error")
@@ -414,11 +406,10 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
                 f"{attempts} attempt(s); refusing to save it as a final deliverable.")
             if pixel_hint:
                 detail = f"{detail} partial_pixel_size={pixel_hint}."
-            err = fail(detail, "incomplete_image")
-            err.update(
-                image_source=image_source, requested_size=size,
-                partial_pixel_size=pixel_hint, nonfinal_retries=_NONFINAL_RETRIES)
-            return err
+            return {
+                **fail(detail, "incomplete_image"), "image_source": image_source, "requested_size": size,
+                "partial_pixel_size": pixel_hint, "nonfinal_retries": _NONFINAL_RETRIES,
+            }
 
         try:
             pixel_size = _png_pixel_size(base64.b64decode(b64))
@@ -429,12 +420,8 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             image=str(saved_path), model=tier_id, prompt=prompt, aspect_ratio=aspect,
             provider="openai-codex", modality="image" if input_images else "text",
             extra={
-                "size": size,
-                "quality": meta["quality"],
-                "input_image_count": len(input_images),
-                "image_source": image_source,
-                "requested_size": size,
-                "pixel_size": pixel_size,
+                "size": size, "quality": meta["quality"], "input_image_count": len(input_images),
+                "image_source": image_source, "requested_size": size, "pixel_size": pixel_size,
             })
 
 
