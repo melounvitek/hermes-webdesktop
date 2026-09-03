@@ -188,11 +188,9 @@ class GatewaySessionWatchersMixin:
         agent = (getattr(self, "_running_agents", None) or {}).get(session_key)
         if agent is None or agent is _AGENT_PENDING_SENTINEL:
             return None
-        if not hasattr(agent, "get_activity_summary"):
-            return None
         try:
             summary = agent.get_activity_summary()
-        except Exception:
+        except Exception:  # incl. AttributeError: agent without an activity summary
             return None
         return summary if isinstance(summary, dict) else None
 
@@ -269,26 +267,25 @@ class GatewaySessionWatchersMixin:
             notice = format_session_stall_notification(idle_seconds)
             # Bound the send: a wedged adapter transport (network hang, dead websocket) must not
             # block the watcher pass — siblings would go unevaluated and the watcher stop.
-            try:
-                result = await asyncio.wait_for(
-                    adapter.send(str(source.chat_id), notice, metadata=metadata),
-                    timeout=_STALL_NOTIFY_SEND_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Session stall notify send timed out after %.0fs for %s; will retry next tick",
-                    _STALL_NOTIFY_SEND_TIMEOUT_SECONDS, session_key,
-                )
-                return False
-            # Adapters often return SendResult(success=False) instead of raising.
-            if result is not None and getattr(result, "success", True) is False:
-                logger.warning(
-                    "Session stall notify failed for %s: %s",
-                    session_key, getattr(result, "error", "send returned success=False"),
-                )
-                return False
+            result = await asyncio.wait_for(
+                adapter.send(str(source.chat_id), notice, metadata=metadata),
+                timeout=_STALL_NOTIFY_SEND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Session stall notify send timed out after %.0fs for %s; will retry next tick",
+                _STALL_NOTIFY_SEND_TIMEOUT_SECONDS, session_key,
+            )
+            return False
         except Exception as exc:
             logger.warning("Session stall notify failed for %s: %s", session_key, exc)
+            return False
+        # Adapters often return SendResult(success=False) instead of raising.
+        if result is not None and getattr(result, "success", True) is False:
+            logger.warning(
+                "Session stall notify failed for %s: %s",
+                session_key, getattr(result, "error", "send returned success=False"),
+            )
             return False
         return True
 

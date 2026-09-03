@@ -497,19 +497,18 @@ class GatewayStreamConsumer(
             "falling back to send() for pre-prompt text (chat=%s)",
             _reason, self.chat_id,
         )
-        fallback_ok = False
         try:
             send_result = await self.adapter.send(self.chat_id, finalize_text)
-            fallback_ok = getattr(send_result, "success", False)
+            if getattr(send_result, "success", False):
+                return True
         except Exception as send_err:
             logger.warning("%s boundary: fallback send also failed: %s", _reason, send_err)
-        if not fallback_ok:
-            logger.error(
-                "%s boundary: both finalize and fallback send failed "
-                "(chat=%s) — pre-prompt text may not have been delivered",
-                _reason, self.chat_id,
-            )
-        return fallback_ok
+        logger.error(
+            "%s boundary: both finalize and fallback send failed "
+            "(chat=%s) — pre-prompt text may not have been delivered",
+            _reason, self.chat_id,
+        )
+        return False
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback from the agent's worker thread.  ``None`` signals a tool
