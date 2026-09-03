@@ -35,7 +35,6 @@ def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None)
 
 def _cron_api(**kwargs):
     from tools.cronjob_tools import cronjob as cronjob_tool
-
     return json.loads(cronjob_tool(**kwargs))
 
 
@@ -47,7 +46,6 @@ def _active_cron_provider_name() -> str:
     """
     try:
         from cron.scheduler_provider import resolve_cron_scheduler
-
         return resolve_cron_scheduler().name or "builtin"
     except Exception:
         return "builtin"
@@ -70,7 +68,6 @@ def _builtin_gateway_liveness() -> Optional[bool]:
         # gateway just after a restart).
         try:
             from gateway.status import is_gateway_runtime_lock_active
-
             if is_gateway_runtime_lock_active():
                 return True
         except Exception:
@@ -162,7 +159,6 @@ _STATE_BADGES = {"paused": ("[paused]", Colors.YELLOW), "completed": ("[complete
 def cron_list(show_all: bool = False):
     """List all scheduled jobs."""
     from cron.jobs import effective_job_state, list_jobs
-
     jobs = list_jobs(include_disabled=show_all)
 
     if not jobs:
@@ -289,7 +285,6 @@ def cron_tick():
 def cron_runs(job_id: Optional[str] = None, limit: int = 20):
     """Show indexed durable cron execution history."""
     from cron.executions import list_executions
-
     records = list_executions(job_id=job_id, limit=limit)
     if not records:
         print("No cron execution attempts recorded.")
@@ -312,7 +307,6 @@ def cron_incidents(args) -> int:
     acking closes an incident so its failure ping stays silent until the error signature changes.
     """
     from cron.incidents import ack_incident, list_incidents
-
     action = getattr(args, "incident_action", "list")
     if action == "ack":
         incident_id = getattr(args, "incident_id", None)
@@ -372,7 +366,6 @@ def _print_ticker_health(pids: list) -> None:
         TICKER_INTERVAL_SECONDS,
     )
     from cron.scheduler import _is_fd_exhaustion_text as _cron_is_fd_exhaustion_text
-
     # ~3 missed ticker iterations (+ slack) before declaring trouble; derived from the shared
     # interval so the threshold tracks the ticker cadence (= 200s at the 60s default).
     STALE_AFTER = TICKER_INTERVAL_SECONDS * 3 + 20
@@ -423,7 +416,6 @@ def cron_status():
     """Show cron execution status."""
     from cron.jobs import list_jobs
     from hermes_cli.gateway import find_gateway_pids
-
     print()
 
     provider = _active_cron_provider_name()
@@ -444,7 +436,6 @@ def cron_status():
             # process is alive. Only declare "not running" when both agree.
             try:
                 from gateway.status import get_running_pid, is_gateway_runtime_lock_active
-
                 gateway_alive_via_lock = is_gateway_runtime_lock_active()
                 lock_pid = get_running_pid() if gateway_alive_via_lock else None
                 pids = [lock_pid] if lock_pid else pids
@@ -500,7 +491,6 @@ def _scripts_dir_for_cron() -> Path:
     profile-aware callers that monkeypatch cron storage inspect the same Hermes home.
     """
     from cron.jobs import CRON_DIR
-
     return CRON_DIR.parent / "scripts"
 
 
@@ -531,7 +521,6 @@ _OVERDUE_GRACE_SECONDS = 15 * 60
 def _next_run_overdue_issue(next_run: str) -> Optional[str]:
     """Issue string when ``next_run_at`` is parked in the past."""
     from datetime import datetime, timezone
-
     try:
         dt = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
     except ValueError:
@@ -586,7 +575,6 @@ def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
 def cron_doctor() -> int:
     """Run read-only cron health checks and return a shell-friendly status."""
     from cron.jobs import list_jobs
-
     jobs = list_jobs(include_disabled=False)
     findings = [(job, issues) for job in jobs if (issues := _cron_doctor_issues_for_job(job))]
 
@@ -662,7 +650,6 @@ def cron_create(args):
 
 def cron_edit(args):
     from cron.jobs import AmbiguousJobReference, resolve_job_ref
-
     try:
         job = resolve_job_ref(args.job_id)
     except AmbiguousJobReference as exc:
@@ -716,7 +703,6 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         # callers (tests, embedding apps) are not tainted.
         try:
             from gateway.session_context import _SESSION_ASYNC_DELIVERY
-
             _stateless_token = _SESSION_ASYNC_DELIVERY.set(False)
         except Exception:
             _stateless_token = None
@@ -761,7 +747,6 @@ def cron_resume(args) -> int:
             return 1
         return _job_action("resume", args.job_id, "Resumed")
     from cron.jobs import AmbiguousJobReference, _hermes_now, rearm_oneshot
-
     if run_now:
         run_at = _hermes_now().isoformat()
     try:
@@ -785,7 +770,6 @@ def cron_notepad(args) -> int:
     notepads into the job prompt on each run.
     """
     from cron import notepad
-
     job_id = str(getattr(args, "job_id", "") or "")
     action = getattr(args, "notepad_action", None) or "list"
     key = getattr(args, "key", None)

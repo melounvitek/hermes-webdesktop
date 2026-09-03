@@ -23,7 +23,6 @@ _PS_RUN_KWARGS = dict(capture_output=True, text=True, encoding="utf-8", errors="
 def _m():
     """Lazy ``hermes_cli.main`` reference (call-time; keeps patches working)."""
     from hermes_cli import main
-
     return main
 
 
@@ -47,7 +46,6 @@ def _iter_process_table() -> list[tuple[int, str]]:
         # readers unbounded and a conhost descendant holding duplicated handles wedges it
         # forever. It also passes CREATE_NO_WINDOW for the pythonw.exe backend.
         from hermes_cli._subprocess_compat import bounded_probe_run
-
         result = bounded_probe_run(
             ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
             timeout=10, errors="ignore",
@@ -98,7 +96,6 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
     # missed, preferring the ledger's full argv.
     try:
         from hermes_cli.process_identity import ledger_entries
-
         seen = {pid for pid, _ in found} | skip
         for entry in ledger_entries():
             pid = entry.get("pid")
@@ -116,7 +113,6 @@ def _hermes_home_for_pid(pid: int) -> str | None:
     """Best-effort ``HERMES_HOME`` from *pid*'s environment (psutil, then /proc)."""
     try:
         import psutil
-
         home = psutil.Process(pid).environ().get("HERMES_HOME")
         if home:
             return home
@@ -234,7 +230,6 @@ def _filter_dashboard_respawn_candidates(
     if own_home is None:
         try:
             from hermes_constants import get_hermes_home
-
             own_home = str(get_hermes_home())
         except Exception:
             own_home = ""
@@ -278,7 +273,6 @@ def _kill_pids_windows(pids: list[int], killed: list[int], failed: list[tuple[in
     """``taskkill /F`` each PID after re-verifying its identity."""
     from gateway.status import get_process_start_time
     from hermes_cli._subprocess_compat import pid_is_hermes, windows_hide_flags
-
     # Capture identity immediately after discovery: a PID reused before the destructive
     # action fails the start-time check.
     pid_start_times = {pid: get_process_start_time(pid) for pid in pids}
@@ -610,7 +604,6 @@ def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
     Best-effort: a bad record contributes no PID; never raises.
     """
     import json
-
     root = base_dir if base_dir is not None else _hermes_home_dir() / _REMOTE_LOCK_SUBDIR
     owned: set[int] = set()
     if not root.is_dir():
@@ -647,7 +640,6 @@ def _process_age_seconds(pid: int) -> float:
     import time as _time
 
     import psutil as _psutil
-
     return max(0.0, _time.time() - _psutil.Process(pid).create_time())
 
 
@@ -670,7 +662,6 @@ def _reap_orphaned_desktop_local_serves(
     """
     import signal as _signal
     import time as _time
-
     signal_term = _signal.SIGTERM if signal_term is None else signal_term
     signal_kill = getattr(_signal, "SIGKILL", _signal.SIGTERM) if signal_kill is None else signal_kill
     sleep_fn = sleep_fn or _time.sleep
@@ -733,7 +724,6 @@ def _reap_orphaned_desktop_local_serves(
     # which is a Windows footgun the linter blocks everywhere.
     sleep_fn(1.5)
     import psutil
-
     for pid in matched:
         if pid in failed:
             continue

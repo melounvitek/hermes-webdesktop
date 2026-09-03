@@ -87,7 +87,6 @@ def reconcile_profile_gateways(
     # precedence over config.yaml and otherwise preserves the configured value.
     from gateway.config import load_gateway_config
     from utils import is_truthy_value
-
     try:
         multiplex_profiles = load_gateway_config().multiplex_profiles
     except Exception:
