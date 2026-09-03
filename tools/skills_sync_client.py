@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -31,8 +30,7 @@ from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
     assemble_root_from_skill_trees, build_commit, build_root_tree, build_sync_manifest_bytes,
     build_tree, canonical_json_bytes, materialize_tree, merge_skill, nest_skill_tree,
     parse_sync_manifest, read_manifest_of_root, read_ref_hash, root_tree_of_commit,
-    skill_trees_of_root, wire_address,
-)
+    skill_trees_of_root, wire_address)
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +71,7 @@ def resolve_identity() -> Dict[str, Any]:
     owner = claims.get("sub") or claims.get("privy_did") or claims.get("tid") or "unknown"
     return {
         "api_key": api_key, "base_url": creds.get("base_url"), "owner": str(owner),
-        "nous_admin": claims.get(NOUS_ADMIN_CLAIM) is True, "claims": claims,
-    }
+        "nous_admin": claims.get(NOUS_ADMIN_CLAIM) is True, "claims": claims}
 
 
 # Configuration -- env-first so a Hermes Cloud instance can enable sync purely through the
@@ -356,20 +353,12 @@ def read_sync_state() -> Dict[str, Any]:
 
 def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
-    path = _sync_state_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".sync_state_", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        except BaseException:
-            with suppress(OSError):
-                os.unlink(tmp)
-            raise
+        from tools.skill_usage import _atomic_write
+
+        _atomic_write(
+            _sync_state_path(), ".sync_state_",
+            lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
 
@@ -435,8 +424,7 @@ def push_skills(
     *,
     skill_names: Optional[List[str]] = None,
     identity: Optional[Dict[str, Any]] = None,
-    message: str = "hermes skill sync",
-) -> Dict[str, Any]:
+    message: str = "hermes skill sync") -> Dict[str, Any]:
     """Push opted-in skills to ``refs/user/<owner>/HEAD``: upload new objects, CAS HEAD. A 409 with
     an actual head -> three-way merge + one retry; a 409 against a NON-EXISTENT ref (stale local
     head, e.g. from another plane) -> redo the CAS as a create. Never raises for inert/no-op cases."""
@@ -461,8 +449,7 @@ def push_skills(
 
     commit_hash = build_commit(
         root_hash, [base_head] if base_head else [], owner=owner, device=stable_device_id(),
-        message=message, objects=objects,
-    )
+        message=message, objects=objects)
     client.put_objects(objects.objects)
     ref = user_head_ref(owner)
     result = {"ok": True, "head": commit_hash, "pushed_objects": len(objects)}
@@ -487,8 +474,7 @@ def _resolve_push_conflict(
     our_commit: str,
     objects: ObjectSet,
     message: str,
-    base_head: Optional[str],
-) -> Dict[str, Any]:
+    base_head: Optional[str]) -> Dict[str, Any]:
     """Three-way merge per skill against the base we forked from (see merge_skill): each side
     changing a DIFFERENT skill -> merge commit (2 parents) + CAS retry; both changing the SAME
     skill -> TRUE OVERLAP -> written to refs/user/<owner>/conflict/<n> for out-of-band resolution."""
@@ -519,9 +505,7 @@ def _resolve_push_conflict(
             "overlapping_skills": sorted(overlaps), "actual_head": actual_head,
             "message": (
                 f"{len(overlaps)} skill(s) changed on both sides; wrote "
-                f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI)."
-            ),
-        }
+                f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
 
     # Merge commit (parents: actual, ours); re-add our objects so the merge push is self-contained.
     merge_objects = ObjectSet()
@@ -529,16 +513,14 @@ def _resolve_push_conflict(
     merged_root = assemble_root_from_skill_trees(merged, merge_objects)
     merge_commit = build_commit(
         merged_root, [actual_head, our_commit], owner=owner, device=stable_device_id(),
-        message=f"merge: {message}", objects=merge_objects,
-    )
+        message=f"merge: {message}", objects=merge_objects)
     client.put_objects(merge_objects.objects)
     try:
         client.cas_ref(user_head_ref(owner), actual_head, merge_commit)
     except SyncConflict as c2:
         return {
             "ok": False, "conflict": True, "actual_head": c2.actual,
-            "message": f"merge CAS lost again (head now {c2.actual}); retry sync.",
-        }
+            "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
     _record_head(read_sync_state(), merge_commit, merged_root)
     return {"ok": True, "head": merge_commit, "merged": True}
 
@@ -619,8 +601,7 @@ def sync_status() -> Dict[str, Any]:
         "nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
         "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
         "opted_in_skills": [], "local_head": None, "owner": None, "org_available": False,
-        "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": [],
-    }
+        "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": []}
     try:
         identity = resolve_identity()
         status.update(logged_in=True, owner=identity.get("owner"), nous_admin=bool(identity.get("nous_admin")))
@@ -638,8 +619,7 @@ def sync_status() -> Dict[str, Any]:
         status.update(
             org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
             org_skills=list_org_skill_names(),
-            org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")),
-        )
+            org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")))
     except SyncInertError:
         pass
     except Exception as e:
@@ -654,5 +634,4 @@ from tools.skills_sync_client_org import (  # noqa: E402,F401  (re-exports)
     _read_org_baseline, _read_org_head, _skill_dir_fingerprint, _write_active_org_marker,
     _write_org_baseline, _write_org_provenance, list_locally_modified_org_skills,
     list_org_skill_names, maybe_pull_org_skills, org_head_ref, org_skill_is_locally_modified,
-    propose_skill, pull_org_skills, resolve_org_identity,
-)
+    propose_skill, pull_org_skills, resolve_org_identity)

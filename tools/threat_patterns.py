@@ -95,8 +95,7 @@ _PATTERNS: List[Tuple[str, str, str]] = [
 # plus, BOM, LTR/RTL embedding + pop + overrides, LTR/RTL/first-strong isolates + pop.
 INVISIBLE_CHARS = frozenset(
     "\u200b\u200c\u200d\u2060\u2062\u2063\u2064\ufeff"
-    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
-)
+    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 # Compiled per scope at import; inclusion is cumulative (all ⊂ context ⊂ strict).
 _SCOPE_SETS = {"all": ("all", "context", "strict"), "context": ("context", "strict"), "strict": ("strict",)}
@@ -146,8 +145,7 @@ def first_threat_message(content: str, scope: str = "strict") -> Optional[str]:
     return (
         f"Blocked: content matches threat pattern '{pid}'. "
         f"Content is injected into the system prompt and must not contain "
-        f"injection or exfiltration payloads."
-    )
+        f"injection or exfiltration payloads.")
 
 
 __all__ = ["INVISIBLE_CHARS", "MAX_SCAN_CHARS", "scan_for_threats", "first_threat_message"]

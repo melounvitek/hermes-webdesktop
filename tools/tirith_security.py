@@ -58,8 +58,7 @@ def _load_security_config() -> dict:
         "tirith_enabled": _env_bool("TIRITH_ENABLED", cfg.get("tirith_enabled", True)),
         "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", "tirith")),
         "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", 5)),
-        "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", True)),
-    }
+        "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", True))}
 
 
 # --- Module state ---
@@ -97,8 +96,7 @@ def _record_tirith_crash() -> None:
         logger.warning(
             "tirith circuit breaker opened after %d consecutive failures; "
             "disabling for the rest of the process",
-            _crash_count,
-        )
+            _crash_count)
 
 
 def _warn_once(key: str, message: str, *args) -> None:
@@ -243,8 +241,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
              "--certificate-identity-regexp", _COSIGN_IDENTITY_REGEXP,
              "--certificate-oidc-issuer", _COSIGN_ISSUER, checksums_path],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=15, stdin=subprocess.DEVNULL,
-        )
+            timeout=15, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("cosign execution failed: %s", exc)
         return None
@@ -491,8 +488,7 @@ def ensure_installed(*, log_failures: bool = True):
         return found
     if _install_thread is None or not _install_thread.is_alive():
         _install_thread = threading.Thread(
-            target=_background_install, kwargs={"log_failures": log_failures}, daemon=True
-        )
+            target=_background_install, kwargs={"log_failures": log_failures}, daemon=True)
         _install_thread.start()
     return None  # not available yet; commands fail-open until ready
 
@@ -505,8 +501,7 @@ _EXIT_ACTIONS = {0: "allow", 1: "block", 2: "warn"}
 # Summary when tirith's JSON is unparseable and only the exit code is known.
 _NO_DETAILS_SUMMARY = {
     "block": "security issue detected (details unavailable)",
-    "warn": "security warning detected (details unavailable)",
-}
+    "warn": "security warning detected (details unavailable)"}
 
 
 def _verdict(action: str, summary: str = "", findings: list | None = None) -> dict:
@@ -539,8 +534,7 @@ def check_command_security(command: str) -> dict:
         result = subprocess.run(
             [tirith_path, "check", "--json", "--non-interactive", "--shell", "posix", "--", command],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=timeout, stdin=subprocess.DEVNULL,
-        )
+            timeout=timeout, stdin=subprocess.DEVNULL)
     except OSError as exc:
         # FileNotFoundError / PermissionError / exec format error: dedupe by (class, errno)
         # so each failure mode surfaces once, not per command.
@@ -584,5 +578,4 @@ def _is_app_tld_finding(finding: dict) -> bool:
         return False
     return any(
         val is not None and ".app" in str(val).lower()
-        for val in (finding.get(k) for k in ("value", "tld", "detail", "description", "message"))
-    )
+        for val in (finding.get(k) for k in ("value", "tld", "detail", "description", "message")))

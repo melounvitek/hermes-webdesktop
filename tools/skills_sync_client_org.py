@@ -21,8 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from tools.skills_sync_client_wire import (
     DEFAULT_MAX_OBJECT_BYTES, ObjectSet, SyncClient, SyncConflict, SyncError, _check_version,
     assemble_root_from_skill_trees, build_commit, build_tree, materialize_tree, read_ref_hash,
-    root_tree_of_commit, skill_trees_of_root,
-)
+    root_tree_of_commit, skill_trees_of_root)
 
 logger = logging.getLogger("tools.skills_sync_client")
 
@@ -155,8 +154,7 @@ def _clear_active_org_marker() -> None:
             marker.unlink()
             logger.info(
                 "skills_sync_client: cleared active-org marker "
-                "(token has no org workflow); org skills no longer resolve"
-            )
+                "(token has no org workflow); org skills no longer resolve")
     except Exception as e:
         logger.debug("skills_sync_client: marker clear failed: %s", e)
 
@@ -258,8 +256,7 @@ def pull_org_skills(
     if conflicted:
         logger.warning(
             "skills_sync_client: %d org skill(s) have local edits AND upstream "
-            "changes; left untouched: %s", len(conflicted), ", ".join(conflicted),
-        )
+            "changes; left untouched: %s", len(conflicted), ", ".join(conflicted))
     return {"ok": True, "org_id": org_id, "head": head, "updated": updated, "conflicted": conflicted}
 
 
@@ -268,8 +265,7 @@ def propose_skill(
     client: Optional[SyncClient] = None,
     *,
     identity: Optional[Dict[str, Any]] = None,
-    message: Optional[str] = None,
-) -> Dict[str, Any]:
+    message: Optional[str] = None) -> Dict[str, Any]:
     """Propose a local (personal) skill's content to the org canonical set.
 
     Snapshots the skill dir as an org-scoped commit splicing that ONE skill subtree into the
@@ -298,8 +294,7 @@ def propose_skill(
         base_head = _read_org_head(client, org_id)
         skill_map = (
             skill_trees_of_root(client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
-            if base_head else {}
-        )
+            if base_head else {})
         skill_map[str(rel)] = skill_tree
         root_hash = assemble_root_from_skill_trees(skill_map, objects)
         commit_hash = build_commit(
@@ -323,8 +318,7 @@ def propose_skill(
     if result.get("proposal_pending"):
         return {
             "ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
-            "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id,
-        }
+            "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id}
     return {"ok": True, "merged": True, "head": result.get("hash", commit_hash), "commit": commit_hash, "org_id": org_id}
 
 

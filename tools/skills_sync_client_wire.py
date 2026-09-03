@@ -145,16 +145,14 @@ def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> 
 
 def build_commit(
     tree_hash: str, parents: List[str], *, owner: str, device: str, message: str,
-    objects: ObjectSet, ts: Optional[str] = None,
-) -> str:
+    objects: ObjectSet, ts: Optional[str] = None) -> str:
     """Build a commit object and return its address. ``parents``: 0 for the first commit, 1 for
     an edit, 2 for a merge (parents[0] = base fast-forwarded from, parents[1] = other head)."""
     return objects.add(KIND_COMMIT, canonical_json_bytes({
         "type": KIND_COMMIT, "tree": tree_hash, "parents": list(parents),
         "author": {"owner": owner, "device": device},
         "ts": ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "message": message, "artifact_type": ARTIFACT_TYPE_SKILL,
-    }))
+        "message": message, "artifact_type": ARTIFACT_TYPE_SKILL}))
 
 
 def build_root_tree(node: Dict[str, Any], objects: ObjectSet, *, manifest_hash: Optional[str] = None) -> str:
@@ -217,8 +215,7 @@ def _check_version(caps: Dict[str, Any]) -> None:
     if ver.split(".", 1)[0] != WIRE_VERSION:
         raise SyncError(
             f"this server speaks sync version {ver!r}, but this Hermes speaks "
-            f"{WIRE_VERSION} — update Hermes to sync with it"
-        )
+            f"{WIRE_VERSION} — update Hermes to sync with it")
 
 
 def _body(r) -> Dict[str, Any]:
@@ -272,8 +269,7 @@ class SyncClient:
         """GET objects/:hash -> ``(kind, bytes)``; kind from the object-type header, blob default."""
         r = self._request(
             "GET", f"org/objects/{obj_hash}" if org_scope else f"objects/{obj_hash}", "get_object",
-            errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"},
-        )
+            errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"})
         return r.headers.get("X-HSP-Object-Type") or KIND_BLOB, r.content
 
     def _get_json_of_kind(self, obj_hash: str, expected: str, org_scope: bool) -> Dict[str, Any]:
@@ -298,8 +294,7 @@ class SyncClient:
         r = self._request(
             "POST", "objects", "put_objects", ok=(200, 201), files=files,
             params={"scope": "org"} if org_scope else None,
-            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"},
-        )
+            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"})
         return _body(r)
 
     def cas_ref(self, name: str, from_hash: Optional[str], to_hash: str) -> Dict[str, Any]:
@@ -308,8 +303,7 @@ class SyncClient:
         ``{"proposal_pending": True, ...}``: SUCCESS-shaped but never to be presented as live/merged."""
         r = self._request(
             "POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409), json={"from": from_hash, "to": to_hash},
-            errors={403: "forbidden (403) -- owner/permission"},
-        )
+            errors={403: "forbidden (403) -- owner/permission"})
         if r.status_code == 202:
             return {"proposal_pending": True, **_body(r)}
         if r.status_code == 409:  # "" actual = the ref does not exist server-side (-> None)
