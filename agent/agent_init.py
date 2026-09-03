@@ -1905,9 +1905,9 @@ def _inject_context_engine_tools(agent):
         _existing_tool_names = {
             t.get("function", {}).get("name") for t in agent.tools if isinstance(t, dict)
         }
-        from agent.memory_manager import normalize_tool_schema as _normalize_tool_schema
+        from agent.memory_manager import normalize_tool_schema
         for _raw_schema in agent.context_compressor.get_tool_schemas():
-            _schema = _normalize_tool_schema(_raw_schema)
+            _schema = normalize_tool_schema(_raw_schema)
             if _schema is None:
                 # A nameless tool makes strict providers 400 and disables the whole toolset.
                 _ra().logger.warning(
@@ -1920,9 +1920,8 @@ def _inject_context_engine_tools(agent):
             if _tname in _existing_tool_names:
                 continue  # already registered via plugin/cache path
             agent.tools.append({"type": "function", "function": _schema})
-            agent.valid_tool_names.add(_tname)
-            agent._context_engine_tool_names.add(_tname)
-            _existing_tool_names.add(_tname)
+            for _names in (agent.valid_tool_names, agent._context_engine_tool_names, _existing_tool_names):
+                _names.add(_tname)
 
     if agent.context_compressor:
         try:
@@ -2003,18 +2002,15 @@ def _emit_compression_summary(agent, cs):
         )
 
     if not agent.quiet_mode:
+        _cc = agent.context_compressor
         if cs.enabled:
             # The active engine's own threshold — a plugin's differs from cs.threshold.
-            _active_threshold_pct = getattr(
-                agent.context_compressor, "threshold_percent", cs.threshold
-            )
-            _cap_note = ""
-            _cap = getattr(agent.context_compressor, "threshold_tokens_cap", None)
-            if _cap and _cap > 0:
-                _cap_note = f" (capped at {_cap:,} tokens)"
-            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(_active_threshold_pct*100)}% = {agent.context_compressor.threshold_tokens:,}{_cap_note})")
+            _pct = getattr(_cc, "threshold_percent", cs.threshold)
+            _cap = getattr(_cc, "threshold_tokens_cap", None)
+            _cap_note = f" (capped at {_cap:,} tokens)" if _cap and _cap > 0 else ""
+            print(f"📊 Context limit: {_cc.context_length:,} tokens (compress at {int(_pct*100)}% = {_cc.threshold_tokens:,}{_cap_note})")
         else:
-            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (auto-compression disabled)")
+            print(f"📊 Context limit: {_cc.context_length:,} tokens (auto-compression disabled)")
         # Gateway users get the same text via _compression_warning on turn 1.
         if _autoraise_notice:
             print(_autoraise_notice)
