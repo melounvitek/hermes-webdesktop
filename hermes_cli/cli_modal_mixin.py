@@ -882,26 +882,22 @@ class CLIModalMixin:
         (approval -> "deny", clarify/sudo/secret -> cancel), nil the state, restore the draft.
         Each step is wrapped so a dead queue can't prevent clearing the others.
         """
-        if self._approval_state:
+        def _put(state, value) -> None:
             try:
-                self._approval_state["response_queue"].put("deny")
+                state["response_queue"].put(value)
             except Exception:
                 pass
+
+        if self._approval_state:
+            _put(self._approval_state, "deny")
             self._approval_state = None
         if self._clarify_state:
-            try:
-                self._clarify_state["response_queue"].put(
-                    "The user cancelled. Use your best judgement to proceed.")
-            except Exception:
-                pass
+            _put(self._clarify_state, "The user cancelled. Use your best judgement to proceed.")
             self._clarify_state = None
             self._clarify_freetext = False
             self._clarify_multi_base = None
         if self._sudo_state:
-            try:
-                self._sudo_state["response_queue"].put("")
-            except Exception:
-                pass
+            _put(self._sudo_state, "")
             self._sudo_state = None
             self._sudo_deadline = 0
             self._restore_modal_input_snapshot()
