@@ -184,11 +184,25 @@ _BG_PROVIDER_KWARGS = {
     "provider_data_collection": "_provider_data_collection",
     "openrouter_min_coding_score": "_openrouter_min_coding_score", "fallback_model": "_fallback_model"}
 
+# /worktree subcommand -> CLICommandsMixin method name (all need a repo root).
+_WORKTREE_SUBCOMMANDS = {
+    **dict.fromkeys(("prune", "gc", "clean"), "_worktree_prune"),
+    **dict.fromkeys(("list", "ls"), "_worktree_list"),
+    **dict.fromkeys(("new", "add", "create"), "_worktree_new")}
+
 # /diff argument -> mode (anything else is a path; --stat/stat is the stat flag).
 _DIFF_MODES = {
     "staged": "staged", "--staged": "staged", "cached": "staged", "--cached": "staged",
     "all": "all", "--all": "all", "head": "all", "session": "session"}
 _DIFF_LABELS = {"working": "Unstaged", "staged": "Staged", "all": "All (vs HEAD)"}
+
+
+def _persist_display_choice(key: str, value: str, label: str, note: str) -> None:
+    """Save a /busy-style choice to config and report saved vs session-only."""
+    if _save(key, value):
+        _cp(_accent_line(f"✓ {label} set to '{value}' (saved to config)"), _dim_line(note))
+    else:
+        _cp(_accent_line(f"✓ {label} set to '{value}' (session only)"))
 
 
 def _split_scope_flags(raw: str):
@@ -285,11 +299,9 @@ def _end_current_session(cli, reason: str) -> None:
 
 
 def _sync_agent_to_session(cli, session_id: str, *, parent_session_id: str, reason: str) -> None:
-    """Point an already-built agent at ``session_id`` after a /resume or /branch switch.
-
-    Resets per-session agent state, re-anchors the DB flush index to the loaded history,
-    and notifies memory providers with reset=False — their accumulated state stays valid
-    and just targets the new session_id (the parent link keeps the lineage)."""
+    """Point an already-built agent at ``session_id`` after a /resume or /branch switch: reset
+    per-session state, re-anchor the DB flush index, and notify memory providers with
+    reset=False (their state stays valid and just targets the new id; parent keeps lineage)."""
     if not cli.agent:
         return
     cli.agent.session_id = session_id
@@ -609,11 +621,8 @@ class CLICommandsMixin:
         return mgr
 
     def _handle_rollback_command(self, command: str):
-        """Handle /rollback — list, diff, or restore filesystem checkpoints.
-
-        ``/rollback`` lists; ``<N>`` restores N preserving user hand-edits (and undoes the last
-        chat turn); ``<N> --all`` is the classic full restore; ``diff <N>`` previews changes since
-        N; ``<N> <file>`` restores a single file."""
+        """Handle /rollback [diff] <N> [<file>|--all] — list, diff, or restore checkpoints.
+        A restore also undoes the last chat turn; ``--all`` overwrites user hand-edits too."""
         from tools.checkpoint_manager import format_checkpoint_list
         mgr = self._checkpoint_manager((
             "  Checkpoints are not enabled.", "  Enable with: hermes --checkpoints",
@@ -626,8 +635,7 @@ class CLICommandsMixin:
         restore_all = any(a.lower() in ("--all", "--force") for a in args)
         args = [a for a in args if a.lower() not in ("--all", "--force")]
         if not args:
-            # List checkpoints — fall back to the cross-project view when the current
-            # directory has none (writes may have landed under the session cwd, not TERMINAL_CWD).
+            # No checkpoints for this dir → cross-project view (writes may sit under the session cwd).
             checkpoints = mgr.list_checkpoints(cwd)
             if not checkpoints:
                 all_checkpoints = mgr.list_all_checkpoints()
@@ -702,10 +710,8 @@ class CLICommandsMixin:
     # ---- /diff ----------------------------------------------------------------------------
 
     def _handle_diff_command(self, command: str):
-        """Handle /diff — show git changes in the working directory.
-
-        Syntax: ``/diff`` (unstaged + untracked), ``staged``, ``all`` (vs HEAD), ``session``
-        (everything Hermes changed since the checkpoint baseline), ``[mode] --stat``, ``[mode] <path...>``."""
+        """Handle /diff [working|staged|all|session] [--stat] [<path>...] — git changes in the
+        cwd; ``session`` is everything Hermes changed since the checkpoint baseline."""
         stat_only = False
         mode = "working"
         paths: list[str] = []
@@ -788,9 +794,7 @@ class CLICommandsMixin:
     # ---- /snapshot ------------------------------------------------------------------------
 
     def _handle_snapshot_command(self, command: str):
-        """Handle /snapshot — lightweight state snapshots for Hermes config/state.
-
-        Syntax: ``/snapshot`` (list), ``create [label]``, ``restore <id>``, ``prune [N]`` (default 20)."""
+        """Handle /snapshot [list|create [label]|restore <id>|prune [N]] — state snapshots."""
         parts = command.split()
         subcmd = parts[1].lower() if len(parts) > 1 else "list"
         handler = {
@@ -1161,12 +1165,8 @@ class CLICommandsMixin:
     def _handle_handoff_command(self, cmd_original: str) -> bool:
         """Handle ``/handoff <platform>`` — transfer this CLI session to a gateway platform.
 
-        Validates the platform + home channel, refuses mid-turn (an in-flight run would race the
-        gateway's switch_session), writes ``handoff_state='pending'``, then block-polls state.db:
-        60s for the gateway to CLAIM the row, then up to 15 min (with heartbeats) for the claimed
-        dispatch to finish. ``completed`` → resume hint + return False (caller exits like /quit).
-        ``failed`` / pending-timeout → error + True (session kept). A running-timeout leaves the
-        row untouched (the gateway owns it) and returns True."""
+        Validate target → prepare session row → mark pending → block-poll (see ``_handoff_wait``).
+        Returns False only on ``completed`` (caller exits like /quit); True keeps the session."""
         platform_name = _command_arg(cmd_original).lower()
         if not platform_name:
             _cp("  Usage: /handoff <platform>",
@@ -1206,9 +1206,8 @@ class CLICommandsMixin:
             return None
         pcfg = gw_config.platforms.get(platform)
         if not pcfg or not pcfg.enabled:
-            # Relay aliasing: a relay-fronted gateway has only a RELAY config block, yet
-            # /handoff discord is deliverable when the relay fronts it. UX pre-check only —
-            # the gateway watcher re-checks against the authenticated transport before dispatch.
+            # Relay aliasing: a relay-fronted gateway has only a RELAY block yet /handoff discord
+            # is deliverable. UX pre-check only — the gateway watcher re-checks before dispatch.
             relay_fronts = False
             try:
                 from gateway.relay import relay_platform_identities
@@ -1257,12 +1256,10 @@ class CLICommandsMixin:
         return session_title or self.session_id[:8]
 
     def _handoff_wait(self, platform_name: str, session_title: str) -> bool:
-        """Two-phase poll, tick every 0.5s. PENDING (unclaimed): 60s — a timeout means no gateway
-        watcher is looking at this state.db, and the CAS fail can't stomp a claim landing the same
-        instant. RUNNING (claimed): the gateway replays the full transcript via a synthetic turn
-        (routinely >60s), so wait much longer with a heartbeat and on timeout do NOT touch the row
-        — failing it here was the split-brain bug (CLI said "failed" while the gateway completed
-        the switch)."""
+        """Two-phase 0.5s poll. PENDING (unclaimed): 60s, then CAS-fail the row so the user can
+        retry (a claim racing this instant wins). RUNNING (claimed): the gateway replays the
+        transcript via a synthetic turn (routinely >60s) — wait 15 min with heartbeats and on
+        timeout do NOT touch the row; failing it here was the split-brain bug."""
         import time as _time
         pending_deadline = _time.time() + self._HANDOFF_PENDING_TIMEOUT
         running_deadline = None
@@ -1283,9 +1280,8 @@ class CLICommandsMixin:
             if current == "completed":
                 _cp("", f"  ↻ Handoff complete. The session is now active on {platform_name}.",
                     f"  Resume it on this CLI later with: /resume {session_title}", "")
-                # Mark handed off so _run_cleanup does NOT finalize it on exit: the gateway owns
-                # the row now, and setting end_reason under it would drop the handoff leg from
-                # session history / session_search.
+                # _run_cleanup must NOT finalize the row on exit: the gateway owns it now, and an
+                # end_reason set under it would drop the handoff leg from session history/search.
                 from cli import _handed_off_session_ids
                 _handed_off_session_ids.add(self.session_id)
                 self._should_exit = True  # same exit semantics as /quit
@@ -1312,9 +1308,7 @@ class CLICommandsMixin:
                     return True
             _time.sleep(0.5)
 
-        # Pending timed out: clear the flag so the user can retry (CAS — a claim racing this
-        # instant wins; we lose only the retry convenience, never the handoff).
-        try:
+        try:  # pending timed out: CAS-clear so the user can retry
             self._session_db.fail_handoff(
                 self.session_id, "timed out waiting for gateway", only_states=("pending",))
         except TypeError:
@@ -1340,9 +1334,8 @@ class CLICommandsMixin:
         if not target:
             _cp("  Usage: /resume <number|session_id_or_title>")
             if self._show_recent_sessions(reason="resume"):
-                # Arm a one-shot pending-resume selection so a bare number on the next line
-                # works. Must be the same list _show_recent_sessions showed and the numbered
-                # branch below resolves — all three use _list_recent_sessions(limit=10).
+                # Arm a one-shot bare-number selection; must be the same list the table showed
+                # and the numbered branch resolves (all use _list_recent_sessions(limit=10)).
                 self._pending_resume_sessions = self._list_recent_sessions(limit=10)
                 return
             _cp("  Tip:   Use /history or `hermes sessions list` to find sessions.")
@@ -1393,10 +1386,8 @@ class CLICommandsMixin:
         self._pending_title = None
         _sync_process_session_id(target_id)
 
-        # Both projections come from one lineage SELECT: model_history is alternation-repaired
-        # for LIVE REPLAY (heals a durable ``user;user`` violation once instead of on every
-        # request); display_history is the full lineage verbatim for _display_resumed_history()
-        # (matches startup --resume).
+        # One lineage SELECT, two projections: model_history is alternation-repaired for live
+        # replay (heals a durable user;user once); display_history is verbatim (as startup --resume).
         model_history, display_history = self._session_db.get_resume_conversations(target_id)
         self.conversation_history = [m for m in (model_history or []) if m.get("role") != "session_meta"]
         self._resume_display_history = [m for m in (display_history or []) if m.get("role") != "session_meta"]
@@ -1416,20 +1407,15 @@ class CLICommandsMixin:
         else:
             _cp(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
 
-        # Same contract as a startup --resume: retarget the process/tool cwd (else the terminal
-        # tools keep operating in the wrong repo), restore the target session's persisted YOLO
-        # bypass (the approval session key changed), and its model/provider (else it reverts to
-        # config default).
+        # Same contract as startup --resume: retarget the tool cwd, restore the persisted YOLO
+        # bypass (approval session key changed) and the model/provider (else config default).
         self._restore_session_cwd(session_meta)
         self._restore_session_yolo(session_meta)
         self._restore_session_model(session_meta)
 
     def _handle_sessions_command(self, cmd_original: str) -> None:
-        """Handle /sessions [list|<id_or_title>] — browse or resume previous sessions.
-
-        Bare/``list`` prints the same recent-sessions table /resume shows; an explicit target
-        delegates to the resume flow so ``/sessions <id>`` and ``/resume <id>`` behave identically.
-        (The TUI has a picker overlay; the classic CLI prints inline.)"""
+        """Handle /sessions [list|<id_or_title>] — bare/``list`` prints the recent-sessions table;
+        an explicit target delegates to /resume so both spellings behave identically."""
         arg = _command_arg(cmd_original)
         if arg and arg.lower() not in {"list", "ls", "browse"}:
             self._handle_resume_command(f"/resume {arg}")
@@ -1459,9 +1445,8 @@ class CLICommandsMixin:
         parent_session_id = self.session_id
         _end_current_session(self, "branched")
 
-        # Create the new session with parent link. The stable ``_branched_from`` marker keeps
-        # the branch visible in /resume + /sessions even after the parent is re-ended with a
-        # different end_reason.
+        # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions
+        # even after the parent is re-ended with a different end_reason.
         try:
             self._session_db.create_session(
                 session_id=new_session_id,
@@ -1475,9 +1460,8 @@ class CLICommandsMixin:
             _cp(f"  Failed to create branch session: {e}")
             return
 
-        # Copy history in bounded-chunk transactions. Best-effort: a failed copy still yields a
-        # usable branch. api_content sidecar: the branch's first turn replays the parent's exact
-        # wire bytes (warm prompt cache) instead of a cold prefill.
+        # Best-effort chunked copy (a failed copy still yields a usable branch); the api_content
+        # sidecar lets the branch's first turn replay the parent's exact wire bytes (warm cache).
         with suppress(Exception):
             self._session_db.append_messages_batch(
                 new_session_id,
@@ -1516,13 +1500,9 @@ class CLICommandsMixin:
     # ---- /worktree ------------------------------------------------------------------------
 
     def _handle_worktree_command(self, cmd_original: str) -> None:
-        """Handle /worktree — inspect, create, or reclaim isolated git worktrees.
-
-        ``/worktree`` shows the active worktree; ``new [name]`` creates one and moves this session
-        into it (retargets ``TERMINAL_CWD`` + process cwd; the launcher's exit cleanup applies —
-        kept only with unpushed commits, as ``hermes -w``); ``list`` lists trees under the repo's
-        .worktrees/; ``prune [--dry-run]`` is the attended reclaim from hermes_cli/worktree_gc.py
-        (never deletes tracked changes, unique unpushed commits, or in-use trees)."""
+        """Handle /worktree [new [name]|list|prune [--dry-run]] — isolated git worktrees.
+        ``new`` moves this session into the tree (as ``hermes -w``: kept on exit only with
+        unpushed commits); ``prune`` never deletes tracked changes, unique commits, or in-use trees."""
         import cli as _cli
         parts = cmd_original.split(None, 2)
         sub = parts[1].lower() if len(parts) > 1 else ""
@@ -1540,19 +1520,15 @@ class CLICommandsMixin:
             else:
                 print("  (not inside a git repository)")
             return
-        handler = {
-            "prune": self._worktree_prune, "gc": self._worktree_prune, "clean": self._worktree_prune,
-            "list": self._worktree_list, "ls": self._worktree_list,
-            "new": self._worktree_new, "add": self._worktree_new, "create": self._worktree_new,
-        }.get(sub)
+        handler = _WORKTREE_SUBCOMMANDS.get(sub)
         if handler is None:
             _pr(f"  Unknown /worktree subcommand: {sub}", "  Usage: /worktree [new [name] | list]")
             return
         if not repo_root:
             print("  ❌ /worktree new requires being inside a git repository."
-                  if handler is self._worktree_new else "  Not inside a git repository.")
+                  if handler == "_worktree_new" else "  Not inside a git repository.")
             return
-        handler(repo_root, rest)
+        getattr(self, handler)(repo_root, rest)
 
     def _worktree_prune(self, repo_root: str, rest: str) -> None:
         import cli as _cli
@@ -1675,11 +1651,8 @@ class CLICommandsMixin:
                 f"  \"{_ellipsize(personality_prompt, 60)}\"")
 
     def _handle_pet_command(self, cmd: str):
-        """Toggle, browse, or adopt a petdex mascot.
-
-        ``/pet`` / ``/pet toggle`` flips ``display.pet.enabled``; ``list`` browses the gallery;
-        ``scale <n>`` resizes; ``<slug>`` adopts (installs if needed); ``off`` disables.
-        Writes ``display.pet.*`` to config; pet surfaces pick it up on their next poll."""
+        """Handle /pet [toggle|list|scale <n>|off|<slug>] — the petdex mascot. Writes
+        ``display.pet.*`` to config; pet surfaces pick it up on their next poll."""
         from agent.pet import store
         from agent.pet.manifest import ManifestError
         from hermes_cli.pets import (
@@ -1726,9 +1699,8 @@ class CLICommandsMixin:
         from hermes_cli.pets import _set_active
         concept = _command_arg(cmd)
         if not concept:
-            # Dispatched from the process_loop daemon thread while prompt_toolkit owns stdin — a
-            # raw input() here never renders and eats keystrokes. Use the thread-aware prompt
-            # helper (run_in_terminal; None when prompting isn't safe).
+            # prompt_toolkit owns stdin on this daemon thread — raw input() never renders and eats
+            # keystrokes; prefer the thread-aware helper (None when prompting isn't safe).
             prompt_helper = getattr(self, "_prompt_text_input", None)
             if callable(prompt_helper):
                 concept = (prompt_helper("(o_o) Describe your pet: ") or "").strip()
@@ -2011,9 +1983,8 @@ class CLICommandsMixin:
         args = cmd.strip().split()[1:]
         store = getattr(self.agent, "_memory_store", None) if getattr(self, "agent", None) else None
         if store is None:
-            # No live agent store (e.g. /memory approve from the Desktop GUI): apply against a
-            # freshly loaded on-disk store, mirroring the gateway path. It persists to the same
-            # MEMORY/USER.md and honors the user's configured char limits.
+            # No live agent store (e.g. Desktop GUI): use a fresh on-disk store, as the gateway
+            # does — same MEMORY/USER.md, same configured char limits.
             from tools.memory_tool import load_on_disk_store
             store = load_on_disk_store()
         out = handle_pending_subcommand(
@@ -2551,9 +2522,7 @@ class CLICommandsMixin:
 
     def _handle_subgoal_command(self, cmd: str) -> None:
         """Dispatch /subgoal: bare → show, ``<text>`` → append, ``remove <n>`` (1-based), ``clear``.
-
-        Subgoals are extra criteria added mid-loop; they join both the judge prompt and the
-        continuation prompt at the next turn boundary (no special kick)."""
+        Subgoals join the judge + continuation prompts at the next turn boundary (no kick)."""
         parts = (cmd or "").strip().split(None, 2)
         arg = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
         mgr = self._session_manager(self._get_goal_manager, "Goals")
@@ -2683,13 +2652,10 @@ class CLICommandsMixin:
     # ---- /focus and its display hooks -----------------------------------------------------
 
     def _handle_focus_command(self, cmd_original: str) -> None:
-        """Toggle or inspect focus view (``/focus [on|off|status]``) — a DISPLAY-ONLY reduced-output mode.
-
-        Composes with the existing ``/verbose`` machinery instead of adding a second suppression
-        path: turning it on stashes the user's tool_progress_mode and snaps it to "off" (the value
-        ``agent/tool_executor.py`` gates on); turning it off restores the stash verbatim. Adds a
-        per-turn hidden-line count with a recovery hint and a ``focus`` status-bar segment. Never
-        touches history, system prompt, or request payloads."""
+        """``/focus [on|off|status]`` — DISPLAY-ONLY reduced output. Reuses the ``/verbose``
+        suppression path: on stashes tool_progress_mode and snaps it to "off" (what
+        ``agent/tool_executor.py`` gates on); off restores the stash verbatim. Never touches
+        history, system prompt, or request payloads."""
         from hermes_cli.colors import Colors as _Colors
         from hermes_cli.focus_view import (
             FOCUS_CONFIG_KEY, FOCUS_TOOL_PROGRESS_MODE, format_focus_status,
@@ -2827,12 +2793,8 @@ class CLICommandsMixin:
     # ---- model-behaviour settings: /reasoning, /busy, /indicator, /fast -------------------
 
     def _handle_reasoning_command(self, cmd: str):
-        """Handle /reasoning — manage effort level and display toggle.
-
-        ``/reasoning`` shows the effort level and display state; ``<level> [--global]`` sets the
-        effort for this session (none, minimal, low, medium, high, xhigh, max, ultra; --global
-        persists to config.yaml); ``show|hide`` toggles thinking in the output; ``full|clamp``
-        picks complete thinking vs. the first-10-lines clamp."""
+        """Handle /reasoning [<level> [--global]|show|hide|full|clamp] — effort level (session
+        scope unless --global) and thinking display toggles (always saved)."""
         from cli import CLI_CONFIG, _parse_reasoning_config
         raw = _command_arg(cmd)
         if not raw:  # show current state
@@ -2898,14 +2860,7 @@ class CLICommandsMixin:
             _cp(_dim_line(f'(._.) Unknown argument: {arg}'), usage)
             return
         self.busy_input_mode = arg
-        self._persist_display_choice("display.busy_input_mode", arg, "Busy input mode", _BUSY_MODE_LONG[arg])
-
-    def _persist_display_choice(self, key: str, value: str, label: str, note: str) -> None:
-        """Save a /busy-style choice to config and report saved vs session-only."""
-        if _save(key, value):
-            _cp(_accent_line(f"✓ {label} set to '{value}' (saved to config)"), _dim_line(note))
-        else:
-            _cp(_accent_line(f"✓ {label} set to '{value}' (session only)"))
+        _persist_display_choice("display.busy_input_mode", arg, "Busy input mode", _BUSY_MODE_LONG[arg])
 
     def _handle_indicator_command(self, cmd: str):
         """Handle /indicator [status|kaomoji|emoji|unicode|ascii] — pick the TUI busy-indicator style.
@@ -2921,8 +2876,8 @@ class CLICommandsMixin:
             _cp(_dim_line(f'(._.) Unknown indicator style: {arg}'), usage)
             return
         self.config.setdefault("display", {})["tui_status_indicator"] = arg
-        self._persist_display_choice("display.tui_status_indicator", arg, "Busy-indicator style",
-                                     "The TUI picks up the new style on its next render.")
+        _persist_display_choice("display.tui_status_indicator", arg, "Busy-indicator style",
+                                "The TUI picks up the new style on its next render.")
 
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode).
@@ -2971,10 +2926,9 @@ class CLICommandsMixin:
             lines=200, expire=7, local=local, nous="nous" in words and not local, yes=True))
 
     def _handle_update_command(self) -> bool:
-        """Handle /update — exit the session and relaunch as ``hermes update``.
-
-        Returns True when confirmed: the caller triggers app exit so the relaunch happens on the
-        main thread after prompt_toolkit restores terminal modes. False when cancelled."""
+        """Handle /update — exit the session and relaunch as ``hermes update``. Returns True when
+        confirmed (the caller exits the app; the relaunch runs on the main thread after
+        prompt_toolkit restores terminal modes), False when cancelled."""
         from hermes_cli.config import is_managed, format_managed_message
         if is_managed():
             print(f"  ✗ {format_managed_message('update Hermes Agent')}")
@@ -2991,9 +2945,8 @@ class CLICommandsMixin:
             print("  🟡 /update cancelled.")
             return False
         _say_block("  ⚕ Launching update...")
-        # run() execs this from the main thread after prompt_toolkit restores terminal modes.
-        # Relaunching here (daemon thread) would skip terminal cleanup on POSIX and, on Windows,
-        # sys.exit would only end the worker thread.
+        # run() execs this on the main thread after prompt_toolkit restores terminal modes;
+        # relaunching from this daemon thread would skip cleanup (POSIX) / only end the thread (Windows).
         self._pending_relaunch = ["update"]
         return True
 
