@@ -327,9 +327,9 @@ class ToolCallGuardrailController:
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
             return self._decide("block", "repeated_exact_failure_block", tool_name, exact_count, signature)
-        repeat_count = self._no_progress.get(signature, ("", 0))[1] if self._is_idempotent(tool_name) else 0
-        if repeat_count >= self.config.no_progress_block_after:
-            return self._decide("block", "idempotent_no_progress_block", tool_name, repeat_count, signature)
+        record = self._no_progress.get(signature) if self._is_idempotent(tool_name) else None
+        if record is not None and record[1] >= self.config.no_progress_block_after:
+            return self._decide("block", "idempotent_no_progress_block", tool_name, record[1], signature)
         return allow
 
     def after_call(

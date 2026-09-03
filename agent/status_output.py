@@ -29,8 +29,7 @@ class StatusOutputMixin:
         the main response; ``force=True`` bypasses both. ``suppress_status_output`` (``hermes chat -q``) wins."""
         if getattr(self, "suppress_status_output", False):
             return
-        muted = getattr(self, "_mute_post_response", False) or (self._has_stream_consumers() and not self._executing_tools)
-        if force or not muted:
+        if force or not (getattr(self, "_mute_post_response", False) or (self._has_stream_consumers() and not self._executing_tools)):
             self._safe_print(*args, **kwargs)
 
     def _should_start_quiet_spinner(self) -> bool:
