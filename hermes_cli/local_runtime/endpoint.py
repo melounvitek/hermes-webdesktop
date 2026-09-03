@@ -7,6 +7,7 @@ its state file appears.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import logging
 import threading
@@ -23,12 +24,11 @@ def _pid_alive(pid: int) -> bool:
     (optimistic). On Windows ``os.kill(pid, 0)`` TERMINATES the process — never use it as a probe."""
     if not pid or pid < 0:
         return False
-    try:
+    with suppress(Exception):
         import psutil  # type: ignore
 
         return psutil.pid_exists(pid)
-    except Exception:  # noqa: BLE001
-        return True
+    return True
 
 
 def _state_endpoint() -> dict | None:
@@ -61,14 +61,13 @@ def managed_root() -> "tuple[str, str] | None":
     ownership-guarded reader, not a raw state-file read: on the shared stable port a foreign
     install's server answers /health for anyone, and a raw read would attach callers to someone
     else's server."""
-    try:
+    with suppress(Exception):
         state = _state_endpoint()
         if state is None:
             return None
         base = str(state.get("base_url", "")).rsplit("/v1", 1)[0]
         return (base, str(state.get("api_key", ""))) if base else None
-    except Exception:  # noqa: BLE001
-        return None
+    return None
 
 
 def managed_get_json(base: str, api_key: str, route: str, timeout_s: float) -> object:
@@ -144,12 +143,11 @@ def _boot_in_flight(config: dict | None) -> bool:
     """True when the managed runtime is enabled and installed (a verified-manifest scan under
     runtimes_root(), NOT a bare ``server_binary()`` call — that needs an install_dir, and calling
     it bare once made this gate throw-and-return False forever, disabling the boot wait)."""
-    try:
+    with suppress(Exception):
         config = _load_config_if_none(config)
         if not ((config or {}).get("local_runtime") or {}).get("enabled"):
             return False
         from hermes_cli.local_runtime.binaries import manifest_verified, runtimes_root
 
         return any(manifest_verified(m) for m in runtimes_root().glob("*/*/manifest.json"))
-    except Exception:  # noqa: BLE001
-        return False
+    return False

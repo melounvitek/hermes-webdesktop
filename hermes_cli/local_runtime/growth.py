@@ -6,6 +6,7 @@ other-process supervisors keep their own policies.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import logging
 
@@ -20,12 +21,11 @@ def window_overrides_path():
 
 def load_window_overrides() -> dict:
     """model_id -> granted window (int). Empty on any read problem."""
-    try:
+    with suppress(Exception):
         with open(window_overrides_path(), encoding="utf-8") as fh:
             data = json.load(fh)
         return {str(k): int(v) for k, v in data.items()}
-    except Exception:  # noqa: BLE001
-        return {}
+    return {}
 
 
 def _write_overrides(overrides: dict) -> None:
@@ -50,16 +50,13 @@ def clear_window_override(model_id: str) -> None:
 
 def is_managed_endpoint(base_url: str) -> bool:
     """True when base_url is the server this process's state file points at."""
-    try:
+    with suppress(Exception):
         from hermes_cli.local_runtime.endpoint import _state_endpoint
 
         state = _state_endpoint()
-        if state is None:
-            return False
-        return (base_url or "").rstrip("/") == str(
-            state.get("base_url", "")).rstrip("/")
-    except Exception:  # noqa: BLE001
-        return False
+        return state is not None and (
+            (base_url or "").rstrip("/") == str(state.get("base_url", "")).rstrip("/"))
+    return False
 
 
 def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,

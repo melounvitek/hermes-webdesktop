@@ -10,6 +10,7 @@ interactive environment.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
 import os
 import re
@@ -88,7 +89,7 @@ def _ram_bytes() -> tuple[int, int]:
             if total <= 0:
                 return 0, 0
             avail = total // 2  # conservative fallback
-            try:
+            with suppress(OSError, ValueError):
                 out = _stdout("/usr/bin/vm_stat")
                 page_m = re.search(r"page size of (\d+)", out)
                 page = int(page_m.group(1)) if page_m else 16384
@@ -99,17 +100,13 @@ def _ram_bytes() -> tuple[int, int]:
                     if (m := re.search(rf"{key}:\s+(\d+)\.", out)))
                 if pages > 0:
                     avail = pages * page
-            except (OSError, ValueError):
-                pass
             return total, avail
         # POSIX
         page = int(_stdout("getconf", "PAGE_SIZE") or 4096)
         total = int(_stdout("getconf", "_PHYS_PAGES") or 0) * page
         avail = total // 2  # conservative when _AVPHYS is unavailable
-        try:
+        with suppress(OSError, ValueError):
             avail = int(_stdout("getconf", "_AVPHYS_PAGES") or 0) * page or avail
-        except (OSError, ValueError):
-            pass
         return total, avail
     except (OSError, ValueError):
         return 0, 0
@@ -147,7 +144,7 @@ def _nvidia_vram() -> tuple[int, int] | None:
     exe = _nvidia_smi_path()
     if exe is None:
         return None
-    try:
+    with suppress(OSError, ValueError, subprocess.TimeoutExpired):
         out = subprocess.run(
             [exe, "--query-gpu=memory.total,memory.free",
              "--format=csv,noheader,nounits"],
@@ -156,8 +153,7 @@ def _nvidia_vram() -> tuple[int, int] | None:
             return None
         total_mib, free_mib = (int(x) for x in out.stdout.strip().splitlines()[0].split(","))
         return total_mib << 20, free_mib << 20
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
+    return None
 
 
 def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
@@ -175,7 +171,7 @@ def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
             continue
     else:
         return None
-    try:
+    with suppress(OSError, AttributeError):
         if cuda.cuInit(0) != 0:
             return None
         dev = ctypes.c_int()
@@ -191,26 +187,20 @@ def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
                 ctypes.byref(attr), _CU_DEVICE_ATTRIBUTE_INTEGRATED, dev) == 0:
             integrated = bool(attr.value)
         return total.value, integrated
-    except (OSError, AttributeError):
-        return None
+    return None
 
 
 def _engine_device_pool() -> "tuple[int, bool | None] | None":
     """(engine_total_bytes, None) from the installed runtime's own --list-devices, or None. The
     fallback when the driver API is unreachable: asks the exact binary that will do the
     allocating. Carries no integrated verdict — callers must gate it."""
-    try:
-        from hermes_cli.local_runtime.binaries import (
-            installed_tags,
-            runtimes_root,
-            server_binary,
-        )
+    with suppress(Exception):  # a probe miss must never block budgeting
+        from hermes_cli.local_runtime.binaries import installed_tags, runtimes_root, server_binary
 
         tags = installed_tags()
         if not tags:
             return None
-        tag_dir = runtimes_root() / tags[0]
-        backend_dirs = [d for d in tag_dir.iterdir() if d.is_dir()]
+        backend_dirs = [d for d in (runtimes_root() / tags[0]).iterdir() if d.is_dir()]
         if not backend_dirs:
             return None
         exe = server_binary(backend_dirs[0])
@@ -222,9 +212,7 @@ def _engine_device_pool() -> "tuple[int, bool | None] | None":
             m = _DEVICE_LINE_RE.search(line)
             if m:
                 return int(m.group(1)) << 20, None
-        return None
-    except Exception:  # noqa: BLE001 — a probe miss must never block budgeting
-        return None
+    return None
 
 
 def _device_pool_view() -> "tuple[int, bool | None] | None":

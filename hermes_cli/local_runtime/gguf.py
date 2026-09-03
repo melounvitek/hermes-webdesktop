@@ -152,40 +152,39 @@ class GGUFHeader:
 def read_gguf_header(path: str | Path) -> GGUFHeader:
     path = Path(path)
 
+    def read(f, fmt: str):
+        return struct.unpack(fmt, f.read(struct.calcsize(fmt)))
+
     def read_str(f) -> str:
-        (n,) = struct.unpack("<Q", f.read(8))
+        (n,) = read(f, "<Q")
         return f.read(n).decode("utf-8", errors="replace")
 
     def read_value(f, vtype: int):
         if vtype == _V_STRING:
             return read_str(f)
         if vtype == _V_ARRAY:
-            (etype,) = struct.unpack("<I", f.read(4))
-            (n,) = struct.unpack("<Q", f.read(8))
+            etype, n = read(f, "<IQ")
             return [read_value(f, etype) for _ in range(n)]
-        fmt = _SCALAR_FMT[vtype]
-        (value,) = struct.unpack(fmt, f.read(struct.calcsize(fmt)))
-        return value
+        return read(f, _SCALAR_FMT[vtype])[0]
 
     with open(path, "rb") as f:
         if f.read(4) != _GGUF_MAGIC:
             raise ValueError(f"not a GGUF file: {path}")
-        (version,) = struct.unpack("<I", f.read(4))
-        n_tensors, n_kv = struct.unpack("<QQ", f.read(16))
+        version, n_tensors, n_kv = read(f, "<IQQ")
 
         metadata: dict = {}
         for _ in range(n_kv):
             key = read_str(f)
-            (vtype,) = struct.unpack("<I", f.read(4))
+            (vtype,) = read(f, "<I")
             metadata[key] = read_value(f, vtype)
 
         tensor_bytes = 0
         embd_bytes = 0
         for _ in range(n_tensors):
             name = read_str(f)
-            (n_dims,) = struct.unpack("<I", f.read(4))
-            dims = struct.unpack(f"<{n_dims}Q", f.read(8 * n_dims))
-            (ttype,) = struct.unpack("<I", f.read(4))
+            (n_dims,) = read(f, "<I")
+            dims = read(f, f"<{n_dims}Q")
+            (ttype,) = read(f, "<I")
             f.read(8)  # offset
             size = _GGML_TYPE_SIZES.get(ttype)
             if size is None:

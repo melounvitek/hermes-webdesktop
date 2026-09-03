@@ -11,6 +11,7 @@ Windows via IPv6 fallback.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import logging
 import secrets
@@ -45,10 +46,8 @@ def state_path() -> Path:
 
 def _quiet(fn) -> None:
     """Best-effort call; a child that vanished mid-walk is not an error."""
-    try:
+    with suppress(Exception):
         fn()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _free_port() -> int:
@@ -79,12 +78,10 @@ def _stable_api_key() -> str:
     connection errors.
     """
     key_path = runtimes_root() / ".api_key"
-    try:
+    with suppress(OSError):
         existing = key_path.read_text(encoding="utf-8").strip()
         if len(existing) >= 16:
             return existing
-    except OSError:
-        pass
     key = secrets.token_urlsafe(24)
     try:
         key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,10 +176,7 @@ class LlamaServerSupervisor:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None:
             # The crash-restart loop calls _spawn repeatedly; each restart would leak one fd.
-            try:
-                self._log_handle.close()
-            except Exception:  # noqa: BLE001 — best-effort
-                pass
+            _quiet(self._log_handle.close)
         self._log_handle = open(self.log_path, "a", encoding="utf-8", errors="replace")
         self._log_handle.write(f"\n# spawn: {cmd}\n")
         self._log_handle.flush()
@@ -220,12 +214,10 @@ class LlamaServerSupervisor:
                 raise RuntimeError(
                     f"llama-server exited rc={self.proc.returncode} during startup "
                     f"(log: {self.log_path})")
-            try:
+            with suppress(urllib.error.URLError, OSError, TimeoutError):
                 with urllib.request.urlopen(self._url("/health"), timeout=3) as r:
                     if r.status == 200:
                         return
-            except (urllib.error.URLError, OSError, TimeoutError):
-                pass
             time.sleep(1)
         raise TimeoutError(f"llama-server not healthy after {timeout_s}s (log: {self.log_path})")
 
@@ -272,12 +264,11 @@ class LlamaServerSupervisor:
         Windows does no cleanup) orphans them with the weights still resident. Enumerate children
         FIRST (the parent must be alive to walk them), terminate all, escalate to kill.
         """
-        try:
+        children: list = []
+        with suppress(Exception):  # no psutil view; still stop the router
             import psutil
 
             children = psutil.Process(proc.pid).children(recursive=True)
-        except Exception:  # noqa: BLE001 — no psutil view; still stop the router
-            children = []
         proc.terminate()
         for child in children:
             _quiet(child.terminate)

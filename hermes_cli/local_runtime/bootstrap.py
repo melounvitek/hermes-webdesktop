@@ -9,6 +9,7 @@ local_runtime disabled never pay the import.
 
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
 import os
 import signal
@@ -33,14 +34,12 @@ def _detect_gpu_vendor() -> str | None:
     smi = _nvidia_smi_path()
     if smi is None:
         return None
-    try:
+    with suppress(OSError, subprocess.TimeoutExpired):
         out = subprocess.run(
             [smi, "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=10)
         if out.returncode == 0 and out.stdout.strip():
             return "nvidia " + out.stdout.strip().splitlines()[0]
-    except (OSError, subprocess.TimeoutExpired):
-        pass
     return None
 
 
@@ -91,13 +90,12 @@ def staged_model_ids() -> "list[str]":
 def _presets_stale() -> bool:
     """True when a staged model has no section in the preset INI — it would autoload with stock
     fit instead of a policy decision."""
-    try:
+    with suppress(Exception):
         from hermes_cli.local_runtime.presets import read_preset_decisions
 
         known = set(read_preset_decisions())
         return any(mid not in known for mid in staged_model_ids())
-    except Exception:  # noqa: BLE001
-        return False
+    return False
 
 
 def _stop_state_server(state: dict) -> None:
@@ -257,10 +255,8 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
         except Exception:
             # start() can fail after the router process exists (health timeout): leaving it
             # running unsupervised strands its VRAM behind a port nothing will clean up.
-            try:
+            with suppress(Exception):
                 sup.stop()
-            except Exception:  # noqa: BLE001 — cleanup is best-effort
-                pass
             raise
         _SUPERVISOR = sup
         logger.info("managed llama-server up at %s (backend=%s tag=%s)",

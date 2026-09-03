@@ -8,6 +8,7 @@ screenshot silently leaving the machine).
 
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,30 +30,26 @@ def is_managed_provider(provider: str, base_url: str = "") -> bool:
         return True
     if p != "custom" or not base_url:
         return False
-    try:
+    with suppress(Exception):
         from hermes_cli.local_runtime.growth import is_managed_endpoint
 
         return is_managed_endpoint(base_url)
-    except Exception:  # noqa: BLE001
-        return False
+    return False
 
 
 def _props_modalities(model_id: str) -> "bool | None":
     """Ask the running server whether this loaded child sees images. None when the server is down,
     the model isn't loaded, or the build doesn't report modalities."""
-    try:
+    with suppress(Exception):
         from hermes_cli.local_runtime.endpoint import managed_get_json, managed_root
 
         ep = managed_root()
         if ep is None:
             return None
-        props = managed_get_json(*ep, f"/props?model={model_id}", timeout_s=3)
-        modalities = props.get("modalities")
+        modalities = managed_get_json(*ep, f"/props?model={model_id}", timeout_s=3).get("modalities")
         if isinstance(modalities, dict) and "vision" in modalities:
             return bool(modalities["vision"])
-        return None
-    except Exception:  # noqa: BLE001
-        return None
+    return None
 
 
 def managed_model_supports_vision(model_id: str) -> "bool | None":
@@ -61,26 +58,19 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
     if not model_id:
         return None
 
-    # Only answer for models actually staged with us.
-    try:
-        from hermes_cli.local_runtime.bootstrap import staged_model_ids
-
-        if model_id not in staged_model_ids():
-            return None
-    except Exception:  # noqa: BLE001
-        return None
-
-    live = _props_modalities(model_id)
-    if live is not None:
-        return live
-
-    # Staged but not loaded (or an older server build): the catalog knows whether this model
-    # ships a vision projector. Capability requires the projector to actually be on disk — a
-    # model downloaded before its mmproj (partial delete, old layout) genuinely cannot see.
-    try:
-        from hermes_cli.local_runtime.bootstrap import assets_dir
+    with suppress(Exception):
+        from hermes_cli.local_runtime.bootstrap import assets_dir, staged_model_ids
         from hermes_cli.local_runtime.catalog import find_entry_for_model
 
+        # Only answer for models actually staged with us.
+        if model_id not in staged_model_ids():
+            return None
+        live = _props_modalities(model_id)
+        if live is not None:
+            return live
+        # Staged but not loaded (or an older server build): the catalog knows whether this model
+        # ships a vision projector. Capability requires the projector to actually be on disk — a
+        # model downloaded before its mmproj (partial delete, old layout) genuinely cannot see.
         hit = find_entry_for_model(model_id)
         if hit is None:
             return None
@@ -88,5 +78,4 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
         if entry.mmproj is None:
             return False
         return (assets_dir() / entry.mmproj.local_name).exists()
-    except Exception:  # noqa: BLE001
-        return None
+    return None
