@@ -63,16 +63,14 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
                 f"                    return\n"
                 f"                    ;;\n"
                 f"            esac\n"
-                f"            ;;"
-            )
+                f"            ;;")
         elif info["subcommands"] or info["flags"]:
             words = " ".join(sorted(info["subcommands"]) if info["subcommands"] else info["flags"])
             cases.append(
                 f"        {cmd})\n"
                 f"            COMPREPLY=($(compgen -W \"{words}\" -- \"$cur\"))\n"
                 f"            return\n"
-                f"            ;;"
-            )
+                f"            ;;")
 
     cases_str = "\n".join(cases)
     return f"""# Hermes Agent bash completion
@@ -120,9 +118,7 @@ complete -F _hermes_completion hermes
 def _zsh_describe_lines(subcommands: dict[str, Any], indent: str) -> str:
     """One ``'name:help'`` line per subcommand, sorted, at the given indent."""
     return "\n".join(
-        f"{indent}'{sc}:{_clean(subcommands[sc].get('help', ''))}'"
-        for sc in sorted(subcommands)
-    )
+        f"{indent}'{sc}:{_clean(subcommands[sc].get('help', ''))}'" for sc in sorted(subcommands))
 
 
 def generate_zsh(parser: argparse.ArgumentParser) -> str:
@@ -149,8 +145,7 @@ def generate_zsh(parser: argparse.ArgumentParser) -> str:
                 f"                            _describe 'profile command' profile_cmds\n"
                 f"                            ;;\n"
                 f"                    esac\n"
-                f"                    ;;"
-            )
+                f"                    ;;")
         else:
             sub_str = _zsh_describe_lines(info["subcommands"], " " * 20)
             safe = cmd.replace("-", "_")
@@ -161,8 +156,7 @@ def generate_zsh(parser: argparse.ArgumentParser) -> str:
                 f"{sub_str}\n"
                 f"                    )\n"
                 f"                    _describe '{cmd} command' {safe}_cmds\n"
-                f"                    ;;"
-            )
+                f"                    ;;")
     sub_cases_str = "\n".join(sub_cases)
     return f"""#compdef hermes
 # Hermes Agent zsh completion
@@ -234,15 +228,13 @@ def generate_fish(parser: argparse.ArgumentParser) -> str:
         "complete -c hermes -f -s p -l profile"
         " -d 'Profile name' -xa '(__hermes_profiles)'",
         "",
-        "# Top-level subcommands",
-    ]
+        "# Top-level subcommands"]
 
     for cmd, info in subcommands:
         lines.append(
             f"complete -c hermes -f "
             f"-n 'not __fish_seen_subcommand_from {top_cmds_str}' "
-            f"-a {cmd} -d '{_clean(info.get('help', ''))}'"
-        )
+            f"-a {cmd} -d '{_clean(info.get('help', ''))}'")
     lines += ["", "# Subcommand completions"]
     for cmd, info in subcommands:
         if not info["subcommands"]:
@@ -252,15 +244,13 @@ def generate_fish(parser: argparse.ArgumentParser) -> str:
             lines.append(
                 f"complete -c hermes -f "
                 f"-n '__fish_seen_subcommand_from {cmd}' "
-                f"-a {sc} -d '{_clean(sinfo.get('help', ''))}'"
-            )
+                f"-a {sc} -d '{_clean(sinfo.get('help', ''))}'")
         if cmd == "profile":  # profile names for the actions that take one
             for action in sorted(_PROFILE_NAME_ACTIONS):
                 lines.append(
                     f"complete -c hermes -f "
                     f"-n '__fish_seen_subcommand_from {action}; "
                     f"and __fish_seen_subcommand_from profile' "
-                    f"-a '(__hermes_profiles)' -d 'Profile name'"
-                )
+                    f"-a '(__hermes_profiles)' -d 'Profile name'")
     lines.append("")
     return "\n".join(lines)

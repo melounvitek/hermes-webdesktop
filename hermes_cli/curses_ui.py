@@ -311,8 +311,7 @@ def _move_filtered_cursor(filtered: List[int], cursor: int, cursor_pos: int, del
 
 
 def _scroll_for_cursor(
-    scroll_offset: int, cursor_pos: int, visible_rows: int, total_rows: int
-) -> int:
+    scroll_offset: int, cursor_pos: int, visible_rows: int, total_rows: int) -> int:
     """Clamp scroll offset so the cursor remains visible."""
     visible_rows = max(1, visible_rows)
     if cursor_pos < scroll_offset:
@@ -323,8 +322,7 @@ def _scroll_for_cursor(
 
 
 def _handle_active_search_key(
-    curses_mod, key: int, search: _SearchState
-) -> tuple[bool, bool, bool]:
+    curses_mod, key: int, search: _SearchState) -> tuple[bool, bool, bool]:
     """Handle a key while the search prompt is active -> ``(handled, confirm, changed)``."""
     if not search.active:
         return False, False, False
