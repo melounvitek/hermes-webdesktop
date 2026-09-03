@@ -43,5 +43,4 @@ def summarize_server(name: str, cfg: dict) -> Dict[str, Any]:
         "auth": auth,
         "oauth_tokens_present": _oauth_tokens_present(name) if auth == "oauth" else None,
         "enabled": cfg.get("enabled", True) is not False,
-        "tools": cfg.get("tools"),
-    }
+        "tools": cfg.get("tools")}

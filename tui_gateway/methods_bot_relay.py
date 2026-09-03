@@ -31,8 +31,7 @@ def _run_delivery(profile: str, tmp: str) -> subprocess.CompletedProcess:
 
     return subprocess.run(
         local_delivery_command(profile, tmp), capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=600,
-    )
+        errors="replace", timeout=600)
 
 
 @method("bot_relay.roster.sync")
@@ -143,8 +142,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
                     # compacts the over-threshold transcript first (no fresh session is
                     # ever minted). Auth/quota/config classes never retry.
                     from tools.bot_failure_reasons import (
-                        RETRY_NONE, classify_agent_error, retry_action,
-                    )
+                        RETRY_NONE, classify_agent_error, retry_action)
 
                     first_detail = (proc.stderr or proc.stdout or "").strip()[-500:]
                     if retry_action(classify_agent_error(first_detail)) != RETRY_NONE:
@@ -158,8 +156,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
             detail = (proc.stderr or proc.stdout or "").strip()[-500:]
             return _err(
                 rid, 5092, f"delivery turn failed: {detail or proc.returncode}",
-                data={"reason": classify_agent_error(detail)},
-            )
+                data={"reason": classify_agent_error(detail)})
         return _ok(rid, {"reply": (proc.stdout or "").strip()})
     except subprocess.TimeoutExpired:
         return _err(rid, 5093, "delivery turn timed out")
@@ -185,8 +182,7 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 
         write_reply(
             _root(), envelope_id, reply=str(params.get("reply") or ""),
-            error=str(params.get("error") or ""), reason=str(params.get("reason") or ""),
-        )
+            error=str(params.get("error") or ""), reason=str(params.get("reason") or ""))
         return _ok(rid, {"ok": True})
     except ValueError as e:
         return _err(rid, 4094, str(e))
@@ -201,8 +197,7 @@ def register(server) -> None:
     server._LONG_HANDLERS = server._LONG_HANDLERS | methods_groups.LONG_HANDLERS
     for name in (
         "get_hosted_room_service", "_WORKER_UNAVAILABLE", "_profile_name", "_requested_profile",
-        "_api_server_key", "_room_link_run_storage_durable",
-    ):
+        "_api_server_key", "_room_link_run_storage_durable"):
         setattr(server, name, getattr(methods_groups, name))
     methods_groups.bind_server(server)
     methods_groups.register(server)

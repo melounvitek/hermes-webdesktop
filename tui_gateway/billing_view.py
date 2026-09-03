@@ -22,8 +22,7 @@ def _wire_str(value):
 def _serialize_billing_error(exc) -> dict:
     """Map a BillingError into the result.error envelope the TUI branches on."""
     from hermes_cli.nous_billing import (
-        BillingRemoteSpendingRevoked, BillingScopeRequired, BillingSessionRevoked, BillingTransient,
-    )
+        BillingRemoteSpendingRevoked, BillingScopeRequired, BillingSessionRevoked, BillingTransient)
     kind = "error"
     if isinstance(exc, BillingRemoteSpendingRevoked):
         kind = "remote_spending_revoked"
@@ -46,8 +45,7 @@ def _serialize_billing_error(exc) -> dict:
         # actor-aware copy + route recovery without re-parsing the message).
         "actor": getattr(exc, "actor", None),
         "code": getattr(exc, "code", None),
-        "recovery": getattr(exc, "recovery", None),
-    }
+        "recovery": getattr(exc, "recovery", None)}
 
 
 def _serialize_payment_method(pm) -> dict | None:
@@ -57,8 +55,7 @@ def _serialize_payment_method(pm) -> dict | None:
         return None
     if pm.kind == "card":
         return {
-            "kind": "card", "brand": pm.brand, "last4": pm.last4, "wallet": pm.wallet,
-            "resolved_via": pm.resolved_via,
+            "kind": "card", "brand": pm.brand, "last4": pm.last4, "wallet": pm.wallet, "resolved_via": pm.resolved_via
         }
     if pm.kind == "link":
         return {"kind": "link", "email": pm.email, "resolved_via": pm.resolved_via}
@@ -73,16 +70,14 @@ def _serialize_auto_reload(ar, format_money) -> dict | None:
         if ar.card.kind == "distinct":
             card_out = {
                 "kind": "distinct", "payment_method_id": ar.card.payment_method_id,
-                "brand": ar.card.brand, "last4": ar.card.last4,
-            }
+                "brand": ar.card.brand, "last4": ar.card.last4}
         else:
             card_out = {"kind": ar.card.kind}
     return {
         "enabled": ar.enabled, "threshold_usd": _wire_str(ar.threshold_usd),
         "threshold_display": format_money(ar.threshold_usd),
         "reload_to_usd": _wire_str(ar.reload_to_usd),
-        "reload_to_display": format_money(ar.reload_to_usd), "card": card_out,
-    }
+        "reload_to_display": format_money(ar.reload_to_usd), "card": card_out}
 
 
 def _serialize_billing_state(state) -> dict:
@@ -98,8 +93,7 @@ def _serialize_billing_state(state) -> dict:
             # None/False on older NAS payloads; resolved_via is the resolution
             # rung for rung-gated surfaces (/subscription confirm).
             "display": state.card.display,
-            "resolved_via": state.card.resolved_via,
-        }
+            "resolved_via": state.card.resolved_via}
     monthly_cap = None
     if state.monthly_cap is not None:
         mc = state.monthly_cap
@@ -107,8 +101,7 @@ def _serialize_billing_state(state) -> dict:
             "limit_usd": _wire_str(mc.limit_usd), "limit_display": format_money(mc.limit_usd),
             "spent_this_month_usd": _wire_str(mc.spent_this_month_usd),
             "spent_display": format_money(mc.spent_this_month_usd),
-            "is_default_ceiling": mc.is_default_ceiling,
-        }
+            "is_default_ceiling": mc.is_default_ceiling}
     return {
         "ok": True,
         "logged_in": state.logged_in,
@@ -133,8 +126,7 @@ def _serialize_billing_state(state) -> dict:
         "error": state.error,
         # Shared two-bar dollar usage model so /topup matches /usage and
         # /subscription from one fetch; fail-open.
-        "usage": _usage_payload(state),
-    }
+        "usage": _usage_payload(state)}
 
 
 def _usage_payload(state) -> dict:
@@ -156,8 +148,7 @@ def _serialize_usage_bar(bar) -> Optional[dict]:
     return {
         "kind": bar.kind, "remaining_display": _fmt_usd(bar.remaining_usd),
         "total_display": _fmt_usd(bar.total_usd), "spent_display": _fmt_usd(bar.spent_usd),
-        "pct_used": bar.pct_used, "fill_fraction": bar.fill_fraction,
-    }
+        "pct_used": bar.pct_used, "fill_fraction": bar.fill_fraction}
 
 
 def _serialize_usage_model(model) -> dict:
@@ -180,8 +171,7 @@ def _serialize_usage_model(model) -> dict:
         "total_spendable_display": _usd(model.total_spendable_usd),
         "has_topup": model.has_topup,
         "plan_bar": _serialize_usage_bar(model.plan_bar),
-        "topup_bar": _serialize_usage_bar(model.topup_bar),
-    }
+        "topup_bar": _serialize_usage_bar(model.topup_bar)}
 
 
 def _serialize_subscription_state(state) -> dict:
@@ -202,8 +192,7 @@ def _serialize_subscription_state(state) -> dict:
             "pending_downgrade_display": format_renews(c.pending_downgrade_at),
             "cancel_at_period_end": c.cancel_at_period_end,
             "cancellation_effective_at": c.cancellation_effective_at,
-            "cancellation_effective_display": format_renews(c.cancellation_effective_at),
-        }
+            "cancellation_effective_display": format_renews(c.cancellation_effective_at)}
     # Selectable catalog for the in-terminal tier picker; price is pre-formatted
     # ($X / $X.YY) so the TUI renders it directly.
     tiers = [
@@ -211,10 +200,8 @@ def _serialize_subscription_state(state) -> dict:
             "tier_id": t.tier_id, "name": t.name, "tier_order": t.tier_order,
             "dollars_per_month_display": format_money(t.dollars_per_month),
             "monthly_credits": _wire_str(t.monthly_credits), "is_current": t.is_current,
-            "is_enabled": t.is_enabled,
-        }
-        for t in state.tiers
-    ]
+            "is_enabled": t.is_enabled}
+        for t in state.tiers]
     return {
         "ok": True,
         "logged_in": state.logged_in,
@@ -230,8 +217,7 @@ def _serialize_subscription_state(state) -> dict:
         "error": state.error,
         # Shared two-bar usage model (account-info is the only source with
         # top-up dollars); fail-open → {available:false}; lazy when logged out.
-        "usage": _usage_payload(state),
-    }
+        "usage": _usage_payload(state)}
 
 
 def _serialize_subscription_preview(p) -> dict:
@@ -246,8 +232,7 @@ def _serialize_subscription_preview(p) -> dict:
         "target_tier_name": p.target_tier_name,
         "monthly_credits_delta": _wire_str(p.monthly_credits_delta),
         "amount_due_now_cents": p.amount_due_now_cents,
-        "effective_at": p.effective_at,
-    }
+        "effective_at": p.effective_at}
 
 
 def register(server) -> None:

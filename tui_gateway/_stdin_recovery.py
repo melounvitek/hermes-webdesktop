@@ -87,8 +87,7 @@ def handle_spurious_eof(recovery_times: list[float], log_fn: object) -> bool:
     if len(recovery_times) > MAX_RECOVERIES_PER_MINUTE:
         log_fn(  # type: ignore[operator]
             f"stdin spurious-EOF recovery rate exceeded "
-            f"({len(recovery_times)}/min, cap {MAX_RECOVERIES_PER_MINUTE})"
-        )
+            f"({len(recovery_times)}/min, cap {MAX_RECOVERIES_PER_MINUTE})")
         return False
     log_fn(f"stdin spurious EOF (subprocess O_NONBLOCK flip), recovering: {diagnose_stdin_state()}")  # type: ignore[operator]
     # Restore blocking mode on the shared description, and clear SO_RCVTIMEO too: a

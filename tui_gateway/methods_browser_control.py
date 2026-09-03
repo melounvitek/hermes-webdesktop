@@ -18,8 +18,7 @@ import hashlib
 import logging
 
 from hermes_cli.dashboard_auth.ws_tickets import (
-    INTERNAL_PROVIDER as _INTERNAL_PROVIDER, INTERNAL_USER_ID as _INTERNAL_USER_ID,
-)
+    INTERNAL_PROVIDER as _INTERNAL_PROVIDER, INTERNAL_USER_ID as _INTERNAL_USER_ID)
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -65,8 +64,7 @@ def _broker_event_writer(transport: object, session_id: str):
                 "jsonrpc": "2.0", "method": "event",
                 "params": {
                     "type": frame.get("method"), "session_id": session_id, "payload": frame.get("params"),
-                },
-            })
+                }})
         except Exception:
             logger.exception(
                 "browser controller event write failed session=%s frame=%s", session_id, frame.get("method")
@@ -80,8 +78,7 @@ def _broker_event_writer(transport: object, session_id: str):
 
 def _controller_method(
     name: str, *, identity_message: str = _IDENTITY_REQUIRED, lookup_scope: bool = True,
-    missing_scope_message: str = _NO_CONTROLLER, precheck=None,
-):
+    missing_scope_message: str = _NO_CONTROLLER, precheck=None):
     """Register a handler behind the shared fail-closed (4403) controller gates.
 
     Order: ``precheck(rid, params)`` (may return an error envelope) → caller holds a
@@ -113,8 +110,7 @@ def _controller_method(
             if lookup_scope:
                 scope = broker.scope_for_session(
                     session_id=session_id, principal_id=_principal_digest(identity),
-                    transport_family=_CLOUD_TRANSPORT_FAMILY,
-                )
+                    transport_family=_CLOUD_TRANSPORT_FAMILY)
                 if scope is None:
                     return _err(rid, _ERR_FORBIDDEN, missing_scope_message)
                 # Defense in depth: the broker's exact-scope ops already reject foreign
@@ -143,8 +139,7 @@ def _register_precheck(rid, params: dict):
 @_controller_method(
     "browser.controller.register",
     identity_message="browser.controller.register requires an authenticated non-internal identity",
-    lookup_scope=False, precheck=_register_precheck,
-)
+    lookup_scope=False, precheck=_register_precheck)
 def _(rid, params: dict, transport, identity, session_id, broker, _scope, session) -> dict:
     """Attach this connection as the browser controller for one session.
 
@@ -167,8 +162,7 @@ def _(rid, params: dict, transport, identity, session_id, broker, _scope, sessio
     scope = browser_control_broker.ControllerScope(
         principal_id=_principal_digest(identity), profile_id=profile_id, session_id=session_id,
         controller_id=controller_id, browser_profile_id=browser_profile_id,
-        transport_family=_CLOUD_TRANSPORT_FAMILY, capabilities=capabilities,
-    )
+        transport_family=_CLOUD_TRANSPORT_FAMILY, capabilities=capabilities)
     broker.attach(scope, _broker_event_writer(transport, session_id), owner=transport)
     return _ok(rid, {
         "scope": {
@@ -178,9 +172,7 @@ def _(rid, params: dict, transport, identity, session_id, broker, _scope, sessio
             "controller_id": scope.controller_id,
             "browser_profile_id": scope.browser_profile_id,
             "transport_family": scope.transport_family,
-            "capabilities": sorted(scope.capabilities),
-        }
-    })
+            "capabilities": sorted(scope.capabilities)}})
 
 
 @_controller_method("browser.controller.result")
@@ -195,8 +187,7 @@ def _(rid, params: dict, _transport, _identity, _session_id, broker, scope, _ses
         return _err(rid, _ERR_FORBIDDEN, "command_id required")
     ok = params.get("ok") is True
     accepted = broker.complete(
-        command_id, scope=scope, ok=ok, result=params.get("result") if ok else params.get("error")
-    )
+        command_id, scope=scope, ok=ok, result=params.get("result") if ok else params.get("error"))
     return _ok(rid, {"accepted": accepted})
 
 

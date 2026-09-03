@@ -27,8 +27,7 @@ def resolve_skin() -> dict:
             "banner_logo": skin.banner_logo,
             "banner_hero": skin.banner_hero,
             "tool_prefix": skin.tool_prefix,
-            "help_header": (skin.branding or {}).get("help_header", ""),
-        }
+            "help_header": (skin.branding or {}).get("help_header", "")}
     except Exception:
         return {}
 
@@ -117,8 +116,7 @@ def _pet_changed_payload() -> dict:
             "slug": pet.slug,
             "displayName": pet.display_name,
             "scale": scale,
-            "spritesheetRevision": _pet_sheet_revision(pet.spritesheet),
-        }
+            "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)}
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
         return {"enabled": False}
 
@@ -133,9 +131,7 @@ def _sessions_sig():
     cron runs (which never touch this gateway's transports) all move. Served sibling
     profile homes are probed too, else a routed profile's Bot Chat never refreshes."""
     return _newest_mtime_ns(
-        root / name
-        for root in (_watcher_home(), *_served_profile_homes)
-        for name in ("state.db", "state.db-wal")
+        root / name for root in (_watcher_home(), *_served_profile_homes) for name in ("state.db", "state.db-wal")
     )
 
 
@@ -159,8 +155,7 @@ def _pairing_sig():
         with contextlib.suppress(OSError):
             # Only the ledgers: _rate_limits.json moves on every unauthorized DM.
             entries += [
-                e for e in root.iterdir() if e.name.endswith(("-pending.json", "-approved.json"))
-            ]
+                e for e in root.iterdir() if e.name.endswith(("-pending.json", "-approved.json"))]
     return _newest_mtime_ns(entries)
 
 
@@ -195,8 +190,7 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "platforms.changed": (2.0, _platforms_sig, lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
     # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
-    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {}),
-}
+    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {})}
 
 # state.db moves on every append of a streaming turn and gateway_state.json on
 # in-flight bookkeeping; the floor coalesces bursts to one broadcast per window,

@@ -50,8 +50,7 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
         agent.switch_model(
             new_model=snapshot.get("model", ""), new_provider=snapshot.get("provider", ""),
             api_key=snapshot.get("api_key", ""), base_url=snapshot.get("base_url", ""),
-            api_mode=snapshot.get("api_mode", ""), capabilities=snapshot.get("capabilities"),
-        )
+            api_mode=snapshot.get("api_mode", ""), capabilities=snapshot.get("capabilities"))
 
 
 @contextlib.contextmanager
@@ -84,8 +83,7 @@ def _restart_completed_failed_agent_build(sid: str, session: dict, failed_ready:
     with build_lock:
         if (
             session.get("agent") is not None or session.get("agent_error") is None
-            or session.get("agent_ready") is not failed_ready or not failed_ready.is_set()
-        ):
+            or session.get("agent_ready") is not failed_ready or not failed_ready.is_set()):
             return False
         model_override = session.get("model_override")
         resume_overrides = session.get("resume_runtime_overrides")
@@ -108,8 +106,7 @@ def _restart_completed_failed_agent_build(sid: str, session: dict, failed_ready:
 def _switch_request(raw_input: str, parsed_flags, persist_override) -> tuple[str, str, bool, bool]:
     """Normalize /model flags → (model_input, explicit_provider, one_turn, persist_global); raises on conflict."""
     from hermes_cli.model_switch import (
-        MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL, MODEL_SWITCH_ERROR_TEXT, parse_model_switch_args,
-        resolve_persist_behavior,
+        MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL, MODEL_SWITCH_ERROR_TEXT, parse_model_switch_args, resolve_persist_behavior
     )
 
     if parsed_flags is None:
@@ -126,8 +123,7 @@ def _switch_request(raw_input: str, parsed_flags, persist_override) -> tuple[str
         raise ValueError(MODEL_SWITCH_ERROR_TEXT[MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL])
     if persist_override is None:
         persist_override = resolve_persist_behavior(
-            is_global_flag, is_session, is_once=one_turn, explicit_provider=explicit_provider
-        )
+            is_global_flag, is_session, is_once=one_turn, explicit_provider=explicit_provider)
     if not model_input:
         raise ValueError("model value required")
     return model_input, explicit_provider, one_turn, persist_override
@@ -178,8 +174,7 @@ def _merge_preflight_warning(result, agent, session: dict, cfg, custom_provs) ->
                 cfg_ctx = int(mc["context_length"])
         merge_preflight_compression_warning(
             result, agent=agent, messages=list(session.get("history", [])),
-            custom_providers=custom_provs, config_context_length=cfg_ctx,
-        )
+            custom_providers=custom_provs, config_context_length=cfg_ctx)
     except Exception as exc:
         logger.debug("preflight-compression switch warning failed: %s", exc)
 
@@ -191,8 +186,7 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key) -> 
 
         warning = combined_selection_warning(
             result.new_model, provider=result.target_provider, base_url=result.base_url or current_base_url,
-            api_key=result.api_key or current_api_key, model_info=result.model_info,
-        )
+            api_key=result.api_key or current_api_key, model_info=result.model_info)
     except Exception:
         warning = None
     if warning is None:
@@ -211,8 +205,7 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         agent.switch_model(
             new_model=result.new_model, new_provider=result.target_provider, api_key=result.api_key,
             base_url=result.base_url, api_mode=result.api_mode,
-            capabilities=getattr(result, "runtime_capabilities", None),
-        )
+            capabilities=getattr(result, "runtime_capabilities", None))
     except Exception as exc:
         # The in-place swap rolled the agent back and re-raised. Abort the whole
         # commit (worker restart, persist, marker, override, config write) or the
@@ -236,19 +229,16 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
 def _apply_model_switch(
     sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
     pin_session_override: bool = True, parsed_flags: Any | None = None,
-    persist_override: bool | None = None,
-) -> dict:
+    persist_override: bool | None = None) -> dict:
     from hermes_cli.model_switch import switch_model
 
     model_input, explicit_provider, one_turn, persist_global = _switch_request(
-        raw_input, parsed_flags, persist_override
-    )
+        raw_input, parsed_flags, persist_override)
     agent = session.get("agent")
     if one_turn and not agent:
         raise ValueError("/model --once requires a live session")
     current_provider, current_model, current_base_url, current_api_key = _current_model_runtime(
-        agent, explicit_provider
-    )
+        agent, explicit_provider)
     # User-defined providers let switch_model resolve named custom endpoints
     # (e.g. "ollama-launch") and validate against saved model lists.
     user_provs, custom_provs, cfg = _provider_context()
@@ -275,16 +265,14 @@ def _apply_model_switch(
     if pin_session_override and isinstance(session, dict) and not one_turn:
         session["model_override"] = {
             "model": result.new_model, "provider": result.target_provider,
-            "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode,
-        }
+            "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode}
     if persist_global:
         _persist_model_switch(result)
     return {
         "value": result.new_model,
         "warning": result.warning_message or "",
         "confirm_required": False,
-        "scope": "once" if one_turn else ("global" if persist_global else "session"),
-    }
+        "scope": "once" if one_turn else ("global" if persist_global else "session")}
 
 
 def _sync_bot_capabilities(sid: str, session: dict) -> None:

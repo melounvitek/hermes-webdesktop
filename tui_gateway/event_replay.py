@@ -100,5 +100,4 @@ def replay_stats() -> dict:
         return {
             "sessions": len(_replay_buffers),
             "events": sum(len(b) for b in _replay_buffers.values()),
-            "max_per_session": _REPLAY_BUFFER_MAX,
-        }
+            "max_per_session": _REPLAY_BUFFER_MAX}

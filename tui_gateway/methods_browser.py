@@ -49,8 +49,7 @@ def _is_default_local_cdp(parsed) -> bool:
         parsed.scheme in {"http", "ws"}
         and parsed.hostname in {"127.0.0.1", "localhost"}
         and port == 9222
-        and parsed.path in {"", "/", "/json", "/json/version"}
-    )
+        and parsed.path in {"", "/", "/json", "/json/version"})
 
 
 def _cdp_http_reachable(parsed, timeout: float = 2.0) -> bool:
@@ -87,8 +86,7 @@ def _launch_failure_hints(port: int, system: str) -> list[str]:
         else [
             "No supported Chromium-family browser executable was found in this environment.",
             f"Install one or start a Chromium-family browser with --remote-debugging-port={port}, then retry /browser connect.",
-        ]
-    )
+        ])
     return [
         *hint,
         "Browser not connected — start a Chromium-family browser with remote debugging and retry /browser connect",
@@ -98,8 +96,7 @@ def _launch_failure_hints(port: int, system: str) -> list[str]:
 def _connect_local_default(port: int, system: str, announce) -> str | None:
     """Discover (or launch) the default local debug browser → its CDP URL, or None after announcing failure."""
     from hermes_cli.browser_connect import (
-        discover_local_cdp_url, find_free_debug_port, launch_chrome_debug, local_port_in_use,
-    )
+        discover_local_cdp_url, find_free_debug_port, launch_chrome_debug, local_port_in_use)
 
     # Dual-stack discovery: when another app squats the IPv4 loopback on the debug
     # port, a browser bound there comes up on [::1] only. An IPv4-only probe misses
@@ -114,8 +111,7 @@ def _connect_local_default(port: int, system: str, announce) -> str | None:
         announce(
             f"Port {port} is occupied by another application that isn't a CDP browser "
             "(an IDE debugger or dev server may be using it) — launching a debug browser "
-            f"on port {launch_port} instead..."
-        )
+            f"on port {launch_port} instead...")
     else:
         announce("Chromium-family browser isn't running with remote debugging — attempting to launch...")
     launch = launch_chrome_debug(launch_port, system)
