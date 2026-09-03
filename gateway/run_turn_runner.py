@@ -653,8 +653,7 @@ class TurnRunner:
             return
         try:
             self._schedule(
-                adapter.play_ack_in_voice(ctx._voice_ack_guild[0]), "voice ack scheduling error",
-                loop=ctx._voice_ack_loop,
+                adapter.play_ack_in_voice(ctx._voice_ack_guild[0]), "voice ack scheduling error", loop=ctx._voice_ack_loop,
             )
         except Exception as err:
             logger.debug("voice ack schedule failed: %s", err)
@@ -674,9 +673,7 @@ class TurnRunner:
         from agent.display import build_tool_preview
         name = str(tool_name or "tool")
         self._ctx.progress_queue.put({
-            "type": "tool.started",
-            "tool_call_id": str(call_id or ""),
-            "tool_name": name,
+            "type": "tool.started", "tool_call_id": str(call_id or ""), "tool_name": name,
             "preview": build_tool_preview(name, args or {}, max_len=64) or "",
         })
 
@@ -688,10 +685,7 @@ class TurnRunner:
         name = str(tool_name or "tool")
         is_error, _ = _detect_tool_failure(name, result)
         self._ctx.progress_queue.put({
-            "type": "tool.completed",
-            "tool_call_id": str(call_id or ""),
-            "tool_name": name,
-            "is_error": bool(is_error),
+            "type": "tool.completed", "tool_call_id": str(call_id or ""), "tool_name": name, "is_error": bool(is_error),
         })
 
     def combined_tool_start_callback(self, call_id, tool_name, args):
@@ -714,11 +708,8 @@ class TurnRunner:
         self._schedule(
             ctx._hooks_ref.emit("agent:step", {
                 "platform": ctx.source.platform.value if ctx.source.platform else "",
-                "user_id": ctx.source.user_id,
-                "session_id": ctx.session_id,
-                "iteration": iteration,
-                "tool_names": names,
-                "tools": prev_tools,
+                "user_id": ctx.source.user_id, "session_id": ctx.session_id,
+                "iteration": iteration, "tool_names": names, "tools": prev_tools,
             }),
             "agent:step hook scheduling error",
         )
@@ -746,10 +737,9 @@ class TurnRunner:
         try:
             # Gateway auto-title failures are not user-actionable, so never surface them as messages;
             # overriding the failure sink keeps CLI on _emit_auxiliary_failure while gateway logs debug.
-            def _title_failure_cb(task: str, exc: BaseException) -> None:
-                logger.debug("Gateway auto-title failure suppressed (not user-visible): %s: %s", task, exc)
-
-            agent._title_failure_callback = _title_failure_cb
+            agent._title_failure_callback = lambda task, exc: logger.debug(
+                "Gateway auto-title failure suppressed (not user-visible): %s: %s", task, exc,
+            )
             session_id = getattr(agent, "session_id", None)
             source = ctx.source
             runner = self._runner
@@ -787,9 +777,7 @@ class TurnRunner:
             )
             return
         fut = self._schedule(
-            _send_or_update_status_coro(
-                ctx._status_adapter, ctx._status_chat_id, event_type, prepared, ctx._status_thread_metadata,
-            ),
+            _send_or_update_status_coro(ctx._status_adapter, ctx._status_chat_id, event_type, prepared, ctx._status_thread_metadata),
             f"status_callback ({event_type}) scheduling error",
         )
         if fut is not None and ctx._cleanup_progress:
@@ -800,7 +788,6 @@ class TurnRunner:
     def _setup_stream_consumer(self, platform_key):
         ctx = self._ctx
         stream_consumer = None
-        stream_delta_cb = None
         # The streaming-TTS consumer is created on the outer loop thread before run_sync launches;
         # run_sync only reads it via the holder for delta-callback wiring.
         stts = ctx.streaming_tts_consumer_holder[0]
@@ -823,45 +810,33 @@ class TurnRunner:
                         ctx.source, scfg, adapter, on_missing_cursor="raise",
                     )
                     stream_consumer = GatewayStreamConsumer(
-                        adapter=adapter,
-                        chat_id=ctx.source.chat_id,
-                        config=consumer_cfg,
+                        adapter=adapter, chat_id=ctx.source.chat_id, config=consumer_cfg,
                         metadata=ctx._status_thread_metadata,
                         on_new_message=(
-                            (lambda: ctx.progress_queue.put(("__reset__",)))
-                            if ctx.progress_queue is not None else None
+                            (lambda: ctx.progress_queue.put(("__reset__",))) if ctx.progress_queue is not None else None
                         ),
                         on_before_finalize=pause_typing_before_finalize,
-                        initial_reply_to_id=ctx.event_message_id,
-                        run_still_current=ctx._run_still_current,
+                        initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
                     )
-                    if want_stream_deltas:
-                        def stream_delta_cb(text: str) -> None:
-                            if ctx._run_still_current():
-                                stream_consumer.on_delta(text)
-                                if stts is not None:  # tee to streaming TTS
-                                    stts.on_delta(text)
                     ctx.stream_consumer_holder[0] = stream_consumer
             except Exception as err:
                 logger.debug("Could not set up stream consumer: %s", err)
-        # Text streaming off but streaming TTS active: TTS-only delta callback for audio synthesis.
-        if stream_delta_cb is None and stts is not None:
+        # Deltas tee to the stream consumer (when text streaming is on) and to streaming TTS.
+        delta_sinks = [sc for sc in ((stream_consumer if want_stream_deltas else None), stts) if sc is not None]
+        stream_delta_cb = None
+        if delta_sinks:
             def stream_delta_cb(text: str) -> None:
                 if ctx._run_still_current():
-                    stts.on_delta(text)
+                    for sink in delta_sinks:
+                        sink.on_delta(text)
 
         def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
                 return
             if stream_consumer is not None:
-                if already_streamed:
-                    stream_consumer.on_segment_break()
-                else:
-                    stream_consumer.on_commentary(text)
-                return
-            if already_streamed or not ctx._status_adapter or not str(text or "").strip():
-                return
-            self._send_status_text(text, ctx._status_thread_metadata, "interim_assistant_callback scheduling error")
+                stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
+            elif not already_streamed and ctx._status_adapter and str(text or "").strip():
+                self._send_status_text(text, ctx._status_thread_metadata, "interim_assistant_callback scheduling error")
 
         return stream_consumer, stream_delta_cb, interim_assistant_cb, want_interim_messages
 
@@ -880,9 +855,8 @@ class TurnRunner:
         # ``hermes gateway setup`` writes ``gateway.platforms`` as a LIST of enabled platform names,
         # not a dict; treat any non-dict shape as "no per-platform overrides" rather than crashing.
         if not isinstance(platforms_cfg, dict):
-            platforms_cfg = {}
-        skip = (platforms_cfg.get(platform_key) or {}).get("skip_context_files")
-        return bool(skip) if skip is not None else False
+            return False
+        return bool((platforms_cfg.get(platform_key) or {}).get("skip_context_files"))
 
     def _cached_sid_is_dead(self, cache_lock, cache) -> tuple:
         """(peeked cached session_id, is_dead) — checked OUTSIDE the cache lock.
@@ -900,10 +874,8 @@ class TurnRunner:
                 peek_sid = entry[3]
         dead = False
         if peek_sid is not None and ctx.session_id is not None and peek_sid != ctx.session_id:
-            try:
+            with suppress(Exception):
                 dead = self._runner.session_store._is_session_ended_in_db(peek_sid)
-            except Exception:
-                dead = False
         return peek_sid, dead
 
     def _current_message_count(self):
@@ -954,14 +926,12 @@ class TurnRunner:
                     "#54878 x #54947) — discarding instead of "
                     "reusing across the routing recovery", ctx.session_key, cached_sid,
                 )
-                out.evicted = self._pop_cached_agent_for_eviction()
             elif not sid_mismatch and cached_mc is not None and msg_count is not None and msg_count != cached_mc:
                 logger.info(
                     "Agent cache invalidated for session %s: "
                     "message_count changed (%s -> %s), "
                     "possible cross-process write", ctx.session_key, cached_mc, msg_count,
                 )
-                out.evicted = self._pop_cached_agent_for_eviction()
             else:
                 out.agent = cached[0]
                 # Refresh LRU order so cap enforcement evicts truly-oldest entries.
@@ -973,6 +943,8 @@ class TurnRunner:
                 out.agent.max_iterations = max_iterations
                 logger.debug("Reusing cached agent for session %s", ctx.session_key)
                 out.reused = True
+                return out
+            out.evicted = self._pop_cached_agent_for_eviction()
         return out
 
     def _release_evicted_agent(self, agent) -> None:
@@ -992,35 +964,21 @@ class TurnRunner:
         from gateway.run import _checkpoint_agent_kwargs
         ctx = self._ctx
         runner = self._runner
+        src = ctx.source
         return ctx.AIAgent(
-            model=turn_route["model"],
-            **turn_route["runtime"],
-            **_checkpoint_agent_kwargs(ctx.user_config),
-            max_iterations=max_iterations,
-            quiet_mode=True,
-            verbose_logging=False,
-            enabled_toolsets=ctx.enabled_toolsets,
-            disabled_toolsets=ctx.disabled_toolsets,
+            model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
+            max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
+            enabled_toolsets=ctx.enabled_toolsets, disabled_toolsets=ctx.disabled_toolsets,
             ephemeral_system_prompt=combined_ephemeral or None,
             prefill_messages=runner._prefill_messages or None,
-            reasoning_config=reasoning_config,
-            service_tier=runner._service_tier,
+            reasoning_config=reasoning_config, service_tier=runner._service_tier,
             request_overrides=turn_route.get("request_overrides"),
-            providers_allowed=pr.get("only"),
-            providers_ignored=pr.get("ignore"),
-            providers_order=pr.get("order"),
-            provider_sort=pr.get("sort"),
-            provider_require_parameters=pr.get("require_parameters", False),
+            providers_allowed=pr.get("only"), providers_ignored=pr.get("ignore"), providers_order=pr.get("order"),
+            provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),
-            session_id=ctx.session_id,
-            platform=platform_key,
-            user_id=ctx.source.user_id,
-            user_id_alt=ctx.source.user_id_alt,
-            user_name=ctx.source.user_name,
-            chat_id=ctx.source.chat_id,
-            chat_name=ctx.source.chat_name,
-            chat_type=ctx.source.chat_type,
-            thread_id=ctx.source.thread_id,
+            session_id=ctx.session_id, platform=platform_key,
+            user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
+            chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
@@ -1058,8 +1016,7 @@ class TurnRunner:
             self._release_evicted_agent(found.evicted)
         if agent is None:
             agent = self._build_fresh_agent(
-                turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
-                skip_context_files,
+                turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr, skip_context_files,
             )
             if cache_lock and cache is not None:
                 with cache_lock:
@@ -1084,10 +1041,7 @@ class TurnRunner:
             logger.debug("render_notice_line failed", exc_info=True)
             return
         if line:
-            self._schedule(
-                self._runner._deliver_platform_notice(self._ctx.source, line),
-                "notice_callback delivery scheduling error",
-            )
+            self._schedule(self._runner._deliver_platform_notice(self._ctx.source, line), "notice_callback delivery scheduling error")
 
     def _make_bg_review_callbacks(self):
         """(send, release): background-review messages ("💾 Memory updated") are held until the
@@ -1099,13 +1053,12 @@ class TurnRunner:
         pending_lock = threading.Lock()
 
         def deliver(message: str) -> None:
-            if not self._status_live():
-                return
-            self._send_status_text(
-                message,
-                _interim_metadata(_non_conversational_metadata(ctx._status_thread_metadata, platform=ctx.source.platform)),
-                "background_review_callback scheduling error",
-            )
+            if self._status_live():
+                self._send_status_text(
+                    message,
+                    _interim_metadata(_non_conversational_metadata(ctx._status_thread_metadata, platform=ctx.source.platform)),
+                    "background_review_callback scheduling error",
+                )
 
         def release() -> None:
             release_evt.set()
@@ -1133,7 +1086,7 @@ class TurnRunner:
         must survive every reused-agent turn. Drop only the PREVIOUS turn's routing overrides before
         layering this turn's, so stale per-turn values never linger."""
         overrides = dict(getattr(agent, "request_overrides", {}) or {})
-        for key, value in (dict(getattr(agent, "_gateway_turn_request_overrides", {}) or {})).items():
+        for key, value in (getattr(agent, "_gateway_turn_request_overrides", {}) or {}).items():
             if overrides.get(key) == value:
                 overrides.pop(key, None)
         turn_overrides = dict(turn_route.get("request_overrides") or {})
@@ -1156,10 +1109,7 @@ class TurnRunner:
             (ctx.native_tool_start_callback or ctx.voice_ack_callback)
             if (ctx._voice_ack_guild[0] is not None or ctx._native_slack_task_cards) else None
         )
-        agent.tool_complete_callback = (
-            ctx.native_tool_complete_callback
-            if ctx._native_slack_task_cards and ctx.native_tool_complete_callback is not None else None
-        )
+        agent.tool_complete_callback = ctx.native_tool_complete_callback if ctx._native_slack_task_cards else None
         agent.step_callback = ctx._step_callback_sync if ctx._hooks_ref.loaded_hooks else None
         agent.stream_delta_callback = stream_delta_cb
         agent.interim_assistant_callback = interim_assistant_cb if want_interim_messages else None
@@ -1173,15 +1123,12 @@ class TurnRunner:
         # Must-deliver notes for THIS turn ride the current user message (api_content sidecar), never
         # the system prompt. Assigned unconditionally so a reused agent never replays a stale note.
         agent._gateway_turn_context_notes = "\n\n".join(runner._consume_pending_turn_sidecar_notes(ctx.session_key))
-        bg_send, bg_release = self._make_bg_review_callbacks()
-        agent.background_review_callback = bg_send
+        agent.background_review_callback, bg_release = self._make_bg_review_callbacks()
         # Register the release hook on the adapter so base.py's finally block fires it after the
         # main response is delivered.
         if ctx._status_adapter and ctx.session_key:
             if getattr(type(ctx._status_adapter), "register_post_delivery_callback", None) is not None:
-                ctx._status_adapter.register_post_delivery_callback(
-                    ctx.session_key, bg_release, generation=ctx.run_generation,
-                )
+                ctx._status_adapter.register_post_delivery_callback(ctx.session_key, bg_release, generation=ctx.run_generation)
             else:
                 pdc = getattr(ctx._status_adapter, "_post_delivery_callbacks", None)
                 if pdc is not None:
@@ -1219,15 +1166,15 @@ class TurnRunner:
             # Returns (future, cancelled_flag) or just a future.
             if isinstance(boundary, tuple):
                 boundary, cancelled_flag = boundary
-            if hasattr(boundary, "result"):
-                ok = boundary.result(timeout=10)
-                if not ok:
-                    logger.warning(
-                        "%s boundary failed to close stream properly — "
-                        "prompt may still appear in typing bubble", reason,
-                    )
-                return bool(ok)
-            return True
+            if not hasattr(boundary, "result"):
+                return True
+            ok = boundary.result(timeout=10)
+            if not ok:
+                logger.warning(
+                    "%s boundary failed to close stream properly — "
+                    "prompt may still appear in typing bubble", reason,
+                )
+            return bool(ok)
         except (TimeoutError, Exception) as err:
             if cancelled_flag is not None:
                 cancelled_flag["cancelled"] = True
@@ -1248,9 +1195,10 @@ class TurnRunner:
             return ""
         session_key = ctx.session_key or ""
         clarify_id = uuid.uuid4().hex[:10]
+        choices = list(choices) if choices else None
         clarify_mod.register(
-            clarify_id=clarify_id, session_key=session_key, question=question,
-            choices=list(choices) if choices else None, multi_select=bool(multi_select),
+            clarify_id=clarify_id, session_key=session_key, question=question, choices=choices,
+            multi_select=bool(multi_select),
         )
         # Unlike approval, clarify passes reopen=True so the continuation re-opens a native stream
         # below the question; if the re-seed fails the consumer degrades to send() automatically.
@@ -1270,8 +1218,7 @@ class TurnRunner:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
         fut = self._schedule(
             ctx._status_adapter.send_clarify(
-                chat_id=ctx._status_chat_id, question=question,
-                choices=list(choices) if choices else None, clarify_id=clarify_id,
+                chat_id=ctx._status_chat_id, question=question, choices=choices, clarify_id=clarify_id,
                 session_key=session_key, metadata=ctx._status_thread_metadata,
             ),
             "Clarify send failed to schedule",
@@ -1299,11 +1246,8 @@ class TurnRunner:
         return response
 
     def _approval_notify_sync(self, approval_data: dict) -> None:
-        """Send the approval request to the user from the agent thread.
-
-        Uses the adapter's interactive button approvals (``send_exec_approval``) when available,
-        else a plain text message with ``/approve`` instructions.
-        """
+        """Send the approval request from the agent thread: the adapter's interactive button
+        approvals (``send_exec_approval``) when available, else plain text with ``/approve`` steps."""
         from gateway.run import (
             _approval_send_outcome, _format_exec_approval_fallback, _interim_metadata,
             _redact_approval_command,
@@ -1319,11 +1263,7 @@ class TurnRunner:
         # command string still leaks secrets. Both the button and plain-text paths use this value.
         cmd = _redact_approval_command(approval_data.get("command", ""))
         desc = approval_data.get("description", "dangerous command")
-        flags = {
-            "allow_permanent": approval_data.get("allow_permanent", True),
-            "allow_session": approval_data.get("allow_session", True),
-            "smart_denied": approval_data.get("smart_denied", False),
-        }
+        flags = {k: approval_data.get(k, d) for k, d in (("allow_permanent", True), ("allow_session", True), ("smart_denied", False))}
         # Check the *class*, not the instance — MagicMock auto-creates attributes in tests.
         if getattr(type(adapter), "send_exec_approval", None) is not None:
             try:
@@ -1381,8 +1321,7 @@ class TurnRunner:
         # sequences. Telegram observed=True rows are withheld from replayable history and attached to
         # the current addressed message as API-only context.
         agent_history, observed_group_context = _build_gateway_agent_history(
-            ctx.history, channel_prompt=ctx.channel_prompt,
-            inject_timestamps=_message_timestamps_enabled(ctx.user_config),
+            ctx.history, channel_prompt=ctx.channel_prompt, inject_timestamps=_message_timestamps_enabled(ctx.user_config),
         )
         # FTS write-corruption guard: if persistence failed silently, the reloaded transcript is
         # stale/empty while the SAME cached agent still holds the live conversation; replacing it
@@ -1407,9 +1346,7 @@ class TurnRunner:
         message. Nothing hits the transcript out-of-band, so alternation stays intact."""
         ctx = self._ctx
         notes = getattr(self._runner, attr, None)
-        note = None
-        if notes and ctx.session_key and ctx.session_key in notes:
-            note = notes.pop(ctx.session_key, None)
+        note = notes.pop(ctx.session_key, None) if notes and ctx.session_key and ctx.session_key in notes else None
         if note:
             ctx.message = note + "\n\n" + ctx.message
 
@@ -1439,11 +1376,10 @@ class TurnRunner:
         interruption_is_fresh = _is_fresh_gateway_interruption(_last_transcript_timestamp(ctx.history), window_secs=window)
         entry = None
         if ctx.session_key:
-            try:
+            with suppress(Exception):
                 entry = self._runner.session_store._entries.get(ctx.session_key)
-            except Exception:
-                entry = None
         resume_pending = entry is not None and getattr(entry, "resume_pending", False)
+        resume_reason = (getattr(entry, "resume_reason", None) or "restart_timeout") if resume_pending else None
         # resume_pending freshness ALSO uses the restart watchdog's ``last_resume_marked_at`` (the true
         # interruption stamp): the transcript clock can be hours older for an active thread, and the
         # startup auto-resume turn has empty text, so gating on it alone yields a blank user message.
@@ -1451,10 +1387,9 @@ class TurnRunner:
             getattr(entry, "last_resume_marked_at", None), window_secs=window,
         )
         if resume_pending and (interruption_is_fresh or mark_is_fresh):
-            reason = getattr(entry, "resume_reason", None) or "restart_timeout"
             # Empty message = the startup auto-resume turn; there is no NEW user message.
             ctx.message, persist_override = _prepare_resume_pending_message(
-                reason, ctx.message, interactive=self._resume_note_interactive(),
+                resume_reason, ctx.message, interactive=self._resume_note_interactive(),
             )
         elif agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh:
             persist_override = ctx.message
@@ -1470,10 +1405,7 @@ class TurnRunner:
         # did not fire (freshness signals disagreed, marker cleared) we must NOT hand the model a blank
         # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
         if isinstance(ctx.message, str) and not ctx.message.strip() and resume_pending:
-            ctx.message = build_resume_recovery_note(
-                getattr(entry, "resume_reason", None) or "restart_timeout", "",
-                interactive=self._resume_note_interactive(),
-            )
+            ctx.message = build_resume_recovery_note(resume_reason, "", interactive=self._resume_note_interactive())
         return persist_override, ctx.persist_user_timestamp
 
     def _native_image_run_message(self):
@@ -1509,9 +1441,7 @@ class TurnRunner:
         token = set_current_session_key(session_key)
         register_gateway_notify(session_key, self._approval_notify_sync)
         try:
-            api_message = _wrap_current_message_with_observed_context(
-                self._native_image_run_message(), observed_group_context,
-            )
+            api_message = _wrap_current_message_with_observed_context(self._native_image_run_message(), observed_group_context)
             kwargs = {"conversation_history": agent_history, "task_id": ctx.session_id}
             if persist_user_message_override is not None:
                 kwargs["persist_user_message"] = persist_user_message_override
@@ -1534,11 +1464,9 @@ class TurnRunner:
             unregister_gateway_notify(session_key)
             # Cancel pending clarify entries so blocked agent threads don't hang past the end of the
             # run (interrupt, completion, gateway shutdown). Idempotent.
-            try:
+            with suppress(Exception):
                 from tools.clarify_gateway import clear_session
                 clear_session(session_key)
-            except Exception:
-                pass
             reset_current_session_key(token)
 
     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
@@ -1559,9 +1487,7 @@ class TurnRunner:
         # diagnostic AND suppress the gateway's own error delivery.
         _final_for_stream = None
         if (
-            isinstance(result, dict)
-            and not result.get("failed")
-            and not result.get("interrupted")
+            isinstance(result, dict) and not result.get("failed") and not result.get("interrupted")
             and result.get("completed") is not False
         ):
             fr = result.get("final_response")
@@ -1636,14 +1562,13 @@ class TurnRunner:
             # Only after this run published its split — a stale /stop→/new predecessor must not
             # mutate routing state.
             if persisted:
+                src = ctx.source
                 if (
-                    getattr(ctx.source, "platform", None) == Platform.TELEGRAM
-                    and getattr(ctx.source, "chat_type", None) == "dm"
-                    and getattr(ctx.source, "thread_id", None) is None
-                    and runner._session_db is not None
+                    getattr(src, "platform", None) == Platform.TELEGRAM and getattr(src, "chat_type", None) == "dm"
+                    and getattr(src, "thread_id", None) is None and runner._session_db is not None
                 ):
                     self._restore_telegram_thread_id_after_split(agent_session_id)
-                runner._sync_telegram_topic_binding(ctx.source, entry, reason="agent-run-compression")
+                runner._sync_telegram_topic_binding(src, entry, reason="agent-run-compression")
         runner._sync_session_model_from_agent(agent_session_id, agent)
         # history_offset=0 whenever the agent's message list lost the original history prefix
         # (split OR in-place compaction): the returned `messages` is the compacted set, persist all
@@ -1659,8 +1584,7 @@ class TurnRunner:
         for extra in (
             (ctx.channel_prompt or "").strip(),
             self._runner._get_system_prompt_for_channel(
-                ctx.source.platform, ctx.source.chat_id or "",
-                thread_id=getattr(ctx.source, "thread_id", None),
+                ctx.source.platform, ctx.source.chat_id or "", thread_id=getattr(ctx.source, "thread_id", None),
                 parent_id=getattr(ctx.source, "parent_chat_id", None),
             ),
         ):
@@ -1677,14 +1601,11 @@ class TurnRunner:
         if "MEDIA:" in final_response:
             return final_response
         media_tags, has_voice_directive = _collect_auto_append_media_tags(
-            result.get("messages", []), history_offset=len(agent_history),
-            history_media_paths=history_media_paths,
+            result.get("messages", []), history_offset=len(agent_history), history_media_paths=history_media_paths,
         )
         if not media_tags:
             return final_response
-        unique_tags = list(dict.fromkeys(media_tags))
-        if has_voice_directive:
-            unique_tags.insert(0, "[[audio_as_voice]]")
+        unique_tags = (["[[audio_as_voice]]"] if has_voice_directive else []) + list(dict.fromkeys(media_tags))
         return final_response + "\n" + "\n".join(unique_tags)
 
     def run_sync(self):
@@ -1714,16 +1635,9 @@ class TurnRunner:
                 model, runtime_kwargs.get("provider"), ctx.session_key or "",
             )
         except Exception as exc:
-            return {
-                "final_response": f"⚠️ Provider authentication failed: {exc}",
-                "messages": [],
-                "api_calls": 0,
-                "tools": [],
-            }
+            return {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [], "api_calls": 0, "tools": []}
         pr = runner._provider_routing
-        reasoning_config = runner._resolve_session_reasoning_config(
-            source=ctx.source, session_key=ctx.session_key, model=model,
-        )
+        reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
         runner._reasoning_config = reasoning_config
         runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
@@ -1751,26 +1665,20 @@ class TurnRunner:
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
+        # failure_reason must survive the empty-response path too (TUI billing, transient-failure
+        # persistence). compression_deferred (soft lock-contention defer) is distinct from
+        # compression_exhausted so the gateway never auto-resets a session a concurrent compressor is
+        # about to shrink.
         common = {
-            "messages": result.get("messages", []),
-            "api_calls": result.get("api_calls", 0),
-            "failed": result.get("failed", False),
-            # The classifier's failure_reason must survive the empty-response path too, or
-            # downstream consumers (TUI billing, transient-failure persistence) lose it.
-            "failure_reason": result.get("failure_reason"),
-            "partial": result.get("partial", False),
-            "completed": result.get("completed"),
-            "interrupted": result.get("interrupted", False),
-            "interrupt_message": result.get("interrupt_message"),
+            "messages": result.get("messages", []), "api_calls": result.get("api_calls", 0),
+            "failed": result.get("failed", False), "failure_reason": result.get("failure_reason"),
+            "partial": result.get("partial", False), "completed": result.get("completed"),
+            "interrupted": result.get("interrupted", False), "interrupt_message": result.get("interrupt_message"),
             "error": result.get("error"),
             "compression_exhausted": result.get("compression_exhausted", False),
-            # Soft lock-contention defer: distinct from compression_exhausted so the gateway never
-            # auto-resets a session that a concurrent compressor is about to shrink.
             "compression_deferred": result.get("compression_deferred", False),
             "tools": ctx.tools_holder[0] or [],
-            "history_offset": history_offset,
-            "compacted_in_place": compacted_in_place,
-            "session_id": effective_session_id,
+            "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
             **usage,
         }
         if not final_response:
@@ -1785,9 +1693,7 @@ class TurnRunner:
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         return {
-            "final_response": final_response,
-            "last_reasoning": result.get("last_reasoning"),
-            **common,
+            "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common,
             "response_previewed": result.get("response_previewed", False),
             "response_transformed": result.get("response_transformed", False),
             # Lets the persistence block tell whether the codex app-server path self-persisted (it
