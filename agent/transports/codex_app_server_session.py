@@ -92,12 +92,11 @@ def _notification_belongs_to_turn(note: dict, *, thread_id: Optional[str], turn_
     """
     if not isinstance(note, dict):
         return False
-    observed_thread_id, observed_turn_id = _notification_scope_ids(note)
-
-    def foreign(expected: Optional[str], observed: Optional[str]) -> bool:
-        return expected is not None and observed is not None and str(observed) != str(expected)
-
-    return not (foreign(thread_id, observed_thread_id) or foreign(turn_id, observed_turn_id))
+    observed = _notification_scope_ids(note)
+    return not any(
+        expected is not None and seen is not None and str(seen) != str(expected)
+        for expected, seen in zip((thread_id, turn_id), observed)
+    )
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -131,12 +130,10 @@ def _coerce_turn_input_text(user_input: Any) -> str:
 # Conservative on purpose: only redirect to `codex login` on a strong signal,
 # otherwise the original error surfaces verbatim.
 _OAUTH_REFRESH_FAILURE_HINTS = (
-    "invalid_grant", "invalid grant",
-    "refresh token", "refresh_token", "token refresh", "token_refresh",
-    "token has expired", "expired_token", "expired token",
-    "not authenticated", "unauthenticated", "unauthorized", "401 unauthorized",
-    "re-authenticate", "reauthenticate", "please log in", "please login",
-    "auth profile", "no auth profile", "oauth",
+    "invalid_grant", "invalid grant", "refresh token", "refresh_token", "token refresh", "token_refresh",
+    "token has expired", "expired_token", "expired token", "not authenticated", "unauthenticated", "unauthorized",
+    "401 unauthorized", "re-authenticate", "reauthenticate", "please log in", "please login", "auth profile",
+    "no auth profile", "oauth",
 )
 
 _OAUTH_REAUTH_HINT = (
@@ -216,13 +213,10 @@ class CodexAppServerSession:
         thread_id = thread_obj.get("id") or thread_obj.get("sessionId") or result.get("sessionId") or result.get("threadId")
         if not thread_id:
             raise CodexAppServerError(
-                code=-32603,
-                message=f"codex thread/start returned no thread id (payload keys: {sorted(result.keys())})",
+                code=-32603, message=f"codex thread/start returned no thread id (payload keys: {sorted(result.keys())})",
             )
         self._thread_id = thread_id
-        logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s", thread_id[:8], self._permission_profile, self._cwd
-        )
+        logger.info("codex app-server thread started: id=%s profile=%s cwd=%s", thread_id[:8], self._permission_profile, self._cwd)
         return thread_id
 
     def close(self) -> None:
@@ -249,16 +243,13 @@ class CodexAppServerSession:
         if not cleaned:
             return False
         with self._active_turn_lock:
-            turn_id = self._active_turn_id
-            thread_id = self._thread_id
-            client = self._client
+            turn_id, thread_id, client = self._active_turn_id, self._thread_id, self._client
         if not turn_id or not thread_id or client is None:
             return False
         try:
             response = client.request(
                 "turn/steer",
-                {"threadId": thread_id, "input": [{"type": "text", "text": cleaned}], "expectedTurnId": turn_id},
-                timeout=10,
+                {"threadId": thread_id, "input": [{"type": "text", "text": cleaned}], "expectedTurnId": turn_id}, timeout=10,
             )
         except (CodexAppServerError, TimeoutError):
             logger.debug("turn/steer rejected for active Codex turn", exc_info=True)
@@ -267,12 +258,10 @@ class CodexAppServerSession:
         return accepted_turn_id in {None, turn_id}
 
     def _format_error_with_stderr(self, prefix: str, exc: Any = "", *, tail_lines: int = _STDERR_TAIL_LINES) -> str:
-        """User-facing error string for generic codex failures.
+        """User-facing error string for generic codex failures, plus the redacted stderr tail.
 
-        Appends the redacted (force=True) stderr tail so provider/auth secrets
-        never leak into chat output, while codex's opaque 'Internal error' text
-        becomes diagnosable. Specific classifications (OAuth, wedge watchdog)
-        produce their own clean hint instead.
+        force=True redaction keeps provider/auth secrets out of chat output while
+        making codex's opaque 'Internal error' diagnosable.
         """
         exc_str = "" if exc is None else str(exc)
         base = f"{prefix}: {exc_str}" if exc_str else prefix
@@ -283,8 +272,7 @@ class CodexAppServerSession:
         joined = "\n".join(line.rstrip() for line in tail if line)
         if not joined.strip():
             return base
-        redacted = redact_sensitive_text(joined, force=True)
-        return f"{base}\ncodex stderr (last {len(tail)} lines):\n{redacted}"
+        return f"{base}\ncodex stderr (last {len(tail)} lines):\n{redact_sensitive_text(joined, force=True)}"
 
     def _stderr_blob(self, n: int) -> str:
         return "\n".join(self._client.stderr_tail(n))
@@ -376,27 +364,28 @@ class CodexAppServerSession:
         this long, fast-fail and retire instead of burning the full turn deadline.
         """
         result = TurnResult()
-        if not self._start_for(result):
-            self._interrupt_event.clear()
-            return result
-        # Do not clear first: a hard stop arriving during ensure_started() must
-        # be honored before launching a Codex turn.
-        if self._interrupt_event.is_set():
-            result.interrupted = True
-            self._interrupt_event.clear()
-            return result
+        if self._start_for(result):
+            # Do not clear first: a hard stop arriving during ensure_started() must
+            # be honored before launching a Codex turn.
+            if self._interrupt_event.is_set():
+                result.interrupted = True
+            else:
+                ts = self._request_for(
+                    result, "turn/start",
+                    {"threadId": self._thread_id, "input": [{"type": "text", "text": _coerce_turn_input_text(user_input)}]},
+                    "turn/start",
+                )
+                if ts is not None:
+                    self._run_started_turn(result, ts, turn_timeout, notification_poll_timeout, post_tool_quiet_timeout)
+        self._interrupt_event.clear()
+        return result
+
+    def _run_started_turn(
+        self, result: TurnResult, ts: dict, turn_timeout: float, notification_poll_timeout: float,
+        post_tool_quiet_timeout: float,
+    ) -> None:
+        """Drive an accepted ``turn/start`` to completion: watchdog, approvals, projection."""
         projector = CodexEventProjector()
-
-        ts = self._request_for(
-            result,
-            "turn/start",
-            {"threadId": self._thread_id, "input": [{"type": "text", "text": _coerce_turn_input_text(user_input)}]},
-            "turn/start",
-        )
-        if ts is None:
-            self._interrupt_event.clear()
-            return result
-
         result.turn_id = (ts.get("turn") or {}).get("id")
         with self._active_turn_lock:
             self._active_turn_id = result.turn_id
@@ -408,10 +397,7 @@ class CodexAppServerSession:
                 return False
             self._issue_interrupt(result.turn_id)
             result.interrupted = True
-            self._retire(
-                result,
-                f"codex went silent for {post_tool_quiet_timeout:.0f}s after a tool result; retiring app-server session.",
-            )
+            self._retire(result, f"codex went silent for {post_tool_quiet_timeout:.0f}s after a tool result; retiring app-server session.")
             return True
 
         def on_server_request(sreq: dict) -> bool:
@@ -425,16 +411,12 @@ class CodexAppServerSession:
                 if pending is None:
                     break
                 if not _notification_belongs_to_turn(pending, thread_id=self._thread_id, turn_id=result.turn_id):
-                    logger.debug(
-                        "ignoring foreign codex notification while draining server request: method=%s",
-                        pending.get("method"),
-                    )
+                    logger.debug("ignoring foreign codex notification while draining server request: method=%s", pending.get("method"))
                     continue
                 proj, aborted = self._absorb_notification(result, projector, pending)
                 if proj.is_tool_iteration:
                     last_tool_completion_at = time.monotonic()
-                if aborted:
-                    turn_complete = True
+                turn_complete = turn_complete or aborted
             self._handle_server_request(sreq)
             # An approval round-trip is live signal — don't let it trip the watchdog.
             last_tool_completion_at = None
@@ -463,8 +445,6 @@ class CodexAppServerSession:
         )
         with self._active_turn_lock:
             self._active_turn_id = None
-        self._interrupt_event.clear()
-        return result
 
     def _drive_turn(
         self, result: TurnResult, *, turn_timeout: float, notification_poll_timeout: float,
@@ -495,8 +475,7 @@ class CodexAppServerSession:
                 break
             sreq = self._client.take_server_request(timeout=0)
             if sreq is not None:
-                if on_server_request(sreq):
-                    turn_complete = True
+                turn_complete = on_server_request(sreq)
                 continue
             note = self._client.take_notification(timeout=notification_poll_timeout)
             if note is None:
@@ -507,8 +486,7 @@ class CodexAppServerSession:
             if not _notification_belongs_to_turn(note, thread_id=self._thread_id, turn_id=result.turn_id):
                 logger.debug("ignoring foreign codex notification: method=%s", method)
                 continue
-            if on_note(note, method):
-                turn_complete = True
+            turn_complete = on_note(note, method)
 
         if accept_final_text_at_deadline and not turn_complete and not result.interrupted and result.final_text and result.error is None:
             logger.warning(
@@ -670,16 +648,10 @@ class CodexAppServerSession:
         reason = params.get("reason")
         grant_root = params.get("grantRoot")
         change_summary = self._pending_file_changes.get(params.get("itemId") or "") or None
-        description_parts = [p for p in (reason, change_summary) if p]
-        if grant_root:
-            description_parts.append(f"grants write to {grant_root}")
+        description_parts = [p for p in (reason, change_summary, grant_root and f"grants write to {grant_root}") if p]
         description = "; ".join(description_parts) if description_parts else "Codex requests to apply a patch"
-        command_label = (
-            f"apply_patch: {change_summary}" if change_summary
-            else f"apply_patch: {reason}" if reason
-            else "apply_patch"
-        )
-        return self._run_approval_callback(command_label, description, "apply_patch")
+        detail = change_summary or reason
+        return self._run_approval_callback(f"apply_patch: {detail}" if detail else "apply_patch", description, "apply_patch")
 
     def _track_pending_file_change(self, note: dict) -> None:
         """Maintain _pending_file_changes from item/started + item/completed so the
@@ -737,10 +709,9 @@ def _apply_compaction_notification(result: TurnResult, note: dict) -> None:
     params = note.get("params") or {}
     if not isinstance(params, dict):
         return
-    if method != "thread/compacted":
-        item = params.get("item") if method in {"item/started", "item/completed"} else None
-        if not isinstance(item, dict) or item.get("type") != "contextCompaction":
-            return
+    item = params.get("item") if method in {"item/started", "item/completed"} else None
+    if method != "thread/compacted" and not (isinstance(item, dict) and item.get("type") == "contextCompaction"):
+        return
     result.compacted = True
     result.thread_id = params.get("threadId") or result.thread_id
     result.turn_id = params.get("turnId") or result.turn_id
