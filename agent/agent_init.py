@@ -32,7 +32,7 @@ from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
 from agent.tool_guardrails import (
-    ToolCallGuardrailConfig, ToolCallGuardrailController, ToolGuardrailDecision
+    ToolCallGuardrailConfig, ToolCallGuardrailController
 )
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
@@ -547,48 +547,103 @@ def _finalize_routing(agent, api_mode, credential_pool):
         ).start()
 
 
-def _init_control_state(agent):
-    # Lets _vprint print during tool execution even with stream consumers registered.
-    agent._executing_tools = False
-    agent._tool_guardrails = ToolCallGuardrailController()
-    agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
+def _set_defaults(agent, table: Dict[str, Any]) -> None:
+    """Assign each ``name -> value`` on ``agent``; callables are factories (fresh per agent)."""
+    for name, value in table.items():
+        setattr(agent, name, value() if callable(value) else value)
 
+
+# Control-flow state (interrupts / steer / redirect / delegation / background review).
+_CONTROL_STATE: Dict[str, Any] = {
+    "_executing_tools": False,  # lets _vprint print while tools run with stream consumers on
+    "_tool_guardrails": ToolCallGuardrailController,
+    "_tool_guardrail_halt_decision": None,
     # Interrupts. Hard cancellation is separate from redirect/message state; the Event makes
     # the cause atomic for auxiliary stream pollers.
-    agent._interrupt_requested = False
-    agent._interrupt_message = None  # Optional message that triggered interrupt
-    agent._hard_interrupt_requested = threading.Event()
-    agent._execution_thread_id: int | None = None  # Set at run_conversation() start
-    agent._interrupt_thread_signal_pending = False
-    agent._client_lock = threading.RLock()
-    agent._model_request_active = threading.Event()
-    agent._supports_active_turn_redirect = True
-
+    "_interrupt_requested": False,
+    "_interrupt_message": None,  # optional message that triggered the interrupt
+    "_hard_interrupt_requested": threading.Event,
+    "_execution_thread_id": None,  # set at run_conversation() start
+    "_interrupt_thread_signal_pending": False,
+    "_client_lock": threading.RLock,
+    "_model_request_active": threading.Event,
+    "_supports_active_turn_redirect": True,
     # /steer: the drain hook appends the note to the last tool result after the current
     # batch — no interrupt, no new user turn (role alternation preserved).
-    agent._pending_steer: Optional[str] = None
-    agent._pending_steer_lock = threading.Lock()
-
+    "_pending_steer": None,
+    "_pending_steer_lock": threading.Lock,
     # Active-turn redirect: keep the valid turn prefix, cancel only the in-flight request,
     # rebuild the tail with the correction. Drained at a role-safe boundary.
-    agent._pending_redirect: Optional[str] = None
-    agent._pending_redirect_lock = threading.Lock()
-
+    "_pending_redirect": None,
+    "_pending_redirect_lock": threading.Lock,
     # Concurrent-tool worker tids: `_set_interrupt` on `_execution_thread_id` alone doesn't
     # reach ThreadPoolExecutor workers, so interrupt()/clear_interrupt() fan out to these.
-    agent._tool_worker_threads: set[int] = set()
-    agent._tool_worker_threads_lock = threading.Lock()
-
-    # Subagent delegation state
-    agent._delegate_depth = 0        # 0 = top-level agent, incremented for children
-    agent._active_children = []      # Running child AIAgents (for interrupt propagation)
-    agent._active_children_lock = threading.Lock()
-
+    "_tool_worker_threads": set,
+    "_tool_worker_threads_lock": threading.Lock,
+    # Subagent delegation: depth (0 = top-level) and running children (interrupt propagation).
+    "_delegate_depth": 0,
+    "_active_children": list,
+    "_active_children_lock": threading.Lock,
     # Background review (agent/background_review.py): the run is installed before the worker
     # starts and fences its first provider phase; the agent pointer enables interrupt fan-out.
-    agent._background_review_agent = None
-    agent._background_review_run = None
-    agent._background_review_lock = threading.Lock()
+    "_background_review_agent": None,
+    "_background_review_run": None,
+    "_background_review_lock": threading.Lock,
+}
+
+# Per-turn bookkeeping: budgets, activity tracking, rate-limit/credits telemetry.
+_TURN_STATE: Dict[str, Any] = {
+    # Iteration budget: notify the LLM only on exhaustion (one message, one grace call, then
+    # a forced summary) — intermediate pressure warnings made models give up early.
+    "_budget_exhausted_injected": False,
+    "_budget_grace_call": False,
+    "_run_budget_started_at": None,  # set by turn_context.prepare_turn when a budget is active
+    "_run_budget_wrapup_injected": False,  # one-shot latch for the 80% wrap-up notice
+    # Activity tracking (API call / tool / stream chunk) for the gateway timeout handler and
+    # "still working" notifications. Named provenances are stamped only by compression writers.
+    "_last_activity_ts": lambda: time.time(),
+    "_last_activity_desc": "initializing",
+    "_last_activity_provenance": ActivityProvenance.UNKNOWN,
+    "_session_activity_last_persist_mono": 0.0,  # rate-limits durable SessionDB stamps
+    "_current_tool": None,
+    "_api_call_count": 0,
+    # Opt-out for the between-turns MCP refresh; set on forks that need byte-identical tools[].
+    "_skip_mcp_refresh": False,
+    # Registry generation of the tool snapshot (set in _load_tools): a late refresh rejects
+    # a stale rebuild instead of clobbering a newer one.
+    "_tool_snapshot_generation": 0,
+    "_rate_limit_state": None,  # from x-ratelimit-* headers; read by /usage
+    # Credits tracking (dev-only, HERMES_DEV_CREDITS) from x-nous-credits-* headers; session
+    # start is latched on the first header so cumulative spend can be reported.
+    "_credits_state": None,
+    "_credits_session_start_micros": None,
+    "_or_cache_hits": 0,  # X-OpenRouter-Cache-Status: HIT count
+}
+
+# Streaming delivery state.
+_STREAM_STATE: Dict[str, Any] = {
+    "_stream_callback": None,  # streaming TTS; set early so _vprint can reference it
+    "_stream_needs_break": False,  # one "\n\n" before the next real text delta after tools
+    # Stateful scrubbers: <memory-context> / thinking spans split across deltas defeat
+    # per-delta regexes (both tags must be in one string).
+    "_stream_context_scrubber": StreamingContextScrubber,
+    "_stream_think_scrubber": StreamingThinkScrubber,
+    "_current_streamed_assistant_text": "",  # so a later completed interim isn't re-sent
+    "_delivered_interim_texts": set,  # interims this user turn (spans Codex continuations)
+    # Single-writer guard for the delta sink: each attempt claims a monotonic writer token and
+    # the sink drops chunks from threads holding a stale one, so a superseded stream can't
+    # interleave with the retry's. Threads that never claimed are never fenced.
+    "_stream_writer_lock": threading.Lock,
+    "_stream_writer_token": 0,
+    "_stream_writer_tls": threading.local,
+    "_stream_writer_dropped": 0,
+    # API-facing user message override when it differs from the persisted transcript (voice).
+    "_persist_user_message_idx": None,
+    "_persist_user_message_override": None,
+    "_persist_user_message_timestamp": None,
+    # Image-to-text fallbacks cached per payload/URL so one tool loop doesn't re-run vision.
+    "_anthropic_image_fallback_cache": dict,
+}
 
 
 def _init_prompt_cache_config(agent):
@@ -622,47 +677,13 @@ def _init_prompt_cache_config(agent):
 
 
 def _init_turn_state(agent, run_budget_seconds):
-    # Iteration budget: notify the LLM only on exhaustion (one message, one grace call, then
-    # a forced summary) — intermediate pressure warnings made models give up early.
-    agent._budget_exhausted_injected = False
-    agent._budget_grace_call = False
-
+    _set_defaults(agent, _TURN_STATE)
     # Wall-clock run budget per turn: constructor arg wins, else agent.run_budget_seconds
     # (in _apply_agent_section). None = fully off (no clock reads, injection, or capping).
     agent.run_budget_seconds = _normalize_run_budget_seconds(run_budget_seconds)
-    # Set by turn_context.prepare_turn when a run budget is active; None otherwise.
-    agent._run_budget_started_at = None
-    # One-shot latch for the 80% wrap-up notice (reset each turn).
-    agent._run_budget_wrapup_injected = False
-
-    # Activity tracking (API call / tool / stream chunk) for the gateway timeout handler and
-    # "still working" notifications.
-    agent._last_activity_ts: float = time.time()
-    agent._last_activity_desc: str = "initializing"
-    # Named provenances are stamped only by compression writers (heartbeat/timeout/cooldown).
-    agent._last_activity_provenance = ActivityProvenance.UNKNOWN
-    # Rate-limit durable SessionDB activity stamps from _touch_activity.
-    agent._session_activity_last_persist_mono: float = 0.0
-    agent._current_tool: str | None = None
-    agent._api_call_count: int = 0
-    # Opt-out for the between-turns MCP refresh; set on forks that need byte-identical tools[].
-    agent._skip_mcp_refresh = False
-    # Registry generation of the tool snapshot (set in _load_tools): a late refresh rejects
-    # a stale rebuild instead of clobbering a newer one.
-    agent._tool_snapshot_generation = 0
-    # Rate limit tracking from x-ratelimit-* response headers; read by /usage.
-    agent._rate_limit_state = None
-
-    # Credits tracking (dev-only, HERMES_DEV_CREDITS) from x-nous-credits-* headers; session
-    # start is latched on the first header so cumulative spend can be reported.
-    agent._credits_state = None
-    agent._credits_session_start_micros = None
     from agent.credits_tracker import new_credits_latch
 
-    agent._credits_latch = new_credits_latch()
-
-    # OpenRouter response cache hits (X-OpenRouter-Cache-Status: HIT in stream headers).
-    agent._or_cache_hits: int = 0
+    agent._credits_latch = new_credits_latch()  # threshold-notice latch (sticky keys + gates)
 
 
 def _setup_logging(agent):
@@ -676,37 +697,6 @@ def _setup_logging(agent):
         _ra().logger.info("Verbose logging enabled (third-party library logs suppressed)")
     # Quiet mode must NOT raise per-logger levels: isEnabledFor() runs before propagation and
     # would starve the root file handlers. Noise reduction belongs in hermes_logging.
-
-
-def _init_stream_state(agent):
-    # Internal stream callback (streaming TTS); set here so _vprint can reference it early.
-    agent._stream_callback = None
-    # Set after tool iterations so one "\n\n" precedes the next real text delta.
-    agent._stream_needs_break = False
-    # Stateful scrubbers: <memory-context> / thinking spans split across deltas defeat
-    # per-delta regexes (both tags must be in one string).
-    agent._stream_context_scrubber = StreamingContextScrubber()
-    agent._stream_think_scrubber = StreamingThinkScrubber()
-    # Text already streamed this response, so a later completed interim isn't re-sent.
-    agent._current_streamed_assistant_text = ""
-    # Interims delivered this user turn (spans Codex continuations) so repeats aren't re-sent.
-    agent._delivered_interim_texts: set[str] = set()
-
-    # Single-writer guard for the delta sink: each attempt claims a monotonic writer token and
-    # the sink drops chunks from threads holding a stale one, so a superseded stream can't
-    # interleave with the retry's. Threads that never claimed are never fenced.
-    agent._stream_writer_lock = threading.Lock()
-    agent._stream_writer_token = 0
-    agent._stream_writer_tls = threading.local()
-    agent._stream_writer_dropped = 0
-
-    # API-facing user message override when it differs from the persisted transcript (voice).
-    agent._persist_user_message_idx = None
-    agent._persist_user_message_override = None
-    agent._persist_user_message_timestamp = None
-
-    # Image-to-text fallbacks cached per payload/URL so one tool loop doesn't re-run vision.
-    agent._anthropic_image_fallback_cache: Dict[str, str] = {}
 
 
 def _bedrock_region_from_url(base_url) -> str:
@@ -2438,7 +2428,7 @@ def init_agent(
         setattr(agent, _cb, _params[_cb])
     agent.suppress_status_output = False
 
-    _init_control_state(agent)
+    _set_defaults(agent, _CONTROL_STATE)
 
     # reasoning_content echo opt-in; switch_model / fallback / restore keep it in sync.
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
@@ -2449,7 +2439,7 @@ def init_agent(
     _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
-    _init_stream_state(agent)
+    _set_defaults(agent, _STREAM_STATE)
     _build_client(agent, api_key, base_url, fallback_model)
     _init_fallback_chain(agent, fallback_model)
     _load_tools(agent, enabled_toolsets, disabled_toolsets)
