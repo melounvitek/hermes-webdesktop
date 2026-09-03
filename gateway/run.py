@@ -2328,6 +2328,19 @@ from gateway.restart import (
 logger = logging.getLogger(__name__)
 
 
+def _best_effort(fn: Callable[[], Any], debug_msg: Optional[str] = None) -> Any:
+    """Call ``fn``, swallowing any Exception (logged at debug when ``debug_msg`` has a ``%s`` slot).
+
+    Returns ``fn()``'s value, or None on failure.
+    """
+    try:
+        return fn()
+    except Exception as exc:
+        if debug_msg:
+            logger.debug(debug_msg, exc)
+        return None
+
+
 # Ceiling for the shutdown quiesce of the gateway-owned thread pool. Drain has
 # already waited for the agents, so what is left here is short blocking work
 # (a transcript append, a routing save); anything slower is a stuck worker we
@@ -4018,11 +4031,12 @@ class GatewayRunner(
 
     def _init_startup_checks(self) -> None:
         """Ensure tirith is installed and warn when manual approvals have no automated assessor."""
-        try:
+        def _ensure_tirith() -> None:
+            # Downloads if needed; non-fatal — fail-open at scan time if unavailable.
             from tools.tirith_security import ensure_installed
             ensure_installed(log_failures=False)
-        except Exception:
-            pass  # Non-fatal — fail-open at scan time if unavailable
+
+        _best_effort(_ensure_tirith)
 
         # Startup heads-up: manual approval mode with no automated risk assessor (tirith disabled AND
         # no auxiliary.approval model) can only gate dangerous commands via live in-chat approval, so
@@ -5273,66 +5287,39 @@ def _replace_target_belongs_to_other_profile(existing_pid: int) -> bool:
 
         our_home = _get_process_hermes_home()
 
+        def refuse(msg: str, *args, level=logging.WARNING) -> bool:
+            logger.log(level, "Refusing --replace: " + msg, *args)
+            return True
+
         # Authorize from the persisted identity record — bound claim: the record must describe THIS pid
         # with THIS live start time, otherwise it is stale/poisoned and proves nothing.
         record = _read_pid_record(_get_pid_path())
         if not isinstance(record, dict) or not _record_looks_like_gateway(record):
-            logger.warning(
-                "Refusing --replace: no valid gateway pid record to prove ownership of PID %s.",
-                existing_pid)
-            return True
-
+            return refuse("no valid gateway pid record to prove ownership of PID %s.", existing_pid)
         record_pid = _pid_from_record(record)
         if record_pid != existing_pid:
-            logger.warning(
-                "Refusing --replace: pid record names %s, not target %s.", record_pid, existing_pid
-            )
-            return True
-
+            return refuse("pid record names %s, not target %s.", record_pid, existing_pid)
         recorded_start = record.get("start_time")
         if not isinstance(recorded_start, int) or isinstance(recorded_start, bool):
             return True
         if _get_process_start_time(existing_pid) != recorded_start:
-            logger.warning(
-                "Refusing --replace: pid record start-time does not match "
-                "the live process %s (stale/PID-reuse record).",
-                existing_pid)
-            return True
-
+            return refuse("pid record start-time does not match the live process %s (stale/PID-reuse record).",
+                          existing_pid)
         recorded_home = record.get("hermes_home")
         if not isinstance(recorded_home, str) or not recorded_home.strip():
-            # Legacy record without hermes_home cannot prove ownership.
-            logger.warning(
-                "Refusing --replace: pid record predates hermes_home "
-                "stampings; ownership of PID %s unprovable.",
-                existing_pid)
-            return True
-
+            return refuse("pid record predates hermes_home stampings; ownership of PID %s unprovable.",
+                          existing_pid)
         if not _same_hermes_home(recorded_home, our_home):
-            logger.error(
-                "Refusing --replace: pid record belongs to a different "
-                "HERMES_HOME (%s, ours %s). Remove the stale PID record or "
-                "stop the owning profile explicitly.",
-                recorded_home,
-                our_home)
-            return True
-
+            return refuse("pid record belongs to a different HERMES_HOME (%s, ours %s). Remove the stale PID "
+                          "record or stop the owning profile explicitly.", recorded_home, our_home,
+                          level=logging.ERROR)
         # Readable-argv consistency check (never authority): an explicit profile flag / HERMES_HOME= that
         # clearly contradicts our home refuses even if the record agreed; bare/matching argv adds nothing.
-        try:
-            live_cmdline = _read_process_cmdline(existing_pid)
-        except Exception:
-            live_cmdline = None  # consistency probe failure → record decides
-        if live_cmdline and _looks_like_profile_conflict_from_cmdline(
-            live_cmdline, our_home
-        ):
-            logger.error(
-                "Refusing --replace: target PID %s command line explicitly "
-                "advertises a different profile than HERMES_HOME %s.",
-                existing_pid,
-                our_home)
-            return True
-
+        # A probe failure leaves the record deciding.
+        live_cmdline = _best_effort(lambda: _read_process_cmdline(existing_pid))
+        if live_cmdline and _looks_like_profile_conflict_from_cmdline(live_cmdline, our_home):
+            return refuse("target PID %s command line explicitly advertises a different profile than "
+                          "HERMES_HOME %s.", existing_pid, our_home, level=logging.ERROR)
         return False
     except Exception:
         # Destructive action + unknown ownership => fail closed (#89315).
@@ -5524,33 +5511,30 @@ async def _start_gateway_replace_existing_instance(existing_pid: int, replace: b
 
 def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
     """Sync bundled skills, set up file logging + startup security audit, and the -v/-q stderr handler."""
-    # Sync bundled skills on gateway start (fast -- skips unchanged)
-    try:
+    def _sync_skills() -> None:
+        # Sync bundled skills on gateway start (fast -- skips unchanged)
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
-    except Exception:
-        pass
+
+    _best_effort(_sync_skills)
 
     # Centralized logging — agent.log (INFO+), errors.log (WARNING+), gateway.log (INFO+, gateway
     # records only). Idempotent, so repeated calls from AIAgent.__init__ don't duplicate.
     from hermes_logging import setup_logging, _safe_stderr
     setup_logging(hermes_home=_hermes_home, mode="gateway")
 
-    # Startup security posture audit — warn-on-load, never blocks: surfaces root / weak-SSH /
-    # ephemeral-container / unauthenticated-listener posture so operators see they're exposed.
-    try:
+    def _security_audit() -> None:
+        # Warn-on-load, never blocks: surfaces root / weak-SSH / ephemeral-container /
+        # unauthenticated-listener posture so operators see they're exposed.
         from hermes_cli.security_audit_startup import log_startup_security_warnings
 
-        _audit_cfg = None
-        try:
+        def _raw_cfg():
             from hermes_cli.config import read_raw_config
+            return read_raw_config()
 
-            _audit_cfg = read_raw_config()
-        except Exception:
-            _audit_cfg = None
-        log_startup_security_warnings(hermes_home=_hermes_home, config=_audit_cfg)
-    except Exception as _audit_exc:
-        logger.debug("Startup security audit failed (non-fatal): %s", _audit_exc)
+        log_startup_security_warnings(hermes_home=_hermes_home, config=_best_effort(_raw_cfg))
+
+    _best_effort(_security_audit, "Startup security audit failed (non-fatal): %s")
 
     # Optional stderr handler — level driven by -v/-q flags on the CLI.
     # verbosity=None (-q/--quiet): no stderr output
@@ -5562,10 +5546,10 @@ def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
         _stderr_handler = logging.StreamHandler(_safe_stderr())
         _stderr_handler.setLevel(_stderr_level)
         _stderr_handler.setFormatter(_gateway_stderr_formatter())
-        logging.getLogger().addHandler(_stderr_handler)
-        # Lower root logger level if needed so DEBUG records can reach the handler
-        if _stderr_level < logging.getLogger().level:
-            logging.getLogger().setLevel(_stderr_level)
+        root = logging.getLogger()
+        root.addHandler(_stderr_handler)
+        if _stderr_level < root.level:  # so DEBUG records can reach the handler
+            root.setLevel(_stderr_level)
 
 
 def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdown: list):
@@ -5820,6 +5804,15 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     return cron_stop, cron_provider, cron_thread, housekeeping_thread
 
 
+def _exit_with_failure_verdict(runner) -> bool:
+    """True (after logging the reason) when the runner asked for a failure exit."""
+    if not runner.should_exit_with_failure:
+        return False
+    if runner.exit_reason:
+        logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+    return True
+
+
 async def _start_gateway_shutdown_tail(
     runner, _control_server, cron_stop: threading.Event, cron_provider,
     cron_thread: threading.Thread, housekeeping_thread: threading.Thread,
@@ -5837,16 +5830,12 @@ async def _start_gateway_shutdown_tail(
         except Exception:
             logger.debug("Control socket stop failed (non-fatal)", exc_info=True)
 
-    try:
+    def _stop_keepalive() -> None:
         from hermes_cli.nous_auth_keepalive import stop_nous_auth_keepalive
-
         stop_nous_auth_keepalive()
-    except Exception:
-        pass
 
-    if runner.should_exit_with_failure:
-        if runner.exit_reason:
-            logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+    _best_effort(_stop_keepalive)
+    if _exit_with_failure_verdict(runner):
         return False
 
     # Stop cron scheduler + housekeeping cooperatively, never join()ed: an in-flight cron delivery
@@ -5990,22 +5979,18 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # HERMES_HOME. Non-fatal: a bind failure just leaves consumers on the process-scan/state-file layer.
     _control_server = await _start_gateway_start_control_socket(runner)
 
-    # Lifecycle ledger: report if the previous life died uncleanly (SIGKILL / OOM / VM death), then
-    # claim the sentinel for this life. Placed after the PID-file/lock claim so only the
-    # authoritative gateway touches it — a --replace loser exiting above must not clobber it.
-    try:
-        from gateway.lifecycle_ledger import record_startup as _lifecycle_record_startup
-        _lifecycle_record_startup()
-    except Exception as _lc_exc:
-        logger.debug("Lifecycle ledger startup record failed: %s", _lc_exc)
+    def _lifecycle_record_startup() -> None:
+        # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
+        # sentinel for this life. After the PID-file claim so a --replace loser can't clobber it.
+        from gateway.lifecycle_ledger import record_startup
+        record_startup()
 
-    try:
+    def _start_keepalive() -> None:
         from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
-
         start_nous_auth_keepalive()
-    except Exception as exc:
-        logger.debug("Nous auth keepalive did not start: %s", exc)
 
+    _best_effort(_lifecycle_record_startup, "Lifecycle ledger startup record failed: %s")
+    _best_effort(_start_keepalive, "Nous auth keepalive did not start: %s")
     _ensure_windows_gateway_venv_imports()
 
     # MCP tool discovery in an executor so the loop stays responsive when a configured MCP server is
@@ -6025,15 +6010,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if not success:
         _shutdown_gateway_health_export(runner)
         return False
-    # Recover any pending messages flushed during a previous shutdown (#72680).
-    try:
+    def _recover_pending() -> None:
+        # Recover any pending messages flushed during a previous shutdown.
         from gateway.shutdown_flush import recover_pending_to_db
         recovered = recover_pending_to_db()
         if recovered:
-            logger.info(
-                "Recovered %d pending message(s) from shutdown flush", recovered)
-    except Exception:
-        pass
+            logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
+
+    _best_effort(_recover_pending)
     if runner.should_exit_cleanly:
         _shutdown_gateway_health_export(runner)
         if runner.exit_reason:
@@ -6049,9 +6033,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         # running mode; preserve that lifecycle path without starting cron.
         try:
             await runner.wait_for_shutdown()
-            if runner.should_exit_with_failure:
-                if runner.exit_reason:
-                    logger.error("Gateway exiting with failure: %s", runner.exit_reason)
+            if _exit_with_failure_verdict(runner):
                 return False
             with suppress(Exception):
                 await _shutdown_mcp_servers_nonblocking()
@@ -6109,34 +6091,27 @@ def main():
     os.environ.setdefault("AI_AGENT", "hermes-agent")
     os.environ.setdefault("HERMES_AGENT", "true")
 
-    # Positive process identity: ledger registration + Windows job-object self-attach, so update-time
-    # reapers can identify this gateway (and its child tree dies with it on Windows). Best-effort.
-    try:
-        from hermes_cli.process_identity import (
-            attach_self_to_kill_on_close_job, register_self
-        )
-
+    def _register_identity() -> None:
+        # Ledger registration + Windows job-object self-attach, so update-time reapers can identify
+        # this gateway (and its child tree dies with it on Windows).
+        from hermes_cli.process_identity import attach_self_to_kill_on_close_job, register_self
         register_self("gateway")
         attach_self_to_kill_on_close_job()
-    except Exception:
-        pass
 
-    # Startup-liveness watchdog: armed before config load, DB opens and the rest of pre-loop startup
-    # so a deadlock there still gets the process respawned by the supervisor instead of wedging as a
-    # live-PID zombie (hermes_cli.main's argv fast-path covers import time). GatewayRunner disarms it.
-    try:
+    def _arm_watchdog() -> None:
+        # Armed before config load / DB opens so a pre-loop deadlock is respawned by the supervisor
+        # instead of wedging as a live-PID zombie (hermes_cli.main's argv fast-path covers import
+        # time). GatewayRunner disarms it.
         from gateway.startup_watchdog import arm_startup_watchdog
         arm_startup_watchdog()
-    except Exception:
-        pass
 
-    # Force UTF-8 stdio on Windows — gateway logs and startup banner would
-    # otherwise UnicodeEncodeError on cp1252 consoles.  No-op on POSIX.
-    try:
+    def _utf8_stdio() -> None:
+        # Windows: gateway logs and banner would UnicodeEncodeError on cp1252 consoles. No-op on POSIX.
         from hermes_cli.stdio import configure_windows_stdio
         configure_windows_stdio()
-    except Exception:
-        pass
+
+    for _step in (_register_identity, _arm_watchdog, _utf8_stdio):
+        _best_effort(_step)
 
     import argparse
 
@@ -6184,31 +6159,27 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
     for stream in (sys.stdout, sys.stderr):
         with suppress(Exception):
             stream.flush()
-    # Release PID + runtime lock BEFORE the log drain: the drain is bounded but could take its full
-    # timeout on a wedged disk, and these locks must never be stranded. os._exit skips atexit and the
-    # early SystemExit paths never run _stop_impl, so release here (idempotent).
-    try:
+    def _release_locks() -> None:
+        # BEFORE the log drain: the drain is bounded but could take its full timeout on a wedged disk,
+        # and these locks must never be stranded. Idempotent (early SystemExit paths never ran _stop_impl).
         from gateway.status import remove_pid_file, release_gateway_runtime_lock
         remove_pid_file()
         release_gateway_runtime_lock()
-    except Exception:
-        pass
-    # Mark this life cleanly exited in the lifecycle sentinel: the single funnel every graceful exit
-    # passes through, so the next boot's unclean-death detector fires only for genuine SIGKILL/OOM/VM
-    # deaths. Ownership-guarded: an old --replace life won't clobber the replacement's fresh sentinel.
-    try:
+
+    def _mark_exited() -> None:
+        # Single funnel every graceful exit passes through, so the next boot's unclean-death detector
+        # fires only for genuine SIGKILL/OOM/VM deaths. Ownership-guarded against an old --replace life.
         from gateway.lifecycle_ledger import mark_exited
         mark_exited(exit_code, reason="graceful_shutdown")
-    except Exception:
-        pass
-    # Drain the async log queue (os._exit bypasses the listener's atexit drain). drain_log_queue() is
-    # bounded with no restart — NOT flush_log_queue(): a listener wedged on the rotation lock would
-    # re-freeze shutdown in an unbounded stop() join. No-op when logging never initialized a queue.
-    try:
+
+    def _drain_logs() -> None:
+        # os._exit bypasses the listener's atexit drain. Bounded, no restart — NOT flush_log_queue():
+        # a listener wedged on the rotation lock would re-freeze shutdown in an unbounded stop() join.
         from hermes_logging import drain_log_queue
         drain_log_queue(timeout=1.0)
-    except Exception:
-        pass
+
+    for _step in (_release_locks, _mark_exited, _drain_logs):
+        _best_effort(_step)
     os._exit(exit_code)
 
 
