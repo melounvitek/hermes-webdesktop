@@ -9,9 +9,7 @@ import sys
 from hermes_cli import projects_db as pdb
 
 
-def build_parser(
-    parent_subparsers: argparse._SubParsersAction,
-) -> argparse.ArgumentParser:
+def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Attach the ``project`` subcommand tree. Returns the top parser."""
     parser = parent_subparsers.add_parser(
         "project",
@@ -83,7 +81,6 @@ def projects_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return 0
-
     handler = _HANDLERS.get(action)
     if handler is None:
         print(f"Unknown project action: {action}", file=sys.stderr)
@@ -138,23 +135,14 @@ def _print_project(proj) -> None:
     if proj.folders:
         print("  folders:")
         for f in proj.folders:
-            mark = " *" if f.is_primary else "  "
-            label = f" ({f.label})" if f.label else ""
-            print(f"   {mark} {f.path}{label}")
+            print(f"   {' *' if f.is_primary else '  '} {f.path}{f' ({f.label})' if f.label else ''}")
 
 
 @_db_command
 def _cmd_create(args, conn) -> int:
     pid = pdb.create_project(
-        conn,
-        name=args.name,
-        slug=args.slug,
-        folders=args.folders,
-        primary_path=args.primary,
-        description=args.description,
-        icon=args.icon,
-        color=args.color,
-        board_slug=args.board,
+        conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
+        description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -170,16 +158,13 @@ def _cmd_create(args, conn) -> int:
 @_db_command
 def _cmd_list(args, conn) -> int:
     active = pdb.get_active_id(conn)
-    projs = pdb.list_projects(
-        conn, include_archived=getattr(args, "include_archived", False)
-    )
+    projs = pdb.list_projects(conn, include_archived=getattr(args, "include_archived", False))
     if not projs:
         print("No projects yet. Create one with `hermes project create <name>`.")
         return 0
     for p in projs:
-        marker = "*" if p.id == active else " "
         flags = " (archived)" if p.archived else ""
-        print(f"{marker} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
+        print(f"{'*' if p.id == active else ' '} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
     return 0
 
 
@@ -214,10 +199,7 @@ def _cmd_rename(args, conn, proj) -> int:
 @_with_project
 def _cmd_set_primary(args, conn, proj) -> int:
     if not pdb.set_primary(conn, proj.id, args.path):
-        return _err(
-            f"'{args.path}' is not a folder of {proj.slug}; "
-            f"add it first with `hermes project add-folder`."
-        )
+        return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
     print(f"Set primary of {proj.slug} -> {args.path}")
     return 0
 
@@ -251,26 +233,20 @@ def _flag_command(op: str, verb: str):
 @_with_project
 def _cmd_bind_board(args, conn, proj) -> int:
     pdb.update_project(conn, proj.id, board_slug=args.board)
-    if args.board.strip():
-        print(f"Bound {proj.slug} -> board {args.board}")
-        _sync_board_default_workdir(proj, args.board)
-    else:
+    if not args.board.strip():
         print(f"Unbound board from {proj.slug}")
+        return 0
+    print(f"Bound {proj.slug} -> board {args.board}")
+    if proj.primary_path:  # best-effort: point the bound board's default_workdir at the primary repo
+        try:
+            from hermes_cli import kanban_db as kb
+
+            slug = kb._normalize_board_slug(args.board)
+            if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
+                kb.write_board_metadata(slug, default_workdir=proj.primary_path)
+        except Exception:
+            pass
     return 0
-
-
-def _sync_board_default_workdir(proj, board_slug: str) -> None:
-    """Best-effort: point the bound board's default_workdir at the primary repo."""
-    if not proj.primary_path:
-        return
-    try:
-        from hermes_cli import kanban_db as kb
-
-        slug = kb._normalize_board_slug(board_slug)
-        if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
-            kb.write_board_metadata(slug, default_workdir=proj.primary_path)
-    except Exception:
-        pass
 
 
 _HANDLERS = {
