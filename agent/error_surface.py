@@ -2,16 +2,11 @@
 
 Maps the internal failure taxonomy (``FailoverReason`` values carried in turn
 results as ``failure_reason``, or raw exceptions from the turn dispatcher)
-onto a small, stable wire descriptor::
-
-    {"layer": <ui layer>, "code": <specific code>, "retryable": <bool>}
-
-Layers (wire values): provider (model API rejected/failed the call), endpoint
-(user-configured custom/local endpoint transport failure), streaming (SSE
-dropped mid-turn), auth, billing (fallback signal; clients usually have a
-richer ``billing_block``), gateway (local runtime errored), disk (disk full /
-persistence failure).
-
+onto a small, stable wire descriptor ``{"layer", "code", "retryable"}``.
+Layers: provider (model API rejected/failed), endpoint (user-configured
+custom/local endpoint transport failure), streaming (SSE dropped mid-turn),
+auth, billing (fallback signal; clients usually have a richer
+``billing_block``), gateway (local runtime errored), disk (disk full).
 Dependency-light and NEVER raises: surfacing diagnostics must not break the
 error path it describes. Descriptors are advisory — clients fall back to
 string sniffing when absent or partial.
@@ -35,10 +30,7 @@ LAYER_DISK = "disk"
 # failure_reason → UI layer. Unlisted reasons fall back to LAYER_PROVIDER:
 # every FailoverReason comes from classifying a provider call.
 _REASON_TO_LAYER = {
-    "auth": LAYER_AUTH,
-    "auth_permanent": LAYER_AUTH,
-    "billing": LAYER_BILLING,
-    "billing_unverified": LAYER_BILLING,
+    "auth": LAYER_AUTH, "auth_permanent": LAYER_AUTH, "billing": LAYER_BILLING, "billing_unverified": LAYER_BILLING,
 }
 
 # Failures between us and the base_url (not a provider verdict); on a
@@ -102,6 +94,15 @@ def _disk_full(candidate: Any) -> bool:
         return False
 
 
+def _result_layer(reason: str, error_text: str, provider: str) -> str:
+    layer = _REASON_TO_LAYER.get(reason)
+    if layer is not None:
+        return layer
+    if reason in _TRANSPORT_REASONS and _is_custom_endpoint(provider):
+        return LAYER_ENDPOINT
+    return LAYER_STREAMING if _looks_like_stream_drop(error_text) else LAYER_PROVIDER
+
+
 def build_error_surface_from_result(result: Any, provider: str = "", model: str = "") -> Optional[dict]:
     """Descriptor for a returned-error turn result (``failed=True`` dicts).
 
@@ -115,35 +116,23 @@ def build_error_surface_from_result(result: Any, provider: str = "", model: str 
         reason = str(result.get("failure_reason") or "").strip()
         if not error_text and not reason:
             return None
-
         # Disk-full wins outright: the fix (free space) is unrelated to the
         # provider stack; hermes_state owns the pattern list.
         if error_text and _disk_full(error_text):
             return _surface(LAYER_DISK, "disk_full", False, provider, model)
-
         if result.get("billing_block") or reason in ("billing", "billing_unverified"):
             return _surface(LAYER_BILLING, reason or "billing", False, provider, model)
-
         if not reason:
             # Failed result without a classified reason (legacy paths).
             if _looks_like_stream_drop(error_text):
                 return _surface(LAYER_STREAMING, "stream_drop", True, provider, model)
             return _surface(LAYER_PROVIDER, "unknown", True, provider, model)
-
-        layer = _REASON_TO_LAYER.get(reason)
-        if layer is None:
-            if reason in _TRANSPORT_REASONS and _is_custom_endpoint(provider):
-                layer = LAYER_ENDPOINT
-            elif _looks_like_stream_drop(error_text):
-                layer = LAYER_STREAMING
-            else:
-                layer = LAYER_PROVIDER
         # Prefer the classifier's own verdict (``failure_retryable``); the
         # reason-set fallback covers older results.
         retryable = result.get("failure_retryable")
         if not isinstance(retryable, bool):
             retryable = reason not in _NON_RETRYABLE_REASONS
-        return _surface(layer, reason, retryable, provider, model)
+        return _surface(_result_layer(reason, error_text, provider), reason, retryable, provider, model)
     except Exception:  # pragma: no cover — never break the error path
         logger.debug("error_surface: result classification failed", exc_info=True)
         return None
@@ -157,13 +146,9 @@ def build_error_surface_from_exception(exc: BaseException, provider: str = "", m
     """
     try:
         message = str(exc) or type(exc).__name__
-
         if _disk_full(exc):
             return _surface(LAYER_DISK, "disk_full", False, provider, model)
-
-        exc_module = type(exc).__module__ or ""
-        api_like = exc_module.split(".")[0] in _API_EXC_MODULE_PREFIXES or hasattr(exc, "status_code")
-
+        api_like = (type(exc).__module__ or "").split(".")[0] in _API_EXC_MODULE_PREFIXES or hasattr(exc, "status_code")
         if not api_like or not isinstance(exc, Exception):
             return _surface(LAYER_GATEWAY, type(exc).__name__, True, provider, model)
 

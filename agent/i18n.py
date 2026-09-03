@@ -66,27 +66,20 @@ def _locales_dir() -> Path:
             return candidate
         logger.warning(
             "HERMES_BUNDLED_LOCALES points to a non-directory path (%s); "
-            "falling back to bundled/source locale resolution",
-            override,
+            "falling back to bundled/source locale resolution", override,
         )
     return Path(__file__).resolve().parent.parent / "locales"
 
 
 def _normalize_lang(value: Any) -> str:
     """Map a user-supplied value (code, alias, or regional tag like ``zh-CN``) to a supported code, else default."""
-    if not isinstance(value, str):
-        return DEFAULT_LANGUAGE
-    key = value.strip().lower()
-    if not key:
-        return DEFAULT_LANGUAGE
+    key = value.strip().lower() if isinstance(value, str) else ""
     if key in SUPPORTED_LANGUAGES:
         return key
     if key in _LANGUAGE_ALIASES:
         return _LANGUAGE_ALIASES[key]
     base = key.split("-", 1)[0]  # strip region suffix
-    if base in SUPPORTED_LANGUAGES:
-        return base
-    return DEFAULT_LANGUAGE
+    return base if base in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE
 
 
 def _cache_catalog(lang: str, flat: dict[str, str]) -> dict[str, str]:
@@ -103,20 +96,18 @@ def _load_catalog(lang: str) -> dict[str, str]:
             return cached
 
     path = _locales_dir() / f"{lang}.yaml"
+    flat: dict[str, str] = {}
     if not path.is_file():
         logger.debug("i18n catalog missing for %s at %s", lang, path)
-        return _cache_catalog(lang, {})
-
-    try:
-        import yaml
-        with path.open("r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-    except Exception as exc:
-        logger.warning("Failed to load i18n catalog %s: %s", path, exc)
-        return _cache_catalog(lang, {})
-
-    flat: dict[str, str] = {}
-    _flatten_into(raw, "", flat)
+    else:
+        try:
+            import yaml
+            with path.open("r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+        except Exception as exc:
+            logger.warning("Failed to load i18n catalog %s: %s", path, exc)
+        else:
+            _flatten_into(raw, "", flat)
     return _cache_catalog(lang, flat)
 
 
@@ -124,8 +115,7 @@ def _flatten_into(node: Any, prefix: str, out: dict[str, str]) -> None:
     # Non-string, non-dict leaves are ignored -- catalogs are text-only.
     if isinstance(node, dict):
         for key, value in node.items():
-            child_key = f"{prefix}.{key}" if prefix else str(key)
-            _flatten_into(value, child_key, out)
+            _flatten_into(value, f"{prefix}.{key}" if prefix else str(key), out)
     elif isinstance(node, str):
         out[prefix] = node
 
@@ -154,9 +144,7 @@ def reset_language_cache() -> None:
 def get_language() -> str:
     """Resolve the active language using env > config > default order."""
     env_lang = os.environ.get("HERMES_LANGUAGE")
-    if env_lang:
-        return _normalize_lang(env_lang)
-    return _config_language_cached() or DEFAULT_LANGUAGE
+    return _normalize_lang(env_lang) if env_lang else _config_language_cached() or DEFAULT_LANGUAGE
 
 
 def t(key: str, lang: str | None = None, **format_kwargs: Any) -> str:
@@ -167,30 +155,18 @@ def t(key: str, lang: str | None = None, **format_kwargs: Any) -> str:
     """
     target = _normalize_lang(lang) if lang else get_language()
     value = _load_catalog(target).get(key)
-
     if value is None and target != DEFAULT_LANGUAGE:
         value = _load_catalog(DEFAULT_LANGUAGE).get(key)
-
     if value is None:
         logger.debug("i18n miss: key=%r lang=%r", key, target)
         value = key
-
-    if format_kwargs:
-        try:
-            return value.format(**format_kwargs)
-        except (KeyError, IndexError, ValueError) as exc:
-            logger.warning(
-                "i18n format failed for key=%r lang=%r kwargs=%r: %s",
-                key, target, format_kwargs, exc,
-            )
-            return value
-    return value
+    if not format_kwargs:
+        return value
+    try:
+        return value.format(**format_kwargs)
+    except (KeyError, IndexError, ValueError) as exc:
+        logger.warning("i18n format failed for key=%r lang=%r kwargs=%r: %s", key, target, format_kwargs, exc)
+        return value
 
 
-__all__ = [
-    "SUPPORTED_LANGUAGES",
-    "DEFAULT_LANGUAGE",
-    "t",
-    "get_language",
-    "reset_language_cache",
-]
+__all__ = ["SUPPORTED_LANGUAGES", "DEFAULT_LANGUAGE", "t", "get_language", "reset_language_cache"]
