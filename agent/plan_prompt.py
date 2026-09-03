@@ -63,7 +63,6 @@ def build_plan_prompt(task: str = "") -> str:
     task_block = f"Task to plan:\n{task}\n" if task else (
         "No explicit task was given with /plan — infer the task from the "
         "current conversation context (the thing we have been discussing "
-        "or working toward). If the conversation does not imply a task, "
-        "ask a brief clarifying question.\n"
+        "or working toward). If the conversation does not imply a task, ask a brief clarifying question.\n"
     )
     return "[/plan — plan mode]\n\n" + _PLAN_MODE_RULES + "\n" + task_block + "\n" + _PLAN_CRAFT

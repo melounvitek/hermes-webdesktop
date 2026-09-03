@@ -37,8 +37,7 @@ _COMMIT_INSTRUCTIONS = (
     "- Add a short body (wrapped at ~72 cols) ONLY when the change needs "
     "explanation; skip it for small/obvious changes.\n"
     "- Describe the actual change, never restate the diff line-by-line.\n"
-    "- Return ONLY the commit message text — no quotes, no markdown fences, no "
-    "preamble."
+    "- Return ONLY the commit message text — no quotes, no markdown fences, no preamble."
 )
 
 
