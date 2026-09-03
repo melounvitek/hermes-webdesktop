@@ -979,9 +979,28 @@ def _notify_session_finalize(*, session_id: str | None, platform: str = "cli", r
         pass
 
 
+def _oneshot_agent_and_session(cli):
+    """``(agent, session_id)`` for a one-shot run; the agent's id wins over the CLI's."""
+    agent = getattr(cli, "agent", None)
+    return agent, getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
+
+
+def _invoke_interrupted_session_end(agent, session_id, reason: str, **extra) -> None:
+    """Best-effort ``on_session_end`` hook for a turn cut short (never raises)."""
+    try:
+        from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+        _invoke_hook(
+            "on_session_end", session_id=session_id, completed=False, interrupted=True,
+            model=getattr(agent, "model", None), platform=getattr(agent, "platform", None) or "cli",
+            reason=reason, **extra,
+        )
+    except Exception:
+        pass
+
+
 def _emit_interrupted_session_end(cli, *, reason: str = "keyboard_interrupt") -> None:
     """Best-effort on_session_end hook for interrupted non-interactive runs."""
-    agent = getattr(cli, "agent", None)
+    agent, session_id = _oneshot_agent_and_session(cli)
     if agent is None:
         return
 
@@ -990,7 +1009,6 @@ def _emit_interrupted_session_end(cli, *, reason: str = "keyboard_interrupt") ->
     except Exception:
         pass
 
-    session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
     if session_id in _handed_off_session_ids:  # gateway owns the lifecycle now
         return
     if session_id:
@@ -999,38 +1017,23 @@ def _emit_interrupted_session_end(cli, *, reason: str = "keyboard_interrupt") ->
         except Exception:
             pass
 
-    try:
-        from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_end",
-            session_id=session_id,
-            task_id=getattr(agent, "_current_task_id", "") or "",
-            turn_id=getattr(agent, "_current_turn_id", "") or "",
-            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-            completed=False,
-            interrupted=True,
-            model=getattr(agent, "model", None),
-            platform=getattr(agent, "platform", None) or "cli",
-            reason=reason,
-        )
-    except Exception:
-        pass
+    _invoke_interrupted_session_end(
+        agent, session_id, reason,
+        task_id=getattr(agent, "_current_task_id", "") or "",
+        turn_id=getattr(agent, "_current_turn_id", "") or "",
+        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+    )
 
 
 def _notify_single_query_session_finalize(cli, *, reason: str = "shutdown") -> None:
-    agent = getattr(cli, "agent", None)
-    session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
+    agent, session_id = _oneshot_agent_and_session(cli)
     if session_id in _single_query_finalize_attempted_session_ids:
         return
     if session_id in _handed_off_session_ids:  # gateway owns the lifecycle now
         return
 
     try:
-        _notify_session_finalize(
-            session_id=session_id,
-            platform=getattr(agent, "platform", None) or "cli",
-            reason=reason,
-        )
+        _notify_session_finalize(session_id=session_id, platform=getattr(agent, "platform", None) or "cli", reason=reason)
     finally:
         _single_query_finalize_attempted_session_ids.add(session_id)
 
@@ -1046,11 +1049,8 @@ def _flush_one_shot_session_store(cli) -> None:
     dedupes via per-message markers and ``end_session`` no-ops on an ended row.
     Handed-off sessions are left strictly alone.
     """
-    agent = getattr(cli, "agent", None)
-    if agent is None:
-        return
-    session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
-    if not session_id or session_id in _handed_off_session_ids:
+    agent, session_id = _oneshot_agent_and_session(cli)
+    if agent is None or not session_id or session_id in _handed_off_session_ids:
         return
     if getattr(agent, "_persist_disabled", False):
         return
@@ -1086,8 +1086,7 @@ def _wait_for_oneshot_background_completions(cli) -> None:
     """
     from tools.process_registry import process_registry
 
-    agent = getattr(cli, "agent", None)
-    task_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
+    _agent, task_id = _oneshot_agent_and_session(cli)
     result = process_registry.wait_for_pending_completions(None)
     if result.get("waited"):
         logger.info(
@@ -1204,10 +1203,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
     if not info:
         return
 
-    wt_path = info["path"]
-    branch = info["branch"]
-    repo_root = info["repo_root"]
-
+    wt_path, branch, repo_root = info["path"], info["branch"], info["repo_root"]
     if not Path(wt_path).exists():
         return
 
@@ -1242,8 +1238,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         return
     try:
         from hermes_cli.config import load_config as _load_full_config
-        from hermes_constants import get_hermes_home as _get_hermes_home
-        _hermes_home_maint = _get_hermes_home()
+        _hermes_home_maint = get_hermes_home()
 
         # One-time repairs, each latched in state_meta once it has run.
         for meta_key, repair, done_msg, skip_msg in (
@@ -4263,11 +4258,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         try:
             from prompt_toolkit.application.current import get_app_or_none
             _app = get_app_or_none()
-            if _app is not None:
-                _loop = getattr(_app, "loop", None)
-                if _loop is not None:
-                    _loop.call_soon_threadsafe(_app.exit)
-                    return  # clean unwind — no traceback, no ENTER pause
+            _loop = getattr(_app, "loop", None)
+            if _loop is not None:
+                _loop.call_soon_threadsafe(_app.exit)
+                return  # clean unwind — no traceback, no ENTER pause
         except Exception:
             pass
         raise KeyboardInterrupt()  # fallback for non-prompt_toolkit contexts
@@ -4495,9 +4489,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             # installs its own). Do NOT call agent.interrupt() here: it would
             # inject a fake user message on every spurious event.
             if sys.platform == "win32":
-                def _sigint_absorb(signum, frame):
-                    return
-                _signal.signal(_signal.SIGINT, _sigint_absorb)
+                _signal.signal(_signal.SIGINT, lambda signum, frame: None)
         except Exception:
             pass  # Signal handlers may fail in restricted environments
 
@@ -4715,12 +4707,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not prune empty session: %s", e)
             else:
-                # /exit --delete: remove transcripts + SQLite history (gemini-cli#19332 port).
+                # /exit --delete: remove transcripts + SQLite history.
                 try:
-                    from hermes_constants import get_hermes_home as _ghh
-                    _sessions_dir = _ghh() / "sessions"
                     _sid = self.agent.session_id
-                    if self._session_db.delete_session(_sid, sessions_dir=_sessions_dir):
+                    if self._session_db.delete_session(_sid, sessions_dir=get_hermes_home() / "sessions"):
                         _cprint(f"  {_DIM}✓ Session {_escape(_sid)} deleted{_RST}")
                     else:
                         _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
@@ -4729,19 +4719,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # on_session_end safety net: run_conversation() fires it per turn on normal
         # completion, so only fire here when the exit happened mid-turn.
         if self.agent and self._agent_running:
-            try:
-                from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "on_session_end",
-                    session_id=self.agent.session_id,
-                    completed=False,
-                    interrupted=True,
-                    model=getattr(self.agent, 'model', None),
-                    platform=getattr(self.agent, 'platform', None) or "cli",
-                    reason="shutdown",
-                )
-            except Exception:
-                pass
+            _invoke_interrupted_session_end(self.agent, self.agent.session_id, "shutdown")
         _run_cleanup()
         self._print_exit_summary()
         self._release_active_session()
@@ -4985,6 +4963,8 @@ def _collect_kanban_task_images(single_query_images):
 
 def _install_single_query_signal_handlers(cli):
     """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() (worker threads see it) before unwinding; kanban workers hard-exit."""
+    import signal as _signal
+
     # Single-query (`-q`) signal handling. Interactive mode registers its own in
     # HermesCLI.run(); here AIAgent's tool worker threads would outlive a plain
     # KeyboardInterrupt (only the main thread unwinds) and orphan the setsid child
@@ -5005,12 +4985,9 @@ def _install_single_query_signal_handlers(cli):
         # stdio first (SIGALRM deadman guards a rare blocking flush).
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
-                import signal as _sig_mod
-                if hasattr(_sig_mod, "SIGALRM"):
-                    # Cancel any pre-existing alarm to avoid colliding with
-                    # caller-installed timers.
-                    _sig_mod.signal(_sig_mod.SIGALRM, lambda *_: os._exit(0))
-                    _sig_mod.alarm(5)
+                if hasattr(_signal, "SIGALRM"):
+                    _signal.signal(_signal.SIGALRM, lambda *_: os._exit(0))
+                    _signal.alarm(5)
             except Exception:
                 pass
             # os._exit(0) skips atexit AND SessionDB's token-drain hook, so
@@ -5025,11 +5002,9 @@ def _install_single_query_signal_handlers(cli):
             os._exit(0)
         raise KeyboardInterrupt()
     try:
-        import signal as _signal
-        _signal.signal(_signal.SIGINT, _signal_handler_q)
-        _signal.signal(_signal.SIGTERM, _signal_handler_q)
-        if hasattr(_signal, "SIGHUP"):
-            _signal.signal(_signal.SIGHUP, _signal_handler_q)
+        for _name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            if hasattr(_signal, _name):
+                _signal.signal(getattr(_signal, _name), _signal_handler_q)
     except Exception:
         pass  # signal handler may fail in restricted environments
 
@@ -5353,23 +5328,15 @@ def main(
         return
 
     _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
-    wt_info = None
-    
-    # Handle query shorthand
     query = query or q
-    
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
 
-    # Join the background worktree creation (started above) before anything
-    # consumes TERMINAL_CWD / wt_info — the HermesCLI construction it
-    # overlapped with is done. Setup failure keeps the old abort semantics.
-    if _join_worktree is not None:
-        wt_info = _join_worktree()
-        if not wt_info:
-            # Worktree was explicitly requested but setup failed —
-            # don't silently run without isolation.
-            return
+    # Join the background worktree creation before anything consumes TERMINAL_CWD.
+    # A requested worktree whose setup failed aborts: never silently run without isolation.
+    wt_info = _join_worktree() if _join_worktree is not None else None
+    if _join_worktree is not None and not wt_info:
+        return
 
     # Inject worktree context into agent's system prompt
     if wt_info:
