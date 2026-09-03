@@ -140,9 +140,7 @@ def _check_mcp_security(should_fix: bool, f: Finding) -> None:
                 continue
             suspicious += 1
             check_warn(f"MCP server '{name}' has suspicious stdio command", "; ".join(issues_found))
-            f.manual_issues.append(
-                f"Review/remove mcp_servers.{name} in config.yaml; rotate any credentials that may have been exposed."
-            )
+            f.manual_issues.append(f"Review/remove mcp_servers.{name} in config.yaml; rotate any credentials that may have been exposed.")
     if suspicious == 0:
         check_ok("No suspicious MCP stdio commands")
 
@@ -287,14 +285,10 @@ def _validate_model_config(config_path, issues: list) -> None:
     policy_id = str(runtime_provider or catalog_provider or "").strip().lower()
     accepts_vendor_slug = policy_id in _VENDOR_SLUG_PROVIDERS or policy_id == "custom" or policy_id.startswith("custom:")
     if default_model and "/" in default_model and policy_id and not accepts_vendor_slug:
-        check_warn(
-            f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
-            "(vendor-prefixed slugs belong to aggregators like openrouter)",
-        )
-        issues.append(
-            f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
-            "Either set model.provider to 'openrouter', or drop the vendor prefix."
-        )
+        check_warn(f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
+                   "(vendor-prefixed slugs belong to aggregators like openrouter)")
+        issues.append(f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
+                      "Either set model.provider to 'openrouter', or drop the vendor prefix.")
 
     if runtime_provider and runtime_provider not in ("auto", "custom"):
         from hermes_cli.doctor import _DHH
@@ -477,6 +471,4 @@ def _check_xai_retirement(should_fix: bool, f: Finding) -> None:
     for ref in retired_refs:
         check_warn(format_issue(ref))
     check_info(f"Migration guide: {MIGRATION_GUIDE_URL}")
-    f.manual_issues.append(
-        f"Update {len(retired_refs)} retired xAI model reference(s) in config.yaml — see {MIGRATION_GUIDE_URL}"
-    )
+    f.manual_issues.append(f"Update {len(retired_refs)} retired xAI model reference(s) in config.yaml — see {MIGRATION_GUIDE_URL}")

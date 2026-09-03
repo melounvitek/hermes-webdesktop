@@ -133,7 +133,6 @@ def _probe_audio(kind: str, config: dict, timeout: float) -> ProbeResult:
     provider = (((config.get(kind) or {}).get("provider")) or "").strip().lower()
     if provider in _LOCAL_AUDIO_PROVIDERS:
         return ProbeResult(name, "skip", f"(provider '{provider or 'local'}' — no remote backend to probe)")
-
     entry = _AUDIO_PROBES.get(provider)
     if entry is None:
         return ProbeResult(name, "skip", f"(provider '{provider}' — no live probe implemented)")
@@ -184,32 +183,26 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
     except (TypeError, ValueError):
         timeout = DEFAULT_PROBE_TIMEOUT
     timeout = max(1.0, timeout)
-
     _section("Live Backend Probes (opt-in, real calls)")
     results: List[ProbeResult] = [
         _run_one(name, lambda n=name, spec=spec: _keyed_probe(n, *spec, timeout), issues)
         for name, spec in _KEYED_PROBES.items()
     ]
     results.append(_run_one("Browser", lambda: _probe_browser(timeout), issues))
-
     servers = config.get("mcp_servers") or {}
     if isinstance(servers, dict) and servers:
         for name in sorted(servers):
             entry = servers[name]
-
             def _probe(n=name, e=entry) -> ProbeResult:
                 if not isinstance(e, dict):
                     return ProbeResult(f"MCP: {n}", "skip", "(malformed config entry)")
                 return ProbeResult(f"MCP: {n}", "pass", f"({len(_probe_mcp_server(n, e, timeout))} tool(s))")
-
             results.append(_run_one(f"MCP: {name}", _probe, issues))
     else:
         results.append(ProbeResult("MCP", "skip", "(no servers configured)"))
         _report(results[-1], issues)
-
     for kind in ("tts", "stt"):
         results.append(_run_one(kind.upper(), lambda k=kind: _probe_audio(k, config, timeout), issues))
-
     return results
 
 

@@ -61,11 +61,7 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
     """
     lines: list = []
     stats = stats or {}
-
-    logical = stats.get("logical_size_bytes")
-    wal = stats.get("wal_size_bytes")
-    freelist = stats.get("freelist_count")
-
+    logical, wal, freelist = (stats.get(k) for k in ("logical_size_bytes", "wal_size_bytes", "freelist_count"))
     size_bits = _bits(
         (logical, lambda: f"logical size {_human_bytes(logical)}"),
         (stats.get("page_count"), lambda: f"{stats['page_count']:,} pages"),
@@ -82,21 +78,15 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
     )
     if row_bits:
         lines.append(("info", ", ".join(row_bits), ""))
-
     fts = stats.get("fts_tables")
     if fts:
         present = [t for t, ok in fts.items() if ok]
         lines.append(("info", "FTS tables: " + (", ".join(present) if present else "none"), ""))
-
     deferral = stats.get("fts_rebuild_deferral")
     if isinstance(deferral, dict):
-        attempts = deferral.get("attempts")
-        pids = deferral.get("holder_pids") or []
-        lines.append((
-            "warn",
-            f"state.db FTS repair is blocked after {attempts or '?'} deferral(s) by PID(s) {pids or 'unknown'}",
-            "(stop the listed processes, then run 'hermes sessions optimize-storage' with the gateway stopped)",
-        ))
+        lines.append(("warn", f"state.db FTS repair is blocked after {deferral.get('attempts') or '?'} deferral(s) "
+                      f"by PID(s) {deferral.get('holder_pids') or [] or 'unknown'}",
+                      "(stop the listed processes, then run 'hermes sessions optimize-storage' with the gateway stopped)"))
 
     # Advisory: oversized database. Suggest auto_prune, and — when the v23 FTS rebuild is pending OR
     # the DB still carries the legacy inline trigram layout (fts_storage_version marker absent) —
@@ -139,8 +129,7 @@ def _check_directory_structure(should_fix: bool) -> Finding:
     if soul_path.exists():
         content = soul_path.read_text(encoding="utf-8").strip()
         # Template comments only (no real content)?
-        lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith(("<!--", "-->", "#"))]
-        if lines:
+        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in content.splitlines()):
             check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
         else:
             check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
@@ -148,12 +137,8 @@ def _check_directory_structure(should_fix: bool) -> Finding:
         check_warn(f"{_DHH}/SOUL.md not found", "(create it to give Hermes a custom personality)")
         if should_fix:
             soul_path.parent.mkdir(parents=True, exist_ok=True)
-            soul_path.write_text(
-                "# Hermes Agent Persona\n\n"
-                "<!-- Edit this file to customize how Hermes communicates. -->\n\n"
-                "You are Hermes, a helpful AI assistant.\n",
-                encoding="utf-8",
-            )
+            soul_path.write_text("# Hermes Agent Persona\n\n<!-- Edit this file to customize how Hermes communicates. -->\n\n"
+                                 "You are Hermes, a helpful AI assistant.\n", encoding="utf-8")
             check_ok(f"Created {_DHH}/SOUL.md with basic template")
             f.fixed += 1
 
@@ -263,11 +248,8 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
                 continue
             check_warn(_text, _detail)
             if "auto_prune" in _detail:
-                issues.append(
-                    "state.db is large — enable sessions.auto_prune in config.yaml"
-                    + (" and run 'hermes sessions optimize-storage' offline (gateway stopped)"
-                       if "optimize-storage" in _detail else "")
-                )
+                issues.append("state.db is large — enable sessions.auto_prune in config.yaml"
+                              + (" and run 'hermes sessions optimize-storage' offline (gateway stopped)" if "optimize-storage" in _detail else ""))
     except Exception as _stats_exc:
         check_info(f"state.db stats unavailable ({_stats_exc})")
 

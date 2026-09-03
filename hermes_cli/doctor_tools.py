@@ -157,8 +157,7 @@ def _check_docker_backend(terminal_env: str, running_in_container: bool, issues:
 def _check_ssh_backend(issues: list[str]) -> None:
     ssh_host = os.getenv("TERMINAL_SSH_HOST")
     if not ssh_host:
-        _fail_and_issue("TERMINAL_SSH_HOST not set", "(required for TERMINAL_ENV=ssh)", "Set TERMINAL_SSH_HOST in .env", issues)
-        return
+        return _fail_and_issue("TERMINAL_SSH_HOST not set", "(required for TERMINAL_ENV=ssh)", "Set TERMINAL_SSH_HOST in .env", issues)
     ssh_user, ssh_port, ssh_key = (os.getenv(f"TERMINAL_SSH_{k}") for k in ("USER", "PORT", "KEY"))
     cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
     if ssh_port:
@@ -205,8 +204,7 @@ def _check_vercel_backend(issues: list[str]) -> None:
     elif auth_status.label.startswith("partial"):
         _fail_and_issue("Vercel auth incomplete", f"({auth_status.label})", "Set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID together", issues)
     else:
-        _fail_and_issue("Vercel auth not configured", f"({auth_status.label})",
-                        "Configure Vercel Sandbox auth with VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID", issues)
+        _fail_and_issue("Vercel auth not configured", f"({auth_status.label})", "Configure Vercel Sandbox auth with VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID", issues)
     for line in auth_status.detail_lines:
         check_info(f"Vercel auth {line}")
     persistent = os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"1", "true", "yes", "on"}
@@ -223,9 +221,8 @@ def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
     except Exception:
         provider = None
     if provider is None:
-        _fail_and_issue(f"Unknown terminal backend '{terminal_env}'", "(no built-in or plugin backend by that name)",
-                        "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it", issues)
-        return
+        return _fail_and_issue(f"Unknown terminal backend '{terminal_env}'", "(no built-in or plugin backend by that name)",
+                               "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it", issues)
     for ok, label, detail in provider.doctor_checks():
         _require(ok, (label, detail), (label, detail), detail.strip("()"), issues)
 
@@ -282,11 +279,8 @@ def _check_agent_browser(should_fix: bool) -> bool:
         # Almost always a dangling global symlink left by npm postinstall after `hermes update` wiped node_modules.
         check_warn("agent-browser found but not runnable", f"(broken symlink at {resolved}? run: npx agent-browser --version)")
     elif _is_termux():
-        _termux_browser_hints(
-            "agent-browser is not installed (expected in the tested Termux path)",
-            "Install it manually later with: npm install -g agent-browser && agent-browser install",
-            node_installed=True,
-        )
+        _termux_browser_hints("agent-browser is not installed (expected in the tested Termux path)",
+                              "Install it manually later with: npm install -g agent-browser && agent-browser install", node_installed=True)
     else:
         check_warn("agent-browser not installed", "(requires npm/npx on PATH)")
     return False
@@ -350,11 +344,8 @@ def _check_node_and_browser(should_fix: bool) -> Finding:
         if _check_agent_browser(should_fix) and not _is_termux():  # Chromium check is not a tested Termux path
             _check_chromium()
     elif _is_termux():
-        _termux_browser_hints(
-            "Node.js not found (browser tools are optional in the tested Termux path)",
-            "Install Node.js on Termux with: pkg install nodejs",
-            node_installed=False,
-        )
+        _termux_browser_hints("Node.js not found (browser tools are optional in the tested Termux path)",
+                              "Install Node.js on Termux with: pkg install nodejs", node_installed=False)
     else:
         check_warn("Node.js not found", "(optional, needed for browser tools)")
     _check_lightpanda()
@@ -385,11 +376,8 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], issues
         if total == 0:
             check_ok(f"{label} deps", "(no known vulnerabilities)")
         elif critical > 0 or high > 0:
-            if workspace_scoped:
-                remedy = "build-tool advisory; clears via lockfile bump"
-            else:
-                flag = " --workspaces=false" if audit_extra == ["--workspaces=false"] else ""
-                remedy = f"run: cd {npm_dir} && npm audit fix{flag}"
+            flag = " --workspaces=false" if audit_extra == ["--workspaces=false"] else ""
+            remedy = "build-tool advisory; clears via lockfile bump" if workspace_scoped else f"run: cd {npm_dir} && npm audit fix{flag}"
             check_warn(f"{label} deps", f"({critical} critical, {high} high, {moderate} moderate — {remedy})")
             if workspace_scoped:
                 check_info("  ^ build-time tooling (not runtime); if manual npm remediation "
@@ -426,7 +414,6 @@ def _check_npm_audit(should_fix: bool) -> Finding:
             # Workspace-scoped audits check the root node_modules; standalone dirs check their own.
             if ((PROJECT_ROOT if audit_extra else npm_dir) / "node_modules").exists():
                 _audit_one(npm_bin, npm_dir, label, audit_extra, f.issues)
-
     if _is_termux():
         check_info("Termux compatibility fallbacks:")
         for note in _TERMUX_INSTALL_ALL_FALLBACK_NOTES:

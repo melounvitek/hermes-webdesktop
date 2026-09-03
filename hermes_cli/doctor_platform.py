@@ -286,24 +286,17 @@ def check_macos_tcc_grants() -> None:
         check_warn("macOS TCC grant check", "(could not read code-signing requirement of the desktop bundle)")
         return
     if "cdhash" in dr.lower():
-        check_warn(
-            "macOS TCC grants will reset after every update",
-            "the desktop bundle's designated requirement is cdhash-pinned "
-            "(pre-#73681 build) — rebuilds invalidate all permission grants. "
-            "Run `hermes update` to get the stable identifier-pinned signing "
-            "identity, then re-grant permissions once.",
-        )
-        return
+        return check_warn("macOS TCC grants will reset after every update",
+                          "the desktop bundle's designated requirement is cdhash-pinned (pre-#73681 build) — rebuilds invalidate "
+                          "all permission grants. Run `hermes update` to get the stable identifier-pinned signing identity, "
+                          "then re-grant permissions once.")
     check_ok("macOS TCC signing identity is stable",
              # --setup-tcc-identity or notarized build: strongest anchor
              "(certificate-anchored DR; grants survive rebuilds)" if "certificate" in dr.lower() else
              "(identifier-pinned DR; grants survive rebuilds — for the strongest anchor, see `hermes desktop --setup-tcc-identity`)")
-    check_info(
-        "If macOS still re-prompts for permissions (toggle shows ON): the stored "
-        "grant is stale — run `tccutil reset ScreenCapture com.nousresearch.hermes` "
-        "(repeat per affected service), toggle it ON in System Settings, then "
-        "fully quit & relaunch Hermes once."
-    )
+    check_info("If macOS still re-prompts for permissions (toggle shows ON): the stored grant is stale — run "
+               "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat per affected service), toggle it ON in "
+               "System Settings, then fully quit & relaunch Hermes once.")
 
 
 def _desktop_app_bundle() -> Path | None:
@@ -389,12 +382,8 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
         for line in full_remediation_text(hit):  # indented under the header as one section
             print(f"    {color(line, Colors.YELLOW)}" if line else "")
         # Also into the action list so the summary block surfaces it.
-        f.manual_issues.append(
-            f"Resolve security advisory {hit.advisory.id}: "
-            f"uninstall {hit.package}=={hit.installed_version} and "
-            f"rotate credentials, then run "
-            f"`hermes doctor --ack {hit.advisory.id}`."
-        )
+        f.manual_issues.append(f"Resolve security advisory {hit.advisory.id}: uninstall {hit.package}=={hit.installed_version} "
+                               f"and rotate credentials, then run `hermes doctor --ack {hit.advisory.id}`.")
     acked_ids = get_acked_ids()  # acked-but-still-installed stays visible
     for h in all_hits:
         if h.advisory.id in acked_ids:
@@ -441,10 +430,9 @@ def _check_python_environment(should_fix: bool) -> Finding:
     return f
 
 
-def _check_certificates(should_fix: bool) -> Finding:
-    f = Finding()
+@doctor_check()
+def _check_certificates(should_fix: bool, f: Finding) -> None:
     check_certificates(should_fix=should_fix, issues=f.manual_issues)
-    return f
 
 
 # (import name, display name, optional)
@@ -469,11 +457,10 @@ def _check_required_packages(should_fix: bool) -> Finding:
     return f
 
 
-def _check_gateway_supervision(should_fix: bool) -> Finding:
-    f = Finding()
+@doctor_check()
+def _check_gateway_supervision(should_fix: bool, f: Finding) -> None:
     _check_gateway_service_linger(f.issues)
     _check_s6_supervision(f.issues)
-    return f
 
 
 def _check_command_installation(should_fix: bool) -> Finding:

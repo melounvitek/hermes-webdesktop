@@ -96,7 +96,6 @@ def _check_auth_providers(should_fix: bool) -> Finding:
         _login_row("MiniMax OAuth", minimax_status, f"(logged in, region={minimax_status.get('region', 'global')})")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
-
     # xAI OAuth — separate try/except so an import failure here cannot
     # disrupt the already-printed Nous/Codex/MiniMax rows above.
     try:
@@ -199,29 +198,23 @@ def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
-
     # Doctor runs from the interactive CLI, so CLI-gated tool checks (e.g. cronjob) see the same context.
     os.environ.setdefault("HERMES_INTERACTIVE", "1")
-
     if ack_target:
         return _ack_advisory(ack_target)
-
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
     print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
-
     total = Finding()
     for title, check in DOCTOR_CHECKS:
         if title:
             _section(title)
         total.merge(check(should_fix))
-
     # Opt-in live probes run AFTER all static checks (`--live`: real network calls; bounded + read-only).
     try:
         from hermes_cli.doctor_live import maybe_run_live_checks
         maybe_run_live_checks(args, total.manual_issues)
     except Exception:
         pass
-
     _print_summary(should_fix, total)

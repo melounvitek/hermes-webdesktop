@@ -20,7 +20,6 @@ def _dotenv_key_names() -> set[str]:
         text = get_env_path().read_text(encoding="utf-8", errors="ignore")
     except (OSError, UnicodeError):
         return set()
-
     names: set[str] = set()
     for raw in text.splitlines():
         line = raw.strip()
@@ -150,7 +149,6 @@ def _config_overrides(config: dict) -> dict[str, str]:
         user_val = user_section.get(key)
         if user_val is not None and user_val != default_section.get(key):
             overrides[f"{section}.{key}"] = str(user_val)
-
     user_toolsets = config.get("toolsets", [])
     if user_toolsets != DEFAULT_CONFIG.get("toolsets", []):
         overrides["toolsets"] = str(user_toolsets)
