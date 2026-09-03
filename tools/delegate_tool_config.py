@@ -1,7 +1,4 @@
-"""Delegation config knobs (delegation.* keys) and child credential/provider resolution.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""Delegation config knobs (delegation.* keys) and child credential/provider resolution."""
 
 from __future__ import annotations
 
@@ -10,8 +7,7 @@ import os
 from typing import Any, Dict, List, Optional
 from utils import base_url_hostname, is_truthy_value
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 # Runtime-provider sentinel for providers that are not natively known; must
 # match hermes_cli.runtime_provider.RUNTIME_PROVIDER_TYPE_CUSTOM.

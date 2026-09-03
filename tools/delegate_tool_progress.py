@@ -1,7 +1,4 @@
-"""Child progress relay, console formatting and child system-prompt construction for delegate_task.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""Child progress relay, console formatting and child system-prompt construction for delegate_task."""
 
 from __future__ import annotations
 
@@ -13,8 +10,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from tools.delegate_tool_registry import _active_subagents, _active_subagents_lock
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 # Terminal child statuses that mean "the subagent did NOT deliver a usable result". Shared by the CLI spinner echo,
 # the gateway failure notice, and the parent-facing failure summary so every surface agrees.

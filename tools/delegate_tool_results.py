@@ -1,7 +1,4 @@
-"""Subagent result post-processing: summary budget/spill, tool-trace summaries, lifecycle hooks and cost rollup.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""Subagent result post-processing: summary budget/spill, tool-trace summaries, lifecycle hooks and cost rollup."""
 
 from __future__ import annotations
 
@@ -11,8 +8,7 @@ import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 def _stringify_tool_content(content: Any) -> str:
     """Stable text for tool-result content. Some OpenAI-compatible paths return

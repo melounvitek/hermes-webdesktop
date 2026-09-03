@@ -1,7 +1,4 @@
-"""Live-subagent registry + model-facing control plane (list/steer/stop) for delegate_task.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""Live-subagent registry + model-facing control plane (list/steer/stop) for delegate_task."""
 
 from __future__ import annotations
 
@@ -13,8 +10,7 @@ from typing import Any, Dict, List, Optional
 from agent.interrupt_compat import request_hard_interrupt
 from tools.registry import tool_error
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 _spawn_pause_lock = threading.Lock()
 _spawn_paused: bool = False

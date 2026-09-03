@@ -1,7 +1,4 @@
-"""delegate_task input validation: tasks=[...] / legacy goal normalisation and per-task output schemas.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""delegate_task input validation: tasks=[...] / legacy goal normalisation and per-task output schemas."""
 
 from __future__ import annotations
 

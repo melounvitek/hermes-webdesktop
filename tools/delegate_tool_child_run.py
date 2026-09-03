@@ -1,9 +1,5 @@
 """Running ONE pre-built child agent: heartbeat, registry entry, workspace seeding,
-timeout/failure handling, result-entry assembly and cleanup (``_ChildRun``).
-
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
-"""
+timeout/failure handling, result-entry assembly and cleanup (``_ChildRun``)."""
 
 from __future__ import annotations
 
@@ -25,8 +21,7 @@ from tools.delegate_tool_results import (
     _extract_output_tail, _looks_like_error_output, _stringify_tool_content, _summarize_tool_arguments,
 )
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 def _num(value: Any, default: int = 0) -> int:
     """int() for counters that may be mocks/None on test doubles."""

@@ -1,8 +1,6 @@
-"""Batch execution + background dispatch for delegate_task.
-
-``delegate_task`` builds a ``_Batch`` (children + origin identity) and hands it to
-``_run_batch``; everything here runs it synchronously or as ONE detached async unit.
-"""
+"""Batch execution + background dispatch for delegate_task: ``delegate_task`` builds a ``_Batch``
+(children + origin identity) and hands it to ``_run_batch``, which runs it synchronously or as ONE
+detached async unit."""
 
 from __future__ import annotations
 
@@ -21,8 +19,7 @@ from tools.delegate_tool_progress import (
 from tools.delegate_tool_registry import _capture_gateway_steer_authority
 from tools.delegate_tool_results import _finalize_child_results
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 
 @dataclass

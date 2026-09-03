@@ -1,7 +1,4 @@
-"""Child toolset resolution for delegate_task: what a child may and may never use.
-
-Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
-"""
+"""Child toolset resolution for delegate_task: what a child may and may never use."""
 
 from __future__ import annotations
 
@@ -11,8 +8,7 @@ from typing import List, Optional
 from toolsets import TOOLSETS
 from tools.delegate_tool_config import _get_inherit_mcp_toolsets
 
-# Log-record parity with the origin module.
-logger = logging.getLogger("tools.delegate_tool")
+logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
 # Tools that children must never have access to
 DELEGATE_BLOCKED_TOOLS = frozenset(
