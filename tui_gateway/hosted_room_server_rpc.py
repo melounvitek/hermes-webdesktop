@@ -36,17 +36,14 @@ class HostedRoomServerRPC:
         self._ids = itertools.count(1)
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        handler = self.server._methods[method]
-        envelope = handler(f"hosted-room-{next(self._ids)}", params)
+        envelope = self.server._methods[method](f"hosted-room-{next(self._ids)}", params)
         if not isinstance(envelope, dict):
             envelope = {}
         error = envelope.get("error")
         if isinstance(error, dict):
             raise HostedRoomSessionError(
-                method,
-                int(error.get("code") or 5000),
-                str(error.get("message") or "gateway rejected the request"),
-            )
+                method, int(error.get("code") or 5000),
+                str(error.get("message") or "gateway rejected the request"))
         result = envelope.get("result")
         if not isinstance(result, dict):
             raise HostedRoomSessionError(method, 5000, "gateway returned no result")
@@ -55,16 +52,14 @@ class HostedRoomServerRPC:
     def resolve_exact(self, *, profile: str, title: str, source: str) -> Mapping[str, Any] | None:
         del source
         result = self._call(
-            "session.list", {"profile": profile, "title": title, "include_hidden": True}
-        )
+            "session.list", {"profile": profile, "title": title, "include_hidden": True})
         rows = result.get("sessions")
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
             return None
         row = rows[0]
         return {
             "session_id": row.get("resolved_id") or row.get("id"),
-            "title": row.get("title") or title,
-        }
+            "title": row.get("title") or title}
 
     def create(self, *, profile: str, title: str, source: str) -> Mapping[str, Any]:
         return self._call(
@@ -76,26 +71,16 @@ class HostedRoomServerRPC:
                 "hidden": True,
                 "room_plumbing": True,
                 "follow_profile_config": True,
-                "close_on_disconnect": False,
-            },
-        )
+                "close_on_disconnect": False})
 
     def resume(self, *, profile: str, session_id: str, source: str) -> Mapping[str, Any]:
         return self._call(
             "session.resume",
-            {"profile": profile, "session_id": session_id, "omit_messages": True, "source": source},
-        )
+            {"profile": profile, "session_id": session_id, "omit_messages": True, "source": source})
 
     def submit(
-        self,
-        *,
-        profile: str,
-        session_id: str,
-        prompt: str,
-        source: str,
-        task: state.TaskIdentity,
-        execution_generation: int,
-        on_terminal: Callable[[Mapping[str, Any]], None],
+        self, *, profile: str, session_id: str, prompt: str, source: str, task: state.TaskIdentity,
+        execution_generation: int, on_terminal: Callable[[Mapping[str, Any]], None],
     ) -> Mapping[str, Any]:
         try:
             return self._call(
@@ -110,11 +95,8 @@ class HostedRoomServerRPC:
                         "task_id": task.task_id,
                         "thread_id": task.thread_id,
                         "turn_id": task.turn_id,
-                        "execution_generation": execution_generation,
-                    },
-                    "_hosted_terminal_callback": on_terminal,
-                },
-            )
+                        "execution_generation": execution_generation},
+                    "_hosted_terminal_callback": on_terminal})
         except HostedRoomSessionError as exc:
             # In-process prompt.submit error envelopes are returned before the
             # background turn is admitted. Preserve that proof so the driver
@@ -150,14 +132,12 @@ class HostedRoomServerRPC:
             task = record.get("_hosted_room_task")
             result = {
                 "active": bool(record.get("running")),
-                "task_id": task.get("task_id") if isinstance(task, dict) else None,
-            }
+                "task_id": task.get("task_id") if isinstance(task, dict) else None}
             pending_reader = getattr(self.server, "_pending_approval_request_payload", None)
             pending = (
                 pending_reader(str(record.get("session_key") or ""))
                 if callable(pending_reader)
-                else None
-            )
+                else None)
             if pending:
                 result["status"] = "waiting_for_approval"
                 result["pending_approval"] = pending
@@ -167,8 +147,7 @@ class HostedRoomServerRPC:
         """Resolve one exact local room approval without broad policy changes."""
         return self._call(
             "approval.respond",
-            {"session_id": session_id, "request_id": request_id, "choice": choice, "all": False},
-        )
+            {"session_id": session_id, "request_id": request_id, "choice": choice, "all": False})
 
     def interrupt(
         self, *, profile: str, session_id: str, source: str, expected_task_id: str
@@ -176,5 +155,7 @@ class HostedRoomServerRPC:
         del source
         return self._call(
             "session.interrupt",
-            {"profile": profile, "session_id": session_id, "expected_hosted_task_id": expected_task_id},
-        )
+            {
+                "profile": profile,
+                "session_id": session_id,
+                "expected_hosted_task_id": expected_task_id})
