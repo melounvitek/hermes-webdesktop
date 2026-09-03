@@ -240,17 +240,16 @@ def _parse_theme_layer(value: Any, default_hex: str, default_alpha: float = 1.0)
         return {"hex": default_hex, "alpha": default_alpha}
     if isinstance(value, str):
         return {"hex": value, "alpha": default_alpha}
-    if isinstance(value, dict):
-        hex_val = value.get("hex", default_hex)
-        alpha_val = value.get("alpha", default_alpha)
-        if not isinstance(hex_val, str):
-            return None
-        try:
-            alpha_f = float(alpha_val)
-        except (TypeError, ValueError):
-            alpha_f = default_alpha
-        return {"hex": hex_val, "alpha": max(0.0, min(1.0, alpha_f))}
-    return None
+    if not isinstance(value, dict):
+        return None
+    hex_val = value.get("hex", default_hex)
+    if not isinstance(hex_val, str):
+        return None
+    try:
+        alpha_f = float(value.get("alpha", default_alpha))
+    except (TypeError, ValueError):
+        alpha_f = default_alpha
+    return {"hex": hex_val, "alpha": max(0.0, min(1.0, alpha_f))}
 
 
 _THEME_DEFAULT_TYPOGRAPHY: Dict[str, str] = {
@@ -261,8 +260,7 @@ _THEME_DEFAULT_TYPOGRAPHY: Dict[str, str] = {
     "letterSpacing": "0",
 }
 _THEME_DEFAULT_LAYOUT: Dict[str, str] = {
-    "radius": "0.5rem",
-    "density": "comfortable",
+    "radius": "0.5rem", "density": "comfortable"
 }
 _THEME_OVERRIDE_KEYS = {
     "card", "cardForeground", "popover", "popoverForeground",
@@ -278,8 +276,7 @@ _THEME_NAMED_ASSET_KEYS = {"bg", "hero", "logo", "crest", "sidebar", "header"}
 # Component-style buckets: each camelCase property under a bucket emits
 # ``--component-<bucket>-<kebab-property>`` on :root, consumed by shell components.
 _THEME_COMPONENT_BUCKETS = {
-    "card", "header", "footer", "sidebar", "tab",
-    "progress", "badge", "backdrop", "page",
+    "card", "header", "footer", "sidebar", "tab", "progress", "badge", "backdrop", "page"
 }
 _THEME_LAYOUT_VARIANTS = {"standard", "cockpit", "tiled"}
 

@@ -55,19 +55,17 @@ def _timezone_options() -> List[str]:
         return ["UTC"]
 
 
+def _select(description: str, *options: str, **extra: Any) -> Dict[str, Any]:
+    return {"type": "select", "description": description, "options": list(options), **extra}
+
+
+# Manual overrides for fields that need select options or custom types.
 _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
-    "timezone": {
-        "type": "select",
-        "description": "IANA timezone (e.g. America/New_York). Blank uses the system timezone.",
-        "options": _timezone_options(),
-        "searchable": True,
-        "clearable": True,
-    },
-    "memory.provider": {
-        "type": "select",
-        "description": "Memory provider plugin",
-        "options": _memory_provider_options(),
-    },
+    "timezone": _select(
+        "IANA timezone (e.g. America/New_York). Blank uses the system timezone.",
+        *_timezone_options(), searchable=True, clearable=True,
+    ),
+    "memory.provider": _select("Memory provider plugin", *_memory_provider_options()),
     "model": {
         "type": "string",
         "description": "Default model (e.g. anthropic/claude-sonnet-4.6)",
@@ -78,21 +76,13 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Context window override (0 = auto-detect from model metadata)",
         "category": "general",
     },
-    "terminal.backend": {
-        "type": "select",
-        "description": "Terminal execution backend",
-        "options": ["local", "docker", "ssh", "modal", "daytona", "vercel_sandbox", "singularity"],
-    },
-    "terminal.vercel_runtime": {
-        "type": "select",
-        "description": "Vercel Sandbox runtime",
-        "options": ["node24", "node22", "python3.13"],  # sync with _SUPPORTED_VERCEL_RUNTIMES in terminal_tool.py
-    },
-    "terminal.modal_mode": {
-        "type": "select",
-        "description": "Modal sandbox mode",
-        "options": ["sandbox", "function"],
-    },
+    "terminal.backend": _select(
+        "Terminal execution backend",
+        "local", "docker", "ssh", "modal", "daytona", "vercel_sandbox", "singularity",
+    ),
+    # sync with _SUPPORTED_VERCEL_RUNTIMES in terminal_tool.py
+    "terminal.vercel_runtime": _select("Vercel Sandbox runtime", "node24", "node22", "python3.13"),
+    "terminal.modal_mode": _select("Modal sandbox mode", "sandbox", "function"),
     "proxy.enabled": {
         "type": "boolean",
         "description": (
@@ -101,109 +91,54 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         ),
         "category": "security",
     },
-    "proxy.credential_source": {
-        "type": "select",
-        "description": "Where iron-proxy loads real upstream secrets at start time",
-        "options": ["env", "bitwarden"],
-        "category": "security",
-    },
+    "proxy.credential_source": _select(
+        "Where iron-proxy loads real upstream secrets at start time", "env", "bitwarden", category="security"
+    ),
     "proxy.enforce_on_docker": {
         "type": "boolean",
         "description": "Refuse Docker sandboxes when egress is enabled but not configured/running",
         "category": "security",
     },
-    "tts.provider": {
-        "type": "select",
-        "description": "Text-to-speech provider",
-        "options": ["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper"],
-    },
-    "stt.provider": {
-        "type": "select",
-        "description": "Speech-to-text provider",
-        # "mistral" temporarily removed — mistralai PyPI package quarantined
-        # (malicious 2.4.6 release on 2026-05-12). Restore once available.
-        "options": ["local", "groq", "openai", "xai", "elevenlabs"],
-    },
-    "stt.local.model": {
-        "type": "select",
-        "description": "Local faster-whisper model size",
-        "options": ["tiny", "base", "small", "medium", "large-v3"],
-    },
-    "stt.groq.model": {
-        "type": "select",
-        "description": "Groq Whisper model",
-        "options": ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"],
-    },
-    "stt.openai.model": {
-        "type": "select",
-        "description": "OpenAI transcription model",
-        "options": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
-    },
-    "stt.elevenlabs.model_id": {
-        "type": "select",
-        "description": "ElevenLabs Scribe model",
-        "options": ["scribe_v2", "scribe_v1"],
-    },
-    "display.skin": {
-        "type": "select",
-        "description": "CLI visual theme",
-        "options": ["default", "ares", "mono", "slate"],
-    },
-    "dashboard.theme": {
-        "type": "select",
-        "description": "Web dashboard visual theme",
-        "options": ["default", "midnight", "ember", "mono", "cyberpunk", "rose"],
-    },
-    "display.resume_display": {
-        "type": "select",
-        "description": "How resumed sessions display history",
-        "options": ["minimal", "full", "off"],
-    },
-    "display.busy_input_mode": {
-        "type": "select",
-        "description": "Input behavior while agent is running",
-        "options": ["interrupt", "queue", "steer"],
-    },
-    "approvals.mode": {
-        "type": "select",
-        "description": "Dangerous command approval mode",
-        "options": ["manual", "smart", "off"],
-    },
-    "context.engine": {
-        "type": "select",
-        "description": "Context management engine",
-        "options": ["default", "custom"],
-    },
-    "human_delay.mode": {
-        "type": "select",
-        "description": "Simulated typing delay mode",
-        "options": ["off", "typing", "fixed"],
-    },
-    "logging.level": {
-        "type": "select",
-        "description": "Log level for agent.log",
-        "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
-    },
-    "agent.service_tier": {
-        "type": "select",
-        "description": "Fast mode: fast = always, auto = first N seconds of each turn, cold = first turn only",
-        "options": ["", "normal", "fast", "auto", "cold"],
-    },
-    "delegation.reasoning_effort": {
-        "type": "select",
-        "description": "Reasoning effort for delegated subagents",
-        "options": ["", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-    },
-    "updates.non_interactive_local_changes": {
-        "type": "select",
-        "description": (
-            "When the chat app / gateway updates Hermes (no terminal prompt), "
-            "what to do with uncommitted local source edits. 'stash' keeps them "
-            "and re-applies them after the update; 'discard' throws them away. "
-            "Terminal updates always ask, regardless of this setting."
-        ),
-        "options": ["stash", "discard"],
-    },
+    "tts.provider": _select(
+        "Text-to-speech provider",
+        "edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper",
+    ),
+    # "mistral" temporarily removed — mistralai PyPI package quarantined
+    # (malicious 2.4.6 release on 2026-05-12). Restore once available.
+    "stt.provider": _select("Speech-to-text provider", "local", "groq", "openai", "xai", "elevenlabs"),
+    "stt.local.model": _select("Local faster-whisper model size", "tiny", "base", "small", "medium", "large-v3"),
+    "stt.groq.model": _select(
+        "Groq Whisper model", "whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"
+    ),
+    "stt.openai.model": _select(
+        "OpenAI transcription model", "whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"
+    ),
+    "stt.elevenlabs.model_id": _select("ElevenLabs Scribe model", "scribe_v2", "scribe_v1"),
+    "display.skin": _select("CLI visual theme", "default", "ares", "mono", "slate"),
+    "dashboard.theme": _select(
+        "Web dashboard visual theme", "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+    ),
+    "display.resume_display": _select("How resumed sessions display history", "minimal", "full", "off"),
+    "display.busy_input_mode": _select("Input behavior while agent is running", "interrupt", "queue", "steer"),
+    "approvals.mode": _select("Dangerous command approval mode", "manual", "smart", "off"),
+    "context.engine": _select("Context management engine", "default", "custom"),
+    "human_delay.mode": _select("Simulated typing delay mode", "off", "typing", "fixed"),
+    "logging.level": _select("Log level for agent.log", "DEBUG", "INFO", "WARNING", "ERROR"),
+    "agent.service_tier": _select(
+        "Fast mode: fast = always, auto = first N seconds of each turn, cold = first turn only",
+        "", "normal", "fast", "auto", "cold",
+    ),
+    "delegation.reasoning_effort": _select(
+        "Reasoning effort for delegated subagents",
+        "", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ),
+    "updates.non_interactive_local_changes": _select(
+        "When the chat app / gateway updates Hermes (no terminal prompt), "
+        "what to do with uncommitted local source edits. 'stash' keeps them "
+        "and re-applies them after the update; 'discard' throws them away. "
+        "Terminal updates always ask, regardless of this setting.",
+        "stash", "discard",
+    ),
     "updates.refresh_cua_driver": {
         "type": "boolean",
         "description": (
@@ -342,13 +277,10 @@ def _custom_provider_options(kind: str, builtin_names: List[str], cfg: Dict[str,
         from tools.transcription_tools import BUILTIN_STT_PROVIDERS as _runtime_builtins
 
     def _add(name: Any) -> None:
-        if not isinstance(name, str):
-            return
-        stripped = name.strip()
-        key = stripped.lower()
-        if stripped and key not in seen:
+        stripped = name.strip() if isinstance(name, str) else ""
+        if stripped and stripped.lower() not in seen:
             names.append(stripped)
-            seen.add(key)
+            seen.add(stripped.lower())
 
     section = cfg.get(kind)
     if not isinstance(section, dict):
@@ -474,12 +406,11 @@ def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, st
     if not isinstance(cfg, dict):
         cfg = {}
     user_providers = cfg.get("providers")
-    user_provider = resolve_user_provider(prov_in, user_providers if isinstance(user_providers, dict) else {})
-    custom_provider = resolve_custom_provider(prov_in, get_compatible_custom_providers(cfg))
-    if user_provider is not None:
-        return user_provider.id, model_in
-    if custom_provider is not None:
-        return custom_provider.id, model_in
+    declared = resolve_user_provider(
+        prov_in, user_providers if isinstance(user_providers, dict) else {}
+    ) or resolve_custom_provider(prov_in, get_compatible_custom_providers(cfg))
+    if declared is not None:
+        return declared.id, model_in
 
     is_custom_provider_slug = canonical == "custom" or canonical.startswith("custom:")
     if canonical not in _KNOWN_PROVIDER_NAMES and not is_custom_provider_slug and "/" in model_in:
@@ -736,12 +667,14 @@ def _apply_aux_assignment_sync(cfg: dict, provider: str, model: str, task: str, 
     if not isinstance(aux, dict):
         aux = {}
 
+    def _slot(slot: str) -> dict:
+        slot_cfg = aux.get(slot)
+        return slot_cfg if isinstance(slot_cfg, dict) else {}
+
     if task == "__reset__":
         # Reset every slot to provider="auto", model="" — keeps other fields intact.
         for slot in _AUX_TASK_SLOTS:
-            slot_cfg = aux.get(slot)
-            if not isinstance(slot_cfg, dict):
-                slot_cfg = {}
+            slot_cfg = _slot(slot)
             slot_cfg["provider"] = "auto"
             slot_cfg["model"] = ""
             slot_cfg.pop("base_url", None)
@@ -759,9 +692,7 @@ def _apply_aux_assignment_sync(cfg: dict, provider: str, model: str, task: str, 
     for slot in targets:
         if slot not in _AUX_TASK_SLOTS:
             raise HTTPException(status_code=400, detail=f"unknown auxiliary task: {slot}")
-        slot_cfg = aux.get(slot)
-        if not isinstance(slot_cfg, dict):
-            slot_cfg = {}
+        slot_cfg = _slot(slot)
         prev_provider = str(slot_cfg.get("provider") or "").strip().lower()
         slot_cfg["provider"] = provider
         slot_cfg["model"] = model

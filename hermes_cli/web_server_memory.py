@@ -99,11 +99,8 @@ def _memory_provider_import_name(dep: str) -> str:
 
 def _dependency_importable(dep: str) -> bool:
     import_name = _memory_provider_import_name(dep)
-    if not import_name:
-        return False
     try:
-        __import__(import_name)
-        return True
+        return bool(import_name) and __import__(import_name) is not None
     except ImportError:
         return False
 
@@ -216,10 +213,8 @@ def _normalize_memory_provider_schema(name: str, provider: Any) -> List[Dict[str
 
 
 def _read_json_file(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except Exception:
         _log.debug("Failed to read JSON config from %s", path, exc_info=True)
         return {}
