@@ -296,7 +296,6 @@ class TestBrowserSupervisorRedaction:
                 closed_by="agent",
             ),),
             frame_tree={"top": {"frame_id": "f1", "url": "about:blank", "origin": "null", "is_oopif": False}},
-            console_errors=(),
             active=True,
             cdp_url="ws://example.invalid/devtools/browser/mock",
             task_id="test",

@@ -60,7 +60,10 @@ def origin_module():
        (``from tools import browser_tool`` in a test that calls the helper directly);
     3. ``sys.modules`` / the ``tools`` package attribute / a fresh import.
     """
-    start = sys._getframe(2)
+    try:
+        start = sys._getframe(2)
+    except ValueError:  # called directly by the interpreter (atexit callback)
+        start = None
     frame = start
     while frame is not None:
         if frame.f_globals.get("__name__") == _ORIGIN_NAME:

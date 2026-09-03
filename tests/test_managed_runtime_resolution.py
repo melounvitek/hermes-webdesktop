@@ -92,7 +92,7 @@ _ALLOWED: dict[tuple[str, str], str] = {
     ("hermes_cli/main.py", "npm"): (
         "Same _ensure_tui_node() gate as node."
     ),
-    ("tools/browser_tool.py", "npx"): (
+    ("tools/browser_tool_install.py", "npx"): (
         "agent-browser runs via `npx`, resolved against the extended browser "
         "PATH that _merge_browser_path() already seeds with the managed dirs."
     ),

@@ -80,31 +80,18 @@ def browser_dialog(
     """Respond to a pending dialog on the active task's CDP supervisor."""
     supervisor = SUPERVISOR_REGISTRY.get(task_id or "default")
     if supervisor is None:
-        return json.dumps(
-            {
-                "success": False,
-                "error": (
-                    "No CDP supervisor is attached to this task. Either the "
-                    "browser backend doesn't expose CDP (Camofox, default "
-                    "Playwright) or no browser session has been started yet. "
-                    "Call browser_navigate or /browser connect first."
-                ),
-            }
-        )
-
-    result = supervisor.respond_to_dialog(
-        action=action,
-        prompt_text=prompt_text,
-        dialog_id=dialog_id,
-    )
+        return json.dumps({
+            "success": False,
+            "error": (
+                "No CDP supervisor is attached to this task. Either the "
+                "browser backend doesn't expose CDP (Camofox, default "
+                "Playwright) or no browser session has been started yet. "
+                "Call browser_navigate or /browser connect first."
+            ),
+        })
+    result = supervisor.respond_to_dialog(action=action, prompt_text=prompt_text, dialog_id=dialog_id)
     if result.get("ok"):
-        return json.dumps(
-            {
-                "success": True,
-                "action": action,
-                "dialog": result.get("dialog", {}),
-            }
-        )
+        return json.dumps({"success": True, "action": action, "dialog": result.get("dialog", {})})
     return json.dumps({"success": False, "error": result.get("error", "unknown error")})
 
 
