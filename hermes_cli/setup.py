@@ -316,15 +316,20 @@ def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list
     return sorted(curses_checklist(title, items, pre, cancel_returns=pre))
 
 
+def _section_rule(title: str) -> None:
+    """Blank-padded cyan ``─── title ───`` divider used by the key-entry screens."""
+    print()
+    print(color(f"  ─── {title} ───", Colors.CYAN))
+    print()
+
+
 def _prompt_api_key(var: dict):
     """Display a nicely formatted API key input screen for a single env var."""
     tools = var.get("tools", [])
     tools_str = ", ".join(tools[:3])
     if len(tools) > 3:
         tools_str += f", +{len(tools) - 3} more"
-    print()
-    print(color(f"  ─── {var.get('description', var['name'])} ───", Colors.CYAN))
-    print()
+    _section_rule(var.get("description", var["name"]))
     if tools_str:
         print_info(f"  Enables: {tools_str}")
     if var.get("url"):

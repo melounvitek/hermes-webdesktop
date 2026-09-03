@@ -327,14 +327,15 @@ def _run_quick_setup(config: dict, hermes_home):
     """Quick setup — only configure items that are missing."""
     from hermes_cli.setup import (
         color, Colors, _info, print_header, print_info, _print_setup_summary, print_success,
-        _prompt_and_save_env_var, _prompt_api_key, prompt_checklist, save_config,
+        _prompt_and_save_env_var, _prompt_api_key, _section_rule, prompt_checklist, save_config,
     )
     from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
     print_header("Quick Setup — Missing Items Only", gap=True)
 
     # Check what's missing
-    missing_required = [v for v in get_missing_env_vars(required_only=False) if v.get("is_required")]
-    missing_optional = [v for v in get_missing_env_vars(required_only=False) if not v.get("is_required")]
+    missing_env = get_missing_env_vars(required_only=False)
+    missing_required = [v for v in missing_env if v.get("is_required")]
+    missing_optional = [v for v in missing_env if not v.get("is_required")]
     missing_config = get_missing_config_fields()
     current_ver, latest_ver = check_config_version()
     if not (missing_required or missing_optional or missing_config or current_ver < latest_ver):
@@ -378,9 +379,7 @@ def _run_quick_setup(config: dict, hermes_home):
         labels = [f"{emojis[p]} {p}" for p in platform_order]
         for idx in prompt_checklist("Which platforms would you like to set up?", labels):
             plat = platform_order[idx]
-            print()
-            print(color(f"  ─── {emojis[plat]} {plat} ───", Colors.CYAN))
-            print()
+            _section_rule(f"{emojis[plat]} {plat}")
             for var in grouped[plat]:
                 print_info(f"  {var.get('description', '')}")
                 if var.get("url"):
