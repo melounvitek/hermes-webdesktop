@@ -7,11 +7,13 @@ so ``patch("gateway.run.X")`` keeps intercepting them at call time.
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
 import json
+import logging
 import os
 import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 from gateway.config import Platform
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
@@ -26,10 +28,8 @@ from gateway.restart import (
 )
 from gateway.session import SessionSource
 from gateway.session_state import SERVICE_TIER_UNSET as _SERVICE_TIER_UNSET
-from hermes_cli.config import cfg_get
+from hermes_cli.config import cfg_get, resolve_ephemeral_system_prompt_from_config
 from hermes_cli.fallback_config import get_fallback_chain
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 from utils import is_truthy_value
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
@@ -38,9 +38,22 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+_BUSY_INPUT_MODES = {"interrupt", "queue", "steer"}
+
 
 class GatewayConfigLoadersMixin:
     """Config/env loaders for runtime knobs (busy modes, reasoning, service tier, timeouts, fallback) for GatewayRunner."""
+
+    @staticmethod
+    def _cfg_str(section: str, key: str) -> str:
+        """``<section>.<key>`` from the gateway runtime config as a stripped string ("" when unset)."""
+        from gateway.run import _load_gateway_runtime_config
+        return str(cfg_get(_load_gateway_runtime_config(), section, key, default="") or "").strip()
+
+    @classmethod
+    def _env_or_cfg_str(cls, env_var: str, section: str, key: str) -> str:
+        """Non-empty stripped env var, else :meth:`_cfg_str`."""
+        return os.getenv(env_var, "").strip() or cls._cfg_str(section, key)
 
     @staticmethod
     def _load_prefill_messages() -> List[Dict[str, Any]]:
@@ -77,17 +90,20 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _load_ephemeral_system_prompt() -> str:
-        """Load ephemeral system prompt: HERMES_EPHEMERAL_SYSTEM_PROMPT env var first, then
-        ``display.personality`` / ``agent.system_prompt`` in config.yaml.
-        """
+        """HERMES_EPHEMERAL_SYSTEM_PROMPT env var first, then ``display.personality`` / ``agent.system_prompt``."""
         from gateway.run import _load_gateway_runtime_config
-        from hermes_cli.config import resolve_ephemeral_system_prompt_from_config
-
         prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
         if prompt:
             return prompt
-        cfg = _load_gateway_runtime_config()
-        return resolve_ephemeral_system_prompt_from_config(cfg)
+        return resolve_ephemeral_system_prompt_from_config(_load_gateway_runtime_config())
+
+    def _channel_override(self, platform: Platform, chat_id: str, thread_id, parent_id):
+        """``channel_overrides`` entry for this channel/thread, or None (also when no config is bound)."""
+        from gateway.run import _get_channel_override
+        config = getattr(self, "config", None)
+        if not config:
+            return None
+        return _get_channel_override(config, platform, chat_id, thread_id=thread_id, parent_id=parent_id)
 
     def _resolve_model_for_channel(
         self,
@@ -104,22 +120,11 @@ class GatewayConfigLoadersMixin:
         API server so the surfaces cannot diverge). No session tier here: session /model overrides
         are applied later by ``_apply_session_model_override``.
         """
-        from gateway.run import _get_channel_override, _resolve_gateway_model
+        from gateway.run import _resolve_gateway_model
         from hermes_cli.model_switch import resolve_effective_model
-
-        override = None
-        config = getattr(self, "config", None)
-        if config:
-            override = _get_channel_override(
-                config,
-                platform,
-                chat_id,
-                thread_id=thread_id,
-                parent_id=parent_id,
-            )
         return resolve_effective_model(
             None,  # session tier applied downstream (_apply_session_model_override)
-            override,
+            self._channel_override(platform, chat_id, thread_id, parent_id),
             _resolve_gateway_model(user_config),
         )
 
@@ -138,38 +143,25 @@ class GatewayConfigLoadersMixin:
         profiles get their own personality/system_prompt and ``/personality`` edits apply next turn).
         Legacy ``channel_prompts`` are applied separately via ``event.channel_prompt`` in ``run_sync``.
         """
-        from gateway.run import _get_channel_override
-        config = getattr(self, "config", None)
-        if config:
-            override = _get_channel_override(
-                config,
-                platform,
-                chat_id,
-                thread_id=thread_id,
-                parent_id=parent_id,
-            )
-            if override and override.system_prompt:
-                return (override.system_prompt or "").strip()
+        override = self._channel_override(platform, chat_id, thread_id, parent_id)
+        if override and override.system_prompt:
+            return (override.system_prompt or "").strip()
         return self._load_ephemeral_system_prompt()
 
     @staticmethod
     def _load_reasoning_config(model: str = "") -> dict | None:
-        """Load reasoning effort from config.yaml, respecting per-model overrides.
+        """Reasoning effort from config.yaml via :func:`hermes_constants.resolve_reasoning_config`.
 
-        Thin wrapper over :func:`hermes_constants.resolve_reasoning_config` (per-model override >
-        global ``agent.reasoning_effort``; YAML False = disabled). Empty ``model`` uses ``model.default``.
+        Per-model override > global ``agent.reasoning_effort``; YAML False = disabled. Empty
+        ``model`` uses ``model.default``.
         """
         from gateway.run import _load_gateway_runtime_config
         from hermes_constants import resolve_reasoning_config
-        cfg = _load_gateway_runtime_config()
-        return resolve_reasoning_config(cfg, model)
+        return resolve_reasoning_config(_load_gateway_runtime_config(), model)
 
     @staticmethod
     def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
-        """Parse `/reasoning` args into `(value, persist_global)`.
-
-        Session-scoped by default; `--global` in any position persists the change to config.yaml.
-        """
+        """Parse `/reasoning` args into `(value, persist_global)`; `--global` anywhere persists to config.yaml."""
         import shlex
 
         text = str(raw_args or "").strip().replace("—", "--")
@@ -179,15 +171,8 @@ class GatewayConfigLoadersMixin:
             tokens = shlex.split(text)
         except ValueError:
             tokens = text.split()
-
-        persist_global = False
-        value_tokens = []
-        for token in tokens:
-            if token == "--global":
-                persist_global = True
-            else:
-                value_tokens.append(token)
-        return " ".join(value_tokens).strip().lower(), persist_global
+        value = " ".join(token for token in tokens if token != "--global")
+        return value.strip().lower(), "--global" in tokens
 
     def _resolve_session_reasoning_config(
         self,
@@ -196,25 +181,19 @@ class GatewayConfigLoadersMixin:
         session_key: Optional[str] = None,
         model: str = "",
     ) -> dict | None:
-        """Resolve reasoning effort for a session, honoring session overrides.
+        """Session ``/reasoning --session`` > per-model ``agent.reasoning_overrides`` > global.
 
-        Priority: session ``/reasoning --session`` > per-model ``agent.reasoning_overrides`` > global
-        ``agent.reasoning_effort``. ``model`` must be the session's *effective* model (session
-        ``/model`` override included); empty uses ``model.default``.
+        ``model`` must be the session's *effective* model (session ``/model`` override included);
+        empty uses ``model.default``.
         """
         resolved_session_key = self._resolve_session_key_or_none(source, session_key)
-
         if resolved_session_key:
             _r_state = self._peek_session_state(resolved_session_key)
             if _r_state is not None and _r_state.conversation.reasoning_override is not None:
                 return _r_state.conversation.reasoning_override
         return self._load_reasoning_config(model)
 
-    def _set_session_reasoning_override(
-        self,
-        session_key: str,
-        reasoning_config: Optional[dict],
-    ) -> None:
+    def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:
         """Set or clear the session-scoped reasoning override."""
         if not session_key:
             return
@@ -224,39 +203,20 @@ class GatewayConfigLoadersMixin:
             None if reasoning_config is None else dict(reasoning_config)
         )
 
-    def _resolve_session_service_tier(
-        self,
-        source=None,
-        session_key: Optional[str] = None,
-    ) -> Optional[str]:
-        """Resolve the effective service tier for a session.
+    def _resolve_session_service_tier(self, source=None, session_key: Optional[str] = None) -> Optional[str]:
+        """Effective service tier: a session-scoped /fast override beats the config default.
 
-        A session-scoped /fast override beats the config default; the override dict stores
-        "priority" or None (explicit normal), so key presence — not truthiness — decides.
+        The override stores "priority" or None (explicit normal), so presence — not truthiness — decides.
         """
         resolved_session_key = self._resolve_session_key_or_none(source, session_key)
-
         if resolved_session_key:
             _t_state = self._peek_session_state(resolved_session_key)
-            if (
-                _t_state is not None
-                and _t_state.conversation.service_tier_override
-                is not _SERVICE_TIER_UNSET
-            ):
+            if _t_state is not None and _t_state.conversation.service_tier_override is not _SERVICE_TIER_UNSET:
                 return _t_state.conversation.service_tier_override
         return self._load_service_tier()
 
-    def _set_session_service_tier_override(
-        self,
-        session_key: str,
-        service_tier,
-        clear: bool = False,
-    ) -> None:
-        """Set or clear the session-scoped /fast override.
-
-        ``service_tier`` is "priority" or None (explicit normal). Pass
-        ``clear=True`` to remove the override entirely (fall back to config).
-        """
+    def _set_session_service_tier_override(self, session_key: str, service_tier, clear: bool = False) -> None:
+        """Set ("priority" / None = explicit normal) or ``clear`` the session-scoped /fast override."""
         if not session_key:
             return
         # Presence-sensitive: "priority" or None (explicit normal) both count as an override; the
@@ -265,15 +225,10 @@ class GatewayConfigLoadersMixin:
             _SERVICE_TIER_UNSET if clear else service_tier
         )
 
-    @staticmethod
-    def _load_service_tier() -> str | None:
-        """Load Priority Processing (agent.service_tier) from config.yaml: "fast"/"priority"/"on" =>
-        "priority"; "normal"/"off" disable; None when unset/unsupported.
-        """
-        from gateway.run import _load_gateway_runtime_config
-        cfg = _load_gateway_runtime_config()
-        raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
-
+    @classmethod
+    def _load_service_tier(cls) -> str | None:
+        """``agent.service_tier``: "fast"/"priority"/"on" => "priority"; "normal"/"off" disable; None when unset/unknown."""
+        raw = cls._cfg_str("agent", "service_tier")
         value = raw.lower()
         if not value or value in {"normal", "default", "standard", "off", "none"}:
             return None
@@ -286,72 +241,38 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _load_show_reasoning() -> bool:
-        """Load show_reasoning toggle from config.yaml display section."""
+        """``display.show_reasoning`` toggle."""
         from gateway.run import _load_gateway_runtime_config
-        cfg = _load_gateway_runtime_config()
-        return is_truthy_value(
-            cfg_get(cfg, "display", "show_reasoning"),
-            default=False,
-        )
+        return is_truthy_value(cfg_get(_load_gateway_runtime_config(), "display", "show_reasoning"), default=False)
 
-    @staticmethod
-    def _load_busy_input_mode() -> str:
-        """Load gateway drain-time busy-input behavior from config/env."""
-        from gateway.run import _load_gateway_runtime_config
-        mode = os.getenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
-        if not mode:
-            cfg = _load_gateway_runtime_config()
-            mode = str(cfg_get(cfg, "display", "busy_input_mode", default="") or "").strip().lower()
-        if mode == "queue":
-            return "queue"
-        if mode == "steer":
-            return "steer"
-        return "interrupt"
+    @classmethod
+    def _load_busy_input_mode(cls) -> str:
+        """Gateway drain-time busy-input behavior from env/config (default ``interrupt``)."""
+        mode = cls._env_or_cfg_str("HERMES_GATEWAY_BUSY_INPUT_MODE", "display", "busy_input_mode").lower()
+        return mode if mode in {"queue", "steer"} else "interrupt"
 
-    @staticmethod
-    def _load_busy_text_mode() -> str:
-        """Resolve normal busy TEXT follow-up behavior.
+    @classmethod
+    def _load_busy_text_mode(cls) -> str:
+        """Normal busy TEXT follow-up behavior.
 
         ``busy_input_mode`` is the source of truth (default ``interrupt``); legacy ``busy_text_mode``
         is honored only when explicitly set so existing queue setups keep working.
         """
-        from gateway.run import GatewayRunner, _load_gateway_runtime_config
-        # Legacy explicit override wins for backward compat.
-        legacy = os.getenv("HERMES_GATEWAY_BUSY_TEXT_MODE", "").strip().lower()
-        if not legacy:
-            cfg = _load_gateway_runtime_config()
-            legacy = str(cfg_get(cfg, "display", "busy_text_mode", default="") or "").strip().lower()
-        if legacy == "interrupt":
-            return "interrupt"
-        if legacy == "queue":
-            return "queue"
-        # No explicit legacy knob → follow busy_input_mode.
-        input_mode = GatewayRunner._load_busy_input_mode()
-        return "queue" if input_mode == "queue" else "interrupt"
+        from gateway.run import GatewayRunner
+        legacy = cls._env_or_cfg_str("HERMES_GATEWAY_BUSY_TEXT_MODE", "display", "busy_text_mode").lower()
+        if legacy in {"interrupt", "queue"}:
+            return legacy
+        return "queue" if GatewayRunner._load_busy_input_mode() == "queue" else "interrupt"
 
     @staticmethod
-    def _busy_modes_from_config(
-        config: dict,
-        *,
-        fallback_input: str,
-        fallback_text: str,
-    ) -> tuple[str, str]:
+    def _busy_modes_from_config(config: dict, *, fallback_input: str, fallback_text: str) -> tuple[str, str]:
         """Resolve one profile's busy modes without consulting process env."""
-        raw_input = str(
-            cfg_get(config, "display", "busy_input_mode", default="") or ""
-        ).strip().lower()
-        input_mode = (
-            raw_input
-            if raw_input in {"interrupt", "queue", "steer"}
-            else fallback_input
-        )
-
-        raw_text = str(
-            cfg_get(config, "display", "busy_text_mode", default="") or ""
-        ).strip().lower()
+        raw_input = str(cfg_get(config, "display", "busy_input_mode", default="") or "").strip().lower()
+        input_mode = raw_input if raw_input in _BUSY_INPUT_MODES else fallback_input
+        raw_text = str(cfg_get(config, "display", "busy_text_mode", default="") or "").strip().lower()
         if raw_text in {"interrupt", "queue"}:
             text_mode = raw_text
-        elif raw_input in {"interrupt", "queue", "steer"}:
+        elif raw_input in _BUSY_INPUT_MODES:
             text_mode = "queue" if input_mode == "queue" else "interrupt"
         else:
             text_mode = fallback_text
@@ -364,10 +285,8 @@ class GatewayConfigLoadersMixin:
             fallback_input=getattr(self, "_busy_input_mode", "interrupt"),
             fallback_text=getattr(self, "_busy_text_mode", "interrupt"),
         )
-        input_modes = self.__dict__.setdefault("_busy_input_modes_by_profile", {})
-        text_modes = self.__dict__.setdefault("_busy_text_modes_by_profile", {})
-        input_modes[profile_name] = input_mode
-        text_modes[profile_name] = text_mode
+        self.__dict__.setdefault("_busy_input_modes_by_profile", {})[profile_name] = input_mode
+        self.__dict__.setdefault("_busy_text_modes_by_profile", {})[profile_name] = text_mode
 
     def _busy_profile_name_for_source(self, source: SessionSource) -> Optional[str]:
         """Return the routed profile whose busy policy applies, if any."""
@@ -381,41 +300,34 @@ class GatewayConfigLoadersMixin:
                 name = ""
         return name or None
 
-    def _effective_busy_input_mode(self, source: SessionSource) -> str:
-        """Resolve busy input mode from the routed profile startup snapshot."""
-        fallback = getattr(self, "_busy_input_mode", "interrupt")
+    def _effective_busy_mode(self, source: SessionSource, attr: str) -> str:
+        """Busy mode from the routed profile's startup snapshot (``attr`` = ``_busy_input_mode`` / ``_busy_text_mode``)."""
+        fallback = getattr(self, attr, "interrupt")
         profile_name = self._busy_profile_name_for_source(source)
         if not profile_name:
             return fallback
-        modes = getattr(self, "_busy_input_modes_by_profile", None)
+        modes = getattr(self, attr + "s_by_profile", None)
         return modes.get(profile_name, fallback) if isinstance(modes, dict) else fallback
+
+    def _effective_busy_input_mode(self, source: SessionSource) -> str:
+        """Resolve busy input mode from the routed profile startup snapshot."""
+        return self._effective_busy_mode(source, "_busy_input_mode")
 
     def _effective_busy_text_mode(self, source: SessionSource) -> str:
         """Resolve legacy busy text mode from the routed profile snapshot."""
-        fallback = getattr(self, "_busy_text_mode", "interrupt")
-        profile_name = self._busy_profile_name_for_source(source)
-        if not profile_name:
-            return fallback
-        modes = getattr(self, "_busy_text_modes_by_profile", None)
-        return modes.get(profile_name, fallback) if isinstance(modes, dict) else fallback
+        return self._effective_busy_mode(source, "_busy_text_mode")
 
-    @staticmethod
-    def _load_restart_drain_timeout() -> float:
-        """Load graceful gateway restart/stop drain timeout in seconds."""
-        from gateway.run import _load_gateway_runtime_config
-        raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
-        if not raw:
-            cfg = _load_gateway_runtime_config()
-            raw = str(cfg_get(cfg, "agent", "restart_drain_timeout", default="") or "").strip()
+    @classmethod
+    def _load_restart_drain_timeout(cls) -> float:
+        """Graceful gateway restart/stop drain timeout in seconds."""
+        raw = cls._env_or_cfg_str("HERMES_RESTART_DRAIN_TIMEOUT", "agent", "restart_drain_timeout")
         value = parse_restart_drain_timeout(raw)
         if raw and value == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT:
             try:
                 float(raw)
             except (TypeError, ValueError):
                 logger.warning(
-                    "Invalid restart_drain_timeout '%s', using default %.0fs",
-                    raw,
-                    DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+                    "Invalid restart_drain_timeout '%s', using default %.0fs", raw, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
                 )
         return value
 
@@ -429,8 +341,7 @@ class GatewayConfigLoadersMixin:
         if env_raw is not None and str(env_raw).strip() != "":
             raw: object = env_raw
         else:
-            cfg = _load_gateway_runtime_config()
-            raw = cfg_get(cfg, "agent", cfg_key, default=None)
+            raw = cfg_get(_load_gateway_runtime_config(), "agent", cfg_key, default=None)
         value = parse(raw)
         if raw is not None and str(raw).strip() != "":
             try:
@@ -441,7 +352,7 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_restart_after_turn_timeout(cls) -> float:
-        """Load in-band restart wait-for-idle timeout in seconds."""
+        """In-band restart wait-for-idle timeout in seconds."""
         return cls._load_env_or_agent_cfg_timeout(
             "HERMES_RESTART_AFTER_TURN_TIMEOUT", "restart_after_turn_timeout",
             parse_restart_after_turn_timeout, DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT,
@@ -449,7 +360,7 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_cron_drain_timeout(cls) -> float:
-        """Load the cron-only floor under the stop()/drain wait."""
+        """The cron-only floor under the stop()/drain wait."""
         return cls._load_env_or_agent_cfg_timeout(
             "HERMES_CRON_DRAIN_TIMEOUT", "cron_drain_timeout",
             parse_cron_drain_timeout, DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
@@ -457,15 +368,9 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _load_signal_interrupt_grace_timeout() -> float:
-        """Load the unexpected-signal post-interrupt grace in seconds."""
+        """``gateway.signal_interrupt_grace_timeout``: the unexpected-signal post-interrupt grace in seconds."""
         from gateway.run import _load_gateway_runtime_config
-        cfg = _load_gateway_runtime_config()
-        raw = cfg_get(
-            cfg,
-            "gateway",
-            "signal_interrupt_grace_timeout",
-            default=None,
-        )
+        raw = cfg_get(_load_gateway_runtime_config(), "gateway", "signal_interrupt_grace_timeout", default=None)
         value = parse_signal_interrupt_grace_timeout(raw)
         if raw is not None and raw != "":
             try:
@@ -473,81 +378,52 @@ class GatewayConfigLoadersMixin:
             except (TypeError, ValueError):
                 logger.warning(
                     "Invalid signal_interrupt_grace_timeout '%s', using default %.0fs",
-                    raw,
-                    DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT,
+                    raw, DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT,
                 )
         return value
 
     def _post_interrupt_grace_timeout(self) -> float:
-        """Return the grace before teardown after forcibly interrupting agents."""
-        if (
-            getattr(self, "_signal_initiated_shutdown", False)
-            and not getattr(self, "_restart_requested", False)
-        ):
-            return max(
-                0.0,
-                float(
-                    getattr(
-                        self,
-                        "_signal_interrupt_grace_timeout",
-                        DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT,
-                    )
-                ),
-            )
+        """Grace before teardown after forcibly interrupting agents (longer on an unexpected signal)."""
+        if getattr(self, "_signal_initiated_shutdown", False) and not getattr(self, "_restart_requested", False):
+            grace = getattr(self, "_signal_interrupt_grace_timeout", DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT)
+            return max(0.0, float(grace))
         return DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT
 
     @staticmethod
     def _load_background_notifications_mode() -> str:
-        """Load background process notification mode from config or env var."""
+        """Background process notification mode from env/config (default ``concise``)."""
         from gateway.run import _load_gateway_runtime_config
         mode = os.getenv("HERMES_BACKGROUND_NOTIFICATIONS", "")
         if not mode:
-            cfg = _load_gateway_runtime_config()
-            raw = cfg_get(cfg, "display", "background_process_notifications")
+            raw = cfg_get(_load_gateway_runtime_config(), "display", "background_process_notifications")
             if raw is False:
                 mode = "off"
             elif raw not in {None, ""}:
                 mode = str(raw)
         mode = (mode or "concise").strip().lower()
-        valid = {"concise", "all", "result", "error", "off"}
-        if mode not in valid:
-            logger.warning(
-                "Unknown background_process_notifications '%s', defaulting to 'concise'",
-                mode,
-            )
+        if mode not in {"concise", "all", "result", "error", "off"}:
+            logger.warning("Unknown background_process_notifications '%s', defaulting to 'concise'", mode)
             return "concise"
         return mode
 
     @staticmethod
     def _load_provider_routing() -> dict:
-        """Load OpenRouter provider routing preferences from config.yaml."""
+        """OpenRouter provider routing preferences (canonical fail-open loader: managed overlay + ${VAR})."""
         from gateway.run import _load_gateway_runtime_config
         try:
-            # Canonical gateway loader (fail-open): managed overlay + ${VAR}
-            # expansion now apply to provider_routing too.
-            cfg = _load_gateway_runtime_config()
-            return cfg.get("provider_routing", {}) or {}
+            return _load_gateway_runtime_config().get("provider_routing", {}) or {}
         except Exception:
-            pass
-        return {}
+            return {}
 
     @staticmethod
     def _load_fallback_model() -> list | None:
-        """Load fallback provider chain from config.yaml.
-
-        Merges ``fallback_providers`` (kept first) with legacy ``fallback_model`` entries.
-        """
+        """Fallback provider chain: ``fallback_providers`` (kept first) merged with legacy ``fallback_model``."""
         from gateway.run import _load_gateway_runtime_config
         try:
-            # Canonical gateway loader (fail-open): managed overlay + ${VAR}
-            # expansion now apply to the fallback chain too.
-            cfg = _load_gateway_runtime_config()
-            fb = get_fallback_chain(cfg)
-            if fb:
-                return fb
+            # Canonical gateway loader (fail-open): managed overlay + ${VAR} expansion apply here too.
+            return get_fallback_chain(_load_gateway_runtime_config()) or None
         except Exception:
-            pass
-        return None
+            return None
 
     def _refresh_fallback_model(self) -> list | None:
         """Re-read fallback_providers from disk for the next agent create/reuse.
@@ -580,10 +456,8 @@ class GatewayConfigLoadersMixin:
             except Exception:
                 pass
         except Exception:
-            # Transient failure — keep last known-good chain.
             logger.debug(
-                "fallback_providers refresh: config.yaml read failed; "
-                "keeping last known-good chain", exc_info=True,
+                "fallback_providers refresh: config.yaml read failed; keeping last known-good chain", exc_info=True,
             )
             return self._fallback_model
         self._fallback_model = get_fallback_chain(cfg) or None
@@ -601,10 +475,7 @@ class GatewayConfigLoadersMixin:
             return
         new_chain = list(chain or [])
         rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
-        if (
-            getattr(agent, "_fallback_activated", False)
-            and rate_limited_until > time.monotonic()
-        ):
+        if getattr(agent, "_fallback_activated", False) and rate_limited_until > time.monotonic():
             return
         old_chain = list(getattr(agent, "_fallback_chain", []) or [])
         agent._fallback_chain = new_chain
