@@ -63,11 +63,8 @@ def _close_late_session_db_result(future: "concurrent.futures.Future") -> None:
 
 def _set_cron_session_title(session_db, session_id, base_title):
     """Persist a non-blank, unique title for a finished cron session; returns it (None if unset).
-
-    Runs synchronously in the cron finally block BEFORE end_session()/close() so no write races the
-    close. Duplicate (unique-title index ValueError) -> get_next_title_in_lineage(); if unavailable,
-    raise rather than end up untitled.
-    """
+    Runs BEFORE end_session()/close() so no write races the close. Duplicate title (unique-index
+    ValueError) -> get_next_title_in_lineage(); if unavailable, raise rather than end up untitled."""
     if not session_db or not session_id:
         return None
     title = (base_title or "").strip()
@@ -106,12 +103,9 @@ def _fallback_chain_phrase() -> str:
 
 
 def _failure_streak_nudge(job: dict) -> str:
-    """Return a review nudge when a recurring job keeps failing, else "".
-
-    ``failure_streak`` is persisted by ``cron.jobs.mark_job_run`` (reset on success); the failure
-    message is delivered BEFORE mark_job_run records this run, hence stored+1.
-    Threshold: ``cron.failure_nudge_threshold`` (default 3, 0 disables).
-    """
+    """Review nudge when a recurring job keeps failing, else "". The failure message is delivered
+    BEFORE mark_job_run records this run, hence stored ``failure_streak`` + 1. Threshold:
+    ``cron.failure_nudge_threshold`` (default 3, 0 disables)."""
     schedule_kind = (job.get("schedule") or {}).get("kind")
     if schedule_kind not in {"cron", "interval"}:
         return ""
@@ -151,11 +145,11 @@ def _detect_gateway_code_skew() -> tuple[str, str] | None:
 class CronTickYielded(RuntimeError):
     """A stale-code ticker yielded this tick to a fresh gateway.
 
-    Raised by ``tick()`` BEFORE the tick lock is acquired when boot fingerprint ≠ disk, this process
-    does NOT own the gateway runtime lock, and a fresh process holds it; the stale process must stay
-    out of the dispatch race entirely (lock contention would starve the fresh ticker). Skew ``None``
-    (non-git, no fingerprint, probe failure) never yields: fail open. Raised, not returned, so
-    provider loops record it via ``record_ticker_error`` and ``hermes cron status`` isn't green.
+    Raised by ``tick()`` BEFORE the tick lock when boot fingerprint ≠ disk, this process does NOT
+    own the runtime lock and a fresh process holds it — the stale process must stay out of the
+    dispatch race (contention would starve the fresh ticker). Skew ``None`` never yields (fail
+    open). Raised, not returned, so ``record_ticker_error`` sees it and ``hermes cron status``
+    isn't green.
     """
 
     def __init__(self, boot_rev: str, disk_rev: str) -> None:
@@ -173,11 +167,9 @@ _last_yield_log: dict[str, object] = {}
 
 
 def _should_yield_tick_to_fresh_gateway() -> tuple[str, str] | None:
-    """Return ``(boot_rev, disk_rev)`` when this tick must yield to a fresher gateway, else None.
-
-    Yields only when ALL hold: code skew, we don't own the runtime lock, another process holds it.
-    Every probe failure returns None — yielding is a certainty claim, never a guess.
-    """
+    """``(boot_rev, disk_rev)`` when this tick must yield to a fresher gateway, else None. Yields
+    only when ALL hold: code skew, we don't own the runtime lock, another process holds it. Every
+    probe failure returns None — yielding is a certainty claim, never a guess."""
     skew = _detect_gateway_code_skew()
     if skew is None:
         return None
@@ -323,12 +315,9 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
 def _upsert_incident_for_failure(
     job: dict, error: str, *, output_file: Optional[Any] = None
 ) -> tuple[bool, Optional[str]]:
-    """Record a durable failure incident (grouped by job + error signature).
-
-    Returns ``(acked, incident_id)``; acked=True when the signature's incident is already
-    ``closed`` -> suppress the per-run ping.
-    Best-effort: store errors log at debug and the caller delivers as if no incident existed.
-    """
+    """Record a durable failure incident (grouped by job + error signature). Returns
+    ``(acked, incident_id)``; acked=True when the signature's incident is already ``closed`` ->
+    suppress the per-run ping. Store errors log at debug; the caller delivers as if none existed."""
     try:
         from cron.incidents import get_incident, upsert_incident
 
@@ -363,13 +352,10 @@ class CronPromptInjectionBlocked(Exception):
 
 
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
-    """Toolsets a cron-spawned agent must never receive.
-
-    ``messaging``/``clarify`` always (interactive). ``cronjob`` by default (loop prevention, not a
-    security boundary); ``cron.allow_agent_scheduling: true`` lifts only that, never the user
-    denylist. ``agent.disabled_toolsets`` is layered on top so per-job ``enabled_toolsets`` cannot
-    widen past config.yaml's denylist.
-    """
+    """Toolsets a cron-spawned agent must never receive: ``messaging``/``clarify`` always
+    (interactive); ``cronjob`` by default (loop prevention, not a security boundary —
+    ``cron.allow_agent_scheduling: true`` lifts only that); ``agent.disabled_toolsets`` layered on
+    top so per-job ``enabled_toolsets`` cannot widen past config.yaml's denylist."""
     cron_cfg = (cfg or {}).get("cron") or {}
     if cron_cfg.get("allow_agent_scheduling"):
         disabled = ["messaging", "clarify"]
@@ -387,12 +373,9 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
 
 
 def _merge_mcp_into_per_job_toolsets(per_job: list[str], cfg: dict) -> list[str]:
-    """Layer enabled MCP servers onto a per-job ``enabled_toolsets`` allowlist.
-
-    Without this a per-job list silently drops every MCP server ("Unknown tool" on mcp_* calls).
-    Mirrors ``_get_platform_tools``: ``no_mcp`` sentinel -> none (sentinel stripped); any MCP server
-    already listed -> treat as allowlist, add nothing; otherwise union in all globally-enabled.
-    """
+    """Layer enabled MCP servers onto a per-job ``enabled_toolsets`` allowlist (else a per-job list
+    silently drops every MCP server). Mirrors ``_get_platform_tools``: ``no_mcp`` sentinel -> none
+    (stripped); any MCP server already listed -> allowlist, add nothing; else union all enabled."""
     result = [t for t in per_job if t != "no_mcp"]
     if "no_mcp" in per_job:
         return result
@@ -408,13 +391,9 @@ def _merge_mcp_into_per_job_toolsets(per_job: list[str], cfg: dict) -> list[str]
 
 
 def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
-    """Resolve the toolset list for a cron job.
-
-    Precedence: per-job ``enabled_toolsets`` (+ ``_merge_mcp_into_per_job_toolsets``) > ``cron``
-    platform config (``_get_platform_tools``) > ``None`` on any failure (full default set).
-    ``_get_platform_tools`` strips _DEFAULT_OFF_TOOLSETS ({moa, homeassistant, rl}) for unconfigured
-    platforms, so fresh installs run cron without ``moa``.
-    """
+    """Toolset list for a cron job. Precedence: per-job ``enabled_toolsets`` (+ MCP merge) >
+    ``cron`` platform config (``_get_platform_tools``, which strips _DEFAULT_OFF_TOOLSETS so fresh
+    installs run without ``moa``) > ``None`` on any failure (full default set)."""
     per_job = job.get("enabled_toolsets")
     if per_job:
         return _merge_mcp_into_per_job_toolsets(list(per_job), cfg or {})
@@ -429,12 +408,9 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
 
 
 def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | None:
-    """Resolve the effective reasoning config for a cron run.
-
-    Per-job ``reasoning_effort`` pin beats global and per-model config; it is model-independent by
-    design (also governs an auth-fallback swap) — clamping stays with provider transports at send
-    time. An unparseable pin warns and falls back, never kills the tick. No pin -> config.
-    """
+    """Effective reasoning config for a cron run. A per-job ``reasoning_effort`` pin beats global
+    and per-model config and is model-independent by design (also governs an auth-fallback swap);
+    clamping stays with provider transports. An unparseable pin warns and falls back to config."""
     from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
 
     pinned = job.get("reasoning_effort")
@@ -465,12 +441,9 @@ SILENT_MARKER = "[SILENT]"
 
 
 def _is_cron_silence_response(text: str) -> bool:
-    """Return True when a cron final response should suppress delivery.
-
-    Looser than the gateway's exact-whole-response rule: ``[SILENT]`` (or SILENT / NO_REPLY /
-    NO REPLY) counts as the whole response OR its own first/last line — NOT mid-sentence. Shares the
-    webhook-lane matcher in :mod:`gateway.response_filters` so the two cannot drift.
-    """
+    """True when a cron final response should suppress delivery: ``[SILENT]`` (or SILENT /
+    NO_REPLY / NO REPLY) as the whole response OR its own first/last line — NOT mid-sentence.
+    Shares the webhook-lane matcher in :mod:`gateway.response_filters` so the two cannot drift."""
     from gateway.response_filters import is_autonomous_silence_response
 
     return is_autonomous_silence_response(text)
@@ -540,10 +513,8 @@ def get_running_job_ids() -> "frozenset[str]":
 
 def try_register_running_job(job_id: str) -> bool:
     """Atomically add ``job_id`` to the in-flight set; False (caller must skip) if already mid-run.
-
     Single dedupe owner for ticker + manual runs (the fire claim's 300s TTL is outlived by real
-    jobs). Callers MUST pair success with ``release_running_job`` in a ``finally``.
-    """
+    jobs). Callers MUST pair success with ``release_running_job`` in a ``finally``."""
     with _running_lock:
         if job_id in _running_job_ids:
             return False
@@ -668,12 +639,9 @@ def _record_forced_release(job_id: str, name: str, age_seconds: float, allowance
 
 
 def _latest_executions_for_releasable_claims() -> dict:
-    """Latest durable execution per releasable-looking claim, one indexed query.
-
-    Two-phase so the healthy path pays no DB work: only claims with a missing/pending/done future
-    are queried. Snapshot under _running_lock — iterating the set while try_register/release mutate
-    it raises RuntimeError.
-    """
+    """Latest durable execution per releasable-looking claim (missing/pending/done future), one
+    indexed query so the healthy path pays no DB work. Snapshot under _running_lock — iterating
+    the set while try_register/release mutate it raises RuntimeError."""
     with _running_lock:
         claim_futures = {job_id: _running_futures.get(job_id) for job_id in _running_job_ids}
     candidates = [
@@ -690,12 +658,9 @@ def _latest_executions_for_releasable_claims() -> dict:
 
 
 def _row_belongs_to_claim(row: dict, claim_started: float) -> bool:
-    """True when the ledger row was claimed at/after this in-memory claim.
-
-    A terminal row older than the claim is the PREVIOUS run's (common for recurring jobs in the
-    try_register->create_execution window); releasing on it would double-dispatch. Unparseable
-    timestamps fail closed (treated as previous-run; the age path still bounds the claim).
-    """
+    """True when the ledger row was claimed at/after this in-memory claim. An older terminal row is
+    the PREVIOUS run's (try_register->create_execution window); releasing on it would
+    double-dispatch. Unparseable timestamps fail closed (the age path still bounds the claim)."""
     claimed_at = row.get("claimed_at")
     if not claimed_at:
         return False
@@ -811,9 +776,9 @@ def mark_running_jobs_interrupted(
     """Best-effort: mark every in-flight cron job interrupted; returns the job IDs marked.
 
     Called by gateway shutdown right after ``process_registry.kill_all()``: a job whose tool was
-    killed must never report success even if its agent thread produces a plausible response.
-    ``only_owners`` (``(job_id, fire_owner)`` pairs) restricts marking to those executions. Tokens
-    go into ``_interrupted_job_ids`` BEFORE ``last_status`` is written so ``run_one_job`` sees them.
+    killed must never report success. ``only_owners`` (``(job_id, fire_owner)`` pairs) restricts
+    marking. Tokens go into ``_interrupted_job_ids`` BEFORE ``last_status`` is written so
+    ``run_one_job`` sees them.
     """
     with _running_lock:
         active_fires = [
@@ -897,11 +862,9 @@ def _inactivity_watchdog_loop(
 
 
 def _cron_inactivity_seconds() -> float:
-    """Parse HERMES_CRON_TIMEOUT (seconds). 0 = unlimited; bad input = 600.
-
-    Shared by run_job's inactivity monitor and the cwd-lock bound so they can't drift: the lock
-    bound must stay >= the inactivity limit or waiters fail while a healthy holder runs.
-    """
+    """Parse HERMES_CRON_TIMEOUT (seconds). 0 = unlimited; bad input = 600. Shared by the
+    inactivity monitor and the cwd-lock bound so they can't drift: the lock bound must stay >= the
+    inactivity limit or waiters fail while a healthy holder runs."""
     raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
     if not raw:
         return 600.0
@@ -959,13 +922,9 @@ def _write_usage_audit(record: dict) -> None:
 
 
 def _interpreter_shutting_down(exc: Optional[BaseException] = None) -> bool:
-    """True when the interpreter is finalizing (tick fired during gateway teardown).
-
-    Once finalization starts, concurrent.futures/asyncio refuse new work, so any delivery attempt
-    (live adapter, asyncio.run, fresh pool) only pollutes errors.log — callers skip with a warning.
-    ``exc`` lets an already-raised scheduling error count as a shutdown signal. Thin wrapper over
-    ``tools.interpreter_shutdown`` (shared with the gateway).
-    """
+    """True when the interpreter is finalizing (tick fired during gateway teardown): concurrent.
+    futures/asyncio refuse new work, so delivery attempts only pollute errors.log — callers skip
+    with a warning. ``exc`` lets an already-raised scheduling error count as a shutdown signal."""
     from tools.interpreter_shutdown import interpreter_shutting_down
 
     return interpreter_shutting_down(exc)
@@ -976,11 +935,8 @@ _hermes_home: Path | None = None
 
 
 def _get_hermes_home() -> Path:
-    """Resolve Hermes home at call time (honouring the test override).
-
-    Cron is per-profile: jobs must be stored AND executed under the active profile's home. Do not
-    freeze this at import or anchor it at the shared default root — either breaks profile isolation.
-    """
+    """Hermes home at call time (honouring the test override). Cron is per-profile: never freeze
+    this at import or anchor it at the shared default root — either breaks profile isolation."""
     return _hermes_home or get_hermes_home()
 
 
@@ -992,12 +948,9 @@ def _get_lock_paths() -> tuple[Path, Path]:
 
 
 def _is_lock_contention_errno(err: OSError) -> bool:
-    """True when *err* from the lock syscall means another ticker holds the lock.
-
-    POSIX flock: EWOULDBLOCK/EAGAIN (EACCES on some NFS); Windows msvcrt.locking: EACCES/EDEADLK.
-    Everything else — notably EMFILE/ENFILE (fd exhaustion) and EACCES on open() — must be
-    surfaced, never swallowed as contention.
-    """
+    """True when *err* from the lock syscall means another ticker holds the lock (POSIX flock:
+    EWOULDBLOCK/EAGAIN, EACCES on some NFS; msvcrt.locking: EACCES/EDEADLK). Everything else —
+    notably EMFILE/ENFILE and EACCES on open() — must be surfaced, never swallowed as contention."""
     if err.errno is None:
         return False
     if fcntl is not None:
@@ -1269,12 +1222,9 @@ class _CronJobConfig:
 
 
 def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConfig:
-    """Load config.yaml and resolve the run's model.
-
-    Precedence: per-job override > cron.model (fleet default) > HERMES_MODEL > config ``model:``.
-    Re-read every tick (no cache) so ``hermes cron edit --model`` takes effect next tick. An axis
-    resolved from cron.model / cron.model_provider is explicit, so the drift guard skips it.
-    """
+    """Load config.yaml and resolve the run's model: per-job override > cron.model (fleet default) >
+    HERMES_MODEL > config ``model:``. Re-read every tick (no cache) so ``hermes cron edit --model``
+    applies next tick. An axis resolved from cron.model/model_provider is explicit (no drift guard)."""
     model = job.get("model") or os.getenv("HERMES_MODEL") or ""
     _cron_default_provider = ""
     _cfg: dict = {}
@@ -1401,11 +1351,9 @@ def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Opt
 def _resolve_job_runtime(
     job: dict, job_id: str, jc: _CronJobConfig,
 ) -> tuple[dict, str, Optional[str]]:
-    """Resolve the runtime, walking the fallback chain on auth/transient-network errors.
-
-    Returns ``(runtime, model, primary_provider_for_drift)``; provider+model swap atomically (never
-    swap only the provider while keeping a paid primary model).
-    """
+    """Resolve the runtime, walking the fallback chain on auth/transient-network errors. Returns
+    ``(runtime, model, primary_provider_for_drift)``; provider+model swap atomically (never swap
+    only the provider while keeping a paid primary model)."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider, format_runtime_provider_error)
     from hermes_cli.auth import AuthError
@@ -1482,12 +1430,10 @@ def _check_model_drift(
     primary_provider_for_drift: Optional[str], primary_model_for_drift: str,
 ) -> None:
     """Fail-closed provider/model drift guard; raises RuntimeError (with drift marker) on drift.
-
-    An unpinned job follows the global default, which may have switched to a paid provider/model
-    since creation. For each unpinned axis with a creation snapshot (job["<axis>_snapshot"]) that
-    now resolves differently: skip the run, no paid call, alert to pin. No snapshot, pinned axes,
-    or resolution from the cron.model fleet default never count as drift.
-    """
+    An unpinned job follows the global default, which may have switched to a paid provider/model:
+    each unpinned axis whose creation snapshot (job["<axis>_snapshot"]) now resolves differently
+    skips the run and alerts to pin. No snapshot, pinned axes, or the cron.model fleet default
+    never count as drift."""
     if not cron_model_drift_guard_enabled(cfg):
         return
     _current_provider = str(
@@ -1630,11 +1576,8 @@ def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
 def _run_agent_with_watchdog(
     agent, prompt: str, job: dict, job_id: str, job_name: str, task_id: str, cancel_event,
 ) -> dict:
-    """Run ``agent.run_conversation`` on a worker thread under the inactivity watchdog.
-
-    Inactivity (not wall-clock) limit from the agent's activity tracker; default 600s, override
-    HERMES_CRON_TIMEOUT, 0 = unlimited.
-    """
+    """Run ``agent.run_conversation`` on a worker thread under the inactivity (not wall-clock)
+    watchdog: default 600s, override HERMES_CRON_TIMEOUT, 0 = unlimited."""
     _cron_timeout = _cron_inactivity_seconds()
     _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
     _POLL_INTERVAL = 5.0
@@ -1730,11 +1673,9 @@ def _run_agent_with_watchdog(
 
 
 def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgent) -> str:
-    """Turn a ``run_conversation`` result into the deliverable final response.
-
-    Raises RuntimeError on `failed=True`/`completed=False`: the error text may sit in
-    `final_response` and would otherwise be delivered as the reply with the job marked ok.
-    """
+    """Deliverable final response from a ``run_conversation`` result. Raises RuntimeError on
+    `failed=True`/`completed=False`: the error text may sit in `final_response` and would otherwise
+    be delivered as the reply with the job marked ok."""
     turn_exit_reason = str(result.get("turn_exit_reason") or "")
     final_response_text = (result.get("final_response") or "").strip()
     max_iteration_summary = (
@@ -2140,11 +2081,9 @@ def run_job(
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job. Returns (success, full_output_doc, final_response, error).
-
-    ``defer_agent_teardown``: if a list, the live agent is appended instead of torn down in
-    ``finally``; the caller MUST call ``_teardown_cron_agent(agent)`` AFTER delivery (delivery
-    against a torn-down async client fails). ``extra_prompt``: per-fire context, never persisted.
-    """
+    ``defer_agent_teardown``: if a list, the live agent is appended instead of torn down; the caller
+    MUST call ``_teardown_cron_agent(agent)`` AFTER delivery (a torn-down async client can't
+    deliver). ``extra_prompt``: per-fire context, never persisted."""
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
@@ -2221,11 +2160,8 @@ def run_job(
 def _teardown_cron_agent(
     agent, job_id: str, *, timeout_seconds: Optional[float] = None
 ) -> None:
-    """Release an ephemeral cron agent's async resources within a hard bound.
-
-    Split out of ``run_job``'s ``finally`` so a caller deferring teardown until after delivery runs
-    the identical cleanup. Bounded because this runs outside the agent inactivity watchdog.
-    """
+    """Release an ephemeral cron agent's async resources within a hard bound (this runs outside the
+    inactivity watchdog). Shared by ``run_job``'s finally and deferred post-delivery teardown."""
     def _cleanup_agent() -> None:
         try:
             if agent is not None:
@@ -2323,13 +2259,11 @@ def run_one_job(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
 ) -> bool:
-    """Run ONE due job end-to-end: execute → save output → deliver → mark.
-
-    Shared firing body for BOTH the built-in ticker and external providers' ``fire_due``. Does NOT
-    decide due-ness or acquire the initial claim (callers use the same store CAS); does keep the
-    claim alive. Returns True if processed (job failure is recorded via ``mark_job_run``), False
-    only if processing raised. ``cancel_event``: optional transport-level cancel (dashboard drain).
-    """
+    """Run ONE due job end-to-end: execute → save output → deliver → mark. Shared by the built-in
+    ticker and external providers' ``fire_due``; does NOT decide due-ness or acquire the initial
+    claim (callers use the store CAS) but keeps it alive. True if processed (a job failure is
+    recorded via ``mark_job_run``), False only if processing raised. ``cancel_event``: optional
+    transport-level cancel (dashboard drain)."""
     if extra_prompt is None:
         # Gateway-forwarded manual run stamps its prompt on the job via trigger_job; the fire that
         # consumes the manual occurrence picks it up here. Single-fire: mark_job_run clears it.
@@ -2402,11 +2336,9 @@ def _classify_delivery_outcome(
 def _compose_run_delivery(
     job: dict, *, success: bool, error, final_response: str, output_file,
 ) -> tuple[str, bool, bool, bool, Optional[str]]:
-    """Build the text to deliver for a finished run.
-
-    Returns ``(deliver_content, blocked_config, silent_alert, incident_acked, failure_incident_id)``.
-    ``silent_alert``: an alert-once marker says the operator was already told; deliver nothing.
-    """
+    """Text to deliver for a finished run. Returns ``(deliver_content, blocked_config,
+    silent_alert, incident_acked, failure_incident_id)``; ``silent_alert``: an alert-once marker
+    says the operator was already told, deliver nothing."""
     err = str(error) if error else ""
     # Failed jobs always deliver, except blocked-config / drift-skip runs, which alert exactly ONCE.
     blocked_config_silent = BLOCKED_CONFIG_SILENT_MARKER in err
@@ -2932,12 +2864,10 @@ def _maybe_run_worktree_maintenance() -> None:
 
 
 def _acquire_tick_lock(lock_file):
-    """Open + non-blocking lock the tick file. Returns the fd, or None on genuine contention.
-
-    fcntl on Unix, msvcrt on Windows. A real OSError (esp. EMFILE/ENFILE) must NOT pass as
-    contention — the scheduler would look healthy while no job runs — so it is re-raised for the
-    ticker loop to record a FAILED tick.
-    """
+    """Open + non-blocking lock the tick file (fcntl / msvcrt). Returns the fd, or None on genuine
+    contention. A real OSError (esp. EMFILE/ENFILE) must NOT pass as contention — the scheduler
+    would look healthy while no job runs — so it is re-raised for the ticker to record a FAILED
+    tick."""
     lock_fd = None
     try:
         lock_fd = open(lock_file, "w", encoding="utf-8")
