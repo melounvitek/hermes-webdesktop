@@ -8,51 +8,47 @@ The lark client is injected per-thread by the feishu_comment event handler.
 import logging
 
 from tools.feishu_lark import (  # noqa: F401  (set_client/get_client are imported by feishu_comment)
-    build_request,
     _check_feishu,
+    build_request,
     get_client,
-    response_data,
-    set_client,
-)
+    lark_call,
+    set_client)
 from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
 
-def _do_request(client, method, uri, paths=None, queries=None, body=None):
-    """Build and execute a BaseRequest, return (code, msg, data_dict)."""
-    # Tool handlers run synchronously in a worker thread (no running event
-    # loop), so call the blocking lark client directly.
-    response = client.request(build_request(method, uri, paths, queries, body))
-    return getattr(response, "code", None), getattr(response, "msg", ""), response_data(response)
+def _comment_op(keys, missing_msg, label, method, uri, queries=None, body=None, flag_success=False):
+    """Handler factory: client check, then required ``keys`` (stripped) → lark_call → result.
 
-
-def _prepare(args: dict, keys: tuple, missing_msg: str):
-    """Client check first, then required fields (stripped). Returns (client, values, error|None)."""
-    client = get_client()
-    values = tuple(args.get(k, "").strip() for k in keys)
-    if client is None:
-        return None, values, tool_error("Feishu client not available")
-    if not all(values):
-        return client, values, tool_error(missing_msg)
-    return client, values, None
+    All keys except ``content`` are URI path params. ``queries(args)`` / ``body(args, values)``
+    build the request pieces; ``flag_success`` adds ``success=True`` to the result (writes).
+    """
+    def _handler(args: dict, **kwargs) -> str:
+        client = get_client()
+        values = tuple(args.get(k, "").strip() for k in keys)
+        if client is None:
+            return tool_error("Feishu client not available")
+        if not all(values):
+            return tool_error(missing_msg)
+        code, msg, data = lark_call(
+            client, method, uri, paths={k: v for k, v in zip(keys, values) if k != "content"},
+            queries=queries and queries(args), body=body and body(args, values))
+        if code != 0:
+            return tool_error(f"{label} failed: code={code} msg={msg}")
+        return tool_result(success=True, data=data) if flag_success else tool_result(data)
+    return _handler
 
 
 def _file_type(args: dict) -> str:
     return args.get("file_type", "docx") or "docx"
 
 
-def _paged_queries(args: dict) -> list:
-    """Query params shared by the comment/reply listing endpoints."""
-    return [
-        ("file_type", _file_type(args)),
-        ("user_id_type", "open_id"),
-        ("page_size", str(args.get("page_size", 100))),
-    ]
-
-
-def _with_page_token(queries: list, args: dict) -> list:
-    """Append page_token last (after any is_whole) so the query order stays as before."""
+def _paged_queries(args: dict, *extra) -> list:
+    """Query params shared by the listing endpoints; page_token goes last (after any extra)."""
+    queries = [
+        ("file_type", _file_type(args)), ("user_id_type", "open_id"),
+        ("page_size", str(args.get("page_size", 100))), *extra]
     page_token = args.get("page_token", "")
     if page_token:
         queries.append(("page_token", page_token))
@@ -66,10 +62,6 @@ _COMMENTS_URI = "/open-apis/drive/v1/files/:file_token/comments"
 _REPLIES_URI = "/open-apis/drive/v1/files/:file_token/comments/:comment_id/replies"
 _ADD_COMMENT_URI = "/open-apis/drive/v1/files/:file_token/new_comments"
 
-
-# ---------------------------------------------------------------------------
-# feishu_drive_list_comments
-# ---------------------------------------------------------------------------
 
 FEISHU_DRIVE_LIST_COMMENTS_SCHEMA = {
     "name": "feishu_drive_list_comments",
@@ -99,28 +91,6 @@ FEISHU_DRIVE_LIST_COMMENTS_SCHEMA = {
 }
 
 
-def _handle_list_comments(args: dict, **kwargs) -> str:
-    client, (file_token,), err = _prepare(args, ("file_token",), "file_token is required")
-    if err:
-        return err
-
-    queries = _paged_queries(args)
-    if args.get("is_whole", False):
-        queries.append(("is_whole", "true"))
-    _with_page_token(queries, args)
-
-    code, msg, data = _do_request(
-        client, "GET", _COMMENTS_URI, paths={"file_token": file_token}, queries=queries,
-    )
-    if code != 0:
-        return tool_error(f"List comments failed: code={code} msg={msg}")
-    return tool_result(data)
-
-
-# ---------------------------------------------------------------------------
-# feishu_drive_list_comment_replies
-# ---------------------------------------------------------------------------
-
 FEISHU_DRIVE_LIST_REPLIES_SCHEMA = {
     "name": "feishu_drive_list_comment_replies",
     "description": "List all replies in a comment thread on a Feishu document.",
@@ -144,27 +114,6 @@ FEISHU_DRIVE_LIST_REPLIES_SCHEMA = {
     },
 }
 
-
-def _handle_list_replies(args: dict, **kwargs) -> str:
-    client, (file_token, comment_id), err = _prepare(
-        args, ("file_token", "comment_id"), "file_token and comment_id are required"
-    )
-    if err:
-        return err
-
-    code, msg, data = _do_request(
-        client, "GET", _REPLIES_URI,
-        paths={"file_token": file_token, "comment_id": comment_id},
-        queries=_with_page_token(_paged_queries(args), args),
-    )
-    if code != 0:
-        return tool_error(f"List replies failed: code={code} msg={msg}")
-    return tool_result(data)
-
-
-# ---------------------------------------------------------------------------
-# feishu_drive_reply_comment
-# ---------------------------------------------------------------------------
 
 FEISHU_DRIVE_REPLY_SCHEMA = {
     "name": "feishu_drive_reply_comment",
@@ -192,29 +141,6 @@ FEISHU_DRIVE_REPLY_SCHEMA = {
 }
 
 
-def _handle_reply_comment(args: dict, **kwargs) -> str:
-    client, (file_token, comment_id, content), err = _prepare(
-        args, ("file_token", "comment_id", "content"), "file_token, comment_id, and content are required"
-    )
-    if err:
-        return err
-
-    # Replies use the rich "content.elements[text_run]" body shape; file_type is a query param.
-    code, msg, data = _do_request(
-        client, "POST", _REPLIES_URI,
-        paths={"file_token": file_token, "comment_id": comment_id},
-        queries=[("file_type", _file_type(args))],
-        body={"content": {"elements": [{"type": "text_run", "text_run": {"text": content}}]}},
-    )
-    if code != 0:
-        return tool_error(f"Reply comment failed: code={code} msg={msg}")
-    return tool_result(success=True, data=data)
-
-
-# ---------------------------------------------------------------------------
-# feishu_drive_add_comment
-# ---------------------------------------------------------------------------
-
 FEISHU_DRIVE_ADD_COMMENT_SCHEMA = {
     "name": "feishu_drive_add_comment",
     "description": (
@@ -237,46 +163,32 @@ FEISHU_DRIVE_ADD_COMMENT_SCHEMA = {
 }
 
 
-def _handle_add_comment(args: dict, **kwargs) -> str:
-    client, (file_token, content), err = _prepare(
-        args, ("file_token", "content"), "file_token and content are required"
-    )
-    if err:
-        return err
+_handle_list_comments = _comment_op(
+    ("file_token",), "file_token is required", "List comments", "GET", _COMMENTS_URI,
+    queries=lambda a: _paged_queries(a, *([("is_whole", "true")] if a.get("is_whole", False) else [])))
+_handle_list_replies = _comment_op(
+    ("file_token", "comment_id"), "file_token and comment_id are required", "List replies", "GET",
+    _REPLIES_URI, queries=_paged_queries)
+# Replies use the rich "content.elements[text_run]" body shape; file_type is a query param.
+_handle_reply_comment = _comment_op(
+    ("file_token", "comment_id", "content"), "file_token, comment_id, and content are required",
+    "Reply comment", "POST", _REPLIES_URI, queries=lambda a: [("file_type", _file_type(a))],
+    body=lambda a, v: {"content": {"elements": [{"type": "text_run", "text_run": {"text": v[-1]}}]}},
+    flag_success=True)
+# new_comments takes the flat "reply_elements[text]" shape with file_type in the body.
+_handle_add_comment = _comment_op(
+    ("file_token", "content"), "file_token and content are required", "Add comment", "POST",
+    _ADD_COMMENT_URI,
+    body=lambda a, v: {"file_type": _file_type(a), "reply_elements": [{"type": "text", "text": v[-1]}]},
+    flag_success=True)
 
-    # new_comments takes the flat "reply_elements[text]" shape with file_type in the body.
-    code, msg, data = _do_request(
-        client, "POST", _ADD_COMMENT_URI,
-        paths={"file_token": file_token},
-        body={"file_type": _file_type(args), "reply_elements": [{"type": "text", "text": content}]},
-    )
-    if code != 0:
-        return tool_error(f"Add comment failed: code={code} msg={msg}")
-    return tool_result(success=True, data=data)
 
-
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-for _name, _schema, _handler, _desc, _emoji in (
-    ("feishu_drive_list_comments", FEISHU_DRIVE_LIST_COMMENTS_SCHEMA, _handle_list_comments,
-     "List document comments", "\U0001f4ac"),
-    ("feishu_drive_list_comment_replies", FEISHU_DRIVE_LIST_REPLIES_SCHEMA, _handle_list_replies,
-     "List comment replies", "\U0001f4ac"),
-    ("feishu_drive_reply_comment", FEISHU_DRIVE_REPLY_SCHEMA, _handle_reply_comment,
-     "Reply to a document comment", "\u2709\ufe0f"),
-    ("feishu_drive_add_comment", FEISHU_DRIVE_ADD_COMMENT_SCHEMA, _handle_add_comment,
-     "Add a whole-document comment", "\u2709\ufe0f"),
+for _schema, _handler, _desc, _emoji in (
+    (FEISHU_DRIVE_LIST_COMMENTS_SCHEMA, _handle_list_comments, "List document comments", "\U0001f4ac"),
+    (FEISHU_DRIVE_LIST_REPLIES_SCHEMA, _handle_list_replies, "List comment replies", "\U0001f4ac"),
+    (FEISHU_DRIVE_REPLY_SCHEMA, _handle_reply_comment, "Reply to a document comment", "\u2709\ufe0f"),
+    (FEISHU_DRIVE_ADD_COMMENT_SCHEMA, _handle_add_comment, "Add a whole-document comment", "\u2709\ufe0f"),
 ):
     registry.register(
-        name=_name,
-        toolset="feishu_drive",
-        schema=_schema,
-        handler=_handler,
-        check_fn=_check_feishu,
-        requires_env=[],
-        is_async=False,
-        description=_desc,
-        emoji=_emoji,
-    )
+        name=_schema["name"], toolset="feishu_drive", schema=_schema, handler=_handler,
+        check_fn=_check_feishu, requires_env=[], is_async=False, description=_desc, emoji=_emoji)
