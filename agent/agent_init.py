@@ -119,12 +119,8 @@ def _context_route_mismatch(
     *, already_normalized: bool = False,
 ) -> bool:
     """Return whether a context pin's configured route differs from runtime."""
-    if already_normalized:
-        configured_route = str(configured_base_url or "")
-        active_route = str(active_base_url or "")
-    else:
-        configured_route = _normalize_route_base_url(configured_base_url)
-        active_route = _normalize_route_base_url(active_base_url)
+    _norm = (lambda v: str(v or "")) if already_normalized else _normalize_route_base_url
+    configured_route, active_route = _norm(configured_base_url), _norm(active_base_url)
     if configured_route:
         return configured_route != active_route
 
@@ -1261,15 +1257,12 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                     agent._memory_manager.add_provider(_mp)
                 elif _mp is not None and _mem_provider_name not in _warned_unavailable_providers:
                     # unavailable_reason() reads config/probes importlib — skip it once warned.
-                    try:
+                    _unavailable_reason = ""
+                    with suppress(Exception):
                         _unavailable_reason = _mp.unavailable_reason()
-                    except Exception:
-                        _unavailable_reason = ""
                     _warn_memory_provider_unavailable(_mem_provider_name, _unavailable_reason)
                 if agent._memory_manager.providers:
-                    agent._memory_manager.initialize_all(
-                        **_memory_provider_init_kwargs(agent, platform)
-                    )
+                    agent._memory_manager.initialize_all(**_memory_provider_init_kwargs(agent, platform))
                     _ra().logger.info("Memory provider '%s' activated", _mem_provider_name)
                 else:
                     _ra().logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
@@ -1278,8 +1271,8 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
             _ra().logger.warning("Memory provider plugin init failed: %s", _mpe)
             agent._memory_manager = None
 
-    from agent.memory_manager import inject_memory_provider_tools as _inject_memory_provider_tools
-    _inject_memory_provider_tools(agent)
+    from agent.memory_manager import inject_memory_provider_tools
+    inject_memory_provider_tools(agent)
 
 
 def _apply_agent_section(agent, _agent_cfg):
@@ -2078,8 +2071,8 @@ def _snapshot_primary_runtime(agent):
 
 
 def _init_usage_state(agent):
-    from agent.runtime_cwd import scope_terminal_cwd as _scope_terminal_cwd
-    agent._subdirectory_hints = SubdirectoryHintTracker(working_dir=_scope_terminal_cwd() or None)
+    from agent.runtime_cwd import scope_terminal_cwd
+    agent._subdirectory_hints = SubdirectoryHintTracker(working_dir=scope_terminal_cwd() or None)
     _set_defaults(agent, _USAGE_STATE)
 
 
