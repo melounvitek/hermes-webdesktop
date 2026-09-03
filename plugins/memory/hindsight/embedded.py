@@ -39,11 +39,9 @@ def _export_port_health_grace_timeout(config: dict[str, Any]) -> None:
     try:
         seconds = float(raw)
     except (TypeError, ValueError):
-        seconds = None
-    if seconds is None or seconds < 0:
-        logger.warning("%s Hindsight port_health_grace_timeout %r; ignoring.",
-                       "Invalid" if seconds is None else "Negative", raw)
-        return
+        return logger.warning("Invalid Hindsight port_health_grace_timeout %r; ignoring.", raw)
+    if seconds < 0:
+        return logger.warning("Negative Hindsight port_health_grace_timeout %r; ignoring.", raw)
     os.environ.setdefault(_PORT_HEALTH_GRACE_ENV, repr(seconds))
 
 
@@ -91,10 +89,14 @@ def _embedded_profile_env_path(config: dict[str, Any]) -> Path:
     return Path.home() / ".hindsight" / "profiles" / f"{profile}.env"
 
 
+def _embedded_llm_api_key(config: dict[str, Any]) -> str:
+    return config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
+
+
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
     """Build the profile-scoped env that standalone hindsight-embed consumes."""
     if llm_api_key is None:
-        llm_api_key = config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
+        llm_api_key = _embedded_llm_api_key(config)
     env_values = {
         "HINDSIGHT_API_LLM_PROVIDER": str(_daemon_llm_provider(config.get("llm_provider", ""))),
         "HINDSIGHT_API_LLM_API_KEY": str(llm_api_key or ""),

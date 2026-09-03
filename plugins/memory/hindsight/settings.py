@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -60,21 +61,14 @@ def _normalize_retain_tags(value: Any) -> List[str]:
     """Normalize tag config/tool values to a deduplicated list of strings."""
     if value is None:
         return []
-    if isinstance(value, list):
-        raw_items = value
-    elif isinstance(value, str):
+    raw_items = value if isinstance(value, list) else [value]
+    if isinstance(value, str):
         text = value.strip()
-        if not text:
-            return []
         parsed = None
         if text.startswith("["):
-            try:
+            with contextlib.suppress(Exception):
                 parsed = json.loads(text)
-            except Exception:
-                pass
         raw_items = parsed if isinstance(parsed, list) else text.split(",")
-    else:
-        raw_items = [value]
     normalized: list[str] = []
     for item in raw_items:
         tag = str(item).strip()
@@ -117,18 +111,8 @@ def _normalize_observation_scopes(value: Any) -> Any:
 def _sanitize_bank_segment(value: str) -> str:
     """URL/filesystem-safe bank_id placeholder: runs outside ``[A-Za-z0-9_-]`` (per
     ``str.isalnum``) become one dash; leading/trailing ``-``/``_`` are stripped."""
-    if not value:
-        return ""
-    out = []
-    prev_dash = False
-    for ch in str(value):
-        if ch.isalnum() or ch in "-_":
-            out.append(ch)
-            prev_dash = False
-        elif not prev_dash:
-            out.append("-")
-            prev_dash = True
-    return "".join(out).strip("-_")
+    # \w == str.isalnum() + "_" for str patterns, so this matches the per-char rule.
+    return re.sub(r"[^\w-]+", "-", str(value)).strip("-_") if value else ""
 
 
 def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str) -> str:

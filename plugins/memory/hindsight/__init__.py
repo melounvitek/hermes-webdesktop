@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import contextvars
 import json
 import logging
@@ -34,14 +35,13 @@ from tools.registry import tool_error
 # Re-exported (tests patch/import these via this module).
 from .embedded import (  # noqa: F401
     _PORT_HEALTH_GRACE_ENV, _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
-    _check_local_runtime, _embedded_profile_env_path, _export_port_health_grace_timeout,
-    _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
-    _secure_write_profile_env, _validate_profile_env_permissions,
+    _check_local_runtime, _embedded_llm_api_key, _embedded_profile_env_path,
+    _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
 )
 from .settings import (  # noqa: F401
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
     _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH, _MIN_CLIENT_VERSION, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
-    _OBSERVATION_SCOPE_KEYWORDS, _PROVIDER_DEFAULT_MODELS, _VALID_BUDGETS, _daemon_llm_provider,
+    _PROVIDER_DEFAULT_MODELS, _VALID_BUDGETS, _daemon_llm_provider,
     _normalize_observation_scopes, _normalize_retain_tags, _parse_int_setting,
     _resolve_bank_id_template, _sanitize_bank_segment,
 )
@@ -201,21 +201,15 @@ RETAIN_SCHEMA = {
         "properties": {
             "content": {"type": "string", "description": "The information to store."},
             "context": {"type": "string", "description": "Short label (e.g. 'user preference', 'project decision')."},
-            "tags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional per-call tags to merge with configured default retain tags.",
-            },
-            "occurred_at": {
-                "type": "string",
-                "description": (
-                    "When the remembered event actually happened, as an ISO-8601 date "
-                    "or datetime (e.g. '2026-08-20' or '2026-08-20T14:30:00+02:00'). "
-                    "Pass this whenever the memory references a specific event time "
-                    "('yesterday', 'last Tuesday', 'on March 3rd') so Hindsight can "
-                    "anchor it on the timeline. Omit for timeless facts/preferences."
-                ),
-            },
+            "tags": {"type": "array", "items": {"type": "string"},
+                     "description": "Optional per-call tags to merge with configured default retain tags."},
+            "occurred_at": {"type": "string", "description": (
+                "When the remembered event actually happened, as an ISO-8601 date "
+                "or datetime (e.g. '2026-08-20' or '2026-08-20T14:30:00+02:00'). "
+                "Pass this whenever the memory references a specific event time "
+                "('yesterday', 'last Tuesday', 'on March 3rd') so Hindsight can "
+                "anchor it on the timeline. Omit for timeless facts/preferences."
+            )},
         },
         "required": ["content"],
     },
@@ -227,13 +221,8 @@ RECALL_SCHEMA = {
         "Search long-term memory. Returns memories ranked by relevance using "
         "semantic search, keyword matching, entity graph traversal, and reranking."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "What to search for."},
-        },
-        "required": ["query"],
-    },
+    "parameters": {"type": "object", "required": ["query"],
+                   "properties": {"query": {"type": "string", "description": "What to search for."}}},
 }
 
 REFLECT_SCHEMA = {
@@ -242,13 +231,8 @@ REFLECT_SCHEMA = {
         "Synthesize a reasoned answer from long-term memories. Unlike recall, "
         "this reasons across all stored memories to produce a coherent response."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "The question to reflect on."},
-        },
-        "required": ["query"],
-    },
+    "parameters": {"type": "object", "required": ["query"],
+                   "properties": {"query": {"type": "string", "description": "The question to reflect on."}}},
 }
 
 
@@ -257,10 +241,8 @@ def _load_config() -> dict:
     (legacy, shared), else environment variables."""
     for path in (get_hermes_home() / "hindsight" / "config.json", Path.home() / ".hindsight" / "config.json"):
         if path.exists():
-            try:
+            with contextlib.suppress(Exception):
                 return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
     return {
         "mode": os.environ.get("HINDSIGHT_MODE", "cloud"),
         "apiKey": get_secret("HINDSIGHT_API_KEY", ""),
@@ -316,10 +298,9 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def backup_paths(self) -> List[str]:
         """Legacy shared config + embedded-mode profile env files live under ~/.hindsight."""
-        try:
+        with contextlib.suppress(Exception):
             return [str(Path.home() / ".hindsight")]
-        except Exception:
-            return []
+        return []
 
     def __init__(self):
         self._config = self._api_key = self._client = None
@@ -384,8 +365,7 @@ class HindsightMemoryProvider(MemoryProvider):
             if mode in _LOCAL_MODES:
                 return _check_local_runtime()[0]
             return mode == "local_external" or bool(
-                _cloud_api_key(cfg) or cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", "")
-            )
+                _cloud_api_key(cfg) or cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", ""))
         except Exception:
             return False
 
@@ -406,10 +386,10 @@ class HindsightMemoryProvider(MemoryProvider):
         from utils import atomic_json_write
         config_path = Path(hermes_home) / "hindsight" / "config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            existing = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-        except Exception:
-            existing = {}
+        existing = {}
+        if config_path.exists():
+            with contextlib.suppress(Exception):
+                existing = json.loads(config_path.read_text(encoding="utf-8"))
         existing.update(values)
         atomic_json_write(config_path, existing, mode=0o600)
 
@@ -489,7 +469,7 @@ class HindsightMemoryProvider(MemoryProvider):
         kwargs = dict(
             profile=cfg.get("profile", "hermes"),
             llm_provider=llm_provider,
-            llm_api_key=cfg.get("llmApiKey") or cfg.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", ""),
+            llm_api_key=_embedded_llm_api_key(cfg),
             llm_model=cfg.get("llm_model", ""),
             idle_timeout=self._idle_timeout,
         )
@@ -577,10 +557,9 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._retain_queue.task_done()
 
     def _atexit_shutdown(self) -> None:
-        if self._shutting_down.is_set():
-            return
         try:
-            self.shutdown()
+            if not self._shutting_down.is_set():
+                self.shutdown()
         except Exception as exc:
             logger.debug("Hindsight atexit shutdown failed: %s", exc)
 
@@ -828,10 +807,8 @@ class HindsightMemoryProvider(MemoryProvider):
             )
             logger.warning(msg)
             # Also print: otherwise the user would only see Hermes get sluggish.
-            try:
+            with contextlib.suppress(Exception):
                 print(f"  ⚠ {msg}", file=sys.stderr, flush=True)
-            except Exception:
-                pass
             self._mode = "disabled"
             return
         _context_thread(self._daemon_start_worker, "hindsight-daemon-start").start()
@@ -1205,14 +1182,10 @@ class HindsightMemoryProvider(MemoryProvider):
         inner_client = getattr(self._client, "_client", None)
         if inner_client is not None and hasattr(inner_client, "aclose"):
             _run_sync(inner_client.aclose())
-            try:
+            with contextlib.suppress(Exception):
                 self._client._client = None
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(RuntimeError):
             self._client.close()
-        except RuntimeError:
-            pass
 
     def shutdown(self) -> None:
         logger.debug("Hindsight shutdown: stopping writer + waiting for background threads")
@@ -1229,10 +1202,8 @@ class HindsightMemoryProvider(MemoryProvider):
                                self._retain_queue.qsize())
         self._join_prefetch(5.0)
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._close_client()
-            except Exception:
-                pass
             self._client = None
         # The module-global loop is intentionally NOT stopped: it's shared by every
         # provider in the process (one per gateway chat session); stopping it would
