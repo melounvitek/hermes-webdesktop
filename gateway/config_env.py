@@ -367,6 +367,77 @@ def _session_settings(config: GatewayConfig) -> None:
                 setattr(config.default_reset_policy, attr, int(raw))
 
 
+def _plugin_probe_seed(entry) -> Optional[dict]:
+    """``env_enablement_fn()`` result as a non-empty dict, else None."""
+    if entry.env_enablement_fn is None:
+        return None
+    try:
+        seed = entry.env_enablement_fn()
+    except Exception as e:
+        logger.debug("env_enablement_fn for %s raised: %s", entry.name, e)
+        return None
+    return seed if isinstance(seed, dict) and seed else None
+
+
+def _plugin_is_configured(entry, existing_extra: dict, seed: Optional[dict]) -> bool:
+    """``entry.is_connected`` on a transient ``enabled=True`` view seeded with env extras."""
+    try:
+        # Seed extras so ``is_connected`` implementations reading ``config.extra`` see
+        # post-enable state; never mutate the real config for the probe.
+        for k, v in (seed or {}).items():
+            if k != "home_channel":
+                existing_extra.setdefault(k, v)
+        configured = bool(entry.is_connected(PlatformConfig(enabled=True, extra=existing_extra)))
+    except Exception as exc:
+        logger.debug("is_connected for %s raised: %s — skipping enablement", entry.name, exc)
+        return False
+    if not configured:
+        logger.debug(
+            "Plugin platform '%s' available but not configured "
+            "(is_connected returned False) — skipping enable",
+            entry.name,
+        )
+    return configured
+
+
+def _enable_plugin_platform(config: GatewayConfig, entry) -> None:
+    try:
+        platform = Platform(entry.name)
+    except Exception as e:
+        logger.debug("unknown platform name %r: %s", entry.name, e)
+        return
+    existing_cfg = config.platforms.get(platform)
+    already_enabled = existing_cfg is not None and existing_cfg.enabled
+    existing_extra = dict(existing_cfg.extra or {}) if existing_cfg is not None else {}
+    # Never re-enable a platform the user explicitly disabled (marker set by the YAML loader).
+    if existing_cfg is not None and not already_enabled and existing_extra.get("_enabled_explicit", False):
+        return
+    seed = _plugin_probe_seed(entry)
+    # Only consult is_connected for platforms not already enabled by YAML/env.
+    if not already_enabled and entry.is_connected is not None and not _plugin_is_configured(entry, existing_extra, seed):
+        return
+    # Verify dependencies LAST — only for platforms already enabled or past the credential gate.
+    try:
+        deps_ok = bool(entry.check_fn())
+    except Exception as e:
+        logger.debug("check_fn for %s raised: %s", entry.name, e)
+        deps_ok = False
+    if not deps_ok and entry.ensure_deps_fn is None:
+        return
+    platform_config = config.platforms.setdefault(platform, PlatformConfig())
+    platform_config.enabled = True
+    if seed:
+        # Commit the env-seeded extras (reuse the probe result; don't call env_enablement_fn twice).
+        seed = dict(seed)
+        home = seed.pop("home_channel", None)
+        platform_config.extra.update(seed)
+        if isinstance(home, dict) and home.get("chat_id"):
+            platform_config.home_channel = HomeChannel(
+                platform=platform, chat_id=str(home["chat_id"]), name=str(home.get("name") or "Home"),
+                thread_id=str(home["thread_id"]) if home.get("thread_id") else None,
+            )
+
+
 def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
     """Registry-driven enable for plugin platforms (built-ins have rows in ``_ENV_STEPS``).
 
@@ -380,65 +451,7 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
         discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
-            try:
-                platform = Platform(entry.name)
-            except Exception as e:
-                logger.debug("unknown platform name %r: %s", entry.name, e)
-                continue
-            existing_cfg = config.platforms.get(platform)
-            already_enabled = existing_cfg is not None and existing_cfg.enabled
-            existing_extra = dict(existing_cfg.extra or {}) if existing_cfg is not None else {}
-            # Never re-enable a platform the user explicitly disabled (marker set by the YAML loader).
-            if existing_cfg is not None and not already_enabled and existing_extra.get("_enabled_explicit", False):
-                continue
-            # Seed extras so ``is_connected`` implementations reading ``config.extra`` see post-enable state.
-            seed_for_probe = None
-            if entry.env_enablement_fn is not None:
-                try:
-                    seed_for_probe = entry.env_enablement_fn()
-                except Exception as e:
-                    logger.debug("env_enablement_fn for %s raised: %s", entry.name, e)
-            has_seed = isinstance(seed_for_probe, dict) and bool(seed_for_probe)
-
-            # Only consult is_connected for platforms not already enabled by YAML/env.
-            if not already_enabled and entry.is_connected is not None:
-                try:
-                    # Probe a transient ``enabled=True`` view; never mutate ``existing_cfg``.
-                    if has_seed:
-                        for k, v in seed_for_probe.items():
-                            if k != "home_channel":
-                                existing_extra.setdefault(k, v)
-                    configured = bool(entry.is_connected(PlatformConfig(enabled=True, extra=existing_extra)))
-                except Exception as exc:
-                    logger.debug("is_connected for %s raised: %s — skipping enablement", entry.name, exc)
-                    configured = False
-                if not configured:
-                    logger.debug(
-                        "Plugin platform '%s' available but not configured "
-                        "(is_connected returned False) — skipping enable",
-                        entry.name,
-                    )
-                    continue
-            # Verify dependencies LAST — only for platforms already enabled or past the credential gate.
-            try:
-                deps_ok = bool(entry.check_fn())
-            except Exception as e:
-                logger.debug("check_fn for %s raised: %s", entry.name, e)
-                deps_ok = False
-            if not deps_ok and entry.ensure_deps_fn is None:
-                continue
-            platform_config = config.platforms.setdefault(platform, PlatformConfig())
-            platform_config.enabled = True
-            if has_seed:
-                # Commit the env-seeded extras (reuse the probe result; don't call env_enablement_fn twice).
-                seed = dict(seed_for_probe)
-                home = seed.pop("home_channel", None)
-                platform_config.extra.update(seed)
-                if isinstance(home, dict) and home.get("chat_id"):
-                    platform_config.home_channel = HomeChannel(
-                        platform=platform, chat_id=str(home["chat_id"]), name=str(home.get("name") or "Home"),
-                        thread_id=str(home["thread_id"]) if home.get("thread_id") else None,
-                    )
+            _enable_plugin_platform(config, entry)
     except Exception as e:
         logger.debug("Plugin platform enable pass failed: %s", e)
 
