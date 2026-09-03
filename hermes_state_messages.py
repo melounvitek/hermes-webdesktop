@@ -396,6 +396,15 @@ class SessionMessagesMixin:
             (session_id, role, int(offset)))
         return row[0] if row else None
 
+    def latest_user_message_row_id(self, session_id: str) -> Optional[int]:
+        """Row id of the most recent active user message, or ``None``.
+
+        The agent's default reaction target: "the message that triggered me",
+        so the model never has to thread row ids through a tool call (mirrors
+        the photon adapter's ``_record_last_inbound``).
+        """
+        return self.latest_message_row_id(session_id, role="user")
+
     def get_message_role(self, session_id: str, row_id: int) -> Optional[str]:
         """Role of the active message at *row_id* in *session_id*, or ``None``."""
         if not session_id:

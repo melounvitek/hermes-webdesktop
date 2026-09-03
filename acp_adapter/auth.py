@@ -27,6 +27,11 @@ def detect_provider() -> Optional[str]:
     return None
 
 
+def has_provider() -> bool:
+    """Return True if Hermes can resolve any runtime provider credentials."""
+    return detect_provider() is not None
+
+
 def build_auth_methods() -> list[Any]:
     """Return registry-compatible ACP auth methods for Hermes.
 

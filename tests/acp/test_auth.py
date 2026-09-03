@@ -3,8 +3,25 @@
 from acp_adapter.auth import (
     TERMINAL_SETUP_AUTH_METHOD_ID,
     build_auth_methods,
+    has_provider,
     detect_provider,
 )
+
+
+class TestHasProvider:
+    def test_has_provider_with_resolved_runtime(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda: {"provider": "openrouter", "api_key": "sk-or-test"},
+        )
+        assert has_provider() is True
+
+    def test_has_provider_false_without_credentials(self, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda: {"provider": "openrouter", "api_key": ""},
+        )
+        assert has_provider() is False
 
 
 class TestDetectProvider:

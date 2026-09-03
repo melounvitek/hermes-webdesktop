@@ -56,6 +56,16 @@ def reset_edit_approval_requester(token: Token) -> None:
     _EDIT_APPROVAL_REQUESTER.reset(token)
 
 
+def clear_edit_approval_requester() -> None:
+    """Clear the current requester; primarily used by tests."""
+
+    _EDIT_APPROVAL_REQUESTER.set(None)
+
+
+def get_edit_approval_requester() -> EditApprovalRequester | None:
+    return _EDIT_APPROVAL_REQUESTER.get()
+
+
 def _read_text_if_exists(path: str) -> str | None:
     p = Path(path).expanduser()
     if p.is_file():

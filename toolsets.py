@@ -370,6 +370,14 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
     return result
 
 
+def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
+    """Resolve several toolsets and return the combined, deduplicated, sorted tool names."""
+    all_tools = set()
+    for name in toolset_names:
+        all_tools.update(resolve_toolset(name))
+    return sorted(all_tools)
+
+
 def _get_plugin_toolset_names() -> Set[str]:
     """Registry toolset names absent from the static TOOLSETS dict."""
     return {n for n in _registry_call("get_registered_toolset_names", ()) if n not in TOOLSETS}

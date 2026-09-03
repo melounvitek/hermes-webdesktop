@@ -998,6 +998,24 @@ def get_provider_auth_state(provider_id: str) -> Optional[Dict[str, Any]]:
     return _load_provider_state(_load_auth_store(), provider_id)
 
 
+def nous_token_has_billing_scope() -> bool:
+    """Return True if the currently-held Nous token carries ``billing:manage``.
+
+    Reads the persisted ``scope`` string saved at login (``_save_provider_state``
+    stores ``token_data.get("scope") or scope``). A space-delimited match. Used by
+    the lazy step-up: if False, the first billing call will 403 ``insufficient_scope``
+    anyway, but checking up front lets a surface skip a doomed round-trip.
+    """
+    try:
+        state = get_provider_auth_state("nous") or {}
+    except Exception:
+        return False
+    scope = state.get("scope")
+    if not isinstance(scope, str):
+        return False
+    return NOUS_BILLING_MANAGE_SCOPE in scope.split()
+
+
 def get_active_provider() -> Optional[str]:
     """Return the currently active provider ID from auth store."""
     return _load_auth_store().get("active_provider")

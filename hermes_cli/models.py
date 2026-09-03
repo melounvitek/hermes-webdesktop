@@ -758,6 +758,31 @@ def _anthropic_models_url(base_url: Optional[str] = None) -> str:
     return endpoint + ("/models" if endpoint.endswith("/v1") else "/v1/models")
 
 
+def curated_models_for_provider(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> list[tuple[str, str]]:
+    """Return ``(model_id, description)`` tuples for a provider's model list.
+
+    Tries to fetch the live model list from the provider's API first,
+    falling back to the static ``_PROVIDER_MODELS`` catalog if the API
+    is unreachable.
+    """
+    normalized = normalize_provider(provider)
+    if normalized == "openrouter":
+        return fetch_openrouter_models(force_refresh=force_refresh)
+
+    # Try live API first (Codex, Nous, etc. all support /models)
+    live = provider_model_ids(normalized)
+    if live:
+        return [(m, "") for m in live]
+
+    # Fallback to static catalog
+    models = _PROVIDER_MODELS.get(normalized, [])
+    return [(m, "") for m in models]
+
+
 def _provider_keys(provider: str) -> set[str]:
     key = (provider or "").strip().lower()
     normalized = normalize_provider(provider)
