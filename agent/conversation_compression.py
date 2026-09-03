@@ -1,16 +1,11 @@
 """Context compression: feasibility probe, warning replay, compress, image fix.
 
-Thread-safety contract for extension points
---------------------------------------------
-With ``compression.context_timeout_seconds > 0`` (default) the whole pass,
-context engines and memory providers included, runs on a pooled daemon thread.
-* Calls may arrive on any pooled thread; never rely on thread-affinity/locals.
-* The message list is a private deep snapshot; in-place mutation is allowed
-  but invisible to the live conversation unless the pass commits.
-* State is published ONLY on an admitted :class:`CompressionCommitFence`
-  commit; work of an engine still running after a host timeout is discarded.
-* One pass per session at a time (durable lock), but different sessions may
-  run concurrently, so shared engine/provider instances must be thread-safe.
+Thread-safety contract for extension points: with ``compression.context_timeout_seconds > 0`` (default) the
+whole pass, context engines and memory providers included, runs on a pooled daemon thread. Calls may arrive
+on any pooled thread (never rely on thread-affinity/locals); the message list is a private deep snapshot
+(in-place mutation is invisible to the live conversation unless the pass commits); state is published ONLY
+on an admitted :class:`CompressionCommitFence` commit (work still running after a host timeout is discarded);
+one pass per session at a time (durable lock) but sessions run concurrently, so shared engines must be thread-safe.
 """
 
 from __future__ import annotations
@@ -47,10 +42,7 @@ def _swallow(message: str, *, exc_info: bool = False):
     try:
         yield
     except Exception as exc:
-        if exc_info:
-            logger.debug(message, exc_info=True)
-        else:
-            logger.debug(message, exc)
+        logger.debug(message, exc_info=True) if exc_info else logger.debug(message, exc)
 
 
 # Terminal outcomes from host/hygiene timeout or cooldown writers. Detached heartbeat workers must not clobber these
@@ -136,9 +128,7 @@ def is_compaction_progress_status(text: str | None) -> bool:
     The gateway re-tags matches as ``kind="compacting"`` for the whole pause; matching only the marker left
     idle/preflight/retry lines looking hung. ``COMPACTION_DONE_STATUS`` is emitted as ``kind="compacted"`` and
     must not match here."""
-    if not isinstance(text, str):
-        return False
-    body = text.strip()
+    body = text.strip() if isinstance(text, str) else ""
     if not body:
         return False
     if COMPACTION_STATUS_MARKER in body:
@@ -153,10 +143,8 @@ def is_compaction_progress_status(text: str | None) -> bool:
 
 
 def _refresh_agent_tool_definitions(agent) -> bool:
-    """Rebuild agent.tools at the compaction commit boundary.
-    Forever-sessions never restart, so this is the only moment config changes reach the frozen dynamic tool
-    schemas; the prompt cache is already invalid. Delegates to refresh_agent_mcp_tools in content_aware mode
-    (swaps on schema CONTENT change). Returns True when tools were added. Never raises."""
+    """Rebuild agent.tools at the compaction commit boundary (the only moment config reaches a forever-session's
+    frozen tool schemas; the prompt cache is already invalid). Returns True when tools were added."""
     from tools.mcp_tool import refresh_agent_mcp_tools
     added = refresh_agent_mcp_tools(agent, content_aware=True)
     if added:
@@ -208,9 +196,7 @@ def _claim_compressor_attempt(compressor: Any) -> int:
         try:
             compressor._compression_attempt_generation = generation
         except Exception:
-            # Slotted/frozen compressor: gen 0 disables the guard. Per-compressor, so gen-0
-            # and gen>0 attempts can never coexist on one instance.
-            return 0
+            return 0  # slotted/frozen compressor: gen 0 disables the guard (per-instance, so never mixed)
         return generation
 
 
@@ -357,25 +343,20 @@ class CompressionCommitFence:
         self._lock = threading.Lock()
         self._cancelled = False
         self._commit_started = False
-        # begin_commit holds self._lock until finish_commit, so this Event is readable
-        # WITHOUT the lock: hosts can see a hung commit and fire the overrun warning.
+        # Readable WITHOUT the lock (begin_commit holds it until finish_commit): hosts see a hung commit.
         self._commit_phase = threading.Event()
-        # Set on ANY host unwind without the fence lock, so a host that cannot block
-        # behind an in-flight commit still blocks FUTURE commits. bool store is atomic.
+        # Set on ANY host unwind without the fence lock so FUTURE commits are blocked; bool store is atomic.
         self._admission_revoked = False
-        # Worker publishes a holder-scoped release once it owns the durable lock; a
-        # timed-out host frees the lease without racing a NEW holder (no ABA).
+        # Holder-scoped release published by the worker once it owns the durable lock (no ABA on a NEW holder).
         self._lock_release_guard = threading.Lock()
         self._cancelled_lock_release: Optional[Callable[[], None]] = None
         self._cancelled_lock_release_requested = False
-        # Touched per streamed summary token; waiters distinguish SLOW-but-alive from
-        # HUNG so slow models are not killed by a fixed wall-clock deadline.
+        # Touched per streamed token so waiters tell SLOW-but-alive from HUNG (no fixed wall-clock kill).
         self._last_progress = time.monotonic()
         self._progress_observed = False
         self._deadline: float | None = None
         self._retain_cancelled_lock_until_worker_done = False
-        # Set once the commit path captured the active-row watermark: later rows survive
-        # as concurrent tail, so hosts may KEEP a detached worker's commit admission.
+        # Set once the active-row watermark is captured: later rows survive as tail, so hosts may keep admission.
         self._commit_watermark_fenced = False
         if total_ceiling_seconds is not None:
             self.set_total_ceiling_seconds(total_ceiling_seconds)
@@ -388,10 +369,7 @@ class CompressionCommitFence:
         self._deadline = time.monotonic() + seconds
 
     def touch_progress(self) -> None:
-        """Record forward progress (e.g. a streamed summary token arriving).
-
-        Called from the worker thread, read by waiters via ``seconds_since_progress``; a bare float store is
-        atomic in CPython so no lock is needed."""
+        """Record forward progress (a streamed token); a bare float store is atomic, so no lock."""
         self._last_progress = time.monotonic()
         self._progress_observed = True
 
@@ -407,10 +385,7 @@ class CompressionCommitFence:
 
     @property
     def deadline_monotonic(self) -> float | None:
-        """The armed deadline as an absolute ``time.monotonic()`` instant.
-
-        Published so the worker's stream consumer can stop exactly when the host stops waiting (see
-        ``auxiliary_client.aux_stream_deadline``)."""
+        """Armed deadline (absolute monotonic); the worker's stream consumer stops when the host stops waiting."""
         return self._deadline
 
     def seconds_since_progress(self) -> float:
@@ -418,10 +393,7 @@ class CompressionCommitFence:
         return max(0.0, time.monotonic() - self._last_progress)
 
     def cancel_before_commit(self, cancel_event: Any = None) -> bool:
-        """Cancel a pending commit, or wait for an active commit to finish.
-
-        Returns ``True`` when cancellation won before the commit boundary; ``False`` after blocking until an
-        already-started commit fully completed."""
+        """Cancel a pending commit (``True``), or block until an active commit finishes (``False``)."""
         with self._lock:
             if not self._commit_started:
                 self._cancelled = True
@@ -430,10 +402,7 @@ class CompressionCommitFence:
             return not self._commit_started
 
     def try_cancel_before_commit(self) -> Optional[bool]:
-        """Non-blocking form of :meth:`cancel_before_commit`.
-
-        Returns ``None`` while an active commit owns the fence so an async caller can yield instead of
-        blocking its event loop."""
+        """Non-blocking :meth:`cancel_before_commit`; ``None`` while an active commit owns the fence."""
         if not self._lock.acquire(blocking=False):
             return None
         try:
@@ -450,13 +419,11 @@ class CompressionCommitFence:
             self._cancelled = True
             self._lock.release()
             if self._admission_revoked:
-                # A revoke that lost the fence-lock race deferred its lease release; commit was
-                # refused, so releasing now is safe (idempotent with holder-qualified cleanup).
+                # A revoke that lost the fence-lock race deferred its lease release; commit refused: release now.
                 self.release_cancelled_compression_lock()
             return False
         self._commit_started = True
-        # Set while the fence lock is held so observers can never see
-        # commit_in_flight=True for a commit that lost to cancellation.
+        # Set under the fence lock so commit_in_flight is never True for a commit that lost to cancellation.
         self._commit_phase.set()
         return True
 
@@ -465,16 +432,12 @@ class CompressionCommitFence:
         self._commit_phase.clear()
         self._lock.release()
         if self._admission_revoked:
-            # A revoke during THIS commit deferred its lease release (no freeing under an
-            # active SessionDB mutation); commit is done, release now. Holder-qualified.
+            # A revoke during THIS commit deferred its lease release (never free mid-mutation); release now.
             self.release_cancelled_compression_lock()
 
     @property
     def commit_in_flight(self) -> bool:
-        """Lock-free read: an admitted commit has begun and not yet finished.
-
-        Safe while the worker holds the fence lock for a hung commit; lets hosts reach the overrun-warning
-        loop instead of spinning on ``try_cancel_before_commit``."""
+        """Lock-free read: an admitted commit is in progress (hosts reach the overrun loop on a hung commit)."""
         return self._commit_phase.is_set()
 
     @property
@@ -487,10 +450,7 @@ class CompressionCommitFence:
         self._retain_cancelled_lock_until_worker_done = True
 
     def mark_commit_watermark_fenced(self) -> None:
-        """Record that this attempt's commit is bounded by a start watermark.
-
-        A watermark-fenced commit archives only rows at or below the watermark and clones later rows as live
-        tail, so a detached worker may keep its admission."""
+        """Record a watermark-bounded commit (later rows survive as tail); a detached worker may keep admission."""
         self._commit_watermark_fenced = True
 
     @property
@@ -499,36 +459,26 @@ class CompressionCommitFence:
         return self._commit_watermark_fenced
 
     def allow_cancelled_lock_release(self) -> None:
-        """Undo :meth:`retain_compression_lock_until_worker_done`.
-
-        Called after a bounded join confirmed the timed-out worker exited, so the durable lease may be
-        released and a fallback attempt can proceed."""
+        """Undo :meth:`retain_compression_lock_until_worker_done` once a bounded join proved the worker exited."""
         self._retain_cancelled_lock_until_worker_done = False
 
     def revoke_commit_admission(self) -> None:
         """Revoke FUTURE commit admission without blocking on the fence lock.
-
-        An in-flight commit is never abandoned, but ``begin_commit`` re-checks the flag under the lock so no new
-        commit is admitted. The lease release must not run mid-commit (a second compressor could interleave): released
-        now if the lock is free, else deferred to ``finish_commit``/refusal (holder-qualified).
-        """
+        An in-flight commit is never abandoned (``begin_commit`` re-checks the flag under the lock). The lease
+        release must not run mid-commit: released now if the lock is free, else deferred to
+        ``finish_commit``/refusal (holder-qualified)."""
         self._admission_revoked = True
         if self._lock.acquire(blocking=False):
             try:
                 self.release_cancelled_compression_lock()
             finally:
                 self._lock.release()
-        # else: deferred — finish_commit()/begin_commit() re-check _admission_revoked
-        # and release once no commit can be mid-mutation.
 
     # ── Holder-qualified durable-lease cancellation: release is DELETE WHERE
     # holder = ?, so a stale release can never free a NEW holder's lease (no ABA).
 
     def begin_lock_setup(self) -> bool:
-        """Fence durable-lock acquisition and release-hook publication.
-
-        The caller holds the fence until the holder-qualified release hook is published (or no lock was
-        taken), so a timeout cannot win in that gap."""
+        """Hold the fence across lock acquisition + release-hook publication so a timeout cannot win between."""
         self._lock.acquire()
         if self.is_cancelled or self._admission_revoked:
             self._lock.release()
@@ -540,10 +490,7 @@ class CompressionCommitFence:
         self._lock.release()
 
     def register_cancelled_lock_release(self, release: Callable[[], None]) -> bool:
-        """Publish the timed-out worker's holder-qualified lock release.
-
-        Returns whether cleanup was already requested; in that race the release runs synchronously before returning.
-        """
+        """Publish the worker's holder-qualified release; if cleanup was already requested, run it and return True."""
         with self._lock_release_guard:
             self._cancelled_lock_release = release
             requested = self._cancelled_lock_release_requested
@@ -558,10 +505,7 @@ class CompressionCommitFence:
                 self._cancelled_lock_release = None
 
     def release_cancelled_compression_lock(self) -> None:
-        """Release the cancelled worker's lock without finalizing its clients.
-
-        Only valid after cancellation won. A request racing ahead of hook publication is retained and
-        fulfilled when the worker publishes the hook."""
+        """After cancellation won: release the worker's lock (a request ahead of hook publication is retained)."""
         if self._retain_cancelled_lock_until_worker_done:
             return
         with self._lock_release_guard:
@@ -571,27 +515,22 @@ class CompressionCommitFence:
             release()
 
 
-# Defaults for the in-agent (non-hygiene) progress-aware compress_context wrap.
-# Mirror hermes_cli.config.DEFAULT_CONFIG["compression"] keys of the same name.
+# Defaults for the in-agent progress-aware wrap; mirror hermes_cli.config.DEFAULT_CONFIG["compression"] keys.
 DEFAULT_CONTEXT_TIMEOUT_SECONDS = 120.0
 DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS = 600.0
 
-# Unlike explicit_interrupt: a /stop after the stall window arms the durable
-# backoff so the next automatic turn does not re-enter the stalled strategy.
+# Unlike explicit_interrupt, a /stop after the stall window arms the durable backoff (no automatic re-entry).
 STALL_INTERRUPTED_FAILURE_CLASS = "stall_interrupted"
 
-# Daemon pool so a fence-cancelled hung worker cannot block interpreter exit
-# via the atexit join. Never shut down per call (workers may still be winding).
+# Daemon pool so a fence-cancelled hung worker cannot block interpreter exit; never shut down per call.
 _compress_timeout_executor = None
 _compress_timeout_executor_lock = threading.Lock()
 
-# Overrun waits proceed in bounded slices so each window logs (escalating)
-# instead of one silent future.result(). Clamped to ceiling for tiny test values
+# Overrun waits proceed in bounded slices so each window logs (escalating); clamped to ceiling for tiny values.
 _COMMIT_OVERRUN_WAIT_SLICE_SECONDS = 30.0
 
-# A worker exiting within the grace proves no provider call is in flight, so the
-# lease can be released even on the total-ceiling path. One that doesn't exit is
-# orphaned behind the poison fence and keeps its lease so no attempt overlaps.
+# A worker exiting within the grace proves no provider call is in flight, so its lease may be released even
+# on the total-ceiling path; one that doesn't exit is orphaned behind the poison fence and keeps its lease.
 _CANCELLED_WORKER_TEARDOWN_GRACE_SECONDS = 5.0
 
 
@@ -611,15 +550,13 @@ def _join_cancelled_worker(future: Any, grace_seconds: float) -> bool:
         # Never started; nothing can be in flight.
         return True
     except Exception:
-        # Exception swallowed: the host already chose the fallback result and the fence
-        # keeps the failed attempt from touching session state.
+        # The host already chose the fallback result; the fence keeps the failed attempt from touching state.
         logger.debug("cancelled compression worker exited with an exception", exc_info=True)
         return True
 
 
-# Executor queue is unbounded: a queued job would wait out its timeout unstarted
-# and run stale later. Cap admission at worker count; fail fast (warn, continue
-# uncompressed). Slots free via done-callback; a never-returning worker loses 1.
+# The executor queue is unbounded and a queued job would run stale, so admission is capped at the worker
+# count (fail fast, continue uncompressed). Slots free via done-callback; a never-returning worker loses one.
 _COMPRESS_EXECUTOR_MAX_WORKERS = 4
 _compress_admission_lock = threading.Lock()
 _compress_admitted_count = 0
@@ -652,8 +589,7 @@ def _get_compress_timeout_executor():
     from tools.daemon_pool import DaemonThreadPoolExecutor
     with _compress_timeout_executor_lock:
         if _compress_timeout_executor is None:
-            # Small pool: compress is rare/heavy; sized for live compress + cancelled
-            # workers still winding down, not asyncio's min(32, cpu+4).
+            # Small pool sized for live compress + cancelled workers winding down, not asyncio's min(32, cpu+4).
             _compress_timeout_executor = DaemonThreadPoolExecutor(
                 max_workers=_COMPRESS_EXECUTOR_MAX_WORKERS, thread_name_prefix="compress-ctx-timeout"
             )
@@ -2199,7 +2135,6 @@ class _CompressionLease:
 
     def release_holder_only(self) -> None:
         """Stop this holder's refresher and release only its durable lock.
-
         Holder-qualified and idempotent: safe for the host after a timeout because a newer holder's lease can
         never be deleted by this stale release."""
         with self._release_guard:

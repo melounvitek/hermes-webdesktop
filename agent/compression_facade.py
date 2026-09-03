@@ -184,7 +184,6 @@ class CompressionFacadeMixin:
         defer_context_engine_notification: bool = False, commit_fence=None,
     ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
-
         ``force=True`` (manual /compress) bypasses the summary-failure cooldown; ``bypass_cooldown=True``
         (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed."""
         # Per-attempt timeout signal for turn-start preflight and in-loop consumers: a stalled
