@@ -442,26 +442,29 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     from tools.process_registry import process_registry, format_process_notification
 
     queue = process_registry.completion_queue
-    _emitted = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
-    _last_kanban_poll = _last_loop_poll = 0.0
+    emitted: set = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
+    handle = lambda evt, deferred: _notif_handle_event(  # noqa: E731
+        sid, session, evt, emitted, process_registry, format_process_notification, deferred
+    )
+    last_kanban_poll = last_loop_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
-        _now = time.monotonic()
+        now = time.monotonic()
         # /loop wakeup driver: fire a due tick for THIS session while idle (same claim-under-lock as
         # kanban dispatch). An active non-parked /goal owns the idle boundary and defers it.
-        if _now - _last_loop_poll >= _LOOP_POLL_SECONDS:
-            _last_loop_poll = _now
+        if now - last_loop_poll >= _LOOP_POLL_SECONDS:
+            last_loop_poll = now
             try:
                 _maybe_fire_tui_loop_tick(sid, session)
-            except Exception as _loop_exc:
-                _notif_log_failure("loop wakeup poll failed", _loop_exc)
-        if _now - _last_kanban_poll >= _KANBAN_POLL_SECONDS:
-            _last_kanban_poll = _now
+            except Exception as loop_exc:
+                _notif_log_failure("loop wakeup poll failed", loop_exc)
+        if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
+            last_kanban_poll = now
             _notif_poll_kanban(sid, session)
         try:
             evt = queue.get(timeout=0.5)
         except Exception:
             continue
-        _notif_handle_event(sid, session, evt, _emitted, process_registry, format_process_notification, None)
+        handle(evt, None)
     # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and
     # orphaned-delegation events are handed back to the shared queue afterwards.
     deferred: list = []
@@ -470,7 +473,7 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
             evt = queue.get_nowait()
         except Exception:
             break
-        if not _notif_handle_event(sid, session, evt, _emitted, process_registry, format_process_notification, deferred):
+        if not handle(evt, deferred):
             break
     for evt in deferred:
         queue.put(evt)
