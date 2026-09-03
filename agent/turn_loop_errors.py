@@ -1,10 +1,8 @@
-"""Outer-loop exception handler for the conversation turn loop.
-
-Extracted from ``run_conversation``'s trailing ``except Exception`` block: phase-aware
-classification (interpreter shutdown, deterministic local post-processing bug vs API-path
-failure), unanswered tool_call error results, and the per-turn error cap that stops the
-loop from spinning until the budget is gone (#92450). Nothing here imports
-``agent.conversation_loop`` at module level (cycle); loop-internal constants resolve lazily.
+"""Outer-loop exception handler for the conversation turn loop: phase-aware classification
+(interpreter shutdown, deterministic local post-processing bug vs API-path failure),
+unanswered tool_call error results, and the per-turn error cap that stops the loop from
+spinning until the budget is gone. Nothing here imports ``agent.conversation_loop`` at
+module level (cycle); loop-internal constants resolve lazily.
 """
 
 from __future__ import annotations
@@ -13,7 +11,7 @@ from dataclasses import dataclass
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
 from agent.message_metadata import append_message
 
@@ -39,72 +37,59 @@ def handle_outer_loop_error(
 ) -> OuterErrorVerdict:
     """Handle an exception that escaped the response-processing block. Shutdown and
     local-processing errors are deterministic and end the turn; API-path errors retry until
-    ``min(_MAX_OUTER_LOOP_ERRORS, max_iterations)`` escaped exceptions (#92450). The
-    assistant message is never appended here: a prefill/interim assistant may already be
-    the tail; ``finalize_turn`` appends only when safe."""
+    ``min(_MAX_OUTER_LOOP_ERRORS, max_iterations)`` escaped exceptions. The assistant
+    message is never appended here: a prefill/interim assistant may already be the tail
+    (assistant→assistant); ``finalize_turn`` appends only when safe."""
     from agent.conversation_loop import (
         _API_CALL_MODULES, _LOCAL_PROCESSING_MODULES, _MAX_OUTER_LOOP_ERRORS,
         _is_interpreter_shutdown_error, _ra,
     )
 
-    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> OuterErrorVerdict:
+    def _verdict(action: str) -> OuterErrorVerdict:
         return OuterErrorVerdict(
             action=action, _outer_error_count=_outer_error_count,
             _turn_exit_reason=_turn_exit_reason, failed=failed, final_response=final_response,
         )
 
-    # Count every escaped exception before classification so permanent
-    # failures terminate even with an unlimited turn budget. (#92450)
+    # Count every escaped exception before classification so permanent failures
+    # terminate even with an unlimited turn budget.
     _outer_error_count += 1
 
-    # Phase-aware classification: deterministic local post-processing bugs
-    # (traceback via local helpers, never API helpers) aren't retried (#66267).
-    # Interpreter shutdown makes every executor op raise: break. (#93217)
+    # Interpreter shutdown makes every executor op raise: break.
     if sys.is_finalizing() or _is_interpreter_shutdown_error(e):
-        error_msg = (
-            f"Interpreter is shutting down — cannot continue " f"(API call #{api_call_count}): {e}"
-        )
+        error_msg = f"Interpreter is shutting down — cannot continue (API call #{api_call_count}): {e}"
         try:
             agent._safe_print(f"❌ {error_msg}")
         except (OSError, ValueError):
             pass
         logger.warning(error_msg)
-        # Best-effort persist — the dying executor may raise the same error;
-        # don't let it mask the shutdown exit. finalize_turn retries.
+        # Best-effort persist — the dying executor may raise the same error; don't let
+        # it mask the shutdown exit. finalize_turn retries.
         try:
             agent._persist_session(messages, conversation_history)
         except Exception:
             pass
         _turn_exit_reason = "interpreter_shutdown"
-        final_response = (
-            "Session is shutting down. Your conversation can be "
-            "resumed with: hermes --resume <session-id>"
-        )
-        # Don't append: a prefill/interim assistant may already be the tail
-        # (assistant→assistant). finalize_turn appends only when safe.
+        final_response = "Session is shutting down. Your conversation can be resumed with: hermes --resume <session-id>"
         return _verdict("break")
 
+    # Deterministic local post-processing bugs (traceback via local helpers, never API
+    # helpers) aren't retried.
     tb_module_names: set[str] = set()
     _tb = e.__traceback__
     while _tb is not None:
-        _fname = os.path.splitext(os.path.basename(_tb.tb_frame.f_code.co_filename))[0]
-        tb_module_names.add(_fname)
+        tb_module_names.add(os.path.splitext(os.path.basename(_tb.tb_frame.f_code.co_filename))[0])
         _tb = _tb.tb_next
-
-    _hit_local = bool(tb_module_names & _LOCAL_PROCESSING_MODULES)
-    _hit_api = bool(tb_module_names & _API_CALL_MODULES)
-
-    _is_local_processing_error = _hit_local and not _hit_api
+    _is_local_processing_error = bool(tb_module_names & _LOCAL_PROCESSING_MODULES) and not (
+        tb_module_names & _API_CALL_MODULES
+    )
 
     if _is_local_processing_error:
-        error_msg = (
-            f"Error during local message processing after "
-            f"OpenAI-compatible API call #{api_call_count}: {str(e)}"
-        )
+        error_msg = f"Error during local message processing after OpenAI-compatible API call #{api_call_count}: {str(e)}"
     else:
         error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
-    # Honor the _vprint contract: suppress_status_output silences hard
-    # failures; quiet_mode -q still shows them. Traceback is logged below.
+    # Honor the _vprint contract: suppress_status_output silences hard failures;
+    # quiet_mode -q still shows them. Traceback is logged below.
     if getattr(agent, "suppress_status_output", False):
         logger.error(error_msg)
     else:
@@ -113,12 +98,11 @@ def handle_outer_loop_error(
         except (OSError, ValueError):
             logger.error(error_msg)
 
-    # ERROR level with traceback so outer-loop failures land in agent.log
-    # AND errors.log and stay reproducible.
+    # ERROR level with traceback so outer-loop failures land in agent.log AND errors.log.
     logger.exception("Outer loop error in API call #%d", api_call_count)
 
-    # An appended assistant tool_calls message needs a role="tool" result
-    # per tool_call_id; fill in error results for unanswered ones.
+    # An appended assistant tool_calls message needs a role="tool" result per
+    # tool_call_id; fill in error results for unanswered ones.
     for idx in range(len(messages) - 1, -1, -1):
         msg = messages[idx]
         if not isinstance(msg, dict):
@@ -132,22 +116,20 @@ def handle_outer_loop_error(
                 if isinstance(m, dict) and m.get("role") == "tool"
             }
             for tc in msg["tool_calls"]:
-                if not tc or not isinstance(tc, dict): continue
-                if tc["id"] not in answered_ids:
-                    err_msg = {
+                if tc and isinstance(tc, dict) and tc["id"] not in answered_ids:
+                    append_message(messages, {
                         "role": "tool",
                         "name": _ra().AIAgent._get_tool_call_name_static(tc),
                         "tool_call_id": tc["id"],
                         "content": f"Error executing tool: {error_msg}",
-                    }
-                    append_message(messages, err_msg)
+                    })
         break
 
-    # Non-tool errors are already printed; a synthetic message would pollute
-    # history and risk breaking role alternation.
+    # Non-tool errors are already printed; a synthetic message would pollute history
+    # and risk breaking role alternation.
 
-    # Local errors are deterministic: stop early instead of retrying until the
-    # budget is gone; a small per-turn cap prevents infinite spinning (#92450).
+    # Local errors are deterministic: stop early instead of retrying until the budget is
+    # gone; a small per-turn cap prevents infinite spinning.
     _outer_error_cap = min(_MAX_OUTER_LOOP_ERRORS, max(1, agent.max_iterations))
     if (
         _is_local_processing_error
@@ -164,7 +146,5 @@ def handle_outer_loop_error(
         else:
             _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
             final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
-        # Don't append the assistant message: a prefill/interim assistant may be
-        # the tail. finalize_turn appends only when _tail_role != "assistant".
         return _verdict("break")
     return _verdict("fallthrough")
