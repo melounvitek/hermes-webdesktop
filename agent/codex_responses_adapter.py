@@ -144,12 +144,11 @@ def _neutralize_harmony_structure(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_neutralize_harmony_structure(item) for item in value]
     if isinstance(value, dict):
-        for key in value:
-            if isinstance(key, str) and _neutralize_harmony_tokens(key) != key:
-                raise ValueError(
-                    "Reserved Harmony tokens in a JSON object key cannot be "
-                    "neutralized without changing its contract."
-                )
+        if any(isinstance(key, str) and _neutralize_harmony_tokens(key) != key for key in value):
+            raise ValueError(
+                "Reserved Harmony tokens in a JSON object key cannot be "
+                "neutralized without changing its contract."
+            )
         return {key: _neutralize_harmony_structure(item) for key, item in value.items()}
     return value
 
@@ -898,29 +897,23 @@ def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespac
     )
 
 
-def _stamped_encrypted_item(item: Any, item_type: str, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
-    """``{type, encrypted_content[, _issuer_kind]}`` for replay, or None without a blob."""
+def _capture_encrypted_item(item: Any, item_type: str, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``{type, encrypted_content[, _issuer_kind]}`` for replay, or None without a blob. Reasoning
+    items also carry ``id`` + ``summary`` (required by the API on replay); transient ``rs_tmp_`` skip."""
     encrypted = getattr(item, "encrypted_content", None)
     if not _nonempty_str(encrypted):
         return None
     raw_item: Dict[str, Any] = {"type": item_type, "encrypted_content": encrypted}
     if issuer_kind:
         raw_item["_issuer_kind"] = issuer_kind
-    return raw_item
-
-
-def _capture_reasoning_item(item: Any, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Capture a reasoning item (blob + summary) for replay; transient ``rs_tmp_`` items are skipped."""
-    raw_item = _stamped_encrypted_item(item, "reasoning", issuer_kind)
-    if raw_item is None:
-        return None
+    if item_type != "reasoning":
+        return raw_item
     item_id = getattr(item, "id", None)
     if isinstance(item_id, str) and item_id.startswith("rs_tmp_"):
         logger.debug("Skipping transient Codex reasoning item during normalization: %s", item_id)
         return None
     if _nonempty_str(item_id):
         raw_item["id"] = item_id
-    # Summary is required by the API when replaying reasoning items.
     summary = getattr(item, "summary", None)
     if isinstance(summary, list):
         raw_item["summary"] = [
@@ -940,9 +933,7 @@ class _OutputScan:
         self.tool_calls: List[Any] = []
         self.has_incomplete_items = response_status in _INCOMPLETE_STATUSES
         self.saw_streaming_or_item_incomplete = response_status in {"queued", "in_progress"}
-        self.saw_commentary_phase = False
-        self.saw_final_answer_phase = False
-        self.saw_reasoning_item = False
+        self.saw_commentary_phase = self.saw_final_answer_phase = self.saw_reasoning_item = False
 
     def scan(self, output: List[Any], issuer_kind: Optional[str]) -> None:
         for item in output:
@@ -953,21 +944,19 @@ class _OutputScan:
                 self.saw_streaming_or_item_incomplete = True
             if item_type == "message":
                 self._message(item, item_status)
-            elif item_type == "reasoning":
-                self.saw_reasoning_item = True
-                reasoning_text = _extract_responses_reasoning_text(item)
-                if reasoning_text:
-                    self.reasoning_parts.append(reasoning_text)
-                raw_item = _capture_reasoning_item(item, issuer_kind)
-                if raw_item is not None:
-                    self.reasoning_items_raw.append(raw_item)
-            elif item_type == "compaction":
+            elif item_type in {"reasoning", "compaction"}:
+                if item_type == "reasoning":
+                    self.saw_reasoning_item = True
+                    reasoning_text = _extract_responses_reasoning_text(item)
+                    if reasoning_text:
+                        self.reasoning_parts.append(reasoning_text)
                 # Compaction checkpoints ride the codex_reasoning_items sidecar (persistence,
                 # replay, cross-issuer guard and kill switch for free).
-                raw_item = _stamped_encrypted_item(item, "compaction", issuer_kind)
+                raw_item = _capture_encrypted_item(item, item_type, issuer_kind)
                 if raw_item is not None:
                     self.reasoning_items_raw.append(raw_item)
-                    logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
+                    if item_type == "compaction":
+                        logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
@@ -1015,8 +1004,7 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
             content = []
         else:
             raise RuntimeError("Responses API returned no output items")
-        output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
-        response.output = output
+        output = response.output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
     scan = _OutputScan(response_status)
