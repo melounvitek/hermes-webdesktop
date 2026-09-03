@@ -538,18 +538,20 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
 def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str]:
     out: List[str] = []
     for e in elements[:max_lines]:
-        label = e.label.replace("\n", " ")[:60]
         where = "@ bounds-unknown (click by element index)" if _bounds_unknown(e.bounds) else f"@ {e.bounds}"
-        out.append(f"  #{e.index} {e.role} {label!r} {where}" + (f" [{e.app}]" if e.app else ""))
+        out.append(f"  #{e.index} {e.role} {e.label.replace(chr(10), ' ')[:60]!r} {where}" + (f" [{e.app}]" if e.app else ""))
     if len(elements) > max_lines:
         out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
     return out
 
-def _bounds_divergence(elements: List[UIElement], image_width: int, image_height: int) -> Optional[Tuple[int, int]]:
-    """(max right edge, max bottom edge) of element bounds when they exceed the screenshot, else None. 5% slack:
-    window chrome can hang a few px past the captured frame without implying a different coordinate space."""
+def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
+                  ) -> Tuple[Optional[float], Optional[str]]:
+    """(scale, note) when element bounds live in a different coordinate space than the screenshot, else
+    (None, None). On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate=
+    clicks read off the screenshot miss by the scale factor. 5% slack: window chrome can hang a few px past the
+    captured frame without implying a different coordinate space. Scale heuristic: larger axis ratio wins."""
     if not elements or image_width <= 0 or image_height <= 0:
-        return None
+        return None, None
     max_x = max_y = 0
     for e in elements:
         try:
@@ -557,19 +559,12 @@ def _bounds_divergence(elements: List[UIElement], image_width: int, image_height
         except (TypeError, ValueError):
             continue
         max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
-    return None if max_x <= image_width * 1.05 and max_y <= image_height * 1.05 else (max_x, max_y)
-
-def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
-                  ) -> Tuple[Optional[float], Optional[str]]:
-    """(scale, note) when element bounds live in a different coordinate space than the screenshot, else
-    (None, None). On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate=
-    clicks read off the screenshot miss by the scale factor. Scale heuristic: larger axis ratio wins."""
-    if (extent := _bounds_divergence(elements, image_width, image_height)) is None:
+    if max_x <= image_width * 1.05 and max_y <= image_height * 1.05:
         return None, None
-    note = (f"element bounds are in native desktop coordinates (extend to ~{extent[0]}x{extent[1]}), "
+    note = (f"element bounds are in native desktop coordinates (extend to ~{max_x}x{max_y}), "
             f"NOT screenshot pixels ({image_width}x{image_height}). coordinate= clicks expect the native "
             "space — derive click points from element bounds, or scale screenshot positions up accordingly")
-    return round(max(extent[0] / image_width, extent[1] / image_height), 2), note
+    return round(max(max_x / image_width, max_y / image_height), 2), note
 
 def _bounds_scale(elements: List[UIElement], image_width: int, image_height: int) -> Optional[float]:
     return _bounds_hints(elements, image_width, image_height)[0]
@@ -583,7 +578,6 @@ class _CaptureView:
     screenshot dims when an image is present, else the backend's; ``visible`` is the capped element list."""
     cap: CaptureResult
     visible: List[UIElement]
-    total: int
     truncated: int
     width: int
     height: int
@@ -594,17 +588,21 @@ class _CaptureView:
     dims_omitted: Optional[Tuple[int, int]] = None  # image below the provider minimum
     has_image: bool = False
 
+    @property
+    def total(self) -> int:
+        return len(self.cap.elements)
+
 def _capture_view(cap: CaptureResult, max_elements: int) -> _CaptureView:
-    total, visible = len(cap.elements), cap.elements[:max_elements]
+    visible = cap.elements[:max_elements]
     dims = _image_dimensions_from_b64(cap.png_b64 or "")
     width, height = dims or (cap.width, cap.height)
     scale, note = _bounds_hints(visible, width, height)
     # Capped labels / capped element array: spill the complete tree for on-demand reads.
-    lost_detail = total > len(visible) or any(len(e.label) > _MAX_ELEMENT_LABEL_CHARS for e in visible)
+    lost_detail = len(cap.elements) > len(visible) or any(len(e.label) > _MAX_ELEMENT_LABEL_CHARS for e in visible)
     too_small = bool(dims) and min(dims) < _MIN_PROVIDER_IMAGE_DIMENSION
     has_image = bool(cap.png_b64) and cap.mode != "ax" and not too_small
     return _CaptureView(
-        cap, visible, total, total - len(visible), width, height, bounds_scale=scale, bounds_note=note,
+        cap, visible, len(cap.elements) - len(visible), width, height, bounds_scale=scale, bounds_note=note,
         elements_file=_spill_elements_to_file(cap) if lost_detail else None,
         screenshot_path=_persist_capture_image(cap) if has_image else None,
         dims_omitted=dims if too_small else None, has_image=has_image)
@@ -622,18 +620,17 @@ def _capture_summary_lines(v: _CaptureView) -> List[str]:
         cap.note,
         v.elements_file and (f"full element tree with untruncated labels saved to {v.elements_file} — "
                              "read_file/search_files it if you need dropped label text or elements beyond the cap"),
+        v.dims_omitted and (f"screenshot omitted: {v.dims_omitted[0]}x{v.dims_omitted[1]} is below the "
+                            f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum"),
     )
-    lines = [
+    return [
         f"capture mode={cap.mode} {v.width}x{v.height}"
         + (f" app={cap.app}" if cap.app else "") + (f" window={cap.window_title!r}" if cap.window_title else ""),
         f"{v.total} interactable element(s):",
-        *(f"  ({note})" for note in notes if note),
+        *(f"  ({note})" for note in notes[:4] if note),
         *_format_elements(v.visible),
+        *(f"  ({note})" for note in notes[4:] if note),
     ]
-    if v.dims_omitted:
-        lines.append(f"  (screenshot omitted: {v.dims_omitted[0]}x{v.dims_omitted[1]} is below the "
-                     f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum)")
-    return lines
 
 def _multimodal_capture(v: _CaptureView, summary: str) -> Dict[str, Any]:
     cap = v.cap  # envelope carrying the screenshot (not the elements array, so no truncation note)
@@ -651,14 +648,13 @@ def _text_capture_payload(v: _CaptureView, summary: str, extra: Optional[Dict[st
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches. Key order is contract:
     fixed fields, ``extra`` branch markers, then set optionals."""
     cap = v.cap
-    payload: Dict[str, Any] = {
+    return json.dumps({
         "mode": cap.mode, "width": v.width, "height": v.height, "app": cap.app, "window_title": cap.window_title,
         "elements": [_element_to_dict(e) for e in v.visible], "total_elements": v.total, "summary": summary,
         **(extra or {}),
-    }
-    payload.update(_present(truncated_elements=v.truncated, elements_file=v.elements_file,
-                            screenshot_path=v.screenshot_path, bounds_scale=v.bounds_scale))
-    return json.dumps(payload)
+        **_present(truncated_elements=v.truncated, elements_file=v.elements_file,
+                   screenshot_path=v.screenshot_path, bounds_scale=v.bounds_scale),
+    })
 
 def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
     v = _capture_view(cap, max_elements)
@@ -700,8 +696,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
-    resp = _capture_response(cap)
-    payload = _action_payload(res)
+    resp, payload = _capture_response(cap), _action_payload(res)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the evidence/verdict contract visible alongside the image — it governs whether input may repeat.
         prefix = json.dumps(payload) + "\n\n"
@@ -714,7 +709,6 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     except (TypeError, json.JSONDecodeError):
         data = {"capture": resp}
     return json.dumps({**data, **payload})
-
 
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
 
@@ -875,12 +869,10 @@ def _route_capture_through_aux_vision(
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
     # exactly for non-vision main models. Dimensions are the backend's on this branch.
-    view = _CaptureView(cap, cap.elements if visible_elements is None else visible_elements, len(cap.elements),
-                        truncated_elements, cap.width, cap.height,
-                        elements_file=elements_file, screenshot_path=screenshot_path)
+    view = _CaptureView(cap, cap.elements if visible_elements is None else visible_elements, truncated_elements,
+                        cap.width, cap.height, elements_file=elements_file, screenshot_path=screenshot_path)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
-
 
 # ── Availability check (used by the tool registry check_fn) ─────────────────
 
