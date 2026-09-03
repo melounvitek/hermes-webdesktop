@@ -1,27 +1,12 @@
 """Routing helpers for inbound user-attached images.
 
-Two modes:
-
-  native  — attach images as OpenAI-style ``image_url`` content parts on the
-            user turn; provider adapters translate these to vendor formats.
-  text    — run ``vision_analyze`` on each image up-front and prepend the
-            (lossy) description to the user's text. Still the right choice
-            for non-vision models.
-
-:func:`decide_image_input_mode` decides once per message turn from
-``agent.image_input_mode`` (``auto`` | ``native`` | ``text``, default ``auto``)
-plus the active model's capability metadata. In ``auto`` mode:
-
-  - An explicitly configured ``auxiliary.vision`` backend is the DE-FACTO route
-    (``text``): a user who named a dedicated vision model wants it used even
-    when the main model has native vision. ``image_input_mode: native`` is the
-    absolute override.
-  - Otherwise, ``supports_vision=True`` (config override or catalog) → native.
-  - Otherwise text via the default vision_analyze flow.
-
-``vision_analyze`` stays surfaced as a tool in every session so skills that
-chain it keep working; routing only affects how *user-attached images on the
-current turn* are presented to the main model.
+``native`` attaches images as OpenAI-style ``image_url`` parts; ``text`` runs
+``vision_analyze`` up-front and prepends the lossy description (right for
+non-vision models). :func:`decide_image_input_mode` picks once per turn from
+``agent.image_input_mode`` (``auto`` | ``native`` | ``text``): in ``auto`` an
+explicit ``auxiliary.vision`` backend forces ``text`` even for vision-capable
+main models (``native`` is the absolute override); else ``supports_vision``
+(config override or catalog) decides. ``vision_analyze`` stays a tool regardless.
 """
 
 from __future__ import annotations
@@ -31,6 +16,8 @@ import logging
 import mimetypes
 import os
 import re
+from contextlib import suppress
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -40,99 +27,68 @@ logger = logging.getLogger(__name__)
 _VALID_MODES = frozenset({"auto", "native", "text"})
 
 
-# Extensions extract_image_refs() auto-attaches. Kept tight: documents/archives
-# are excluded because the gateway routes them via send_document, and we never
-# want a PDF attached as a vision part.
-_IMAGE_EXTS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic",
-)
+# Extensions extract_image_refs() auto-attaches. Documents/archives are excluded:
+# the gateway routes them via send_document and a PDF must never become a vision part.
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic")
 _IMAGE_EXT_PATTERN = "|".join(e.lstrip(".") for e in _IMAGE_EXTS)
-
-# Absolute / home-relative local image path — same shape as gateway's
-# extract_local_files(): anchored to ``~/`` or ``/``, the lookbehind skips
-# matches inside URLs, case-insensitive extension.
+# Local path: same shape as gateway extract_local_files() — anchored to ``~/`` or
+# ``/``, lookbehind skips matches inside URLs. URL: strict ``http(s)://`` so
+# ``file://`` and other schemes are not grabbed; optional query string.
 _LOCAL_IMAGE_PATH_RE = re.compile(
-    r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:" + _IMAGE_EXT_PATTERN + r")\b",
-    re.IGNORECASE,
+    r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:" + _IMAGE_EXT_PATTERN + r")\b", re.IGNORECASE,
 )
-
-# http(s) URL ending in an image extension, optional query string. Strict
-# ``http(s)://`` so ``file://`` and other schemes are not grabbed.
 _IMAGE_URL_RE = re.compile(
-    r"https?://[^\s<>\"']+?\.(?:" + _IMAGE_EXT_PATTERN + r")(?:\?[^\s<>\"']*)?",
-    re.IGNORECASE,
+    r"https?://[^\s<>\"']+?\.(?:" + _IMAGE_EXT_PATTERN + r")(?:\?[^\s<>\"']*)?", re.IGNORECASE,
 )
+_CODE_SPAN_RES = (re.compile(r"```[^\n]*\n.*?```", re.DOTALL), re.compile(r"`[^`\n]+`"))
+
+
+def _matches_outside_code(pattern: re.Pattern, text: str) -> Iterable[str]:
+    """Yield ``pattern`` matches whose start is not inside a fenced block or inline backticks."""
+    spans = [(m.start(), m.end()) for p in _CODE_SPAN_RES for m in p.finditer(text)]
+    return (m.group(0) for m in pattern.finditer(text) if not any(s <= m.start() < e for s, e in spans))
+
+
+def _existing_file(candidate: str) -> Optional[str]:
+    """Expanded path when it is a regular file; None otherwise (incl. OSError on pathological input)."""
+    expanded = os.path.expanduser(candidate)
+    try:
+        return expanded if os.path.isfile(expanded) else None
+    except OSError:
+        return None
 
 
 def extract_image_refs(text: str) -> Tuple[List[str], List[str]]:
-    """Scan free-form text for image references the model should see.
-
-    Returns ``(local_paths, urls)``, each order-preserving and deduplicated.
-    Local paths (``/`` or ``~/``) must exist on disk as files; URLs are not
-    validated (the provider fetches them). Matches inside fenced code blocks
-    and inline backticks are skipped so pasted example snippets aren't treated
-    as live attachments (mirrors ``BaseAdapter.extract_local_files``).
-    """
+    """Scan free-form text for image references → ``(local_paths, urls)``, each
+    ordered and deduplicated. Local paths must exist as files; URLs are not
+    validated (the provider fetches them). Code spans are skipped so pasted
+    snippets aren't live attachments (mirrors ``BaseAdapter.extract_local_files``)."""
     if not isinstance(text, str) or not text:
         return [], []
-
-    code_spans: list[tuple[int, int]] = [
-        (m.start(), m.end())
-        for pattern, flags in ((r"```[^\n]*\n.*?```", re.DOTALL), (r"`[^`\n]+`", 0))
-        for m in re.finditer(pattern, text, flags)
-    ]
-
-    def _in_code(pos: int) -> bool:
-        return any(s <= pos < e for s, e in code_spans)
-
-    local_paths: list[str] = []
-    for match in _LOCAL_IMAGE_PATH_RE.finditer(text):
-        if _in_code(match.start()):
-            continue
-        expanded = os.path.expanduser(match.group(0))
-        try:
-            if not os.path.isfile(expanded):
-                continue
-        except OSError:
-            # ENAMETOOLONG / EINVAL on pathological inputs — skip rather than crash.
-            continue
-        if expanded not in local_paths:
-            local_paths.append(expanded)
-
-    urls: list[str] = []
-    for match in _IMAGE_URL_RE.finditer(text):
-        if _in_code(match.start()):
-            continue
-        # Trailing punctuation is almost certainly prose ("see https://x/a.png.").
-        url = match.group(0).rstrip(".,;:!?)]>")
-        if url not in urls:
-            urls.append(url)
-
-    return local_paths, urls
+    local_paths = dict.fromkeys(
+        p for p in map(_existing_file, _matches_outside_code(_LOCAL_IMAGE_PATH_RE, text)) if p
+    )
+    # Trailing punctuation is almost certainly prose ("see https://x/a.png.").
+    urls = dict.fromkeys(u.rstrip(".,;:!?)]>") for u in _matches_outside_code(_IMAGE_URL_RE, text))
+    return list(local_paths), list(urls)
 
 
-# Strict YAML/JSON boolean coercion for capability overrides. ``bool("false")``
-# is True, so a quoted ``supports_vision: "false"`` would silently enable native
-# routing on a model that can't handle it. Accept only YAML boolean tokens,
-# real bools and 0/1; anything else is None so the caller falls through to
-# models.dev rather than honouring garbage.
-_TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
-_FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
+_BOOL_TOKENS = {
+    **dict.fromkeys(("true", "yes", "on", "1"), True),
+    **dict.fromkeys(("false", "no", "off", "0"), False),
+}
 
 
 def _coerce_capability_bool(raw: Any) -> Optional[bool]:
-    """Return True/False for recognised boolean values, None otherwise."""
+    """Strict boolean coercion for capability overrides: real bools, 0/1 and YAML
+    boolean tokens only; anything else is None so the caller falls through to
+    models.dev. ``bool("false")`` is True, so a quoted ``supports_vision: "false"``
+    would otherwise silently enable native routing on a model that can't handle it."""
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, int):
         return bool(raw) if raw in (0, 1) else None
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s in _TRUE_TOKENS:
-            return True
-        if s in _FALSE_TOKENS:
-            return False
-    return None
+    return _BOOL_TOKENS.get(raw.strip().lower()) if isinstance(raw, str) else None
 
 
 def _dict_or_empty(raw: Any) -> Dict[str, Any]:
@@ -160,20 +116,17 @@ def _model_supports_vision_override(models_cfg: Any, model: str) -> Optional[boo
 
 
 def _custom_provider_entries(cfg: Dict[str, Any], names: Iterable[str]) -> Iterable[Dict[str, Any]]:
-    """Yield legacy ``custom_providers`` list entries whose ``name`` matches ``names``.
+    """Yield legacy ``custom_providers`` entries matching ``names`` (case-insensitive);
+    ``names`` is the outer loop so list order cannot let a persisted default shadow the live route."""
+    entries = _custom_provider_list(cfg)
+    for wanted in (n.strip().lower() for n in names):
+        yield from (e for e in entries if _clean_str(e.get("name")).lower() == wanted)
 
-    Iterates ``names`` in the given priority order (outer loop) so list order
-    cannot let a persisted default shadow the live route.
-    """
-    custom_providers = cfg.get("custom_providers")
-    if not isinstance(custom_providers, list):
-        return
-    entries = [e for e in custom_providers if isinstance(e, dict)]
-    for name in names:
-        wanted = name.strip().lower()
-        for entry in entries:
-            if _clean_str(entry.get("name")).lower() == wanted:
-                yield entry
+
+def _custom_provider_list(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Dict entries of the legacy ``custom_providers`` list (empty when absent/malformed)."""
+    raw = cfg.get("custom_providers")
+    return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
 
 
 def _supports_vision_override(
@@ -193,32 +146,22 @@ def _supports_vision_override(
     """
     if not isinstance(cfg, dict):
         return None
-
     model_cfg = _dict_or_empty(cfg.get("model"))
     top = _coerce_capability_bool(model_cfg.get("supports_vision"))
     if top is not None:
         return top
 
-    provider_candidates: List[str] = []
-    for candidate in (requested_provider, provider, _clean_str(model_cfg.get("provider"))):
-        if candidate:
-            provider_candidates.append(candidate)
-            if candidate.startswith("custom:") and candidate[len("custom:"):]:
-                provider_candidates.append(candidate[len("custom:"):])
-    provider_candidates = list(dict.fromkeys(provider_candidates))
+    candidates: List[str] = []
+    for candidate in filter(None, (requested_provider, provider, _clean_str(model_cfg.get("provider")))):
+        candidates.append(candidate)
+        if candidate.startswith("custom:") and candidate[len("custom:"):]:
+            candidates.append(candidate[len("custom:"):])
+    candidates = list(dict.fromkeys(candidates))
 
     providers_cfg = _dict_or_empty(cfg.get("providers"))
-    for p in provider_candidates:
-        coerced = _model_supports_vision_override(_dict_or_empty(providers_cfg.get(p)).get("models"), model)
-        if coerced is not None:
-            return coerced
-
-    for entry in _custom_provider_entries(cfg, provider_candidates):
-        coerced = _model_supports_vision_override(entry.get("models"), model)
-        if coerced is not None:
-            return coerced
-
-    return None
+    model_maps = [_dict_or_empty(providers_cfg.get(p)).get("models") for p in candidates]
+    model_maps += [entry.get("models") for entry in _custom_provider_entries(cfg, candidates)]
+    return next((v for v in (_model_supports_vision_override(m, model) for m in model_maps) if v is not None), None)
 
 
 def _resolve_inference_value(
@@ -228,141 +171,129 @@ def _resolve_inference_value(
     *,
     runtime_ok: Callable[[str], bool],
 ) -> str:
-    """Shared resolution for ``base_url`` / ``api_key`` of the active inference provider.
-
-    Order: context-local runtime value (when ``runtime_ok`` accepts it) →
-    ``model.<key>`` → ``providers.<name>.<key>`` → ``custom_providers[].<key>``,
-    where ``<name>`` covers the provider and ``model.provider`` in both bare
-    and ``custom:``-prefixed forms.
-    """
+    """``base_url`` / ``api_key`` of the active inference provider. Order: runtime
+    value (when ``runtime_ok`` accepts it) → ``model.<key>`` → ``providers.<name>.<key>``
+    → ``custom_providers[].<key>``, ``<name>`` covering the provider and
+    ``model.provider`` in both bare and ``custom:``-prefixed forms."""
     runtime = _runtime_main(key)
     if runtime and runtime_ok(runtime):
         return runtime
-
     if not isinstance(cfg, dict):
         return ""
-
     model_cfg = _dict_or_empty(cfg.get("model"))
     value = _clean_str(model_cfg.get(key))
     if value:
         return value
 
-    candidate_names: set[str] = set()
+    names: set[str] = set()
     for p in filter(None, (provider, _clean_str(model_cfg.get("provider")))):
-        candidate_names.add(p)
-        if p.lower().startswith("custom:"):
-            candidate_names.add(p.split(":", 1)[1])
-        else:
-            candidate_names.add(f"custom:{p}")
-
-    providers_cfg = cfg.get("providers")
-    if isinstance(providers_cfg, dict):
-        for name in candidate_names:
-            entry = providers_cfg.get(name)
-            if isinstance(entry, dict):
-                value = _clean_str(entry.get(key))
-                if value:
-                    return value
-
-    custom_providers = cfg.get("custom_providers")
-    if isinstance(custom_providers, list):
-        lowered = {n.lower() for n in candidate_names}
-        for entry_raw in custom_providers:
-            if not isinstance(entry_raw, dict):
-                continue
-            entry_name = _clean_str(entry_raw.get("name"))
-            if entry_name not in candidate_names and entry_name.lower() not in lowered:
-                continue
-            value = _clean_str(entry_raw.get(key))
-            if value:
-                return value
-
-    return ""
+        names.add(p)
+        names.add(p.split(":", 1)[1] if p.lower().startswith("custom:") else f"custom:{p}")
+    lowered = {n.lower() for n in names}
+    providers_cfg = _dict_or_empty(cfg.get("providers"))
+    entries = [e for e in map(providers_cfg.get, names) if isinstance(e, dict)]
+    entries += [
+        e for e in _custom_provider_list(cfg)
+        if _clean_str(e.get("name")) in names or _clean_str(e.get("name")).lower() in lowered
+    ]
+    return next((v for v in (_clean_str(e.get(key)) for e in entries) if v), "")
 
 
-def _resolve_inference_base_url(
-    cfg: Optional[Dict[str, Any]],
-    provider: str,
-) -> str:
-    """Best-effort base URL for the active inference provider.
-
-    The runtime base_url is only trusted when it belongs to the requested
-    provider (or no provider was requested).
-    """
-    requested_provider = _clean_str(provider).lower()
-
-    def _runtime_ok(_: str) -> bool:
-        return not requested_provider or requested_provider == _runtime_main("provider").lower()
-
-    return _resolve_inference_value(cfg, provider, "base_url", runtime_ok=_runtime_ok)
+def _resolve_inference_base_url(cfg: Optional[Dict[str, Any]], provider: str) -> str:
+    """Best-effort base URL for the active inference provider; the runtime value is
+    only trusted when it belongs to the requested provider (or none was requested)."""
+    requested = _clean_str(provider).lower()
+    return _resolve_inference_value(
+        cfg, provider, "base_url",
+        runtime_ok=lambda _: not requested or requested == _runtime_main("provider").lower(),
+    )
 
 
-def _resolve_inference_api_key(
-    cfg: Optional[Dict[str, Any]],
-    provider: str,
-) -> str:
-    """Best-effort API key for the active inference provider.
-
-    Mirrors :func:`_resolve_inference_base_url` so the key matches the base URL
-    actually probed; otherwise the local server-type probe hits a keyed remote
-    endpoint without Authorization and sprays 401s on every image turn.
-    """
+def _resolve_inference_api_key(cfg: Optional[Dict[str, Any]], provider: str) -> str:
+    """Best-effort API key, resolved like :func:`_resolve_inference_base_url` so it
+    matches the base URL actually probed; otherwise the local server-type probe hits
+    a keyed remote endpoint without Authorization and sprays 401s on every image turn."""
     return _resolve_inference_value(cfg, provider, "api_key", runtime_ok=lambda _: True)
 
 
-def _should_probe_ollama_vision(
-    provider: str, base_url: str, api_key: str = ""
-) -> bool:
-    """True when the active provider likely fronts a local Ollama server.
-
-    Server-fingerprint probing is only valid for LOCAL endpoints: remote
-    OpenAI-compatible APIs (sglang, vLLM) expose Ollama-compat routes that can
-    misidentify, and probing them without an api_key returns 401 on every leg.
-    """
-    if (provider or "").strip().lower() == "ollama":
+def _should_probe_ollama_vision(provider: str, base_url: str, api_key: str = "") -> bool:
+    """True when the active provider likely fronts a local Ollama server. Fingerprint
+    probing is only valid for LOCAL endpoints: remote OpenAI-compatible APIs (sglang,
+    vLLM) expose Ollama-compat routes that can misidentify, and probing them without
+    an api_key returns 401 on every leg."""
+    if _clean_str(provider).lower() == "ollama":
         return True
     if not base_url:
         return False
     try:
         from agent.model_metadata import detect_local_server_type, is_local_endpoint
 
-        if not is_local_endpoint(base_url):
-            return False
         # Forward the key: an unauthorized probe can never produce a positive verdict.
-        return detect_local_server_type(base_url, api_key=api_key) == "ollama"
+        return bool(is_local_endpoint(base_url)) and detect_local_server_type(base_url, api_key=api_key) == "ollama"
     except Exception:
         return False
 
 
 def _coerce_mode(raw: Any) -> str:
     """Normalize a config value into one of the valid modes (default ``auto``)."""
-    if isinstance(raw, str) and raw.strip().lower() in _VALID_MODES:
-        return raw.strip().lower()
-    return "auto"
+    mode = raw.strip().lower() if isinstance(raw, str) else ""
+    return mode if mode in _VALID_MODES else "auto"
 
 
 def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when the user configured a specific ``auxiliary.vision`` backend.
-
-    An explicit backend is the DE-FACTO image route in ``auto`` mode even when
-    the main model could take images natively. ``auto``/empty provider with no
-    model and no base_url is not explicit.
-    """
-    if not isinstance(cfg, dict):
-        return False
-    aux = cfg.get("auxiliary") or {}
-    if not isinstance(aux, dict):
-        return False
-    vision = aux.get("vision") or {}
-    if not isinstance(vision, dict):
-        return False
-
-    provider = _clean_str(vision.get("provider")).lower()
-    return not (
-        provider in {"", "auto"}
+    """True when the user configured a specific ``auxiliary.vision`` backend — the
+    de-facto image route in ``auto`` mode even when the main model has native vision.
+    ``auto``/empty provider with no model and no base_url is not explicit."""
+    vision = _dict_or_empty(_dict_or_empty(_dict_or_empty(cfg).get("auxiliary")).get("vision"))
+    return bool(vision) and not (
+        _clean_str(vision.get("provider")).lower() in {"", "auto"}
         and not _clean_str(vision.get("model"))
         and not _clean_str(vision.get("base_url"))
     )
+
+
+def _probe_managed_runtime(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """Managed local runtime verdict: the server receiving the image is the authority
+    on whether it can see (its /props reports modalities). Cloud catalogs have never
+    heard of a local GGUF, so without this every local model reads as text-only and
+    screenshots detour to a cloud auxiliary."""
+    from hermes_cli.local_runtime.capabilities import is_managed_provider, managed_model_supports_vision
+
+    managed = is_managed_provider(provider, _resolve_inference_base_url(cfg, provider) or "")
+    return managed_model_supports_vision(model) if managed else None
+
+
+def _probe_models_dev(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """models.dev catalog verdict. ``allow_network=True`` on purpose: this runs only
+    when an image needs routing, and the text-only-main guard depends on catalog
+    data — a cold cache returning "unknown" would reintroduce attempting the call.
+    The fetch is cached (4h TTL) and backoff-limited."""
+    from agent.models_dev import get_model_capabilities
+
+    caps = get_model_capabilities(provider, model, allow_network=True)
+    return None if caps is None else bool(caps.supports_vision)
+
+
+def _probe_ollama(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """Ollama ``/api/show`` verdict for local endpoints (see :func:`_should_probe_ollama_vision`)."""
+    base_url = _resolve_inference_base_url(cfg, provider)
+    if not base_url and _clean_str(provider).lower() == "ollama":
+        base_url = "http://localhost:11434/v1"
+    api_key = _resolve_inference_api_key(cfg, provider)
+    if not _should_probe_ollama_vision(provider, base_url, api_key=api_key):
+        return None
+    from agent.model_metadata import query_ollama_supports_vision
+
+    return query_ollama_supports_vision(model, base_url, api_key=api_key)
+
+
+# Capability probes after the config override, in priority order; each returns
+# True/False or None (unknown → next probe). Exceptions are logged and treated as None.
+_VISION_PROBES: Tuple[Tuple[str, Callable[..., Optional[bool]]], ...] = (
+    ("managed-runtime caps lookup", _probe_managed_runtime),
+    ("caps lookup", _probe_models_dev),
+    ("ollama vision probe", _probe_ollama),
+)
 
 
 def _lookup_supports_vision(
@@ -374,84 +305,34 @@ def _lookup_supports_vision(
 ) -> Optional[bool]:
     """Return True/False if vision capability can be resolved, None if unknown.
 
-    Order: config ``supports_vision`` override → managed local runtime →
-    models.dev catalog → Ollama probe for local endpoints.
+    Order: config ``supports_vision`` override → :data:`_VISION_PROBES`
+    (managed local runtime → models.dev catalog → Ollama probe).
     """
     # Named custom providers are canonicalized to ``provider="custom"``; the
     # original name lives in the context-local main runtime. Borrow it only on an
     # exact provider+model match so background/auxiliary lookups never take
     # another turn's identity.
-    if not requested_provider:
-        if (
-            _runtime_main("provider").lower() == _clean_str(provider).lower()
-            and _runtime_main("model") == _clean_str(model)
-        ):
-            requested_provider = _runtime_main("requested_provider")
+    if (
+        not requested_provider
+        and _runtime_main("provider").lower() == _clean_str(provider).lower()
+        and _runtime_main("model") == _clean_str(model)
+    ):
+        requested_provider = _runtime_main("requested_provider")
 
-    override = _supports_vision_override(
-        cfg,
-        provider,
-        model,
-        requested_provider=requested_provider,
-    )
+    override = _supports_vision_override(cfg, provider, model, requested_provider=requested_provider)
     if override is not None:
         return override
     if not provider or not model:
         return None
 
-    # Managed local runtime: the server receiving the image is the authority on
-    # whether it can see (its /props reports modalities). Cloud catalogs have
-    # never heard of a local GGUF, so without this every local model reads as
-    # text-only and screenshots detour to a cloud auxiliary.
-    try:
-        from hermes_cli.local_runtime.capabilities import (
-            is_managed_provider,
-            managed_model_supports_vision,
-        )
-
-        if is_managed_provider(provider, _resolve_inference_base_url(cfg, provider) or ""):
-            managed = managed_model_supports_vision(model)
-            if managed is not None:
-                return managed
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("image_routing: managed-runtime caps lookup failed for %s:%s — %s",
-                     provider, model, exc)
-
-    caps = None
-    try:
-        from agent.models_dev import get_model_capabilities
-        # allow_network=True on purpose: this runs only when an image needs
-        # routing, and the text-only-main guard depends on catalog data — a cold
-        # cache returning "unknown" would reintroduce attempting the call. The
-        # fetch is cached (4h TTL) and backoff-limited.
-        caps = get_model_capabilities(provider, model, allow_network=True)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("image_routing: caps lookup failed for %s:%s — %s", provider, model, exc)
-    if caps is not None:
-        return bool(caps.supports_vision)
-
-    base_url = _resolve_inference_base_url(cfg, provider)
-    if not base_url and (provider or "").strip().lower() == "ollama":
-        base_url = "http://localhost:11434/v1"
-
-    resolved_api_key = _resolve_inference_api_key(cfg, provider)
-
-    if _should_probe_ollama_vision(provider, base_url, api_key=resolved_api_key):
+    for label, probe in _VISION_PROBES:
         try:
-            from agent.model_metadata import query_ollama_supports_vision
-
-            ollama_vision = query_ollama_supports_vision(
-                model, base_url, api_key=resolved_api_key
-            )
-            if ollama_vision is not None:
-                return ollama_vision
+            verdict = probe(provider, model, cfg)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug(
-                "image_routing: ollama vision probe failed for %s:%s — %s",
-                provider,
-                model,
-                exc,
-            )
+            logger.debug("image_routing: %s failed for %s:%s — %s", label, provider, model, exc)
+            continue
+        if verdict is not None:
+            return verdict
     return None
 
 
@@ -462,61 +343,40 @@ def decide_image_input_mode(
     *,
     requested_provider: str = "",
 ) -> str:
-    """Return ``"native"`` or ``"text"`` for the given turn.
-
-    Args:
-      provider: active inference provider ID (e.g. ``"anthropic"``).
-      model:    active model slug as sent to the provider.
-      cfg:      loaded config.yaml dict, or None (behaves as auto).
-      requested_provider: provider identity before runtime canonicalization.
-    """
-    mode_cfg = "auto"
-    if isinstance(cfg, dict):
-        agent_cfg = cfg.get("agent") or {}
-        if isinstance(agent_cfg, dict):
-            mode_cfg = _coerce_mode(agent_cfg.get("image_input_mode"))
-
+    """Return ``"native"`` or ``"text"`` for the given turn (``cfg`` None behaves as
+    auto; ``requested_provider`` is the identity before runtime canonicalization)."""
+    mode_cfg = _coerce_mode(_dict_or_empty(_dict_or_empty(cfg).get("agent")).get("image_input_mode"))
     if mode_cfg != "auto":
         return mode_cfg
-
-    # auto: an explicit auxiliary.vision backend wins (see module docstring);
-    # native remains the default for unconfigured installs.
-    if _explicit_aux_vision_override(cfg):
+    if _explicit_aux_vision_override(cfg):  # auto: an explicit auxiliary.vision backend wins
         return "text"
-    if requested_provider:
-        supports = _lookup_supports_vision(
-            provider,
-            model,
-            cfg,
-            requested_provider=requested_provider,
-        )
-    else:
-        # Keep the three-argument call contract for callers/tests that replace
-        # the capability lookup hook.
-        supports = _lookup_supports_vision(provider, model, cfg)
-    return "native" if supports is True else "text"
+    # Keep the three-argument call contract for callers/tests that replace the lookup hook.
+    extra = {"requested_provider": requested_provider} if requested_provider else {}
+    return "native" if _lookup_supports_vision(provider, model, cfg, **extra) is True else "text"
 
 
-# Image size handling is REACTIVE: attach at full size regardless of provider
-# and let ``run_agent._try_shrink_image_parts_in_messages`` shrink + retry on
-# rejection (e.g. Anthropic's 5 MB ceiling as HTTP 400). Provider ceilings are
-# partial and evolving (OpenAI 49 MB+, Anthropic 5 MB, Gemini 100 MB); a
-# proactive table would go stale and silently degrade quality for providers
-# that would have accepted the full image — worse than one extra API call.
+# Image size handling is REACTIVE: attach at full size and let
+# ``run_agent._try_shrink_image_parts_in_messages`` shrink + retry on rejection
+# (e.g. Anthropic's 5 MB ceiling as HTTP 400). Provider ceilings are partial and
+# evolving; a proactive table would go stale and silently degrade quality.
 
-
-# Magic-byte signatures, checked in order. Filename-based detection is
-# unreliable when platforms lie about content-type (Discord serves PNG as
-# ``image/webp`` for proxied stickers); Anthropic rejects a media_type that
-# does not match the bytes with HTTP 400, so we sniff.
-_HEIC_BRANDS = frozenset({
-    b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heim", b"heis",
-})
-_MAGIC_PREFIXES: Tuple[Tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
+# Magic-byte signatures as ((offset, bytes), ...) conjunctions, checked in order.
+# Platforms lie about content-type (Discord serves PNG as ``image/webp`` for
+# proxied stickers) and Anthropic rejects a mismatched media_type with HTTP 400.
+# ISO-BMFF family (HEIC/HEIF/AVIF): 'ftyp' at 4..8, major brand at 8..12.
+_FTYP_BRANDS = {
+    **dict.fromkeys((b"avif", b"avis"), "image/avif"),
+    **dict.fromkeys((b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heim", b"heis"), "image/heic"),
+}
+_MAGIC: Tuple[Tuple[Tuple[Tuple[int, bytes], ...], str], ...] = (
+    (((0, b"\x89PNG\r\n\x1a\n"),), "image/png"),
+    (((0, b"\xff\xd8\xff"),), "image/jpeg"),
+    (((0, b"GIF87a"),), "image/gif"), (((0, b"GIF89a"),), "image/gif"),
+    (((0, b"RIFF"), (8, b"WEBP")), "image/webp"),
+    (((0, b"BM"),), "image/bmp"),
+    *((((4, b"ftyp"), (8, brand)), mime) for brand, mime in _FTYP_BRANDS.items()),
+    (((0, b"II*\x00"),), "image/tiff"), (((0, b"MM\x00*"),), "image/tiff"),
+    (((0, b"\x00\x00\x01\x00"),), "image/x-icon"),
 )
 
 
@@ -524,48 +384,25 @@ def _sniff_mime_from_bytes(raw: bytes) -> Optional[str]:
     """Detect image MIME from magic bytes; None if unrecognised."""
     if not raw:
         return None
-    for prefix, mime in _MAGIC_PREFIXES:
-        if raw.startswith(prefix):
+    for conditions, mime in _MAGIC:
+        if all(raw[off:off + len(sig)] == sig for off, sig in conditions):
             return mime
-    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        return "image/webp"
-    if raw.startswith(b"BM"):
-        return "image/bmp"
-    # ISO-BMFF family (HEIC/HEIF/AVIF): 'ftyp' at 4..8, major brand at 8..12.
-    if len(raw) >= 12 and raw[4:8] == b"ftyp":
-        brand = raw[8:12]
-        if brand in {b"avif", b"avis"}:
-            return "image/avif"
-        if brand in _HEIC_BRANDS:
-            return "image/heic"
-    if raw[:4] in {b"II*\x00", b"MM\x00*"}:
-        return "image/tiff"
-    if raw[:4] == b"\x00\x00\x01\x00":
-        return "image/x-icon"
     # SVG is text: look for an <svg tag near the start (skip BOM/whitespace).
     head = raw[:512].lstrip().lower()
-    if (head.startswith(b"<?xml") or head.startswith(b"<svg")) and b"<svg" in head:
-        return "image/svg+xml"
-    return None
+    return "image/svg+xml" if head.startswith((b"<?xml", b"<svg")) and b"<svg" in head else None
 
 
-# Formats every major vision provider accepts natively. Anything else must be
-# transcoded to PNG before declaring media_type or the provider returns HTTP
-# 400 and the whole turn fails. Chat platforms freely accept AVIF (Chromium
-# screenshots), HEIC (iPhone), TIFF, BMP and ICO, so users do hit this. SVG is
-# vector — Pillow cannot rasterize it — and is skipped (logged) instead.
-_UNIVERSALLY_SUPPORTED_MIMES = frozenset({
-    "image/png", "image/jpeg", "image/gif", "image/webp",
-})
+# Formats every major vision provider accepts natively. Anything else is transcoded
+# to PNG before declaring media_type or the provider returns HTTP 400 and the turn
+# fails; chat platforms freely accept AVIF (Chromium screenshots), HEIC (iPhone),
+# TIFF, BMP and ICO. SVG is vector — Pillow cannot rasterize it — so it is skipped.
+_UNIVERSALLY_SUPPORTED_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
 
 def _transcode_to_png(raw: bytes) -> Optional[bytes]:
-    """Decode image bytes with Pillow and re-encode as PNG; None when impossible.
-
-    HEIC/HEIF and AVIF need optional Pillow plugins, registered on demand; a
-    missing plugin just looks like "Pillow can't decode this" so the caller
-    skips the image and the rest of the turn proceeds.
-    """
+    """Decode with Pillow and re-encode as PNG; None when impossible. HEIC/HEIF and
+    AVIF need optional Pillow plugins, registered on demand; a missing plugin just
+    looks like "can't decode" so the caller skips the image and the turn proceeds."""
     try:
         from PIL import Image
     except ImportError:
@@ -575,66 +412,61 @@ def _transcode_to_png(raw: bytes) -> Optional[bytes]:
             "(and `pillow-heif` / `pillow-avif-plugin` for those formats)."
         )
         return None
-    try:
+    with suppress(Exception):
         import pillow_heif  # type: ignore
 
         pillow_heif.register_heif_opener()
-    except Exception:
-        pass
-    try:
+    with suppress(Exception):
         import pillow_avif  # type: ignore  # noqa: F401  -- registers AVIF on import
-    except Exception:
-        pass
     try:
-        from io import BytesIO
-
         with Image.open(BytesIO(raw)) as im:
-            # Normalise exotic modes to RGBA so PNG can serialise and any
-            # source transparency survives.
+            # Normalise exotic modes to RGBA so PNG can serialise and transparency survives.
             if im.mode not in {"RGB", "RGBA", "L", "LA", "P"}:
                 im = im.convert("RGBA")
             buf = BytesIO()
             im.save(buf, format="PNG", optimize=False)
             return buf.getvalue()
     except Exception as exc:
-        logger.info(
-            "image_routing: Pillow could not transcode image to PNG -- %s", exc
-        )
+        logger.info("image_routing: Pillow could not transcode image to PNG -- %s", exc)
         return None
 
 
 _SUFFIX_MIMES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
 }
 
 
 def _guess_mime(path: Path, raw: Optional[bytes] = None) -> str:
     """Image MIME for *path*: magic bytes (authoritative) → ``mimetypes`` → suffix → jpeg."""
-    if raw is not None:
-        sniffed = _sniff_mime_from_bytes(raw)
-        if sniffed:
-            return sniffed
-    mime, _ = mimetypes.guess_type(str(path))
+    sniffed = _sniff_mime_from_bytes(raw) if raw is not None else None
+    mime = sniffed or mimetypes.guess_type(str(path))[0]
     if mime and mime.startswith("image/"):
         return mime
     # mimetypes on some Linux distros mis-maps .jpg; default to jpeg.
     return _SUFFIX_MIMES.get(path.suffix.lower(), "image/jpeg")
 
 
-def _file_to_data_url(path: Path) -> Optional[str]:
-    """Encode a local image as a base64 data URL at its native size.
+def _accepted_mimes() -> frozenset:
+    """Provider-accepted MIME set for the current main runtime. The managed local
+    server decodes fewer formats (no WebP — and a WebP part fails SILENTLY: the model
+    confabulates a description), so its narrower set transcodes those here."""
+    try:
+        from agent.auxiliary_client import _runtime_main_value
+        from hermes_cli.local_runtime.capabilities import ACCEPTED_IMAGE_MIMES, is_managed_provider
 
-    Size is NOT limited here (the agent retry loop shrinks on the provider's
-    first rejection, so lenient providers pay no silent quality tax). Format
-    compatibility IS handled: MIMEs outside the accepted set are transcoded to
-    PNG. Returns None when the file can't be read, is blocked by the read
-    guard, or can't be transcoded — the caller reports it in ``skipped``.
-    """
+        if is_managed_provider(str(_runtime_main_value("provider") or ""), str(_runtime_main_value("base_url") or "")):
+            return ACCEPTED_IMAGE_MIMES
+    except Exception:  # noqa: BLE001 — best-effort narrowing only
+        pass
+    return _UNIVERSALLY_SUPPORTED_MIMES
+
+
+def _file_to_data_url(path: Path) -> Optional[str]:
+    """Encode a local image as a base64 data URL at native size (the agent retry
+    loop shrinks on rejection, so lenient providers pay no silent quality tax);
+    MIMEs outside the accepted set are transcoded to PNG. None when unreadable,
+    blocked by the read guard, or untranscodable — the caller reports ``skipped``."""
     try:
         from agent.file_safety import raise_if_read_blocked
 
@@ -643,50 +475,23 @@ def _file_to_data_url(path: Path) -> Optional[str]:
         logger.warning("image_routing: blocked local image attachment %s -- %s", path, exc)
         return None
     except Exception:
-        # Keep attachment routing best-effort if the guard itself is unavailable.
-        pass
-
+        pass  # Keep attachment routing best-effort if the guard itself is unavailable.
     try:
         raw = path.read_bytes()
     except Exception as exc:
         logger.warning("image_routing: failed to read %s — %s", path, exc)
         return None
     mime = _guess_mime(path, raw=raw)
-    accepted = _UNIVERSALLY_SUPPORTED_MIMES
-    # The managed local server decodes fewer formats (no WebP — and a WebP part
-    # fails SILENTLY: the model confabulates a description). Narrow the accepted
-    # set so those formats transcode here instead of vanishing server-side.
-    try:
-        from agent.auxiliary_client import _runtime_main_value
-        from hermes_cli.local_runtime.capabilities import (
-            ACCEPTED_IMAGE_MIMES,
-            is_managed_provider,
-        )
-
-        if is_managed_provider(
-                str(_runtime_main_value("provider") or ""),
-                str(_runtime_main_value("base_url") or "")):
-            accepted = ACCEPTED_IMAGE_MIMES
-    except Exception:  # noqa: BLE001 — best-effort narrowing only
-        pass
-    if mime not in accepted:
-        transcoded = _transcode_to_png(raw)
-        if transcoded is None:
+    if mime not in _accepted_mimes():
+        if (transcoded := _transcode_to_png(raw)) is None:
             logger.warning(
-                "image_routing: %s is %s which is not accepted by the "
-                "active provider and could not be transcoded to PNG; "
-                "skipping this attachment.",
-                path, mime,
+                "image_routing: %s is %s which is not accepted by the active provider "
+                "and could not be transcoded to PNG; skipping this attachment.", path, mime,
             )
             return None
-        logger.info(
-            "image_routing: transcoded %s (%s) -> image/png for provider compatibility",
-            path.name, mime,
-        )
-        raw = transcoded
-        mime = "image/png"
-    b64 = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{b64}"
+        logger.info("image_routing: transcoded %s (%s) -> image/png for provider compatibility", path.name, mime)
+        raw, mime = transcoded, "image/png"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def build_native_content_parts(
@@ -696,49 +501,30 @@ def build_native_content_parts(
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Build an OpenAI-style ``content`` list for a user turn.
 
-    Local paths are embedded as base64 ``data:`` URLs; remote URLs pass through
-    verbatim. When at least one image attaches, a single text part combines the
-    caption (or a neutral default) with one hint per image —
-    ``[Image attached at: <path>]`` / ``[Image attached: <url>]`` — giving the
-    model a string handle for tools that take an image path/URL, mirroring the
-    text-mode hint from ``Runner._enrich_message_with_vision``.
-
-    Returns ``(content_parts, skipped)``; ``skipped`` holds local paths that
-    could not be read. URLs are never skipped (not validated here).
+    Local paths become base64 ``data:`` URLs; remote URLs pass through verbatim.
+    When any image attaches, one text part combines the caption (or a neutral
+    default) with a ``[Image attached at: <path>]`` / ``[Image attached: <url>]``
+    hint per image — a string handle for tools taking an image path/URL, mirroring
+    ``Runner._enrich_message_with_vision``. Returns ``(content_parts, skipped)``;
+    ``skipped`` holds unreadable local paths (URLs are never skipped).
     """
     skipped: List[str] = []
-    image_parts: List[Dict[str, Any]] = []
-    hint_lines: List[str] = []
-
+    attached: List[Tuple[str, str]] = []  # (url, hint)
     for raw_path in image_paths:
         p = Path(raw_path)
         data_url = _file_to_data_url(p) if p.exists() and p.is_file() else None
-        if not data_url:
+        if data_url:
+            attached.append((data_url, f"[Image attached at: {raw_path}]"))
+        else:
             skipped.append(str(raw_path))
-            continue
-        image_parts.append({"type": "image_url", "image_url": {"url": data_url}})
-        hint_lines.append(f"[Image attached at: {raw_path}]")
-
-    for url in image_urls or []:
-        url = (url or "").strip()
-        if not url:
-            continue
-        image_parts.append({"type": "image_url", "image_url": {"url": url}})
-        hint_lines.append(f"[Image attached: {url}]")
+    attached += [(u, f"[Image attached: {u}]") for u in ((u or "").strip() for u in image_urls or []) if u]
 
     text = (user_text or "").strip()
-
-    if image_parts:
-        base_text = text or "What do you see in this image?"
-        combined_text = f"{base_text}\n\n" + "\n".join(hint_lines)
-        return [{"type": "text", "text": combined_text}, *image_parts], skipped
-
-    # No images attached — plain text-only behaviour.
-    return ([{"type": "text", "text": text}] if text else []), skipped
+    if not attached:
+        return ([{"type": "text", "text": text}] if text else []), skipped
+    combined_text = f"{text or 'What do you see in this image?'}\n\n" + "\n".join(h for _, h in attached)
+    image_parts = [{"type": "image_url", "image_url": {"url": u}} for u, _ in attached]
+    return [{"type": "text", "text": combined_text}, *image_parts], skipped
 
 
-__all__ = [
-    "decide_image_input_mode",
-    "build_native_content_parts",
-    "extract_image_refs",
-]
+__all__ = ["decide_image_input_mode", "build_native_content_parts", "extract_image_refs"]
