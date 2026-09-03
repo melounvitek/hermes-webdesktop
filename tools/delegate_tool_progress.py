@@ -110,6 +110,42 @@ def _normalize_event(event_type: Any) -> Any:
     except (ValueError, TypeError):
         return None
 
+_CONTEXT_FILES_INTRO = (
+    "\nThe workspace's project context files are reproduced below. Their conventions and invariants are binding for "
+    "your work in this workspace.\n\n"
+)
+_COMPLETION_INSTRUCTIONS = (
+    "\nComplete this task using the tools available to you. When finished, provide a clear, concise summary of:\n"
+    "- What you did\n- What you found or accomplished\n- Any files you created or modified\n- Any issues encountered\n\n"
+    "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path "
+    "unless the task/context explicitly gives that path. If no exact local path is provided, discover it first before "
+    "issuing git/workdir-specific commands.\n\n"
+    "Keep your final summary tight: lead with outcomes, prefer bullet points over paragraphs, and don't replay your "
+    "whole process. Your response is returned to the parent agent as a summary, and overlong summaries crowd out the "
+    "parent's context window."
+)
+_ORCHESTRATOR_BLOCK = (
+    "\n## Subagent Spawning (Orchestrator Role)\n"
+    "You have access to the `delegate_task` tool and CAN spawn your own subagents to parallelize independent work.\n\n"
+    "WHEN to delegate:\n"
+    "- The goal decomposes into 2+ independent subtasks that can run in parallel (e.g. research A and B simultaneously).\n"
+    "- A subtask is reasoning-heavy and would flood your context with intermediate data.\n\n"
+    "WHEN NOT to delegate:\n"
+    "- Single-step mechanical work — do it directly.\n"
+    "- Trivial tasks you can execute in one or two tool calls.\n"
+    "- Re-delegating your entire assigned goal to one worker (that's just pass-through with no value added).\n\n"
+    "Coordinate your workers' results and synthesize them before reporting back to your parent. You are responsible "
+    "for the final summary, not your workers.\n\n"
+)
+_LEAF_CHILDREN_NOTE = (
+    "Your own children MUST be leaves (cannot delegate further) because they would be at the depth floor — you cannot "
+    "pass role='orchestrator' to your own delegate_task calls."
+)
+_NESTED_CHILDREN_NOTE = (
+    "Your own children can themselves be orchestrators or leaves, depending on the `role` you pass to delegate_task. "
+    "Default is 'leaf'; pass role='orchestrator' explicitly when a child needs to further decompose its work."
+)
+
 def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
     max_spawn_depth: int = 2, child_depth: int = 1,
@@ -136,51 +172,14 @@ def _build_child_system_prompt(
             from agent.prompt_builder import build_context_files_prompt
             _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         if _ctx_files.strip():
-            parts.append(
-                "\nThe workspace's project context files are reproduced "
-                "below. Their conventions and invariants are binding for "
-                "your work in this workspace.\n\n" + _ctx_files.strip()
-            )
-    parts.append(
-        "\nComplete this task using the tools available to you. When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
-        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Keep your final summary tight: lead with outcomes, prefer bullet "
-        "points over paragraphs, and don't replay your whole process. Your "
-        "response is returned to the parent agent as a summary, and overlong "
-        "summaries crowd out the parent's context window."
-    )
+            parts.append(_CONTEXT_FILES_INTRO + _ctx_files.strip())
+    parts.append(_COMPLETION_INSTRUCTIONS)
     if role == "orchestrator":
-        child_note = (
-            "Your own children MUST be leaves (cannot delegate further) "
-            "because they would be at the depth floor — you cannot pass "
-            "role='orchestrator' to your own delegate_task calls."
-            if child_depth + 1 >= max_spawn_depth
-            else "Your own children can themselves be orchestrators or leaves, "
-            "depending on the `role` you pass to delegate_task. Default is "
-            "'leaf'; pass role='orchestrator' explicitly when a child needs to further decompose its work."
-        )
+        child_note = _LEAF_CHILDREN_NOTE if child_depth + 1 >= max_spawn_depth else _NESTED_CHILDREN_NOTE
         parts.append(
-            "\n## Subagent Spawning (Orchestrator Role)\n"
-            "You have access to the `delegate_task` tool and CAN spawn "
-            "your own subagents to parallelize independent work.\n\n"
-            "WHEN to delegate:\n"
-            "- The goal decomposes into 2+ independent subtasks that can "
-            "run in parallel (e.g. research A and B simultaneously).\n"
-            "- A subtask is reasoning-heavy and would flood your context with intermediate data.\n\n"
-            "WHEN NOT to delegate:\n"
-            "- Single-step mechanical work — do it directly.\n"
-            "- Trivial tasks you can execute in one or two tool calls.\n"
-            "- Re-delegating your entire assigned goal to one worker "
-            "(that's just pass-through with no value added).\n\n"
-            "Coordinate your workers' results and synthesize them before "
-            "reporting back to your parent. You are responsible for the final summary, not your workers.\n\n"
-            f"NOTE: You are at depth {child_depth}. The delegation tree "
-            f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
+            _ORCHESTRATOR_BLOCK
+            + f"NOTE: You are at depth {child_depth}. The delegation tree is capped at max_spawn_depth={max_spawn_depth}. "
+            + child_note
         )
     return "\n".join(parts)
 
