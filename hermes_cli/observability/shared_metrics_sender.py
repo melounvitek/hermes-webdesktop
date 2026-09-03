@@ -41,35 +41,29 @@ GZIP_THRESHOLD_BYTES = 4096
 #: Packages per pass. Bounds work on an interactive hook even after an outage.
 MAX_PACKAGES_PER_PASS = 20
 
-#: How long a claimed row is held. The claim writes a LEASE INTO THE FUTURE:
-#: selection requires `next_attempt_at <= now`, so no other process can take the
-#: package for the length of the lease. Must exceed the worst case for ONE package
-#: (three 30s timeouts plus 1s+5s backoff, ~96s) — which is why packages are claimed
-#: one at a time right before sending: a batch of 20 under one lease can legally run
-#: ~1900s, so later rows' leases expired while still held and got re-sent.
+#: Claim lease, written INTO THE FUTURE as next_attempt_at so no other process selects
+#: the row meanwhile. Must exceed one package's worst case (3x30s timeouts + 1s+5s
+#: backoff, ~96s) — hence packages are claimed one at a time right before sending; a
+#: batch of 20 under one lease can run ~1900s and get re-sent by another process.
 _CLAIM_LEASE_SECONDS = 300
 
 #: Floor applied after a pass fails to deliver, so a hard-down service is not
 #: retried on every task completion.
 _FAILURE_BACKOFF_SECONDS = 15 * 60
 
-#: Permanent statuses per the ingest contract. Deliberately narrow: 400 means the
-#: envelope will never validate; 413 because a package over the 1 MiB cap cannot
-#: shrink on retry. Everything else — including 403 from the origin guard and 404
-#: from a bad path — is retried, since those are usually deployment/edge
-#: misconfiguration that resolves without the package changing.
+#: Permanent statuses per the ingest contract, deliberately narrow: 400 never validates,
+#: 413 (over the 1 MiB cap) cannot shrink on retry. Everything else — including 403 from
+#: the origin guard and 404 from a bad path — is deployment/edge misconfiguration that
+#: resolves without the package changing, so it is retried.
 _PERMANENT_STATUSES = frozenset({400, 413})
 
-#: Attempts after which a package is abandoned. Without a ceiling a poisoned row
-#: is retried until 30-day retention deletes it (~160 requests), wasting the user's
-#: bandwidth and pinning a doomed package at the head of the queue.
+#: Attempts after which a package is abandoned; otherwise a poisoned row is retried until
+#: 30-day retention deletes it (~160 requests) and pins the head of the queue.
 MAX_SEND_ATTEMPTS = 25
 
-#: Maximum distance one reconcile call can advance the 'obs' mark. Honest heartbeats
-#: arrive hours apart so the cap never binds normally; a machine off for months catches
-#: up in a few hook fires (fail-closed latency only). It bounds FORWARD clock poison:
-#: without it one glitched sample (NTP flap reading 2099) drags the mark — and every
-#: window open and confirmation horizon — decades ahead, a refused-data leak.
+#: Max distance one reconcile can advance the 'obs' mark. Never binds for honest
+#: heartbeats (hours apart); bounds FORWARD clock poison, where one glitched sample (NTP
+#: flap reading 2099) would drag every window open and confirmation horizon decades ahead.
 MAX_OBS_ADVANCE_SECONDS = 30 * 24 * 3600
 
 
@@ -87,13 +81,11 @@ class SendOutcome:
     deferred: int = 0
 
 
+@dataclass(slots=True)
 class _Response:
-    __slots__ = ("status", "retry_after", "body")
-
-    def __init__(self, status: int, retry_after: str | None, body: str) -> None:
-        self.status = status
-        self.retry_after = retry_after
-        self.body = body
+    status: int
+    retry_after: str | None
+    body: str
 
 
 def _post(endpoint: str, payload: bytes, *, timeout: int) -> _Response:
@@ -144,8 +136,8 @@ def reconcile_send_consent(
 ) -> None:
     """Reconcile the consent-window table with the observed config state.
 
-    THE ONLY writer of consent state. Must run inside a write transaction. A pure function
-    of (config, now, store): call it from anywhere, any number of times, in any order.
+    THE ONLY writer of consent state; must run inside a write transaction. Idempotent in
+    (config, now, store): call it from anywhere, any number of times, in any order.
     """
     stamp = _isoformat(now or _utc_now())
     raw_stamp = stamp  # pre-cap observation time, used to clamp closes
@@ -188,13 +180,11 @@ def reconcile_send_consent(
                 (obs, open_row[0]),
             )
     elif open_row is not None:
-        # Close at the last CONFIRMED moment, but never after the closing observation's
-        # own raw stamp. Both clamps are load-bearing: min with last_confirmed_at means an
-        # unobserved gap (machine off, hand-edited config) is never asserted as consented;
-        # min with the RAW (pre-cap, pre-MAX) stamp means a last_confirmed_at poisoned by a
-        # glitched-forward sample is pulled back to the true revoke moment by an honest
-        # clock, so the refused era falls OUTSIDE the window. A rolled-back clock only
-        # closes EARLIER — fail-closed.
+        # Close at the last CONFIRMED moment, never after the closing observation's RAW
+        # stamp. Both clamps are load-bearing: last_confirmed_at means an unobserved gap
+        # (machine off, hand-edited config) is never asserted as consented; the raw
+        # (pre-cap) stamp pulls a glitched-forward last_confirmed_at back to the true
+        # revoke moment. A rolled-back clock only closes EARLIER — fail-closed.
         connection.execute(
             "UPDATE send_consent_windows"
             " SET closed_at = MIN(last_confirmed_at, ?)"
@@ -204,9 +194,8 @@ def reconcile_send_consent(
 
 
 #: Claim-time consent predicate: the package's period must fall entirely inside SOME
-#: recorded consent window. An open window vouches only up to its last confirmed moment,
-#: so a package whose period runs past it waits for the next reconcile heartbeat
-#: (fail-closed; released within one hook fire).
+#: recorded window. An open window vouches only up to its last confirmed moment, so a
+#: package running past it waits for the next reconcile heartbeat (fail-closed).
 CONSENT_GATE_SQL = """EXISTS (
     SELECT 1 FROM send_consent_windows w
     WHERE package_outbox.period_start >= w.opened_at
@@ -250,13 +239,11 @@ class SharedMetricsSender:
     # -- selection ---------------------------------------------------------
 
     def _claim_next(self, now: datetime, seen: set[str]) -> dict | None:
-        """Claim exactly ONE package, immediately before it is sent.
+        """Claim exactly ONE package, immediately before it is sent (see _CLAIM_LEASE_SECONDS).
 
-        Claiming a batch up front fails: one shared lease would have to cover the whole
-        pass, and 20 retrying packages can outlive any sane lease. ``seen`` (packages this
-        pass finished with) is excluded IN SQL: with LIMIT 1, returning None for a seen row
-        would look like an empty queue and abandon everything behind it, and rows can
-        legitimately become eligible again mid-pass.
+        ``seen`` (packages this pass finished with) is excluded IN SQL: with LIMIT 1,
+        returning None for a seen row would look like an empty queue and abandon everything
+        behind it, and rows can legitimately become eligible again mid-pass.
         """
         with self._write() as connection:
             stamp = _isoformat(now)
@@ -264,8 +251,7 @@ class SharedMetricsSender:
 
             placeholders = ",".join("?" for _ in seen)
             exclusion = f" AND package_id NOT IN ({placeholders})" if seen else ""
-            # Consent is a READ here — the claim must never mutate the window table, or
-            # selecting a row could rewrite what is permitted to be sent.
+            # Consent is a READ here: the claim must never mutate the window table.
             row = connection.execute(
                 f"""
                     SELECT package_id, payload_json, sent_install_id
@@ -300,10 +286,8 @@ class SharedMetricsSender:
                         claim_token = ?
                     WHERE package_id = ?
                     """,
-                # Lease INTO THE FUTURE (see _CLAIM_LEASE_SECONDS). The token is this
-                # claim's identity: a reclaim after expiry mints a new one, and every later
-                # write by THIS claimant is compare-and-set against it, so a lapsed claimant
-                # that resumes cannot settle or transmit.
+                # The token is this claim's identity: a reclaim after expiry mints a new one
+                # and every later write by THIS claimant is compare-and-set against it.
                 (_isoformat(lease_until), token, package_id),
             )
             return {
@@ -320,9 +304,8 @@ class SharedMetricsSender:
     ) -> str | None:
         """Record the transmitted install_id on the row, or reject an unusable one.
 
-        ``sent_install_id`` records exactly what the wire will carry. Rejecting here rather
-        than raising matters: an exception rolls back the claim transaction and blocks every
-        healthy package behind this one.
+        Rejecting rather than raising matters: an exception would roll back the claim
+        transaction and block every healthy package behind this one.
         """
         install_id = None
         try:
@@ -363,12 +346,8 @@ class SharedMetricsSender:
 
     @staticmethod
     def _body(payload_json: str, transmitted_id: str) -> bytes:
-        """Rebuild the exact bytes to send.
-
-        Recomputed from the stored package (json.dumps with these options is deterministic)
-        with install_id taken from the frozen ``sent_install_id`` column, keeping "a resend
-        is byte-identical" anchored to one recorded value.
-        """
+        """Rebuild the exact bytes to send: deterministic json.dumps of the stored package
+        with install_id from the frozen ``sent_install_id`` column (resends are byte-identical)."""
         payload = dict(json.loads(payload_json))
         payload["install_id"] = transmitted_id
         return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
@@ -383,10 +362,9 @@ class SharedMetricsSender:
     ) -> None:
         """Write send state for one package.
 
-        Guarded on send_state so a pass whose lease lapsed cannot resurrect a row another
-        process already finished (overwriting 'sent' back to 'pending' would re-send). With
-        ``token`` the write is also compare-and-set on claim_token: a superseded claimant
-        writes zero rows and its settlement/backoff/error silently lose to the newer claim.
+        Guarded on send_state so a lapsed pass cannot resurrect a row another process already
+        finished. With ``token`` the write is also compare-and-set on claim_token: a
+        superseded claimant writes zero rows.
         """
         assignments = ", ".join(f"{name} = ?" for name in columns)
         predicate = " AND (send_state IS NULL OR send_state = 'pending')" if only_if_pending else ""
@@ -401,13 +379,12 @@ class SharedMetricsSender:
             )
 
     def _renew_claim(self, package_id: str, token: str | None) -> bool:
-        """Atomically re-assert ownership and extend the lease. CAS, one row.
+        """Atomically re-assert ownership and extend the lease (CAS, one row; rowcount == 1
+        is the only grant).
 
-        A read-only ownership check is not enough: a claimant whose lease expired while
-        suspended still has its token in the row if nobody reclaimed yet, and would POST
-        while another process legitimately reclaims (check-to-POST expiry race). Pushing a
-        fresh lease in the same CAS keeps the upcoming POST (30s, well under the 300s lease)
-        entirely inside renewed authority. rowcount == 1 is the only grant.
+        A read-only check is not enough: a claimant whose lease expired while suspended still
+        has its token in the row and would POST while another process reclaims. Renewing in
+        the same CAS keeps the 30s POST inside the 300s lease.
         """
         if token is None:
             return False
@@ -435,9 +412,7 @@ class SharedMetricsSender:
     def _defer(
         self, package_id: str, delay_seconds: int, reason: str, *, token: str | None = None
     ) -> None:
-        # Clamp to >= 1s: a past deadline would make the row instantly re-eligible and let
-        # a pass spin on it. Unreachable today (Retry-After is pre-clamped, other callers
-        # pass positive constants) — kept as a guard against a future caller.
+        # Clamp to >= 1s so a past deadline can never make the row instantly re-eligible.
         retry_at = self._now().timestamp() + max(1, int(delay_seconds))
         self._mark(
             package_id,
@@ -450,9 +425,8 @@ class SharedMetricsSender:
     def _send_one(self, package: dict) -> str:
         """Try one package. Returns 'sent', 'rejected', or 'deferred'.
 
-        Delivery is at-least-once. The pre-POST renewal plus token-fenced writes close the
-        claim->POST and settle-after-reclaim gaps, but a suspension landing MID-POST can
-        still duplicate: no client-side check can revoke a request in flight.
+        Delivery is at-least-once: renewal plus token-fenced writes close the claim->POST
+        and settle-after-reclaim gaps, but a suspension MID-POST can still duplicate.
         """
         package_id = package["package_id"]
         token = package.get("claim_token")
@@ -463,10 +437,8 @@ class SharedMetricsSender:
             return "deferred"
 
         for attempt in range(1, self._max_attempts + 1):
-            # Renew before EVERY external POST (CAS on token, pending, lease unexpired), so a
-            # suspended-then-resumed claimant whose lease lapsed yields even before anyone
-            # reclaims. The ingest key is minute-prefixed, so duplicates become distinct
-            # stored objects, not overwrites.
+            # Renew before EVERY external POST so a lapsed claimant yields even before anyone
+            # reclaims. The ingest key is minute-prefixed: duplicates are distinct objects.
             if not self._renew_claim(package_id, token):
                 logger.info(
                     "Shared-metrics claim on %s superseded or expired; yielding", package_id
@@ -484,9 +456,6 @@ class SharedMetricsSender:
                     )
                     return "sent"
                 if response.status in _PERMANENT_STATUSES:
-                    # Only contract-terminal statuses. 403 in particular is the origin guard
-                    # during an edge misconfiguration — treating it as permanent would
-                    # discard every package sent during the incident.
                     logger.warning(
                         "Telemetry package %s rejected with HTTP %s; not retrying",
                         package_id,
@@ -518,19 +487,15 @@ class SharedMetricsSender:
     # -- entry point -------------------------------------------------------
 
     def send_pending(self) -> SendOutcome:
-        """Run one bounded pass. Never raises.
-
-        Claims and sends ONE package at a time so each row's lease only covers its own
-        transmission, and re-checks consent before every send so revoking `send` mid-pass
-        stops the remaining packages.
-        """
+        """Run one bounded pass, one claim+send at a time, re-checking consent before each
+        send so revoking `send` mid-pass stops the remainder. Never raises."""
         outcome = SendOutcome()
         seen: set[str] = set()
 
         for _ in range(MAX_PACKAGES_PER_PASS):
             if not self._still_consented():
-                # Stop transmitting and reconcile through the single consent writer so
-                # the window closes at its last confirmed moment.
+                # Reconcile through the single consent writer so the window closes at its
+                # last confirmed moment.
                 logger.info("Shared-metrics sending disabled mid-pass; stopping")
                 self._reconcile(send_enabled=False)
                 break
@@ -564,11 +529,8 @@ class SharedMetricsSender:
             logger.warning("Unable to reconcile shared-metrics consent", exc_info=True)
 
     def _still_consented(self) -> bool:
-        """Re-read profile-owned send consent.
-
-        Consent is a boundary, not cached config: docs promise ``send: false`` stops
-        transmission immediately, and a pass can run for minutes.
-        """
+        """Re-read profile-owned send consent: docs promise ``send: false`` stops transmission
+        immediately, and a pass can run for minutes."""
         if self._consent_check is None:
             return True
         try:
