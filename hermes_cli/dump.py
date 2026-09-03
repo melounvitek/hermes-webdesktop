@@ -229,7 +229,6 @@ def _openai_version() -> str:
 def run_dump(args):
     """Output a compact, copy-pasteable setup summary."""
     show_keys = getattr(args, "show_keys", False)
-
     # Load env from .env file so key checks work
     load_hermes_dotenv(hermes_home=get_env_path().parent, project_env=get_project_root() / ".env")
     project_root = get_project_root()
@@ -245,7 +244,6 @@ def run_dump(args):
     except Exception:
         profile = "(default)"
     openai_ver = _openai_version()
-
     lines = [
         "--- hermes dump ---",
         f"version:          {_version_line(project_root)}",
@@ -261,7 +259,6 @@ def run_dump(args):
         "api_keys:",
         *_api_key_lines(show_keys),
     ]
-
     toolsets = config.get("toolsets", ["hermes-cli"])
     platforms = [name for name, env in _PLATFORM_ENV_VARS.items() if os.getenv(env)]
     lines += [
@@ -275,7 +272,6 @@ def run_dump(args):
         f"  cron_jobs:          {_cron_summary(hermes_home)}",
         f"  skills:             {_count_skills(hermes_home)}",
     ]
-
     overrides = _config_overrides(config)
     if overrides:
         lines += ["", "config_overrides:"] + [f"  {key}: {val}" for key, val in overrides.items()]

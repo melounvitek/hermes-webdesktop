@@ -48,7 +48,6 @@ def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool
         return False
     try:
         from hermes_cli import auth
-
         return bool((getattr(auth, getter)() or {}).get("logged_in"))
     except Exception:
         return False
@@ -107,8 +106,7 @@ def _build_apikey_providers_list() -> list:
                 continue
             if {_normalize_provider(a) for a in (_pp.name, *(_pp.aliases or ()))} & _dedicated_canonical:
                 continue
-            # Separate API-key vars from base-URL override vars — the health-check loop sends the
-            # first found value as Authorization: Bearer, so a URL string must never be picked.
+            # Key vars vs base-URL vars: the first found value goes out as Authorization: Bearer, never a URL.
             _is_url = lambda v: v.endswith("_BASE_URL") or v.endswith("_URL")  # noqa: E731
             _key_vars = tuple(v for v in _pp.env_vars if not _is_url(v))
             if not _key_vars:
@@ -167,9 +165,8 @@ def _probe_anthropic() -> ProbeResult:
             headers["x-api-key"] = key
         url = "https://api.anthropic.com/v1/models"
         r = httpx.get(url, headers=headers, timeout=10)
-        # Reactive recovery: OAuth subscriptions without 1M context reject with 400 "long context beta
-        # is not yet available for this subscription". Retry once with that beta stripped so doctor
-        # doesn't falsely report Anthropic as unreachable.
+        # OAuth subscriptions without 1M context reject with 400 "long context beta is not yet available";
+        # retry once with that beta stripped so doctor doesn't falsely report Anthropic as unreachable.
         if is_oauth and r.status_code == 400 and "long context beta" in r.text.lower() and "not yet available" in r.text.lower():
             headers["anthropic-beta"] = ",".join([b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS))
             r = httpx.get(url, headers=headers, timeout=10)
@@ -208,8 +205,7 @@ def _apikey_request(key: str, base_env, default_url) -> tuple:
     # Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1 (OpenAI-compat surface exposing /models).
     if not base and key.startswith("sk-kimi-"):
         base = "https://api.kimi.com/coding/v1"
-    # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding with no /v1) don't support
-    # /models — rewrite to the OpenAI-compat /v1 surface for health checks.
+    # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding sans /v1) lack /models — use the OpenAI-compat /v1 surface.
     if base and base.rstrip("/").endswith("/anthropic"):
         from agent.auxiliary_client import _to_openai_base_url
         base = _to_openai_base_url(base)
@@ -274,14 +270,12 @@ def _probe_azure_entra() -> ProbeResult:
             return _skip(name)
     except Exception:
         return _skip(name)
-
     try:
         from agent.azure_identity_adapter import (
             EntraIdentityConfig, SCOPE_AI_AZURE_DEFAULT, describe_active_credential, has_azure_identity_installed,
         )
     except Exception as exc:
         return _row(name, "warn", f"(adapter import failed: {exc})", [f"Azure Foundry adapter import failed: {exc}"], label=label)
-
     if not has_azure_identity_installed():
         return _row(name, "warn", "(azure-identity not installed)", [f"Install azure-identity: {sys.executable} -m pip install azure-identity"], label=label)
     entra_cfg = model_cfg.get("entra") or {}
@@ -315,9 +309,8 @@ def run_probes(probes: list) -> list:
     Probes are independent HTTP calls (series cost ~5s wall, 2s of it boto3's IMDS lookup);
     parallel collapses the section to roughly the slowest single probe without changing the output.
     """
-    # Disable boto3's EC2 instance-metadata probe (169.254.169.254, multi-second timeout off-EC2).
-    # Set on the parent thread before submitting so the env mutation never races a worker;
-    # has_aws_credentials() already gates on real env creds, so IMDS is never legitimate for doctor.
+    # Disable boto3's EC2 instance-metadata probe (169.254.169.254, multi-second timeout off-EC2). Set on the
+    # parent thread before submitting so it never races a worker; has_aws_credentials() already gates on real creds.
     _imds_prev = os.environ.get("AWS_EC2_METADATA_DISABLED")
     os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
     try:

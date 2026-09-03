@@ -1,13 +1,11 @@
 """``hermes doctor`` — diagnose (and with --fix, repair) a Hermes install.
 
-``run_doctor`` walks ``DOCTOR_CHECKS`` in order; each check prints its own
-rows and returns a ``Finding``. Check bodies live in the ``doctor_*`` sibling
-modules and are re-exported here so ``hermes_cli.doctor.<name>`` stays the
-stable import/monkeypatch surface.
+``run_doctor`` walks ``DOCTOR_CHECKS`` in order; each check prints its own rows and returns a ``Finding``.
+Check bodies live in the ``doctor_*`` siblings and are re-exported here so ``hermes_cli.doctor.<name>``
+stays the stable import/monkeypatch surface.
 """
 
-# stdlib modules stay bound here: tests patch doctor.shutil.which / doctor.subprocess.run /
-# doctor.importlib.util.find_spec / doctor.Path.home / doctor.sys.platform / doctor.os.listdir.
+# stdlib modules stay bound here: tests patch doctor.shutil.which / .subprocess.run / .importlib.util.find_spec / .Path.home / .sys.platform / .os.listdir.
 import os
 import sys
 import subprocess  # noqa: F401
@@ -19,7 +17,7 @@ from hermes_cli.config import (  # noqa: F401  (detect_install_method: tests pat
     detect_install_method, get_env_path, get_hermes_home, get_project_root,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_constants import display_hermes_home
+from hermes_constants import display_hermes_home, is_termux as _is_termux  # noqa: F401  (tests call doctor._is_termux)
 
 PROJECT_ROOT = get_project_root()
 HERMES_HOME = get_hermes_home()
@@ -71,8 +69,6 @@ _PROVIDER_ENV_HINTS = (
     "TOKENPLAN_API_KEY",
 )
 
-
-from hermes_constants import is_termux as _is_termux  # noqa: F401  (tests call doctor._is_termux)
 from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
 
 
@@ -87,17 +83,15 @@ def _check_auth_providers(should_fix: bool) -> Finding:
         if not _login_row("OpenAI Codex auth", codex_status):
             if codex_status.get("error"):
                 check_info(codex_status["error"])
-            # Native OAuth uses Hermes' own device-code flow — the Codex CLI is only needed to import
-            # existing tokens from ~/.codex/auth.json. Attach the hint to the Codex auth row so it
-            # doesn't read as remediation for whichever provider happens to print next.
+            # Native OAuth uses Hermes' own device-code flow — the Codex CLI only imports existing tokens from
+            # ~/.codex/auth.json. Hint sits under the Codex row so it doesn't read as another provider's remedy.
             if not _safe_which("codex"):
                 check_info("codex CLI not installed (optional — only required to import tokens from an existing Codex CLI login)")
         minimax_status = get_minimax_oauth_auth_status()
         _login_row("MiniMax OAuth", minimax_status, f"(logged in, region={minimax_status.get('region', 'global')})")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
-    # xAI OAuth — separate try/except so an import failure here cannot
-    # disrupt the already-printed Nous/Codex/MiniMax rows above.
+    # xAI OAuth — separate try/except so an import failure cannot disrupt the already-printed rows above.
     try:
         from hermes_cli.auth import get_xai_oauth_auth_status
         xai_oauth_status = get_xai_oauth_auth_status() or {}
@@ -197,15 +191,15 @@ def _print_summary(should_fix: bool, total: Finding) -> None:
 def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
-    ack_target = getattr(args, 'ack', None)
     # Doctor runs from the interactive CLI, so CLI-gated tool checks (e.g. cronjob) see the same context.
     os.environ.setdefault("HERMES_INTERACTIVE", "1")
-    if ack_target:
-        return _ack_advisory(ack_target)
+    if getattr(args, 'ack', None):
+        return _ack_advisory(args.ack)
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+    for line in ("┌─────────────────────────────────────────────────────────┐",
+                 "│                 🩺 Hermes Doctor                        │",
+                 "└─────────────────────────────────────────────────────────┘"):
+        print(color(line, Colors.CYAN))
     total = Finding()
     for title, check in DOCTOR_CHECKS:
         if title:

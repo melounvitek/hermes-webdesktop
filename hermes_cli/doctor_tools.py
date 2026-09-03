@@ -1,7 +1,5 @@
 """External-tool checks for hermes doctor: terminal backends, git/rg, Node + agent-browser, npm audit, tool availability.
-
-Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching).
-"""
+Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching)."""
 
 from __future__ import annotations
 
@@ -111,7 +109,6 @@ def _enabled_cli_toolsets_for_doctor() -> set[str] | None:
     try:
         from hermes_cli.config import load_config
         from hermes_cli.tools_config import _get_platform_tools
-
         return {str(toolset) for toolset in _get_platform_tools(load_config() or {}, "cli")}
     except Exception:
         return None
@@ -197,7 +194,6 @@ def _check_vercel_backend(issues: list[str]) -> None:
     _require(importlib.util.find_spec("vercel") is not None, ("vercel SDK", "(installed)"),
              ("vercel SDK not installed", "(pip install 'hermes-agent[vercel]')"),
              "Install the Vercel optional dependency: pip install 'hermes-agent[vercel]'", issues)
-
     auth_status = describe_vercel_auth()
     if auth_status.ok:
         check_ok("Vercel auth", f"({auth_status.label})")
@@ -239,8 +235,8 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
         running_in_container = _is_container()
     except Exception:
         running_in_container = False
-    # Inside our container docker-in-docker isn't set up, so the local backend is the intended one: skip the
-    # noisy "docker not found" warning. An explicit TERMINAL_ENV=docker (mounted docker.sock) still gets checked.
+    # In our container docker-in-docker isn't set up, so local is intended: skip the noisy "docker not found"
+    # warning. An explicit TERMINAL_ENV=docker (mounted docker.sock) still gets checked.
     if running_in_container and terminal_env != "docker":
         check_info("Running inside a container — using local terminal backend (docker-in-docker is not configured by default)")
         terminal_env = "local"
@@ -263,7 +259,6 @@ def _check_agent_browser(should_fix: bool) -> bool:
         resolved = _find_agent_browser(validate=False)
     except Exception:
         resolved = None
-
     if resolved and _is_npx_agent_browser_sentinel(resolved):
         check_ok("agent-browser", "(resolves via npx on first use)")
         if should_fix:
@@ -426,9 +421,7 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import PROJECT_ROOT, _doctor_web_capability_rows
     sys.path.insert(0, str(PROJECT_ROOT))
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
-
     available, unavailable = _apply_doctor_tool_availability_overrides(*check_tool_availability())
-
     # Web is split into search/extract readiness rows so an explicitly
     # selected but unconfigured backend cannot look healthy.
     web_rows = []
@@ -437,7 +430,6 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
         if web_rows:
             available = [tid for tid in available if tid != "web"]
             unavailable = [item for item in unavailable if item.get("name") != "web"]
-
     for tid in available:
         check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
     for status, label, detail in web_rows:
@@ -445,7 +437,6 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     for item in unavailable:
         env_vars = item.get("missing_vars") or item.get("env_vars") or []
         check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")
-
     # Only toolsets enabled for the CLI count toward the summary; default-off or
     # disabled toolsets may warn above but must not pollute it.
     api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
