@@ -30,9 +30,7 @@ logger = logging.getLogger("gateway.run")
 class GatewayBusySessionMixin:
     """Busy-session queueing, slot claims, slash dispatch tables, destructive-slash confirmation."""
 
-    def _queue_during_drain_enabled(
-        self, busy_input_mode: Optional[str] = None
-    ) -> bool:
+    def _queue_during_drain_enabled(self, busy_input_mode: Optional[str] = None) -> bool:
         # "queue"/"steer" mean messages survive a restart (queued for the new process); "interrupt" drops.
         mode = busy_input_mode or self._busy_input_mode
         return self._restart_requested and mode in {"queue", "steer"}
@@ -50,17 +48,12 @@ class GatewayBusySessionMixin:
         if pending_slot is None:
             return
         if session_key in pending_slot:
-            self._session_state(session_key).conversation.queued_events.append(
-                queued_event
-            )
+            self._session_state(session_key).conversation.queued_events.append(queued_event)
         else:
             pending_slot[session_key] = queued_event
 
     def _promote_queued_event(
-        self,
-        session_key: str,
-        adapter: Any,
-        pending_event: Optional["MessageEvent"],
+        self, session_key: str, adapter: Any, pending_event: Optional["MessageEvent"]
     ) -> Optional["MessageEvent"]:
         """Promote the next overflow item after the slot drained.
 
@@ -87,9 +80,7 @@ class GatewayBusySessionMixin:
             depth += 1
         return depth
 
-    def _rescue_orphaned_overflow(
-        self, session_key: str, adapter: Any
-    ) -> Optional["MessageEvent"]:
+    def _rescue_orphaned_overflow(self, session_key: str, adapter: Any) -> Optional["MessageEvent"]:
         """Pop the oldest orphaned FIFO overflow event for an idle session (None if nothing to rescue).
 
         ``queued_events`` drains only at the post-turn promotion site; a busy window ending without
@@ -113,15 +104,12 @@ class GatewayBusySessionMixin:
             logger.warning(
                 "Rescued orphaned FIFO overflow event for idle session "
                 "%s — it was queued during a busy window but the post-turn "
-                "drain never promoted it (#99882)",
-                session_key,
+                "drain never promoted it (#99882)", session_key,
             )
             if overflow:
                 logger.warning(
                     "%d overflow event(s) still queued for session %s after "
-                    "rescue staging (will drain via normal promotion)",
-                    len(overflow),
-                    session_key,
+                    "rescue staging (will drain via normal promotion)", len(overflow), session_key,
                 )
             return head
         except Exception:
@@ -186,9 +174,7 @@ class GatewayBusySessionMixin:
         return active_session_limit_message(active_count, max_sessions)
 
     def _claim_active_session_slot(
-        self,
-        session_key: str,
-        source: SessionSource,
+        self, session_key: str, source: SessionSource
     ) -> tuple[Any, Optional[str]]:
         """Claim a cross-process active-session slot for a new gateway turn."""
         if self._is_session_running(session_key):
@@ -252,9 +238,7 @@ class GatewayBusySessionMixin:
             logger.warning(
                 "Compression in-flight check failed while reading session %s; "
                 "treating compression as active to avoid interrupting a possible "
-                "parent-session rotation",
-                session_key,
-                exc_info=True,
+                "parent-session rotation", session_key, exc_info=True,
             )
             return True
         session_db = getattr(self, "_session_db", None)
@@ -262,9 +246,7 @@ class GatewayBusySessionMixin:
             return False
         raw_db = getattr(session_db, "_db", session_db)
         try:
-            holder = await asyncio.to_thread(
-                raw_db.get_compression_lock_holder, str(session_id)
-            )
+            holder = await asyncio.to_thread(raw_db.get_compression_lock_holder, str(session_id))
             # Production returns Optional[str]. Reject non-strings so a MagicMock auto-attr (or any
             # unexpected truthy) cannot look like a held lock and skip hygiene.
             return isinstance(holder, str) and bool(holder)
@@ -274,9 +256,7 @@ class GatewayBusySessionMixin:
             logger.warning(
                 "Compression in-flight check failed while reading lock holder "
                 "for session %s; treating compression as active to avoid "
-                "interrupting a possible parent-session rotation",
-                session_id,
-                exc_info=True,
+                "interrupting a possible parent-session rotation", session_id, exc_info=True,
             )
             return True
 
@@ -323,9 +303,7 @@ class GatewayBusySessionMixin:
         ):
             # Preserve photo-burst / media-merge semantics for the head slot.
             merge_pending_message_event(
-                adapter._pending_messages,
-                session_key,
-                event,
+                adapter._pending_messages, session_key, event,
                 merge_text=event.message_type == MessageType.TEXT,
             )
             return
@@ -333,8 +311,7 @@ class GatewayBusySessionMixin:
         if self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING:
             logger.warning(
                 "Dropping busy-mode follow-up for session %s — pending queue at cap (%d).",
-                session_key,
-                self._BUSY_QUEUE_MAX_PENDING,
+                session_key, self._BUSY_QUEUE_MAX_PENDING,
             )
             return
 
@@ -353,11 +330,7 @@ class GatewayBusySessionMixin:
 
         adapter = self._adapter_for_source(event.source)
         enriched_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
-            event,
-            adapter,
-            event.source,
-            text,
-            log_context="Busy-steer",
+            event, adapter, event.source, text, log_context="Busy-steer"
         )
         if not successful_transcripts:
             return text
@@ -378,8 +351,7 @@ class GatewayBusySessionMixin:
         """Send a busy-path reply anchored to the event (thread metadata included)."""
         reply_anchor = self._reply_anchor_for_event(event)
         await adapter._send_with_retry(
-            chat_id=event.source.chat_id,
-            content=content,
+            chat_id=event.source.chat_id, content=content,
             reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
             metadata=self._thread_metadata_for_source(event.source, reply_anchor),
         )
@@ -440,17 +412,12 @@ class GatewayBusySessionMixin:
         except Exception:
             logger.warning(
                 "Plain-text approval routing failed for session %s; "
-                "falling through to busy handling",
-                session_key, exc_info=True,
+                "falling through to busy handling", session_key, exc_info=True,
             )
         return False
 
     async def _resolve_busy_steer_or_redirect(
-        self,
-        event: MessageEvent,
-        session_key: str,
-        effective_mode: str,
-        running_agent: Any,
+        self, event: MessageEvent, session_key: str, effective_mode: str, running_agent: Any
     ) -> "GatewayRunner._BusySteerOutcome":
         """Apply interrupt->queue demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
@@ -458,14 +425,12 @@ class GatewayBusySessionMixin:
         # the agent isn't running yet, lacks steer(), or the payload is empty. Interrupt is demoted
         # to queue while subagents run (interrupt() would abort them); /stop and /new still cancel all.
         demoted_for_subagents = (
-            effective_mode == "interrupt"
-            and self._agent_has_active_subagents(running_agent)
+            effective_mode == "interrupt" and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
             logger.info(
                 "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
-                "because the running agent has active subagents (#30170)",
-                session_key,
+                "because the running agent has active subagents (#30170)", session_key,
             )
             effective_mode = "queue"
         demoted_for_compression = (
@@ -475,8 +440,7 @@ class GatewayBusySessionMixin:
         if demoted_for_compression:
             logger.info(
                 "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
-                "because context compression is in flight (#56391)",
-                session_key,
+                "because context compression is in flight (#56391)", session_key,
             )
             effective_mode = "queue"
         steered = False
@@ -526,11 +490,8 @@ class GatewayBusySessionMixin:
                 logger.warning("Gateway redirect failed for session %s: %s", session_key, exc)
                 redirected = False
         return self._BusySteerOutcome(
-            effective_mode=effective_mode,
-            demoted_for_subagents=demoted_for_subagents,
-            demoted_for_compression=demoted_for_compression,
-            steered=steered,
-            redirected=redirected,
+            effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
+            demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
         )
 
     async def _interrupt_running_agent_for_busy_event(self, event: MessageEvent, adapter, running_agent) -> None:
@@ -541,10 +502,7 @@ class GatewayBusySessionMixin:
             _media_urls = getattr(event, "media_urls", None) or []
             if self._pending_event_audio_paths(event):
                 _interrupt_text, _ = await self._transcribe_and_echo_pending_voice(
-                    event,
-                    adapter,
-                    event.source,
-                    event.text or "",
+                    event, adapter, event.source, event.text or "",
                     log_context="Voice-busy-interrupt",
                 )
             elif not _interrupt_text and _media_urls:
@@ -564,10 +522,7 @@ class GatewayBusySessionMixin:
         else:
             steer_ack_enabled = bool(
                 resolve_display_setting(
-                    _load_gateway_config(),
-                    platform_key,
-                    "busy_steer_ack_enabled",
-                    True,
+                    _load_gateway_config(), platform_key, "busy_steer_ack_enabled", True
                 )
             )
         if not steer_ack_enabled:
@@ -579,23 +534,12 @@ class GatewayBusySessionMixin:
     )
 
     def _compose_busy_ack_message(
-        self,
-        event: MessageEvent,
-        now: float,
-        _busy_state,
-        running_agent: Any,
-        *,
-        is_steer_mode: bool,
-        is_queue_mode: bool,
-        is_redirect_mode: bool,
-        demoted_for_subagents: bool,
-        demoted_for_compression: bool,
+        self, event: MessageEvent, now: float, _busy_state, running_agent: Any, *,
+        is_steer_mode: bool, is_queue_mode: bool, is_redirect_mode: bool,
+        demoted_for_subagents: bool, demoted_for_compression: bool,
     ) -> str:
         from gateway.run import (
-            _AGENT_PENDING_SENTINEL,
-            _hermes_home,
-            _load_gateway_config,
-            _platform_config_key,
+            _AGENT_PENDING_SENTINEL, _hermes_home, _load_gateway_config, _platform_config_key
         )
         from gateway.display_config import resolve_display_setting
 
@@ -603,10 +547,8 @@ class GatewayBusySessionMixin:
         status_parts = []
         busy_ack_detail_enabled = bool(
             resolve_display_setting(
-                _load_gateway_config(),
-                _platform_config_key(event.source.platform),
-                "busy_ack_detail",
-                True,
+                _load_gateway_config(), _platform_config_key(event.source.platform),
+                "busy_ack_detail", True,
             )
         )
 
@@ -647,10 +589,7 @@ class GatewayBusySessionMixin:
         # One-time onboarding hint about the queue/interrupt knob (flag persisted to config.yaml).
         try:
             from agent.onboarding import (
-                BUSY_INPUT_FLAG,
-                busy_input_hint_gateway,
-                is_seen,
-                mark_seen,
+                BUSY_INPUT_FLAG, busy_input_hint_gateway, is_seen, mark_seen
             )
             if not is_seen(_load_gateway_config(), BUSY_INPUT_FLAG):
                 _hint_mode = (
@@ -678,11 +617,9 @@ class GatewayBusySessionMixin:
         if not self._is_user_authorized(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s",
-                event.source.user_id,
+                "user=%s (%s), platform=%s, session=%s", event.source.user_id,
                 event.source.user_name,
-                event.source.platform.value if event.source.platform else "unknown",
-                session_key,
+                event.source.platform.value if event.source.platform else "unknown", session_key,
             )
             return True  # handled (silently dropped); do not fall through
 
@@ -761,13 +698,8 @@ class GatewayBusySessionMixin:
         self._session_state(session_key).turn.busy_ack_ts = now
 
         message = self._compose_busy_ack_message(
-            event,
-            now,
-            _busy_state,
-            running_agent,
-            is_steer_mode=is_steer_mode,
-            is_queue_mode=is_queue_mode,
-            is_redirect_mode=is_redirect_mode,
+            event, now, _busy_state, running_agent, is_steer_mode=is_steer_mode,
+            is_queue_mode=is_queue_mode, is_redirect_mode=is_redirect_mode,
             demoted_for_subagents=_steer.demoted_for_subagents,
             demoted_for_compression=_steer.demoted_for_compression,
         )
@@ -879,10 +811,7 @@ class GatewayBusySessionMixin:
         if state is not None and not args:
             reason = state.get("reason")
             suffix = f" (reason: {reason})" if reason else ""
-            return (
-                f"⏸️ Hermes is already paused{suffix}. "
-                "Use `/pause off` to resume."
-            )
+            return f"⏸️ Hermes is already paused{suffix}. Use `/pause off` to resume."
         estop.engage(reason=args or None)
         suffix = f" (reason: {args})" if args else ""
         return (
@@ -904,9 +833,7 @@ class GatewayBusySessionMixin:
         # Hard-kill: a soft interrupt can't reach a truly hung executor thread.
         from gateway.run import _INTERRUPT_REASON_STOP
         await self._interrupt_and_clear_session(
-            quick_key,
-            source,
-            interrupt_reason=_INTERRUPT_REASON_STOP,
+            quick_key, source, interrupt_reason=_INTERRUPT_REASON_STOP,
             invalidation_reason="stop_command",
         )
         logger.info("STOP for session %s — agent interrupted, session lock released", quick_key)
@@ -917,9 +844,7 @@ class GatewayBusySessionMixin:
         # into the same broken history); clear pending messages so the old text doesn't replay.
         from gateway.run import _INTERRUPT_REASON_RESET
         await self._interrupt_and_clear_session(
-            quick_key,
-            source,
-            interrupt_reason=_INTERRUPT_REASON_RESET,
+            quick_key, source, interrupt_reason=_INTERRUPT_REASON_RESET,
             invalidation_reason="new_command",
         )
         return await self._handle_reset_command(event)
@@ -936,22 +861,16 @@ class GatewayBusySessionMixin:
             queued_event = MessageEvent(
                 text=queued_text,
                 message_type=event.message_type if has_media else MessageType.TEXT,
-                source=event.source,
-                raw_message=event.raw_message,
-                message_id=event.message_id,
+                source=event.source, raw_message=event.raw_message, message_id=event.message_id,
                 media_urls=list(getattr(event, "media_urls", []) or []),
                 media_types=list(getattr(event, "media_types", []) or []),
                 media_text_inlined=list(getattr(event, "media_text_inlined", []) or []),
-                reply_to_message_id=event.reply_to_message_id,
-                reply_to_text=event.reply_to_text,
+                reply_to_message_id=event.reply_to_message_id, reply_to_text=event.reply_to_text,
                 reply_to_author_id=event.reply_to_author_id,
                 reply_to_author_name=event.reply_to_author_name,
-                reply_to_is_own_message=event.reply_to_is_own_message,
-                auto_skill=event.auto_skill,
-                channel_prompt=event.channel_prompt,
-                channel_context=event.channel_context,
-                internal=event.internal,
-                timestamp=event.timestamp,
+                reply_to_is_own_message=event.reply_to_is_own_message, auto_skill=event.auto_skill,
+                channel_prompt=event.channel_prompt, channel_context=event.channel_context,
+                internal=event.internal, timestamp=event.timestamp,
             )
             self._enqueue_fifo(quick_key, queued_event, adapter)
         depth = self._queue_depth(quick_key, adapter=adapter)
@@ -974,11 +893,8 @@ class GatewayBusySessionMixin:
             adapter = self._adapter_for_source(source)
             if adapter:
                 queued_event = MessageEvent(
-                    text=steer_text,
-                    message_type=MessageType.TEXT,
-                    source=event.source,
-                    message_id=event.message_id,
-                    channel_prompt=event.channel_prompt,
+                    text=steer_text, message_type=MessageType.TEXT, source=event.source,
+                    message_id=event.message_id, channel_prompt=event.channel_prompt,
                     channel_context=event.channel_context,
                 )
                 self._enqueue_fifo(quick_key, queued_event, adapter)
@@ -1020,9 +936,7 @@ class GatewayBusySessionMixin:
             return await self._handle_loop_command(event)
         return "Agent is running — use /loop status / pause / stop mid-run, or /stop before setting a new loop."
 
-    def _check_slash_access(
-        self, source: SessionSource, canonical_cmd: str
-    ) -> Optional[str]:
+    def _check_slash_access(self, source: SessionSource, canonical_cmd: str) -> Optional[str]:
         """Denial message if ``source`` cannot run ``canonical_cmd``, else None (both dispatch paths
         use it so an in-flight agent can't bypass admin gating; no ``allow_admin_from`` → None)."""
         from gateway.slash_access import policy_for_source as _policy_for_source
@@ -1034,9 +948,7 @@ class GatewayBusySessionMixin:
             return None
         logger.info(
             "Slash command /%s denied for %s:%s (not admin, not in user_allowed_commands)",
-            canonical_cmd,
-            source.platform.value if source.platform else "?",
-            source.user_id,
+            canonical_cmd, source.platform.value if source.platform else "?", source.user_id,
         )
         allowed_preview = sorted(policy.user_allowed_commands)
         if allowed_preview:
@@ -1067,9 +979,7 @@ class GatewayBusySessionMixin:
         chat_type = getattr(source, "chat_type", None) or ""
         # Match the exact key or prefix + ":" so a thread id that merely starts with this one
         # is not matched.
-        prefix = ":".join(
-            ["agent:main", platform, chat_type, str(chat_id), str(thread_id)]
-        )
+        prefix = ":".join(["agent:main", platform, chat_type, str(chat_id), str(thread_id)])
         return [
             key
             for key, agent in self._running_agent_items()
@@ -1159,13 +1069,7 @@ class GatewayBusySessionMixin:
             return BlueprintCommandResult(f"Cron blueprint command failed: {e}")
 
     async def _maybe_confirm_destructive_slash(
-        self,
-        *,
-        event: MessageEvent,
-        command: str,
-        title: str,
-        detail: str,
-        execute,
+        self, *, event: MessageEvent, command: str, title: str, detail: str, execute
     ) -> Union[str, "EphemeralReply", None]:
         """Gate a destructive session slash command (/new, /reset, /undo).
 
@@ -1204,11 +1108,7 @@ class GatewayBusySessionMixin:
             f"_Text fallback: reply `{_p}approve`, `{_p}always`, or `{_p}cancel`._"
         )
         return await self._request_slash_confirm(
-            event=event,
-            command=command,
-            title=title,
-            message=prompt_message,
-            handler=_on_confirm,
+            event=event, command=command, title=title, message=prompt_message, handler=_on_confirm
         )
 
     _DESTRUCTIVE_OPTOUT_NOTE = {
@@ -1247,8 +1147,7 @@ class GatewayBusySessionMixin:
                 else:
                     logger.warning(
                         "Could not persist destructive_slash_confirm=false "
-                        "(session=%s); config.yaml is not writable",
-                        session_key,
+                        "(session=%s); config.yaml is not writable", session_key,
                     )
             except Exception as exc:
                 logger.warning("Failed to persist destructive_slash_confirm=false: %s", exc)
@@ -1259,13 +1158,7 @@ class GatewayBusySessionMixin:
         return result
 
     async def _request_slash_confirm(
-        self,
-        *,
-        event: MessageEvent,
-        command: str,
-        title: str,
-        message: str,
-        handler,
+        self, *, event: MessageEvent, command: str, title: str, message: str, handler
     ) -> Optional[str]:
         """Ask the user to confirm a slash command; ``handler(choice)`` runs on "once"/"always"/
         "cancel" and its return is sent as a message. Returns None if buttons rendered, else the
@@ -1291,19 +1184,14 @@ class GatewayBusySessionMixin:
         if adapter is not None:
             try:
                 button_result = await adapter.send_slash_confirm(
-                    chat_id=source.chat_id,
-                    title=title,
-                    message=message,
-                    session_key=session_key,
-                    confirm_id=confirm_id,
-                    metadata=metadata,
+                    chat_id=source.chat_id, title=title, message=message, session_key=session_key,
+                    confirm_id=confirm_id, metadata=metadata,
                 )
                 if button_result and getattr(button_result, "success", False):
                     return None  # buttons rendered — no redundant text ack
             except Exception as exc:
                 logger.debug(
-                    "send_slash_confirm failed for %s on %s: %s",
-                    command, source.platform, exc,
+                    "send_slash_confirm failed for %s on %s: %s", command, source.platform, exc
                 )
         # Text fallback — the prompt message itself is the direct reply.
         return message
