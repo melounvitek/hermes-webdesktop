@@ -59,10 +59,8 @@ def require_enabled(console: Console, cfg: dict, product: str, command: str) -> 
     """Print the "integration is disabled" hint and return False unless ``cfg["enabled"]``."""
     if cfg.get("enabled"):
         return True
-    console.print(
-        f"[yellow]{product} integration is disabled.  Run "
-        f"`hermes secrets {command} setup` first.[/yellow]"
-    )
+    console.print(f"[yellow]{product} integration is disabled.  Run "
+                  f"`hermes secrets {command} setup` first.[/yellow]")
     return False
 
 
@@ -96,12 +94,8 @@ def print_table(console: Console, columns: Sequence, rows: Iterable,
 def cli_version(binary: Path) -> str:
     """Return the first line of ``<binary> --version`` or ``"version unknown"``."""
     try:
-        res = subprocess.run(
-            [str(binary), "--version"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=5,
-        )
+        res = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
+                             encoding='utf-8', errors='replace', timeout=5)
         if res.returncode == 0:
             return (res.stdout or res.stderr).strip().splitlines()[0]
     except (OSError, subprocess.TimeoutExpired):
@@ -112,8 +106,8 @@ def cli_version(binary: Path) -> str:
 def secret_cli_env() -> dict:
     """Env for a secret-manager CLI child (``bws`` / ``op``).
 
-    Intentionally receives tokens — no scrub, no HOME rewrite (both CLIs store
-    state under the real user home).
+    Intentionally receives tokens — no scrub, no HOME rewrite (both CLIs store state under the
+    real user home).
     """
     from tools.environments.local import build_subprocess_env
 
@@ -122,41 +116,10 @@ def secret_cli_env() -> dict:
     return env
 
 
-def prompt_new_token(
-    console: Console,
-    given: Optional[str],
-    token_env: str,
-    *,
-    flag: str,
-    intro: str,
-    prompt: str,
-) -> Optional[str]:
-    """Return a non-empty token from ``given`` or a masked prompt; None (after printing) on failure."""
-    token = (given or "").strip()
-    if not token:
-        if not sys.stdin.isatty():
-            console.print(f"[red]No TTY — pass the token with {flag}.[/red]")
-            return None
-        console.print(intro)
-        token = masked_secret_prompt(prompt).strip()
-    if not token:
-        console.print("[red]Empty token, aborting.[/red]")
-        return None
-    return token
-
-
 def rotate_token(
-    console: Console,
-    given: Optional[str],
-    token_env: str,
-    *,
-    flag: str,
-    intro: str,
-    prompt: str,
-    verify: Optional[Callable[[str], bool]],
-    save: Callable[[str, str], object],
-    env_path: Callable[[], object],
-    clear_caches: Callable[[], object],
+    console: Console, given: Optional[str], token_env: str, *, flag: str, intro: str, prompt: str,
+    verify: Optional[Callable[[str], bool]], save: Callable[[str, str], object],
+    env_path: Callable[[], object], clear_caches: Callable[[], object],
     disabled_note: Optional[str],
 ) -> int:
     """Shared ``token`` subcommand: prompt, optionally verify, then persist. Returns the exit code.
@@ -168,31 +131,30 @@ def rotate_token(
     in effect. Old cached pulls are keyed on the previous token's fingerprint; clearing them
     makes the next startup fetch fresh with the new credential.
     """
-    token = prompt_new_token(console, given, token_env, flag=flag, intro=intro, prompt=prompt)
-    if token is None:
+    token = (given or "").strip()
+    if not token:
+        if not sys.stdin.isatty():
+            console.print(f"[red]No TTY — pass the token with {flag}.[/red]")
+            return 1
+        console.print(intro)
+        token = masked_secret_prompt(prompt).strip()
+    if not token:
+        console.print("[red]Empty token, aborting.[/red]")
         return 1
     if verify is not None and not verify(token):
         return 1
     save(token_env, token)
     os.environ[token_env] = token
     clear_caches()
-    console.print(
-        f"[green]✓[/green] stored in {env_path()} as {token_env}.  "
-        "Takes effect on the next Hermes invocation."
-    )
+    console.print(f"[green]✓[/green] stored in {env_path()} as {token_env}.  "
+                  "Takes effect on the next Hermes invocation.")
     if disabled_note:
         console.print(disabled_note)
     return 0
 
 
-def prompt_index(
-    console: Console,
-    prompt: str,
-    count: int,
-    *,
-    allow_empty: bool = False,
-    empty_message: Optional[str] = None,
-) -> int:
+def prompt_index(console: Console, prompt: str, count: int, *,
+                 allow_empty: bool = False, empty_message: Optional[str] = None) -> int:
     """Loop until the user enters an integer in ``1..count``; return it.
 
     Blank input returns 0 when ``allow_empty``; otherwise ``empty_message`` (if any)
