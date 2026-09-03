@@ -53,7 +53,6 @@ class InternalSessionRPC(Protocol):
     ) -> Mapping[str, Any] | None: ...
 
 
-# Resolve the local or peer session transport for one durable room task.
 MemberTransportResolver = Callable[["HostedRoomBinding", Mapping[str, Any]], InternalSessionRPC]
 
 
@@ -109,18 +108,16 @@ class HostedRoomRuntime:
         indeterminate_defer_seconds: float = 60.0, max_concurrent_rooms: int = 4,
         unavailable_retry_min_seconds: float = 1.0, unavailable_retry_max_seconds: float = 30.0,
         process_generation: str | None = None) -> None:
-        for name, value in (
-            ("lease_ttl_seconds", lease_ttl_seconds),
-            ("poll_interval_seconds", poll_interval_seconds),
-            ("active_poll_interval_seconds", active_poll_interval_seconds),
-            ("turn_timeout_seconds", turn_timeout_seconds),
-            ("indeterminate_defer_seconds", indeterminate_defer_seconds)):
+        positive = dict(
+            lease_ttl_seconds=lease_ttl_seconds, poll_interval_seconds=poll_interval_seconds,
+            active_poll_interval_seconds=active_poll_interval_seconds,
+            turn_timeout_seconds=turn_timeout_seconds,
+            indeterminate_defer_seconds=indeterminate_defer_seconds)
+        for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
-        if (
-            not isinstance(max_concurrent_rooms, int)
-            or isinstance(max_concurrent_rooms, bool)
-            or max_concurrent_rooms < 1):
+        if (not isinstance(max_concurrent_rooms, int) or isinstance(max_concurrent_rooms, bool)
+                or max_concurrent_rooms < 1):
             raise ValueError("max_concurrent_rooms must be a positive integer")
         if not 0 < unavailable_retry_min_seconds <= unavailable_retry_max_seconds:
             raise ValueError("unavailable retry bounds are invalid")
@@ -130,11 +127,8 @@ class HostedRoomRuntime:
         self.rpc, self.transport_resolver, self.turn_lock = rpc, transport_resolver, turn_lock
         self.prepare_room, self.publish_terminal = prepare_room, publish_terminal
         self.pending_action, self.clock = pending_action, clock
-        self.lease_ttl_seconds, self.poll_interval_seconds = (
-            float(lease_ttl_seconds), float(poll_interval_seconds))
-        self.active_poll_interval_seconds = float(active_poll_interval_seconds)
-        self.turn_timeout_seconds = float(turn_timeout_seconds)
-        self.indeterminate_defer_seconds = float(indeterminate_defer_seconds)
+        for name, value in positive.items():
+            setattr(self, name, float(value))
         self.max_concurrent_rooms = max_concurrent_rooms
         self.unavailable_retry_min_seconds, self.unavailable_retry_max_seconds = (
             float(unavailable_retry_min_seconds), float(unavailable_retry_max_seconds))
@@ -143,7 +137,7 @@ class HostedRoomRuntime:
             cast(Callable[[], Iterable[HostedRoomBinding]], rooms) if callable(rooms)
             else (lambda bindings=tuple(rooms): bindings))
         self._stop, self._wake = threading.Event(), threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread = self._last_error = None
         self._room_threads: dict[str, threading.Thread] = {}
         self._rooms_needing_reschedule: set[str] = set()
         self._leases: dict[str, state.DriverLease] = {}
@@ -154,7 +148,6 @@ class HostedRoomRuntime:
         self._blocked_rooms: set[str] = set()
         self._status_lock, self._current_tasks = threading.Lock(), {}
         self._room_schedule_cursor, self._cycles = 0, 0
-        self._last_error: str | None = None
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -182,7 +175,7 @@ class HostedRoomRuntime:
             room_threads = tuple(self._room_threads.values())
         for room_thread in room_threads:
             room_thread.join(max(0.0, deadline - time.monotonic()))
-        return not thread.is_alive() and all(not t.is_alive() for t in room_threads)
+        return not any(t.is_alive() for t in (thread, *room_threads))
 
     def wakeup(self) -> None:
         """Wake the worker after task admission or a room-state change."""
@@ -219,32 +212,26 @@ class HostedRoomRuntime:
             if before["status"] in state.TERMINAL_STATUSES:
                 raise state.InvalidTaskTransitionError(
                     f"cannot cancel task in state '{before['status']}'")
-            fenced = dict(
-                cancel_id=cancel_id, expected_cancel_generation=before["cancel_generation"],
-                clock=self.clock)
-            if before["status"] in {"queued", "deferred"}:
-                try:
-                    cancelled = state.cancel_task(self.db_path, identity, **fenced)
-                except (state.InvalidTaskTransitionError, state.StaleTaskError):
-                    continue  # lost the race with the worker; re-route
-                self.wakeup()
-                return cancelled
+            direct = before["status"] in {"queued", "deferred"}
             try:
-                stopping = state.begin_task_cancel(self.db_path, identity, **fenced)
+                result = (state.cancel_task if direct else state.begin_task_cancel)(
+                    self.db_path, identity, cancel_id=cancel_id,
+                    expected_cancel_generation=before["cancel_generation"], clock=self.clock)
             except (state.InvalidTaskTransitionError, state.StaleTaskError):
-                continue  # settled or re-queued mid-flight; re-route
-            binding = self._binding_for_room(identity.room_id)
-            try:
-                if binding is not None:
-                    lease = self._ensure_lease(binding)
-                    if self._peer_stop_acknowledged(binding, stopping) or (
-                        not self._settle_stopping_completion(binding, stopping, lease)
-                        and self._interrupt_stopping_task(binding, stopping)):
-                        self._complete_cancel(stopping, cancel_id=cancel_id)
-            except Exception as exc:
-                self._record_error(f"stop remains pending: {exc}")
+                continue  # lost the race with the worker (settled or re-queued); re-route
+            if not direct:
+                binding = self._binding_for_room(identity.room_id)
+                try:
+                    if binding is not None:
+                        lease = self._ensure_lease(binding)
+                        if self._peer_stop_acknowledged(binding, result) or (
+                            not self._settle_stopping_completion(binding, result, lease)
+                            and self._interrupt_stopping_task(binding, result)):
+                            self._complete_cancel(result, cancel_id=cancel_id)
+                except Exception as exc:
+                    self._record_error(f"stop remains pending: {exc}")
             self.wakeup()
-            return state.get_task(self.db_path, identity)
+            return result if direct else state.get_task(self.db_path, identity)
         # Routing retries exhausted under contention: surface the live status honestly.
         final = state.get_task(self.db_path, identity)
         if final["status"] == "cancelled":
@@ -264,20 +251,21 @@ class HostedRoomRuntime:
         lease = self._ensure_lease(binding)
         if task["status"] == "deferred":
             return self._requeue(state.requeue_deferred_task, task, lease, identity.room_id)
-        # Explicit Retry may resume the exact stored session; an automatic
-        # abandoned-attempt scan remains non-resuming for local sessions.
+        # Explicit Retry may resume the exact stored session; the automatic abandoned-attempt
+        # scan stays non-resuming for local sessions.
         inspection = self._inspect_recovery_session(binding, task)
         if inspection.terminal is not None:
             return self._resolve_indeterminate(binding, task, lease, inspection.terminal)
         if inspection.status == "cancelled":
-            return self._resolve_remote_cancel(binding, task, lease)
+            return self._fenced(
+                state.resolve_indeterminate_cancellation, binding, task, lease,
+                cancel_id=f"remote-cancel:{task['execution_generation']}")
         if inspection.active:
             self._set_blocked(identity.room_id, True)
             raise state.InvalidTaskTransitionError(
                 "cannot retry while the original task attempt is still active")
         return self._requeue(state.requeue_indeterminate_task, task, lease, identity.room_id)
 
-    # ------------------------------------------------------------------ durable-state helpers
     def _publish(self, binding: HostedRoomBinding, task: dict[str, Any]) -> dict[str, Any]:
         if self.publish_terminal is not None:
             self.publish_terminal(binding, task)
@@ -307,9 +295,9 @@ class HostedRoomRuntime:
     def _complete_cancel(
         self, task: Mapping[str, Any], *, cancel_id: str | None = None) -> dict[str, Any]:
         return state.complete_task_cancel(
-            self.db_path, task["identity"],
+            self.db_path, task["identity"], clock=self.clock,
             cancel_id=task["cancel_id"] if cancel_id is None else cancel_id,
-            expected_cancel_generation=task["cancel_generation"], clock=self.clock)
+            expected_cancel_generation=task["cancel_generation"])
 
     def _resolve_indeterminate(
         self, binding: HostedRoomBinding, task: Mapping[str, Any], lease: state.DriverLease,
@@ -317,13 +305,6 @@ class HostedRoomRuntime:
         return self._fenced(
             state.resolve_indeterminate_task, binding, task, lease, publish=publish,
             **asdict(terminal))
-
-    def _resolve_remote_cancel(
-        self, binding: HostedRoomBinding, task: Mapping[str, Any], lease: state.DriverLease,
-        *, publish: bool = True) -> dict[str, Any]:
-        return self._fenced(
-            state.resolve_indeterminate_cancellation, binding, task, lease, publish=publish,
-            cancel_id=f"remote-cancel:{task['execution_generation']}")
 
     def _finish_stop(
         self, binding: HostedRoomBinding, task: Mapping[str, Any], lease: state.DriverLease
@@ -336,7 +317,6 @@ class HostedRoomRuntime:
             return True
         return False
 
-    # ------------------------------------------------------------------ session probes
     def _resume_exact(
         self, transport: InternalSessionRPC, room_id: str, profile: str) -> str | None:
         """Resume the canonical room session and return its runtime id (None when absent).
@@ -380,15 +360,13 @@ class HostedRoomRuntime:
     def _interrupt_stopping_task(self, binding: HostedRoomBinding, task: Mapping[str, Any]) -> bool:
         transport, profile, session_id = self._open_session(binding, task)
         if session_id is None:
-            # A local accepted turn cannot survive without its canonical
-            # session: an authoritative absence is a safe Stop acknowledgement
-            # (resolution errors raise). A peer remains uncertain instead.
+            # A local turn cannot survive without its canonical session, so an authoritative
+            # absence is a safe Stop acknowledgement (errors raise); a peer stays uncertain.
             return transport is not None and transport is self.rpc
         info = transport.info(**_session_kw(profile, session_id))
         if not _info_active(info):
-            # History was checked immediately before this probe. An exact
-            # session that is no longer active cannot keep executing, and after
-            # a restart its process-local task marker is expected to be absent.
+            # History was checked just before this probe: an inactive exact session cannot
+            # keep executing, and after a restart its process-local task marker is absent.
             return True
         if not _info_is_active_for(info, task["identity"], require_exact=True):
             return False
@@ -415,8 +393,7 @@ class HostedRoomRuntime:
         self, task: Mapping[str, Any], *, session_id: str, info: Mapping[str, Any]) -> None:
         if self.pending_action is None:
             return
-        approval = info.get("pending_approval") or info.get("approval")
-        action = None
+        approval, action = info.get("pending_approval") or info.get("approval"), None
         if isinstance(approval, Mapping):
             choices = [c for c in approval.get("choices") or () if c in {"once", "deny"}]
             safe_approval = {**approval, "choices": choices or ["once", "deny"]}
@@ -430,7 +407,7 @@ class HostedRoomRuntime:
     def _retry_stopping_tasks(self, binding: HostedRoomBinding, lease: state.DriverLease) -> bool:
         for task in self._tasks(binding, "stopping"):
             try:
-                lease = self._renew_lease_if_needed(binding, lease)
+                lease = self._renew_lease_if_needed(lease)
                 if self._peer_stop_acknowledged(binding, task):
                     self._complete_cancel(task)
                     continue
@@ -445,8 +422,7 @@ class HostedRoomRuntime:
     def _worker_loop(self) -> None:
         try:
             while not self._stop.is_set():
-                # Clear before work so a write racing the cycle remains set and
-                # causes an immediate follow-up pass rather than being lost.
+                # Clear before work so a write racing the cycle forces a follow-up pass.
                 self._wake.clear()
                 try:
                     self._run_cycle()
@@ -511,9 +487,8 @@ class HostedRoomRuntime:
                 self._set_blocked(binding.room_id, False)
             self._record_error(f"room {binding.room_id}: {exc}")
         finally:
-            current = threading.current_thread()
             with self._status_lock:
-                if self._room_threads.get(binding.room_id) is current:
+                if self._room_threads.get(binding.room_id) is threading.current_thread():
                     self._room_threads.pop(binding.room_id, None)
                 should_wake = binding.room_id in self._rooms_needing_reschedule
                 self._rooms_needing_reschedule.discard(binding.room_id)
@@ -530,19 +505,21 @@ class HostedRoomRuntime:
                 return
             self._ambiguous_rooms.pop(binding.room_id, None)
         lease = self._ensure_lease(binding)
-        recovery_key = (lease.room_id, lease.lease_generation)
-        if recovery_key not in self._recovered_leases:
+        if (lease.room_id, lease.lease_generation) not in self._recovered_leases:
             state.recover_room(self.db_path, lease, clock=self.clock)
-            self._recovered_leases.add(recovery_key)
+            self._recovered_leases.add((lease.room_id, lease.lease_generation))
         if self._retry_stopping_tasks(binding, lease):
             self._set_blocked(binding.room_id, True)
             return
         if self._reconcile_indeterminate(binding, lease):
             return
         for task in self._tasks(binding, "queued"):
-            if self._stop.is_set() or self._route_retry_is_deferred(task):
+            retry = self._unavailable_route_retries.get(
+                (task["identity"].room_id, _member_id(task)))
+            if self._stop.is_set() or (
+                    retry is not None and self.clock() < retry["next_attempt_at"]):
                 return
-            lease = self._renew_lease_if_needed(binding, lease)
+            lease = self._renew_lease_if_needed(lease)
             attempt = state.start_task(
                 self.db_path, task["identity"], lease,
                 expected_cancel_generation=task["cancel_generation"], clock=self.clock)
@@ -551,17 +528,8 @@ class HostedRoomRuntime:
             if current["status"] not in state.TERMINAL_STATUSES:
                 return
 
-    # ------------------------------------------------------------------ route retry backoff
-    @staticmethod
-    def _route_retry_key(task: Mapping[str, Any]) -> tuple[str, str]:
-        return task["identity"].room_id, _member_id(task)
-
-    def _route_retry_is_deferred(self, task: Mapping[str, Any]) -> bool:
-        retry = self._unavailable_route_retries.get(self._route_retry_key(task))
-        return retry is not None and self.clock() < retry["next_attempt_at"]
-
     def _defer_unavailable_route(self, task: Mapping[str, Any]) -> float:
-        key = self._route_retry_key(task)
+        key = (task["identity"].room_id, _member_id(task))
         previous = self._unavailable_route_retries.get(key)
         lo, hi = self.unavailable_retry_min_seconds, self.unavailable_retry_max_seconds
         delay = lo if previous is None else min(hi, max(lo, previous["delay"] * 2))
@@ -575,26 +543,21 @@ class HostedRoomRuntime:
             current = self._leases.get(binding.room_id)
         if current is not None:
             try:
-                return self._renew_lease_if_needed(binding, current)
+                return self._renew_lease_if_needed(current)
             except state.StaleLeaseError:
                 self._drop_lease(binding.room_id)
-
         lease = state.acquire_lease(
             self.db_path, room_id=binding.room_id, gateway_id=binding.gateway_id,
             authority_epoch=binding.authority_epoch, process_generation=self.process_generation,
             ttl_seconds=self.lease_ttl_seconds, clock=self.clock)
         with self._status_lock:
             self._leases[binding.room_id] = lease
-            self._recovered_leases = {
-                key for key in self._recovered_leases if key[0] != binding.room_id}
+            self._recovered_leases = {k for k in self._recovered_leases if k[0] != binding.room_id}
         return lease
 
     def _renew_lease_if_needed(
-        self, binding: HostedRoomBinding, lease: state.DriverLease, *, force: bool = False
-    ) -> state.DriverLease:
-        del binding
-        renew_at = lease.expires_at - (self.lease_ttl_seconds / 2)
-        if not force and self.clock() < renew_at:
+        self, lease: state.DriverLease, *, force: bool = False) -> state.DriverLease:
+        if not force and self.clock() < lease.expires_at - (self.lease_ttl_seconds / 2):
             return lease
         renewed = state.renew_lease(
             self.db_path, lease, ttl_seconds=self.lease_ttl_seconds, clock=self.clock)
@@ -616,9 +579,8 @@ class HostedRoomRuntime:
     def _execute_attempt(
         self, binding: HostedRoomBinding, task: Mapping[str, Any], attempt: state.TaskAttempt
     ) -> None:
-        profile = task["payload"]["target_profile"]
+        profile, submit_attempted = task["payload"]["target_profile"], False
         transport = self._transport_for(binding, task)
-        submit_attempted = False
         with self._status_lock:
             self._current_tasks[binding.room_id] = attempt.identity
         try:
@@ -626,14 +588,14 @@ class HostedRoomRuntime:
                 session = self._resolve_or_create(transport, profile, binding.room_id)
                 # A submit should fail before admission or return after it; an unexpected
                 # exception at that boundary is ambiguous, never a proven failure.
-                submit_attempted = True
-                session_id = _session_id(session)
+                submit_attempted, session_id = True, _session_id(session)
                 deadline_monotonic = time.monotonic() + self.turn_timeout_seconds
                 transport.submit(
                     **_session_kw(profile, session_id), prompt=task["payload"]["prompt"],
                     task=attempt.identity, execution_generation=attempt.execution_generation,
                     on_terminal=lambda receipt: self._on_terminal(binding, attempt, receipt))
-                self._unavailable_route_retries.pop(self._route_retry_key(task), None)
+                self._unavailable_route_retries.pop(
+                    (task["identity"].room_id, _member_id(task)), None)
                 receipt = self._wait_for_terminal(
                     binding, profile=profile, session_id=session_id, attempt=attempt,
                     transport=transport, deadline_monotonic=deadline_monotonic)
@@ -686,8 +648,9 @@ class HostedRoomRuntime:
             or f"reply:{attempt.identity.task_id}:{attempt.execution_generation}",
             result=_bounded_terminal_result(receipt))
         try:
-            settled = state.settle_task(self.db_path, attempt, **asdict(terminal), clock=self.clock)
-            self._publish(binding, settled)
+            self._publish(
+                binding,
+                state.settle_task(self.db_path, attempt, **asdict(terminal), clock=self.clock))
         except state.StaleTaskError:
             with suppress(state.StaleLeaseError, state.StaleTaskError):
                 current = state.get_task(self.db_path, attempt.identity)
@@ -717,7 +680,7 @@ class HostedRoomRuntime:
                 return None
             if task["status"] == "stopping":
                 try:
-                    lease = self._renew_lease_if_needed(binding, lease)
+                    lease = self._renew_lease_if_needed(lease)
                     if self._finish_stop(binding, task, lease):
                         return None
                 except Exception as exc:
@@ -728,7 +691,7 @@ class HostedRoomRuntime:
             if time.monotonic() >= deadline_monotonic:
                 self._expire_attempt_deadline(binding, task, lease)
                 return None
-            lease = self._renew_lease_if_needed(binding, lease)
+            lease = self._renew_lease_if_needed(lease)
             receipt = self._terminal_from_history(transport, profile, session_id, task)
             if receipt is not None:
                 return receipt
@@ -739,16 +702,11 @@ class HostedRoomRuntime:
             self._wake.clear()
         return None
 
-    # ------------------------------------------------------------------ deadline stops
-    @staticmethod
-    def _is_deadline_stop(task: Mapping[str, Any]) -> bool:
-        return str(task.get("cancel_id") or "").startswith("deadline:")
-
     def _complete_acknowledged_stop(
         self, binding: HostedRoomBinding, task: Mapping[str, Any], lease: state.DriverLease
     ) -> dict[str, Any]:
         """Terminalize an acknowledged Stop: deadline stops publish an explicit failure."""
-        if not self._is_deadline_stop(task):
+        if not str(task.get("cancel_id") or "").startswith("deadline:"):
             return self._complete_cancel(task)
         return self._fenced(
             state.settle_stopping_task, binding, task, lease,
@@ -764,15 +722,15 @@ class HostedRoomRuntime:
         """Fence, stop, and terminalize one exact attempt at its deadline."""
         if task["status"] == "running":
             task = state.begin_task_cancel(
-                self.db_path, task["identity"],
+                self.db_path, task["identity"], clock=self.clock,
                 cancel_id=f"deadline:{int(task['execution_generation'])}",
-                expected_cancel_generation=int(task["cancel_generation"]), clock=self.clock)
+                expected_cancel_generation=int(task["cancel_generation"]))
         elif task["status"] != "stopping":
             return
         # A user Stop that won the race keeps its own cancellation semantics.
-        if not self._is_deadline_stop(task):
+        if not str(task.get("cancel_id") or "").startswith("deadline:"):
             return
-        lease = self._renew_lease_if_needed(binding, lease, force=True)
+        lease = self._renew_lease_if_needed(lease, force=True)
         if not self._finish_stop(binding, task, lease):
             self._record_error(
                 f"task {task['identity'].task_id} exceeded its deadline; stop remains pending")
@@ -789,8 +747,7 @@ class HostedRoomRuntime:
             if inspection.terminal is not None:
                 self._harvest_previous_attempt(binding, task, inspection.terminal)
             elif inspection.active:
-                # The prior session still owns the turn. Do not contend for its
-                # lease or submit a duplicate prompt.
+                # The prior session still owns the turn: no lease contention, no duplicate prompt.
                 raise state.LeaseHeldError("recovered session turn is still active")
 
     def _inspect_session(
@@ -798,9 +755,9 @@ class HostedRoomRuntime:
         *, read_history: bool) -> _RecoveryInspection:
         """Probe one resolved session: optional terminal receipt from history, then live info."""
         profile = task["payload"]["target_profile"]
-        receipt = None
-        if read_history:
-            receipt = self._terminal_from_history(transport, profile, session_id, task)
+        receipt = (
+            self._terminal_from_history(transport, profile, session_id, task)
+            if read_history else None)
         info = transport.info(**_session_kw(profile, session_id))
         self._report_pending_action(task, session_id=session_id, info=info)
         return _RecoveryInspection(
@@ -809,8 +766,7 @@ class HostedRoomRuntime:
 
     def _inspect_recovery_session(
         self, binding: HostedRoomBinding, task: Mapping[str, Any]) -> _RecoveryInspection:
-        profile = task["payload"]["target_profile"]
-        transport = self._transport_for(binding, task)
+        profile, transport = task["payload"]["target_profile"], self._transport_for(binding, task)
         with self.turn_lock(profile):
             session_id = self._resume_exact(transport, task["identity"].room_id, profile)
             if session_id is None:
@@ -841,8 +797,8 @@ class HostedRoomRuntime:
             return False
         inspected = self._inspected_indeterminate_attempts
         for task in unresolved:
-            generation = int(task["execution_generation"])
-            attempt_key = (binding.room_id, task["identity"].task_id, generation)
+            attempt_key = (
+                binding.room_id, task["identity"].task_id, int(task["execution_generation"]))
             is_local = self._transport_for(binding, task) is self.rpc
             if is_local and attempt_key not in inspected:
                 inspection = self._inspect_local_recovery_session(task)
@@ -868,7 +824,9 @@ class HostedRoomRuntime:
                 inspected.add(attempt_key)
             if inspection.status == "cancelled":
                 # Remote-probe resolutions are not republished here.
-                self._resolve_remote_cancel(binding, task, lease, publish=False)
+                self._fenced(
+                    state.resolve_indeterminate_cancellation, binding, task, lease, publish=False,
+                    cancel_id=f"remote-cancel:{task['execution_generation']}")
                 inspected.discard(attempt_key)
                 continue
             if inspection.terminal is not None:
@@ -902,7 +860,6 @@ class HostedRoomRuntime:
         with suppress(state.StaleLeaseError, state.StaleTaskError):
             state.settle_task(self.db_path, previous_attempt, **asdict(receipt), clock=self.clock)
 
-    # ------------------------------------------------------------------ misc
     def _tasks(self, binding: HostedRoomBinding, status: str) -> list[dict[str, Any]]:
         return state.list_tasks(self.db_path, room_id=binding.room_id, status=status)
 
@@ -965,8 +922,7 @@ def _truncate_utf8(value: Any, *, max_bytes: int) -> tuple[str, bool]:
     text, encoded = str(value or ""), str(value or "").encode("utf-8")
     if len(encoded) <= max_bytes:
         return text, False
-    suffix = _TERMINAL_TRUNCATION_NOTICE.encode("utf-8")
-    prefix = encoded[: max(0, max_bytes - len(suffix))]
+    prefix = encoded[: max(0, max_bytes - len(_TERMINAL_TRUNCATION_NOTICE.encode("utf-8")))]
     while prefix:
         try:
             return prefix.decode("utf-8") + _TERMINAL_TRUNCATION_NOTICE, True
@@ -979,8 +935,7 @@ def _bounded_terminal_result(receipt: Mapping[str, Any]) -> dict[str, Any]:
     text, truncated = _truncate_utf8(receipt.get("text", ""), max_bytes=MAX_TERMINAL_TEXT_BYTES)
     error, error_truncated = _truncate_utf8(receipt.get("error", ""), max_bytes=4096)
     return {
-        "message_id": receipt.get("message_id"),
-        "text": text,
+        "message_id": receipt.get("message_id"), "text": text,
         **({"error": error} if error else {}),
         **({"truncated": True} if truncated or error_truncated else {})}
 
@@ -993,8 +948,7 @@ def _find_terminal_receipt(
         if (
             message.get("task_id") != identity.task_id
             or message.get("execution_generation") != execution_generation
-            or message.get("role") != "assistant"
-            or status not in {"settled", "failed"}):
+            or message.get("role") != "assistant" or status not in {"settled", "failed"}):
             continue
         receipt_id = message.get("message_id")
         if not isinstance(receipt_id, str) or not receipt_id:
@@ -1012,8 +966,5 @@ def _info_active(info: Mapping[str, Any]) -> bool:
 
 def _info_is_active_for(
     info: Mapping[str, Any], identity: state.TaskIdentity, *, require_exact: bool = False) -> bool:
-    if not _info_active(info):
-        return False
-    active_task_id = info.get("task_id")
-    return active_task_id == identity.task_id if require_exact else (
-        active_task_id in {None, identity.task_id})
+    accepted = (identity.task_id,) if require_exact else (None, identity.task_id)
+    return _info_active(info) and info.get("task_id") in accepted
