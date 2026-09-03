@@ -12,7 +12,6 @@ import sys
 
 def _cmd_memory_off():
     from hermes_cli.config import load_config, save_config
-
     config = load_config()
     if not isinstance(config.get("memory"), dict):
         config["memory"] = {}
@@ -24,7 +23,6 @@ def _cmd_memory_off():
 
 def _cmd_memory_reset(args):
     from hermes_constants import get_hermes_home, display_hermes_home
-
     mem_dir = get_hermes_home() / "memories"
     target = getattr(args, "target", "all")
     files_to_reset = []
@@ -69,7 +67,6 @@ def cmd_memory(args):
         _cmd_memory_reset(args)
     else:
         from hermes_cli.memory_setup import memory_command
-
         memory_command(args)
 
 
@@ -86,7 +83,6 @@ def cmd_acp(args):
     """Launch Hermes Agent as an ACP server."""
     try:
         from acp_adapter.entry import main as acp_main
-
         acp_main([flag for attr, flag in _ACP_FLAGS if getattr(args, attr, False)])
     except ImportError:
         print("ACP dependencies not installed.", file=sys.stderr)
@@ -99,16 +95,13 @@ def cmd_tools(args):
     action = getattr(args, "tools_action", None)
     if action in {"list", "disable", "enable"}:
         from hermes_cli.tools_config import tools_disable_enable_command
-
         tools_disable_enable_command(args)
     elif action == "post-setup":
         from hermes_cli.tools_config import run_post_setup_command
-
         sys.exit(run_post_setup_command(args))
     else:
         _require_tty("tools")
         from hermes_cli.tools_config import tools_command
-
         tools_command(args)
 
 
@@ -117,7 +110,6 @@ def cmd_insights(args):
     try:
         from hermes_state import SessionDB
         from agent.insights import InsightsEngine
-
         db = SessionDB()
         engine = InsightsEngine(db)
         report = engine.generate(days=args.days, source=args.source)
@@ -139,13 +131,11 @@ def _dict_or_empty(value) -> dict:
 def cmd_monitoring(args):
     """Gateway monitoring status: health & diagnostics export posture."""
     from hermes_cli.config import load_config
-
     action = getattr(args, "monitoring_action", None) or "status"
     mon = _dict_or_empty(load_config().get("monitoring"))
 
     if action == "status":
         from agent.monitoring import otlp_exporter
-
         gh = _dict_or_empty(mon.get("gateway_health_export"))
         otlp = _dict_or_empty(_dict_or_empty(mon.get("export")).get("otlp"))
 
@@ -181,13 +171,11 @@ def cmd_skills(args):
     if action == "config":
         _require_tty("skills config")
         from hermes_cli.skills_config import skills_command as skills_config_command
-
         skills_config_command(args)
     elif action in ("trust", "untrust"):
         _cmd_skills_trust(args)
     else:
         from hermes_cli.skills_hub import skills_command
-
         skills_command(args)
 
 
@@ -198,14 +186,12 @@ def _cmd_skills_trust(args):
     (nearest ancestor with ``.git``).
     """
     from pathlib import Path
-
     from agent.skill_utils import (
         PROJECT_SKILLS_SUBDIRS,
         _candidate_project_skills_dirs,
         find_project_root,
         iter_skill_index_files)
     from hermes_cli.config import load_config, save_config
-
     action = args.skills_action
     raw_path = getattr(args, "path", None)
     if raw_path:

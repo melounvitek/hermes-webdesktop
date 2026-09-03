@@ -32,7 +32,6 @@ def _pyproject_project(debug_fmt: str | None = None) -> dict | None:
         return None
     try:
         import tomllib
-
         with pyproject.open("rb") as handle:
             project = tomllib.load(handle).get("project", {})
     except Exception as exc:
@@ -58,7 +57,6 @@ def _parse_requirements(raw_deps: list[str]) -> list[tuple[str, "object | None",
     parsed: list[tuple[str, "object | None", str]] = []
     try:
         from packaging.requirements import Requirement  # type: ignore
-
         for spec in raw_deps:
             try:
                 req = Requirement(spec)
@@ -283,7 +281,6 @@ def _recover_core_update_marker_locked() -> None:
         # ensure_uv bootstraps the installer itself when missing (the early pass's
         # stdlib-only lookup cannot), so a venv whose uv vanished mid-update still heals.
         from hermes_cli.managed_uv import ensure_uv
-
         ensure_uv()
 
         # Shared stdlib executor: this late path and the pre-import early pass run exactly
@@ -358,7 +355,6 @@ def _windows_shim_in_process_chain() -> Path | None:
 
     try:
         import psutil
-
         me = psutil.Process()
         for proc in [me] + list(me.parents()):
             try:
@@ -412,7 +408,6 @@ def _reexec_dependency_sync_off_windows_shim() -> bool:
         return False
 
     from hermes_constants import venv_python_path
-
     python_exe = venv_python_path(shim.parent.parent, windows=True)
     cmd = [str(python_exe), "-m", "hermes_cli.main", *sys.argv[1:]]
     if python_exe.is_file():
@@ -439,13 +434,11 @@ def _default_venv_install_target() -> tuple[list[str], dict[str, str] | None]:
     from hermes_cli.main import PROJECT_ROOT, _is_termux_env
     try:
         from hermes_cli.managed_uv import ensure_uv
-
         uv_bin = ensure_uv()
     except Exception:
         uv_bin = None
     if uv_bin:
         from hermes_constants import project_venv_dir
-
         venv_dir = project_venv_dir(PROJECT_ROOT) or PROJECT_ROOT / "venv"
         env = {**os.environ, "VIRTUAL_ENV": str(venv_dir)}
         if _is_termux_env(env):
@@ -511,7 +504,6 @@ def _venv_scripts_dir() -> Path | None:
     """Return the venv Scripts directory if we're running inside the project venv."""
     from hermes_cli.main import PROJECT_ROOT, _is_windows
     from hermes_constants import project_venv_dir, venv_bin_dir
-
     venv_dir = project_venv_dir(PROJECT_ROOT)
     if venv_dir is None:
         return None
@@ -649,7 +641,6 @@ def _cleanup_pending_shim_renames(scripts_dir: Path) -> int:
         return 0
     try:
         import winreg
-
         with winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE, _PENDING_RENAME_KEY, 0,
             winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE,
@@ -970,7 +961,6 @@ def _interpreter_scripts_dir() -> Path | None:
     """
     from hermes_cli.main import _is_windows
     from hermes_constants import venv_bin_dir
-
     exe = Path(sys.executable)
     # sys.executable lives IN the bin/Scripts dir; parent.parent is the env root.
     cand = venv_bin_dir(exe.parent.parent, windows=_is_windows())
@@ -1216,7 +1206,6 @@ def _resolve_install_target_python(
     from hermes_cli.main import _is_windows
     if env and "VIRTUAL_ENV" in env:
         from hermes_constants import venv_python_path
-
         candidate = venv_python_path(Path(env["VIRTUAL_ENV"]), windows=_is_windows())
         if candidate.exists():
             return candidate
@@ -1253,7 +1242,6 @@ def _resolve_node_runtime_npm() -> str | None:
     """
     from hermes_cli.main import _is_windows
     from hermes_constants import find_node_executable
-
     npm = find_node_executable("npm")
     if _is_windows():
         return npm
