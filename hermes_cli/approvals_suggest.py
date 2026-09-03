@@ -248,9 +248,7 @@ def derive_glob(normalized: str) -> Optional[str]:
 
 
 def build_proposals(
-    records: Iterable[tuple[str, str]],
-    existing: Optional[set] = None,
-    min_count: int = 2,
+    records: Iterable[tuple[str, str]], existing: Optional[set] = None, min_count: int = 2,
     limit: int = 20,
 ) -> list[Proposal]:
     """Aggregate scan records into a ranked, safety-filtered proposal list.
@@ -352,10 +350,8 @@ def suggest_command(args) -> int:
 
     existing = set(approval_module.load_permanent_allowlist())
     proposals = build_proposals(
-        scan_approval_history(db_path, days=days),
-        existing=existing,
-        min_count=getattr(args, "min_count", 2),
-        limit=getattr(args, "limit", 20),
+        scan_approval_history(db_path, days=days), existing=existing,
+        min_count=getattr(args, "min_count", 2), limit=getattr(args, "limit", 20),
     )
     as_json = getattr(args, "json", False)
 

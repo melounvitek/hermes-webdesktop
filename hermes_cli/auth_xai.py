@@ -134,12 +134,8 @@ def _write_through_xai_oauth_to_global_root(state: Dict[str, Any]) -> None:
 
 
 def _save_xai_oauth_tokens(
-    tokens: Dict[str, Any],
-    *,
-    discovery: Optional[Dict[str, Any]] = None,
-    redirect_uri: str = "",
-    last_refresh: Optional[str] = None,
-    auth_mode: str = "oauth_device_code",
+    tokens: Dict[str, Any], *, discovery: Optional[Dict[str, Any]] = None, redirect_uri: str = "",
+    last_refresh: Optional[str] = None, auth_mode: str = "oauth_device_code",
     set_active: bool = True,
 ) -> None:
     """Persist xAI OAuth tokens into the auth store.
@@ -310,10 +306,7 @@ def _xai_tokens_from_payload(payload: Dict[str, Any], access_token: str, fallbac
 
 
 def refresh_xai_oauth_pure(
-    access_token: str,
-    refresh_token: str,
-    *,
-    token_endpoint: str = "",
+    access_token: str, refresh_token: str, *, token_endpoint: str = "",
     timeout_seconds: float = 20.0,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _nonempty_str, _utc_now_z, _xai_oauth_discovery
@@ -330,8 +323,7 @@ def refresh_xai_oauth_pure(
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
     with httpx.Client(timeout=timeout, headers={"Accept": "application/json"}) as client:
         response = client.post(
-            endpoint,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            endpoint, headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={"grant_type": "refresh_token", "client_id": XAI_OAUTH_CLIENT_ID, "refresh_token": refresh_token},
         )
     if response.status_code != 200:
@@ -356,11 +348,9 @@ def refresh_xai_oauth_pure(
             "xAI token refresh failed." + suffix, "xai_refresh_failed", relogin=response.status_code in {400, 401},
         )
     payload, refreshed_access = _refresh_payload_access_token(
-        response,
-        provider="xai-oauth",
+        response, provider="xai-oauth",
         invalid_json=("xAI token refresh returned invalid JSON: {exc}", "xai_refresh_invalid_json"),
-        invalid_json_relogin=False,
-        strict_str=False,
+        invalid_json_relogin=False, strict_str=False,
         invalid_response=("xAI token refresh response was not a JSON object.", "xai_refresh_invalid_response"),
         missing_access=("xAI token refresh response was missing access_token.", "xai_refresh_missing_access_token"),
     )
@@ -368,11 +358,7 @@ def refresh_xai_oauth_pure(
 
 
 def _refresh_xai_oauth_tokens(
-    tokens: Dict[str, Any],
-    *,
-    token_endpoint: str,
-    redirect_uri: str = "",
-    timeout_seconds: float,
+    tokens: Dict[str, Any], *, token_endpoint: str, redirect_uri: str = "", timeout_seconds: float
 ) -> Dict[str, Any]:
     # Re-persist whatever auth_mode is already stored (legacy pre-device-code logins may still
     # carry ``oauth_pkce``): the refresh hot path must not relabel how the grant was obtained.
@@ -436,9 +422,7 @@ def _xai_oauth_inference_base_url() -> str:
 
 
 def resolve_xai_oauth_runtime_credentials(
-    *,
-    force_refresh: bool = False,
-    refresh_if_expiring: bool = True,
+    *, force_refresh: bool = False, refresh_if_expiring: bool = True,
     refresh_skew_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _auth_store_lock, _is_terminal_xai_oauth_refresh_error, _refresh_xai_oauth_tokens, _xai_oauth_discovery
@@ -515,10 +499,8 @@ def _login_xai_oauth(args, pconfig: ProviderConfig, *, force_new_login: bool = F
 
     creds = _xai_oauth_device_code_login(timeout_seconds=timeout_seconds, open_browser=open_browser)
     _save_xai_oauth_tokens(
-        creds["tokens"],
-        discovery=creds.get("discovery"),
-        redirect_uri=creds.get("redirect_uri", ""),
-        last_refresh=creds.get("last_refresh"),
+        creds["tokens"], discovery=creds.get("discovery"),
+        redirect_uri=creds.get("redirect_uri", ""), last_refresh=creds.get("last_refresh"),
         auth_mode="oauth_device_code",
     )
     # An explicit interactive re-login means the user wants the xAI credential re-enabled.
@@ -550,11 +532,7 @@ def _xai_oauth_request_device_code(client: httpx.Client, *, scope: str = XAI_OAU
 
 
 def _xai_oauth_poll_device_token(
-    client: httpx.Client,
-    *,
-    token_endpoint: str,
-    device_code: str,
-    expires_in: int,
+    client: httpx.Client, *, token_endpoint: str, device_code: str, expires_in: int,
     poll_interval: int,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _poll_device_token_generic
@@ -573,8 +551,7 @@ def _xai_oauth_poll_device_token(
 
     return _poll_device_token_generic(
         lambda: client.post(
-            token_endpoint,
-            headers=_FORM_JSON_HEADERS,
+            token_endpoint, headers=_FORM_JSON_HEADERS,
             data={"grant_type": DEVICE_CODE_GRANT_TYPE, "client_id": XAI_OAUTH_CLIENT_ID, "device_code": device_code},
         ),
         expires_in=int(expires_in),
@@ -603,10 +580,8 @@ def _xai_oauth_device_code_login(*, timeout_seconds: float = 20.0, open_browser:
         )
         print(f"Waiting for approval (polling every {max(1, interval)}s)...")
         payload = _xai_oauth_poll_device_token(
-            client,
-            token_endpoint=discovery["token_endpoint"],
-            device_code=str(device_data["device_code"]),
-            expires_in=int(device_data["expires_in"]),
+            client, token_endpoint=discovery["token_endpoint"],
+            device_code=str(device_data["device_code"]), expires_in=int(device_data["expires_in"]),
             poll_interval=interval,
         )
 

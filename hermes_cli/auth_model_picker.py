@@ -22,11 +22,7 @@ _CURRENT_SUFFIX = "  ← currently in use"
 
 
 def _confirm_selection_guards(
-    model_id: str,
-    *,
-    provider: str = "",
-    base_url: str = "",
-    api_key: str = "",
+    model_id: str, *, provider: str = "", base_url: str = "", api_key: str = "",
     include_kinds: Optional[List[str]] = None,
 ) -> bool:
     """Prompt before saving a model that trips any selection guard (cost, data-policy, ...).
@@ -64,12 +60,8 @@ class _ModelPickerRows:
     """
 
     def __init__(
-        self,
-        all_models: List[str],
-        pricing: Optional[Dict[str, Dict[str, str]]],
-        *,
-        current_model: str,
-        sale_chrome: bool,
+        self, all_models: List[str], pricing: Optional[Dict[str, Dict[str, str]]], *,
+        current_model: str, sale_chrome: bool,
     ) -> None:
         from hermes_cli.models import _format_price_per_mtok, compute_sale_discount
 
@@ -161,14 +153,10 @@ class _ModelPickerRows:
 
 
 def _prompt_model_selection(
-    model_ids: List[str],
-    current_model: str = "",
+    model_ids: List[str], current_model: str = "",
     pricing: Optional[Dict[str, Dict[str, str]]] = None,
-    unavailable_models: Optional[List[str]] = None,
-    portal_url: str = "",
-    unavailable_message: str = "",
-    confirm_provider: str = "",
-    confirm_base_url: str = "",
+    unavailable_models: Optional[List[str]] = None, portal_url: str = "",
+    unavailable_message: str = "", confirm_provider: str = "", confirm_base_url: str = "",
     confirm_api_key: str = "",
 ) -> Optional[str]:
     """Interactive model picker; current_model listed first. Returns the chosen model ID or None.

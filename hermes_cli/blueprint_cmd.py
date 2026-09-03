@@ -183,10 +183,7 @@ def _manage_hint(surface: str) -> str:
 
 
 def handle_blueprint_command(
-    args: str,
-    *,
-    origin: Optional[Dict[str, Any]] = None,
-    surface: str = "cli",
+    args: str, *, origin: Optional[Dict[str, Any]] = None, surface: str = "cli"
 ) -> BlueprintCommandResult:
     """Dispatch a ``/blueprint`` invocation.
 

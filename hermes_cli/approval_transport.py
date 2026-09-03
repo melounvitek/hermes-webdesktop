@@ -54,16 +54,8 @@ class ApprovalRequest:
 
     @classmethod
     def create(
-        cls,
-        *,
-        command: str,
-        description: str,
-        pattern_key: str,
-        pattern_keys: tuple[str, ...],
-        session_key: str,
-        surface: str,
-        allow_session: bool,
-        allow_permanent: bool,
+        cls, *, command: str, description: str, pattern_key: str, pattern_keys: tuple[str, ...],
+        session_key: str, surface: str, allow_session: bool, allow_permanent: bool,
         timeout_seconds: float = 300,
     ) -> "ApprovalRequest":
         choices: list[ApprovalChoice] = ["once"]
@@ -109,12 +101,8 @@ def _deny(failure: str) -> ApprovalTransportResult:
 
 
 def invoke_approval_transport(
-    present: ApprovalPresentFn,
-    request: ApprovalRequest,
-    *,
-    timeout_seconds: float,
-    poll_interval: float = 1.0,
-    on_poll: Callable[[], None] | None = None,
+    present: ApprovalPresentFn, request: ApprovalRequest, *, timeout_seconds: float,
+    poll_interval: float = 1.0, on_poll: Callable[[], None] | None = None,
     is_interrupted: Callable[[], bool] | None = None,
 ) -> ApprovalTransportResult:
     """Run a sync or async transport on a bounded daemon worker.

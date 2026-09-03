@@ -83,8 +83,7 @@ def _minimax_pkce_pair() -> tuple:
 
 
 def _minimax_request_user_code(
-    client: httpx.Client, *, portal_base_url: str, client_id: str,
-    code_challenge: str, state: str,
+    client: httpx.Client, *, portal_base_url: str, client_id: str, code_challenge: str, state: str
 ) -> Dict[str, Any]:
     response = _minimax_post_form(
         client,

@@ -67,8 +67,7 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
 
     try:
         response = httpx.post(
-            QWEN_OAUTH_TOKEN_URL,
-            headers=_FORM_JSON_HEADERS,
+            QWEN_OAUTH_TOKEN_URL, headers=_FORM_JSON_HEADERS,
             data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": QWEN_OAUTH_CLIENT_ID},
             timeout=timeout_seconds,
         )
@@ -121,9 +120,7 @@ def _mark_qwen_oauth_active(creds: Dict[str, Any]) -> None:
 
 
 def resolve_qwen_runtime_credentials(
-    *,
-    force_refresh: bool = False,
-    refresh_if_expiring: bool = True,
+    *, force_refresh: bool = False, refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _qwen_cli_auth_path, _refresh_qwen_cli_tokens

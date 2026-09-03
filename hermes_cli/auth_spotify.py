@@ -45,22 +45,15 @@ def _spotify_scope_string(raw_scope: Optional[str] = None) -> str:
 
 
 def _spotify_setting(
-    state: Optional[Dict[str, Any]],
-    state_key: str,
-    env_vars: Tuple[str, ...],
-    default: str,
-    *,
-    explicit: Optional[str] = None,
-    strip_slash: bool = False,
+    state: Optional[Dict[str, Any]], state_key: str, env_vars: Tuple[str, ...], default: str, *,
+    explicit: Optional[str] = None, strip_slash: bool = False,
 ) -> str:
     """First non-empty of explicit arg, env vars (``.env`` aware), stored state, then *default*."""
     from hermes_cli.config import get_env_value
 
     candidates = (
-        explicit,
-        *(get_env_value(var) for var in env_vars),
-        state.get(state_key) if isinstance(state, dict) else None,
-        default,
+        explicit, *(get_env_value(var) for var in env_vars),
+        state.get(state_key) if isinstance(state, dict) else None, default,
     )
     for candidate in candidates:
         cleaned = _clean(candidate)
@@ -113,12 +106,7 @@ def _spotify_code_challenge(code_verifier: str) -> str:
 
 
 def _spotify_build_authorize_url(
-    *,
-    client_id: str,
-    redirect_uri: str,
-    scope: str,
-    state: str,
-    code_challenge: str,
+    *, client_id: str, redirect_uri: str, scope: str, state: str, code_challenge: str,
     accounts_base_url: str,
 ) -> str:
     query = urlencode({
@@ -204,14 +192,8 @@ def _spotify_wait_for_callback(redirect_uri: str, *, timeout_seconds: float = 18
 
 
 def _spotify_token_payload_to_state(
-    token_payload: Dict[str, Any],
-    *,
-    client_id: str,
-    redirect_uri: str,
-    requested_scope: str,
-    accounts_base_url: str,
-    api_base_url: str,
-    previous_state: Optional[Dict[str, Any]] = None,
+    token_payload: Dict[str, Any], *, client_id: str, redirect_uri: str, requested_scope: str,
+    accounts_base_url: str, api_base_url: str, previous_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _coerce_ttl_seconds
     now = datetime.now(timezone.utc)
@@ -237,15 +219,8 @@ def _spotify_token_payload_to_state(
 
 
 def _spotify_token_post(
-    accounts_base_url: str,
-    data: Dict[str, str],
-    *,
-    timeout_seconds: float,
-    what: str,
-    failed_code: str,
-    invalid_code: str,
-    invalid_message: str,
-    failed_suffix: str = "",
+    accounts_base_url: str, data: Dict[str, str], *, timeout_seconds: float, what: str,
+    failed_code: str, invalid_code: str, invalid_message: str, failed_suffix: str = "",
     relogin_required: bool = False,
 ) -> Dict[str, Any]:
     """POST to Spotify's ``/api/token`` and return the JSON payload, or raise a shaped AuthError."""
@@ -272,12 +247,7 @@ def _spotify_token_post(
 
 
 def _spotify_exchange_code_for_tokens(
-    *,
-    client_id: str,
-    code: str,
-    redirect_uri: str,
-    code_verifier: str,
-    accounts_base_url: str,
+    *, client_id: str, code: str, redirect_uri: str, code_verifier: str, accounts_base_url: str,
     timeout_seconds: float = 20.0,
 ) -> Dict[str, Any]:
     return _spotify_token_post(
@@ -310,30 +280,22 @@ def _refresh_spotify_oauth_state(state: Dict[str, Any], *, timeout_seconds: floa
     payload = _spotify_token_post(
         accounts_base_url,
         {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
-        timeout_seconds=timeout_seconds,
-        what="token refresh",
-        failed_code="spotify_refresh_failed",
+        timeout_seconds=timeout_seconds, what="token refresh", failed_code="spotify_refresh_failed",
         invalid_code="spotify_refresh_invalid",
         invalid_message="Spotify refresh response did not include an access_token.",
-        failed_suffix=" Run `hermes auth spotify` again.",
-        relogin_required=True,
+        failed_suffix=" Run `hermes auth spotify` again.", relogin_required=True,
     )
 
     return _spotify_token_payload_to_state(
-        payload,
-        client_id=client_id,
-        redirect_uri=_spotify_redirect_uri(state=state),
+        payload, client_id=client_id, redirect_uri=_spotify_redirect_uri(state=state),
         requested_scope=str(state.get("scope") or DEFAULT_SPOTIFY_SCOPE),
-        accounts_base_url=accounts_base_url,
-        api_base_url=_spotify_api_base_url(state),
+        accounts_base_url=accounts_base_url, api_base_url=_spotify_api_base_url(state),
         previous_state=state,
     )
 
 
 def resolve_spotify_runtime_credentials(
-    *,
-    force_refresh: bool = False,
-    refresh_if_expiring: bool = True,
+    *, force_refresh: bool = False, refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _auth_store_lock, _is_expiring, _load_auth_store, _load_provider_state, _quarantine_flat_oauth_state, _refresh_spotify_oauth_state, _save_auth_store, _store_provider_state
@@ -479,12 +441,8 @@ def login_spotify_command(args) -> None:
     code_verifier = _spotify_code_verifier()
     state_nonce = uuid.uuid4().hex
     authorize_url = _spotify_build_authorize_url(
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        scope=scope,
-        state=state_nonce,
-        code_challenge=_spotify_code_challenge(code_verifier),
-        accounts_base_url=accounts_base_url,
+        client_id=client_id, redirect_uri=redirect_uri, scope=scope, state=state_nonce,
+        code_challenge=_spotify_code_challenge(code_verifier), accounts_base_url=accounts_base_url,
     )
 
     print(
@@ -512,20 +470,13 @@ def login_spotify_command(args) -> None:
         raise SystemExit("Spotify authorization failed: state mismatch.")
 
     token_payload = _spotify_exchange_code_for_tokens(
-        client_id=client_id,
-        code=str(callback.get("code") or ""),
-        redirect_uri=redirect_uri,
-        code_verifier=code_verifier,
-        accounts_base_url=accounts_base_url,
+        client_id=client_id, code=str(callback.get("code") or ""), redirect_uri=redirect_uri,
+        code_verifier=code_verifier, accounts_base_url=accounts_base_url,
         timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
     )
     spotify_state = _spotify_token_payload_to_state(
-        token_payload,
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        requested_scope=scope,
-        accounts_base_url=accounts_base_url,
-        api_base_url=api_base_url,
+        token_payload, client_id=client_id, redirect_uri=redirect_uri, requested_scope=scope,
+        accounts_base_url=accounts_base_url, api_base_url=api_base_url,
     )
 
     with _auth_store_lock():
