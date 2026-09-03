@@ -816,13 +816,9 @@ class KawaiiSpinner:
         """Return the active skin's ``spinner[key]`` list, or *fallback* when absent/empty."""
         try:
             skin = _get_skin()
-            if skin:
-                values = skin.spinner.get(key, [])
-                if values:
-                    return values
+            return (skin.spinner.get(key, []) if skin else None) or fallback
         except Exception:
-            pass
-        return fallback
+            return fallback
 
     get_waiting_faces = classmethod(lambda cls: cls._skin_spinner_list("waiting_faces", cls.KAWAII_WAITING))
     get_thinking_faces = classmethod(lambda cls: cls._skin_spinner_list("thinking_faces", cls.KAWAII_THINKING))
@@ -832,10 +828,8 @@ class KawaiiSpinner:
         self.message = message
         self.spinner_frames = self.SPINNERS.get(spinner_type, self.SPINNERS['dots'])
         self.running = False
-        self.thread = None
-        self.frame_idx = 0
-        self.start_time = None
-        self.last_line_len = 0
+        self.thread = self.start_time = None
+        self.frame_idx = self.last_line_len = 0
         self._print_fn = print_fn  # when set, bypasses self._out so silenced agents stay silent
         self._out = sys.stdout  # captured NOW, before any child redirect_stdout(devnull) replaces it
 
@@ -889,14 +883,10 @@ class KawaiiSpinner:
                 time.sleep(0.1)
                 continue
             frame = self.spinner_frames[self.frame_idx % len(self.spinner_frames)]
-            elapsed = time.time() - self.start_time
-            if wings:
-                left, right = wings[self.frame_idx % len(wings)]
-                line = f"  {left} {frame} {self.message} {right} ({elapsed:.1f}s)"
-            else:
-                line = f"  {frame} {self.message} ({elapsed:.1f}s)"
-            pad = max(self.last_line_len - len(line), 0)
-            self._write(f"\r{line}{' ' * pad}", end='', flush=True)
+            elapsed = f"({time.time() - self.start_time:.1f}s)"
+            left, right = wings[self.frame_idx % len(wings)] if wings else ("", "")
+            line = f"  {left} {frame} {self.message} {right} {elapsed}" if wings else f"  {frame} {self.message} {elapsed}"
+            self._write(f"\r{line}{' ' * max(self.last_line_len - len(line), 0)}", end='', flush=True)
             self.last_line_len = len(line)
             self.frame_idx += 1
             time.sleep(0.12)
@@ -918,10 +908,7 @@ class KawaiiSpinner:
     def print_above(self, text: str):
         """Print a line above the spinner (next tick redraws it below). Works inside
         redirect_stdout(devnull) because _write targets the stdout captured at creation."""
-        if not self.running:
-            self._write(f"  {text}", flush=True)
-            return
-        self._write(f"\r{self._clear_line_blanks()}\r  {text}", flush=True)
+        self._write(f"\r{self._clear_line_blanks()}\r  {text}" if self.running else f"  {text}", flush=True)
 
     def stop(self, final_message: str = None):
         self.running = False
@@ -973,18 +960,17 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         return True, f" [{_trim_error(str(err_msg))}]" if err_msg else f" [exit {exit_code}]"
 
     if isinstance(data, dict):
+        failed = data.get("success") is False
         # Memory: distinguish "store full" from real errors.
-        if tool_name == "memory" and data.get("success") is False and "exceed the limit" in data.get("error", ""):
+        if tool_name == "memory" and failed and "exceed the limit" in data.get("error", ""):
             return True, " [full]"
         err = data.get("error") or data.get("message")
-        if err and (data.get("success") is False or "error" in data):
+        if err and (failed or "error" in data):
             return True, f" [{_trim_error(str(err))}]"
-
     # Multimodal results (dicts) are successes; failures arrive as JSON-encoded strings.
-    if not isinstance(result, str):
-        return False, ""
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
+    if isinstance(result, str) and (
+        '"error"' in result[:500].lower() or '"failed"' in result[:500].lower() or result.startswith("Error")
+    ):
         return True, " [error]"
     return False, ""
 
@@ -1007,12 +993,11 @@ def _cute_path(p) -> str:
 
 def _cute_web_extract(a: dict, _r) -> str:
     urls = a.get("urls", [])
-    if urls:
-        url = _display_url(urls[0] if isinstance(urls, list) else urls)
-        if url:
-            extra = f" +{len(urls)-1}" if isinstance(urls, list) and len(urls) > 1 else ""
-            return f"┊ 📄 fetch     {_cute_trunc(_domain(url))}{extra}"
-    return "┊ 📄 fetch     pages"
+    url = _display_url(urls[0] if isinstance(urls, list) else urls) if urls else ""
+    if not url:
+        return "┊ 📄 fetch     pages"
+    extra = f" +{len(urls)-1}" if isinstance(urls, list) and len(urls) > 1 else ""
+    return f"┊ 📄 fetch     {_cute_trunc(_domain(url))}{extra}"
 
 
 def _cute_todo_list(a: dict, result) -> str:
@@ -1051,12 +1036,10 @@ def _cute_skill_view(a: dict, _r) -> str:
 def _cute_cronjob(a: dict, _r) -> str:
     action = a.get("action", "?")
     if action == "create":
-        skills = a.get("skills") or ([] if not a.get("skill") else [a.get("skill")])
+        skills = a.get("skills") or ([a.get("skill")] if a.get("skill") else [])
         label = a.get("name") or (skills[0] if skills else None) or a.get("prompt", "task")
         return f"┊ ⏰ cron      create {_cute_trunc(label)}"
-    if action == "list":
-        return "┊ ⏰ cron      listing"
-    return f"┊ ⏰ cron      {action} {a.get('job_id', '')}"
+    return "┊ ⏰ cron      listing" if action == "list" else f"┊ ⏰ cron      {action} {a.get('job_id', '')}"
 
 
 def _cute_execute_code(a: dict, _r) -> str:
@@ -1072,14 +1055,15 @@ def _cute_browser_exec(a: dict, _r) -> str:
 
 def _cute_delegate(a: dict, _r) -> str:
     action_preview = _delegate_action_preview(a)
-    if action_preview is not None:
-        return f"┊ 🔀 delegate  {_cute_trunc(action_preview)}"
     tasks = a.get("tasks")
-    if tasks and isinstance(tasks, list):
+    if action_preview is not None:
+        detail = action_preview
+    elif tasks and isinstance(tasks, list):
         goals = _delegate_task_goals(tasks, per_goal_len=30)
-        detail = " | ".join(goals) if goals else "parallel"
-        return f"┊ 🔀 delegate  {len(goals) or len(tasks)}x: {_cute_trunc(detail)}"
-    return f"┊ 🔀 delegate  {_cute_trunc(a.get('goal', ''))}"
+        detail = f"{len(goals) or len(tasks)}x: " + (" | ".join(goals) if goals else "parallel")
+    else:
+        detail = a.get("goal", "")
+    return f"┊ 🔀 delegate  {_cute_trunc(detail)}"
 
 
 def _cute_process_manage(a: dict, _r) -> str:
@@ -1129,16 +1113,10 @@ def _get_cute_tool_message(tool_name: str, args: dict, duration: float, result: 
     failure suffix from :func:`_detect_tool_failure`; the leading ``┊`` becomes the skin's tool prefix."""
     args = redact_tool_args_for_display(tool_name, args) or args
     is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
-    skin_prefix = get_skin_tool_prefix()
     render = _CUTE_LINES.get(tool_name)
-    if render is not None:
-        body = render(args, result)
-    else:
-        body = f"┊ ⚡ {tool_name[:9]:9} {_cute_trunc(build_tool_preview(tool_name, args) or '')}"
-    line = f"{body}  {duration:.1f}s"
-    if skin_prefix != "┊":
-        line = line.replace("┊", skin_prefix, 1)
-    return line if not is_failure else f"{line}{failure_suffix}"
+    body = render(args, result) if render else f"┊ ⚡ {tool_name[:9]:9} {_cute_trunc(build_tool_preview(tool_name, args) or '')}"
+    line = f"{body}  {duration:.1f}s".replace("┊", get_skin_tool_prefix(), 1)
+    return f"{line}{failure_suffix}" if is_failure else line
 
 
 def get_cute_tool_message(tool_name: str, args: dict, duration: float, result: str | None = None) -> str:
