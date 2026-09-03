@@ -5292,9 +5292,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # mode for /focus off. Never changes what is sent to the model
         # (hermes_cli/focus_view.py).
         self._focus_view_enabled = bool(display.get("focus_view", False))
-        self._focus_saved_tool_progress = None
+        self._focus_saved_tool_progress = self._focus_last_counted_tool = None
         self._focus_hidden_lines = 0
-        self._focus_last_counted_tool = None
         if self._focus_view_enabled:
             from hermes_cli.focus_view import (
                 FOCUS_TOOL_PROGRESS_MODE,
@@ -5362,19 +5361,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.user_message_preview_last_lines = max(0, _int_or(_ump.get("last_lines", 2), 2))
 
         # Streaming display state
-        self._stream_buf = ""        # partial line buffer for line-buffered rendering
-        self._stream_started = False  # True once the first delta arrives
-        self._stream_box_opened = False  # True once the response box header is printed
+        self._stream_buf = ""  # partial line buffer for line-buffered rendering
         self._reasoning_preview_buf = ""  # coalesce tiny reasoning chunks for [thinking] output
+        self._stream_started = self._stream_box_opened = False  # first delta seen / box header printed
         # Lines that may belong to a markdown table are held here until the block
         # ends so they can be re-padded with wcwidth-aware widths.
         self._stream_table_buf: list[str] = []
         self._in_stream_table = False
         self._pending_edit_snapshots = {}
-        self._last_input_mode_recovery = 0.0
-        self._input_mode_recovery_notice_shown = False
-        self._last_termios_drift_check = 0.0
-        self._termios_drift_notice_shown = False
+        self._last_input_mode_recovery = self._last_termios_drift_check = 0.0
+        self._input_mode_recovery_notice_shown = self._termios_drift_notice_shown = False
 
     def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules):
         """Resolve model/provider/base_url, turn limits, toolsets, checkpoints, prompt/personality, reasoning + routing config."""
@@ -5718,20 +5714,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # restored terminal modes — on the main thread, not the process_loop thread.
         self._pending_relaunch: list[str] | None = None
         self._last_ctrl_c_time = 0
-        self._clarify_state = None
+        # Blocking-prompt overlays (clarify / sudo / approval / slash-confirm / model picker).
+        self._clarify_state = self._clarify_multi_base = None
         self._clarify_freetext = False
         self._clarify_deadline = 0
-        self._clarify_multi_base = None
         self._clarify_prefill = ""
-        self._sudo_state = None
-        self._sudo_deadline = 0
-        self._modal_input_snapshot = None
-        self._approval_state = None
-        self._approval_deadline = 0
+        self._sudo_state = self._modal_input_snapshot = self._approval_state = None
+        self._sudo_deadline = self._approval_deadline = 0
         self._approval_lock = threading.Lock()
-        self._slash_confirm_state = None
+        self._slash_confirm_state = self._model_picker_state = None
         self._slash_confirm_deadline = 0
-        self._model_picker_state = None
         # Composer placeholder chosen once per session so it stays stable on screen.
         try:
             from hermes_cli.tips import get_random_composer_placeholder
@@ -5744,37 +5736,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._pending_resume_sessions = None
         # One-shot agent seed set by a slash handler (e.g. /blueprint <name>);
         # consumed by the interactive loop right after process_command() returns.
-        self._pending_agent_seed = None
-        self._secret_state = None
+        self._pending_agent_seed = self._secret_state = None
         self._secret_deadline = 0
         self._spinner_text: str = ""  # thinking spinner text for TUI
         self._tool_start_time: float = 0.0  # monotonic start of the current tool (live elapsed)
         self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
         self._last_scrollback_tool: str = ""  # last tool name printed to scrollback ("new" dedup)
-        self._command_running = False
-        self._command_blocks_input = False
+        self._command_running = self._command_blocks_input = False
         self._command_status = ""
         # Petdex mascot (opt-in via display.pet). Kitty/Ghostty: Unicode placeholders
         # + out-of-band image transmission; other terminals: truecolor half-blocks.
-        self._pet_renderer = None  # agent.pet.render.PetRenderer | None
-        self._pet_slug: str = ""
-        self._pet_enabled: bool = False
+        self._pet_renderer = self._pet_anim_thread = None  # agent.pet.render.PetRenderer | None
+        self._pet_slug = self._pet_kitty_pending = ""
+        self._pet_enabled = self._pet_anim_running = False
         self._pet_cols: int = 18
         self._pet_scale: float = 0.7
         self._pet_frames_cache: dict = {}  # state -> list[grid]
         self._pet_kitty_cache: dict = {}  # state -> kitty placeholder payload
-        self._pet_kitty_image_id: int = 0
-        self._pet_kitty_pending: str = ""
-        self._pet_frame_idx: int = 0
+        self._pet_kitty_image_id = self._pet_frame_idx = 0
         self._pet_lock = threading.Lock()
         self._pet_cfg_checked: float = 0.0
-        self._pet_anim_running: bool = False
-        self._pet_anim_thread = None
         # Transient reaction beats (wave/jump/failed) + steady reasoning flag.
         self._pet_event: str = ""
         self._pet_event_until: float = 0.0
-        self._pet_reasoning: bool = False
-        self._pet_turn_error: bool = False
+        self._pet_reasoning = self._pet_turn_error = False
         self._attached_images: list[Path] = []
         self._image_counter = 0
         # Ctrl+S prompt stash. In-memory only: drafts routinely contain secrets.
@@ -5793,12 +5778,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
-        self._voice_mode = False
-        self._voice_tts = False
+        self._voice_mode = self._voice_tts = self._voice_recording = False
+        self._voice_processing = self._voice_continuous = False
         self._voice_recorder = None
-        self._voice_recording = False
-        self._voice_processing = False
-        self._voice_continuous = False
         self._voice_tts_done = threading.Event()
         self._voice_tts_done.set()
         self._voice_tts_stop = None  # active streaming pipeline's stop event
@@ -5813,10 +5795,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # While True the input rules + status bar stay hidden until the next input:
         # set by _recover_after_resize() so a SIGWINCH cannot stamp a fresh status
         # bar over one the terminal just reflowed into scrollback (#19280, #22976).
-        self._status_bar_suppressed_after_resize = False
+        self._status_bar_suppressed_after_resize = self._resize_recovery_pending = False
         self._resize_recovery_lock = threading.Lock()
         self._resize_recovery_timer = None
-        self._resize_recovery_pending = False
         # Debounced timer clearing that suppression once the reflow settles.
         self._status_bar_unsuppress_timer = None
         # Last width seen by the resize handler: width change (reflow -> possible
@@ -5829,10 +5810,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         # Cache-hit ratio baseline — reset on model switch and on context compression
         # so the bar reflects the current cache regime, not a lifetime average.
-        self._cache_hit_baseline_prompt = 0
-        self._cache_hit_baseline_read = 0
-        self._cache_hit_baseline_model: Optional[str] = None
+        self._cache_hit_baseline_prompt = self._cache_hit_baseline_read = 0
         self._cache_hit_baseline_compressions = 0
+        self._cache_hit_baseline_model: Optional[str] = None
 
     def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
         """Claim a global active-session slot for this CLI process."""
