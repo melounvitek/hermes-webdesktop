@@ -268,13 +268,6 @@ def settle_unrecovered_error(
             compression_attempts=compression_attempts, result=result,
         )
 
-    def _fallback_break() -> UnrecoveredErrorVerdict:
-        nonlocal active_system_prompt, retry_count, compression_attempts
-        active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
-        retry_count = 0
-        compression_attempts = 0
-        return _verdict("break")
-
     # ``FailoverReason.billing`` (402) is deliberately NOT excluded: pool rotation and
     # eager fallback already gave up, so retrying only burns paid requests on a depleted
     # balance. Mirrors 401/403.
@@ -316,7 +309,11 @@ def settle_unrecovered_error(
             else:
                 agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
         if agent._try_activate_fallback():
-            return _fallback_break()
+            # Direct ``return _verdict("break")`` is load-bearing: the restart handler
+            # re-runs the pre-API preflight against the fallback's context window.
+            active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+            retry_count = compression_attempts = 0
+            return _verdict("break")
         return _verdict("return", nonretryable_client_error_result(
             agent, api_error, classified, status_code=status_code, api_kwargs=api_kwargs,
             api_messages=api_messages, messages=messages, conversation_history=conversation_history,
@@ -341,7 +338,11 @@ def settle_unrecovered_error(
         if agent._has_pending_fallback():
             agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
         if agent._try_activate_fallback():
-            return _fallback_break()
+            # Direct ``return _verdict("break")`` is load-bearing: the restart handler
+            # re-runs the pre-API preflight against the fallback's context window.
+            active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+            retry_count = compression_attempts = 0
+            return _verdict("break")
         return _verdict("return", max_retries_exhausted_result(
             agent, api_error, classified, max_retries=max_retries, is_rate_limited=is_rate_limited,
             error_msg=error_msg, api_kwargs=api_kwargs, api_messages=api_messages,
