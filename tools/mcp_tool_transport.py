@@ -207,8 +207,7 @@ class MCPServerTransportMixin:
         # Reap orphans of prior attempts first, else each retry piles up zombie pairs. Unscoped on
         # purpose (also reaps servers that never reconnect). Off-loop: the reaper blocks up to 2s.
         await asyncio.to_thread(_core._kill_orphaned_mcp_children)
-        # Snapshot child PIDs before spawning so the new one can be identified.
-        pids_before = _core._snapshot_child_pids()
+        pids_before = _core._snapshot_child_pids()  # so the new child can be identified after spawn
         new_pids: set = set()
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
         _core._write_stderr_log_header(self.name)
@@ -331,14 +330,10 @@ class MCPServerTransportMixin:
             # (headers, auth, timeout) and layers TLS on top. The client MUST come from the SDK's
             # own httpx module (httpx2 on mcp >= 2.0) — see sdk_httpx().
             _httpx_mod = _core.sdk_httpx()
-
-            def _mcp_http_client_factory(headers=None, timeout=None, auth=None):
-                return _httpx_mod.AsyncClient(
-                    follow_redirects=True, verify=ssl_verify,
-                    timeout=timeout if timeout is not None else _httpx_mod.Timeout(30.0, read=300.0),
-                    **{k: v for k, v in (("headers", headers), ("auth", auth), ("cert", client_cert)) if v is not None})
-
-            sse_kwargs["httpx_client_factory"] = _mcp_http_client_factory
+            sse_kwargs["httpx_client_factory"] = lambda headers=None, timeout=None, auth=None: _httpx_mod.AsyncClient(
+                follow_redirects=True, verify=ssl_verify,
+                timeout=timeout if timeout is not None else _httpx_mod.Timeout(30.0, read=300.0),
+                **{k: v for k, v in (("headers", headers), ("auth", auth), ("cert", client_cert)) if v is not None})
         return _core.sse_client(**sse_kwargs)
 
     def _streamable_http_transport(self, url: str, headers: dict, connect_timeout: float,

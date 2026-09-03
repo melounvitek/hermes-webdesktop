@@ -64,9 +64,8 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
     ``KeyboardInterrupt``/``SystemExit`` leaf anywhere is re-raised, never flattened into a loggable
     error; a non-cancellation leaf is preferred over the ``CancelledError`` noise anyio sprays on siblings."""
     while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
-        fatal, _rest = exc.split((KeyboardInterrupt, SystemExit))
-        if fatal is not None:
-            leaf: BaseException = fatal
+        leaf: BaseException = exc.split((KeyboardInterrupt, SystemExit))[0]
+        if leaf is not None:
             while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
                 leaf = leaf.exceptions[0]
             raise leaf
@@ -85,12 +84,11 @@ def _classify_mcp_failure(exc: BaseException) -> str:
     """``'permanent'`` (``run()`` parks instead of burning the retry ladder: auth 401/403,
     NonMcpEndpointError, InvalidMcpUrlError, missing stdio command) or ``'transient'`` (backoff retry)."""
     root = _unwrap_exception_group(exc)
-    permanent = (
-        _core._is_auth_error(root)
-        or isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError, FileNotFoundError))
-        or (isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT)
-        # 401/403 HTTPStatusError that _is_auth_error's type-gate missed (auth types not importable here).
-        or getattr(getattr(root, "response", None), "status_code", None) in (401, 403))
+    permanent = (_core._is_auth_error(root)
+                 or isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError, FileNotFoundError))
+                 or (isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT)
+                 # 401/403 HTTPStatusError that _is_auth_error's type-gate missed (auth types not importable here)
+                 or getattr(getattr(root, "response", None), "status_code", None) in (401, 403))
     return "permanent" if permanent else "transient"
 
 
@@ -170,24 +168,23 @@ def _resolve_identity_header(server_name: str, config: dict):
     if not isinstance(name, str) or not name.strip():
         return _ignore("requires a non-empty 'name'")
     value_from = (raw.get("value_from") or "static").strip().lower()
-    if value_from == "static":
-        value = raw.get("value")
-        if not isinstance(value, str) or not value.strip():
-            return _ignore("with value_from: static requires a non-empty string 'value'")
-        return (name.strip(), value)
     if value_from == "profile":
         from hermes_cli.profiles import get_active_profile_name
         return (name.strip(), get_active_profile_name())
-    return _ignore("value_from must be 'static' or 'profile' (got %r)", value_from)
+    if value_from != "static":
+        return _ignore("value_from must be 'static' or 'profile' (got %r)", value_from)
+    value = raw.get("value")
+    if not isinstance(value, str) or not value.strip():
+        return _ignore("with value_from: static requires a non-empty string 'value'")
+    return (name.strip(), value)
 
 
 def _apply_identity_header(server_name: str, config: dict, headers: dict) -> dict:
     """Merge the identity header into ``headers`` in place; an explicit entry of the same name (any
     casing) wins — never silently override user config."""
-    resolved = _resolve_identity_header(server_name, config)
-    if resolved is None:
+    name, value = _resolve_identity_header(server_name, config) or (None, None)
+    if name is None:
         return headers
-    name, value = resolved
     if any(key.lower() == name.lower() for key in headers):
         logger.debug("MCP server '%s': identity_header '%s' already set via explicit "
                      "headers config — keeping the explicit value", server_name, name)
@@ -210,10 +207,9 @@ def _make_redirect_header_stripper(original_url, *, strict: bool = False,
         headers = response.next_request.headers
         headers.pop("authorization", None)
         headers.pop("Authorization", None)
-        if strict:
-            for _name in configured_header_names:
-                while _name in headers:
-                    del headers[_name]
+        for _name in configured_header_names if strict else ():
+            while _name in headers:
+                del headers[_name]
 
     return _strip_on_cross_origin_redirect
 

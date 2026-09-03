@@ -175,8 +175,7 @@ class SamplingHandler:
             logger.warning("MCP server '%s' sampling rate limit exceeded (%d/min)", self.server_name, self.max_rpm)
             return None, self._fail(
                 f"Sampling rate limit exceeded for server '{self.server_name}' ({self.max_rpm} requests/minute)")
-        model = self._resolve_model(mcp_field(params, "model_preferences", "modelPreferences"))
-        resolved_model = model or self.model_override or ""
+        resolved_model = self._resolve_model(mcp_field(params, "model_preferences", "modelPreferences")) or ""
         if self.allowed_models and resolved_model and resolved_model not in self.allowed_models:
             logger.warning("MCP server '%s' requested model '%s' not in allowed_models",
                            self.server_name, resolved_model)
@@ -208,7 +207,7 @@ class SamplingHandler:
         resolved_model, err = self._admit(params)
         if err is not None:
             return err
-        sync_call = self._build_llm_call(params, resolved_model)
+        sync_call = self._build_llm_call(params, resolved_model)  # outside the try: its errors propagate, not _fail
         try:
             response = await asyncio.wait_for(asyncio.to_thread(sync_call), timeout=self.timeout)
         except asyncio.TimeoutError:

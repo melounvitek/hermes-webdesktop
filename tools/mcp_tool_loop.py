@@ -202,8 +202,7 @@ def _wait_for_server_session_ready(srv: Any, *, old_session: Any = None, timeout
     """Poll until the server exposes a usable, ready session (during a reconnect ``srv.session`` is
     briefly None or stale; retrying blindly burns breaker strikes). With ``old_session`` the observed
     session must differ. Iteration-bounded, not deadline-bounded: tests freeze ``time.monotonic``."""
-    poll_interval = 0.25
-    iterations = max(1, int(max(float(timeout), 0.0) / poll_interval))
+    iterations = max(1, int(max(float(timeout), 0.0) / 0.25))
     for i in range(iterations):
         session = getattr(srv, "session", None)
         ready = getattr(srv, "_ready", None)
@@ -214,7 +213,7 @@ def _wait_for_server_session_ready(srv: Any, *, old_session: Any = None, timeout
         if session is not None and session is not old_session and is_ready:
             return True
         if i < iterations - 1:
-            time.sleep(poll_interval)
+            time.sleep(0.25)
     return False
 
 
@@ -224,11 +223,11 @@ def _signal_reconnect_and_wait(server_name: str, srv: Any, *, op_description: st
     loop = _core._mcp_loop
     if loop is None or not loop.is_running():
         return False
+
     def _request_reconnect() -> None:
-        ready = getattr(srv, "_ready", None)
+        ready, reconnect_event = getattr(srv, "_ready", None), getattr(srv, "_reconnect_event", None)
         if hasattr(ready, "clear"):
             ready.clear()
-        reconnect_event = getattr(srv, "_reconnect_event", None)
         if hasattr(reconnect_event, "set"):
             reconnect_event.set()
 
@@ -245,10 +244,9 @@ def _ensure_mcp_loop():
     with _core._lock:
         if _origin._mcp_loop is not None and _origin._mcp_loop.is_running():
             return
-        _origin._mcp_loop = asyncio.new_event_loop()
-        _origin._mcp_loop.set_exception_handler(_core._mcp_loop_exception_handler)
-        _origin._mcp_thread = threading.Thread(
-            target=_origin._mcp_loop.run_forever, name="mcp-event-loop", daemon=True)
+        loop = _origin._mcp_loop = asyncio.new_event_loop()
+        loop.set_exception_handler(_core._mcp_loop_exception_handler)
+        _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
         _origin._mcp_thread.start()
 
 
@@ -259,43 +257,41 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
         if only_if_idle and (_core._servers or _core._server_connecting):
             logger.debug("Leaving MCP event loop running; active servers are registered or connecting")
             return False
-        loop = _origin._mcp_loop
-        thread = _origin._mcp_thread
-        _origin._mcp_loop = None
-        _origin._mcp_thread = None
-    if loop is not None:
-        # Drain before stopping: tasks still suspended when the loop closes get resumed by the GC
-        # against a closed loop. shutdown_mcp_servers only reaps _servers; everything else ends here.
-        future = None
-        if loop.is_running():
-            from agent.async_utils import safe_schedule_threadsafe
+        loop, thread = _origin._mcp_loop, _origin._mcp_thread
+        _origin._mcp_loop = _origin._mcp_thread = None
+    if loop is None:
+        return True
+    # Drain before stopping: tasks still suspended when the loop closes get resumed by the GC
+    # against a closed loop. shutdown_mcp_servers only reaps _servers; everything else ends here.
+    future = None
+    if loop.is_running():
+        from agent.async_utils import safe_schedule_threadsafe
 
-            future = safe_schedule_threadsafe(
-                _core._drain_and_stop_mcp_loop(), loop, logger=logger,
-                log_message="MCP loop drain: failed to schedule", log_level=logging.WARNING)
-            if future is not None:
-                try:
-                    future.result(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT + 1)
-                except TimeoutError:
-                    logger.warning("Timed out waiting for MCP loop drain after %.1fs",
-                                   _core._MCP_LOOP_DRAIN_TIMEOUT + 1)
-                except BaseException as exc:
-                    logger.warning("Error draining MCP loop tasks: %s", exc)
-        elif not loop.is_closed():
+        future = safe_schedule_threadsafe(
+            _core._drain_and_stop_mcp_loop(), loop, logger=logger,
+            log_message="MCP loop drain: failed to schedule", log_level=logging.WARNING)
+        if future is not None:
             try:
-                loop.run_until_complete(_core._drain_mcp_loop_tasks(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT))
+                future.result(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT + 1)
+            except TimeoutError:
+                logger.warning("Timed out waiting for MCP loop drain after %.1fs", _core._MCP_LOOP_DRAIN_TIMEOUT + 1)
             except BaseException as exc:
-                logger.warning("Error draining stopped MCP loop tasks: %s", exc)
-        if future is None and loop.is_running():  # drain-and-stop wasn't scheduled: stop it ourselves
-            loop.call_soon_threadsafe(loop.stop)
-        if thread is not None:
-            thread.join(timeout=5)
-            if thread.is_alive():
-                logger.warning("MCP event loop thread did not stop within 5.0s")
+                logger.warning("Error draining MCP loop tasks: %s", exc)
+    elif not loop.is_closed():
         try:
-            loop.close()
-        except Exception as exc:
-            logger.warning("Unable to close MCP event loop cleanly: %s", exc)
-        # The loop is gone, so no session can be in flight: reap active too.
-        _core._kill_orphaned_mcp_children(include_active=True)
+            loop.run_until_complete(_core._drain_mcp_loop_tasks(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT))
+        except BaseException as exc:
+            logger.warning("Error draining stopped MCP loop tasks: %s", exc)
+    if future is None and loop.is_running():  # drain-and-stop wasn't scheduled: stop it ourselves
+        loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(timeout=5)
+        if thread.is_alive():
+            logger.warning("MCP event loop thread did not stop within 5.0s")
+    try:
+        loop.close()
+    except Exception as exc:
+        logger.warning("Unable to close MCP event loop cleanly: %s", exc)
+    # The loop is gone, so no session can be in flight: reap active too.
+    _core._kill_orphaned_mcp_children(include_active=True)
     return True
