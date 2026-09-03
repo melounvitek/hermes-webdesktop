@@ -12,6 +12,7 @@ flows (import cycle) and tests patch ``hermes_cli.config.load_config`` etc. at c
 from __future__ import annotations
 
 import contextlib
+import subprocess
 
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import clear_model_endpoint_credentials
@@ -262,6 +263,16 @@ def _curses_choice(title: str, rows: list, default_idx: int):
         from hermes_cli.setup import _curses_prompt_choice
         return _curses_prompt_choice(title, rows, default_idx)
     except Exception:
+        return None
+
+
+def _radiolist(title: str, items: list, default_idx: int = 0, **kw):
+    """``curses_radiolist`` index (-1 = cancelled), or None when curses is unavailable so the
+    caller can fall back to a numbered prompt."""
+    try:
+        from hermes_cli.curses_ui import curses_radiolist
+        return curses_radiolist(title, items, selected=default_idx, cancel_returns=-1, **kw)
+    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
         return None
 
 

@@ -8,10 +8,9 @@ imported lazily inside the functions that use them (call-time resolution keeps
 """
 
 import contextlib
-import subprocess
 
 from typing import Optional
-from hermes_cli.model_setup_flows_common import _ask, _ensure_dict_section, _print_numbered, _say
+from hermes_cli.model_setup_flows_common import _ask, _ensure_dict_section, _print_numbered, _radiolist, _say
 
 
 def _is_profile_api_key_provider(provider_id: str) -> bool:
@@ -524,13 +523,12 @@ def _remove_custom_provider(config):
         for entry in providers]
     choices.append("Cancel")
 
-    try:
-        from hermes_cli.curses_ui import curses_radiolist
-        idx = curses_radiolist("Select provider to remove:", list(choices), selected=0, cancel_returns=-1)
+    idx = _radiolist("Select provider to remove:", list(choices))
+    if idx is not None:
         print()
         if idx < 0:
             idx = None
-    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
+    else:
         for i, c in enumerate(choices, 1):
             print(f"  {i}. {c}")
         print()
@@ -575,14 +573,13 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
         default_idx = 0
 
     n = len(ordered)
-    try:
-        from hermes_cli.curses_ui import curses_radiolist
-        choices = [_label(effort) for effort in ordered] + [disable_label, skip_label]
-        idx = curses_radiolist("Select reasoning effort:", choices, selected=default_idx, cancel_returns=-1)
+    idx = _radiolist("Select reasoning effort:", [_label(effort) for effort in ordered] + [disable_label, skip_label],
+                     default_idx)
+    if idx is not None:
         if idx < 0:
             return None
         print()
-    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
+    else:
         print("Select reasoning effort:")
         for i, effort in enumerate(ordered, 1):
             print(f"  {i}. {_label(effort)}")

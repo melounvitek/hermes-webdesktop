@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import contextlib
 import os
-import subprocess
 import urllib.parse
 
 from hermes_cli.cli_output import line_input
 from hermes_cli.providers import custom_provider_slug
 from hermes_cli.model_setup_flows_common import (
     _HTTP, _ask, _commit_model_config, _load_config_model_section,
-    _prune_replaced_custom_model_config_credentials, _say)
+    _prune_replaced_custom_model_config_credentials, _radiolist, _say)
 
 
 def _parse_context_length(text: str):
@@ -263,12 +262,11 @@ def _pick_named_custom_model(name: str, models: list, saved_model: str):
     """Searchable radiolist over *models* (numbered prompt without curses); None = cancelled."""
     default_idx = models.index(saved_model) if saved_model and saved_model in models else 0
     print(f"Found {len(models)} model(s):\n")
-    try:
-        from hermes_cli.curses_ui import curses_radiolist
-        menu_items = [f"{m} (current)" if m == saved_model else m for m in models] + ["Cancel"]
-        idx = curses_radiolist(f"Select model from {name}:", menu_items, selected=default_idx, cancel_returns=-1, searchable=True)
+    menu_items = [f"{m} (current)" if m == saved_model else m for m in models] + ["Cancel"]
+    idx = _radiolist(f"Select model from {name}:", menu_items, default_idx, searchable=True)
+    if idx is not None:
         print()
-    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
+    else:
         for i, m in enumerate(models, 1):
             print(f"  {i}. {m}{' (current)' if m == saved_model else ''}")
         _say(f"  {len(models) + 1}. Cancel", "")
