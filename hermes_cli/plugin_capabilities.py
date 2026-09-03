@@ -94,9 +94,7 @@ def capability_set_hash(capabilities: Iterable[str]) -> str:
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Consent state (read side — fail closed on ANY error)
-# ---------------------------------------------------------------------------
+# ── Consent state (read side — fail closed on ANY error) ────────────────────────────────────
 
 def _plugin_entry(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> dict:
     """``plugins.entries.<plugin_id>`` or ``{}`` — never raises (unreadable state = not granted)."""
@@ -149,9 +147,7 @@ def plugin_capability_granted(plugin_id: str, capability: str, config: Optional[
     return allowed
 
 
-# ---------------------------------------------------------------------------
-# Consent state (write side)
-# ---------------------------------------------------------------------------
+# ── Consent state (write side) ──────────────────────────────────────────────────────────────
 
 def _child_dict(parent: dict, key: str) -> dict:
     """``parent[key]`` as a dict, replacing any non-dict value in place."""

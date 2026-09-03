@@ -66,9 +66,7 @@ class PluginPack:
     skills: List[str] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Parse + validate
-# ---------------------------------------------------------------------------
+# ── Parse + validate ────────────────────────────────────────────────────────────────────────
 
 def _entry_label(item: Any, index: int) -> str:
     if isinstance(item, dict):
@@ -188,9 +186,7 @@ def load_pack(path_or_url: str) -> PluginPack:
     return parse_pack(path.read_text(encoding="utf-8"), source=str(path))
 
 
-# ---------------------------------------------------------------------------
-# Resolution (bare index names → owner/repo) + review screen
-# ---------------------------------------------------------------------------
+# ── Resolution (bare index names → owner/repo) + review screen ──────────────────────────────
 
 @dataclass
 class ResolvedPackPlugin:
@@ -267,9 +263,7 @@ def render_pack_review(console, pack: PluginPack, resolved: List[ResolvedPackPlu
         "require individual consent after install — a pack never bulk-grants.[/dim]")
 
 
-# ---------------------------------------------------------------------------
-# Install fan-out
-# ---------------------------------------------------------------------------
+# ── Install fan-out ─────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class PackInstallResult:
@@ -382,9 +376,7 @@ def install_pack_plugins(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
+# ── Export ──────────────────────────────────────────────────────────────────────────────────
 
 _GITHUB_HTTPS_RE = re.compile(r"^https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+?)(?:\.git)?$")
 
@@ -469,17 +461,15 @@ def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack"
     return text, warnings
 
 
-# ---------------------------------------------------------------------------
-# CLI commands
-# ---------------------------------------------------------------------------
+# ── CLI commands ────────────────────────────────────────────────────────────────────────────
 
 def _load_and_review(console, source: str):
     """Load *source* (exit 1 on PackError), resolve it, print the review screen."""
+    from hermes_cli.plugins_cmd import _fail
     try:
         pack = load_pack(source)
     except PackError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        sys.exit(1)
+        _fail(console, f"[red]Error:[/red] {exc}")
     resolved = resolve_pack_plugins(pack)
     render_pack_review(console, pack, resolved)
     return pack, resolved
@@ -487,8 +477,8 @@ def _load_and_review(console, source: str):
 
 def cmd_pack_show(source: str) -> None:
     """``hermes plugins pack show <path-or-url>`` — dry-run review."""
-    from rich.console import Console
-    console = Console()
+    from hermes_cli.plugins_cmd import _console
+    console = _console()
     pack, resolved = _load_and_review(console, source)
     unresolved = [rp for rp in resolved if rp.identifier is None]
     if unresolved:
@@ -501,24 +491,17 @@ def cmd_pack_show(source: str) -> None:
 def cmd_pack_install(source: str, *, force: bool = False) -> None:
     """``hermes plugins pack install <path-or-url>``: mandatory review screen -> one pack-level
     consent -> pinned fan-out installs -> per-plugin capability consent. Exit 1 if any failed."""
-    from rich.console import Console
-    console = Console()
+    from hermes_cli.plugins_cmd import _ask_yes, _console, _fail, _is_tty
+    console = _console()
     pack, resolved = _load_and_review(console, source)
 
     # Mandatory review confirmation — no --yes in v1 (arbitrary third-party code × N).
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        console.print(
+    if not _is_tty():
+        _fail(console, (
             "[red]Error:[/red] Pack install requires an interactive terminal "
-            "to review and confirm the pack contents (no --yes in v1).")
-        sys.exit(1)
-    try:
-        answer = console.input(
-            f"\nInstall {len(resolved)} plugin(s) from pack '{pack.name}'? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if answer not in {"y", "yes"}:
-        console.print("[dim]Aborted — nothing installed.[/dim]")
-        sys.exit(1)
+            "to review and confirm the pack contents (no --yes in v1)."))
+    if not _ask_yes(f"\nInstall {len(resolved)} plugin(s) from pack '{pack.name}'? [y/N] ", console.input):
+        _fail(console, "[dim]Aborted — nothing installed.[/dim]")
 
     results = install_pack_plugins(pack, resolved, console, force=force)
     ok = [r for r in results if r.ok]
@@ -551,9 +534,8 @@ def pack_command(args) -> None:
     """Dispatch ``hermes plugins pack <action>``."""
     handler = _PACK_ACTIONS.get(getattr(args, "pack_action", None))
     if handler is None:
-        from rich.console import Console
-        Console().print("[red]Error:[/red] Usage: hermes plugins pack {install|export|show}")
-        sys.exit(1)
+        from hermes_cli.plugins_cmd import _console, _fail
+        _fail(_console(), "[red]Error:[/red] Usage: hermes plugins pack {install|export|show}")
     handler(args)
 
 

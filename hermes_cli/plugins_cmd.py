@@ -410,9 +410,7 @@ def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
     return target
 
 
-# ---------------------------------------------------------------------------
-# Install metadata + git plumbing
-# ---------------------------------------------------------------------------
+# ── Install metadata + git plumbing ─────────────────────────────────────────────────────────
 
 _EXACT_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -1385,9 +1383,7 @@ def cmd_list(args: Any | None = None) -> None:
     console.print("[dim]Plugins are opt-in by default — only 'enabled' plugins load.[/dim]")
 
 
-# ---------------------------------------------------------------------------
-# Provider plugin discovery helpers
-# ---------------------------------------------------------------------------
+# ── Provider plugin discovery helpers ───────────────────────────────────────────────────────
 
 
 def _discover_memory_providers() -> list[tuple[str, str]]:
@@ -1471,9 +1467,7 @@ def _provider_categories() -> list:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Composite plugins UI
-# ---------------------------------------------------------------------------
+# ── Composite plugins UI ────────────────────────────────────────────────────────────────────
 
 
 def cmd_show(name: str) -> None:
