@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
@@ -217,6 +218,11 @@ _payload_json = partial(_canonical_json, label="payload", max_bytes=MAX_EVENT_JS
 
 
 _bounded_int = partial(bounded_int, error=HostedRoomError)
+_validate_room_name = partial(
+    _validate_identifier, label="name", max_chars=MAX_ROOM_NAME_CHARS, pattern=None, invalid="invalid room name")
+_validate_event_kind = partial(
+    _validate_identifier, label="kind", max_chars=MAX_EVENT_KIND_CHARS, pattern=_EVENT_KIND_RE,
+    invalid="invalid event kind")
 
 
 def _actor_id(value: Any, label: str) -> str:
@@ -250,10 +256,6 @@ def user_event_id(client_event_id: Any) -> str:
     return f"user:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
 
 
-_validate_room_name = partial(
-    _validate_identifier, label="name", max_chars=MAX_ROOM_NAME_CHARS, pattern=None, invalid="invalid room name")
-
-
 def _validate_members(value: Any) -> tuple[list[dict[str, Any]], str]:
     if not isinstance(value, list):
         raise HostedRoomError("members must be a list")
@@ -284,11 +286,6 @@ def _legacy_members_match(existing_json: str, proposed: list[dict[str, Any]]) ->
         if previous_target not in (None, {}) and previous_target != current_target:
             return False
     return True
-
-
-_validate_event_kind = partial(
-    _validate_identifier, label="kind", max_chars=MAX_EVENT_KIND_CHARS, pattern=_EVENT_KIND_RE,
-    invalid="invalid event kind")
 
 
 def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
@@ -339,9 +336,10 @@ def _migrate_remote_run_schema(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS hosted_room_remote_runs_migrating")
     conn.execute(f"CREATE TABLE hosted_room_remote_runs_migrating ({_REMOTE_RUNS_BODY})")
     if columns:
-        home = "home_install_id" if "home_install_id" in columns else "'legacy'"
-        gateway = "authority_gateway_id" if "authority_gateway_id" in columns else "'legacy'"
-        epoch = "authority_epoch" if "authority_epoch" in columns else "1"
+        home, gateway, epoch = (
+            column if column in columns else default
+            for column, default in (
+                ("home_install_id", "'legacy'"), ("authority_gateway_id", "'legacy'"), ("authority_epoch", "1")))
         conn.execute(
             f"""INSERT OR IGNORE INTO hosted_room_remote_runs_migrating(
                     room_id, home_install_id, authority_gateway_id,
@@ -463,8 +461,7 @@ def _read_connection(db_path: DbPath) -> sqlite3.Connection:
     return open_sqlite(path)
 
 
-def _transaction(db_path: DbPath, *, immediate: bool = False):
-    return transaction(_connect, db_path, immediate=immediate)
+_transaction = partial(transaction, _connect, immediate=False)
 
 
 # --- row helpers ------------------------------------------------------------------
@@ -494,6 +491,12 @@ def _room_row(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], room_
 def _require_authority(room: sqlite3.Row, gateway_id: str, epoch: int, message: str) -> None:
     if str(room["authority_gateway_id"]) != gateway_id or int(room["authority_epoch"]) != epoch:
         raise AuthorityConflictError(message)
+
+
+def _fenced_update(conn: sqlite3.Connection, sql: str, params: tuple, error: Exception) -> None:
+    """Run a compare-and-swap UPDATE; anything but exactly one row means the fence was lost."""
+    if conn.execute(sql, params).rowcount != 1:
+        raise error
 
 
 def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> sqlite3.Row:
@@ -683,13 +686,15 @@ def delete_room_link_records(db_path: DbPath, *, room_id: str) -> int:
         return conn.execute("DELETE FROM hosted_room_links WHERE room_id=?", (room_id,)).rowcount
 
 
+def _claim_values(claims: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, str]:
+    return {key: str(claims.get(key) or "") for key in keys}
+
+
 def _room_grant_scope_key(claims: Mapping[str, Any]) -> str:
     """Return a stable non-secret key for one room/home/target/profile scope."""
-    fields = {
-        key: str(claims.get(key) or "")
-        for key in (
-            "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id", "target_install_id",
-            "target_profile")}
+    fields = _claim_values(claims, (
+        "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id", "target_install_id",
+        "target_profile"))
     if not all(fields.values()):
         raise HostedRoomError("room grant scope is incomplete")
     return hashlib.sha256(compact_json(fields).encode("utf-8")).hexdigest()
@@ -717,8 +722,8 @@ def revoke_room_grant_scope(
                 AND member_id=? AND target_profile=? AND authority_gateway_id=?
                 AND authority_epoch=?""",
             (
-                timestamp, timestamp, str(claims.get("room_id") or ""), str(claims.get("member_id") or ""),
-                str(claims.get("target_profile") or ""), str(claims.get("authority_gateway_id") or ""),
+                timestamp, timestamp,
+                *_claim_values(claims, ("room_id", "member_id", "target_profile", "authority_gateway_id")).values(),
                 int(claims.get("authority_epoch") or 0)))
 
 
@@ -874,16 +879,14 @@ def _adopt_legacy_room(
     claim_bytes = _insert_event(
         conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed", actor_json, target_epoch,
         payload_json, now, allow_control=True)
-    adopted = conn.execute("""UPDATE hosted_rooms
+    _fenced_update(conn, """UPDATE hosted_rooms
             SET members_json=?, authority_gateway_id=?, authority_epoch=?,
                 next_seq=next_seq+1, revision=revision+1, event_bytes=event_bytes+?, updated_at=?
             WHERE room_id=? AND authority_gateway_id='legacy' AND authority_epoch=? AND next_seq=?
             AND disbanded_at IS NULL""",
         (
             members_json, authority_gateway_id, target_epoch, claim_bytes, now, room_id,
-            int(existing["authority_epoch"]), seq))
-    if adopted.rowcount != 1:
-        raise AuthorityConflictError("legacy room adoption lost its fence")
+            int(existing["authority_epoch"]), seq), AuthorityConflictError("legacy room adoption lost its fence"))
     existing = _reload(conn, _SELECT_ROOM, (room_id,), "adopted room could not be reloaded")
     result = _room_from_row(existing, idempotent=True)
     result["adopted"] = True
@@ -945,14 +948,11 @@ def list_rooms(
     """Return one bounded read-only page ordered by most recent change."""
     limit = _bounded_limit(limit, MAX_ROOM_LIST_LIMIT)
     offset = _non_negative(offset, "offset")
-    conn = _read_connection(db_path)
-    try:
+    with closing(_read_connection(db_path)) as conn:
         rows = conn.execute(
             f"""SELECT {_ROOM_COLUMNS} FROM hosted_rooms WHERE disbanded_at IS NULL OR ?
                 ORDER BY updated_at DESC, room_id ASC LIMIT ? OFFSET ?""", (int(include_disbanded), limit, offset)
         ).fetchall()
-    finally:
-        conn.close()
     return [_room_from_row(row) for row in rows]
 
 
@@ -1025,10 +1025,9 @@ def append_event(
         event_bytes = _insert_event(
             conn, room, room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, now,
             allow_control=kind in _CONTROL_EVENT_KINDS)
-        advanced = conn.execute("""UPDATE hosted_rooms SET next_seq=?, event_bytes=event_bytes+?, updated_at=?
-                WHERE room_id=? AND next_seq=?""", (seq + 1, event_bytes, now, room_id, seq))
-        if advanced.rowcount != 1:
-            raise RuntimeError("hosted room sequence advance lost its write fence")
+        _fenced_update(conn, """UPDATE hosted_rooms SET next_seq=?, event_bytes=event_bytes+?, updated_at=?
+                WHERE room_id=? AND next_seq=?""", (seq + 1, event_bytes, now, room_id, seq),
+            RuntimeError("hosted room sequence advance lost its write fence"))
         row = _reload(
             conn, f"SELECT {_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=? AND seq=?", (room_id, seq),
             "appended event could not be reloaded")
@@ -1112,13 +1111,12 @@ def _append_authority_claim(
     claim_bytes = _insert_event(
         conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", actor_json, target_epoch, payload_json,
         now, allow_control=True)
-    updated = conn.execute("""UPDATE hosted_rooms SET authority_gateway_id=?,
+    _fenced_update(conn, """UPDATE hosted_rooms SET authority_gateway_id=?,
             authority_epoch=authority_epoch+1, next_seq=next_seq+1,
             event_bytes=event_bytes+?, revision=revision+1, updated_at=? WHERE room_id=?
             AND disbanded_at IS NULL AND authority_gateway_id=? AND authority_epoch=?""",
-        (new_gateway_id, claim_bytes, now, room_id, expected_gateway_id, expected_epoch))
-    if updated.rowcount != 1:
-        raise AuthorityConflictError("hosted room authority changed")
+        (new_gateway_id, claim_bytes, now, room_id, expected_gateway_id, expected_epoch),
+        AuthorityConflictError("hosted room authority changed"))
     return _load_event(conn, room_id, event_id)
 
 
@@ -1210,14 +1208,13 @@ def disband_room(
             conn, room, room_id, int(room["next_seq"]), "system:room-disbanded", "room.disbanded",
             _system_actor_json("room-control"), int(room["authority_epoch"]), _payload_json({"room_id": room_id}), now,
             allow_control=True)
-        updated = conn.execute("""UPDATE hosted_rooms
+        _fenced_update(conn, """UPDATE hosted_rooms
                 SET disbanded_at=?, updated_at=?, revision=revision+1,
                     next_seq=next_seq+1, event_bytes=event_bytes+?
                 WHERE room_id=? AND disbanded_at IS NULL AND authority_gateway_id=?
                 AND authority_epoch=?""",
-            (now, now, disband_bytes, room_id, expected_gateway_id, expected_epoch))
-        if updated.rowcount != 1:
-            raise RoomConflictError("hosted room disband lost its fence")
+            (now, now, disband_bytes, room_id, expected_gateway_id, expected_epoch),
+            RoomConflictError("hosted room disband lost its fence"))
         conn.execute(_INSERT_RETIRED, (room_id, now))
         event = _reload(
             conn, _SELECT_EVENT, (room_id, "system:room-disbanded"), "room disband event could not be reloaded")
