@@ -16,6 +16,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +43,15 @@ def live_transcript_root() -> Path:
     return get_hermes_dir("cache/delegation", "delegation_cache") / "live"
 
 
+@contextmanager
+def _best_effort(what: str):
+    """Swallow and debug-log any failure: nothing here may reach the agent loop."""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Live transcript %s failed: %s", what, exc)
+
+
 def _one_line(text: Any, limit: int) -> str:
     """Collapse to a single line and truncate with an elided-chars note."""
     s = " ".join(str(text or "").split())
@@ -62,6 +72,10 @@ def _redact(text: str) -> str:
         return "[line withheld: redaction unavailable]"
 
 
+def _joined(*parts: str) -> str:
+    return " ".join(filter(None, parts))
+
+
 def _dump_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -74,29 +88,26 @@ class LiveTranscriptWriter:
                  context: Optional[str] = None, root: Optional[Path] = None):
         self.delegation_id = delegation_id
         self.task_index = task_index
-        self._ok = True
+        self._ok = False
         self._lock = threading.Lock()
         self._stream_buf: List[str] = []
         self._stream_len = 0
-        try:
+        self.path: Optional[Path] = None
+        with _best_effort(f"init ({delegation_id} task {task_index})"):
             goal_line = _one_line(goal, _KICKOFF_MAX)
             d = (root if root is not None else live_transcript_root()) / delegation_id
             d.mkdir(parents=True, exist_ok=True)
-            self.path: Optional[Path] = d / f"task-{task_index}.log"
-            header = (
+            path = d / f"task-{task_index}.log"
+            path.write_text(
                 "=== Hermes subagent live transcript ===\n"
                 f"delegation: {delegation_id}   task: {task_index}\n"
                 f"goal: {_redact(goal_line)}\n"  # header bypasses event(), so redact here too
                 f"started: {time.strftime(_TIME_FMT)}\n"
                 "(append-only; streams while the subagent runs — tail -f me)\n"
-                + "=" * 40 + "\n")
-            self.path.write_text(header, encoding="utf-8")
+                + "=" * 40 + "\n", encoding="utf-8")
+            self.path, self._ok = path, True
             self.event("user", "kickoff: " + goal_line
                        + (f" | context: {_one_line(context, _KICKOFF_MAX)}" if context else ""))
-        except Exception as exc:
-            logger.debug("Live transcript init failed (%s task %s): %s", delegation_id, task_index, exc)
-            self._ok = False
-            self.path = None
 
     def event(self, role: str, text: str) -> None:
         """Append one ``HH:MM:SS role | text`` line. Single choke point: every typed
@@ -154,13 +165,12 @@ class LiveTranscriptWriter:
             self.assistant_text(text)
 
     def _on_complete(self, tool_name, preview, args, kwargs):
-        self.flush_stream()
         dur = kwargs.get("duration_seconds")
         summary = kwargs.get("summary") or preview
-        self.marker(" ".join(filter(None, [
+        self.marker(_joined(
             f"status={kwargs.get('status', '?')}",
             f"duration={dur}s" if dur is not None else "",
-            f"summary: {_one_line(summary, _RESULT_MAX)}" if summary else ""])))
+            f"summary: {_one_line(summary, _RESULT_MAX)}" if summary else ""))
 
     # Event demux (the tool_progress_callback surface): handler(self, tool_name, preview, args, kwargs).
     _OBSERVERS = {
@@ -187,11 +197,11 @@ class LiveTranscriptWriter:
     def finalize(self, entry: Dict[str, Any]) -> None:
         """Terminal marker with exit-reason detail subagent.complete lacks."""
         exit_reason = entry.get("exit_reason")
-        self.marker(" ".join(filter(None, [
+        self.marker(_joined(
             f"end status={entry.get('status', '?')}",
             f"exit_reason={exit_reason}" if exit_reason else "",
             "(iteration budget exhausted)" if exit_reason == "max_iterations" else "",
-            f"error: {_one_line(entry['error'], _RESULT_MAX)}" if entry.get("error") else ""])))
+            f"error: {_one_line(entry['error'], _RESULT_MAX)}" if entry.get("error") else ""))
 
 
 def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
@@ -199,18 +209,14 @@ def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
     the log; writer failures never propagate. Preserves the ``_flush`` contract."""
 
     def _cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
-        try:
+        with _best_effort("observe"):
             writer.observe(event_type, tool_name, preview, args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — must never hit the agent loop
-            logger.debug("Live transcript observe failed: %s", exc)
         if inner_cb is not None:
             inner_cb(event_type, tool_name, preview, args, **kwargs)
 
     def _flush():
-        try:
+        with _best_effort("flush"):
             writer.flush_stream()
-        except Exception:
-            pass
         if callable(getattr(inner_cb, "_flush", None)):
             inner_cb._flush()
 
@@ -228,7 +234,7 @@ def create_live_transcripts(
     ``(None, [None]*n, [])`` so delegation proceeds untouched."""
     n = len(task_list)
     prune_stale_live_dirs()  # best-effort; never raises
-    try:
+    with _best_effort("creation"):
         # Same id shape as async_delegation's so the dir name matches the handle.
         deleg_id = delegation_id or f"deleg_{uuid.uuid4().hex[:8]}"
         made = [LiveTranscriptWriter(deleg_id, i, str(t.get("goal", "")), context=t.get("context") or context)
@@ -239,9 +245,7 @@ def create_live_transcripts(
             return None, [None] * n, []
         _write_manifest(deleg_id, task_list, paths, model=model, provider=provider)
         return deleg_id, writers, paths
-    except Exception as exc:
-        logger.debug("Live transcript creation failed: %s", exc)
-        return None, [None] * n, []
+    return None, [None] * n, []
 
 
 def _manifest_path(delegation_id: str) -> Path:
@@ -251,7 +255,7 @@ def _manifest_path(delegation_id: str) -> Path:
 def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     paths: List[str], model: Optional[str] = None,
                     provider: Optional[str] = None) -> None:
-    try:
+    with _best_effort("manifest write"):
         _dump_json(_manifest_path(delegation_id), {
             "delegation_id": delegation_id, "started": time.strftime(_TIME_FMT),
             "task_count": len(task_list), "model": model, "provider": provider,
@@ -261,8 +265,6 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 "goal": _redact(str(t.get("goal", ""))[:500]),
                 "log": paths[i] if i < len(paths) else None,
                 "status": "running"} for i, t in enumerate(task_list)]})
-    except Exception as exc:
-        logger.debug("Live transcript manifest write failed: %s", exc)
 
 
 def update_manifest_statuses(delegation_id: Optional[str],
@@ -270,7 +272,7 @@ def update_manifest_statuses(delegation_id: Optional[str],
     """Best-effort per-task status update once the batch has aggregated."""
     if not delegation_id:
         return
-    try:
+    with _best_effort("manifest update"):
         mp = _manifest_path(delegation_id)
         manifest = json.loads(mp.read_text(encoding="utf-8"))
         by_index = {r.get("task_index"): r for r in results if isinstance(r, dict)}
@@ -282,14 +284,12 @@ def update_manifest_statuses(delegation_id: Optional[str],
                     task["exit_reason"] = r["exit_reason"]
         manifest["completed"] = time.strftime(_TIME_FMT)
         _dump_json(mp, manifest)
-    except Exception as exc:
-        logger.debug("Live transcript manifest update failed: %s", exc)
 
 
 def prune_stale_live_dirs(max_age_days: int = LIVE_RETENTION_DAYS) -> int:
     """Remove live/<delegation_id> dirs older than the retention window. Best-effort."""
     removed = 0
-    try:
+    with _best_effort("pruning"):
         root = live_transcript_root()
         if not root.is_dir():
             return 0
@@ -301,6 +301,4 @@ def prune_stale_live_dirs(max_age_days: int = LIVE_RETENTION_DAYS) -> int:
                     removed += 1
             except OSError:
                 continue
-    except Exception as exc:
-        logger.debug("Live transcript pruning failed: %s", exc)
     return removed
