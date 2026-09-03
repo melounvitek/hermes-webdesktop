@@ -113,13 +113,11 @@ def _validate_name(name: str) -> Optional[str]:
 
 
 def _validate_category(category: Optional[str]) -> Optional[str]:
-    if category is None:
+    if category is None or (isinstance(category, str) and not category.strip()):
         return None
     if not isinstance(category, str):
         return "Category must be a string."
     category = category.strip()
-    if not category:
-        return None
     invalid = (f"Invalid category '{category}'. {_NAME_RULE} "
                "Categories must be a single directory name.")
     if "/" in category or "\\" in category:
@@ -516,8 +514,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
             return _err(f"failed to archive '{name}': {e}")
         if not ok:
             return _err(archive_msg)
-        return {"success": True, "_archived": True,
-                "message": f"Skill '{name}' archived ({archive_msg}).{absorbed_note}"}
+        return {"success": True,
+                "message": f"Skill '{name}' archived ({archive_msg}).{absorbed_note}",
+                "_archived": True}
 
     shutil.rmtree(skill_dir)
     _rmdir_if_empty(skill_dir.parent, skills_root)  # empty category dir, never the root
@@ -581,8 +580,7 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 
 # --- Main entry point ---------------------------------------------------------
 
-# Set while replaying an already-approved staged skill write so skill_manage()
-# does not re-gate (and re-stage) it.
+# Set while replaying an approved staged skill write so skill_manage() does not re-gate it.
 _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
     "skill_gate_bypass", default=False)
 
@@ -642,8 +640,7 @@ def apply_skill_pending(payload: Dict[str, Any]) -> str:
         _skill_gate_bypass.reset(token)
 
 
-# Debounce state for the sync push hook: a burst of skill_manage writes
-# collapses into one push after a quiet window, on a daemon timer.
+# Sync push debounce: a burst of skill_manage writes collapses into one push on a daemon timer.
 _sync_push_timer = None
 _sync_push_lock = threading.Lock()
 _SYNC_PUSH_DEBOUNCE_S = 5.0
@@ -674,21 +671,18 @@ def _maybe_debounced_sync_push(skill_name: str) -> None:
 
 
 def _act_patch(a):
-    # Two shapes: old_string/new_string = targeted replacement;
-    # content (alone) = full SKILL.md rewrite (absorbs the old 'edit').
+    """Two shapes: old_string/new_string = targeted replacement (validated in _patch_skill so the
+    tool and the helper give the same guidance); content alone = full rewrite (the old 'edit')."""
     if a["content"] and (a["old_string"] or a["new_string"] is not None):
         return tool_error("Pass EITHER content (full SKILL.md rewrite) OR "
                           "old_string/new_string (targeted replacement), not both.", success=False)
     if a["content"]:
         return _edit_skill(a["name"], a["content"])
-    # Targeted-replacement validation lives in _patch_skill so the public
-    # tool and the helper return the same actionable guidance.
     return _patch_skill(a["name"], a["old_string"], a["new_string"], a["file_path"], a["replace_all"])
 
 
-# action -> handler(args dict). Handlers return a result dict, or a JSON string
-# (tool_error) for argument-shape errors. "edit" is a legacy alias for a full
-# rewrite (old transcripts/callers; not in the schema).
+# action -> handler(args dict) returning a result dict, or a tool_error JSON string for
+# argument-shape errors. "edit" is a legacy alias for a full rewrite (not in the schema).
 _ACTION_HANDLERS = {
     "create": lambda a: _create_skill(a["name"], a["content"], a["category"]),
     "edit": lambda a: _edit_skill(a["name"], a["content"]),
@@ -697,15 +691,16 @@ _ACTION_HANDLERS = {
     "write_file": lambda a: _write_file(a["name"], a["file_path"], a["file_content"]),
     "remove_file": lambda a: _remove_file(a["name"], a["file_path"])}
 # action -> (arg, is_missing, error) argument-shape checks run before the handler.
+_MISSING, _IS_NONE = (lambda v: not v), (lambda v: v is None)
 _REQUIRED_ARGS = {
-    "create": [("content", lambda v: not v,
+    "create": [("content", _MISSING,
                 "content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).")],
-    "edit": [("content", lambda v: not v,
+    "edit": [("content", _MISSING,
               "content is required for a full rewrite. Provide the full updated SKILL.md text.")],
-    "write_file": [("file_path", lambda v: not v,
-                    "file_path is required for 'write_file'. Example: 'references/api-guide.md'"),
-                   ("file_content", lambda v: v is None, "file_content is required for 'write_file'.")],
-    "remove_file": [("file_path", lambda v: not v, "file_path is required for 'remove_file'.")]}
+    "write_file": [
+        ("file_path", _MISSING, "file_path is required for 'write_file'. Example: 'references/api-guide.md'"),
+        ("file_content", _IS_NONE, "file_content is required for 'write_file'.")],
+    "remove_file": [("file_path", _MISSING, "file_path is required for 'remove_file'.")]}
 
 
 def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
@@ -738,8 +733,7 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
             bump_patch(name, action=action, task_id=task_id, session_id=session_id)
         elif action == "delete" and not result.get("_archived"):
             forget(name)
-    # Runs only AFTER the write gate passed (staged writes returned early), so
-    # un-reviewed content is never pushed.
+    # Only AFTER the write gate passed (staged writes returned early): never push un-reviewed content.
     with suppress(Exception):
         _maybe_debounced_sync_push(name)
 
@@ -757,12 +751,11 @@ def skill_manage(
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
 
-    # Approval gate: skills are too large to review inline, so they always stage
-    # regardless of origin; bypassed when replaying an approved staged write.
-    args = dict(
-        content=content, category=category, file_path=file_path,
-        file_content=file_content, old_string=old_string, new_string=new_string,
-        replace_all=replace_all, absorbed_into=absorbed_into)
+    # Approval gate: skills are too large to review inline, so they always stage regardless
+    # of origin; bypassed when replaying an approved staged write.
+    args = dict(content=content, category=category, file_path=file_path, file_content=file_content,
+                old_string=old_string, new_string=new_string, replace_all=replace_all,
+                absorbed_into=absorbed_into)
     if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
 

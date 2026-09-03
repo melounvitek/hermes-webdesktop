@@ -133,13 +133,11 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         if len(operations) != 1:
             return tool_error("delete must be the SOLE op in its call — it doesn't "
                               "compose with other ops' rollback.", success=False)
-        op = operations[0]
-        nm = op.get("name") or default_name
+        nm = operations[0].get("name") or default_name
         if not nm:
             return tool_error("operations[0] (delete) needs a 'name'.", success=False)
-        return _smt.skill_manage(
-            action="delete", name=nm, absorbed_into=op.get("absorbed_into"),
-            task_id=task_id, session_id=session_id)
+        return _smt.skill_manage(action="delete", name=nm, task_id=task_id, session_id=session_id,
+                                 absorbed_into=operations[0].get("absorbed_into"))
 
     names, err = _validate_batch_ops(operations, default_name, tool_error)
     if err is not None:
@@ -176,13 +174,11 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
                 parsed = {"success": False, "error": "unparseable op result"}
             if not parsed.get("success"):
                 note, rollback_failed = _rollback(snapshots, _smt._find_skill)
-                fail = {
+                fail = {  # key order is wire-visible
                     "success": False,
-                    "error": (
-                        f"operations[{i}] ({op['action']} on '{names[i]}') failed: "
-                        f"{parsed.get('error', 'unknown error')} — batch aborted, {note}."),
-                    "failed_index": i,
-                    "completed_before_failure": i}
+                    "error": (f"operations[{i}] ({op['action']} on '{names[i]}') failed: "
+                              f"{parsed.get('error', 'unknown error')} — batch aborted, {note}."),
+                    "failed_index": i, "completed_before_failure": i}
                 # Carry the failing op's teaching payload (patch's file_preview /
                 # fuzzy-match hints) through — without it the model recovers blind.
                 for k, v in parsed.items():
