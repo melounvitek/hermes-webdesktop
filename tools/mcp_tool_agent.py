@@ -25,9 +25,9 @@ def _agent_tool_defs(agent) -> list:
 
 
 def _resolve_refresh_toolsets(agent, enabled_override, disabled_override):
-    """Explicit reloads pass freshly-resolved toolsets (so a server just ENABLED
-    in config is picked up) and the agent's selection is updated to match;
-    automatic paths pass nothing and reuse the build-time selection."""
+    """Explicit reloads pass freshly-resolved toolsets (so a server just ENABLED in config is
+    picked up) and the agent's selection is updated to match; automatic paths pass nothing
+    and reuse the build-time selection."""
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
     if enabled_override is not None or disabled_override is not None:
@@ -39,8 +39,8 @@ def _resolve_refresh_toolsets(agent, enabled_override, disabled_override):
 
 
 def _tool_defs_content_changed(agent, new_defs: list) -> bool:
-    """Byte-level diff of the serialized tool arrays (dynamic schemas change
-    CONTENT under stable names); False if either side fails to serialize."""
+    """Byte-level diff of the serialized tool arrays (dynamic schemas change CONTENT under
+    stable names); False if either side fails to serialize."""
     try:
         dump = lambda defs: json.dumps(defs, sort_keys=True, separators=(",", ":"), default=str)  # noqa: E731
         return dump(_agent_tool_defs(agent)) != dump(new_defs)
@@ -52,13 +52,11 @@ def _publish_tool_snapshot(
     agent, new_defs: list, new_names: set, *, snapshot_generation: int,
     staged_engine_names: set, content_aware: bool, prefix_registered: Optional[set],
 ) -> Optional[set]:
-    """Single atomic read-diff-publish under ``_agent_tools_lock`` so ``added``
-    matches what was published and a stale (older-generation) rebuild can't
-    overwrite a newer one. Returns the added names, or None when nothing was
-    published (unchanged, or a newer snapshot already won)."""
+    """Single atomic read-diff-publish under ``_agent_tools_lock`` so ``added`` matches what
+    was published and a stale (older-generation) rebuild can't overwrite a newer one. Returns
+    the added names, or None when nothing was published (unchanged, or a newer snapshot won)."""
     with _agent_tools_lock:
-        # Tolerate an agent that never set the generation (or a non-int mock)
-        # rather than failing the whole refresh on the comparison.
+        # Tolerate an agent that never set the generation (or a non-int mock).
         published_gen = getattr(agent, "_tool_snapshot_generation", -1)
         published_gen = published_gen if isinstance(published_gen, int) else -1
         if snapshot_generation < published_gen:
@@ -84,53 +82,41 @@ def _publish_tool_snapshot(
 
 
 def refresh_agent_mcp_tools(
-    agent,
-    *,
-    enabled_override=None,
-    disabled_override=None,
-    quiet_mode: bool = True,
-    content_aware: bool = False,
-    preserve_prefix: bool = False,
-) -> set:
-    """Re-derive an already-built agent's tool snapshot from the live registry;
-    returns the newly-added tool names (empty when unchanged).
+    agent, *, enabled_override=None, disabled_override=None, quiet_mode: bool = True,
+    content_aware: bool = False, preserve_prefix: bool = False) -> set:
+    """Re-derive an already-built agent's tool snapshot from the live registry; returns the
+    newly-added tool names (empty when unchanged).
 
-    The agent snapshots ``agent.tools`` once at build time, so servers that
-    connect later (slow OAuth server, ``/reload-mcp``) are invisible until
-    rebuilt. Single shared rebuild for the TUI RPC, gateway reload, late-binding
-    thread and between-turns refresh: respects the agent's toolset filter, diffs
-    by tool NAME (a count compare misses an equal-size swap), re-injects the
-    memory-provider / context-engine (``lcm_*``) tools ``agent_init`` appends
-    after ``get_tool_definitions`` (a naive rebuild would drop them), and
-    publishes ``(tools, valid_tool_names)`` together under ``_agent_tools_lock``.
+    The agent snapshots ``agent.tools`` once at build time, so servers that connect later
+    (slow OAuth server, ``/reload-mcp``) are invisible until rebuilt. Single shared rebuild for
+    the TUI RPC, gateway reload, late-binding thread and between-turns refresh: respects the
+    agent's toolset filter, diffs by tool NAME (a count compare misses an equal-size swap),
+    re-injects the memory-provider / context-engine (``lcm_*``) tools ``agent_init`` appends
+    after ``get_tool_definitions``, and publishes ``(tools, valid_tool_names)`` together
+    under ``_agent_tools_lock``.
 
-    ``preserve_prefix`` is for rebuilds inside a live conversation, where the
-    tool array is a cached request prefix and any moved byte re-prefills the
-    whole history: existing tools keep their slot (schemas still refresh), a
-    still-registered tool whose ``check_fn`` merely flapped is carried forward,
-    a deregistered tool is dropped, new tools append at the tail. Carrying an
-    unavailable tool forward is safe: ``check_fn`` gates exposure, never
-    invocation. The caller owns the prompt-cache contract (turn-boundary policy
-    differs per caller)."""
+    ``preserve_prefix`` is for rebuilds inside a live conversation, where the tool array is a
+    cached request prefix and any moved byte re-prefills the whole history: existing tools
+    keep their slot (schemas still refresh), a still-registered tool whose ``check_fn`` merely
+    flapped is carried forward (safe: ``check_fn`` gates exposure, never invocation), a
+    deregistered tool is dropped, new tools append at the tail. The caller owns the
+    prompt-cache contract (turn-boundary policy differs per caller)."""
     from model_tools import get_tool_definitions
     from tools.registry import registry
 
     enabled, disabled = _resolve_refresh_toolsets(agent, enabled_override, disabled_override)
-    # Capture the registry generation BEFORE the slow get_tool_definitions call;
-    # at publish time a slower caller holding an OLDER set must not clobber a
-    # newer set another caller already published.
+    # Capture the registry generation BEFORE the slow get_tool_definitions call; at publish
+    # time a slower caller holding an OLDER set must not clobber a newer set already published.
     snapshot_generation = registry._generation
-    # Computed OUTSIDE the lock (can be slow); diff + publish happen together in
-    # one critical section so concurrent callers can't torn-publish.
-    new_defs = list(
-        get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or []
-    )
+    # Computed OUTSIDE the lock (can be slow); diff + publish happen together in one critical
+    # section so concurrent callers can't torn-publish.
+    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or [])
     new_names = {_def_name(t) for t in new_defs}
-    # Re-append the post-build families on LOCALS only; live agent attributes
-    # are untouched until the single atomic publish.
+    # Re-append the post-build families on LOCALS only; live agent attributes are untouched
+    # until the single atomic publish.
     staged_engine_names = _core._reinject_post_build_tools(agent, new_defs, new_names)
-    # Registry membership is read OUTSIDE ``_agent_tools_lock``: taking
-    # ``registry._lock`` under the tools lock would be the first nesting of the two.
+    # Registry membership is read OUTSIDE ``_agent_tools_lock``: taking ``registry._lock``
+    # under the tools lock would be the first nesting of the two.
     prefix_registered: Optional[set] = None
     if preserve_prefix:
         try:
@@ -139,20 +125,19 @@ def refresh_agent_mcp_tools(
             pass  # fail open to the plain rebuild
     added = _publish_tool_snapshot(
         agent, new_defs, new_names, snapshot_generation=snapshot_generation,
-        staged_engine_names=staged_engine_names, content_aware=content_aware, prefix_registered=prefix_registered,
-    )
+        staged_engine_names=staged_engine_names, content_aware=content_aware, prefix_registered=prefix_registered)
     if added is None:
         return set()
-    # Re-pin the session's tool order so a rebuild-for-existing-session
-    # (gateway agent-cache eviction) restores exactly these names.
+    # Re-pin the session's tool order so a rebuild-for-existing-session (gateway agent-cache
+    # eviction) restores exactly these names.
     persist_agent_tool_names(agent)
     return added
 
 
 def reprobe_tool_availability() -> None:
-    """Explicit ``/reload-mcp`` hatch out of the tools[] freeze: drop the
-    ``check_fn`` verdict cache AND the ``get_tool_definitions`` memo (keyed on
-    registry generation, so it would otherwise replay the stale verdicts)."""
+    """Explicit ``/reload-mcp`` hatch out of the tools[] freeze: drop the ``check_fn`` verdict
+    cache AND the ``get_tool_definitions`` memo (keyed on registry generation, so it would
+    otherwise replay the stale verdicts)."""
     from model_tools import _clear_tool_defs_cache
     from tools.registry import invalidate_check_fn_cache
 
@@ -173,12 +158,11 @@ def persist_agent_tool_names(agent) -> None:
 
 
 def restore_agent_tool_prefix(agent, saved_names: list) -> bool:
-    """Fold a freshly built agent's ``tools`` onto the session's saved order;
-    True if changed. The gateway rebuilds a NEW AIAgent for an existing session
-    after agent-cache eviction, with no predecessor to preserve, so the saved
-    name list stands in: a saved tool still registered but failing its probe is
-    carried forward from the registry schema, a deregistered one is dropped, new
-    tools append at the tail (same rule as ``_merge_preserving_prefix``)."""
+    """Fold a freshly built agent's ``tools`` onto the session's saved order; True if changed.
+    The gateway rebuilds a NEW AIAgent for an existing session after agent-cache eviction, with
+    no predecessor to preserve, so the saved name list stands in (same merge rule as
+    ``_merge_preserving_prefix``; a saved tool still registered but failing its probe is
+    carried forward from the registry schema)."""
     if not saved_names:
         return False
     from tools.registry import registry
@@ -206,11 +190,10 @@ def restore_agent_tool_prefix(agent, saved_names: list) -> bool:
 
 
 def _merge_preserving_prefix(current_defs: list, new_defs: list, registered_names: set) -> tuple[list, set]:
-    """Fold a fresh tool snapshot into a live one without moving existing bytes.
-    Ordered by ``current_defs`` (the cached request prefix): a name in both keeps
-    its slot but takes the fresh schema; a name only in the live list is kept if
-    still registered (``check_fn`` flapped), else dropped; a name only in the
-    fresh list is appended at the tail."""
+    """Fold a fresh tool snapshot into a live one without moving existing bytes. Ordered by
+    ``current_defs`` (the cached request prefix): a name in both keeps its slot but takes the
+    fresh schema; a name only in the live list is kept if still registered (``check_fn``
+    flapped), else dropped; a name only in the fresh list is appended at the tail."""
     fresh = {_def_name(entry): entry for entry in new_defs if _def_name(entry)}
     merged = []
     for entry in current_defs:
@@ -225,11 +208,10 @@ def _merge_preserving_prefix(current_defs: list, new_defs: list, registered_name
 
 
 def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
-    """Append memory-provider and context-engine tools onto the caller's staged
-    ``tools_list`` / ``name_set`` (never the live agent attributes), mirroring
-    ``agent_init``'s post-build injection. Idempotent and fail-soft. Returns the
-    context-engine routing names THIS rebuild appended: a name already owned by
-    a registry/plugin tool is not claimed, matching agent_init."""
+    """Append memory-provider and context-engine tools onto the caller's staged ``tools_list``
+    / ``name_set`` (never the live agent attributes), mirroring ``agent_init``'s post-build
+    injection. Idempotent and fail-soft. Returns the context-engine routing names THIS rebuild
+    appended: a name already owned by a registry/plugin tool is not claimed, matching agent_init."""
     def _add(schema) -> bool:
         name = schema.get("name", "") if isinstance(schema, dict) else ""
         if not name or name in name_set:
@@ -247,19 +229,17 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
     try:
         get_mem_schemas = _schema_getter("_memory_manager", "get_all_tool_schemas")
         if get_mem_schemas is not None:
-            # Same toolset gate inject_memory_provider_tools uses.
-            from agent.memory_manager import memory_provider_tools_enabled
+            from agent.memory_manager import memory_provider_tools_enabled  # same gate inject_memory_provider_tools uses
             if memory_provider_tools_enabled(
-                enabled, getattr(agent, "disabled_toolsets", None), memory_tool_present="memory" in name_set,
-            ):
+                    enabled, getattr(agent, "disabled_toolsets", None), memory_tool_present="memory" in name_set):
                 for schema in get_mem_schemas():
                     _add(schema)
     except Exception:
         logger.debug("Memory-provider tool re-injection skipped", exc_info=True)
 
-    # The `context_engine` toolset is intentionally empty, so lcm_* tools exist
-    # only via this append. Honor the enabled_toolsets gate agent_init uses, or a
-    # restricted-toolset platform would re-leak tools the build excluded.
+    # The `context_engine` toolset is intentionally empty, so lcm_* tools exist only via this
+    # append. Honor the enabled_toolsets gate agent_init uses, or a restricted-toolset platform
+    # would re-leak tools the build excluded.
     staged_engine_names: set = set()
     try:
         get_schemas = _schema_getter("context_compressor", "get_tool_schemas")
