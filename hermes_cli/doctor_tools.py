@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from hermes_cli.doctor_platform import _system_package_install_cmd
-from hermes_cli.doctor_report import Finding, _fail_and_issue, check_info, check_ok, check_warn
+from hermes_cli.doctor_report import Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_constants import agent_browser_runnable, is_termux as _is_termux
 
@@ -38,13 +38,12 @@ def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
     return steps + [f"{n}) npm install -g agent-browser", f"{n + 1}) agent-browser install"]
 
 
-def _termux_install_all_fallback_notes() -> list[str]:
-    return [
-        "Termux install profile: use .[termux-all] for broad compatibility (installer default on Termux).",
-        "Matrix E2EE extra is excluded on Termux (python-olm currently fails to build).",
-        "Local faster-whisper extra is excluded on Termux (ctranslate2/av build path unavailable).",
-        "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY).",
-    ]
+_TERMUX_INSTALL_ALL_FALLBACK_NOTES = (
+    "Termux install profile: use .[termux-all] for broad compatibility (installer default on Termux).",
+    "Matrix E2EE extra is excluded on Termux (python-olm currently fails to build).",
+    "Local faster-whisper extra is excluded on Termux (ctranslate2/av build path unavailable).",
+    "STT fallback: use Groq Whisper (set GROQ_API_KEY) or OpenAI Whisper (set VOICE_TOOLS_OPENAI_KEY).",
+)
 
 
 def _is_kanban_worker_env_gate(item: dict) -> bool:
@@ -72,13 +71,10 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
     try:
         from agent.web_search_registry import get_active_extract_provider, get_active_search_provider
         from tools.web_tools import _ensure_web_plugins_loaded, _provider_is_ready
-
-        # Doctor is a fresh process: bundled web providers only register during plugin
-        # discovery, which nothing has triggered yet (idempotent, cheap on rerun).
+        # Fresh process: bundled web providers only register during plugin discovery (idempotent, cheap).
         _ensure_web_plugins_loaded()
     except Exception:
         return rows
-
     for capability, getter in (("web search", get_active_search_provider), ("web extract", get_active_extract_provider)):
         try:
             provider = getter()
@@ -88,18 +84,15 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
             rows.append(("warn", capability, "(no provider selected or registered)"))
             continue
         name = getattr(provider, "name", None) or type(provider).__name__
-        if _provider_is_ready(provider):
-            rows.append(("ok", capability, f"({name})"))
-        else:
-            rows.append(("warn", capability, f"({name} selected; provider not configured)"))
+        rows.append(("ok", capability, f"({name})") if _provider_is_ready(provider)
+                    else ("warn", capability, f"({name} selected; provider not configured)"))
     return rows
 
 
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
     from hermes_cli.doctor import _honcho_is_configured_for_doctor
-    updated_available = list(available)
-    updated_unavailable = []
+    updated_available, updated_unavailable = list(available), []
     for item in unavailable:
         if _is_kanban_worker_env_gate(item):
             gated = "kanban"
@@ -136,14 +129,9 @@ def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]
 
 def _check_git_and_rg(should_fix: bool) -> Finding:
     f = Finding()
-    if _safe_which("git"):
-        check_ok("git")
-    else:
-        check_warn("git not found", "(optional)")
-    if _safe_which("rg"):
-        check_ok("ripgrep (rg)", "(faster file search)")
-    else:
-        check_warn("ripgrep (rg) not found", "(file search uses grep fallback)")
+    check_bool(_safe_which("git"), "git", ("git not found", "(optional)"))
+    if not check_bool(_safe_which("rg"), ("ripgrep (rg)", "(faster file search)"),
+                      ("ripgrep (rg) not found", "(file search uses grep fallback)")):
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
     return f
 
@@ -155,10 +143,9 @@ def _check_docker_backend(terminal_env: str, running_in_container: bool, issues:
     if terminal_env == "docker":
         if not _safe_which("docker"):
             _fail_and_issue("docker not found", "(required for TERMINAL_ENV=docker)", "Install Docker or change TERMINAL_ENV", issues)
-        elif _run_ok(["docker", "info"], timeout=10):
-            check_ok("docker", "(daemon running)")
         else:
-            _fail_and_issue("docker daemon not running", "", "Start Docker daemon", issues)
+            _require(_run_ok(["docker", "info"], timeout=10), ("docker", "(daemon running)"), ("docker daemon not running", ""),
+                     "Start Docker daemon", issues)
     elif _safe_which("docker"):
         check_ok("docker", "(optional)")
     elif _is_termux():
@@ -170,8 +157,7 @@ def _check_docker_backend(terminal_env: str, running_in_container: bool, issues:
 def _check_ssh_backend(issues: list[str]) -> None:
     ssh_host = os.getenv("TERMINAL_SSH_HOST")
     if not ssh_host:
-        _fail_and_issue("TERMINAL_SSH_HOST not set", "(required for TERMINAL_ENV=ssh)", "Set TERMINAL_SSH_HOST in .env", issues)
-        return
+        return _fail_and_issue("TERMINAL_SSH_HOST not set", "(required for TERMINAL_ENV=ssh)", "Set TERMINAL_SSH_HOST in .env", issues)
     ssh_user, ssh_port, ssh_key = (os.getenv(f"TERMINAL_SSH_{k}") for k in ("USER", "PORT", "KEY"))
     cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
     if ssh_port:
@@ -179,17 +165,19 @@ def _check_ssh_backend(issues: list[str]) -> None:
     if ssh_key:
         cmd += ["-i", os.path.expanduser(ssh_key)]
     cmd += [f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host, "echo ok"]
-    if _run_ok(cmd, timeout=15, text=True, encoding='utf-8', errors='replace'):
-        check_ok(f"SSH connection to {ssh_host}")
-    else:
-        _fail_and_issue(f"SSH connection to {ssh_host}", "", f"Check SSH configuration for {ssh_host}", issues)
+    _require(_run_ok(cmd, timeout=15, text=True, encoding='utf-8', errors='replace'),
+             f"SSH connection to {ssh_host}", (f"SSH connection to {ssh_host}", ""), f"Check SSH configuration for {ssh_host}", issues)
+
+
+def _require(cond, ok, bad, issue: str, issues: list[str]) -> None:
+    """``check_ok(*ok)`` when *cond*, else ``check_fail(*bad)`` and record *issue*."""
+    if not check_bool(cond, ok, bad, fail=True):
+        issues.append(issue)
 
 
 def _check_daytona_backend(issues: list[str]) -> None:
-    if os.getenv("DAYTONA_API_KEY"):
-        check_ok("Daytona API key", "(configured)")
-    else:
-        _fail_and_issue("DAYTONA_API_KEY not set", "(required for TERMINAL_ENV=daytona)", "Set DAYTONA_API_KEY environment variable", issues)
+    _require(os.getenv("DAYTONA_API_KEY"), ("Daytona API key", "(configured)"),
+             ("DAYTONA_API_KEY not set", "(required for TERMINAL_ENV=daytona)"), "Set DAYTONA_API_KEY environment variable", issues)
     try:
         from daytona import Daytona  # noqa: F401 — SDK presence check
         check_ok("daytona SDK", "(installed)")
@@ -200,23 +188,15 @@ def _check_daytona_backend(issues: list[str]) -> None:
 def _check_vercel_backend(issues: list[str]) -> None:
     from tools.terminal_tool import _SUPPORTED_VERCEL_RUNTIMES
     runtime = os.getenv("TERMINAL_VERCEL_RUNTIME", "node24").strip() or "node24"
-    if runtime in _SUPPORTED_VERCEL_RUNTIMES:
-        check_ok("Vercel runtime", f"({runtime})")
-    else:
-        supported = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
-        _fail_and_issue("Vercel runtime unsupported", f"({runtime}; use {supported})", f"Set TERMINAL_VERCEL_RUNTIME to one of: {supported}", issues)
-
-    if os.getenv("TERMINAL_CONTAINER_DISK", "51200").strip() in {"", "0", "51200"}:
-        check_ok("Vercel disk setting", "(uses platform default)")
-    else:
-        _fail_and_issue("Vercel custom disk unsupported", "(reset terminal.container_disk to 51200)",
-                        "Vercel Sandbox does not support custom container_disk; use the shared default 51200", issues)
-
-    if importlib.util.find_spec("vercel") is not None:
-        check_ok("vercel SDK", "(installed)")
-    else:
-        _fail_and_issue("vercel SDK not installed", "(pip install 'hermes-agent[vercel]')",
-                        "Install the Vercel optional dependency: pip install 'hermes-agent[vercel]'", issues)
+    supported = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
+    _require(runtime in _SUPPORTED_VERCEL_RUNTIMES, ("Vercel runtime", f"({runtime})"),
+             ("Vercel runtime unsupported", f"({runtime}; use {supported})"), f"Set TERMINAL_VERCEL_RUNTIME to one of: {supported}", issues)
+    _require(os.getenv("TERMINAL_CONTAINER_DISK", "51200").strip() in {"", "0", "51200"},
+             ("Vercel disk setting", "(uses platform default)"), ("Vercel custom disk unsupported", "(reset terminal.container_disk to 51200)"),
+             "Vercel Sandbox does not support custom container_disk; use the shared default 51200", issues)
+    _require(importlib.util.find_spec("vercel") is not None, ("vercel SDK", "(installed)"),
+             ("vercel SDK not installed", "(pip install 'hermes-agent[vercel]')"),
+             "Install the Vercel optional dependency: pip install 'hermes-agent[vercel]'", issues)
 
     auth_status = describe_vercel_auth()
     if auth_status.ok:
@@ -224,36 +204,30 @@ def _check_vercel_backend(issues: list[str]) -> None:
     elif auth_status.label.startswith("partial"):
         _fail_and_issue("Vercel auth incomplete", f"({auth_status.label})", "Set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID together", issues)
     else:
-        _fail_and_issue("Vercel auth not configured", f"({auth_status.label})",
-                        "Configure Vercel Sandbox auth with VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID", issues)
+        _fail_and_issue("Vercel auth not configured", f"({auth_status.label})", "Configure Vercel Sandbox auth with VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID", issues)
     for line in auth_status.detail_lines:
         check_info(f"Vercel auth {line}")
-
-    if os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"1", "true", "yes", "on"}:
-        check_info("Vercel persistence: snapshot filesystem only; live processes do not survive sandbox recreation")
-    else:
-        check_info("Vercel persistence: ephemeral filesystem")
+    persistent = os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in {"1", "true", "yes", "on"}
+    check_info("Vercel persistence: snapshot filesystem only; live processes do not survive sandbox recreation"
+               if persistent else "Vercel persistence: ephemeral filesystem")
 
 
 def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()
         from agent.terminal_env_registry import get_provider
-
         provider = get_provider(terminal_env)
     except Exception:
         provider = None
     if provider is None:
-        _fail_and_issue(f"Unknown terminal backend '{terminal_env}'", "(no built-in or plugin backend by that name)",
-                        "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it", issues)
-        return
+        return _fail_and_issue(f"Unknown terminal backend '{terminal_env}'", "(no built-in or plugin backend by that name)",
+                               "Fix terminal.backend in config.yaml, or install/enable the plugin that provides it", issues)
     for ok, label, detail in provider.doctor_checks():
-        if ok:
-            check_ok(label, detail)
-        else:
-            _fail_and_issue(label, detail, detail.strip("()"), issues)
+        _require(ok, (label, detail), (label, detail), detail.strip("()"), issues)
+
+
+_BACKEND_CHECKS = {"ssh": _check_ssh_backend, "daytona": _check_daytona_backend, "vercel_sandbox": _check_vercel_backend}
 
 
 def _check_terminal_backend(should_fix: bool) -> Finding:
@@ -265,20 +239,14 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
         running_in_container = _is_container()
     except Exception:
         running_in_container = False
-
-    # Inside our container docker-in-docker isn't set up, so the local backend is the
-    # intended one: skip the noisy "docker not found" warning. An explicit
-    # TERMINAL_ENV=docker (user likely mounted docker.sock) still gets the normal check.
+    # Inside our container docker-in-docker isn't set up, so the local backend is the intended one: skip the
+    # noisy "docker not found" warning. An explicit TERMINAL_ENV=docker (mounted docker.sock) still gets checked.
     if running_in_container and terminal_env != "docker":
         check_info("Running inside a container — using local terminal backend (docker-in-docker is not configured by default)")
         terminal_env = "local"
     _check_docker_backend(terminal_env, running_in_container, f.issues)
-    if terminal_env == "ssh":
-        _check_ssh_backend(f.issues)
-    elif terminal_env == "daytona":
-        _check_daytona_backend(f.issues)
-    elif terminal_env == "vercel_sandbox":
-        _check_vercel_backend(f.issues)
+    if terminal_env in _BACKEND_CHECKS:
+        _BACKEND_CHECKS[terminal_env](f.issues)
     elif terminal_env not in _BUILTIN_TERMINAL_BACKENDS:
         _check_plugin_backend(terminal_env, f.issues)
     return f
@@ -287,9 +255,8 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
 def _check_agent_browser(should_fix: bool) -> bool:
     """agent-browser resolution; returns True when browser tools will find a usable install.
 
-    Mirrors ``tools.browser_tool._find_agent_browser``'s own cascade (it resolves lazily via
-    npx or a global/Hermes-managed install) so doctor can't diverge from what the tools find;
-    validate=False keeps this a cheap existence check with no subprocess or install side effects.
+    Mirrors ``tools.browser_tool._find_agent_browser``'s own cascade (lazy npx or a global/Hermes-managed
+    install) so doctor can't diverge from the tools; validate=False keeps it a cheap, side-effect-free check.
     """
     try:
         from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel
@@ -300,38 +267,38 @@ def _check_agent_browser(should_fix: bool) -> bool:
     if resolved and _is_npx_agent_browser_sentinel(resolved):
         check_ok("agent-browser", "(resolves via npx on first use)")
         if should_fix:
-            # Can't tell from here whether npx's cache is warm — fire the same warm-up
-            # `hermes update` does so the first browser call doesn't pay the registry fetch.
+            # Can't tell whether npx's cache is warm — fire the same warm-up `hermes update` does.
             from tools.browser_tool import warm_agent_browser_npx_cache
-            if warm_agent_browser_npx_cache():
-                check_info("  Warmed npx cache for agent-browser")
-            else:
-                check_info("  Could not warm npx cache (offline or npx unavailable)")
+            check_info("  Warmed npx cache for agent-browser" if warm_agent_browser_npx_cache()
+                       else "  Could not warm npx cache (offline or npx unavailable)")
         return True
     if resolved and agent_browser_runnable(resolved):
         check_ok("agent-browser", "(browser automation)")
         return True
     if resolved:
-        # Almost always a dangling global symlink left by agent-browser's npm
-        # postinstall after `hermes update` wiped node_modules.
+        # Almost always a dangling global symlink left by npm postinstall after `hermes update` wiped node_modules.
         check_warn("agent-browser found but not runnable", f"(broken symlink at {resolved}? run: npx agent-browser --version)")
     elif _is_termux():
-        check_info("agent-browser is not installed (expected in the tested Termux path)")
-        check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
-        check_info("Termux browser setup:")
-        for step in _termux_browser_setup_steps(node_installed=True):
-            check_info(step)
+        _termux_browser_hints("agent-browser is not installed (expected in the tested Termux path)",
+                              "Install it manually later with: npm install -g agent-browser && agent-browser install", node_installed=True)
     else:
         check_warn("agent-browser not installed", "(requires npm/npx on PATH)")
     return False
 
 
+def _termux_browser_hints(*lines: str, node_installed: bool) -> None:
+    for line in lines:
+        check_info(line)
+    check_info("Termux browser setup:")
+    for step in _termux_browser_setup_steps(node_installed=node_installed):
+        check_info(step)
+
+
 def _check_chromium() -> None:
     """Playwright Chromium presence, using the exact predicate browser_tool uses to hide browser_* tools.
 
-    Lazy import: browser_tool is a ~150KB module; if it can't import that is a separate
-    bug surfaced elsewhere. Camofox, a CDP override, a cloud provider, or Lightpanda all
-    bypass the local Chromium requirement, so no warning is emitted for them.
+    Lazy import: browser_tool is ~150KB; an import failure is a separate bug surfaced elsewhere. Camofox, a
+    CDP override, a cloud provider, or Lightpanda all bypass the local Chromium requirement (no warning).
     """
     from hermes_cli.doctor import PROJECT_ROOT
     try:
@@ -341,12 +308,10 @@ def _check_chromium() -> None:
         return
     if _is_camofox_mode() or bool(_get_cdp_override_raw()) or _get_cloud_provider() is not None or _using_lightpanda_engine():
         return
-    if _chromium_installed():
-        check_ok("Playwright Chromium", "(browser engine)")
-        return
-    check_warn("Playwright Chromium not installed", "(browser_* tools will be hidden from the agent)")
-    with_deps = "" if sys.platform == "win32" else "--with-deps "
-    check_info(f"Install with: cd {PROJECT_ROOT} && npx playwright install {with_deps}chromium")
+    if not check_bool(_chromium_installed(), ("Playwright Chromium", "(browser engine)"),
+                      ("Playwright Chromium not installed", "(browser_* tools will be hidden from the agent)")):
+        with_deps = "" if sys.platform == "win32" else "--with-deps "
+        check_info(f"Install with: cd {PROJECT_ROOT} && npx playwright install {with_deps}chromium")
 
 
 def _check_lightpanda() -> None:
@@ -366,10 +331,8 @@ def _check_lightpanda() -> None:
     if not used:
         check_warn("browser.engine=lightpanda is shadowed", f"({reason})")
         check_info("Fix: pick Lightpanda in `hermes tools` → Browser Automation, or set browser.engine: auto")
-    elif find_lightpanda_binary():
-        check_ok("Lightpanda", f"({reason})")
-    else:
-        check_warn("Lightpanda selected but binary not found", "(browser tools will fail until it is installed)")
+    elif not check_bool(find_lightpanda_binary(), ("Lightpanda", f"({reason})"),
+                        ("Lightpanda selected but binary not found", "(browser tools will fail until it is installed)")):
         check_info(LIGHTPANDA_INSTALL_HINT)
 
 
@@ -381,11 +344,8 @@ def _check_node_and_browser(should_fix: bool) -> Finding:
         if _check_agent_browser(should_fix) and not _is_termux():  # Chromium check is not a tested Termux path
             _check_chromium()
     elif _is_termux():
-        check_info("Node.js not found (browser tools are optional in the tested Termux path)")
-        check_info("Install Node.js on Termux with: pkg install nodejs")
-        check_info("Termux browser setup:")
-        for step in _termux_browser_setup_steps(node_installed=False):
-            check_info(step)
+        _termux_browser_hints("Node.js not found (browser tools are optional in the tested Termux path)",
+                              "Install Node.js on Termux with: pkg install nodejs", node_installed=False)
     else:
         check_warn("Node.js not found", "(optional, needed for browser tools)")
     _check_lightpanda()
@@ -399,10 +359,9 @@ def _plural(n: int) -> str:
 def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], issues: list[str]) -> None:
     """Run one `npm audit --json` and report; any failure is silently skipped.
 
-    Workspace-scoped (`--workspace <name>`) advisories are build-time tooling (esbuild/vite),
-    not runtime code. `npm audit fix --workspace` crashes on current npm (arborist "edgesOut"),
-    and the root-level fix can crash on the same tree ("isDescendantOf"), so no manual fix
-    command is offered for those — they clear via a lockfile bump.
+    Workspace-scoped (`--workspace <name>`) advisories are build-time tooling (esbuild/vite), not runtime
+    code. `npm audit fix --workspace` crashes on current npm (arborist "edgesOut") and the root-level fix can
+    crash on the same tree ("isDescendantOf"), so no manual fix command is offered — they clear via a lockfile bump.
     """
     import json
     try:
@@ -417,11 +376,8 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], issues
         if total == 0:
             check_ok(f"{label} deps", "(no known vulnerabilities)")
         elif critical > 0 or high > 0:
-            if workspace_scoped:
-                remedy = "build-tool advisory; clears via lockfile bump"
-            else:
-                flag = " --workspaces=false" if audit_extra == ["--workspaces=false"] else ""
-                remedy = f"run: cd {npm_dir} && npm audit fix{flag}"
+            flag = " --workspaces=false" if audit_extra == ["--workspaces=false"] else ""
+            remedy = "build-tool advisory; clears via lockfile bump" if workspace_scoped else f"run: cd {npm_dir} && npm audit fix{flag}"
             check_warn(f"{label} deps", f"({critical} critical, {high} high, {moderate} moderate — {remedy})")
             if workspace_scoped:
                 check_info("  ^ build-time tooling (not runtime); if manual npm remediation "
@@ -436,10 +392,9 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], issues
 def _check_npm_audit(should_fix: bool) -> Finding:
     """npm audit per Node package tree (root, web/ui-tui workspaces, WhatsApp bridge).
 
-    PROJECT_ROOT is audited with --workspaces=false so the apps/* glob (Electron, node-pty, ...)
-    is never resolved for a routine security check; web and ui-tui are audited via --workspace.
-    The WhatsApp bridge may live under a writable HERMES_HOME mirror rather than the (possibly
-    read-only) install tree in Docker, so it is resolved through the shared helper.
+    PROJECT_ROOT is audited with --workspaces=false so the apps/* glob (Electron, node-pty, ...) is never
+    resolved for a routine check; web and ui-tui via --workspace. The WhatsApp bridge may live under a writable
+    HERMES_HOME mirror rather than the (possibly read-only) Docker install tree, hence the shared resolver.
     """
     from hermes_cli.doctor import PROJECT_ROOT
     f = Finding()
@@ -456,51 +411,43 @@ def _check_npm_audit(should_fix: bool) -> Finding:
             (PROJECT_ROOT, "ui-tui workspace", ["--workspace", "ui-tui"]),
             (whatsapp_bridge_dir, "WhatsApp bridge", []),
         ):
-            # Workspace-scoped audits run from PROJECT_ROOT check the root node_modules;
-            # standalone dirs (whatsapp-bridge) check their own.
-            check_dir = PROJECT_ROOT if audit_extra else npm_dir
-            if (check_dir / "node_modules").exists():
+            # Workspace-scoped audits check the root node_modules; standalone dirs check their own.
+            if ((PROJECT_ROOT if audit_extra else npm_dir) / "node_modules").exists():
                 _audit_one(npm_bin, npm_dir, label, audit_extra, f.issues)
-
     if _is_termux():
         check_info("Termux compatibility fallbacks:")
-        for note in _termux_install_all_fallback_notes():
+        for note in _TERMUX_INSTALL_ALL_FALLBACK_NOTES:
             check_info(note)
     return f
 
 
-def _check_tool_availability(should_fix: bool) -> Finding:
+@doctor_check("Could not check tool availability", "({e})")
+def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import PROJECT_ROOT, _doctor_web_capability_rows
-    f = Finding()
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
 
-        available, unavailable = check_tool_availability()
-        available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
+    available, unavailable = _apply_doctor_tool_availability_overrides(*check_tool_availability())
 
-        # Web is split into search/extract readiness rows so an explicitly
-        # selected but unconfigured backend cannot look healthy.
-        web_rows = []
-        if "web" in available or any(item.get("name") == "web" for item in unavailable):
-            web_rows = _doctor_web_capability_rows()
-            if web_rows:
-                available = [tid for tid in available if tid != "web"]
-                unavailable = [item for item in unavailable if item.get("name") != "web"]
+    # Web is split into search/extract readiness rows so an explicitly
+    # selected but unconfigured backend cannot look healthy.
+    web_rows = []
+    if "web" in available or any(item.get("name") == "web" for item in unavailable):
+        web_rows = _doctor_web_capability_rows()
+        if web_rows:
+            available = [tid for tid in available if tid != "web"]
+            unavailable = [item for item in unavailable if item.get("name") != "web"]
 
-        for tid in available:
-            check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
-        for status, label, detail in web_rows:
-            (check_ok if status == "ok" else check_warn)(label, detail)
-        for item in unavailable:
-            env_vars = item.get("missing_vars") or item.get("env_vars") or []
-            check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")
+    for tid in available:
+        check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
+    for status, label, detail in web_rows:
+        (check_ok if status == "ok" else check_warn)(label, detail)
+    for item in unavailable:
+        env_vars = item.get("missing_vars") or item.get("env_vars") or []
+        check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")
 
-        # Only toolsets enabled for the CLI count toward the summary; default-off or
-        # disabled toolsets may warn above but must not pollute it.
-        api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
-        if api_disabled or any(status != "ok" for status, _, _ in web_rows):
-            f.issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
-    except Exception as e:
-        check_warn("Could not check tool availability", f"({e})")
-    return f
+    # Only toolsets enabled for the CLI count toward the summary; default-off or
+    # disabled toolsets may warn above but must not pollute it.
+    api_disabled = _missing_api_key_toolsets_for_summary(unavailable)
+    if api_disabled or any(status != "ok" for status, _, _ in web_rows):
+        f.issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
