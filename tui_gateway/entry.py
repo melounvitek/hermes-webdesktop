@@ -1,10 +1,9 @@
 import os
 import sys
 
-# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
-# from shadowing Hermes's own top-level modules.  ``hermes_bootstrap`` lives at
-# the repo root (its name can't collide with a user package), so importing it
-# before the guard runs is safe.
+# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory from
+# shadowing Hermes's own top-level modules. ``hermes_bootstrap`` lives at the repo
+# root (its name can't collide with a user package), so importing it first is safe.
 import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
@@ -15,6 +14,7 @@ import signal
 import threading
 import time
 import traceback
+from contextlib import suppress
 
 from tui_gateway._env import env_float
 from tui_gateway._stdin_recovery import handle_spurious_eof
@@ -26,26 +26,20 @@ from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
 
-# Handle for a background MCP discovery thread spawned by THIS module.  Stays
-# None when discovery is delegated to the shared owner in hermes_cli.mcp_startup
-# (the current path); the wait/in-flight/join helpers consult both owners.
+# Discovery thread spawned by THIS module; None when delegated to the shared owner in
+# hermes_cli.mcp_startup (current path). The wait/in-flight/join helpers consult both.
 _mcp_discovery_thread = None
-
-# True once ensure_mcp_discovery_started found MCP servers configured and spawned
-# discovery through the shared owner.  Lets wait_for_mcp_discovery re-invoke the
-# idempotent spawn on later agent builds so the retry-after-zero-connected
-# allowance can fire (otherwise a first run that connected nothing latches the
-# process MCP-less).  A flag rather than a config re-probe so non-MCP sessions
-# never pay the tools.mcp_tool import on the per-agent-build wait path.
+# Set once MCP servers are found configured, so wait_for_mcp_discovery can re-invoke
+# the idempotent spawn on later builds (retry-after-zero-connected) without a config
+# re-probe — non-MCP sessions never pay the tools.mcp_tool import per build.
 _mcp_discovery_enabled = False
 
 
 def _install_sidecar_publisher() -> None:
     """Mirror every dispatcher emit to the dashboard sidebar via WS.
 
-    Activated by `HERMES_TUI_SIDECAR_URL`, set by the dashboard's ``/api/pty``
-    endpoint when a chat tab passes a ``channel`` query param.  Best-effort:
-    connect failure or runtime drop falls back to stdio-only.
+    Activated by `HERMES_TUI_SIDECAR_URL` (set by the dashboard's ``/api/pty``
+    endpoint). Best-effort: connect failure or runtime drop falls back to stdio-only.
     """
     url = os.environ.get("HERMES_TUI_SIDECAR_URL")
     if not url:
@@ -55,10 +49,9 @@ def _install_sidecar_publisher() -> None:
     server._stdio_transport = TeeTransport(server._stdio_transport, WsPublisherTransport(url))
 
 
-# Grace for orderly shutdown (atexit + finalisers) before ``os._exit(0)`` so a
-# wedged worker mid-flush can't strand the process.  1s covers the gateway's own
-# shutdown work; ``HERMES_TUI_GATEWAY_SHUTDOWN_GRACE_S`` overrides for slower
-# environments (a longer grace also means a longer wait on a real deadlock).
+# Grace for orderly shutdown before ``os._exit(0)`` so a worker wedged mid-flush can't
+# strand the process; ``HERMES_TUI_GATEWAY_SHUTDOWN_GRACE_S`` overrides (a longer grace
+# also means a longer wait on a real deadlock).
 _DEFAULT_SHUTDOWN_GRACE_S = 1.0
 
 
@@ -73,32 +66,24 @@ def _stamp() -> str:
 
 def _append_crash_log(header: str, dump=None) -> None:
     """Best-effort ``=== header ===`` entry in the crash log; ``dump(f)`` adds detail."""
-    try:
+    with suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n=== {header} ===\n")
             if dump is not None:
                 dump(f)
-    except Exception:
-        pass
 
 
 def _log_signal(signum: int, frame) -> None:
     """Capture WHICH thread and WHERE a termination signal hit us, then exit.
 
-    SIG_DFL for SIGPIPE kills the process silently the instant a background
-    thread (TTS, beep, voice status) writes to a stdout the TUI stopped reading,
-    leaving no trace in the crash log.  ``sys.exit(0)`` alone used to race the
-    worker pool — a thread holding ``_stdout_lock`` mid-flush blocks interpreter
-    shutdown indefinitely — so we log all thread stacks, give the process the
-    configured grace to drain, and fall back to ``os._exit(0)``.
+    ``sys.exit(0)`` alone raced the worker pool — a thread holding ``_stdout_lock``
+    mid-flush blocks interpreter shutdown indefinitely — so log all thread stacks,
+    give the configured grace to drain, then ``os._exit(0)``.
     """
     # SIGPIPE/SIGHUP don't exist on Windows — only look up attributes present.
-    names = {
-        int(sig): attr
-        for attr in ("SIGPIPE", "SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK")
-        if (sig := getattr(signal, attr, None)) is not None
-    }
+    names = {int(sig): attr for attr in ("SIGPIPE", "SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK")
+             if (sig := getattr(signal, attr, None)) is not None}
     name = names.get(signum, f"signal {signum}")
 
     def _dump(f):
@@ -118,16 +103,13 @@ def _log_signal(signum: int, frame) -> None:
     timer = threading.Timer(_shutdown_grace_seconds(), lambda: os._exit(0))
     timer.daemon = True
     timer.start()
-
-    # The atexit handler (_shutdown_sessions) can be blocked past the grace
-    # window by a worker holding the GIL/_stdout_lock; finalize explicitly so
-    # unpersisted messages reach state.db before the hard-exit timer fires.
-    try:
+    # The atexit handler (_shutdown_sessions) can be blocked past the grace window
+    # by a worker holding the GIL/_stdout_lock; finalize explicitly so unpersisted
+    # messages reach state.db before the hard-exit timer fires.
+    with suppress(Exception):
         from tui_gateway.server import _shutdown_sessions
 
         _shutdown_sessions()
-    except Exception:
-        pass
 
     # Unwind the main thread so atexit + finalisers run inside the grace window;
     # the daemon timer is the safety net if that unwind hangs.
@@ -138,31 +120,24 @@ def _install_signal(signame, handler):
     """Install a signal handler if legal in this thread and platform.
 
     signal.signal() raises ValueError outside the main thread; skip silently so a
-    worker-thread first import (Desktop build path: server._build does ``from
-    tui_gateway.entry import ...``) doesn't abort.  Handlers are process-global,
-    so any main-thread import installs them for everyone.  Missing signals
-    (Windows: SIGPIPE/SIGHUP) are skipped too.
+    worker-thread first import (Desktop build path: server._build imports entry)
+    doesn't abort. Handlers are process-global, so any main-thread import installs
+    them for everyone. Missing signals (Windows: SIGPIPE/SIGHUP) are skipped too.
     """
-    if threading.current_thread() is not threading.main_thread():
-        return
     sig = getattr(signal, signame, None)
-    if sig is None:
+    if sig is None or threading.current_thread() is not threading.main_thread():
         return
-    try:
+    # Off the main thread despite the check, or handler rejected by the platform.
+    with suppress(ValueError, OSError, RuntimeError):
         signal.signal(sig, handler)
-    except (ValueError, OSError, RuntimeError):
-        # Off the main thread despite the check, or handler rejected by the
-        # platform — skip rather than crash the import.
-        pass
 
 
-# SIGPIPE: ignore, don't exit.  SIG_DFL killed the process silently whenever a
-# *background* thread wrote to a pipe the TUI had gone quiet on, even with the
-# main thread fine on stdin.  Ignoring lets the write raise BrokenPipeError
-# (write_json handles it with a clean sys.exit(0) + _log_exit) so the gateway
-# lives as long as the command pipe is readable.  Terminal signals route through
-# _log_signal so kills/hangups are diagnosable; SIGBREAK (Windows Ctrl+Break) is
-# the weaker SIGHUP equivalent.
+# SIGPIPE: ignore, don't exit. SIG_DFL killed the process silently whenever a
+# *background* thread (TTS, beep, voice status) wrote to a pipe the TUI had gone
+# quiet on. Ignoring lets the write raise BrokenPipeError (write_json handles it with
+# a clean sys.exit(0) + _log_exit) so the gateway lives as long as the command pipe
+# is readable. Terminal signals route through _log_signal so kills/hangups are
+# diagnosable; SIGBREAK (Windows Ctrl+Break) is the weaker SIGHUP.
 _install_signal("SIGPIPE", signal.SIG_IGN)
 _install_signal("SIGTERM", _log_signal)
 if hasattr(signal, "SIGHUP"):
@@ -173,12 +148,9 @@ _install_signal("SIGINT", signal.SIG_IGN)
 
 
 def _log_exit(reason: str) -> None:
-    """Record why the gateway is shutting down.
-
-    Every exit path (startup/parse-error/response write fail, stdin EOF)
-    collapses into a silent sys.exit(0); without this trail the TUI shows
-    "gateway exited" with no clue WHICH broken pipe or message triggered it.
-    """
+    """Record why the gateway is shutting down: every exit path collapses into a
+    silent sys.exit(0), and without this trail the TUI shows "gateway exited" with
+    no clue WHICH broken pipe or message triggered it."""
     _append_crash_log(f"gateway exit · {_stamp()} · reason={reason}")
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
@@ -186,13 +158,10 @@ def _log_exit(reason: str) -> None:
 def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     """Block until background MCP discovery finishes, up to the resolved bound.
 
-    Discovery runs in a daemon thread so a slow/dead server can't freeze
-    ``gateway.ready``, but the agent snapshots its tool list ONCE at build time.
-    Joining with a bounded timeout before the first build lets already-spawning
-    servers land (join returns the instant discovery completes, so no-MCP
-    startups pay ~0s) without re-introducing the startup hang.  The bound is
-    ``mcp_discovery_timeout`` from config (via ``hermes_cli.mcp_startup``);
-    ``timeout`` overrides it.
+    The agent snapshots its tool list ONCE at build time, so a bounded join before
+    the first build lets already-spawning servers land (no-MCP startups pay ~0s)
+    without re-introducing the startup hang. Bound: ``mcp_discovery_timeout`` from
+    config; ``timeout`` overrides it.
     """
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
@@ -204,12 +173,11 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
             bound = timeout if timeout is not None else 0.75
         thread.join(timeout=bound)
         return
-    # Shared-owner path.  Re-invoke the idempotent spawn first: if the previous
-    # run connected zero servers, the retry allowance starts a fresh run instead
-    # of leaving the process latched MCP-less.  It runs under the CALLER's
-    # profile context (agent build binds the session profile's HERMES_HOME
-    # first), so a launch profile without mcp_servers doesn't starve selected
-    # profiles.  Gated so non-MCP sessions never pay the tools.mcp_tool import.
+    # Shared-owner path. Re-invoke the idempotent spawn first so a previous
+    # zero-connected run gets its retry instead of latching the process MCP-less.
+    # It runs under the CALLER's profile context (agent build binds the session
+    # profile's HERMES_HOME first), so a launch profile without mcp_servers doesn't
+    # starve selected profiles. Gated so non-MCP sessions skip the mcp_tool import.
     if not _mcp_discovery_enabled:
         return
     try:
@@ -218,24 +186,17 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
         start_background_mcp_discovery(logger=logger, thread_name="tui-mcp-discovery")
     except Exception:
         logger.debug("TUI MCP discovery retry-spawn failed", exc_info=True)
-    try:
+    with suppress(Exception):
         from hermes_cli.mcp_startup import wait_for_mcp_discovery as _startup_wait
 
         _startup_wait(timeout)
-    except Exception:
-        pass
 
 
 def mcp_discovery_in_flight() -> bool:
-    """True if ANY background MCP discovery thread is still running.
-
-    The agent-build path uses this to schedule a late tool-snapshot refresh when
-    discovery didn't land within the bounded join.  There are two owners by
-    surface — the stdio ``hermes --tui`` thread here and the
-    ``hermes_cli.mcp_startup`` thread used by desktop/dashboard — and the
-    late-refresh scheduler imports this regardless of surface, so it MUST
-    consult both or slow MCP servers' tools never surface on desktop.
-    """
+    """True if ANY background MCP discovery thread is still running. Two owners by
+    surface (stdio thread here, ``hermes_cli.mcp_startup`` for desktop/dashboard);
+    the late-refresh scheduler calls this regardless of surface, so it MUST consult
+    both or slow MCP servers' tools never surface on desktop."""
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
         return True
@@ -248,12 +209,9 @@ def mcp_discovery_in_flight() -> bool:
 
 
 def join_mcp_discovery(timeout: float | None = None) -> bool:
-    """Join both discovery owners; True once neither is alive.
-
-    Unlike ``wait_for_mcp_discovery`` this accepts an unbounded/long wait and
-    reports the outcome (for the off-critical-path late-refresh waiter).
-    ``timeout`` bounds EACH join: entry thread first, then the shared owner.
-    """
+    """Join both discovery owners; True once neither is alive. Unlike
+    ``wait_for_mcp_discovery`` this accepts an unbounded wait (off-critical-path
+    late-refresh waiter); ``timeout`` bounds EACH join, entry thread first."""
     entry_done = True
     thread = _mcp_discovery_thread
     if thread is not None:
@@ -282,13 +240,12 @@ def _has_configured_mcp_servers() -> bool:
 def ensure_mcp_discovery_started() -> None:
     """Start background MCP discovery for the current profile context, once.
 
-    ``main()`` calls this for the stdio path.  WebSocket/Desktop entrypoints skip
-    ``main()``, so ``server._start_agent_build`` also calls it AFTER binding the
-    session profile's HERMES_HOME — the shared owner captures the caller's
-    context-local override into the discovery thread, so discovery reads the
-    SELECTED profile's ``mcp_servers``.  Delegating keeps the process-wide start
-    lock, retry-after-zero-connected allowance, and interactive-OAuth
-    suppression.  Limitation: MCP registration is process-global, so the FIRST
+    ``main()`` calls this for stdio; WS/Desktop skip ``main()``, so
+    ``server._start_agent_build`` also calls it AFTER binding the session profile's
+    HERMES_HOME — the shared owner captures that context-local override, so
+    discovery reads the SELECTED profile's ``mcp_servers``. Delegating keeps the
+    process-wide start lock, retry-after-zero-connected allowance and
+    interactive-OAuth suppression. MCP registration is process-global: the FIRST
     profile to build an agent wins the discovery slot.
     """
     global _mcp_discovery_enabled
@@ -304,30 +261,33 @@ def ensure_mcp_discovery_started() -> None:
         logger.warning("Background MCP tool discovery failed to start", exc_info=True)
 
 
+def _write_or_exit(payload: dict, reason: str) -> None:
+    if not write_json(payload):
+        _log_exit(reason)
+        sys.exit(0)
+
+
 def main():
     _install_sidecar_publisher()
 
-    # Heartbeat row lets the orphan sweep tell "live but idle backend" from
-    # "truly orphaned"; must run BEFORE the sweep so it sees our row.
-    try:
-        server._start_backend_heartbeat_refresher()
-    except Exception:
-        logger.warning("backend heartbeat refresher start failed", exc_info=True)
-
-    # One-time sweep of rows orphaned by a previous gateway process (the
-    # in-process reap timer dies with the process).  Once-per-process and
-    # config-gated, so the handle_ws call site is a no-op when this ran.
-    try:
-        server._schedule_startup_orphan_sweep()
-    except Exception:
-        logger.warning("startup orphan sweep scheduling failed", exc_info=True)
+    # Heartbeat row lets the orphan sweep tell "live but idle backend" from "truly
+    # orphaned"; must run BEFORE the sweep so it sees our row. The sweep itself is
+    # once-per-process and config-gated (the handle_ws call site becomes a no-op).
+    for start, what in (
+        (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
+        (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+    ):
+        try:
+            start()
+        except Exception:
+            logger.warning("%s failed", what, exc_info=True)
 
     # Backgrounded so a dead MCP server (~7s of connect retries) can't freeze
-    # startup; _make_agent briefly joins it (wait_for_mcp_discovery).  The config
+    # startup; _make_agent briefly joins it (wait_for_mcp_discovery). The config
     # gate inside keeps the ~200ms MCP SDK import off the no-mcp_servers path.
     ensure_mcp_discovery_started()
 
-    if not write_json({
+    _write_or_exit({
         "jsonrpc": "2.0",
         "method": "event",
         "params": {
@@ -335,21 +295,17 @@ def main():
             # change_events: clients demote legacy polls (see tui_gateway/ws.py).
             # replay_epoch: WS restart detection; the stdio TUI ignores it.
             "payload": {
-                "skin": resolve_skin(),
-                "change_events": True,
-                "replay_epoch": replay_epoch(),
+                "skin": resolve_skin(), "change_events": True, "replay_epoch": replay_epoch(),
             },
         },
-    }):
-        _log_exit("startup write failed (broken stdout pipe before first event)")
-        sys.exit(0)
+    }, "startup write failed (broken stdout pipe before first event)")
 
     # Live-apply skins Hermes activates mid-conversation.
     server._ensure_skin_watcher()
 
     # Warm the /model picker's provider-models cache during this idle window
     # (mirrors the classic CLI loop); otherwise the first /model open blocks on
-    # serial /v1/models fetches.  Fire-and-forget, once-per-process.
+    # serial /v1/models fetches. Fire-and-forget, once-per-process.
     try:
         from hermes_cli.model_switch import prewarm_picker_cache_async
         prewarm_picker_cache_async()
@@ -371,16 +327,16 @@ def main():
         try:
             req = json.loads(line)
         except json.JSONDecodeError:
-            if not write_json({"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}, "id": None}):
-                _log_exit("parse-error-response write failed (broken stdout pipe)")
-                sys.exit(0)
+            _write_or_exit(
+                {"jsonrpc": "2.0", "error": {"code": -32700, "message": "parse error"}, "id": None},
+                "parse-error-response write failed (broken stdout pipe)")
             continue
 
         method = req.get("method") if isinstance(req, dict) else None
         resp = dispatch(req)
-        if resp is not None and not write_json(resp):
-            _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
-            sys.exit(0)
+        if resp is not None:
+            _write_or_exit(
+                resp, f"response write failed for method={method!r} (broken stdout pipe)")
 
 
 if __name__ == "__main__":

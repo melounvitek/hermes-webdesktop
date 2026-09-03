@@ -1,4 +1,5 @@
-"""Agent callback wiring: child-session live mirror, per-session agent callbacks, personality overlay, background/preview agent kwargs, agent reset.
+"""Agent callback wiring: child-session live mirror, per-session agent callbacks,
+personality overlay, background/preview agent kwargs, agent reset.
 
 Bodies are rebound onto server.py's globals at install time (see
 method_ctx.bind_module), so they reference server.py globals bare.
@@ -52,37 +53,33 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
         return
     csid = live[0]
     text = str(payload.get("text") or "")
+    # thinking/text/start (the child's goal, as a one-time header) are plain deltas.
+    delta = {"subagent.thinking": "reasoning.delta", "subagent.text": "message.delta",
+             "subagent.start": "message.delta"}
     with _child_mirrors_lock:
         st = _child_mirrors.setdefault(child_key, {"seq": 0, "open_tool": None, "started": False})
         if not st["started"]:
             st["started"] = True
             _emit("message.start", csid)
-        if event_type == "subagent.thinking":
+        if event_type in delta:
             if text:
-                _emit("reasoning.delta", csid, {"text": text})
-        elif event_type == "subagent.text":
-            if text:
-                _emit("message.delta", csid, {"text": text})
-        elif event_type == "subagent.start":
-            # One-time header (the child's goal) so a fresh window has context first.
-            if text:
-                _emit("message.delta", csid, {"text": f"{text}\n"})
-        elif event_type == "subagent.tool":
-            if st["open_tool"]:
-                _emit("tool.complete", csid, st["open_tool"])
+                if event_type == "subagent.start":
+                    text = f"{text}\n"
+                _emit(delta[event_type], csid, {"text": text})
+            return
+        if event_type not in ("subagent.tool", "subagent.complete"):
+            return
+        if st["open_tool"]:
+            _emit("tool.complete", csid, st["open_tool"])
+        if event_type == "subagent.tool":
             st["seq"] += 1
-            tool = {
-                "name": str(payload.get("tool_name") or "tool"),
-                "tool_id": f"submirror:{child_key}:{st['seq']}",
-                "args": {},
-            }
+            tool = {"name": str(payload.get("tool_name") or "tool"),
+                    "tool_id": f"submirror:{child_key}:{st['seq']}", "args": {}}
             if preview := str(payload.get("tool_preview") or payload.get("text") or ""):
                 tool["preview"] = preview
             st["open_tool"] = tool
             _emit("tool.start", csid, tool)
-        elif event_type == "subagent.complete":
-            if st["open_tool"]:
-                _emit("tool.complete", csid, st["open_tool"])
+        else:
             summary = str(payload.get("summary") or payload.get("text") or "")
             _emit("message.complete", csid, {"text": summary})
             _child_mirrors.pop(child_key, None)
@@ -100,8 +97,7 @@ def _agent_cbs(sid: str) -> dict:
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(sid, tc_id, name, args),
         "tool_complete_callback": lambda tc_id, name, args, result: _on_tool_complete(sid, tc_id, name, args, result),
         "tool_progress_callback": lambda event_type, name=None, preview=None, args=None, **kwargs: _on_tool_progress(
-            sid, event_type, name, preview, args, **kwargs
-        ),
+            sid, event_type, name, preview, args, **kwargs),
         "tool_gen_callback": lambda name: _tool_progress_enabled(sid) and _emit("tool.generating", sid, {"name": name}),
         "thinking_callback": lambda text: _emit("thinking.delta", sid, {"text": text}),
         # Affection reaction (ily / <3 / good bot) → hearts; core-detected so TUI and desktop share it.
@@ -112,14 +108,12 @@ def _agent_cbs(sid: str) -> dict:
         "status_callback": lambda kind, text=None: _status_update(sid, str(kind), None if text is None else str(text)),
         # Credits/notice spine: AgentNotice → notification.show; recovery clear → notification.clear.
         "notice_callback": lambda n: _emit(
-            "notification.show",
-            sid,
+            "notification.show", sid,
             {"text": n.text, "level": n.level, "kind": n.kind, "ttl_ms": n.ttl_ms, "key": n.key, "id": n.id},
         ),
         "notice_clear_callback": lambda key: _emit("notification.clear", sid, {"key": key}),
         "clarify_callback": lambda q, c, multi_select=False, questions=None: (
-            _clarify_block(sid, q, c, multi_select=multi_select, questions=questions)
-        ),
+            _clarify_block(sid, q, c, multi_select=multi_select, questions=questions)),
         "read_terminal_callback": _read_block("terminal.read.request", 30),
         "read_preview_callback": _read_block("preview.read.request", 45),
         # drive_preview / annotate_preview (desktop GUI): renderer drives the preview webview and
@@ -133,16 +127,14 @@ def _agent_cbs(sid: str) -> dict:
             "mcp.setup.request", sid, {"server": server, "action": action, "reason": reason}, timeout=600
         ),
         # tour (desktop GUI): renderer drives driver.js and answers tour.respond.
-        "tour_callback": lambda payload: _tour_request(sid, payload),
-    }
+        "tour_callback": lambda payload: _tour_request(sid, payload)}
 
     # Interim assistant commentary (text alongside tool calls). Gated on
     # display.interim_assistant_messages (default true); _run_prompt_submit overwrites
     # it per turn and clears it in its finally so a stale closure can't fire.
     if _load_interim_assistant_messages():
         callbacks["interim_assistant_callback"] = lambda text, *, already_streamed=False: _emit(
-            "message.interim", sid, {"text": str(text), "already_streamed": bool(already_streamed)}
-        )
+            "message.interim", sid, {"text": str(text), "already_streamed": bool(already_streamed)})
 
     return callbacks
 
@@ -155,15 +147,12 @@ def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
         return
     # task_id is the durable session_key; _sessions (and desktop event routing) key by sid.
     key = str(task_id or "")
-    sid, session = "", None
     with _sessions_lock:
-        if key in _sessions:
-            sid, session = key, _sessions[key]
-        else:
-            for cand_sid, cand in _sessions.items():
-                if cand.get("session_key") == key or getattr(cand.get("agent"), "session_id", None) == key:
-                    sid, session = cand_sid, cand
-                    break
+        sid, session = (key, _sessions[key]) if key in _sessions else next(
+            ((s, c) for s, c in _sessions.items()
+             if c.get("session_key") == key or getattr(c.get("agent"), "session_id", None) == key),
+            ("", None),
+        )
     if session is None:
         return
     resolved = os.path.abspath(os.path.expanduser(str(path)))
@@ -176,13 +165,10 @@ def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
     _persist_session_cwd_and_schedule_git_meta(session, resolved)
     try:
         agent = session.get("agent")
-        if agent is not None:
-            info = _session_info(agent, session)
-        else:
-            info = {
-                "cwd": resolved, "branch": _git_branch_for_cwd(resolved),
-                "project": _project_info_for_cwd(resolved), "lazy": True,
-            }
+        info = _session_info(agent, session) if agent is not None else {
+            "cwd": resolved, "branch": _git_branch_for_cwd(resolved),
+            "project": _project_info_for_cwd(resolved), "lazy": True,
+        }
         _emit("session.info", sid, info)
     except Exception:
         logger.debug("failed to emit session.info after project workspace move", exc_info=True)
@@ -210,13 +196,6 @@ def _wire_callbacks(sid: str):
     set_secret_capture_callback(secret_cb)
 
 
-def _render_personality_prompt(value) -> str:
-    """Delegates to hermes_cli.personality (single owner of rendering)."""
-    from hermes_cli.personality import render_personality_prompt
-
-    return render_personality_prompt(value)
-
-
 def _available_personalities(cfg: dict | None = None) -> dict:
     """Built-ins + user overrides, via hermes_cli.personality (single owner)."""
     from hermes_cli.personality import available_personalities
@@ -230,7 +209,7 @@ def _validate_personality(value: str, cfg: dict | None = None) -> tuple[str, str
     Same contract as hermes_cli.personality.resolve_personality, but goes through
     the module-level _available_personalities so tests keep a single patch point.
     """
-    from hermes_cli.personality import normalize_personality_name
+    from hermes_cli.personality import normalize_personality_name, render_personality_prompt
 
     name = normalize_personality_name(value)
     if not name:
@@ -239,7 +218,7 @@ def _validate_personality(value: str, cfg: dict | None = None) -> tuple[str, str
     if name not in personalities:
         names = ", ".join(f"`{n}`" for n in sorted(personalities))
         raise ValueError(f"Unknown personality: `{str(value).strip()}`.\n\nAvailable: `none`, {names}")
-    return name, _render_personality_prompt(personalities[name])
+    return name, render_personality_prompt(personalities[name])
 
 
 def _prompt_text(value) -> str:
@@ -250,8 +229,7 @@ def _prompt_text(value) -> str:
 
 
 def _apply_personality_to_session(
-    sid: str, session: dict, new_prompt: str, personality: str = ""
-) -> tuple[bool, dict | None]:
+    sid: str, session: dict, new_prompt: str, personality: str = "") -> tuple[bool, dict | None]:
     """Apply a personality change to a live session without resetting history.
 
     Updates the ephemeral system prompt in place (appended at API-call time, so
@@ -266,17 +244,14 @@ def _apply_personality_to_session(
     if not agent:
         return False, None
     agent.ephemeral_system_prompt = new_prompt or None
-    if new_prompt:
-        marker = (
-            "[System: The user has changed the assistant's personality. "
-            "From this point forward, adopt the following persona and respond "
-            f"accordingly: {new_prompt}]"
-        )
-    else:
-        marker = (
-            "[System: The user has cleared the personality overlay. "
-            "From this point forward, respond in your normal default style.]"
-        )
+    marker = (
+        "[System: The user has changed the assistant's personality. "
+        "From this point forward, adopt the following persona and respond "
+        f"accordingly: {new_prompt}]"
+        if new_prompt else
+        "[System: The user has cleared the personality overlay. "
+        "From this point forward, respond in your normal default style.]"
+    )
     # Like the model-switch marker: role=user so strict providers accept it
     # mid-conversation, but `display_kind` keeps it out of the
     # `truncate_before_user_ordinal` addressing space (untagged, every rewind would
@@ -298,9 +273,7 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
     raw = (cfg.get("agent") or {}).get("max_turns")
     if raw is None:
         raw = cfg.get("max_turns")
-    if raw is not None:
-        return _resolve_turn_limit(raw, default=default)
-    return default
+    return default if raw is None else _resolve_turn_limit(raw, default=default)
 
 
 def _parse_tui_skills_env() -> list[str]:
@@ -326,45 +299,45 @@ def _agent_fallback_model(agent):
     """Return an agent's fallback chain without rehydrating deliberately empty chains."""
     if hasattr(agent, "_fallback_chain"):
         return agent._fallback_chain or []
-    if hasattr(agent, "_fallback_model"):
-        return agent._fallback_model
-    return _load_fallback_model()
+    return agent._fallback_model if hasattr(agent, "_fallback_model") else _load_fallback_model()
 
 
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
 
+    def g(name, default=None):
+        return getattr(agent, name, default)
+
     return {
-        "base_url": getattr(agent, "base_url", None) or None,
-        "api_key": getattr(agent, "api_key", None) or None,
-        "provider": getattr(agent, "provider", None) or None,
-        "api_mode": getattr(agent, "api_mode", None) or None,
-        "acp_command": getattr(agent, "acp_command", None) or None,
-        "acp_args": getattr(agent, "acp_args", None) or None,
-        "model": getattr(agent, "model", None) or _resolve_model(),
+        "base_url": g("base_url") or None,
+        "api_key": g("api_key") or None,
+        "provider": g("provider") or None,
+        "api_mode": g("api_mode") or None,
+        "acp_command": g("acp_command") or None,
+        "acp_args": g("acp_args") or None,
+        "model": g("model") or _resolve_model(),
         "max_iterations": _cfg_max_turns(cfg, 25),
         # Detached tasks declare platform="tui" (no UI sid for renderer-routed
         # events), so resolve toolsets against it — never GUI schema they can't use.
-        "enabled_toolsets": getattr(agent, "enabled_toolsets", None) or _load_enabled_toolsets("tui"),
+        "enabled_toolsets": g("enabled_toolsets") or _load_enabled_toolsets("tui"),
         "quiet_mode": True,
         "verbose_logging": False,
-        "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None) or None,
-        "providers_allowed": getattr(agent, "providers_allowed", None),
-        "providers_ignored": getattr(agent, "providers_ignored", None),
-        "providers_order": getattr(agent, "providers_order", None),
-        "provider_sort": getattr(agent, "provider_sort", None),
-        "provider_require_parameters": getattr(agent, "provider_require_parameters", False),
-        "provider_data_collection": getattr(agent, "provider_data_collection", None),
-        "openrouter_min_coding_score": getattr(agent, "openrouter_min_coding_score", None),
+        "ephemeral_system_prompt": g("ephemeral_system_prompt") or None,
+        "providers_allowed": g("providers_allowed"),
+        "providers_ignored": g("providers_ignored"),
+        "providers_order": g("providers_order"),
+        "provider_sort": g("provider_sort"),
+        "provider_require_parameters": g("provider_require_parameters", False),
+        "provider_data_collection": g("provider_data_collection"),
+        "openrouter_min_coding_score": g("openrouter_min_coding_score"),
         "session_id": task_id,
-        "reasoning_config": getattr(agent, "reasoning_config", None)
-        or _load_reasoning_config(str(getattr(agent, "model", "") or "")),
-        "service_tier": getattr(agent, "service_tier", None) or _load_service_tier(),
-        "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
+        "reasoning_config": g("reasoning_config")
+        or _load_reasoning_config(str(g("model", "") or "")),
+        "service_tier": g("service_tier") or _load_service_tier(),
+        "request_overrides": dict(g("request_overrides", {}) or {}),
         "platform": "tui",
         "session_db": _get_db(),
-        "fallback_model": _agent_fallback_model(agent),
-    }
+        "fallback_model": _agent_fallback_model(agent)}
 
 
 def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
@@ -383,7 +356,6 @@ def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_cha
             history = list(session.get("history", []) or [])
     except Exception:
         history = list(session.get("history", []) or [])
-
     if not history:
         return []
     start = max(0, len(history) - max_messages)
@@ -391,16 +363,14 @@ def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_cha
         if history[idx].get("role") == "user":
             start = min(start, idx)
             break
-
     trimmed: list[dict] = []
     for msg in history[start:]:
         if not isinstance(msg, dict):
             continue
-        role = msg.get("role")
-        if role not in ("user", "assistant", "tool", "system"):
+        if msg.get("role") not in ("user", "assistant", "tool", "system"):
             continue
         copy = {k: v for k, v in msg.items() if k != "reasoning"}
-        if role == "tool":
+        if msg.get("role") == "tool":
             content = copy.get("content")
             if isinstance(content, str) and len(content) > max_tool_chars:
                 copy["content"] = content[:max_tool_chars] + f"\n... (truncated, original {len(content)} chars)"
@@ -416,8 +386,7 @@ def _preview_tool_result_preview(name: str, result: str) -> str:
     if not isinstance(data, dict):
         return ""
     if name == "terminal":
-        output = str(data.get("output") or "").strip()
-        if output:
+        if output := str(data.get("output") or "").strip():
             return output[-1200:]
         if data.get("session_id"):
             return f"Background process started: {data.get('session_id')}"
@@ -452,8 +421,7 @@ def _preview_restart_callbacks(parent: str, task_id: str) -> dict:
             progress(f"{event_type.replace('.', ' ')}: {name}")
 
     return {
-        "tool_start_callback": tool_start,
-        "tool_complete_callback": tool_complete,
+        "tool_start_callback": tool_start, "tool_complete_callback": tool_complete,
         "tool_progress_callback": tool_progress,
         "tool_gen_callback": lambda name: progress(f"Preparing {name}"),
         "status_callback": lambda kind, text=None: progress(text if text is not None else kind),
@@ -471,23 +439,19 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         for k in ("model_override", "create_reasoning_override", "create_service_tier_override", "one_turn_model_restore"):
             session.pop(k, None)
         new_agent = _make_agent(
-            sid,
-            session["session_key"],
-            session_id=session["session_key"],
+            sid, session["session_key"], session_id=session["session_key"],
             platform_override=_session_source(session),
-            context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session),
-        )
+            context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session))
     finally:
         _clear_session_context(tokens)
     session.update(
-        agent=new_agent, config_model_seen=_config_model_target(), attached_images=[], queued_prompt=None
-    )
-    session.pop("queued_prompts", None)
-    session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
-    session.update(
+        agent=new_agent, config_model_seen=_config_model_target(), attached_images=[],
+        queued_prompt=None,
+        _queued_prompt_generation=int(session.get("_queued_prompt_generation", 0)) + 1,
         edit_snapshots={}, image_counter=0, running=False, show_reasoning=_load_show_reasoning(),
         tool_progress_mode=_load_tool_progress_mode(), tool_started_at={},
     )
+    session.pop("queued_prompts", None)
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
