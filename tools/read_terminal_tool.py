@@ -14,11 +14,9 @@ from tools.registry import registry, tool_error
 
 
 def read_pane(callback: Optional[Callable], window, errors: tuple) -> str:
-    """Shared body of the read_terminal / read_preview bridges.
-
-    ``window`` is ``((key, value, floor), ...)``; None values are omitted, others are
-    int-coerced and floored. ``errors`` = (not_desktop, not_integers, fail_prefix, empty).
-    """
+    """Shared body of the read_terminal / read_preview / read_window bridges. ``window`` is
+    ``((key, value, floor), ...)`` (None omitted, else int-coerced and floored); ``errors`` =
+    (not_desktop, not_integers, fail_prefix, empty)."""
     if callback is None:
         return tool_error(errors[0])
     try:

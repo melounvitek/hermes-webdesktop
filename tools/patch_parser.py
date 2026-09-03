@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """V4A patch format parser and applier (format used by codex, cline, etc.).
 
-    *** Begin Patch
-    *** Update File: path/to/file.py
-    @@ optional context hint @@
-     context line (space prefix)
-    -removed line
-    +added line
-    *** Add File: path/to/new.py
-    +new file content
-    *** Delete File: path/to/old.py
-    *** Move File: old/path.py -> new/path.py
-    *** End Patch
+    *** Begin Patch / *** End Patch wrap the operations:
+    *** Update File: p.py   then hunks: ``@@ hint @@``, `` ctx``, ``-old``, ``+new``
+    *** Add File: n.py      then ``+`` lines;  *** Delete File: o.py;  *** Move File: a -> b
 
     operations, error = parse_v4a_patch(patch_content)
     result = apply_v4a_operations(operations, file_ops)
@@ -175,10 +167,10 @@ def _validate_operations(operations: List[PatchOperation], file_ops: Any) -> Lis
     errors: List[str] = []
     real_change_count = 0
 
-    # Virtual overlay so inter-op state validates (e.g. a MOVE creating the
-    # destination a later UPDATE targets). UPDATE/MOVE reads consult it first.
-    pending_content: dict = {}   # path -> content produced by an earlier op
-    removed_paths: set = set()   # paths a MOVE/DELETE has taken away
+    # Virtual overlay so inter-op state validates (e.g. a MOVE creating the destination
+    # a later UPDATE targets): path -> content from an earlier op; paths MOVE/DELETE removed.
+    pending_content: dict = {}
+    removed_paths: set = set()
 
     def _read(path: str):
         if path in removed_paths and path not in pending_content:
@@ -283,9 +275,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
             error="Patch validation failed (no files were modified):\n"
                   + "\n".join(f"  • {e}" for e in validation_errors))
 
-    files_modified: List[str] = []
-    files_created: List[str] = []
-    files_deleted: List[str] = []
+    files: Dict[str, List[str]] = {"created": [], "deleted": [], "modified": []}
     all_diffs: List[str] = []
     # V4A bypasses the WriteResult/PatchResult plumbing that write_file uses,
     # so LSP diagnostics and lint must be propagated explicitly per file.
@@ -293,15 +283,9 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
     errors: List[str] = []
     lint_results: Dict[str, dict] = {}
 
-    dispatch: Dict[OperationType, Tuple[Callable[[PatchOperation, Any], ApplyResult], List[str], str]] = {
-        OperationType.ADD: (_apply_add, files_created, "add"),
-        OperationType.DELETE: (_apply_delete, files_deleted, "delete"),
-        OperationType.MOVE: (_apply_move, files_modified, "move"),
-        OperationType.UPDATE: (_apply_update, files_modified, "update")}
-
     for op in operations:
         try:
-            handler, bucket, verb = dispatch[op.operation]
+            handler, verb, bucket = _APPLY_DISPATCH[op.operation]
             ok, payload, lsp, lint = handler(op, file_ops)
             if not ok:
                 errors.append(f"Failed to {verb} {op.file_path}: {payload}")
@@ -309,7 +293,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
             label = op.file_path
             if op.operation is OperationType.MOVE:
                 label = f"{op.file_path} -> {op.new_path}"
-            bucket.append(label)
+            files[bucket].append(label)
             all_diffs.append(payload)
             if lsp:
                 lsp_blocks.append(lsp)
@@ -322,9 +306,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
     # concatenation keeps per-file attribution.
     result_kwargs = dict(
         diff='\n'.join(all_diffs),
-        files_modified=files_modified,
-        files_created=files_created,
-        files_deleted=files_deleted,
+        files_modified=files["modified"], files_created=files["created"], files_deleted=files["deleted"],
         lint=lint_results if lint_results else None,
         lsp_diagnostics="\n\n".join(lsp_blocks) if lsp_blocks else None)
     if errors:
@@ -454,3 +436,12 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> ApplyResult:
         current_content.splitlines(keepends=True), new_content.splitlines(keepends=True),
         fromfile=f"a/{op.file_path}", tofile=f"b/{op.file_path}"))
     return True, diff, getattr(write_result, "lsp_diagnostics", None), getattr(write_result, "lint", None)
+
+
+# operation -> (handler, verb for error text, files_* bucket)
+_APPLY_DISPATCH: Dict[OperationType, Tuple[Callable[[PatchOperation, Any], ApplyResult], str, str]] = {
+    OperationType.ADD: (_apply_add, "add", "created"),
+    OperationType.DELETE: (_apply_delete, "delete", "deleted"),
+    OperationType.MOVE: (_apply_move, "move", "modified"),
+    OperationType.UPDATE: (_apply_update, "update", "modified"),
+}

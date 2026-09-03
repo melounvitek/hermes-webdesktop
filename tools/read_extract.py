@@ -25,20 +25,16 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 from xml.etree import ElementTree as ET
 
-__all__ = [
-    "EXTRACTABLE_EXTENSIONS",
-    "ExtractionError",
-    "extract_document_bytes",
-    "extract_document_text",
-    "is_extractable_document"]
+__all__ = ["EXTRACTABLE_EXTENSIONS", "ExtractionError", "extract_document_bytes",
+           "extract_document_text", "is_extractable_document"]
 
 EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx"})
 # Formats handled only when the optional anydoc converter is installed.
 ANYDOC_EXTENSIONS = frozenset({
     ".doc", ".docm", ".ppt", ".pps", ".pot", ".pptx", ".pptm", ".ppsx", ".ppsm",
     ".xls", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub", ".pdf"})
-# anydoc loads the whole file through its Rust core with no streaming, and the
-# read_file char budget only applies after conversion — cap the input size.
+# anydoc loads whole files with no streaming and the read_file char budget only applies
+# after conversion — cap the input size.
 MAX_ANYDOC_BYTES = 50 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 _MAX_XLSX_ROWS_PER_SHEET = 5000
@@ -56,9 +52,8 @@ class ExtractionError(Exception):
 
 def _extension(path: str) -> str:
     ext = Path(path).suffix.lower()
-    if ext in EXTRACTABLE_EXTENSIONS or (ext in ANYDOC_EXTENSIONS and _anydoc() is not None):
-        return ext
-    return ""
+    known = ext in EXTRACTABLE_EXTENSIONS or (ext in ANYDOC_EXTENSIONS and _anydoc() is not None)
+    return ext if known else ""
 
 
 _ANYDOC_UNSET = object()
@@ -143,8 +138,8 @@ def extract_document_bytes(data: bytes, path: str) -> str:
 
 
 def _anydoc_missing_error(path: str) -> str:
-    """Teaching error for anydoc-gated formats; the schema deliberately omits this caveat
-    so only sessions that hit one pay for the explanation (and the fix)."""
+    """Teaching error for anydoc-gated formats (deliberately absent from the schema so only
+    sessions that hit one pay for it)."""
     return (
         f"Cannot convert {path!r}: this format needs the optional anydoc "
         "converter, which is not installed (install blocked or first "
@@ -155,28 +150,23 @@ def _anydoc_missing_error(path: str) -> str:
 
 
 def _hosted_ocr_config() -> tuple:
-    """Resolve hosted-OCR settings: (enabled, api_key, api_url). Never raises.
-
-    Maintainer decision: the ONLY route is a direct ``FIRECRAWL_API_KEY`` (anydoc defaults
-    api_url to https://api.firecrawl.dev); the Nous managed gateway is NOT used — its Parse
-    proxy live-probed broken (revisit when it grows Parse support). ``file_tools.hosted_ocr:
-    false`` disables even with a key; true/unset → enabled iff the key is present. Env probe
-    only, no network at schema-build time.
-    """
+    """Resolve hosted-OCR settings: (enabled, api_key, api_url). Never raises; no network.
+    Maintainer decision: the ONLY route is a direct ``FIRECRAWL_API_KEY`` (anydoc defaults the
+    api_url); the Nous gateway is NOT used — its Parse proxy live-probed broken (revisit when
+    it grows Parse support). ``file_tools.hosted_ocr: false`` disables even with a key."""
     api_key = os.environ.get("FIRECRAWL_API_KEY") or None
     enabled = api_key is not None
     with contextlib.suppress(Exception):
         from hermes_cli.config import load_config_readonly
-        cfg = load_config_readonly()
-        section = cfg.get("file_tools") if isinstance(cfg, dict) else None
+        section = load_config_readonly().get("file_tools")
         if isinstance(section, dict) and section.get("hosted_ocr") is False:
             enabled = False
     return enabled, api_key, None
 
 
 def hosted_ocr_available() -> bool:
-    """Public probe for read_file's schema line (same gate as :func:`_hosted_ocr_config`);
-    a key that fails at conversion time lands in the NEEDS-OCR warning instead."""
+    """Public probe for read_file's schema line; a key failing at conversion time lands in
+    the NEEDS-OCR warning instead."""
     return _hosted_ocr_config()[0]
 
 
@@ -202,16 +192,12 @@ def _finalize_anydoc_text(text: Any, path: str, pdf_note: Callable[[], str]) -> 
     paginates: a footer may never be fetched). Covers PARTIAL gaps without NeedsOcrError."""
     if not isinstance(text, str) or not text.strip():
         raise ExtractionError("Document contains no extractable text")
-    text = text.rstrip("\n") + "\n"
-    if Path(path).suffix.lower() == ".pdf":
-        note = pdf_note()
-        if note:
-            text = note + text
-    return text
+    note = pdf_note() if Path(path).suffix.lower() == ".pdf" else ""
+    return (note or "") + text.rstrip("\n") + "\n"
 
 
 def _ocr_scanned_pdf(mod: Any, path: str, exc: BaseException) -> str:
-    """Typed scanned-pages signal (anydoc >= 0.2): try hosted OCR when a Firecrawl route exists, else teach recovery."""
+    """anydoc >= 0.2 scanned-pages signal: hosted OCR when a route exists, else teach recovery."""
     pages = list(getattr(exc, "pages", []) or [])
     enabled, api_key, api_url = _hosted_ocr_config()
     hosted_error = ""
@@ -286,9 +272,8 @@ def _pdf_page_texts(path: str) -> Optional[list[str]]:
             ["pdftotext", path, "-"], capture_output=True, timeout=PDF_PAGE_SCAN_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0:
-        return None
-    pages = proc.stdout.decode("utf-8", errors="replace").split("\f")
+    out = proc.stdout.decode("utf-8", errors="replace") if proc.returncode == 0 else ""
+    pages = out.split("\f") if out else []
     if pages and not pages[-1].strip():
         pages.pop()  # trailing form-feed artifact
     return pages or None
@@ -351,8 +336,8 @@ def _pdf_coverage_note(path: str, display_path: Optional[str] = None) -> str:
 
 
 def _pdf_coverage_note_from_bytes(data: bytes, display_path: str) -> str:
-    """Coverage note for backend-transferred PDF bytes: pdftotext is path-oriented, so scan a
-    host temp copy; the recovery command still names ``display_path`` (visible to the agent)."""
+    """Coverage note for backend-transferred PDF bytes via a host temp copy (pdftotext is
+    path-oriented); the recovery command still names ``display_path``."""
     try:
         with _temp_copy(data, ".pdf") as temp_path:
             return _pdf_coverage_note(temp_path, display_path=display_path)
@@ -380,8 +365,7 @@ def _base64_bytes(payload: str) -> int:
 
 
 def _clean_stream_text(text: str) -> str:
-    """Strip ANSI escapes and collapse ``\\r`` progress-bar rewrites: Jupyter renders only
-    the final frame of a ``\\r``-redrawn line (tqdm), so keep the text after the last ``\\r``."""
+    """Strip ANSI escapes; keep only the final ``\\r`` frame of each line (tqdm redraws)."""
     from tools.ansi_strip import strip_ansi
     lines = []
     for line in strip_ansi(text).replace("\r\n", "\n").split("\n"):
@@ -390,10 +374,8 @@ def _clean_stream_text(text: str) -> str:
     return "\n".join(lines)
 
 
-# Notebook outputs longer than this are tail-truncated per output block so a
-# single runaway training log cannot flood the extracted text.
+# Per-output-block truncation so one runaway training log cannot flood the extraction.
 _MAX_OUTPUT_CHARS = 20_000
-
 # nbformat v3 stores mime data flat on the output dict under these keys.
 _V3_MIME_KEYS = (("png", "image/png"), ("jpeg", "image/jpeg"), ("svg", "image/svg+xml"), ("html", "text/html"))
 
@@ -507,7 +489,7 @@ def _extract_notebook(path: str) -> str:
 
 @contextlib.contextmanager
 def _open_zip(path: str, kind: str) -> Iterator[zipfile.ZipFile]:
-    """Open an OOXML package; bad-zip/OS failures (also from the body) become ExtractionError."""
+    """Open an OOXML package; bad-zip/OS failures (body included) become ExtractionError."""
     try:
         with zipfile.ZipFile(path) as zf:
             yield zf

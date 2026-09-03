@@ -20,12 +20,11 @@ logger = logging.getLogger(__name__)
 _OSV_ENDPOINT = os.getenv("OSV_ENDPOINT", "https://api.osv.dev/v1/query")
 _TIMEOUT = 10  # seconds
 
-# Result cache: (ecosystem, package, version) -> (expiry_monotonic, result).
-# MCP reconnect ladders and parked-server self-probes re-run the preflight for
-# the SAME package on every spawn; uncached, a flapping server becomes a
-# sustained OSV/DNS query stream. Advisories don't flip on second timescales,
-# so clean AND blocked verdicts are reusable. Network failures are NOT cached:
-# fail-open covers them and caching one could mask a real advisory later.
+# Result cache: (ecosystem, package, version) -> (expiry_monotonic, result). Reconnect
+# ladders and parked-server self-probes re-run the preflight for the SAME package on every
+# spawn; uncached, a flapping server becomes a sustained OSV/DNS query stream. Clean AND
+# blocked verdicts are reusable; network failures are NOT cached (fail-open covers them and
+# caching one could mask a real advisory later).
 _CACHE_TTL_S = float(os.getenv("OSV_CHECK_CACHE_TTL", "3600"))
 _CACHE_MAX_ENTRIES = 256
 _cache: dict = {}
@@ -55,10 +54,7 @@ def _cache_put(key, result: Optional[str]) -> None:
 
 def check_package_for_malware(command: str, args: list) -> Optional[str]:
     """Check an MCP server package (inferred from ``command``/``args``) for MAL-* advisories.
-
-    Returns a BLOCKED message when malware is found, else None — including on network
-    errors and unrecognized commands (fail-open).
-    """
+    Returns a BLOCKED message, else None — also on network errors/unknown commands (fail-open)."""
     ecosystem = _infer_ecosystem(command)
     if not ecosystem:
         return None  # not npx/uvx — skip
@@ -99,9 +95,8 @@ def _infer_ecosystem(command: str) -> Optional[str]:
 
 def _parse_package_from_args(args: list, ecosystem: str) -> Tuple[Optional[str], Optional[str]]:
     """Extract (package_name, version) from command args, or (None, None) if not parseable."""
-    # Skip flags to find the package token. Honor npx's explicit install target
-    # (--package=NAME / --package NAME / -p NAME), which names a package distinct
-    # from the executed binary; otherwise the first bare positional is used.
+    # Skip flags to find the package token. npx's explicit install target (--package=NAME /
+    # --package NAME / -p NAME) names a package distinct from the executed binary.
     package_token = None
     take_next = False
     for arg in args or ():
