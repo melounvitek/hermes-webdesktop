@@ -314,11 +314,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
 def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
     """Reinstall Python deps (uv preferred, pip fallback) and re-arm active tool deps."""
     from hermes_cli.update_cmd import (
-        _ensure_uv_for_termux,
-        _ensure_venv_pip,
-        _m,
-        _refuse_update_for_contended_shims,
-        _shim_quarantine_error_type,
+        _ensure_uv_for_termux, _ensure_venv_pip, _m, _refuse_update_for_contended_shims, _shim_quarantine_error_type,
     )
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
@@ -363,17 +359,9 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     drivers causing 'Invalid argument'). Returns ``False`` when a Desktop rebuild ran and failed.
     """
     from hermes_cli.update_cmd import (
-        _finish_dashboard_update_cleanup,
-        _m,
-        _print_bundled_skills_sync_report,
-        _print_curator_first_run_notice,
-        _print_curator_recent_run_notice,
-        _print_update_summary,
-        _read_project_version,
-        _rebuild_desktop_after_update,
-        _sweep_bytecode_after_update,
-        _update_node_dependencies,
-        _validate_critical_modules_import,
+        _finish_dashboard_update_cleanup, _m, _print_bundled_skills_sync_report, _print_curator_first_run_notice,
+        _print_curator_recent_run_notice, _print_update_summary, _read_project_version, _rebuild_desktop_after_update,
+        _sweep_bytecode_after_update, _update_node_dependencies, _validate_critical_modules_import,
         _verify_and_restore_state_dbs_post_update,
     )
     active_tool_dependencies = _m()._capture_active_tool_dependencies()
@@ -424,8 +412,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     node_failures = _update_node_dependencies()
     _m()._build_web_ui(_m().PROJECT_ROOT / "web")
     desktop_build_ok = _rebuild_desktop_after_update(
-        _m().PROJECT_ROOT / "apps" / "desktop",
-        had_desktop_app_before_update=had_desktop_app_before_update,
+        _m().PROJECT_ROOT / "apps" / "desktop", had_desktop_app_before_update=had_desktop_app_before_update,
     )
 
     with suppress(Exception):
@@ -443,9 +430,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
         _verify_and_restore_state_dbs_post_update()
 
     update_complete = _print_update_summary(
-        node_failures=node_failures,
-        desktop_build_ok=desktop_build_ok,
-        pre_update_version=pre_update_version,
+        node_failures=node_failures, desktop_build_ok=desktop_build_ok, pre_update_version=pre_update_version,
     )
     with _best_effort('Curator first-run notice failed: %s'):
         _print_curator_first_run_notice()
