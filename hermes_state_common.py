@@ -1,7 +1,7 @@
 """Shared constants and helpers for the SessionDB family of modules.
 
-Lives outside hermes_state so the mixin modules can import it without a
-cycle; hermes_state re-exports every name for backward compatibility.
+Lives outside hermes_state so the mixin modules can import it without a cycle;
+hermes_state re-exports every name for backward compatibility.
 """
 
 import contextlib
@@ -20,20 +20,20 @@ from agent.context_compressor import (
 )
 
 
-# Session preview = head of the first user message, shown wherever a session
-# has no title.  A /skill invocation embeds the whole skill body, so its plain
-# head would preview the SKILL's prose; scaffolded rows carry a wider excerpt
-# (whole message under budget, else head + tail where the typed instruction
-# lands) so ``_shape_preview`` can recover ``/work — fix the title leak``.
+# Session preview = head of the first user message, shown wherever a session has no
+# title.  A /skill invocation embeds the whole skill body, so its plain head would
+# preview the SKILL's prose; scaffolded rows carry a wider excerpt (whole message under
+# budget, else head + tail where the typed instruction lands) so ``_shape_preview`` can
+# recover ``/work — fix the title leak``.
 _PREVIEW_HEAD_CHARS = 63
 _PREVIEW_SCAFFOLD_WINDOW = 400
 _PREVIEW_MAX_CHARS = 60
 
 
 def escape_like(text: str) -> str:
-    """Escape LIKE wildcards (``%``, ``_``) so derived text matches literally;
-    pair with ``ESCAPE '\\'``.  ``_`` is common in branch names, titles and
-    paths, and a documented substring/prefix match must not silently widen."""
+    """Escape LIKE wildcards (``%``, ``_``) so derived text matches literally; pair with
+    ``ESCAPE '\\'``.  ``_`` is common in branch names, titles and paths, and a documented
+    substring/prefix match must not silently widen."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -56,8 +56,7 @@ def _sql_trim_whitespace(expression: str) -> str:
 
 def _sql_starts_with(expression: str, prefixes: tuple[str, ...]) -> str:
     trimmed = _sql_ltrim_whitespace(expression)
-    checks = [f"SUBSTR({trimmed}, 1, {len(prefix)}) = {_sql_literal(prefix)}" for prefix in prefixes]
-    return "(" + " OR ".join(checks) + ")"
+    return "(" + " OR ".join(f"SUBSTR({trimmed}, 1, {len(p)}) = {_sql_literal(p)}" for p in prefixes) + ")"
 
 
 def _sql_after_marker(marker: str) -> str:
@@ -65,9 +64,9 @@ def _sql_after_marker(marker: str) -> str:
     return f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(marker)}) + {len(marker)})"
 
 
-# Current and legacy long-form prefixes share this whole introduction; matching
-# all of it keeps an ordinary message that merely starts with the bracketed
-# label from counting as a compaction carrier.
+# Current and legacy long-form prefixes share this whole introduction; matching all of
+# it keeps an ordinary message that merely starts with the bracketed label from
+# counting as a compaction carrier.
 _PREVIEW_LONG_FORM_PREFIX = SUMMARY_PREFIX.split("Do NOT answer", 1)[0]
 _PREVIEW_SUMMARY_PREFIXES = (_PREVIEW_LONG_FORM_PREFIX, LEGACY_SUMMARY_PREFIX)
 _PREVIEW_STANDALONE_SUMMARY_SQL = _sql_starts_with("m.content", _PREVIEW_SUMMARY_PREFIXES)
@@ -88,8 +87,8 @@ _PREVIEW_MERGED_PRIOR_UNWRAPPED_SQL = (
 )
 _PREVIEW_FORCE_USER_REMAINDER_SQL = _sql_after_marker(_SUMMARY_END_MARKER)
 
-# Pure compaction rows are ineligible for previews; force-user-leading and
-# merged carriers are eligible only when authentic content survives.
+# Pure compaction rows are ineligible for previews; force-user-leading and merged
+# carriers are eligible only when authentic content survives.
 _PREVIEW_ELIGIBLE_SQL = (
     f"((NOT {_PREVIEW_STANDALONE_SUMMARY_SQL} AND NOT {_PREVIEW_MERGED_SUMMARY_SQL})"
     f" OR ({_PREVIEW_STANDALONE_SUMMARY_SQL}"
@@ -99,8 +98,8 @@ _PREVIEW_ELIGIBLE_SQL = (
     f" AND LENGTH({_sql_trim_whitespace(_PREVIEW_MERGED_PRIOR_UNWRAPPED_SQL)}) > 0))"
 )
 
-# Shared ``_preview_raw`` SELECT expression for every listing query (scaffolded
-# rows: head + tail spliced around SKILL_EXCERPT_JOINT when over budget).
+# Shared ``_preview_raw`` SELECT expression for every listing query (scaffolded rows:
+# head + tail spliced around SKILL_EXCERPT_JOINT when over budget).
 _PREVIEW_RAW_SELECT = (
     f"CASE WHEN {_PREVIEW_STANDALONE_SUMMARY_SQL}"
     f" THEN {_PREVIEW_FORCE_USER_REMAINDER_SQL}"
@@ -125,9 +124,7 @@ def _shape_preview(raw: Any) -> str:
     text = text.replace("\n", " ").replace("\r", " ")
     described = describe_skill_invocation(text)
     text = described if described is not None else text.split(SKILL_EXCERPT_JOINT)[0]
-    if len(text) > _PREVIEW_MAX_CHARS:
-        return text[:_PREVIEW_MAX_CHARS] + "..."
-    return text
+    return text[:_PREVIEW_MAX_CHARS] + "..." if len(text) > _PREVIEW_MAX_CHARS else text
 
 
 # Correlated ``_preview_raw`` column for a ``sessions s`` row.
@@ -140,8 +137,8 @@ _PREVIEW_RAW_SUBQUERY_SQL = (
 
 # ── Session lineage predicates ({a} = sessions alias) ───────────────────────
 
-# A /branch child (kept visible, never cascade-deleted): stable marker OR the
-# legacy end_reason heuristic.
+# A /branch child (kept visible, never cascade-deleted): stable marker OR the legacy
+# end_reason heuristic.
 _BRANCH_CHILD_SQL = (
     "json_extract(COALESCE({a}.model_config, '{{}}'), '$._branched_from') IS NOT NULL"
     " OR EXISTS (SELECT 1 FROM sessions p"
@@ -157,10 +154,9 @@ _COMPRESSION_CHILD_SQL = (
 
 _RESET_END_REASONS = (
     "session_reset",
-    # switch_session() creates no child row, but pre-marker DBs hold legacy
-    # reset children whose parent later ended 'session_switch'.  Also keeps
-    # this set identical to the recovery fence in
-    # find_latest_gateway_session_for_peer (which interpolates the SQL form).
+    # switch_session() creates no child row, but pre-marker DBs hold legacy reset
+    # children whose parent later ended 'session_switch'.  Must stay identical to the
+    # recovery fence in find_latest_gateway_session_for_peer (interpolates the SQL form).
     "session_switch",
     "idle",
     "daily",
@@ -177,34 +173,33 @@ _RECOVERABLE_END_REASONS = (
     "ws_orphan_reap",
     # Stale sentinel-parked runtime superseded by a fresh session.resume.
     "superseded_by_resume",
-    # Startup sweep of rows orphaned by a dead gateway process: same accident
-    # class as ws_orphan_reap, kept distinct for forensics.
+    # Startup sweep of rows orphaned by a dead gateway process: same accident class as
+    # ws_orphan_reap, kept distinct for forensics.
     "startup_orphan_reap",
 )
 _RECOVERABLE_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RECOVERABLE_END_REASONS)
 
-# End reasons written by AUTOMATIC cleanup (shutdown, orphan reapers, idle/LRU
-# eviction), not by a deliberate conversation boundary.  Such a stamp means
-# "some runtime went away", NOT "this conversation ended", so a writer that can
-# prove liveness (e.g. a compression rotation holding the lease) may clear it.
-# Superset of the recoverable set plus the TUI gateway's automatic reasons.
+# End reasons written by AUTOMATIC cleanup (shutdown, orphan reapers, idle/LRU eviction),
+# not by a deliberate conversation boundary: "some runtime went away", NOT "this
+# conversation ended", so a writer that can prove liveness (e.g. a compression rotation
+# holding the lease) may clear it.  Superset of the recoverable set plus the TUI
+# gateway's automatic reasons.
 _AUTOMATIC_END_REASONS = frozenset(_RECOVERABLE_END_REASONS) | {
     "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict",
 }
 
 
 def is_automatic_end_reason(reason) -> bool:
-    """True when *reason* is an automatic-cleanup end stamp (see above).  Single
-    owner of the accidental-vs-deliberate predicate; compression-liveness
-    sites must call this rather than re-implement the taxonomy."""
+    """True when *reason* is an automatic-cleanup end stamp.  Single owner of the
+    accidental-vs-deliberate predicate; compression-liveness sites must call this."""
     return isinstance(reason, str) and reason in _AUTOMATIC_END_REASONS
 
 
 def _legacy_reset_child_sql(alias: str, reasons_sql: str) -> str:
-    """Pre-marker reset-continuation heuristic: child rides its parent's exact
-    non-empty routing key and the parent ended at a reset boundary.  Shared by
-    ``_RESET_CHILD_SQL`` and ``reopen_session()``'s marker-stamping UPDATE so
-    the two cannot drift; ``reasons_sql`` is a literal or placeholder list."""
+    """Pre-marker reset-continuation heuristic: child rides its parent's exact non-empty
+    routing key and the parent ended at a reset boundary.  Shared by ``_RESET_CHILD_SQL``
+    and ``reopen_session()``'s marker-stamping UPDATE so the two cannot drift;
+    ``reasons_sql`` is a literal or placeholder list."""
     return (
         f"EXISTS (SELECT 1 FROM sessions p"
         f"            WHERE p.id = {alias}.parent_session_id"
@@ -215,16 +210,16 @@ def _legacy_reset_child_sql(alias: str, reasons_sql: str) -> str:
     )
 
 
-# A reset starts a separate user-visible conversation though rows keep
-# parent_session_id for lineage.  Stable marker, or the same-key fallback for
-# pre-marker rows (the exact-key requirement keeps subagent children out).
+# A reset starts a separate user-visible conversation though rows keep parent_session_id
+# for lineage.  Stable marker, or the same-key fallback for pre-marker rows (the
+# exact-key requirement keeps subagent children out).
 _RESET_CHILD_SQL = (
     "json_extract(COALESCE({a}.model_config, '{{}}'), '$._reset_from') IS NOT NULL"
     " OR " + _legacy_reset_child_sql("{a}", _RESET_END_REASONS_SQL)
 )
 
-# Picker-visible rows: roots + branch/reset children (not subagent runs or
-# compression continuations).
+# Picker-visible rows: roots + branch/reset children (not subagent runs or compression
+# continuations).
 _LISTABLE_CHILD_SQL = (
     f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')}"
     f" OR {_RESET_CHILD_SQL.format(a='s')})"
@@ -242,9 +237,9 @@ def _ephemeral_child_sql(alias: str = "s") -> str:
 
 
 def _sql_freshest_of(activity: str, session_id_expr: str, started: str) -> str:
-    """Freshest of *activity* and the latest message timestamp for
-    *session_id_expr*, else *started*.  Heartbeats are rate-limited (~60s) so
-    ``last_activity_at`` can lag a newer message; never prefer it alone."""
+    """Freshest of *activity* and the latest message timestamp for *session_id_expr*,
+    else *started*.  Heartbeats are rate-limited (~60s) so ``last_activity_at`` can lag
+    a newer message; never prefer it alone."""
     msg_max = f"(SELECT MAX(_act_m.timestamp) FROM messages _act_m WHERE _act_m.session_id = {session_id_expr})"
     return (
         f"COALESCE("
@@ -273,33 +268,29 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
 
 SCHEMA_VERSION = 28
 
-# Auto-maintenance VACUUMs only when at least this fraction of pages is on the
-# freelist; below it a full rewrite costs more I/O than it returns.
+# Auto-maintenance VACUUMs only when at least this fraction of pages is on the freelist;
+# below it a full rewrite costs more I/O than it returns.
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
 # FTS storage layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta
-# ``fts_storage_version``): schema version advances freely on open, the FTS
-# layout only changes when a DB is born fresh or explicitly optimized via
-# ``hermes sessions optimize-storage``.  Legacy DBs sit at 0 (marker absent)
-# with a working inline index; 1 = v23 external-content layout.
+# ``fts_storage_version``): schema version advances freely on open, the FTS layout only
+# changes when a DB is born fresh or explicitly optimized via ``hermes sessions
+# optimize-storage``.  Legacy DBs sit at 0 (marker absent) with a working inline index;
+# 1 = v23 external-content layout.
 FTS_STORAGE_VERSION = 1
 
 # Cap on user-controlled FTS5 query input before sanitizer processing.
 MAX_FTS5_QUERY_CHARS = 2_048
 
-# ── Helpers shared by SessionDB, its mixins and the registry ──────────────
 
 def stat_db_file_identity(path) -> "tuple[int, int] | None":
-    """``(st_dev, st_ino)`` for *path*, or None.  st_ino=0 (Windows, some
-    network FS) would false-positive every replaced-file check, so it counts
-    as unknown."""
+    """``(st_dev, st_ino)`` for *path*, or None.  st_ino=0 (Windows, some network FS)
+    would false-positive every replaced-file check, so it counts as unknown."""
     try:
         st = os.stat(path)
     except OSError:
         return None
-    if not st.st_dev or not st.st_ino:
-        return None
-    return (st.st_dev, st.st_ino)
+    return (st.st_dev, st.st_ino) if st.st_dev and st.st_ino else None
 
 
 _FTS_TRIGGERS = (
