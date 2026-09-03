@@ -477,6 +477,19 @@ class SearchMixin:
         ) if multiline else None
         return self._run_search_pipeline(cmd_parts, output_mode, limit, offset, context, warning=ml_note)
 
+    def _grep_cmd(self, head: List[str], pattern: str, output_mode: str, context: int,
+                  file_glob: Optional[str] = None) -> List[str]:
+        """``head`` + context/include/mode flags + quoted pattern (argument order is fixed)."""
+        parts = list(head)
+        if context > 0:
+            parts.extend(["-C", str(context)])
+        if file_glob:
+            parts.extend(["--include", self._escape_shell_arg(file_glob)])
+        if output_mode in _OUTPUT_MODE_FLAGS:
+            parts.append(_OUTPUT_MODE_FLAGS[output_mode])
+        parts.append(self._escape_shell_arg(pattern))
+        return parts
+
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
                           limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Fallback search using grep."""
@@ -489,14 +502,7 @@ class SearchMixin:
                 pattern, path, file_glob, limit, offset, output_mode, context, protected_paths)
         # -H forces filenames; -E matches rg regex behavior; --exclude-dir='.*'
         # mirrors rg's hidden-dir default (.git/, .hub/index-cache/, ...).
-        cmd_parts = ["grep", "-rnHE", "--exclude-dir='.*'"]
-        if context > 0:
-            cmd_parts.extend(["-C", str(context)])
-        if file_glob:
-            cmd_parts.extend(["--include", self._escape_shell_arg(file_glob)])
-        if output_mode in _OUTPUT_MODE_FLAGS:
-            cmd_parts.append(_OUTPUT_MODE_FLAGS[output_mode])
-        cmd_parts.append(self._escape_shell_arg(pattern))
+        cmd_parts = self._grep_cmd(["grep", "-rnHE", "--exclude-dir='.*'"], pattern, output_mode, context, file_glob)
         # grep applies --exclude-dir to the search root too, so a relative root
         # "." would be excluded by '.*'. Anchor relative paths at the shell's
         # live $PWD (quoted separately so user paths stay escaped).
@@ -523,12 +529,7 @@ class SearchMixin:
         a hard grep error surfaces as an empty result rather than exit 2 —
         acceptable for this darwin-local-broad-search-only branch.
         """
-        grep_parts = ["grep", "-nHE"]
-        if context > 0:
-            grep_parts.extend(["-C", str(context)])
-        if output_mode in _OUTPUT_MODE_FLAGS:
-            grep_parts.append(_OUTPUT_MODE_FLAGS[output_mode])
-        grep_parts.append(self._escape_shell_arg(pattern))
+        grep_parts = self._grep_cmd(["grep", "-nHE"], pattern, output_mode, context)
         find_parts = [
             "find", self._escape_shell_arg(path or "."),
             self._prune_expr(protected_paths), "-o",

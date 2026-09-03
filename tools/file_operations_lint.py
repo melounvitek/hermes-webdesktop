@@ -263,27 +263,26 @@ class LintMixin:
         except Exception:  # noqa: BLE001
             return False
 
+    def _lsp_call(self, method: str, path: str, default):
+        """``svc.<method>(path)`` on the active service; ``default`` when there is
+        no service or the call raises (LSP never breaks a write)."""
+        svc = self._lsp_service()
+        if svc is None:
+            return default
+        try:
+            return getattr(svc, method)(path)
+        except Exception:  # noqa: BLE001
+            return default
+
     def _lsp_will_handle(self, path: str) -> bool:
         """True iff the LSP service is active AND ``enabled_for(path)`` (workspace
         detection, disabled-server set, broken-pair short-circuit). Any failure →
         False so the shell linter still runs."""
-        svc = self._lsp_service()
-        if svc is None:
-            return False
-        try:
-            return bool(svc.enabled_for(path))
-        except Exception:  # noqa: BLE001
-            return False
+        return bool(self._lsp_call("enabled_for", path, False))
 
     def _snapshot_lsp_baseline(self, path: str) -> None:
         """Capture pre-edit LSP diagnostics so the post-write delta is correct. Silent on failure."""
-        svc = self._lsp_service()
-        if svc is None:
-            return
-        try:
-            svc.snapshot_baseline(path)
-        except Exception:  # noqa: BLE001
-            pass
+        self._lsp_call("snapshot_baseline", path, None)
 
     def _maybe_lsp_diagnostics(self, path: str, *, pre_content: Optional[str] = None,
                                post_content: Optional[str] = None) -> str:

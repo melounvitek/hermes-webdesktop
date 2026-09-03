@@ -228,14 +228,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     @staticmethod
     def _is_likely_binary_bytes(sample: bytes) -> bool:
         """Byte-layer binary detection: text iff valid UTF-8, allowing one incomplete
-        multibyte sequence at the very end (an artifact of the byte-boundary cut).
-
-        NUL bytes or mid-stream invalid UTF-8 (latin-1, true binaries) stay
-        read-only so a read→edit→write round-trip never rewrites undecodable bytes
-        as U+FFFD. A file that legitimately CONTAINS U+FFFD is valid UTF-8 and
-        reads as text (the text-layer check couldn't tell a stored replacement
-        char from a transport-manufactured one).
-        """
+        multibyte sequence at the very end (artifact of the byte-boundary cut).
+        NUL bytes or mid-stream invalid UTF-8 stay read-only so a read→edit→write
+        round-trip never rewrites undecodable bytes as U+FFFD; a file that
+        legitimately CONTAINS U+FFFD is valid UTF-8 and reads as text."""
         if not sample:
             return False
         if b"\x00" in sample:
@@ -320,15 +316,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         return "'" + _bash_safe_path(arg).replace("'", "'\"'\"'") + "'"
 
     def _escape_native_tool_arg(self, arg: str) -> str:
-        """Quote a path for a NATIVE Windows binary (rg, node, git ...).
-
-        Those don't understand the MSYS ``/c/...`` form ``_escape_shell_arg``
-        produces, and Hermes disables MSYS argument conversion for its bash
-        subprocesses, so nothing translates it back (→ ``os error 3``). The
-        forward-slash native form ``C:/Users/x`` is accepted by every layer:
-        bash passes it untouched and Windows treats ``/`` as a separator.
-        Identical to ``_escape_shell_arg`` off Windows.
-        """
+        """Quote a path for a NATIVE Windows binary (rg, node, git ...): those don't
+        understand the MSYS ``/c/...`` form and Hermes disables MSYS argument
+        conversion, so nothing translates it back (→ ``os error 3``). ``C:/Users/x``
+        is accepted by every layer. Identical to ``_escape_shell_arg`` off Windows."""
         from tools.environments.local import _IS_WINDOWS, _msys_to_windows_path
         if _IS_WINDOWS and arg:
             arg = _msys_to_windows_path(arg).replace("\\", "/")
@@ -336,19 +327,16 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
     def _atomic_write(self, path: str, content: str) -> "ExecuteResult":
         """Write ``content`` atomically: stdin → temp file in the SAME directory →
-        ``mv -f`` over the target (same-FS rename; cross-device ``mv`` degrades to
-        copy+unlink and is NOT atomic). ``mkdir -p`` is folded in. Exit 0 means the
-        swap happened; non-zero means nothing was renamed and the original is intact.
+        ``mv -f`` (same-FS rename; cross-device ``mv`` is copy+unlink, NOT atomic).
+        ``mkdir -p`` folded in. Exit 0 = swap happened; non-zero = original intact.
 
-        Script notes: symlink targets are resolved first (replacing the link with a
-        plain file would orphan the target) and the temp dir recomputed from the
-        RESOLVED target. ``mktemp -p`` with a hidden marked template, PID-stamped
-        fallback without mktemp. Existing target: mode copied via ``stat`` (GNU
-        ``-c%a`` / BSD ``-f%Lp``) + ``chmod`` — ``chmod --reference`` is GNU-only.
-        New target: ``chmod "=rw"`` AFTER cat gives umask-default perms instead of
-        mktemp's 0600; deliberately not ``$(umask)`` arithmetic (zsh parses
-        leading-zero constants as decimal) and quoted so zsh doesn't =word-expand.
-        ``trap ... EXIT`` removes the temp on every failure path.
+        Symlink targets are resolved first (replacing the link would orphan the
+        target) and the temp dir recomputed from the RESOLVED target. Existing
+        target: mode copied via ``stat`` (GNU ``-c%a`` / BSD ``-f%Lp``) + ``chmod``
+        (``chmod --reference`` is GNU-only). New target: ``chmod "=rw"`` AFTER cat
+        gives umask-default perms instead of mktemp's 0600 — not ``$(umask)``
+        arithmetic (zsh parses leading-zero constants as decimal), quoted so zsh
+        doesn't =word-expand. ``trap ... EXIT`` removes the temp on every failure.
         """
         q_path = self._escape_shell_arg(path)
         q_parent = self._escape_shell_arg(os.path.dirname(path) or ".")
@@ -376,16 +364,6 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             "trap - EXIT")
         return self._exec(script, stdin_data=content)
 
-    def _detect_file_line_ending(self, path: str, pre_content: Optional[str] = None) -> Optional[str]:
-        """Dominant on-disk line ending, or None when undeterminable (new/empty/
-        single-line file). Uses ``pre_content`` when given, else a 4KB ``head``."""
-        if pre_content:
-            return _detect_line_ending(pre_content)
-        head_result = self._head(path, 4096)
-        if head_result.exit_code != 0 or not head_result.stdout:
-            return None
-        return _detect_line_ending(head_result.stdout)
-
     def _file_has_bom(self, path: str, pre_content: Optional[str] = None) -> bool:
         """Whether the on-disk file starts with a UTF-8 BOM. ALWAYS probes disk:
         ``pre_content`` usually comes from ``read_file_raw``, which strips BOMs, so
@@ -412,12 +390,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def _probe_regular_file(self, path: str) -> tuple[int, str]:
         """Byte size of a REGULAR file: ``(file_size, status)`` with status ``"ok"``,
         ``"missing"``, ``"not_regular"`` or ``"bad_size"`` (unparseable ``wc``).
-
-        ``wc -c <`` on a writer-less FIFO, socket or /dev/zero blocks forever (read
-        helpers pass no timeout) and file_tools' name-based device blocklist can't
-        cover a FIFO — it's a file TYPE at any path. ``[ -f ]`` is a stat (symlinks
-        followed) so it answers without touching content.
-        """
+        ``wc -c <`` on a writer-less FIFO/socket//dev/zero blocks forever and a
+        name-based blocklist can't cover a FIFO (a file TYPE at any path); ``[ -f ]``
+        is a stat (symlinks followed) so it answers without touching content."""
         arg = self._escape_shell_arg(path)
         stat_result = self._exec(
             f"if [ -f {arg} ]; then wc -c < {arg} 2>/dev/null; "
@@ -807,11 +782,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def _fail_closed_syntax_error(path: str, ext: str, content: str) -> Optional[WriteResult]:
         """Fail-closed pre-write gate for ``_FAIL_CLOSED_INPROC_EXTS`` (JSON/YAML/TOML):
         a structured-format write that doesn't parse is a corrupt write, so refuse
-        before any bytes touch disk. ``.py`` keeps its non-blocking lint-delta report.
-
-        Checked against the RAW content, before the BOM/CRLF shims: linting
-        post-shim would false-positive on a legitimately BOM-marked file.
-        """
+        before any bytes touch disk. Checked against the RAW content, before the
+        BOM/CRLF shims (post-shim linting would false-positive on a BOM-marked file)."""
         linter = LINTERS_INPROC.get(ext) if ext in _FAIL_CLOSED_INPROC_EXTS else None
         if linter is None:
             return None
@@ -824,14 +796,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             "NOT created or modified. Fix the content and retry."))
 
     def _capture_pre_content(self, path: str, ext: str, pre_content: Optional[str]) -> Optional[str]:
-        """Pre-write content for the lint-delta and LSP line-shift consumers.
-
-        Read only for extensions in the UNION of in-process lint and LSP coverage
-        (skipping binaries/opaque formats keeps the hot path fast). A caller-
-        supplied ``pre_content`` is reused as-is; a failed ``cat`` leaves None so
-        both consumers degrade gracefully (lint reports all errors; LSP skips the
-        shift map).
-        """
+        """Pre-write content for the lint-delta and LSP line-shift consumers. Read
+        only for extensions in the UNION of in-process lint and LSP coverage (keeps
+        the hot path fast for binaries); a failed ``cat`` leaves None so both
+        consumers degrade gracefully."""
         if pre_content is not None:
             return pre_content
         if ext in LINTERS_INPROC or self._lsp_handles_extension(ext):
@@ -841,15 +809,15 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         return None
 
     def _match_on_disk_conventions(self, path: str, content: str, pre_content: Optional[str]) -> str:
-        """Re-apply the on-disk file's CRLF endings and UTF-8 BOM to ``content``.
-
-        read_file strips the BOM and models send bare-LF text, so a round-trip
-        would otherwise silently normalize a CRLF file (patch would leave mixed
-        endings) and drop a byte signature some Windows toolchains key on. The BOM
-        is only prepended when the original had one and ``content`` doesn't
-        already (guards double-BOM from callers passing raw bytes).
-        """
-        if self._detect_file_line_ending(path, pre_content) == "\r\n":
+        """Re-apply the on-disk file's CRLF endings and UTF-8 BOM to ``content``:
+        read_file strips the BOM and models send bare-LF text, so a round-trip would
+        otherwise normalize CRLF files and drop the BOM. The BOM is only prepended
+        when ``content`` lacks one (guards double-BOM)."""
+        sample = pre_content
+        if not sample:
+            head = self._head(path, 4096)
+            sample = head.stdout if head.exit_code == 0 else ""
+        if _detect_line_ending(sample) == "\r\n":
             content = _normalize_line_endings(content, "\r\n")
         if self._file_has_bom(path, pre_content) and not _has_bom(content):
             content = _UTF8_BOM + content
@@ -857,11 +825,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
     def _verify_written_hash(self, path: str, content_bytes: bytes) -> tuple[Optional[bool], Optional[WriteResult]]:
         """Compare the on-disk sha256 to the intended bytes: ``(verified, error)``.
-
-        An explicit ``verified`` flag saves the model the re-read turn it otherwise
-        spends confirming persistence; a mismatch is a hard error, never silent
-        corruption. ``verified`` is None when the hash could not be taken.
-        """
+        The explicit flag saves the model a confirming re-read; a mismatch is a hard
+        error. ``verified`` is None when the hash could not be taken."""
         try:
             hash_result = self._exec(f"sha256sum {self._escape_shell_arg(path)} 2>/dev/null")
             if hash_result.exit_code == 0 and hash_result.stdout.strip():
@@ -881,14 +846,11 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Write content atomically, creating parent directories as needed.
 
         Order: deny list → lone-surrogate refusal → fail-closed syntax gate on the
-        CANDIDATE content (JSON/YAML/TOML; nothing touches disk on failure) →
-        pre-content capture → CRLF/BOM preservation → LSP baseline snapshot →
-        atomic write (content rides stdin: no ARG_MAX limit, never in the command
-        string) → sha256 verification → lint delta (only errors THIS write
-        introduced) → LSP diagnostics when syntax is clean.
-
-        ``pre_content``: pre-edit content the caller already has (patch_replace read
-        it); saves a ``cat``. BOM detection always probes disk regardless.
+        CANDIDATE content (JSON/YAML/TOML) → pre-content capture → CRLF/BOM
+        preservation → LSP baseline snapshot → atomic write (content rides stdin:
+        no ARG_MAX limit) → sha256 verification → lint delta → LSP diagnostics
+        when syntax is clean. ``pre_content``: pre-edit content the caller already
+        has (saves a ``cat``); BOM detection always probes disk regardless.
         """
         path = self._expand_path(path)
         denied = get_write_denied_error(path)
@@ -940,14 +902,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
     def _no_match_result(self, path: str, content: str, old_string: str,
                          new_string: str, match_count: int, error: Optional[str]) -> PatchResult:
-        """PatchResult for a failed fuzzy match.
-
-        Already-applied detection first: the most common production patch failure
-        is a re-send of an edit that already landed (identical old/new, or
-        old_string gone while new_string is present verbatim) — a success-shaped
-        no-op stops the model burning turns on re-reads. Otherwise attach a
-        best-effort "Did you mean?" snippet to the error.
-        """
+        """PatchResult for a failed fuzzy match. Already-applied detection first: the
+        most common production failure is a re-send of an edit that already landed,
+        and a success-shaped no-op stops the model burning turns on re-reads.
+        Otherwise attach a best-effort "Did you mean?" snippet to the error."""
         from tools.fuzzy_match import format_no_match_hint, is_already_applied
         if is_already_applied(content, old_string, new_string):
             return PatchResult(
@@ -965,15 +923,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
     def _verify_patch_persisted(self, path: str, new_content: str) -> Optional[PatchResult]:
         """Re-read ``path`` and confirm the intended bytes landed; error result or None.
-
-        Catches silent persistence failures (backend FS oddities, a race with
-        another task, truncated pipe) that would otherwise return success-with-
-        diff while the file is unchanged. Line endings are normalized before
-        comparing: Windows text-mode ``open()`` writes ``\\n`` as ``\\r\\n``, so the
-        disk legitimately holds CRLF while ``new_content`` has LF. The re-read's
-        leading BOM is stripped too — write_file restored it on disk but
-        ``new_content`` is the BOM-less string we matched against.
-        """
+        Catches silent persistence failures (FS oddities, races, truncated pipe).
+        Line endings are normalized first (Windows text-mode ``open()`` writes LF as
+        CRLF) and the re-read's BOM stripped (``new_content`` is the BOM-less
+        string we matched against)."""
         verify_result = self._cat(path)
         if verify_result.exit_code != 0:
             return PatchResult(error=f"Post-write verification failed: could not re-read {path}")
