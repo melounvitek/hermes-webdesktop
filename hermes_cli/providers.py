@@ -201,7 +201,6 @@ def _models_dev_info(canonical: str, allow_network: bool = True):
     ``get_provider_info`` with single-arg lambdas."""
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
-
         return _mdev_provider(canonical) if allow_network else _mdev_provider(canonical, allow_network=False)
     except Exception:
         return None
@@ -216,7 +215,6 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
     canonical = normalize_provider(name)
     mdev_info = _models_dev_info(canonical, allow_network)
     overlay = HERMES_OVERLAYS.get(canonical)
-
     if mdev_info is not None:
         ov = overlay or HermesOverlay()
         env_vars = list(mdev_info.env)
@@ -228,7 +226,6 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
             base_url=ov.base_url_override or mdev_info.api, base_url_env_var=ov.base_url_env_var,
             is_aggregator=ov.is_aggregator, auth_type=ov.auth_type, doc=mdev_info.doc, source="models.dev",
         )
-
     if overlay is not None:
         return ProviderDef(
             id=canonical, name=_LABEL_OVERRIDES.get(canonical, canonical), transport=overlay.transport,
@@ -236,7 +233,6 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
             base_url_env_var=overlay.base_url_env_var, is_aggregator=overlay.is_aggregator,
             auth_type=overlay.auth_type, source="hermes",
         )
-
     # Plugin-registered profiles (plugins/model-providers/<name>/) absent from models.dev and
     # HERMES_OVERLAYS would otherwise be "Unknown provider" in /model, --provider and model-switch
     # even though the picker lists them. Only profiles with a concrete endpoint resolve here:
@@ -245,7 +241,6 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
     # resolve_provider_full's custom step and collapse keyed ``custom:<name>`` ids to bare custom.
     try:
         from providers import get_provider_profile as _profile
-
         _prof = _profile(canonical)
         if _prof is not None and (_prof.base_url or "").strip():
             _api_mode_to_transport = {v: k for k, v in TRANSPORT_TO_API_MODE.items()}
@@ -456,7 +451,6 @@ def _lossy_alias_registry_pdef(raw: str, canonical: str) -> Optional[ProviderDef
     through the built-in chain so overlay transports apply."""
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY as _AUTH_PROVIDER_REGISTRY
-
         _pcfg = _AUTH_PROVIDER_REGISTRY.get(raw)
         if _pcfg is None:
             return None
@@ -477,7 +471,6 @@ def _llamacpp_pdef() -> Optional[ProviderDef]:
     provider the Local Models 'Use' flow writes to config."""
     try:
         from hermes_cli.local_runtime.endpoint import resolve_llamacpp_endpoint
-
         endpoint = resolve_llamacpp_endpoint(wait_for_boot_s=0)
     except Exception:
         endpoint = None
@@ -503,7 +496,6 @@ def resolve_provider_full(
     """
     canonical = normalize_provider(name)
     raw = name.strip().lower()
-
     if user_providers:
         user_pdef = resolve_user_provider(raw, user_providers)
         if user_pdef is not None:

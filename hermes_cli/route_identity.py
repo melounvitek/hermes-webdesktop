@@ -28,7 +28,6 @@ def normalize_route_base_url(base_url: Any) -> str:
         port = parsed.port
     except (TypeError, ValueError):
         return raw
-
     route_host = parsed.netloc.rsplit("@", 1)[-1]
     if route_host.startswith("[") or ":" in host:
         host = f"[{host}]"
@@ -36,11 +35,9 @@ def normalize_route_base_url(base_url: Any) -> str:
         host = f"{host}:{port}"
     if "@" in parsed.netloc:
         host = f"{parsed.netloc.rsplit('@', 1)[0]}@{host}"
-
     path = parsed.path
     if path.endswith("/") and not had_query_delimiter:
         path = path[:-1]
-
     normalized = urlunsplit((scheme, host, path, parsed.query, ""))
     if had_query_delimiter and not parsed.query:
         normalized += "?"
@@ -59,7 +56,6 @@ def should_clear_context_pin(
         return True
     try:
         from agent.agent_init import _context_route_mismatch
-
         return _context_route_mismatch(configured_base_url, active_base_url, configured_provider, active_provider)
     except Exception:
         return True
@@ -70,5 +66,4 @@ async def should_clear_context_pin_async(*args: Any) -> bool:
     event loop — the resolution chain is cache-only (``allow_network=False``) but can still do
     cold-start disk I/O."""
     import asyncio
-
     return await asyncio.to_thread(should_clear_context_pin, *args)

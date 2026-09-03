@@ -69,7 +69,6 @@ def provider_catalog() -> list[ProviderDescriptor]:
     auto-extended by provider plugins). Auth/env from ``PROVIDER_REGISTRY``; display metadata from
     ``ProviderProfile`` with canonical/env fallbacks so profile-less providers still resolve."""
     from hermes_cli.models import CANONICAL_PROVIDERS
-
     PROVIDER_REGISTRY = _safe_import("hermes_cli.auth", "PROVIDER_REGISTRY", {})
     OPTIONAL_ENV_VARS = _safe_import("hermes_cli.config", "OPTIONAL_ENV_VARS", {})
     # Overlays carry auth_type for providers with no registry/profile entry — notably the ``moa``
@@ -77,11 +76,9 @@ def provider_catalog() -> list[ProviderDescriptor]:
     HERMES_OVERLAYS = _safe_import("hermes_cli.providers", "HERMES_OVERLAYS", {})
     try:
         from providers import list_providers
-
         profiles = {p.name: p for p in list_providers()}
     except Exception:
         profiles = {}
-
     out: list[ProviderDescriptor] = []
     for order, entry in enumerate(CANONICAL_PROVIDERS):
         slug = entry.slug

@@ -18,7 +18,6 @@ from utils import base_url_host_matches
 
 def _rp():
     import hermes_cli.runtime_provider as origin
-
     return origin
 
 
@@ -49,7 +48,6 @@ def _azure_foundry_api_key(rp, explicit_api_key: str) -> str:
         return explicit_api_key
     try:
         from hermes_cli.config import get_env_value
-
         api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or ""
     except Exception:
         api_key = ""
@@ -75,7 +73,6 @@ def _resolve_azure_foundry_runtime(
     rp = _rp()
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url_clean = str(explicit_base_url or "").strip().rstrip("/")
-
     cfg_base_url, cfg_api_mode, cfg_auth_mode, cfg_entra = "", "chat_completions", "api_key", {}
     if rp._cfg_provider(model_cfg) == "azure-foundry":
         cfg_base_url = rp._config_base_url_for_provider(model_cfg, "azure-foundry")
@@ -83,11 +80,9 @@ def _resolve_azure_foundry_runtime(
         cfg_auth_mode = str(model_cfg.get("auth_mode") or "api_key").strip().lower() or "api_key"
         if isinstance(model_cfg.get("entra"), dict):
             cfg_entra = model_cfg["entra"]
-
     # GPT-5.x / codex / o1-o4 deployments are Responses-API-only on Foundry.
     effective_model = str(target_model or model_cfg.get("default") or "").strip()
     cfg_api_mode = rp._azure_inferred_api_mode(effective_model, cfg_api_mode)
-
     env_base_url = rp._getenv("AZURE_FOUNDRY_BASE_URL", "").strip().rstrip("/")
     base_url = explicit_base_url_clean or cfg_base_url or env_base_url
     if not base_url:
@@ -97,7 +92,6 @@ def _resolve_azure_foundry_runtime(
         )
     if cfg_api_mode == "anthropic_messages":
         base_url = re.sub(r"/v1/?$", "", base_url)
-
     if cfg_auth_mode == "entra_id":
         if explicit_api_key:
             # --api-key on the CLI while config says entra_id: honour the explicit string
@@ -145,7 +139,6 @@ def _resolve_openrouter_runtime(
     # Aliases resolving to "custom" (ollama, vllm, …) follow bare-custom trust + routing rules.
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
-
     env_openrouter_base_url = rp._getenv("OPENROUTER_BASE_URL", "").strip()
     env_custom_base_url = rp._getenv("CUSTOM_BASE_URL", "").strip()
     use_config_base_url = bool(cfg_base_url.strip()) and not explicit_base_url and (
@@ -159,7 +152,6 @@ def _resolve_openrouter_runtime(
         or env_openrouter_base_url
         or OPENROUTER_BASE_URL
     ).rstrip("/")
-
     is_openrouter_url = base_url_host_matches(base_url, "openrouter.ai")
     # Explicitly-configured OpenRouter mirrors (OPENROUTER_BASE_URL + provider=openrouter) still
     # count as OpenRouter for key selection.
@@ -179,7 +171,6 @@ def _resolve_openrouter_runtime(
     api_key = next((str(c or "").strip() for c in candidates if rp.has_usable_secret(c)), "")
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
     cfg_api_mode = rp._parse_api_mode(model_cfg.get("api_mode"))
-
     # Explicit "custom" stays "custom" rather than relabeling to "openrouter".
     if requested_norm != "custom":
         return rp._runtime(
@@ -224,7 +215,6 @@ def _resolve_bedrock_runtime(requested_provider: str, model_cfg: Dict[str, Any],
         resolve_aws_auth_env_var, resolve_bedrock_bearer_token, resolve_bedrock_runtime_region,
     )
     from hermes_cli.config import load_config  # direct (not the origin delegate), as before
-
     rp = _rp()
     # Explicitly selected bedrock trusts boto3's credential chain (IMDS, ECS/Lambda roles, SSO)
     # which the env-var check can't detect.
@@ -273,7 +263,6 @@ def _is_external_process_provider(provider: str) -> bool:
         return False
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
-
         pconfig = PROVIDER_REGISTRY.get(name)
         if pconfig is not None:
             return pconfig.auth_type == "external_process"
@@ -281,7 +270,6 @@ def _is_external_process_provider(provider: str) -> bool:
         pass
     try:
         from providers import get_provider_profile
-
         profile = get_provider_profile(name)
     except Exception:
         return False

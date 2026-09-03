@@ -25,7 +25,6 @@ _LLAMACPP_ALIASES = ("llamacpp", "llama.cpp", "llama-cpp")
 def _rp():
     """Origin module, late-bound so test patches on ``hermes_cli.runtime_provider.*`` apply."""
     import hermes_cli.runtime_provider as origin
-
     return origin
 
 
@@ -129,7 +128,6 @@ def _shadowed_by_builtin(requested_norm: str) -> bool:
 def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Scan ``providers:`` (new-style, keyed) for ``requested_norm``."""
     from hermes_cli.config import is_provider_enabled
-
     rp = _rp()
     for ep_name, entry in providers.items():
         # ``providers.<name>.enabled: false`` entries stay in config but are invisible here.
@@ -353,7 +351,6 @@ def is_routable_provider(provider: Optional[str]) -> bool:
         return False
     try:
         from hermes_cli.providers import resolve_provider_full
-
         rp = _rp()
         config = rp.load_config()
         return resolve_provider_full(name, config.get("providers"), rp.get_compatible_custom_providers(config)) is not None
@@ -437,7 +434,6 @@ def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optiona
     rp = _rp()
     try:
         from hermes_cli.local_runtime.endpoint import resolve_llamacpp_endpoint
-
         endpoint = resolve_llamacpp_endpoint()
     except Exception:  # noqa: BLE001 — resolution is best-effort
         endpoint = None
@@ -494,7 +490,6 @@ def _resolve_direct_alias_runtime(
 def _opencode_family_for_custom(requested_provider: str, base_url: str) -> Optional[str]:
     """OpenCode family by provider name, else by opencode.ai host (``/zen/go`` => opencode-go)."""
     from hermes_cli.models import opencode_provider_family
-
     family = opencode_provider_family(requested_provider)
     if family is not None:
         return family
@@ -524,14 +519,12 @@ def _resolve_named_custom_runtime(
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
-
     custom_provider = rp._get_named_custom_provider(requested_provider)
     if not custom_provider:
         return None
     base_url = ((explicit_base_url or "").strip() or custom_provider.get("base_url", "")).rstrip("/")
     if not base_url:
         return None
-
     pool_result = rp._try_resolve_from_custom_pool(
         base_url, "custom", custom_provider.get("api_mode"),
         provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
@@ -540,7 +533,6 @@ def _resolve_named_custom_runtime(
         # The pool doesn't know the custom_providers fields — propagate them here too.
         _apply_custom_provider_extras(custom_provider, target_model, pool_result)
         return pool_result
-
     explicit_key = (explicit_api_key or "").strip()
     candidates = [
         explicit_key,
@@ -549,33 +541,28 @@ def _resolve_named_custom_runtime(
         *rp._host_gated_env_key_candidates(base_url, ollama=False),
     ]
     api_key: Any = next((c for c in candidates if rp.has_usable_secret(c)), "")
-
     # ``key_cmd`` credentials are minted per request (short-lived bearers would go stale
     # mid-session); both wire clients accept a callable api_key (the Entra ID contract). An
     # explicit --api-key still wins as the one-off recovery escape hatch.
     key_cmd = _clean(custom_provider.get("key_cmd", ""))
     if key_cmd and not rp.has_usable_secret(explicit_key):
         from agent.command_token_source import build_command_token_provider
-
         token_provider = build_command_token_provider(
             key_cmd, str(custom_provider.get("name", requested_provider) or "custom")
         )
         if token_provider is not None:
             api_key = token_provider
-
     result = _custom_runtime(
         rp, base_url, api_key, custom_provider.get("api_mode"),
         source=f"custom_provider:{custom_provider.get('name', requested_provider)}", requested_provider=requested_provider,
     )
     _apply_custom_provider_extras(custom_provider, target_model, result)
-
     # OpenCode-family custom providers (opencode-go/zen names, or opencode.ai hosts) serve models
     # on different API surfaces — a static api_mode 503s for /v1/responses-only models. Re-derive
     # api_mode from the model and normalize /v1 like the built-in paths.
     family = _opencode_family_for_custom(requested_provider, base_url)
     if family is not None and not custom_provider.get("api_mode"):
         from hermes_cli.models import normalize_opencode_base_url, opencode_model_api_mode
-
         effective_model = str(
             target_model or custom_provider.get("model") or rp._get_model_config().get("default") or ""
         ).strip()

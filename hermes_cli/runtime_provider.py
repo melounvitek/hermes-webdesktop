@@ -293,7 +293,6 @@ def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
 
 def _anthropic_token_or_raise() -> str:
     from agent.anthropic_adapter import resolve_anthropic_token
-
     token = resolve_anthropic_token()
     if not token:
         raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
@@ -382,7 +381,6 @@ def _auto_detect_local_model(base_url: str) -> str:
         return ""
     try:
         import requests
-
         url = base_url.rstrip("/")
         if not url.endswith("/v1"):
             url += "/v1"
@@ -848,7 +846,6 @@ def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
     treated as a static API key; a short-lived token is minted per call, and mid-session expiry is
     recovered on 401 by run_agent._try_refresh_vertex_client_credentials()."""
     from agent.vertex_adapter import get_vertex_config
-
     token, base_url = get_vertex_config()
     if not token or not base_url:
         raise AuthError(
@@ -951,11 +948,9 @@ def resolve_runtime_provider(
     (e.g. OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
-
     runtime = _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
     if runtime:
         return runtime
-
     runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider, explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url, target_model=target_model,
@@ -963,53 +958,41 @@ def resolve_runtime_provider(
     if runtime:
         runtime["requested_provider"] = requested_provider
         return runtime
-
     if not explicit_base_url and not explicit_api_key:
         runtime = _local_endpoint_bypass(requested_provider, explicit_api_key, explicit_base_url)
         if runtime:
             return runtime
-
     provider = resolve_provider(requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)
     model_cfg = _get_model_config()
-
     runtime = _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
     if runtime is not None:
         return runtime
-
     runtime = _resolve_explicit_runtime(
         provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
         explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url, target_model=target_model,
     )
     if runtime:
         return runtime
-
     runtime = _resolve_from_pool(provider, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
     if runtime:
         return runtime
-
     if provider in _OAUTH_RUNTIME_PROVIDERS:
         runtime = _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model)
         if runtime:
             return runtime
-
     if provider == "minimax-oauth":
         runtime = _minimax_oauth_runtime(provider, requested_provider)
         if runtime:
             return runtime
-
     if _is_external_process_provider(provider):
         return _resolve_external_process_runtime(provider, requested_provider)
-
     if provider == "anthropic":
         return _anthropic_env_runtime(requested_provider, model_cfg)
-
     if provider == "bedrock":
         return _resolve_bedrock_runtime(requested_provider, model_cfg, target_model)
-
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
         return _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
-
     return _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
 
 
