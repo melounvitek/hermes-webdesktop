@@ -49,8 +49,7 @@ _HERMES_BRANDING: Dict[str, str] = {
 
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
-        "name": "default",
-        "description": "Classic Hermes — gold and kawaii",
+        "name": "default", "description": "Classic Hermes — gold and kawaii",
         # Dark-authored; values match the TUI's DARK_THEME so both render the same gold.
         "colors": {
             "banner_border": "#CD7F32", "banner_title": "#FFD700", "banner_accent": "#FFBF00",
@@ -83,8 +82,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "branding": _HERMES_BRANDING,
         "tool_prefix": "┊"},
     "ares": {
-        "name": "ares",
-        "description": "War-god theme — crimson and bronze",
+        "name": "ares", "description": "War-god theme — crimson and bronze",
         "colors": {
             "banner_border": "#A93333", "banner_title": "#C7A96B", "banner_accent": "#DD4A3A",
             "banner_dim": "#905151", "banner_text": "#F1E6CF", "ui_accent": "#DD4A3A",
@@ -132,8 +130,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [dim #6B1717]⠀⠀⠀⠀⠀⠀⠀⠀war god online⠀⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
     "mono": {
-        "name": "mono",
-        "description": "Monochrome — clean grayscale",
+        "name": "mono", "description": "Monochrome — clean grayscale",
         "colors": {
             "banner_border": "#5E5E5E", "banner_title": "#e6edf3", "banner_accent": "#aaaaaa",
             "banner_dim": "#606060", "banner_text": "#c9d1d9", "ui_accent": "#aaaaaa",
@@ -150,8 +147,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "branding": {**_HERMES_BRANDING, "help_header": "[?] Available Commands"},
         "tool_prefix": "┊"},
     "slate": {
-        "name": "slate",
-        "description": "Cool blue — developer-focused",
+        "name": "slate", "description": "Cool blue — developer-focused",
         "colors": {
             "banner_border": "#4169e1", "banner_title": "#7eb8f6", "banner_accent": "#8EA8FF",
             "banner_dim": "#545E6B", "banner_text": "#c9d1d9", "ui_accent": "#7eb8f6",
@@ -164,9 +160,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "session_border": "#545E6B", "completion_menu_bg": "#151C2F",
             "completion_menu_current_bg": "#324867", "selection_bg": "#3A5375",
             "shell_dollar": "#7eb8f6", "voice_status_bg": "#151C2F"},
-        "spinner": {},
-        "branding": _HERMES_BRANDING,
-        "tool_prefix": "┊"},
+        "spinner": {}, "branding": _HERMES_BRANDING, "tool_prefix": "┊"},
     "daylight": {
         "name": "daylight",
         "description": "Light theme for bright terminals with dark text and cool blue accents",
@@ -202,12 +196,9 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#E8DCC8", "completion_menu_meta_bg": "#F0E8D8",
             "completion_menu_meta_current_bg": "#DFCFB0", "selection_bg": "#E8DAD0",
             "shell_dollar": "#8B4513", "voice_status_bg": "#F5F0E8"},
-        "spinner": {},
-        "branding": _HERMES_BRANDING,
-        "tool_prefix": "┊"},
+        "spinner": {}, "branding": _HERMES_BRANDING, "tool_prefix": "┊"},
     "poseidon": {
-        "name": "poseidon",
-        "description": "Ocean-god theme — deep blue and seafoam",
+        "name": "poseidon", "description": "Ocean-god theme — deep blue and seafoam",
         "colors": {
             "banner_border": "#2A6FB9", "banner_title": "#A9DFFF", "banner_accent": "#5DB8F5",
             "banner_dim": "#44638F", "banner_text": "#EAF7FF", "ui_accent": "#5DB8F5",
@@ -255,8 +246,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [dim #153C73]⠀⠀⠀⠀⠀⠀⠀deep waters hold⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
     "sisyphus": {
-        "name": "sisyphus",
-        "description": "Sisyphean theme — austere grayscale with persistence",
+        "name": "sisyphus", "description": "Sisyphean theme — austere grayscale with persistence",
         "colors": {
             "banner_border": "#B7B7B7", "banner_title": "#F5F5F5", "banner_accent": "#E7E7E7",
             "banner_dim": "#5C5C5C", "banner_text": "#D3D3D3", "ui_accent": "#E7E7E7",
@@ -305,8 +295,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [dim #4A4A4A]⠀⠀⠀⠀⠀⠀⠀⠀⠀the boulder⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
     "charizard": {
-        "name": "charizard",
-        "description": "Volcanic theme — burnt orange and ember",
+        "name": "charizard", "description": "Volcanic theme — burnt orange and ember",
         "colors": {
             "banner_border": "#C75B1D", "banner_title": "#FFD39A", "banner_accent": "#F29C38",
             "banner_dim": "#C58A45", "banner_text": "#FFF0D4", "ui_accent": "#F29C38",
