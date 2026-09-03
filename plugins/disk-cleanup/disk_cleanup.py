@@ -9,6 +9,7 @@ Scope: strictly HERMES_HOME and /tmp/hermes-*; never ~/.hermes/logs/ or system d
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import shutil
@@ -98,22 +99,18 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     "patches", "projects", "skins", "themes", "contributors",
     "profiles", "backups", "optional-skills"})
 
-# Defense-in-depth for quick(): exact cron control-plane paths never deleted regardless of
-# stored category (guards stale tracked.json entries).
-_PROTECTED_CRON_PATHS: set[str] = set()
+@functools.lru_cache(maxsize=1)  # built lazily so HERMES_HOME resolves once
+def _protected_cron_paths() -> frozenset:
+    """Defense-in-depth for quick(): EXACT cron control-plane paths (``cron/``, ``output/`` root,
+    ``jobs.json``, ``.tick.lock``) never deleted regardless of stored category (stale tracked.json).
+    Never widen to everything under ``cron/output/``: run artifacts there are disposable; only
+    wholesale deletion of ``output/`` is fatal."""
+    return frozenset(str(x) for parent in ("cron", "cronjobs") for base in (get_hermes_home() / parent,)
+                     for x in (base, base / "output", base / "jobs.json", base / ".tick.lock"))
 
 
 def _is_protected_cron_path(p: Path) -> bool:
-    """True if *p* is cron control-plane state (EXACT match: ``cron/``, ``jobs.json``,
-    ``.tick.lock``, the ``output/`` root). Never widen to everything under ``cron/output/``:
-    run artifacts there are disposable; only wholesale deletion of ``output/`` is fatal."""
-    if not _PROTECTED_CRON_PATHS:  # built lazily so HERMES_HOME resolves once
-        hermes_home = get_hermes_home()
-        for parent in ("cron", "cronjobs"):
-            base = hermes_home / parent
-            _PROTECTED_CRON_PATHS.update(
-                str(x) for x in (base, base / "output", base / "jobs.json", base / ".tick.lock"))
-    return str(p.resolve()) in _PROTECTED_CRON_PATHS
+    return str(p.resolve()) in _protected_cron_paths()
 
 
 def fmt_size(n: float) -> str:

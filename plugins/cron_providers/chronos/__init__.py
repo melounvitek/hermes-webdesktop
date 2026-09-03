@@ -58,23 +58,23 @@ class ChronosCronScheduler(CronScheduler):
             self._client = NasCronClient(_cfg("cron", "chronos", "portal_url"))
         return self._client
 
+    def _reconcile_logged(self, log, what: str) -> None:
+        try:
+            self.reconcile()
+        except Exception as e:
+            log("Chronos %s reconcile failed: %s", what, e)
+
     def start(self, stop_event, *, adapters=None, loop=None, interval=60):
         """Arm all enabled jobs via NAS, then RETURN — no loop, no periodic wake (scale-to-zero)."""
         # A new lifecycle can't prove what an interrupted process did: classify unknown, never requeue.
         self.recover_interrupted()
-        try:
-            self.reconcile()
-        except Exception as e:
-            logger.warning("Chronos start() reconcile failed: %s", e)
+        self._reconcile_logged(logger.warning, "start()")
 
     def stop(self) -> None:
         pass
 
     def on_jobs_changed(self) -> None:
-        try:
-            self.reconcile()
-        except Exception as e:
-            logger.debug("Chronos on_jobs_changed reconcile failed: %s", e)
+        self._reconcile_logged(logger.debug, "on_jobs_changed")
 
     def register_job(self, job: Dict[str, Any]) -> None:
         """Arm the first one-shot for a new job; may raise so creation can report it."""
