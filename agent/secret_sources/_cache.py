@@ -165,13 +165,8 @@ class SecretCache(Generic[K]):
         self.memory: Dict[K, CachedFetch] = {}
         self.disk: DiskCache[K] = DiskCache(basename, key_serializer=key_serializer)
 
-    def lookup(
-        self,
-        key: K,
-        ttl_seconds: float,
-        home_path: Optional[Path] = None,
-        read_disk: Optional[Callable[[], Optional[CachedFetch]]] = None,
-    ) -> Optional[CachedFetch]:
+    def lookup(self, key: K, ttl_seconds: float, home_path: Optional[Path] = None,
+               read_disk: Optional[Callable[[], Optional[CachedFetch]]] = None) -> Optional[CachedFetch]:
         """Fresh entry from L1, else from L2 (promoted into L1), else None.
 
         ``read_disk`` swaps in an alternative L2 reader (e.g. an encrypted file).

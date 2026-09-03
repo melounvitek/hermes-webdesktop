@@ -146,22 +146,15 @@ _GENERIC_REMEDIATION = {
 class SecretSource(ABC):
     """One external secret backend. Subclasses set attributes + ``fetch``.
 
-    Attributes:
-        name: Config-section key under ``secrets:`` (``[a-z0-9_]+``); also the
-            provenance label for every var this source supplies.
-        label: Human-readable name for startup messages / ``secrets status``.
-        shape: ``"mapped"`` (user binds env-var names to refs) or ``"bulk"``
-            (backend injects whole projects). Mapped beats bulk: an explicit
-            binding is stronger intent than a project dump.
-        scheme: URI scheme this source owns for refs (``"op"``). Unique across
-            sources so refs can later appear outside the ``secrets:`` block.
-        token_env_key / default_token_env: config key naming the bootstrap-auth
-            env var, and its default. Drives :meth:`protected_env_vars` so a
-            vault holding its own access token can't clobber the credential
-            used to reach it.
-        override_existing_default: value of ``override_existing`` when unset.
-        remediation_hints: per-kind overrides of the generic remediation text;
-            ``{name}`` / ``{token_env}`` placeholders are filled in.
+    ``name``: config-section key under ``secrets:`` (``[a-z0-9_]+``) and the
+    provenance label. ``shape``: ``"mapped"`` (user binds env-var names to refs)
+    or ``"bulk"`` (backend injects whole projects); mapped beats bulk because an
+    explicit binding is stronger intent. ``scheme``: URI scheme this source owns
+    for refs, unique across sources. ``token_env_key`` / ``default_token_env``:
+    config key naming the bootstrap-auth env var and its default; drives
+    :meth:`protected_env_vars` so a vault holding its own access token can't
+    clobber the credential used to reach it. ``remediation_hints``: per-kind
+    overrides of the generic remediation text (``{name}`` / ``{token_env}``).
     """
 
     api_version: int = SECRET_SOURCE_API_VERSION
@@ -245,15 +238,8 @@ def scrub_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
-def run_cli(
-    argv: Sequence[str],
-    *,
-    env: Dict[str, str],
-    timeout: float,
-    label: str,
-    timeout_message: str,
-    stdin: Any = subprocess.DEVNULL,
-) -> subprocess.CompletedProcess:
+def run_cli(argv: Sequence[str], *, env: Dict[str, str], timeout: float, label: str,
+            timeout_message: str, stdin: Any = subprocess.DEVNULL) -> subprocess.CompletedProcess:
     """``subprocess.run`` an argv list (never a shell), capturing utf-8 text.
 
     Timeout and spawn failure become ``RuntimeError`` with messages safe to
@@ -261,12 +247,8 @@ def run_cli(
     """
     try:
         return subprocess.run(  # noqa: S603 — argv list, no shell
-            list(argv),
-            env=env,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
-            stdin=stdin,
+            list(argv), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, stdin=stdin,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(timeout_message) from exc
@@ -274,13 +256,8 @@ def run_cli(
         raise RuntimeError(f"failed to invoke {label}: {exc}") from exc
 
 
-def run_secret_cli(
-    argv: Sequence[str],
-    *,
-    allow_env: Sequence[str] = (),
-    extra_env: Optional[Dict[str, str]] = None,
-    timeout: float = DEFAULT_CLI_TIMEOUT_SECONDS,
-) -> subprocess.CompletedProcess:
+def run_secret_cli(argv: Sequence[str], *, allow_env: Sequence[str] = (), extra_env: Optional[Dict[str, str]] = None,
+                   timeout: float = DEFAULT_CLI_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
     """Run a secret-manager helper CLI with a minimal, allowlisted env.
 
     The child gets PATH/HOME/locale basics plus only ``allow_env`` (auth/session

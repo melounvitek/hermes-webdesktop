@@ -21,13 +21,8 @@ from pathlib import Path
 from typing import Dict, List, MutableMapping, Optional
 
 from agent.secret_sources.base import (
-    SECRET_SOURCE_API_VERSION,
-    ErrorKind,
-    FetchResult,
-    SecretSource,
-    is_valid_env_name,
-    reset_source_environment,
-    set_source_environment,
+    SECRET_SOURCE_API_VERSION, ErrorKind, FetchResult, SecretSource, is_valid_env_name,
+    reset_source_environment, set_source_environment,
 )
 from hermes_constants import hermes_home_key
 
@@ -104,13 +99,8 @@ def _validate_source(source: SecretSource) -> Optional[str]:
     return None
 
 
-def register_source(
-    source: SecretSource,
-    *,
-    replace: bool = False,
-    builtin: bool = False,
-    scope: Optional[str] = None,
-) -> bool:
+def register_source(source: SecretSource, *, replace: bool = False, builtin: bool = False,
+                    scope: Optional[str] = None) -> bool:
     """Register a secret source. Returns True on success.
 
     Rejections are logged, never raised — a bad plugin must not take down
@@ -130,14 +120,12 @@ def register_source(
         if name in effective and not replace:
             logger.warning("Secret source '%s' already registered; ignoring duplicate", name)
             return False
-        if source.scheme:
-            for other_name, other in effective.items():
-                if other_name != name and other.scheme == source.scheme:
-                    logger.warning(
-                        "Ignoring secret source '%s': scheme '%s://' is already owned by source '%s'",
-                        name, source.scheme, other_name,
-                    )
-                    return False
+        owner = next((n for n, o in effective.items()
+                      if n != name and source.scheme and o.scheme == source.scheme), None)
+        if owner:
+            logger.warning("Ignoring secret source '%s': scheme '%s://' is already owned by source '%s'",
+                           name, source.scheme, owner)
+            return False
         target = _SOURCES if scope is None else _SCOPED_SOURCES.setdefault(scope, {})
         target[name] = source
         if scope is None:
@@ -166,13 +154,8 @@ def snapshot_registration(name: str, *, scope: Optional[str] = None) -> Optional
         return target.get(name)
 
 
-def restore_registration(
-    name: str,
-    current: SecretSource,
-    previous: Optional[SecretSource],
-    *,
-    scope: Optional[str] = None,
-) -> bool:
+def restore_registration(name: str, current: SecretSource, previous: Optional[SecretSource], *,
+                         scope: Optional[str] = None) -> bool:
     """Restore a host-owned source registration if it is still current."""
     _ensure_builtin_sources()
     with _REGISTRY_LOCK:
@@ -235,10 +218,8 @@ def _reset_registry_for_tests() -> None:
 # --- Orchestrated apply -----------------------------------------------------
 
 
-def _fetch_with_timeout(
-    source: SecretSource, cfg: dict, home_path: Path,
-    environ: MutableMapping[str, str],
-) -> FetchResult:
+def _fetch_with_timeout(source: SecretSource, cfg: dict, home_path: Path,
+                        environ: MutableMapping[str, str]) -> FetchResult:
     """Run source.fetch() under a wall-clock budget; never raises.
 
     A daemon worker thread enforces the budget: a source that blows it is
@@ -247,9 +228,7 @@ def _fetch_with_timeout(
     better than an unbounded hang on every ``hermes`` invocation.
     """
     timeout = source.fetch_timeout_seconds(cfg)
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix=f"secret-src-{source.name}"
-    )
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"secret-src-{source.name}")
     try:
         def _fetch() -> FetchResult:
             token = set_source_environment(environ)
@@ -263,21 +242,18 @@ def _fetch_with_timeout(
             result = future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
             future.cancel()
-            return FetchResult().fail(
-                f"fetch exceeded {timeout:.0f}s budget — startup continued "
-                "without this source (raise secrets."
-                f"{source.name}.timeout_seconds if the backend is just slow)",
-                ErrorKind.TIMEOUT,
-            )
+            return FetchResult().fail(f"fetch exceeded {timeout:.0f}s budget — startup continued "
+                                      "without this source (raise secrets."
+                                      f"{source.name}.timeout_seconds if the backend is just slow)",
+                                      ErrorKind.TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — contract violation, contain it
             return FetchResult().fail(f"fetch raised {type(exc).__name__}: {exc}", ErrorKind.INTERNAL)
     finally:
         executor.shutdown(wait=False)
 
     if not isinstance(result, FetchResult):
-        return FetchResult().fail(
-            f"fetch returned {type(result).__name__} instead of FetchResult", ErrorKind.INTERNAL,
-        )
+        return FetchResult().fail(f"fetch returned {type(result).__name__} instead of FetchResult",
+                                  ErrorKind.INTERNAL)
     return result
 
 
@@ -299,10 +275,8 @@ def _ordered_enabled_sources(secrets_cfg: dict, *, scope: Optional[str] = None) 
         order.update((n, None) for n in names if n in sources)
         unknown = [n for n in names if n not in sources]
         if unknown:
-            logger.warning(
-                "secrets.sources names unknown source(s): %s (known: %s)",
-                ", ".join(unknown), ", ".join(sources) or "none",
-            )
+            logger.warning("secrets.sources names unknown source(s): %s (known: %s)",
+                           ", ".join(unknown), ", ".join(sources) or "none")
     order.update((n, None) for n in sources)
 
     enabled: List[SecretSource] = []
@@ -374,9 +348,7 @@ class _Applier:
             alias = _profile_alias_target(var, profile)
             if (alias and alias not in supplied_directly and alias not in self.claimed
                     and self._try_apply(sr, source, override, alias, value)):
-                result.warnings.append(
-                    f"applied profile-scoped {var} as {alias} (active profile {profile!r})"
-                )
+                result.warnings.append(f"applied profile-scoped {var} as {alias} (active profile {profile!r})")
 
     def _try_apply(self, sr: SourceReport, source: SecretSource, override: bool,
                    var: str, value: str) -> bool:
@@ -389,11 +361,9 @@ class _Applier:
             return False
         if var in self.claimed:
             sr.skipped_claimed.append(var)
-            self.report.conflicts.append(
-                f"{var}: kept value from {self.claimed[var]}; "
-                f"{source.name} also supplies it (first source wins — "
-                "remove one binding or reorder secrets.sources)"
-            )
+            self.report.conflicts.append(f"{var}: kept value from {self.claimed[var]}; "
+                                         f"{source.name} also supplies it (first source wins — "
+                                         "remove one binding or reorder secrets.sources)")
             return False
         existed = bool(self.env.get(var))
         if existed and (var in self.preserve or not override):
@@ -408,27 +378,20 @@ class _Applier:
 
 def apply_all(secrets_cfg: dict, home_path: Path,
               environ: Optional[MutableMapping[str, str]] = None) -> ApplyReport:
-    """Fetch from every enabled source and apply the merged result to env.
+    """Fetch from every enabled source and apply the merged result to ``environ``
+    (default ``os.environ``).
 
-    ``environ`` defaults to ``os.environ``; injectable for tests.
-
-    Precedence per env var (most-specific intent wins):
-
-    1. ``secrets.preserve_existing`` names — a pre-existing env value always
-       wins, even against ``override_existing: true``.
-    2. Pre-existing env (.env / shell) — unless the winning source has
-       ``override_existing: true``.
-    3. Mapped sources, in configured order.
-    4. Bulk sources, in configured order.
-
-    First claim wins: a later source carrying the same var gets a
-    ``skipped_claimed`` entry and a conflict warning — never a silent clobber,
+    Precedence per env var, most-specific intent first: (1) ``secrets.preserve_existing``
+    names always keep a pre-existing value, even against ``override_existing: true``;
+    (2) pre-existing .env/shell value, unless the winning source has
+    ``override_existing: true``; (3) mapped sources in configured order; (4) bulk
+    sources in configured order. First claim wins: a later source carrying the same
+    var gets ``skipped_claimed`` plus a conflict warning — never a silent clobber,
     and ``override_existing`` never applies across sources.
 
     Profile aliasing: under a named profile an applied ``FOO_<PROFILE>``
-    (credential-shaped suffixes only) also hydrates canonical ``FOO`` so
-    adapters reading fixed env names see the profile's value. The alias obeys
-    the same guards and is disabled with ``secrets.profile_alias: false``.
+    (credential-shaped suffixes only) also hydrates canonical ``FOO``, under the
+    same guards; disabled with ``secrets.profile_alias: false``.
     """
     env = environ if environ is not None else os.environ
     report = ApplyReport()
@@ -439,14 +402,12 @@ def apply_all(secrets_cfg: dict, home_path: Path,
         return report
 
     preserve_raw = secrets_cfg.get("preserve_existing")
-    preserve = frozenset(
-        n.strip() for n in preserve_raw if isinstance(n, str) and n.strip()
-    ) if isinstance(preserve_raw, list) else frozenset()
+    preserve = frozenset(n.strip() for n in preserve_raw if isinstance(n, str) and n.strip()
+                         ) if isinstance(preserve_raw, list) else frozenset()
     profile = _active_profile_name(home_path) if secrets_cfg.get("profile_alias", True) else ""
 
     # Mapped outranks bulk regardless of list order.
-    ordered = ([s for s in enabled if s.shape == "mapped"]
-               + [s for s in enabled if s.shape == "bulk"])
+    ordered = [s for s in enabled if s.shape == "mapped"] + [s for s in enabled if s.shape == "bulk"]
 
     fetches: List[tuple[SecretSource, dict, FetchResult]] = []
     protected: Dict[str, str] = {}  # var → source that protects it
