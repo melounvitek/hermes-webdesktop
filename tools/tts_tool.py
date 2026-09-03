@@ -88,13 +88,18 @@ from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-expo
     _wrap_pcm_as_wav,
 )
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
+    DEFAULT_ELEVENLABS_MODEL_ID,
+    DEFAULT_ELEVENLABS_VOICE_ID,
     DEFAULT_GEMINI_TTS_MODEL,
     DEFAULT_GEMINI_TTS_VOICE,
     DEFAULT_MINIMAX_BASE_URL,
     DEFAULT_MINIMAX_CN_BASE_URL,
+    TTS_RESPONSE_BODY_LIMIT_BYTES,
+    _XAI_FIRST_SENTENCE_RE,
     _XAI_INLINE_SPEECH_TAGS,
     _XAI_WRAPPING_SPEECH_TAGS,
     _apply_xai_auto_speech_tags,
+    _elevenlabs_environment_kwargs,
     _generate_edge_tts,
     _generate_elevenlabs,
     _generate_gemini_tts,
@@ -106,12 +111,14 @@ from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exp
 from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
     DEFAULT_PIPER_VOICE,
     _LOCAL_TTS_MODEL_CACHES,
+    _TTS_MODEL_CACHE_MAX,
     _generate_kittentts,
     _generate_neutts,
     _generate_piper_tts,
     _kittentts_model_cache,
     _piper_voice_cache,
     _resolve_piper_voice_path,
+    _tts_cache_get_or_load,
 )
 from tools.tts_tool_speaker import stream_tts_to_speaker  # noqa: F401 — historical name re-exported
 from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
@@ -122,6 +129,9 @@ from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-expor
 )
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
     DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_OPENAI_VOICE,
+    MANAGED_OPENAI_TTS_MODELS,
     _generate_deepinfra_tts,
     _generate_openai_tts,
     _has_openai_audio_backend,
