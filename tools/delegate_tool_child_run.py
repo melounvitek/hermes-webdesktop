@@ -155,12 +155,10 @@ def _dump_subagent_timeout_diagnostic(
     *, child: Any, task_index: int, timeout_seconds: float, duration_seconds: float,
     worker_thread: Optional[threading.Thread], goal: str,
 ) -> Optional[str]:
-    """Write a structured diagnostic for a subagent that timed out before any
-    API call (users hit "timed out with no response" and 0 API calls with no way
-    to inspect it). Lands under ``~/.hermes/logs/subagent-timeout-<sid>-<ts>.log``
-    with the child's config, prompt/schema sizes, activity snapshot and the
-    worker thread's stack. Returns the path, or None on failure.
-    """
+    """Structured diagnostic for a subagent that timed out before any API call
+    (otherwise "timed out with no response", 0 API calls, nothing to inspect):
+    ``~/.hermes/logs/subagent-timeout-<sid>-<ts>.log`` with the child's config,
+    prompt/schema sizes, activity snapshot and worker stack. Path, or None on failure."""
     try:
         from hermes_constants import get_hermes_home
         import datetime as _dt
@@ -213,12 +211,9 @@ def _dump_subagent_timeout_diagnostic(
 # ── Per-run helpers ──────────────────────────────────────────────────────────
 
 def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
-    """Build the parent-activity heartbeat thread for one child (not started).
-
-    Returns ``(stop_event, thread)``. The caller starts the thread inside its
-    ``try`` so a failed ``start()`` (OS thread exhaustion) leaves ``ident`` None
-    and the finally-path join can be skipped safely.
-    """
+    """``(stop_event, thread)`` for one child's parent-activity heartbeat, NOT
+    started: the caller starts it inside its ``try`` so a failed ``start()`` (OS
+    thread exhaustion) leaves ``ident`` None and the finally-path join is skipped."""
     from tools.delegate_tool import (_HEARTBEAT_INTERVAL, _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL)
     _heartbeat_stop = threading.Event()
     # Stale detection: a cycle counts as stale when (tool, iteration,
@@ -269,11 +264,9 @@ def _register_child(
     child: Any, parent_agent: Any, goal: str, *, owner_session_id: Optional[str], owner_transport: Any,
     owner_session_record: Any,
 ) -> Optional[str]:
-    """Register the live child in the module registry; return its subagent_id.
-
-    Test doubles without a stable string ``_subagent_id`` are not registered
-    (returns None) and the caller skips every registry interaction for them.
-    """
+    """Register the live child in the module registry; return its subagent_id. Test
+    doubles without a stable string ``_subagent_id`` are not registered (None) and
+    the caller skips every registry interaction for them."""
     _subagent_id = getattr(child, "_subagent_id", None)
     if not isinstance(_subagent_id, str) or not _subagent_id:
         return None
@@ -340,14 +333,14 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
 def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     """Hand ``child.close()`` to a Future done-callback and drain its transports.
 
-    The interrupt is cooperative: the worker still runs its finally path, so
-    closing now could close SQLite under its final write — the done-callback is
-    the first safe boundary. The abandoned worker is usually parked in an
-    OpenSSL read; NEVER hard-close that transport from this thread (cross-thread
-    FD release under a live SSL read corrupts native state) — shutdown() the
-    pooled sockets so the read settles with EOF and the worker unwinds. One
-    immediate sweep + one delayed re-sweep for a connection opened in between; a
-    worker that still won't settle keeps its resources until process exit.
+    The interrupt is cooperative: the worker still runs its finally path, so closing
+    now could close SQLite under its final write — the done-callback is the first
+    safe boundary. The abandoned worker is usually parked in an OpenSSL read; NEVER
+    hard-close that transport from this thread (cross-thread FD release under a
+    live SSL read corrupts native state) — shutdown() the pooled sockets so the read
+    settles with EOF and the worker unwinds. One immediate sweep + one delayed
+    re-sweep for a connection opened in between; a worker that still won't settle
+    keeps its resources until process exit.
     """
     child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
     _drain = getattr(child, "_drain_transports_after_abandonment", None)
@@ -397,11 +390,9 @@ class _SchemaOutcome:
 def _validate_child_output_schema(
     child: Any, result: Dict[str, Any], task_index: int, child_task_id: str, relay_child_text: Any
 ) -> _SchemaOutcome:
-    """Validate the final answer against the attached output_schema with ONE bounded retry.
-
-    Schema-less children (no dict on ``child._delegate_output_schema``) take no
-    branch here so their result entry stays byte-identical.
-    """
+    """Validate the final answer against the attached output_schema with ONE bounded
+    retry. Schema-less children (no dict on ``child._delegate_output_schema``) take
+    no branch here so their result entry stays byte-identical."""
     _output_schema = getattr(child, "_delegate_output_schema", None)
     if not isinstance(_output_schema, dict):
         return _SchemaOutcome(_output_schema, None, [], 0)
@@ -469,12 +460,10 @@ def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
 def _build_result_entry(
     child: Any, result: Dict[str, Any], task_index: int, duration: float, schema: _SchemaOutcome,
 ) -> Dict[str, Any]:
-    """Derive the parent-visible result entry (status, exit_reason, tool trace, tokens, cost).
-
-    ``status`` / ``exit_reason`` / ``truncated`` follow the contract in the
-    ``_run_single_child`` docstring; a structured failure always wins over the
-    summary-presence heuristic (which is only a fallback for legacy/mock results).
-    """
+    """Parent-visible result entry (status, exit_reason, tool trace, tokens, cost).
+    ``status``/``exit_reason``/``truncated`` follow the ``_run_single_child`` contract;
+    a structured failure always wins over the summary-presence heuristic (a fallback
+    for legacy/mock results only)."""
     summary = result.get("final_response") or ""
     # "(empty)" is run_agent's give-up sentinel after repeated empty LLM
     # responses (usually a transport bug) — a failure, not a success.
@@ -561,11 +550,8 @@ def _build_result_entry(
 @dataclass
 class _ChildRun:
     """State of one child run, shared by every phase of ``_run_single_child``.
-
-    ``worktree_info`` stays None until isolation engages, so ``attach_worktree``
-    is a no-op on every early error path; ``child_task_id`` /
-    ``parent_reads_snapshot`` are set by ``seed_workspace``.
-    """
+    ``worktree_info`` stays None until isolation engages (``attach_worktree`` is
+    then a no-op on every early error path); ``seed_workspace`` sets the rest."""
 
     child: Any
     parent_agent: Any
@@ -652,18 +638,16 @@ class _ChildRun:
         """Run the child's conversation on a daemon worker: ``(result, None, False)``
         or ``(None, error_entry, close_deferred)`` on timeout/exception.
 
-        The hard timeout is off by default (``result(timeout=None)`` blocks; stuck
-        children are the heartbeat's job). Daemon worker: a timed-out child is
-        abandoned and a non-daemon thread would block interpreter exit at atexit
-        join. The worker installs a non-interactive approval callback so dangerous
-        command prompts never fall back to ``input()`` and deadlock the parent TUI
-        (deny vs approve follows delegation.subagent_auto_approve).
-
-        On failure: steer acceptance closes BEFORE the stop signal (a concurrent
-        steer is drained into the entry or rejected, never silently lost); a
-        0-API-call timeout gets a diagnostic dump; a timed-out worker that still
-        owns the child gets ``child.close()`` via a Future done-callback
-        (``close_deferred=True``) because closing from this thread races its
+        Hard timeout is off by default (``result(timeout=None)``; stuck children are
+        the heartbeat's job). Daemon worker: an abandoned timed-out child on a
+        non-daemon thread would block interpreter exit at atexit join. The worker
+        installs a non-interactive approval callback (deny/approve per
+        delegation.subagent_auto_approve) so dangerous-command prompts never fall
+        back to ``input()`` and deadlock the parent TUI. On failure: steer acceptance
+        closes BEFORE the stop signal (a concurrent steer is drained into the entry
+        or rejected, never lost); a 0-API-call timeout gets a diagnostic dump; a
+        worker that still owns the child gets ``child.close()`` via a Future
+        done-callback (``close_deferred=True``) — closing here would race its
         still-unwinding finally path.
         """
         from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
@@ -811,13 +795,11 @@ class _ChildRun:
         _safe_progress(self.child_progress_cb, "subagent.complete", **complete_kwargs)
 
     def cleanup(self, *, heartbeat: tuple, child_pool: Any, leased_cred_id: Any, close_deferred: bool) -> None:
-        """Finally-path teardown (idempotent, never raises).
-
-        Order matters: stop heartbeat → drop registry entry → release credential
-        lease → restore the parent's process-global tool names → detach from the
-        parent's interrupt list → close the child (unless a timed-out worker still
-        owns it) → pop the child's Relay scope if no turn is active.
-        """
+        """Finally-path teardown (idempotent, never raises). Order matters: stop
+        heartbeat → drop registry entry → release credential lease → restore the
+        parent's process-global tool names → detach from the parent's interrupt list
+        → close the child (unless a timed-out worker still owns it) → pop the child's
+        Relay scope if no turn is active."""
         child = self.child
         _heartbeat_stop, _heartbeat_thread = heartbeat
         _heartbeat_stop.set()

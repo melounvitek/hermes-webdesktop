@@ -82,13 +82,11 @@ def check_delegate_requirements() -> bool:
 
 
 def _open_child_session_db(parent_agent) -> Any:
-    """DEDICATED SessionDB handle for the child, or None.
-
-    The parent's handle can be closed by its own lifecycle while a background
-    child still flushes (transcript silently dropped). It MUST open the same db
-    FILE as the parent's handle (non-launch profiles), else lineage /
-    session_search break; released by the child's close() via _owns_session_db.
-    """
+    """DEDICATED SessionDB handle for the child, or None: the parent's handle can be
+    closed by its own lifecycle while a background child still flushes (transcript
+    silently dropped). It MUST open the same db FILE as the parent's handle
+    (non-launch profiles), else lineage / session_search break; released by the
+    child's close() via _owns_session_db."""
     parent_session_db = getattr(parent_agent, "_session_db", None)
     if parent_session_db is None:
         return None
@@ -120,11 +118,9 @@ def _build_child_agent(
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
 ):
-    """Build (don't run) a child AIAgent on the main thread.
-
-    override_* (from delegation config) replace parent inheritance so children
-    can run on a different provider:model pair.
-    """
+    """Build (don't run) a child AIAgent on the main thread. override_* (from
+    delegation config) replace parent inheritance so children can run on a
+    different provider:model pair."""
     import uuid as _uuid
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
@@ -347,13 +343,11 @@ def delegate_task(
     output_schema: Optional[Dict[str, Any]] = None, action: Optional[str] = None, subagent_id: Optional[str] = None,
     message: Optional[str] = None, parent_agent=None, credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones.
-
-    ``action`` list/steer/stop run synchronously and bypass the pause gate,
-    depth limit and async dispatch. ``role`` is legacy (per-task beats
-    top-level; capability is depth-derived). Returns JSON with one results
-    entry per task, or a dispatch handle when running in the background.
-    """
+    """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control
+    running ones. ``action`` list/steer/stop run synchronously and bypass the pause
+    gate, depth limit and async dispatch. ``role`` is legacy (per-task beats
+    top-level; capability is depth-derived). Returns JSON with one results entry
+    per task, or a dispatch handle when running in the background."""
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 
@@ -597,14 +591,12 @@ from tools.registry import registry, tool_error
 
 def _model_background_value(args: dict, parent_agent=None) -> bool:
     """Background flag for the MODEL-facing dispatch path (registry fallback).
-
-    Top-level delegations always run in the background — the model does not
-    choose — for single tasks and fan-out batches alike (one async unit, one
-    consolidated result). The exception is an orchestrator subagent (depth > 0),
-    which needs its workers' results within its own turn. The live path is
+    Top-level delegations always run in the background — the model does not choose
+    — for single tasks and fan-out batches alike (one async unit, one consolidated
+    result); an orchestrator subagent (depth > 0) is the exception since it needs
+    its workers' results within its own turn. The live path is
     ``run_agent._dispatch_delegate_task``; this mirrors it for the rare case the
-    intercept is bypassed. Direct Python callers keep the synchronous default.
-    """
+    intercept is bypassed. Direct Python callers keep the synchronous default."""
     return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

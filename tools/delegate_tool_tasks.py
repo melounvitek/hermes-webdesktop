@@ -38,16 +38,13 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
     return parsed, None
 
 def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
-    """Batch-only quality gate beyond per-task goal presence; actionable error or None.
-
-    No minimum count: a one-entry array is the canonical single-task shape
-    (legacy top-level `goal` is wrapped into one). Duplicate goals are
-    deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble
-    sampling) are legitimate and blocking them broke real workflows. The
-    too-short check applies only to multi-task fan-outs (terse goals there are
-    usually unexpanded templates); a SINGLE task legitimately uses short goals
-    ("Fix the tests").
-    """
+    """Batch-only quality gate beyond per-task goal presence; actionable error or
+    None. No minimum count: a one-entry array is the canonical single-task shape
+    (legacy top-level `goal` is wrapped into one). Duplicate goals are deliberately
+    NOT rejected — identical-goal fan-outs (best-of-N / ensemble sampling) are
+    legitimate and blocking them broke real workflows. The too-short check applies
+    only to multi-task fan-outs (terse goals there are usually unexpanded
+    templates); a SINGLE task legitimately uses short goals ("Fix the tests")."""
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
         if _PLACEHOLDER_GOAL_RE.match(" ".join(goal.lower().split())):

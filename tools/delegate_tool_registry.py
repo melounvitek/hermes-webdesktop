@@ -78,12 +78,10 @@ def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
 
 def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
     """Atomically close steer acceptance and drain its final durable artifact.
-
-    ``steer_subagent`` holds the same registry lock through ``agent.steer``.
-    Therefore either acceptance wins and this drain sees its exact text, or
-    closure wins and the caller is rejected. Exact agent identity prevents a
-    finishing child with a recycled public id from closing its replacement.
-    """
+    ``steer_subagent`` holds the same registry lock through ``agent.steer``, so
+    either acceptance wins and this drain sees its exact text, or closure wins and
+    the caller is rejected. Exact agent identity prevents a finishing child with a
+    recycled public id from closing its replacement."""
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
         if record is None or record.get("agent") is not agent:
@@ -120,14 +118,14 @@ def steer_subagent(
 ) -> bool:
     """Queue steering text into a running subagent without stopping it.
 
-    Calls AIAgent.steer(), which appends the text to the child's last tool result
-    at its next iteration boundary — the current tool call is never cut. True iff
-    the text was QUEUED while the child still accepted work; False for
-    unknown/closed id, ownership mismatch, no live agent, or empty text.
-    ``owner_session_id=None`` keeps the in-process helper contract; gateway
-    callers must pass exact authority. Acceptance and completion are linearized
-    by the registry lock: if acceptance wins but no delivery boundary remains,
-    the text lands in the entry as ``missed_steer``.
+    AIAgent.steer() appends the text to the child's last tool result at its next
+    iteration boundary — the current tool call is never cut. True iff the text was
+    QUEUED while the child still accepted work; False for unknown/closed id,
+    ownership mismatch, no live agent, or empty text. ``owner_session_id=None``
+    keeps the in-process helper contract; gateway callers must pass exact
+    authority. Acceptance and completion are linearized by the registry lock: if
+    acceptance wins but no delivery boundary remains, the text lands in the entry
+    as ``missed_steer``.
     """
     if not text or not text.strip():
         return False
@@ -211,16 +209,15 @@ def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> st
 def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     """True when *parent_agent*'s conversation owns this live-child record.
 
-    Tier 1: object identity — the ``_delegate_parent_ref`` weakref chain reaches
-    *parent_agent* (fast path while the parent AIAgent survives the run).
-    Tier 2: durable lineage — the record's ``owner_agent_session_id`` matches the
-    caller's ``session_id``, resolving compression-rotation lineage on both
-    sides. Tier 2 exists because the identity chain is BRITTLE across parent
-    rebuilds: the CLI sets ``self.agent = None`` mid-session (route change,
-    credential refresh, /model, MoA one-shots) and builds a NEW AIAgent while
-    the child keeps a weakref to the old one. Delivery always routed by durable
-    session id; control must use the same spine or running children go
-    invisible/unsteerable.
+    Tier 1: identity — the ``_delegate_parent_ref`` weakref chain reaches
+    *parent_agent* (fast path while the parent AIAgent survives the run). Tier 2:
+    durable lineage — the record's ``owner_agent_session_id`` matches the caller's
+    ``session_id`` after resolving compression-rotation lineage on both sides.
+    Tier 2 exists because the identity chain is BRITTLE across parent rebuilds:
+    the CLI sets ``self.agent = None`` mid-session (route change, credential
+    refresh, /model, MoA one-shots) and builds a NEW AIAgent while the child keeps
+    a weakref to the old one. Delivery routes by durable session id; control must
+    use the same spine or running children go invisible/unsteerable.
     """
     if _is_descendant_of(record.get("agent"), parent_agent):
         return True
@@ -261,12 +258,9 @@ def _list_payload(parent_agent: Any) -> Dict[str, Any]:
     return payload
 
 def _handle_control_action(action: str, subagent_id: Optional[str], message: Optional[str], parent_agent: Any) -> str:
-    """Synchronous control plane for delegate_task: list/steer/stop.
-
-    Runs in-turn (never backgrounded) and only over subagents descended from
-    *parent_agent* — the same registry the TUI overlay drives, but scoped so
-    a conversation can only control its own spawn tree.
-    """
+    """Synchronous control plane for delegate_task: list/steer/stop. Runs in-turn
+    (never backgrounded) over the same registry the TUI overlay drives, scoped so a
+    conversation can only control its own spawn tree."""
     if action == "list":
         return json.dumps(_list_payload(parent_agent), ensure_ascii=False)
 

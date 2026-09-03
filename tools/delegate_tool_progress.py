@@ -72,14 +72,11 @@ def format_subagent_failure_line(
 
 
 class DelegateEvent(str, enum.Enum):
-    """Formal event types emitted during delegation progress.
-
-    The relay normalises incoming legacy strings (``tool.started``,
-    ``_thinking``, …) to these values via ``_LEGACY_EVENT_MAP``; external
-    consumers (gateway SSE, ACP adapter, CLI) still receive the legacy strings
-    during the deprecation window. TASK_SPAWNED / TASK_COMPLETED / TASK_FAILED
-    are reserved for future orchestrator lifecycle events, not emitted yet.
-    """
+    """Formal delegation progress event types. The relay normalises incoming legacy
+    strings (``tool.started``, ``_thinking``, …) to these via ``_LEGACY_EVENT_MAP``;
+    external consumers (gateway SSE, ACP adapter, CLI) still receive the legacy
+    strings during the deprecation window. TASK_SPAWNED / TASK_COMPLETED /
+    TASK_FAILED are reserved for future orchestrator lifecycle events, not emitted yet."""
 
     TASK_SPAWNED = "delegate.task_spawned"
     TASK_PROGRESS = "delegate.task_progress"
@@ -126,12 +123,10 @@ def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
     max_spawn_depth: int = 2, child_depth: int = 1,
 ) -> str:
-    """Build a focused system prompt for a child agent.
-
-    role='orchestrator' appends a delegation-capability block (modeled on
-    OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth
-    grounded in the passed config so the LLM can't confabulate nesting.
-    """
+    """Focused system prompt for a child agent. role='orchestrator' appends a
+    delegation-capability block (modeled on OpenClaw's buildSubagentSystemPrompt);
+    its depth note is literal truth grounded in the passed config so the LLM can't
+    confabulate nesting."""
     parts = ["You are a focused subagent working on a specific delegated task.", "", f"YOUR TASK:\n{goal}"]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
@@ -219,15 +214,12 @@ _BATCH_ORDINALS: Dict[str, int] = {}
 _BATCH_ORDINALS_LOCK = threading.Lock()
 
 def format_batch_tag(delegation_id: Optional[str]) -> str:
-    """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1``
-    (first batch seen in this process), the next distinct id → ``set 2``.
-
-    Several batches (a parent's fan-out plus a child's nested fan-out, or two
-    concurrent tools) print interleaved ``[n/N]`` lines to one console; without
-    a tag ``✓ [3/3]`` and ``✓ [3/9]`` are indistinguishable, and a raw hex
-    slice is unreadable. Empty string when no id is known so callers can
-    concatenate unconditionally.
-    """
+    """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1`` (first
+    batch seen in this process), the next distinct id → ``set 2``. Several batches
+    (a parent's fan-out plus a child's nested fan-out, or two concurrent tools)
+    print interleaved ``[n/N]`` lines to one console; without a tag ``✓ [3/3]`` and
+    ``✓ [3/9]`` are indistinguishable, and a raw hex slice is unreadable. Empty
+    string when no id is known so callers can concatenate unconditionally."""
     if not isinstance(delegation_id, str) or not delegation_id:
         return ""
     with _BATCH_ORDINALS_LOCK:
@@ -268,14 +260,12 @@ def _short(text: str, n: int) -> str:
 
 
 class _ChildProgressRelay:
-    """Callable relaying one child's events to the parent display.
-
-    CLI: prints tree-view lines above the parent's delegation spinner.
-    Gateway: batches tool names (``_BATCH_SIZE``) and relays to the parent's
-    progress callback, threading the identity kwargs (subagent_id, parent_id,
-    depth, model, toolsets) into every event so the TUI can rebuild the live
-    spawn tree and route per-branch controls back by ``subagent_id``.
-    """
+    """Callable relaying one child's events to the parent display. CLI: prints
+    tree-view lines above the parent's delegation spinner. Gateway: batches tool
+    names (``_BATCH_SIZE``) and relays to the parent's progress callback, threading
+    the identity kwargs (subagent_id, parent_id, depth, model, toolsets) into every
+    event so the TUI can rebuild the live spawn tree and route per-branch controls
+    back by ``subagent_id``."""
 
     _BATCH_SIZE = 5
 
