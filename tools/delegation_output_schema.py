@@ -3,8 +3,8 @@
 Optional per-task ``output_schema`` (a JSON Schema object): the child gets an
 OUTPUT CONTRACT block appended to its context, the parent validates the final
 answer with jsonschema, and on failure sends exactly ONE bounded retry turn
-carrying the validation errors verbatim (max 1 retry — more retries make
-frontier models drop fields that were right the first time; no schema re-paste).
+carrying the validation errors verbatim (more retries make frontier models
+drop fields that were right the first time; the schema is never re-pasted).
 """
 
 from __future__ import annotations
@@ -15,15 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_CONTRACT_HEADER = "OUTPUT CONTRACT (machine-validated)"
-
 
 def coerce_output_schema(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Validate a model/caller-supplied output_schema value.
-
-    Returns ``(schema, None)`` when usable, ``(None, error)`` when not;
-    ``None`` input passes through as ``(None, None)`` (no schema requested).
-    """
+    """``(schema, None)`` when usable, ``(None, error)`` when not; ``None`` input
+    passes through as ``(None, None)`` (no schema requested)."""
     if raw is None:
         return None, None
     if isinstance(raw, str):
@@ -39,7 +34,6 @@ def coerce_output_schema(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[s
         return None, f"output_schema must be a JSON Schema object, got {type(raw).__name__}."
     try:
         from jsonschema.validators import validator_for  # type: ignore[import-untyped]
-
         validator_for(raw).check_schema(raw)
     except ImportError:
         # Degrade to accepting the dict as-is so delegation still works without jsonschema.
@@ -56,20 +50,17 @@ def append_output_contract(context: Optional[str], schema: Dict[str, Any]) -> st
     except (TypeError, ValueError):
         schema_text = str(schema)
     block = (
-        f"{_CONTRACT_HEADER}:\n"
+        "OUTPUT CONTRACT (machine-validated):\n"
         "Your FINAL response must be a single JSON object that validates "
         "against this JSON Schema. No prose before or after the JSON; a "
         "```json code fence is acceptable but not required.\n"
-        f"{schema_text}"
-    )
+        f"{schema_text}")
     base = (context or "").rstrip()
     return f"{base}\n\n{block}" if base else block
 
 
-def extract_json_candidate(text: str) -> str:
-    """Strip markdown fences and prose around the outermost ``{...}``/``[...]``
-    span. Returns the (possibly unchanged) candidate; parse errors are
-    reported by validate_output."""
+def _extract_json_candidate(text: str) -> str:
+    """Strip markdown fences and prose around the outermost ``{...}``/``[...]``."""
     raw = (text or "").strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]
@@ -89,12 +80,8 @@ def extract_json_candidate(text: str) -> str:
 
 
 def validate_output(text: str, schema: Dict[str, Any]) -> Tuple[bool, List[str]]:
-    """Validate a child's final answer against ``schema``.
-
-    Returns ``(True, [])`` or ``(False, errors)`` with human-readable strings
-    suitable for the retry turn.
-    """
-    candidate = extract_json_candidate(text or "")
+    """``(True, [])`` or ``(False, errors)`` with strings suitable for the retry turn."""
+    candidate = _extract_json_candidate(text or "")
     if not candidate.strip():
         return False, ["Response was empty — expected a JSON object matching the schema."]
     try:
@@ -110,19 +97,16 @@ def validate_output(text: str, schema: Dict[str, Any]) -> Tuple[bool, List[str]]
     errors = sorted(validator.iter_errors(parsed), key=lambda e: list(e.absolute_path))
     rendered = [  # bound error volume for the retry prompt
         "$" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in err.absolute_path) + f": {err.message}"
-        for err in errors[:10]
-    ]
+        for err in errors[:10]]
     return not rendered, rendered
 
 
 def build_retry_message(errors: List[str]) -> str:
-    """Single bounded retry turn: errors verbatim, deliberately NOT re-pasting
-    the schema (the child already has it in its context)."""
+    """Single bounded retry turn: errors verbatim, schema deliberately NOT re-pasted."""
     error_block = "\n".join(f"- {e}" for e in errors)
     return (
         "Your previous final response was rejected by the output contract "
         "validator. Validation errors:\n"
         f"{error_block}\n\n"
         "Reply with ONLY the corrected JSON object matching the OUTPUT "
-        "CONTRACT schema from your task context. No prose, no explanations."
-    )
+        "CONTRACT schema from your task context. No prose, no explanations.")

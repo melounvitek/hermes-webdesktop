@@ -13,6 +13,10 @@ from hermes_constants import get_hermes_home
 logger = logging.getLogger(__name__)
 
 
+def _now() -> str:
+    return datetime.datetime.now().isoformat()
+
+
 class DebugSession:
     """Per-tool debug session that records tool calls to a JSON log file."""
 
@@ -22,12 +26,10 @@ class DebugSession:
         self.session_id = str(uuid.uuid4()) if self.enabled else ""
         self.log_dir = get_hermes_home() / "logs"
         self._calls: list[Dict[str, Any]] = []
-        self._start_time = datetime.datetime.now().isoformat() if self.enabled else ""
-
+        self._start_time = _now() if self.enabled else ""
         if self.enabled:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            logger.debug("%s debug mode enabled - Session ID: %s",
-                         tool_name, self.session_id)
+            logger.debug("%s debug mode enabled - Session ID: %s", tool_name, self.session_id)
 
     @property
     def active(self) -> bool:
@@ -35,13 +37,8 @@ class DebugSession:
 
     def log_call(self, call_name: str, call_data: Dict[str, Any]) -> None:
         """Append a tool-call entry to the in-memory log."""
-        if not self.enabled:
-            return
-        self._calls.append({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "tool_name": call_name,
-            **call_data,
-        })
+        if self.enabled:
+            self._calls.append({"timestamp": _now(), "tool_name": call_name, **call_data})
 
     def save(self) -> None:
         """Flush the in-memory log to a JSON file in the logs directory."""
@@ -52,7 +49,7 @@ class DebugSession:
             payload = {
                 "session_id": self.session_id,
                 "start_time": self._start_time,
-                "end_time": datetime.datetime.now().isoformat(),
+                "end_time": _now(),
                 "debug_enabled": True,
                 "total_calls": len(self._calls),
                 "tool_calls": self._calls,

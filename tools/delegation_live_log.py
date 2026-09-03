@@ -1,15 +1,11 @@
 """Live, tail-able transcripts for delegated subagents.
 
-Each ``delegate_task`` dispatch creates one append-only log per child under
-``<hermes_home>/cache/delegation/live/<delegation_id>/task-<n>.log``, pre-created
-with a header at dispatch (so ``tail -f`` attaches immediately), streaming one
-line per child event; paths are returned from ``delegate_task``.
-``cache/delegation`` is mounted read-only into remote terminal backends
-(``credential_files._CACHE_DIRS``), so every line written here must be
-credential-redacted. Constraints: never raise into the agent loop (first write
-failure disables the writer); append mode per write (no handle to lose on a
-child crash, close() is the flush); side-channel only (prompt cache unaffected);
-no config knobs (7-day retention constant, pruned on each dispatch).
+One append-only log per child under ``<hermes_home>/cache/delegation/live/
+<delegation_id>/task-<n>.log``, pre-created with a header at dispatch (so
+``tail -f`` attaches immediately); paths are returned from ``delegate_task``.
+``cache/delegation`` is mounted read-only into remote terminal backends, so
+every line written here must be credential-redacted. Never raises into the
+agent loop; append mode per write (close() is the flush); 7-day retention.
 """
 
 from __future__ import annotations
@@ -27,31 +23,23 @@ logger = logging.getLogger(__name__)
 
 LIVE_RETENTION_DAYS = 7
 
-# Per-line truncation budgets (chars). The .log is a compact operational view;
+# Per-line truncation budgets (chars): the .log is a compact operational view;
 # the child's SessionDB transcript and summary spill files carry full text.
 _ASSISTANT_MAX = 600
 _THINKING_MAX = 300
 _ARGS_MAX = 220
 _RESULT_MAX = 400
 _KICKOFF_MAX = 500
-
 # Stream deltas are buffered and flushed as one assistant line when another
 # event type arrives (or on completion); capped so a huge reply can't hold memory.
 _STREAM_BUFFER_FLUSH_CHARS = 4000
-
 _TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def live_transcript_root() -> Path:
     """Root directory for live transcripts (profile-safe, never ~/.hermes)."""
     from hermes_constants import get_hermes_dir
-
     return get_hermes_dir("cache/delegation", "delegation_cache") / "live"
-
-
-def new_live_delegation_id() -> str:
-    """Same shape as async_delegation's ids so the dir name matches the handle."""
-    return f"deleg_{uuid.uuid4().hex[:8]}"
 
 
 def _one_line(text: Any, limit: int) -> str:
@@ -63,14 +51,12 @@ def _one_line(text: Any, limit: int) -> str:
 
 
 def _redact(text: str) -> str:
-    """Mask credentials before anything reaches the sandbox-readable transcript.
-    ``force=True``: safety boundary, redact even when the global toggle is off;
-    if the redactor is unavailable, withhold the line rather than leak."""
+    """Mask credentials (``force=True``: safety boundary, even when the global
+    toggle is off); if the redactor is unavailable, withhold rather than leak."""
     if not text:
         return text
     try:
         from agent.redact import redact_sensitive_text
-
         return redact_sensitive_text(text, force=True) or ""
     except Exception:  # pragma: no cover - core module; never leak on failure
         return "[line withheld: redaction unavailable]"
@@ -81,9 +67,8 @@ def _dump_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 class LiveTranscriptWriter:
-    """Append-only human-readable event log for ONE subagent task. Best-effort:
-    the first write failure flips ``_ok`` off and later calls become
-    debug-logged no-ops. Never raises."""
+    """Append-only event log for ONE subagent task. Best-effort: the first write
+    failure flips ``_ok`` off and later calls become debug-logged no-ops."""
 
     def __init__(self, delegation_id: str, task_index: int, goal: str,
                  context: Optional[str] = None, root: Optional[Path] = None):
@@ -104,8 +89,7 @@ class LiveTranscriptWriter:
                 f"goal: {_redact(goal_line)}\n"  # header bypasses event(), so redact here too
                 f"started: {time.strftime(_TIME_FMT)}\n"
                 "(append-only; streams while the subagent runs — tail -f me)\n"
-                + "=" * 40 + "\n"
-            )
+                + "=" * 40 + "\n")
             self.path.write_text(header, encoding="utf-8")
             self.event("user", "kickoff: " + goal_line
                        + (f" | context: {_one_line(context, _KICKOFF_MAX)}" if context else ""))
@@ -115,9 +99,8 @@ class LiveTranscriptWriter:
             self.path = None
 
     def event(self, role: str, text: str) -> None:
-        """Append one ``HH:MM:SS role | text`` line, flushed per event. Single
-        choke point: every typed helper funnels through here so one redaction
-        covers args, results, thinking and streamed text."""
+        """Append one ``HH:MM:SS role | text`` line. Single choke point: every typed
+        helper funnels through here so one redaction covers everything."""
         if not self._ok or self.path is None:
             return
         line = f"{time.strftime('%H:%M:%S')} {role:<9}| {_redact(text)}\n"
@@ -171,10 +154,6 @@ class LiveTranscriptWriter:
             text, self._stream_buf, self._stream_len = "".join(self._stream_buf), [], 0
             self.assistant_text(text)
 
-    def _on_tool_completed(self, tool_name, preview, args, kwargs):
-        self.tool_result(str(tool_name or ""), result=kwargs.get("result"),
-                         duration=kwargs.get("duration"), is_error=bool(kwargs.get("is_error")))
-
     def _on_complete(self, tool_name, preview, args, kwargs):
         self.flush_stream()
         dur = kwargs.get("duration_seconds")
@@ -182,27 +161,26 @@ class LiveTranscriptWriter:
         self.marker(" ".join(filter(None, [
             f"status={kwargs.get('status', '?')}",
             f"duration={dur}s" if dur is not None else "",
-            f"summary: {_one_line(summary, _RESULT_MAX)}" if summary else "",
-        ])))
+            f"summary: {_one_line(summary, _RESULT_MAX)}" if summary else ""])))
 
     # Event demux (the tool_progress_callback surface): handler(self, tool_name, preview, args, kwargs).
     _OBSERVERS = {
         "tool.started": lambda s, n, p, a, kw: s.tool_start(str(n or ""), p if p else a),
-        "tool.completed": _on_tool_completed,
+        "tool.completed": lambda s, n, p, a, kw: s.tool_result(
+            str(n or ""), result=kw.get("result"), duration=kw.get("duration"),
+            is_error=bool(kw.get("is_error"))),
         # Fired as cb("_thinking", <text>) — text rides in the tool_name slot.
         "_thinking": lambda s, n, p, a, kw: s.thinking(str(n or p or "")),
         # cb("reasoning.available", "_thinking", <text>, None)
         "reasoning.available": lambda s, n, p, a, kw: s.thinking(str(p or "")),
         "subagent.text": lambda s, n, p, a, kw: s.add_stream_delta(str(p or "")),
         "subagent.start": lambda s, n, p, a, kw: s.event("start", _one_line(p, _KICKOFF_MAX)),
-        "subagent.complete": _on_complete,
-    }
+        "subagent.complete": _on_complete}
 
     def observe(self, event_type: Any, tool_name: Any = None,
                 preview: Any = None, args: Any = None, **kwargs: Any) -> None:
-        """Map a child tool_progress_callback event (shapes from agent/tool_executor.py,
-        agent/conversation_loop.py, delegate_tool._run_single_child) onto transcript
-        lines. Unknown events are ignored. Never raises (event() swallows I/O)."""
+        """Map a child tool_progress_callback event onto transcript lines.
+        Unknown events are ignored. Never raises (event() swallows I/O)."""
         handler = self._OBSERVERS.get(str(event_type or ""))
         if handler is not None:
             handler(self, tool_name, preview, args, kwargs)
@@ -214,14 +192,12 @@ class LiveTranscriptWriter:
             f"end status={entry.get('status', '?')}",
             f"exit_reason={exit_reason}" if exit_reason else "",
             "(iteration budget exhausted)" if exit_reason == "max_iterations" else "",
-            f"error: {_one_line(entry['error'], _RESULT_MAX)}" if entry.get("error") else "",
-        ])))
+            f"error: {_one_line(entry['error'], _RESULT_MAX)}" if entry.get("error") else ""])))
 
 
 def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
-    """Wrap a child's tool_progress_callback so events also land in the log.
-    ``inner_cb`` may be None; writer failures never propagate and the inner
-    callback is unchanged. Preserves the ``_flush`` attribute contract."""
+    """Wrap a child's tool_progress_callback (may be None) so events also land in
+    the log; writer failures never propagate. Preserves the ``_flush`` contract."""
 
     def _cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
         try:
@@ -244,22 +220,21 @@ def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
 
 
 def create_live_transcripts(
-    task_list: List[Dict[str, Any]],
-    context: Optional[str] = None,
-    delegation_id: Optional[str] = None,
-    model: Optional[str] = None,
+    task_list: List[Dict[str, Any]], context: Optional[str] = None,
+    delegation_id: Optional[str] = None, model: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> tuple[Optional[str], List[Optional[LiveTranscriptWriter]], List[str]]:
-    """Create one pre-headered writer per task + a manifest.json; also prunes
-    stale live dirs. Returns ``(delegation_id, writers, paths)``; on any
-    top-level failure ``(None, [None]*n, [])`` so delegation proceeds untouched."""
+    """One pre-headered writer per task + a manifest.json; prunes stale dirs.
+    Returns ``(delegation_id, writers, paths)``; on any top-level failure
+    ``(None, [None]*n, [])`` so delegation proceeds untouched."""
     n = len(task_list)
     try:
         prune_stale_live_dirs()
     except Exception:
         pass
     try:
-        deleg_id = delegation_id or new_live_delegation_id()
+        # Same id shape as async_delegation's so the dir name matches the handle.
+        deleg_id = delegation_id or f"deleg_{uuid.uuid4().hex[:8]}"
         made = [LiveTranscriptWriter(deleg_id, i, str(t.get("goal", "")), context=t.get("context") or context)
                 for i, t in enumerate(task_list)]
         writers: List[Optional[LiveTranscriptWriter]] = [w if w.path is not None else None for w in made]
@@ -293,8 +268,7 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 "goal": _redact(str(t.get("goal", ""))[:500]),
                 "log": paths[i] if i < len(paths) else None,
                 "status": "running",
-            } for i, t in enumerate(task_list)],
-        })
+            } for i, t in enumerate(task_list)]})
     except Exception as exc:
         logger.debug("Live transcript manifest write failed: %s", exc)
 
