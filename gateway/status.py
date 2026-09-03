@@ -643,21 +643,8 @@ def _pid_exists(pid: int) -> bool:
         pass  # Fall through to stdlib fallback.
     if _IS_WINDOWS:
         return _pid_exists_win32_ctypes(pid)
-    # POSIX: a zombie answers os.kill(pid, 0), so check its state first.
-    try:
-        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        if len(stat_fields) > 2 and stat_fields[2] == "Z":
-            return False
-    except FileNotFoundError:  # No /proc (macOS/BSD): use ps state.
-        with contextlib.suppress(Exception):
-            r = subprocess.run(
-                ["ps", "-o", "state=", "-p", str(pid)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-            )
-            if r.returncode == 0 and r.stdout.strip().startswith("Z"):
-                return False
-    except (IndexError, PermissionError, OSError):
-        pass
+    if _posix_is_zombie(pid):  # a zombie still answers os.kill(pid, 0)
+        return False
     try:
         os.kill(pid, 0)  # windows-footgun: ok — POSIX-only branch (the whole point of _pid_exists)
         return True
@@ -667,6 +654,23 @@ def _pid_exists(pid: int) -> bool:
         return True  # Exists but we can't signal it.
     except OSError:
         return False
+
+
+def _posix_is_zombie(pid: int) -> bool:
+    """Zombie via ``/proc/<pid>/stat`` field 3, or ``ps -o state=`` without /proc (macOS/BSD)."""
+    try:
+        stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        return len(stat_fields) > 2 and stat_fields[2] == "Z"
+    except FileNotFoundError:
+        with contextlib.suppress(Exception):
+            r = subprocess.run(
+                ["ps", "-o", "state=", "-p", str(pid)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            )
+            return r.returncode == 0 and r.stdout.strip().startswith("Z")
+    except (IndexError, PermissionError, OSError):
+        pass
+    return False
 
 
 def _pid_exists_win32_ctypes(pid: int) -> bool:
