@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from contextlib import suppress
 from typing import Dict, List
 
 from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
@@ -49,13 +50,11 @@ def _untracked_diff(cwd: str, files: List[str]) -> str:
     """Render untracked files as new-file diffs via ``git diff --no-index``."""
     chunks: List[str] = []
     for rel in files[:_MAX_UNTRACKED_FILES]:
-        try:
+        with suppress(subprocess.TimeoutExpired, OSError):
             # --no-index exits 1 when files differ — the success path, so the code is ignored.
             _, out = _run(["diff", "--no-index", "--", os.devnull, rel], cwd)
             if out.strip():
                 chunks.append(out.rstrip("\n"))
-        except (subprocess.TimeoutExpired, OSError):
-            continue
     if len(files) > _MAX_UNTRACKED_FILES:
         chunks.append(f"... ({len(files) - _MAX_UNTRACKED_FILES} more untracked files not shown)")
     return "\n".join(chunks)
@@ -88,8 +87,7 @@ def collect_working_diff(cwd: str, mode: str = "working", paths: List[str] | Non
     except OSError as e:
         return {"success": False, "error": f"git failed: {e}"}
 
-    stat = stat_out.strip()
-    diff = diff_out.strip()
+    stat, diff = stat_out.strip(), diff_out.strip()
     if untracked_diff:
         diff = f"{diff}\n{untracked_diff}".strip()
     result = {"success": True, "stat": stat, "diff": diff, "untracked": untracked}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -26,13 +27,23 @@ def _ensure_dep(feature: str) -> None:
 
 
 class _Engine:
-    """Minimal hotword-engine contract: feed int16 frames, get a bool."""
+    """Minimal hotword-engine contract: feed int16 frames, get a bool. Subclasses set ``feature``
+    (lazy_deps name, ensured before ``_build``) and their own ``cfg`` sub-section ``section``."""
 
+    feature: str = ""
+    section: str = ""
     frame_length: int = 1280  # 80 ms at 16 kHz
 
     #: (matched phrase, profile name) of the most recent fire. Multi-phrase engines
     #: (sherpa) set this for profile routing; single-phrase engines leave it None.
     last_match: Optional[tuple[str, str]] = None
+
+    def __init__(self, cfg: Dict[str, Any]):
+        _ensure_dep(self.feature)
+        self._build(cfg, _sub(cfg, self.section), _ww())
+
+    def _build(self, cfg: Dict[str, Any], sub: Dict[str, Any], ww) -> None:
+        raise NotImplementedError
 
     def process(self, frame) -> bool:  # frame: 1-D int16 ndarray
         raise NotImplementedError
@@ -41,7 +52,7 @@ class _Engine:
         """Clear any internal audio/feature buffer (called on every (re)start)."""
 
     def close(self) -> None:
-        pass
+        """Release engine resources (called once on stop)."""
 
 
 def _looks_like_path(value: str) -> bool:
@@ -58,14 +69,13 @@ class _OpenWakeWordEngine(_Engine):
     ``sensitivity`` IS the raw 0..1 threshold (higher = stricter). A real utterance holds the score
     high across frames while a stray phoneme spikes one, so ``confirmation_frames`` hits are required."""
 
+    feature, section = "wake.openwakeword", "openwakeword"
     frame_length = 1280  # openWakeWord recommends 80 ms frames.
 
-    def __init__(self, cfg: Dict[str, Any]):
-        _ensure_dep("wake.openwakeword")
+    def _build(self, cfg, sub, ww) -> None:
         import openwakeword
         from openwakeword.model import Model
-        ww = _ww()
-        model_ref = str(_sub(cfg, "openwakeword").get("model") or ww._BUNDLED_MODEL_NAME).strip()
+        model_ref = str(sub.get("model") or ww._BUNDLED_MODEL_NAME).strip()
         framework = self._usable_framework(ww.resolve_inference_framework(cfg))
         self._threshold = ww._sensitivity(cfg)
         self._confirm_needed = ww._confirmation_frames(cfg)
@@ -103,11 +113,8 @@ class _OpenWakeWordEngine(_Engine):
         return "onnx"
 
     def process(self, frame) -> bool:
-        scores = self._model.predict(frame)
-        if not any(score >= self._threshold for score in scores.values()):
-            self._confirm_streak = 0
-            return False
-        self._confirm_streak += 1
+        hit = any(score >= self._threshold for score in self._model.predict(frame).values())
+        self._confirm_streak = self._confirm_streak + 1 if hit else 0
         if self._confirm_streak < self._confirm_needed:
             return False
         self._confirm_streak = 0
@@ -117,10 +124,8 @@ class _OpenWakeWordEngine(_Engine):
         # Clears openWakeWord's rolling feature buffer so stale audio captured before a
         # pause can't re-fire the moment we resume.
         self._confirm_streak = 0
-        try:
+        with suppress(Exception):
             self._model.reset()
-        except Exception:
-            pass
 
     def close(self) -> None:
         self.reset()
@@ -164,15 +169,14 @@ class _SherpaKwsEngine(_Engine):
     """sherpa-onnx open-vocabulary keyword spotting — any typed phrase, zero training. ``wake_word.phrase``
     is BPE-tokenized at runtime against the model's vocabulary: DETECTION config, not a cosmetic label."""
 
+    feature, section = "wake.sherpa", "sherpa"
     frame_length = 1280  # streaming zipformer accepts any chunk; match capture path.
 
-    def __init__(self, cfg: Dict[str, Any]):
-        _ensure_dep("wake.sherpa")
+    def _build(self, cfg, sub, ww) -> None:
         import sherpa_onnx
         import tempfile
         from sherpa_onnx import text2token
-        ww = _ww()
-        model_dir = str(_sub(cfg, "sherpa").get("model_dir") or "").strip()
+        model_dir = str(sub.get("model_dir") or "").strip()
         d = Path(model_dir) if model_dir else _ensure_sherpa_model()
         if not (d / "tokens.txt").exists():
             raise RuntimeError(f"sherpa KWS model not found at {d}")
@@ -185,8 +189,8 @@ class _SherpaKwsEngine(_Engine):
             for prof, p in ww.enrolled_profile_phrases().items():
                 phrase_map.setdefault(p.strip(), prof)
         phrases = list(phrase_map)
-        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"),
-                            tokens_type="bpe", bpe_model=str(d / "bpe.model"))
+        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"), tokens_type="bpe",
+                            bpe_model=str(d / "bpe.model"))
         # sherpa keyword entries reject spaces in the @display-name; underscore them and
         # map display → profile for match routing.
         self._display_to_profile: Dict[str, str] = {}
@@ -198,23 +202,22 @@ class _SherpaKwsEngine(_Engine):
             kw.write(" ".join(toks) + f" @{display}\n")
         kw.close()
         self._keywords_file = kw.name
-        self.last_match: Optional[tuple[str, str]] = None
 
         # Shared 0..1 sensitivity → sherpa keywords_threshold. 0.5 lands on sherpa's
         # recommended 0.25; a stricter 0.35 missed ~12% of true positives in live TTS
         # matrix tests while 0.25 held zero false fires.
         threshold = 0.05 + 0.4 * ww._sensitivity(cfg)
 
-        def _model_file(pattern: str) -> str:
-            hits = sorted(d.glob(pattern))
+        def _model_file(part: str) -> str:
+            hits = sorted(d.glob(f"{part}-*[!8].onnx"))
             if not hits:
-                raise RuntimeError(f"sherpa KWS model file missing: {d}/{pattern}")
+                raise RuntimeError(f"sherpa KWS model file missing: {d}/{part}-*[!8].onnx")
             return str(hits[0])
 
         self._spotter = sherpa_onnx.KeywordSpotter(
-            tokens=str(d / "tokens.txt"), encoder=_model_file("encoder-*[!8].onnx"),
-            decoder=_model_file("decoder-*[!8].onnx"), joiner=_model_file("joiner-*[!8].onnx"),
-            keywords_file=self._keywords_file, keywords_threshold=threshold, num_threads=1,
+            tokens=str(d / "tokens.txt"), encoder=_model_file("encoder"), decoder=_model_file("decoder"),
+            joiner=_model_file("joiner"), keywords_file=self._keywords_file, keywords_threshold=threshold,
+            num_threads=1,
         )
         self._stream = self._spotter.create_stream()
 
@@ -226,8 +229,7 @@ class _SherpaKwsEngine(_Engine):
             self._spotter.decode_stream(self._stream)
             result = self._spotter.get_result(self._stream)
             if result:
-                fired = True
-                display = str(result)
+                fired, display = True, str(result)
                 self.last_match = (display.replace("_", " ").lower(),
                                    self._display_to_profile.get(display, ""))
                 self._spotter.reset_stream(self._stream)  # one utterance must not fire repeatedly
@@ -235,32 +237,29 @@ class _SherpaKwsEngine(_Engine):
 
     def reset(self) -> None:
         # Fresh stream drops buffered audio/decoder state (pause → resume must not re-fire).
-        try:
+        with suppress(Exception):
             self._stream = self._spotter.create_stream()
-        except Exception:
-            pass
 
     def close(self) -> None:
-        try:
+        with suppress(OSError):
             os.unlink(self._keywords_file)
-        except OSError:
-            pass
 
 
 class _PorcupineEngine(_Engine):
     """Picovoice Porcupine — premium, on-device, needs an access key."""
 
-    def __init__(self, cfg: Dict[str, Any]):
-        _ensure_dep("wake.porcupine")
+    feature, section = "wake.porcupine", "porcupine"
+
+    def _build(self, cfg, sub, ww) -> None:
         import pvporcupine
         access_key = (os.getenv("PORCUPINE_ACCESS_KEY") or "").strip()
         if not access_key:
             raise RuntimeError("Porcupine wake word requires PORCUPINE_ACCESS_KEY "
                                "(get a free key at https://console.picovoice.ai).")
-        keyword = str(_sub(cfg, "porcupine").get("keyword") or "jarvis").strip()
+        keyword = str(sub.get("keyword") or "jarvis").strip()
         # Porcupine's `sensitivities` runs the OPPOSITE way to our shared knob (higher =
         # looser); invert so "higher = stricter" holds for every engine.
-        kwargs: Dict[str, Any] = {"access_key": access_key, "sensitivities": [1.0 - _ww()._sensitivity(cfg)]}
+        kwargs: Dict[str, Any] = {"access_key": access_key, "sensitivities": [1.0 - ww._sensitivity(cfg)]}
         kwargs["keyword_paths" if _looks_like_path(keyword) else "keywords"] = [keyword]
         self._porcupine = pvporcupine.create(**kwargs)
         self.frame_length = self._porcupine.frame_length
@@ -269,7 +268,5 @@ class _PorcupineEngine(_Engine):
         return self._porcupine.process(frame) >= 0  # pvporcupine wants a plain sequence of int16
 
     def close(self) -> None:
-        try:
+        with suppress(Exception):
             self._porcupine.delete()
-        except Exception:
-            pass

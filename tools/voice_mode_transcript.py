@@ -3,18 +3,18 @@ stop phrases, and the TTS self-echo guard. No audio dependencies."""
 
 import difflib
 import re
+from contextlib import suppress
 from typing import Optional
 
 
 def _voice_config() -> dict:
     """``voice`` section of config.yaml, or ``{}`` when missing, malformed, or the
     config system can't be imported (broken config mid-install)."""
-    try:
+    with suppress(Exception):
         from hermes_cli.config import load_config
         voice_cfg = load_config().get("voice", {})
         return voice_cfg if isinstance(voice_cfg, dict) else {}
-    except Exception:
-        return {}
+    return {}
 
 
 # Whisper commonly hallucinates these phrases on silent/near-silent audio
@@ -36,9 +36,8 @@ _HALLUCINATION_REPEAT_RE = re.compile(r'^(?:thank you|thanks|bye|you|ok|okay|the
 def is_whisper_hallucination(transcript: str) -> bool:
     """Check if a transcript is a known Whisper hallucination on silence."""
     cleaned = transcript.strip().lower()
-    if not cleaned:
-        return True
-    return cleaned.rstrip('.!') in WHISPER_HALLUCINATIONS or bool(_HALLUCINATION_REPEAT_RE.match(cleaned))
+    return (not cleaned or cleaned.rstrip('.!') in WHISPER_HALLUCINATIONS
+            or bool(_HALLUCINATION_REPEAT_RE.match(cleaned)))
 
 
 DEFAULT_VOICE_STOP_PHRASES = ("stop",)
@@ -48,15 +47,12 @@ def _load_voice_stop_phrases() -> tuple:
     """Configured ``voice.stop_phrases`` (default ``("stop",)``); an empty tuple disables
     the feature. Malformed config (dict, list of non-strings) falls back to the default
     rather than crashing the voice loop."""
-    try:
+    with suppress(Exception):
         raw = _voice_config().get("stop_phrases", DEFAULT_VOICE_STOP_PHRASES)
         if isinstance(raw, str):
             raw = [raw]
         if isinstance(raw, (list, tuple)):
-            return tuple(str(p).strip().lower() for p in raw
-                         if isinstance(p, (str, int, float)) and str(p).strip())
-    except Exception:
-        pass
+            return tuple(str(p).strip().lower() for p in raw if isinstance(p, (str, int, float)) and str(p).strip())
     return DEFAULT_VOICE_STOP_PHRASES
 
 
@@ -72,9 +68,7 @@ def is_voice_stop_phrase(transcript: str, stop_phrases: Optional[tuple] = None) 
     utterance — lowercased, surrounding punctuation stripped — must equal a phrase, so "stop doing
     that and try again" still reaches the agent. ``voice.stop_phrases: []`` disables."""
     cleaned = transcript.strip().lower().strip(".,!?;: \t\n\"'") if transcript else ""
-    if not cleaned:
-        return False
-    return cleaned in (_configured_stop_phrases() if stop_phrases is None else stop_phrases)
+    return bool(cleaned) and cleaned in (_configured_stop_phrases() if stop_phrases is None else stop_phrases)
 
 
 # Similarity ratio (difflib.SequenceMatcher) above which a playback-phase barge transcript
@@ -94,21 +88,13 @@ def _normalize_for_echo_compare(text: str) -> str:
 
 def is_tts_echo(transcript: str, spoken_text: str,
                 threshold: float = DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD) -> bool:
-    """True when *transcript* looks like a self-capture of *spoken_text*.
-
-    Character-level similarity (language-agnostic, no word tokenization): a genuine
-    user interjection is very unlikely to closely match Hermes' own words, so a high
-    ratio signals speaker-bleed (fail-closed guard for the playback-phase listener).
-    The playback-phase capture only spans pre-roll plus time-to-silence, so for long
-    replies the transcript is a short FRAGMENT and the whole-string ratio dilutes toward
-    0; when it misses, a transcript-sized window slides across `spoken_text`. Transcripts
-    shorter than `MIN_FRAGMENT_LENGTH_FOR_ECHO` skip the fallback (a short interjection
-    trivially matches a short window).
-    """
-    if not transcript or not spoken_text:
-        return False
-    a = _normalize_for_echo_compare(transcript)
-    b = _normalize_for_echo_compare(spoken_text)
+    """True when *transcript* looks like a self-capture of *spoken_text*. Character-level similarity
+    (language-agnostic): a genuine interjection rarely matches Hermes' own words, so a high ratio signals
+    speaker-bleed (fail-closed guard for the playback-phase listener). Playback capture spans only pre-roll
+    plus time-to-silence, so for long replies the transcript is a FRAGMENT and the whole-string ratio dilutes
+    toward 0; when it misses, a transcript-sized window slides across `spoken_text`. Transcripts shorter than
+    `MIN_FRAGMENT_LENGTH_FOR_ECHO` skip the fallback (a short interjection trivially matches a short window)."""
+    a, b = _normalize_for_echo_compare(transcript or ""), _normalize_for_echo_compare(spoken_text or "")
     if not a or not b:
         return False
 

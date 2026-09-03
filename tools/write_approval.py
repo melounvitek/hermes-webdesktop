@@ -18,6 +18,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,10 +46,9 @@ def write_approval_enabled(subsystem: str) -> bool:
         return False
     try:
         from hermes_cli.config import load_config, cfg_get
-        raw = cfg_get(load_config(), subsystem, CONFIG_KEY, default=False)
+        return _normalize_enabled(cfg_get(load_config(), subsystem, CONFIG_KEY, default=False))
     except Exception:
         return False
-    return _normalize_enabled(raw)
 
 
 def _normalize_enabled(value: Any) -> bool:
@@ -61,16 +61,17 @@ def _normalize_enabled(value: Any) -> bool:
 
 # --- Pending store (file-backed) ---
 
-def _pending_dir(subsystem: str) -> Path:
-    return get_hermes_home() / "pending" / subsystem
-
-
 def _pending_path(subsystem: str, pending_id: str) -> Path:
-    return _pending_dir(subsystem) / f"{pending_id}.json"
+    return get_hermes_home() / "pending" / subsystem / f"{pending_id}.json"
 
 
 def _read_record(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _pending_files(subsystem: str) -> list:
+    d = _pending_path(subsystem, "").parent
+    return list(d.glob("*.json")) if d.exists() else []
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin: str) -> Dict[str, Any]:
@@ -97,11 +98,8 @@ def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin
 
 def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     """Return all pending records for ``subsystem``, oldest first."""
-    d = _pending_dir(subsystem)
-    if not d.exists():
-        return []
     records: List[Dict[str, Any]] = []
-    for p in d.glob("*.json"):
+    for p in _pending_files(subsystem):
         try:
             records.append(_read_record(p))
         except Exception:
@@ -112,17 +110,16 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
-    path = _pending_path(subsystem, pending_id)
-    try:
+    with suppress(Exception):
+        path = _pending_path(subsystem, pending_id)
         return _read_record(path) if path.exists() else None
-    except Exception:
-        return None
+    return None
 
 
 def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
-    path = _pending_path(subsystem, pending_id)
     try:
+        path = _pending_path(subsystem, pending_id)
         if path.exists():
             path.unlink()
             return True
@@ -133,11 +130,9 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
-    d = _pending_dir(subsystem)
-    try:
-        return sum(1 for _ in d.glob("*.json")) if d.exists() else 0
-    except Exception:
-        return 0
+    with suppress(Exception):
+        return len(_pending_files(subsystem))
+    return 0
 
 
 # --- Write origin ---
@@ -145,11 +140,10 @@ def pending_count(subsystem: str) -> int:
 def current_origin() -> str:
     """``foreground`` or ``background_review`` — reuses the skill-provenance ContextVar
     the background review fork sets; foreground turns leave it at the default."""
-    try:
+    with suppress(Exception):
         from tools.skill_provenance import get_current_write_origin
         return get_current_write_origin()
-    except Exception:
-        return "foreground"
+    return "foreground"
 
 
 # --- Gate decision ---
@@ -183,11 +177,11 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
     if subsystem == SKILLS or current_origin() == "background_review":
         return _staged(subsystem)
     granted = _prompt_inline_memory_approval(inline_summary, inline_detail)
-    if granted is True:
+    if granted is None:
+        return _staged(MEMORY)
+    if granted:
         return GateDecision(allow=True)
-    if granted is False:
-        return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
-    return _staged(MEMORY)
+    return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
 
 
 def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
@@ -209,18 +203,14 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     except Exception as e:
         logger.error("Inline memory approval prompt failed: %s", e)
         return None
-    if choice in {"once", "session"}:
-        return True
-    return False if choice == "deny" else None  # unknown outcome → stage rather than drop
+    # unknown outcome → stage rather than drop
+    return {"once": True, "session": True, "deny": False}.get(choice)
 
 
 # --- Skill-specific helpers (gist + diff for the review affordances) ---
 
-_GIST_TEMPLATES = {
-    "write_file": "write {file_path} in '{name}'",
-    "remove_file": "remove {file_path} from '{name}'",
-    "delete": "delete skill '{name}'",
-}
+_GIST_TEMPLATES = {"write_file": "write {file_path} in '{name}'", "remove_file": "remove {file_path} from '{name}'",
+                   "delete": "delete skill '{name}'"}
 
 
 def skill_gist(action: str, name: str, *, content: str = "", file_path: str = "",
@@ -230,14 +220,12 @@ def skill_gist(action: str, name: str, *, content: str = "", file_path: str = ""
     if action in {"create", "edit"} and content:
         desc = _frontmatter_description(content)
         size = f"{len(content) // 1024 + 1} KB" if len(content) >= 1024 else f"{len(content)} chars"
-        verb = "create" if action == "create" else "rewrite"
-        return f"{verb} '{name}' — {desc} ({size})" if desc else f"{verb} '{name}' ({size})"
+        return f"{'create' if action == 'create' else 'rewrite'} '{name}'{f' — {desc}' if desc else ''} ({size})"
     if action == "patch":
         removed = old_string.count("\n") + 1 if old_string else 0
         added = new_string.count("\n") + 1 if new_string else 0
         return f"patch '{name}' {file_path or 'SKILL.md'} (+{added}/-{removed} lines)"
-    template = _GIST_TEMPLATES.get(action, "{action} '{name}'")
-    return template.format(action=action, name=name, file_path=file_path)
+    return _GIST_TEMPLATES.get(action, "{action} '{name}'").format(action=action, name=name, file_path=file_path)
 
 
 def _frontmatter_description(content: str) -> str:
@@ -248,12 +236,11 @@ def _frontmatter_description(content: str) -> str:
 
 def _find_skill_path(name: str) -> Optional[Path]:
     """Directory of an installed skill, or None if unknown / lookup unavailable."""
-    try:
+    with suppress(Exception):
         from tools.skill_manager_tool import _find_skill
         found = _find_skill(name)
         return found["path"] if found else None
-    except Exception:
-        return None
+    return None
 
 
 def skill_pending_diff(record: Dict[str, Any]) -> str:
@@ -264,33 +251,25 @@ def skill_pending_diff(record: Dict[str, Any]) -> str:
     name = payload.get("name", "")
     if action == "create":
         return payload.get("content") or ""
-    if action == "remove_file":
-        return f"remove file: {payload.get('file_path')} from skill '{name}'"
-    if action == "delete":
-        return f"delete skill '{name}'"
     if action not in {"edit", "patch", "write_file"}:
-        return f"({action} on '{name}')"
+        return {"remove_file": f"remove file: {payload.get('file_path')} from skill '{name}'",
+                "delete": f"delete skill '{name}'"}.get(action, f"({action} on '{name}')")
 
     # patch/write_file target a file inside the skill; edit always targets SKILL.md.
-    target_label = "SKILL.md"
-    current = ""
+    target_label, current = "SKILL.md", ""
     skill_dir = _find_skill_path(name)
     if skill_dir:
         if action != "edit":
             target_label = payload.get("file_path") or "SKILL.md"
-        try:
+        with suppress(Exception):
             p = skill_dir / target_label
             current = p.read_text(encoding="utf-8") if p.exists() else ""
-        except Exception:
-            current = ""
 
-    if action == "edit":
-        new = payload.get("content") or ""
-    elif action == "patch":
+    if action == "patch":
         old_s, new_s = payload.get("old_string") or "", payload.get("new_string") or ""
         new = current.replace(old_s, new_s) if current else f"(patch {old_s!r} → {new_s!r})"
     else:
-        new = payload.get("file_content") or ""
+        new = payload.get("content" if action == "edit" else "file_content") or ""
     diff = difflib.unified_diff(current.splitlines(keepends=True), new.splitlines(keepends=True),
                                 fromfile=f"a/{target_label}", tofile=f"b/{target_label}")
     return "".join(diff) or "(no textual change)"
