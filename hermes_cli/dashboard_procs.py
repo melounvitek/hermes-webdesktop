@@ -626,21 +626,14 @@ def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
             # Mirror validateOwnershipId(): exactly 32 lowercase hex chars.
             if not entry.is_dir() or not _is_hex(ownership_id, 32) or not lock_path.is_file():
                 continue
-            with open(lock_path, "rb") as handle:
-                data = handle.read()
-        except OSError:
-            continue
-        if len(data) > 65536:
-            continue
-        try:
+            data = lock_path.read_bytes()
+            if len(data) > 65536:
+                continue
             parsed = json.loads(data)
-        except (UnicodeDecodeError, ValueError):
+        except (OSError, UnicodeDecodeError, ValueError):
             continue
         if _valid_lockfile_payload(parsed, ownership_id):
-            try:
-                owned.add(int(parsed["pid"]))
-            except (TypeError, ValueError):
-                continue
+            owned.add(parsed["pid"])  # validated as int above
     return owned
 
 

@@ -86,21 +86,19 @@ def _register_self_hosted_client(
             payload = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         # Structured JSON errors: {error, error_description}.
-        detail = ""
         try:
             err_body = json.loads(exc.read().decode())
             detail = err_body.get("error_description") or err_body.get("error") or ""
         except Exception:
-            pass
+            detail = ""
         if exc.code == 401:
-            raise RuntimeError("Nous Portal rejected the access token (401). Try `hermes auth add "
-                               "nous` to re-authenticate.") from exc
-        if exc.code == 403:
-            raise RuntimeError(
-                detail or "Your account is not permitted to register a self-hosted dashboard."
-            ) from exc
-        suffix = f": {detail}" if detail else ""
-        raise RuntimeError(f"Portal returned HTTP {exc.code}{suffix}") from exc
+            message = ("Nous Portal rejected the access token (401). "
+                       "Try `hermes auth add nous` to re-authenticate.")
+        elif exc.code == 403:
+            message = detail or "Your account is not permitted to register a self-hosted dashboard."
+        else:
+            message = f"Portal returned HTTP {exc.code}" + (f": {detail}" if detail else "")
+        raise RuntimeError(message) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not reach Nous Portal at {portal_base_url}: {exc.reason}") from exc
 

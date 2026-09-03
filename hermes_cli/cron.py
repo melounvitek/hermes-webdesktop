@@ -116,14 +116,8 @@ def _format_lateness(seconds: float) -> str:
     minutes, _ = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes and not days:
-        parts.append(f"{minutes}m")
-    return " ".join(parts) or "0m"
+    parts = [(days, "d"), (hours, "h"), (minutes if not days else 0, "m")]
+    return " ".join(f"{n}{unit}" for n, unit in parts if n) or "0m"
 
 
 def _dispatch_display(dispatch: dict) -> Optional[str]:
@@ -545,12 +539,10 @@ def _next_run_overdue_issue(next_run: str) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     overdue_s = (datetime.now(timezone.utc) - dt).total_seconds()
-    if overdue_s > _OVERDUE_GRACE_SECONDS:
-        hours = overdue_s / 3600
-        if hours >= 1:
-            return f"next_run_at is {hours:.1f}h overdue — job is not firing (is the scheduler running?)"
-        return f"next_run_at is {overdue_s / 60:.0f}m overdue — job is not firing (is the scheduler running?)"
-    return None
+    if overdue_s <= _OVERDUE_GRACE_SECONDS:
+        return None
+    amount = f"{overdue_s / 3600:.1f}h" if overdue_s >= 3600 else f"{overdue_s / 60:.0f}m"
+    return f"next_run_at is {amount} overdue — job is not firing (is the scheduler running?)"
 
 
 def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
@@ -600,10 +592,8 @@ def cron_doctor() -> int:
 
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
-        if jobs:
-            print(color(f"  Checked {len(jobs)} active job(s).", Colors.DIM))
-        else:
-            print(color("  No active jobs configured.", Colors.DIM))
+        print(color(f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured.",
+                    Colors.DIM))
         return 0
 
     issue_count = sum(len(issues) for _, issues in findings)
@@ -705,7 +695,6 @@ def cron_edit(args):
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
-
     updated = result["job"]
     print(color(f"Updated job: {updated['job_id']}", Colors.GREEN))
     print(f"  Name: {updated['name']}\n  Schedule: {updated['schedule']}")
@@ -807,34 +796,32 @@ def cron_notepad(args) -> int:
         return 1
 
     try:
-        if action in ("set", "get", "delete"):
-            usage_args = "set <key> <value>" if action == "set" else f"{action} <key>"
-            if key is None or (action == "set" and value is None):
-                print(color(f"Usage: hermes cron notepad <job_id> {usage_args}", Colors.RED))
-                return 1
-            if action == "set":
-                notepad.set_note(job_id, key, value)
-                print(color(f"Set notepad key '{key}' for job {job_id}.", Colors.GREEN))
-                return 0
-            if action == "get":
-                stored = notepad.get_note(job_id, key)
-                if stored is not None:
-                    print(stored)
-                    return 0
-            elif notepad.delete_note(job_id, key):
-                print(color(f"Deleted notepad key '{key}' for job {job_id}.", Colors.GREEN))
-                return 0
-            print(color(f"No notepad key '{key}' for job {job_id}.", Colors.YELLOW))
-            return 1
-
-        notes = notepad.list_notes(job_id)
-        if not notes:
-            print(color(f"Notepad for job {job_id} is empty.", Colors.DIM))
+        if action not in ("set", "get", "delete"):  # list (default)
+            notes = notepad.list_notes(job_id)
+            if not notes:
+                print(color(f"Notepad for job {job_id} is empty.", Colors.DIM))
+            for note in notes:
+                print(f"  {color(note['key'], Colors.YELLOW)} = {note['value']}\n"
+                      f"    {color('updated: ' + str(note['updated_at']), Colors.DIM)}")
             return 0
-        for note in notes:
-            print(f"  {color(note['key'], Colors.YELLOW)} = {note['value']}\n"
-                  f"    {color('updated: ' + str(note['updated_at']), Colors.DIM)}")
-        return 0
+        usage_args = "set <key> <value>" if action == "set" else f"{action} <key>"
+        if key is None or (action == "set" and value is None):
+            print(color(f"Usage: hermes cron notepad <job_id> {usage_args}", Colors.RED))
+            return 1
+        if action == "set":
+            notepad.set_note(job_id, key, value)
+            print(color(f"Set notepad key '{key}' for job {job_id}.", Colors.GREEN))
+            return 0
+        if action == "get":
+            stored = notepad.get_note(job_id, key)
+            if stored is not None:
+                print(stored)
+                return 0
+        elif notepad.delete_note(job_id, key):
+            print(color(f"Deleted notepad key '{key}' for job {job_id}.", Colors.GREEN))
+            return 0
+        print(color(f"No notepad key '{key}' for job {job_id}.", Colors.YELLOW))
+        return 1
     except ValueError as exc:
         print(color(f"Notepad error: {exc}", Colors.RED))
         return 1
