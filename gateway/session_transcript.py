@@ -4,6 +4,7 @@ bound onto ``SessionStore`` via the MRO."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from agent.turn_context import extract_api_content_sidecar
@@ -42,6 +43,13 @@ def _spool_dropped(session_id: str, message: Dict[str, Any]):
         return None
 
 
+# Message keys persisted only for assistant rows (None otherwise).
+_ASSISTANT_ONLY_KEYS = (
+    "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items",
+    "codex_message_items",
+)
+
+
 class SessionTranscriptMixin:
     """SessionStore transcript I/O: SQLite append with a per-session retry queue,
     compression-reroute following, FTS corruption recovery, rewrite/rewind/load."""
@@ -51,9 +59,7 @@ class SessionTranscriptMixin:
     def _compression_tip_for_session_id(self, session_id: Optional[str]) -> Optional[str]:
         """Latest compression continuation for *session_id* (heals a mapping left pointing at a
         compressed parent by a restart or failed send)."""
-        if not session_id:
-            return session_id
-        db = self._db_for_session_id(session_id)
+        db = self._db_for_session_id(session_id) if session_id else None
         if db is None:
             return session_id
         try:
@@ -66,12 +72,9 @@ class SessionTranscriptMixin:
         self, entry: "SessionEntry", original_session_id: Optional[str],
         canonical_session_id: Optional[str]) -> bool:
         """Rewrite *entry* to the compression continuation if stale. Lock held."""
-        if (
-            not original_session_id
-            or not canonical_session_id
-            or entry.session_id != original_session_id
-            or canonical_session_id == original_session_id
-        ):
+        if not original_session_id or not canonical_session_id:
+            return False
+        if entry.session_id != original_session_id or canonical_session_id == original_session_id:
             return False
         logger.info(
             "SessionStore healed compressed session mapping: %s -> %s", entry.session_id,
@@ -94,10 +97,8 @@ class SessionTranscriptMixin:
                 return None
             if entry.session_id == target_session_id:
                 return entry
-            if entry.session_id != expected_session_id:
-                return None
             if not self._heal_compression_tip_locked(entry, expected_session_id, target_session_id):
-                return None
+                return None  # route moved (session_id != expected) or nothing to heal
             self._save()  # bookkeeping, not user activity: leave ``updated_at`` alone
             return entry
 
@@ -154,10 +155,7 @@ class SessionTranscriptMixin:
             self._dirty_transcripts.pop(queue_session_id, None)
             self._transcript_append_failures.pop(session_id, None)
         for dropped in remaining:
-            try:
-                from gateway.shutdown_flush import spool_dropped_transcript_message
-                spool_dropped_transcript_message(session_id, dropped)
-            except Exception:
+            if _spool_dropped(session_id, dropped) is None:
                 logger.warning(
                     "pending fallback failed for replaced state.db transcript on %s", session_id,
                     exc_info=True)
@@ -175,9 +173,7 @@ class SessionTranscriptMixin:
         child's id is unpublished until its write succeeds, so a by-id lookup would hit the ambient
         store."""
         owner_db = self._db_for_session_id(session_id)
-        if owner_db is None:
-            return ""
-        tip = owner_db.get_compression_tip(session_id)
+        tip = owner_db.get_compression_tip(session_id) if owner_db is not None else None
         if tip and tip != session_id:
             tip_row = owner_db.get_session(tip)
             if tip_row is not None and tip_row.get("ended_at") is None:
@@ -214,9 +210,7 @@ class SessionTranscriptMixin:
                 if entry.session_id == session_id:
                     entry.session_id = child_id
             self._save()
-        _hints = getattr(self, "_session_owner_hints", None)
-        if _hints:
-            _hints.pop(child_id, None)
+        (getattr(self, "_session_owner_hints", None) or {}).pop(child_id, None)
 
     def _append_to_transcript_serialized(self, session_id: str, message: Dict[str, Any]) -> None:
         """Append a message to a session's transcript (SQLite), draining the per-session retry
@@ -339,11 +333,7 @@ class SessionTranscriptMixin:
             tool_name=message.get("tool_name"),
             tool_calls=message.get("tool_calls"),
             tool_call_id=message.get("tool_call_id"),
-            reasoning=message.get("reasoning") if is_assistant else None,
-            reasoning_content=message.get("reasoning_content") if is_assistant else None,
-            reasoning_details=message.get("reasoning_details") if is_assistant else None,
-            codex_reasoning_items=message.get("codex_reasoning_items") if is_assistant else None,
-            codex_message_items=message.get("codex_message_items") if is_assistant else None,
+            **{k: message.get(k) if is_assistant else None for k in _ASSISTANT_ONLY_KEYS},
             platform_message_id=(message.get("platform_message_id") or message.get("message_id")),
             observed=bool(message.get("observed")),
             timestamp=message.get("timestamp"),
@@ -376,14 +366,14 @@ class SessionTranscriptMixin:
         if db is None or not hasattr(db, "rebuild_fts"):
             return False
         # WAL split-brain guard: skip when a foreign process holds state.db.
+        foreign_holders = None
         if hasattr(db, "_foreign_state_db_holders"):
             foreign_holders = db._foreign_state_db_holders()
-            if foreign_holders:
-                logger.warning(
-                    "Skipping Session DB FTS rebuild while foreign processes hold the database or "
-                    "WAL sidecars (%s); canonical transcript writes remain available.",
-                    foreign_holders)
-                return False
+        if foreign_holders:
+            logger.warning(
+                "Skipping Session DB FTS rebuild while foreign processes hold the database or "
+                "WAL sidecars (%s); canonical transcript writes remain available.", foreign_holders)
+            return False
         try:
             rebuilt = db.rebuild_fts()
         except Exception as exc:
@@ -440,13 +430,10 @@ class SessionTranscriptMixin:
         if not self._db_for_session_id(session_id):
             return []
         session_id = self._follow_reroutes(session_id)
-        try:
+        with contextlib.suppress(Exception):
             # Durable successor survives restart; the reroute map doesn't.
-            tip = self._db_for_session_id(session_id).get_compression_tip(session_id)
-            if tip:
-                session_id = tip
-        except Exception:
-            pass
+            db = self._db_for_session_id(session_id)
+            session_id = db.get_compression_tip(session_id) or session_id
         try:
             # repair_alternation: this feeds LIVE REPLAY; heal a durable user;user wedge once here.
             return self._db_for_session_id(session_id).get_messages_as_conversation(
@@ -506,11 +493,9 @@ class SessionTranscriptMixin:
                     session_id, target_id, preserve_compaction_handoff=handoff is not None,
                     expected_active_ids=expected_active_ids,
                     expected_target_content=target_view.get("content"))
-            except ValueError as e:
-                logger.debug("rewind_session: %s", e)
-                return None
             except Exception as e:
-                logger.debug("rewind_session: rewind_to_message failed: %s", e)
+                prefix = "" if isinstance(e, ValueError) else "rewind_to_message failed: "
+                logger.debug("rewind_session: %s%s", prefix, e)
                 return None
             self._clear_dirty_transcript(session_id)
             # ``target_view`` is the live projection; a composite carrier's raw row holds the
