@@ -175,20 +175,14 @@ def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_que
 
 def _prepend_corruption_marker(tool_msg: dict, marker: str) -> None:
     existing = tool_msg.get("content")
-    if isinstance(existing, str):
-        if not existing:
-            tool_msg["content"] = marker
-        elif not existing.startswith(marker):
-            tool_msg["content"] = f"{marker}\n{existing}"
+    if isinstance(existing, str) and existing.startswith(marker):
         return
-    if existing is None:
-        tool_msg["content"] = marker
-        return
-    try:
-        existing_text = json.dumps(existing)
-    except TypeError:
-        existing_text = str(existing)
-    tool_msg["content"] = f"{marker}\n{existing_text}"
+    if not isinstance(existing, (str, type(None))):
+        try:
+            existing = json.dumps(existing)
+        except TypeError:
+            existing = str(existing)
+    tool_msg["content"] = f"{marker}\n{existing}" if existing else marker
 
 
 def _find_tool_result(messages: list, start: int, tool_call: dict) -> Optional[dict]:
@@ -203,13 +197,11 @@ def _find_tool_result(messages: list, start: int, tool_call: dict) -> Optional[d
 
 def _cursor_skip_prefix(messages: list, cursor: Optional[dict]) -> int:
     """Length of the ``is``-identical prefix already validated on the previous call."""
+    prev_prefix = cursor.get("prefix") if cursor is not None else None
     start = 0
-    if cursor is not None:
-        prev_prefix = cursor.get("prefix")
-        if isinstance(prev_prefix, list):
-            limit = min(len(prev_prefix), len(messages))
-            while start < limit and messages[start] is prev_prefix[start]:
-                start += 1
+    if isinstance(prev_prefix, list):
+        while start < min(len(prev_prefix), len(messages)) and messages[start] is prev_prefix[start]:
+            start += 1
     return start
 
 
@@ -1216,11 +1208,10 @@ def dump_api_request_debug(
         }
         if error is not None:
             dump_payload["error"] = _api_error_debug_info(error)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header) so a
         # "../"-shaped ID cannot write outside logs_dir.
         safe_sid = _ra()._safe_session_filename_component(agent.session_id)
-        dump_file = agent.logs_dir / f"request_dump_{safe_sid}_{timestamp}.json"
+        dump_file = agent.logs_dir / f"request_dump_{safe_sid}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
         # Redact secrets first: this fires unconditionally on API errors and captures the full
         # request body, so context-embedded secrets would otherwise land in cleartext on disk.
         from agent.redact import redact_sensitive_text
@@ -1247,18 +1238,16 @@ def _direct_native_anthropic_tool_cache_capability(
     return eff_api_mode == "anthropic_messages" and base_url_hostname(eff_base_url) == "api.anthropic.com"
 
 
+# The cache_ttl tiers accepted by config; mirrored by agent_init's live-agent snapshot.
+VALID_CACHE_TTLS = ("5m", "1h")
+
+
 def cache_ttl_means_disabled(ttl: Any) -> bool:
     """True when a ``prompt_caching.cache_ttl`` value means caching off (single predicate shared
     by ``agent_init`` and the stub policy paths). Unknown values (``"2h"``, ints) are NOT a disable."""
-    if ttl in ("5m", "1h"):
+    if ttl in VALID_CACHE_TTLS:
         return False
-    if ttl is False or ttl is None:
-        return True
-    return str(ttl).lower() in ("off", "false", "disabled", "no", "none")
-
-
-# The cache_ttl tiers accepted by config; mirrored by agent_init's live-agent snapshot.
-VALID_CACHE_TTLS = ("5m", "1h")
+    return ttl is False or ttl is None or str(ttl).lower() in ("off", "false", "disabled", "no", "none")
 
 
 def _raw_cache_ttl_from_config(default: Any) -> Any:
