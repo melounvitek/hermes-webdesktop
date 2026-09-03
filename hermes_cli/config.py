@@ -905,10 +905,7 @@ def _set_nested(config, dotted_key: str, value):
 
 
 def clear_model_endpoint_credentials(
-    model_cfg: Dict[str, Any],
-    *,
-    clear_api_key: bool = True,
-    clear_api_mode: bool = True,
+    model_cfg: Dict[str, Any], *, clear_api_key: bool = True, clear_api_mode: bool = True,
     clear_base_url: bool = False,
 ) -> Dict[str, Any]:
     """Remove stale inline endpoint credentials from a model config.
@@ -1192,11 +1189,8 @@ class ConfigIssue:
 
 
 def _require_fields(
-    issues: List["ConfigIssue"],
-    entry: Dict[str, Any],
-    label: str,
-    fields: Tuple[Tuple[str, str], ...],
-    suffix: str = "",
+    issues: List["ConfigIssue"], entry: Dict[str, Any], label: str,
+    fields: Tuple[Tuple[str, str], ...], suffix: str = "",
 ) -> None:
     """Append a warning for every falsy ``field`` of *entry* (message: ``<label> is missing '<f>' field``)."""
     for field, hint in fields:
@@ -1475,9 +1469,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # minimal config, not an ancient install: it gets the normal ladder and a version stamp.
     # Imported lazily because the steps call back into this module.
     from hermes_cli.config_migrations import (
-        SUPPORT_FLOOR_VERSION,
-        run_migrations,
-        support_floor_message,
+        SUPPORT_FLOOR_VERSION, run_migrations, support_floor_message
     )
 
     floor_refused = (
@@ -1567,8 +1559,7 @@ def _warn_invalid_platform_toolsets(results: Dict[str, Any], quiet: bool) -> Non
         from hermes_cli.toolset_scope import toolset_allowed_for_platform
 
         ts_warnings = validate_platform_toolsets(
-            read_raw_config().get("platform_toolsets"),
-            validate_toolset,
+            read_raw_config().get("platform_toolsets"), validate_toolset,
             toolset_allowed_for_platform,
         )
         for w in ts_warnings:
@@ -1812,8 +1803,7 @@ def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
     if isinstance(current, dict) and isinstance(raw, dict):
         return {
             key: _preserve_env_ref_templates(
-                value,
-                raw.get(key),
+                value, raw.get(key),
                 loaded_expanded.get(key) if isinstance(loaded_expanded, dict) else None,
             )
             for key, value in current.items()
@@ -1828,8 +1818,7 @@ def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
         if current_by_name is not None and raw_by_name is not None:
             return [
                 _preserve_env_ref_templates(
-                    item,
-                    raw_by_name.get(item.get("name")),
+                    item, raw_by_name.get(item.get("name")),
                     loaded_by_name.get(item.get("name")) if loaded_by_name is not None else None,
                 )
                 for item in current
@@ -1866,8 +1855,7 @@ def _explicit_config_paths(config: Dict[str, Any]) -> Set[Tuple[str, ...]]:
 
 
 def _strip_default_values(
-    config: Dict[str, Any],
-    defaults: Dict[str, Any] = DEFAULT_CONFIG,
+    config: Dict[str, Any], defaults: Dict[str, Any] = DEFAULT_CONFIG,
     preserve_keys: Optional[Set[Tuple[str, ...]]] = None,
 ) -> Dict[str, Any]:
     """Return *config* without keys whose values match *defaults*.
@@ -2009,8 +1997,7 @@ TURN_LIMIT_UNLIMITED = sys.maxsize
 
 # Spellings that mean "no limit" (compared lowercased, whitespace-stripped).
 _UNLIMITED_SPELLINGS = frozenset({
-    "none", "null", "unlimited", "infinite", "infinity", "inf",
-    "∞", "-1", "0",
+    "none", "null", "unlimited", "infinite", "infinity", "inf", "∞", "-1", "0"
 })
 
 
@@ -2207,11 +2194,7 @@ def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
 
 
 def write_platform_config_field(
-    platform_key: str,
-    field_key: str,
-    value: Any,
-    *,
-    raw: bool = False,
+    platform_key: str, field_key: str, value: Any, *, raw: bool = False
 ) -> None:
     """Persist one scalar field under ``platforms.<platform_key>``.
 
@@ -2284,9 +2267,7 @@ def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
 
 
 def apply_terminal_config_to_env(
-    *,
-    env: Optional[Dict[str, str]] = None,
-    config: Optional[Dict[str, Any]] = None,
+    *, env: Optional[Dict[str, str]] = None, config: Optional[Dict[str, Any]] = None,
     override: Optional[bool] = None,
 ) -> Dict[str, str]:
     """Bridge ``terminal.*`` config into the env vars terminal tools read.
@@ -2515,8 +2496,7 @@ def _strip_managed_keys_for_save(config: Dict[str, Any], managed_scope) -> Dict[
     if _stripped:
         print(
             f"Note: {len(_stripped)} managed setting(s) were not saved "
-            f"(managed by your administrator): {', '.join(sorted(_stripped))}",
-            file=sys.stderr,
+            f"(managed by your administrator): {', '.join(sorted(_stripped))}", file=sys.stderr,
         )
     return config
 
@@ -2535,11 +2515,8 @@ def _commented_sections_for_save(normalized: Dict[str, Any]) -> Optional[str]:
 
 
 def save_config(
-    config: Dict[str, Any],
-    *,
-    strip_defaults: bool = True,
-    preserve_keys: Optional[Set[Tuple[str, ...]]] = None,
-    merge_existing: bool = False,
+    config: Dict[str, Any], *, strip_defaults: bool = True,
+    preserve_keys: Optional[Set[Tuple[str, ...]]] = None, merge_existing: bool = False,
 ):
     """Save configuration to ~/.hermes/config.yaml.
 
@@ -2570,8 +2547,7 @@ def save_config(
         normalized = current_normalized
         if _raw_for_paths:
             normalized = _preserve_env_ref_templates(
-                normalized,
-                _canonicalize_config(_raw_for_paths),
+                normalized, _canonicalize_config(_raw_for_paths),
                 _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
             )
 
@@ -2780,10 +2756,7 @@ def _quote_env_value(value: str) -> str:
 
 
 def _env_line_defines_key(
-    line: str,
-    key: str,
-    *,
-    is_windows: Optional[bool] = None,
+    line: str, key: str, *, is_windows: Optional[bool] = None
 ) -> bool:
     """True when a .env line assigns ``key`` — plain, ``export``-prefixed, or ``KEY = value``.
 
@@ -2797,8 +2770,7 @@ def _env_line_defines_key(
     if not separator:
         return False
     return _env_var_policy_name(
-        assigned_key.strip(),
-        is_windows=is_windows,
+        assigned_key.strip(), is_windows=is_windows
     ) == _env_var_policy_name(key, is_windows=is_windows)
 
 
@@ -2840,8 +2812,7 @@ def _env_write_blocked(key: str, action: str) -> bool:
         src = (managed_dir / ".env") if managed_dir else "the managed scope"
         print(
             f"Cannot {action} {key}: it is managed by your administrator ({src}) "
-            f"and cannot be changed.",
-            file=sys.stderr,
+            f"and cannot be changed.", file=sys.stderr,
         )
         return True
     return False
@@ -3053,9 +3024,7 @@ def _show_managed_banner() -> None:
     print()
     print(color(
         f"  ⚷ Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
-        f"and cannot be changed",
-        Colors.YELLOW,
-        Colors.BOLD,
+        f"and cannot be changed", Colors.YELLOW, Colors.BOLD,
     ))
     for label, keys in (("config", managed_keys), ("env", managed_env)):
         if keys:
@@ -3087,8 +3056,7 @@ def _show_model_section(config: Dict[str, Any]) -> None:
         if env_ghost is not None and str(env_ghost).strip() != str(cfg_max_turns).strip():
             print(color(
                 f"                ⚠ .env has stale HERMES_MAX_ITERATIONS={env_ghost} "
-                f"(run 'hermes doctor --fix' to remove)",
-                Colors.YELLOW,
+                f"(run 'hermes doctor --fix' to remove)", Colors.YELLOW,
             ))
     except Exception:
         pass
@@ -3324,8 +3292,7 @@ def cron_model_drift_guard_enabled(
 
 
 def _cron_fleet_default_covers_axis(
-    axis: str,
-    config: Optional[Dict[str, Any]] = None,
+    axis: str, config: Optional[Dict[str, Any]] = None
 ) -> bool:
     """True when cron.model / cron.model_provider covers *axis*: such an axis no longer follows the
     global model/provider at fire time, so the guard never engages and warnings would be false."""
@@ -3347,9 +3314,7 @@ def _model_assignment_text(value: Any) -> str:
 
 
 def resolve_cron_model_drift_defaults(
-    config: Any,
-    *,
-    environ: Optional[Dict[str, str]] = None,
+    config: Any, *, environ: Optional[Dict[str, str]] = None
 ) -> Tuple[str, str]:
     """Resolve the global ``(provider, model)`` cron compares against snapshots.
 
@@ -3366,9 +3331,7 @@ def resolve_cron_model_drift_defaults(
     elif isinstance(model_config, dict):
         provider = _model_assignment_text(model_config.get("provider"))
         configured_model = _model_assignment_text(
-            model_config.get("default")
-            or model_config.get("model")
-            or model_config.get("name")
+            model_config.get("default") or model_config.get("model") or model_config.get("name")
         )
     else:
         configured_model = ""
@@ -3376,11 +3339,7 @@ def resolve_cron_model_drift_defaults(
 
 
 def cron_model_drift_axes(
-    job: Any,
-    *,
-    current_provider: Any = "",
-    current_model: Any = "",
-    config: Any = None,
+    job: Any, *, current_provider: Any = "", current_model: Any = "", config: Any = None
 ) -> List[str]:
     """Return the unpinned axes that the fail-closed cron guard would block."""
     if not isinstance(job, dict) or not cron_model_drift_guard_enabled(config):
@@ -3435,11 +3394,7 @@ def _cron_model_impact_result(available: bool, guard_enabled: bool) -> Dict[str,
 
 
 def build_cron_model_impact(
-    *,
-    current_provider: Any = "",
-    current_model: Any = "",
-    config: Any = None,
-    jobs: Any = None,
+    *, current_provider: Any = "", current_model: Any = "", config: Any = None, jobs: Any = None
 ) -> Dict[str, Any]:
     """Build a bounded, profile-local summary of jobs blocked by model drift.
 
@@ -3474,10 +3429,7 @@ def build_cron_model_impact(
             continue
         seen_ids.add(job_id)
         axes = cron_model_drift_axes(
-            job,
-            current_provider=current_provider,
-            current_model=current_model,
-            config=config,
+            job, current_provider=current_provider, current_model=current_model, config=config
         )
         if not axes:
             continue
@@ -3494,9 +3446,7 @@ def build_cron_model_impact(
 
 
 def warn_unpinned_cron_jobs_after_model_config_change(
-    key: str,
-    value: Any,
-    config: Optional[Dict[str, Any]] = None,
+    key: str, value: Any, config: Optional[Dict[str, Any]] = None
 ) -> None:
     """Warn when a global model/provider change will trip cron's drift guard."""
     axis = _cron_model_drift_axis_for_config_key(key)
@@ -3508,9 +3458,7 @@ def warn_unpinned_cron_jobs_after_model_config_change(
         return
     impact = build_cron_model_impact(
         current_provider=new_value if axis == "provider" else "",
-        current_model=new_value if axis == "model" else "",
-        config=config,
-        jobs=None,
+        current_model=new_value if axis == "model" else "", config=config, jobs=None,
     )
     affected = impact["affected_count"]
     if affected <= 0:
@@ -3703,16 +3651,14 @@ def _coerce_config_set_value(key: str, value: str) -> Any:
         print(
             f"Warning: value for '{key}' looks like a list/mapping but is "
             f"not valid YAML/JSON; storing as string. Most isinstance-gated "
-            f"readers will ignore a string here.",
-            file=sys.stderr,
+            f"readers will ignore a string here.", file=sys.stderr,
         )
         return value
     if isinstance(parsed, (list, dict)):
         return parsed
     print(
         f"Warning: value for '{key}' looks like a list/mapping but "
-        f"parsed as {type(parsed).__name__}; storing as string.",
-        file=sys.stderr,
+        f"parsed as {type(parsed).__name__}; storing as string.", file=sys.stderr,
     )
     return value
 
@@ -3749,8 +3695,7 @@ def _exit_if_key_managed(key: str, action: str) -> None:
         src = (managed_dir / "config.yaml") if managed_dir else "the managed scope"
         print(
             f"Cannot {action} '{key}': it is managed by your administrator ({src}) "
-            f"and cannot be changed. Contact your administrator to modify it.",
-            file=sys.stderr,
+            f"and cannot be changed. Contact your administrator to modify it.", file=sys.stderr,
         )
         sys.exit(1)
 
@@ -3826,16 +3771,14 @@ def _write_user_config(config_path: Path, user_config: Dict[str, Any]) -> None:
 def _print_unknown_key_notice(key: str, suggestion: Optional[str]) -> None:
     print(color(
         f"⚠ '{key}' is not a recognized config key — it was saved anyway, "
-        "but Hermes may not read it.",
-        Colors.YELLOW,
+        "but Hermes may not read it.", Colors.YELLOW,
     ))
     if suggestion:
         print(color(f"  Did you mean: {suggestion}", Colors.YELLOW))
     print(color(
         "  (Custom top-level keys are supported and bridged to the "
         "environment for skills/external tools. Use --force to skip "
-        "this notice.)",
-        Colors.DIM,
+        "this notice.)", Colors.DIM,
     ))
 
 
