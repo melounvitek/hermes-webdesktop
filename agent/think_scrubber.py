@@ -122,27 +122,25 @@ class StreamingThinkScrubber:
     def _find_earliest_closed_pair(self, buf: str):
         """(start_idx, end_idx) of the earliest ``<tag>...</tag>`` pair (non-greedy, case-insensitive), else None."""
         buf_lower = buf.lower()
-        best: "tuple[int, int] | None" = None
+        pairs = []
         for open_tag, close_tag in zip(self._OPEN_TAGS, self._CLOSE_TAGS):
             open_idx = buf_lower.find(open_tag)
-            if open_idx == -1:
-                continue
-            close_idx = buf_lower.find(close_tag, open_idx + len(open_tag))
-            if close_idx != -1 and (best is None or open_idx < best[0]):
-                best = (open_idx, close_idx + len(close_tag))
-        return best
+            close_idx = buf_lower.find(close_tag, open_idx + len(open_tag)) if open_idx != -1 else -1
+            if close_idx != -1:
+                pairs.append((open_idx, close_idx + len(close_tag)))
+        return min(pairs) if pairs else None
 
     def _find_open_at_boundary(self, buf: str, already_emitted: list[str]) -> Tuple[int, int]:
         """Return the earliest block-boundary open-tag (idx, len), or (-1, 0)."""
         buf_lower = buf.lower()
-        best_idx, best_len = -1, 0
+        hits = []
         for tag in self._OPEN_TAGS:
             idx = buf_lower.find(tag)
             while idx != -1 and not self._is_block_boundary(buf, idx, already_emitted):
                 idx = buf_lower.find(tag, idx + 1)
-            if idx != -1 and (best_idx == -1 or idx < best_idx):
-                best_idx, best_len = idx, len(tag)
-        return best_idx, best_len
+            if idx != -1:
+                hits.append((idx, len(tag)))
+        return min(hits) if hits else (-1, 0)
 
     def _is_block_boundary(self, buf: str, idx: int, already_emitted: list[str]) -> bool:
         """True iff *idx* is a block boundary: position 0 after a newline-terminated (or no) prior emission,
