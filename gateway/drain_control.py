@@ -7,17 +7,13 @@ Presence of an ACTIVE marker means "external drain" (``gateway_state ->
 "draining"``); absence or a stale marker means "not draining".
 
 Staleness — two independent, individually-lenient signals (either suffices):
-  * epoch mismatch: HERMES_HOME is a durable volume on Hermes Cloud, so a
-    marker survives the machine restart that a drain-gated action ends in;
-    honouring it would park the fresh gateway in ``draining`` forever.
-  * expiry: a same-epoch orphan (writer never cancelled) is ignored once
-    ``requested_at`` is older than :data:`DRAIN_REQUEST_MAX_AGE_SECONDS`;
-    re-calling :func:`write_drain_request` refreshes it (long-drain keep-alive).
-
-Reading never raises: a malformed/half-written file reads as ``{}``, which still
-counts as drain-active (fail-safe toward quiescing).  Both staleness checks
-reject only on a *definite* verdict — a marker with no epoch/timestamp, or a
-host without ``/proc``, degrades to presence-only and never fails closed.
+epoch mismatch (HERMES_HOME is a durable volume on Hermes Cloud, so a marker
+survives the machine restart a drain-gated action ends in and would park the
+fresh gateway in ``draining`` forever) and expiry (a same-epoch orphan is
+ignored past :data:`DRAIN_REQUEST_MAX_AGE_SECONDS`; re-writing refreshes it).
+Reading never raises: a malformed file reads as ``{}``, still drain-active
+(fail-safe toward quiescing).  Staleness rejects only on a *definite* verdict —
+no epoch/timestamp, or no ``/proc``, degrades to presence-only, never fail-closed.
 """
 from __future__ import annotations
 
@@ -35,11 +31,9 @@ from utils import atomic_json_write
 _log = logging.getLogger(__name__)
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
-
 # Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a
 # leaked marker can cause. Long drains refresh the marker instead of raising this.
 DRAIN_REQUEST_MAX_AGE_SECONDS = 3600.0
-
 # Dedup for the expired-marker warning (the watcher re-reads every second).
 # Keyed by ``requested_at`` so a keep-alive re-write that later expires logs again.
 _expiry_logged_for: Optional[str] = None
@@ -55,20 +49,14 @@ def current_instantiation_epoch() -> str:
     time on a plain ``docker restart``.  ``""`` when neither source is readable
     (non-Linux, no ``/proc``), which disables the epoch check — never fail-closed.
     """
-    boot_id = ""
+    boot_id = pid1_start = ""
     with contextlib.suppress(OSError):
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-
-    pid1_start = ""
     with contextlib.suppress(OSError, IndexError):
         # "<pid> (<comm>) <state> ...": comm may contain spaces/parens, so split
         # on the LAST ')'. starttime is field 22 (1-indexed) = tail index 19.
-        stat = Path("/proc/1/stat").read_text(encoding="utf-8")
-        pid1_start = stat.rsplit(")", 1)[1].split()[19]
-
-    if not boot_id and not pid1_start:
-        return ""
-    return f"{boot_id}:{pid1_start}"
+        pid1_start = Path("/proc/1/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+    return f"{boot_id}:{pid1_start}" if (boot_id or pid1_start) else ""
 
 
 def drain_request_path(home: Optional[Path] = None) -> Path:
@@ -77,10 +65,7 @@ def drain_request_path(home: Optional[Path] = None) -> Path:
 
 
 def write_drain_request(
-    *,
-    principal: str = "drain-control",
-    suppress_notification: bool = False,
-    home: Optional[Path] = None,
+    *, principal: str = "drain-control", suppress_notification: bool = False, home: Optional[Path] = None
 ) -> dict[str, Any]:
     """Write the begin-drain marker atomically. Returns the payload written.
 
@@ -142,10 +127,7 @@ def _marker_is_expired(body: dict[str, Any]) -> bool:
             "age=%.0fs > max %.0fs, principal=%s) — the drain that wrote it "
             "was never cancelled; treating as stale so the gateway keeps "
             "accepting turns.",
-            raw,
-            age,
-            DRAIN_REQUEST_MAX_AGE_SECONDS,
-            body.get("principal"),
+            raw, age, DRAIN_REQUEST_MAX_AGE_SECONDS, body.get("principal"),
         )
     return True
 
@@ -155,8 +137,7 @@ def _active_drain_body(home: Optional[Path]) -> Optional[dict[str, Any]]:
     body = read_drain_request(home=home)
     if body is None:
         return None
-    current = current_instantiation_epoch()
-    marker_epoch = body.get("epoch")
+    current, marker_epoch = current_instantiation_epoch(), body.get("epoch")
     if (current and marker_epoch and marker_epoch != current) or _marker_is_expired(body):
         return None
     return body

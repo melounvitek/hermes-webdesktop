@@ -112,9 +112,7 @@ def _current_turn_messages(messages: List[Dict[str, Any]], history_offset: int) 
 
 
 def repair_explicit_computer_use_media_paths(
-    response: str,
-    messages: List[Dict[str, Any]],
-    history_offset: int = 0,
+    response: str, messages: List[Dict[str, Any]], history_offset: int = 0
 ) -> str:
     """Recover model-mangled paths for explicitly requested screenshots.
 
@@ -130,30 +128,29 @@ def repair_explicit_computer_use_media_paths(
         return response
 
 
-def _repair_explicit_computer_use_media_paths_inner(
-    response: str,
-    messages: List[Dict[str, Any]],
-    history_offset: int = 0,
-) -> str:
-    if "MEDIA:" not in response:
-        return response
-
-    turn_messages = _current_turn_messages(messages, history_offset)
+def _canonical_capture_paths(turn_messages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """``{lowercase basename: absolute canonical path}`` from this turn's computer_use results."""
     call_id_names = tool_name_by_call_id(turn_messages)
-
-    canonical_by_basename: Dict[str, str] = {}
+    canonical: Dict[str, str] = {}
     for msg in turn_messages:
         if msg.get("role") not in {"tool", "function"}:
             continue
         call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        tool_name = str(msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or "")
-        if tool_name != "computer_use":
+        if str(msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or "") != "computer_use":
             continue
         for path in _iter_computer_use_capture_paths(msg.get("content")):
             basename = _computer_use_capture_basename(path)
             if basename and _ABS_PATH_PREFIX_RE.match(path):
-                canonical_by_basename[basename] = path
+                canonical[basename] = path
+    return canonical
 
+
+def _repair_explicit_computer_use_media_paths_inner(
+    response: str, messages: List[Dict[str, Any]], history_offset: int = 0
+) -> str:
+    if "MEDIA:" not in response:
+        return response
+    canonical_by_basename = _canonical_capture_paths(_current_turn_messages(messages, history_offset))
     if not canonical_by_basename:
         return response
 

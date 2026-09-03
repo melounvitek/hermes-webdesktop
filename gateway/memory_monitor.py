@@ -25,7 +25,6 @@ _BYTES_TO_MB = 1024 * 1024
 _monitor_thread: Optional[threading.Thread] = None
 _stop_event: Optional[threading.Event] = None
 _start_time: Optional[float] = None
-_interval_seconds: float = 300.0
 _lock = threading.Lock()
 
 
@@ -50,14 +49,13 @@ def _get_rss_mb() -> Optional[int]:
 def log_memory_usage(prefix: str = "") -> None:
     """Log ``[MEMORY] [<prefix> ]rss=... gc=... threads=... uptime=...``; safe from any thread."""
     rss = _get_rss_mb()
-    uptime = int(time.monotonic() - _start_time) if _start_time else 0
     logger.info(
         "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds",
         f"{prefix} " if prefix else "",
         "unavailable" if rss is None else f"{rss}MB",
         gc.get_count(),  # (gen0, gen1, gen2)
         threading.active_count(),
-        uptime,
+        int(time.monotonic() - _start_time) if _start_time else 0,
     )
 
 
@@ -66,8 +64,7 @@ def _monitor_loop(stop_event: threading.Event, interval: float) -> None:
     while not stop_event.wait(interval):
         try:
             log_memory_usage()
-        except Exception as e:
-            # Never let the monitor crash the gateway.
+        except Exception as e:  # never let the monitor crash the gateway
             logger.debug("Memory monitor iteration failed: %s", e)
 
 
@@ -77,7 +74,7 @@ def start_memory_monitoring(interval_seconds: float = 300.0) -> bool:
     Returns True if a fresh monitor was started; False if one is already running
     or RSS introspection is unavailable (warned once).
     """
-    global _monitor_thread, _stop_event, _start_time, _interval_seconds
+    global _monitor_thread, _stop_event, _start_time
 
     with _lock:
         if _monitor_thread is not None and _monitor_thread.is_alive():
@@ -88,19 +85,15 @@ def start_memory_monitoring(interval_seconds: float = 300.0) -> bool:
                 "nor psutil could read process RSS — skipping periodic logging.",
             )
             return False
-
         _start_time = time.monotonic()
-        _interval_seconds = float(interval_seconds)
         _stop_event = threading.Event()
         log_memory_usage(prefix="baseline")
         _monitor_thread = threading.Thread(
-            target=_monitor_loop,
-            args=(_stop_event, _interval_seconds),
-            name="gateway-memory-monitor",
-            daemon=True,
+            target=_monitor_loop, args=(_stop_event, float(interval_seconds)),
+            name="gateway-memory-monitor", daemon=True,
         )
         _monitor_thread.start()
-        logger.info("[MEMORY] Periodic memory monitoring started (interval: %ds)", int(_interval_seconds))
+        logger.info("[MEMORY] Periodic memory monitoring started (interval: %ds)", int(interval_seconds))
         return True
 
 
@@ -114,14 +107,11 @@ def stop_memory_monitoring(timeout: float = 2.0) -> None:
         with contextlib.suppress(Exception):
             log_memory_usage(prefix="shutdown")
         _stop_event.set()
-        thread = _monitor_thread
-        _monitor_thread = None
-        _stop_event = None
+        thread, _monitor_thread, _stop_event = _monitor_thread, None, None
 
     # Join outside the lock so a stuck log call can't deadlock shutdown.
     with contextlib.suppress(Exception):
         thread.join(timeout=timeout)
-
     logger.info("[MEMORY] Periodic memory monitoring stopped")
 
 

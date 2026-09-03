@@ -1,10 +1,8 @@
-"""
-Session mirroring for cross-platform message delivery.
+"""Session mirroring for cross-platform message delivery.
 
-When a message is sent to a platform (send_message or cron delivery), append
-a "delivery-mirror" record to the target session's transcript so the
-receiving-side agent knows what was sent. Standalone: works from CLI, cron
-and gateway contexts without the full SessionStore machinery.
+When a message is sent to a platform (send_message or cron delivery), append a
+"delivery-mirror" record to the target session's transcript so the receiving-side
+agent knows what was sent.  Standalone: works from CLI, cron and gateway contexts.
 """
 
 import json
@@ -92,10 +90,9 @@ def _find_session_id(
         db = get_shared_session_db()
         try:
             finder = getattr(db, "find_session_by_origin", None)
-            if callable(finder):
-                session_id = finder(platform=platform, chat_id=chat_id, thread_id=thread_id, user_id=user_id)
-                if session_id:
-                    return str(session_id)
+            session_id = finder(platform=platform, chat_id=chat_id, thread_id=thread_id, user_id=user_id) if callable(finder) else None
+            if session_id:
+                return str(session_id)
         finally:
             release_or_close(db)
     except Exception as e:
@@ -104,8 +101,7 @@ def _find_session_id(
     if not _SESSIONS_INDEX.exists():
         return None
     try:
-        with open(_SESSIONS_INDEX, encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(_SESSIONS_INDEX.read_text(encoding="utf-8"))
     except Exception:
         return None
 

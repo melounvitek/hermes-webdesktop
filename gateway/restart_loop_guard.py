@@ -1,20 +1,15 @@
 """Auto-resume restart-loop breaker (defense-3).
 
-Defenses 1 and 2 (the ``_HERMES_GATEWAY`` guard on ``hermes gateway
-stop|restart`` + ``terminal_tool``, and the cron-creation lifecycle filter) stop
-the agent scheduling its own restart.  They do NOT cover every SIGTERM source
-(raw ``launchctl kickstart``, a bad external monitor, any repeated crash): the
-supervisor respawns, the gateway auto-resumes the restart-interrupted session,
-whose next turn re-runs the offending logic.
-
-Last-resort circuit breaker: each boot with restart-interrupted sessions pending
-is timestamped and persisted to ``<HERMES_HOME>/gateway/restart_loop.json``
-(each boot is a fresh process).  Boots CHAIN while consecutive gaps stay within
-``max_gap_seconds``, so a slow crash cycle (liveness watchdog every ~150s) trips
-exactly like a fast ~10s respawn loop.  When tripped, the caller SKIPS
-auto-resume for that boot — real inbound messages are still served.
-Best-effort: any read/write failure fails OPEN (a broken breaker must never
-wedge a healthy gateway).
+Defenses 1 and 2 (the ``_HERMES_GATEWAY`` guard on ``hermes gateway stop|restart``
++ ``terminal_tool``, and the cron-creation lifecycle filter) stop the agent
+scheduling its own restart but not every SIGTERM source (``launchctl kickstart``,
+a bad external monitor, any repeated crash): the supervisor respawns, the gateway
+auto-resumes the restart-interrupted session, whose next turn re-runs the
+offending logic.  Each such boot is persisted to ``<HERMES_HOME>/gateway/
+restart_loop.json``; boots CHAIN while consecutive gaps stay within
+``max_gap_seconds`` (a ~150s watchdog-kill cycle trips like a ~10s respawn loop).
+Tripped → caller SKIPS auto-resume; inbound messages still served.  Any I/O
+failure fails OPEN — a broken breaker must never wedge a healthy gateway.
 """
 
 from __future__ import annotations

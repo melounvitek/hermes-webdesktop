@@ -23,12 +23,10 @@ _AUTO_BUDGET_FRACTION = 0.65
 # Below this a budget is noise — small containers would evict every pass and
 # never keep a warm prefix.
 _AUTO_BUDGET_FLOOR_MB = 512
-
 _DEFAULT_MAX_EVICTIONS_PER_PASS = 16
 # Never shed the hottest sessions: their prompt cache is worth the most, and
 # evicting them just moves the cost to the next turn.
 _DEFAULT_PROTECT_RECENT = 8
-
 _BYTES_PER_MB = 1024 * 1024
 _OFF_WORDS = frozenset({"", "off", "none", "false", "disabled"})
 
@@ -75,20 +73,15 @@ def _cgroup_limit_bytes() -> Optional[int]:
     """
     if sys.platform != "linux":
         return None
-    candidates: list[str] = []
     try:
         from gateway.cgroup_cleanup import _own_cgroup_path
 
         own = _own_cgroup_path()
     except Exception:
         own = None
-    if own and own != "/":
-        candidates += [f"/sys/fs/cgroup{own}/memory.high", f"/sys/fs/cgroup{own}/memory.max"]
-    candidates += [
-        "/sys/fs/cgroup/memory.high",
-        "/sys/fs/cgroup/memory.max",
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-    ]
+    roots = [f"/sys/fs/cgroup{own}"] if own and own != "/" else []
+    roots.append("/sys/fs/cgroup")
+    candidates = [f"{r}/memory.{f}" for r in roots for f in ("high", "max")] + ["/sys/fs/cgroup/memory/memory.limit_in_bytes"]
     for candidate in candidates:
         try:
             limit = int(Path(candidate).read_text(encoding="utf-8").strip())
@@ -144,7 +137,6 @@ def resolve_agent_cache_bounds(config: Any) -> AgentCacheBounds:
     section = (config.get("agent") or {}).get("agent_cache") if isinstance(config, dict) else None
     if not isinstance(section, dict):
         section = {}
-
     protect_recent = section.get("protect_recent")
     protect_parsed = _positive(protect_recent)
     # 0 means "shed anything" — distinct from unset.  The bool guard keeps
@@ -152,7 +144,6 @@ def resolve_agent_cache_bounds(config: Any) -> AgentCacheBounds:
     # disabling MRU protection.
     if protect_parsed is None and _is_int(protect_recent) and protect_recent == 0:
         protect_parsed = 0
-
     return AgentCacheBounds(
         max_size=_positive(section.get("max_size")),
         idle_ttl_secs=_positive(section.get("idle_ttl_secs"), float),
@@ -179,7 +170,6 @@ def read_anon_rss_mb() -> Optional[int]:
                 return kib // 1024
     except Exception:
         pass
-
     try:
         import psutil  # type: ignore
 
@@ -223,7 +213,6 @@ def plan_pressure_evictions(
     protect = min(max(protect_recent, 0), len(entries) // 2)
     if protect:
         entries = entries[:-protect]
-
     plan: List[Tuple[str, Any]] = []
     for key, agent in entries:
         if len(plan) >= max_evictions:

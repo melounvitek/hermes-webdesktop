@@ -1,25 +1,14 @@
-"""
-Event Hook System
+"""Event hook system: fires handlers at gateway lifecycle points.
 
-Fires handlers at gateway lifecycle points. Hooks are discovered from
-~/.hermes/hooks/<name>/ directories, each containing HOOK.yaml (name,
-description, events) and handler.py (``def handle(event_type, context)``,
-sync or async). Handler errors are logged and never block the pipeline.
-
-Events:
-  gateway:startup, session:start, session:end (user ran /new or /reset),
-  session:reset, agent:start, agent:step (each tool-loop turn), agent:end,
-  command:* (any slash command; wildcard match).
-
-Context passed to ``agent:start`` / ``agent:end``:
-  platform, user_id, chat_id, thread_id (Telegram forum-topic / thread root
-  id as string; empty when not in a thread), chat_type ("dm" | "group" |
-  "forum" | ""), session_id, message (truncated to 500 chars).
-``agent:end`` adds: response (truncated to 500 chars), model, provider.
-
-Handlers posting a follow-up into the same Telegram forum-topic should pass
-``message_thread_id=int(thread_id)`` when ``chat_type == "forum"`` and
-``thread_id`` is non-empty.
+Hooks live in ~/.hermes/hooks/<name>/ with HOOK.yaml (name, description, events)
+and handler.py (``def handle(event_type, context)``, sync or async).  Handler
+errors are logged and never block the pipeline.  Events: gateway:startup,
+session:start/end/reset, agent:start, agent:step (each tool-loop turn),
+agent:end, command:* (wildcard).  ``agent:start``/``agent:end`` context: platform,
+user_id, chat_id, thread_id (forum-topic/thread root as str, "" outside a thread),
+chat_type ("dm"|"group"|"forum"|""), session_id, message (500 chars); ``agent:end``
+adds response (500 chars), model, provider.  Telegram forum follow-ups should pass
+``message_thread_id=int(thread_id)`` when ``chat_type == "forum"`` and thread_id set.
 """
 
 import asyncio
@@ -97,10 +86,8 @@ class HookRegistry:
     def discover_and_load(self) -> None:
         """Register built-in hooks, then load every valid hook dir under HOOKS_DIR."""
         self._register_builtin_hooks()
-
         if not HOOKS_DIR.exists():
             return
-
         for hook_dir in sorted(HOOKS_DIR.iterdir()):
             if not hook_dir.is_dir():
                 continue
@@ -114,12 +101,9 @@ class HookRegistry:
             hook_name, events, handle_fn, description = loaded
             for event in events:
                 self._handlers.setdefault(event, []).append(handle_fn)
-            self._loaded_hooks.append({
-                "name": hook_name,
-                "description": description,
-                "events": events,
-                "path": str(hook_dir),
-            })
+            self._loaded_hooks.append(
+                {"name": hook_name, "description": description, "events": events, "path": str(hook_dir)}
+            )
             print(f"[hooks] Loaded hook '{hook_name}' for events: {events}", flush=True)
 
     def _resolve_handlers(self, event_type: str) -> List[Callable]:
@@ -137,11 +121,7 @@ class HookRegistry:
         """Fire all handlers for an event, discarding return values."""
         await self.emit_collect(event_type, context)
 
-    async def emit_collect(
-        self,
-        event_type: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> List[Any]:
+    async def emit_collect(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> List[Any]:
         """Fire handlers and return their non-None return values in order.
 
         Used for decision-style hooks (e.g. ``command:<name>`` policies that
@@ -150,7 +130,6 @@ class HookRegistry:
         """
         if context is None:
             context = {}
-
         results: List[Any] = []
         for fn in self._resolve_handlers(event_type):
             try:

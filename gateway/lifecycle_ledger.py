@@ -39,7 +39,7 @@ def _process_hermes_home() -> Path:
 
 
 def _home_path(home: Optional[Path], relative: tuple) -> Path:
-    return (home if home is not None else _process_hermes_home()).joinpath(*relative)
+    return (_process_hermes_home() if home is None else home).joinpath(*relative)
 
 
 def get_lifecycle_sentinel_path(home: Optional[Path] = None) -> Path:
@@ -123,15 +123,10 @@ def _pid_alive_with_start_time(pid: Any, start_time: Any) -> bool:
     """
     try:
         pid_int = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid_int <= 0:
-        return False
-    try:
         # NOT os.kill(pid, 0): on Windows that sends CTRL_C_EVENT to the target's console group.
         from gateway.status import _pid_exists, get_process_start_time
 
-        if not _pid_exists(pid_int):
+        if pid_int <= 0 or not _pid_exists(pid_int):
             return False
     except Exception:
         return False
@@ -200,9 +195,7 @@ def check_state_db_integrity(home: Optional[Path] = None) -> str:
             row = conn.execute("PRAGMA quick_check(1)").fetchone()
     except Exception as exc:
         return f"check-failed: {exc}"
-    if not row or row[0] is None:
-        return "check-failed: no result"
-    return str(row[0])
+    return "check-failed: no result" if not row or row[0] is None else str(row[0])
 
 
 def record_startup(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:

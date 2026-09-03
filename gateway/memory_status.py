@@ -32,9 +32,7 @@ _HEARTBEAT_FRESH_TTL_S = 150.0
 
 def _nonneg_int(value: Any) -> Optional[int]:
     """Return *value* if it is a non-negative int (bools rejected), else None."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _mb(kib: Any) -> Optional[int]:
@@ -97,14 +95,8 @@ def collect_memory_status(
     """
     moment = now or datetime.now(timezone.utc)
     status: Dict[str, Any] = {
-        "pressure": "unknown",
-        "gateway_rss_mb": None,
-        "system_total_mb": None,
-        "system_available_mb": None,
-        "swap_used_mb": None,
-        "sampled_at": None,
-        "last_boot_unclean": False,
-        "last_boot_suspected_oom": False,
+        "pressure": "unknown", "gateway_rss_mb": None, "system_total_mb": None, "system_available_mb": None,
+        "swap_used_mb": None, "sampled_at": None, "last_boot_unclean": False, "last_boot_suspected_oom": False,
         # Identity of the CURRENT life (sentinel started_at): the dashboard keys
         # banner dismissal on it so acknowledging one OOM restart does not mute the NEXT.
         "boot_id": None,
@@ -115,10 +107,9 @@ def collect_memory_status(
         sampled_at = _parse_iso(heartbeat.get("updated_at"))
         mem = heartbeat.get("mem")
         if isinstance(mem, dict):
-            status["gateway_rss_mb"] = _mb(mem.get("rss_kib"))
-            status["system_total_mb"] = _mb(mem.get("mem_total_kib"))
-            status["system_available_mb"] = _mb(mem.get("mem_available_kib"))
-            status["swap_used_mb"] = _mb(mem.get("swap_used_kib"))
+            for dst, src in (("gateway_rss_mb", "rss_kib"), ("system_total_mb", "mem_total_kib"),
+                             ("system_available_mb", "mem_available_kib"), ("swap_used_mb", "swap_used_kib")):
+                status[dst] = _mb(mem.get(src))
             if sampled_at is not None:
                 status["sampled_at"] = sampled_at.isoformat()
                 # Stale sample: numbers still reported (sampled_at says when) but

@@ -71,10 +71,8 @@ def _probe_gateway(runtime_status: dict[str, Any]) -> dict[str, Any]:
     platforms = runtime_status.get("platforms")
     platforms = platforms if isinstance(platforms, dict) else {}
     connected = sum(
-        1
-        for value in platforms.values()
-        if isinstance(value, dict)
-        and str(value.get("state") or value.get("status") or "").lower() in _CONNECTED_STATES
+        isinstance(v, dict) and str(v.get("state") or v.get("status") or "").lower() in _CONNECTED_STATES
+        for v in platforms.values()
     )
     status = "ok" if state in {"running", "draining"} else "degraded"
     return _check(status, state=state, connected_platforms=connected, platforms=len(platforms))
