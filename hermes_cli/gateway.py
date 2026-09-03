@@ -117,12 +117,11 @@ class WindowsGatewayService:
 
 
 def _get_service_pids(all_profiles: bool = False) -> set:
-    """Return PIDs managed by systemd/launchd gateway services (excluded from stale-process sweeps).
+    """PIDs managed by systemd/launchd gateway services (excluded from stale-process sweeps).
 
     Relies on the service manager committing the new PID before the restart command returns.
-    Default scope covers only the current profile's unit/label; ``all_profiles`` widens to the
-    whole ``hermes-gateway*`` / ``ai.hermes.gateway*`` fleet so the update path and orphan reaper
-    never misclassify a sibling profile's service gateway as a manual process and kill it.
+    ``all_profiles`` widens the current profile's unit/label to the whole ``hermes-gateway*`` /
+    ``ai.hermes.gateway*`` fleet so update/reaper never kill a sibling's service gateway as "manual".
     """
     pids: set = set()
 
@@ -191,7 +190,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
 
 
 def _get_parent_pid(pid: int) -> int | None:
-    """Return the parent PID for ``pid``, or ``None``. psutil first (works on Windows, where ``ps`` doesn't)."""
+    """Parent PID for ``pid``, or None. psutil first (works on Windows, where ``ps`` doesn't)."""
     if pid <= 1:
         return None
     try:
@@ -245,12 +244,11 @@ def _request_gateway_self_restart(pid: int) -> bool:
 
 
 def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
-    """Send SIGUSR1 (drain-aware restart) to a gateway PID and wait for it to exit.
+    """SIGUSR1 (drain-aware restart) a gateway PID and wait for exit; False if unsent or it outlived the timeout.
 
-    gateway/run.py maps SIGUSR1 to ``request_restart(via_service=True)``: refuse new turns, wait
-    for in-flight work, ``stop()``, exit; systemd/launchd then relaunch. ``drain_timeout`` must
-    cover the after-turn wait plus the drain — pass ``resolve_restart_exit_wait_budget(...)``.
-    Returns False if the signal couldn't be sent or the process outlived the timeout.
+    gateway/run.py maps SIGUSR1 to ``request_restart(via_service=True)``: refuse new turns, drain,
+    ``stop()``, exit; the supervisor relaunches. ``drain_timeout`` must cover after-turn wait + drain
+    — pass ``resolve_restart_exit_wait_budget(...)``.
     """
     if not hasattr(signal, "SIGUSR1") or pid <= 0:
         return False
@@ -265,11 +263,8 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
 
 
 def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
-    """Wait up to ``timeout``s for ``pid`` to exit; True once gone, False on timeout.
-
-    ``launchctl bootstrap`` fails with EIO while the previous instance is still draining, so
-    teardown callers must wait for the real exit before re-bootstrapping.
-    """
+    """Wait up to ``timeout``s for ``pid`` to exit; True once gone. (``launchctl bootstrap`` fails EIO
+    while the previous instance still drains, so teardown callers must wait for the real exit.)"""
     if pid <= 0:
         return True
     # ``os.kill(pid, 0)`` hard-kills on Windows (TerminateProcess); use _pid_exists instead.
@@ -351,12 +346,9 @@ def _probe_loop_tick_socket_sustained(
     pid: int, home: Path | None, *, timeout: float = 1.0, strikes: int = 3, gap_s: float = 0.2,
     tcp_port: int | None = None,
 ) -> bool | None:
-    """Probe the tick socket up to ``strikes`` times, ``gap_s`` apart, until a reply.
-
-    One silent probe is not destructive evidence (a transient synchronous stall can outlast one
-    recv timeout). True: some attempt answered. False: a node stayed silent the whole window.
-    None: no socket node on some attempt (vanished / legacy producer) — not evidence.
-    """
+    """Probe the tick socket up to ``strikes`` times, ``gap_s`` apart: True once answered, False if a node
+    stayed silent the whole window, None if the node vanished (not evidence). One silent probe is not
+    destructive evidence — a transient synchronous stall can outlast one recv timeout."""
     total = max(int(strikes), 0)
     for attempt in range(total):
         if tcp_port is not None:
@@ -378,11 +370,8 @@ def probe_gateway_loop_liveness(
     tick_timeout: float = 1.0, tick_strikes: int = 3, tick_gap_s: float = 0.2,
 ) -> str:
     """Classify a gateway PID's event loop as alive / wedged / unknown (see block comment above).
-
-    A stale heartbeat is ``wedged`` only when the payload declares the tick socket armed AND the
-    socket stays silent across ``tick_strikes`` consecutive misses; any answer is ``alive``; any
-    conflict or ambiguity is ``unknown`` so callers keep the graceful-drain path.
-    """
+    Stale heartbeat is ``wedged`` only when the payload declares the tick socket armed AND it stays
+    silent across ``tick_strikes`` misses; any answer is ``alive``; ambiguity is ``unknown``."""
     try:
         stale_budget = max(float(stale_after), 0.0)
     except (TypeError, ValueError):
@@ -443,11 +432,9 @@ def probe_gateway_loop_liveness(
 
 
 def _escalate_wedged_gateway(pid: int, *, term_grace: float = 5.0, kill_wait: float = 5.0) -> bool:
-    """Bounded stop (SIGTERM, ``term_grace``, SIGKILL, ``kill_wait``) for a provably dead loop.
-
-    Callers MUST have classified the gateway ``GATEWAY_LOOP_WEDGED`` first: escalating a merely
-    busy gateway bypasses the cron drain floor and SIGKILLs live work. True once the PID is gone.
-    """
+    """Bounded stop (SIGTERM, ``term_grace``, SIGKILL, ``kill_wait``) for a provably dead loop; True once gone.
+    Callers MUST have classified ``GATEWAY_LOOP_WEDGED`` first: escalating a merely busy gateway
+    bypasses the cron drain floor and SIGKILLs live work."""
     from gateway.status import get_process_start_time
     expected_start_time = get_process_start_time(pid)
     try:
@@ -604,13 +591,10 @@ def _iter_windows_list_processes(listing: str):
 
 
 def _windows_process_listing() -> str | None:
-    """``CommandLine=``/``ProcessId=`` LIST output for every Windows process, or None.
-
-    wmic when present, else Get-CimInstance emitting the same shape. ``bounded_probe_run``, NOT
-    ``subprocess.run(timeout=...)``: on Windows run()'s post-timeout cleanup joins pipe readers
-    unbounded and a conhost.exe holding duplicated handles wedges the caller forever; it also
-    hides the console window this windowless pythonw backend would otherwise flash.
-    """
+    """``CommandLine=``/``ProcessId=`` LIST output for every Windows process (wmic, else Get-CimInstance), or None.
+    ``bounded_probe_run``, NOT ``subprocess.run(timeout=...)``: run()'s post-timeout cleanup joins pipe
+    readers unbounded and a conhost.exe holding duplicated handles wedges the caller forever; it also
+    hides the console window this windowless pythonw backend would flash."""
     from hermes_cli._subprocess_compat import bounded_probe_run
     wmic_path = shutil.which("wmic")
     result = None
@@ -718,12 +702,10 @@ def find_profile_gateway_processes(exclude_pids: set | None = None, *, strict: b
 def find_windows_gateway_services(
     *, psutil_module=None, profile_processes: list[ProfileGatewayProcess] | None = None
 ) -> list[WindowsGatewayService]:
-    """Find profile gateways supervised by real Windows services.
-
-    Service-logon processes may hide their command lines, so identity comes from Hermes's own PID
-    file plus a parent chain ending at a running SCM service PID. The whole service subtree is
-    returned so the Desktop preflight exempts exactly what the updater stops through the SCM.
-    """
+    """Profile gateways supervised by real Windows services. Service-logon processes may hide their
+    command lines, so identity = Hermes's own PID file + a parent chain ending at a running SCM service
+    PID. The whole service subtree is returned so the Desktop preflight exempts exactly what the
+    updater stops through the SCM."""
     if sys.platform != "win32":
         return []
     try:
@@ -821,10 +803,8 @@ def _gateway_run_args_for_profile(profile: str) -> list[str]:
 
 
 def _capture_gateway_argv(pid: int) -> list[str] | None:
-    """Live argv of a running gateway (snapshotted before update kills so unmapped gateways can respawn).
-
-    ``None`` if psutil is unavailable, the process is gone/denied, or the argv isn't a gateway command.
-    """
+    """Live argv of a running gateway (snapshotted before update kills so unmapped gateways can respawn);
+    None if psutil is unavailable, the process is gone/denied, or the argv isn't a gateway command."""
     if pid <= 1:
         return None
     try:
@@ -848,12 +828,9 @@ def _capture_gateway_argv(pid: int) -> list[str] | None:
 
 
 def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | None:
-    """Choose who relaunches a profile gateway after ``hermes update``.
-
-    ``--external-supervisor`` gateways must exit back to their manager (a detached watcher would
-    race its replacement). Otherwise arm the profile-derived detached watcher, falling back to
-    replaying the captured command line.
-    """
+    """Choose who relaunches a profile gateway after ``hermes update``: ``--external-supervisor`` gateways
+    exit back to their manager (a detached watcher would race its replacement); otherwise arm the
+    profile-derived detached watcher, falling back to replaying the captured command line."""
     argv = _capture_gateway_argv(pid)
     if argv and "--external-supervisor" in argv:
         return "external-supervisor"
@@ -875,12 +852,9 @@ def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
 
 
 def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
-    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits.
-
-    Both watcher and respawned gateway need platform-appropriate detach: POSIX ``start_new_session``
-    (setsid); on Windows that flag does NOT detach (the watcher would die with the CLI console), so
-    ``windows_detach_popen_kwargs()`` supplies the creationflags.
-    """
+    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits. Watcher and respawn
+    both need platform-appropriate detach: POSIX setsid; on Windows ``start_new_session`` does NOT detach
+    (the watcher would die with the CLI console), so ``windows_detach_popen_kwargs()`` supplies flags."""
     if old_pid <= 0 or not run_argv:
         return False
     from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway, windows_detach_popen_kwargs
@@ -1479,12 +1453,10 @@ _REAPER_SUPERVISOR_WALK_LIMIT = 12
 
 
 def _reaper_candidate_is_supervisor_owned(pid: int) -> bool:
-    """True when ``pid``'s parent chain reaches ``services.exe`` (Task Scheduler-owned gateway).
-
-    Windows-only reaper backstop: ``_get_service_pids()`` is empty there, so a Scheduled-Task gateway
-    with a stale pidfile would look like an orphan. Fail-open once the bootstrap parent exits; not
-    applied on POSIX, where everything descends from PID 1.
-    """
+    """True when ``pid``'s parent chain reaches ``services.exe`` (Task Scheduler-owned gateway). Windows-only
+    reaper backstop: ``_get_service_pids()`` is empty there, so a Scheduled-Task gateway with a stale
+    pidfile would look like an orphan. Fail-open once the Task's bootstrap parent exits. Not applied
+    on POSIX, where everything descends from PID 1 and would look supervised."""
     if not is_windows():
         return False
     try:
@@ -1503,12 +1475,10 @@ def _reaper_candidate_is_supervisor_owned(pid: int) -> bool:
 
 
 def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool:
-    """Kill no-supervisor gateway orphans the pidfile/runtime record can't see.
-
-    On WSL/no-systemd hosts the restart fallback runs the gateway in-process under a ``gateway restart``
-    argv; a stale pidfile then lets a live orphan hold the webhook port while a restart stacks a
-    duplicate. No-op where a supervisor exists. ``extra_exclude``: PIDs the caller already killed.
-    """
+    """Kill no-supervisor gateway orphans the pidfile/runtime record can't see. On WSL/no-systemd hosts
+    the restart fallback runs the gateway in-process under a ``gateway restart`` argv; a stale pidfile
+    then lets a live orphan keep the webhook port while a restart stacks a duplicate. No-op where a
+    supervisor exists (there ``gateway restart`` is a transient command). ``extra_exclude``: already killed."""
     try:
         supervised_host = supports_systemd_services()
     except Exception:
@@ -1653,8 +1623,9 @@ def _mark_planned_stop(pid: int | None = None) -> None:
 
 
 def stop_profile_gateway() -> bool:
-    """Stop only this profile's gateway via its PID file; True if a process was stopped. With no
-    supervisor the pidfile can be stale while an orphan holds the port, so fall back to the orphan scan."""
+    """Stop only this profile's gateway via its PID file; True if a process was stopped. Without a
+    supervisor the pidfile can be stale while a live orphan holds the webhook port, so fall back to
+    the orphan-aware scan rather than stacking a duplicate."""
     try:
         from gateway.status import get_running_pid, remove_pid_file
     except ImportError:
@@ -1744,7 +1715,7 @@ _WINDOWS_TASK_SUPERVISOR_STATES = frozenset({"Running", "Ready", "Queued"})
 
 def _windows_scheduled_task_state(task_name: str) -> str | None:
     """English ``Get-ScheduledTask`` State, or None on failure. PowerShell, not ``schtasks``: schtasks
-    localizes its output in the local codepage; the ``State`` enum is stable across locales."""
+    localizes its output in the local codepage (utf-8 decoding mangles it); the State enum is stable."""
     if not is_windows():
         return None
     ps_cmd = f"$t = Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue; if ($t) {{ $t.State }} else {{ 'MISSING' }}"
@@ -1764,10 +1735,8 @@ def _windows_scheduled_task_state(task_name: str) -> str | None:
 
 
 def _windows_scheduled_task_supervises(task_name: str) -> bool:
-    """True when Task Scheduler still owns this profile's gateway (Ready counts: the task is Ready, not Running, after bootstrap exits).
-
-    Best-effort: any failure returns False so the caller falls back to pidfile / parent-chain exclusions.
-    """
+    """True when Task Scheduler still owns this profile's gateway (Ready counts: the task is Ready, not
+    Running, after bootstrap exits). Any failure returns False so callers fall back to pidfile / parent-chain."""
     return _windows_scheduled_task_state(task_name) in _WINDOWS_TASK_SUPERVISOR_STATES
 
 
@@ -3997,11 +3966,8 @@ def _running_under_gateway_supervisor() -> bool:
 
 
 def named_profile_served_by_running_multiplexer(profile_name: str | None = None) -> bool:
-    """True when a live default multiplexer already ticks this named profile.
-
-    A satellite profile has no gateway.pid of its own; the default multiplexer's ticker fires its
-    jobs and serves its platforms. ``profile_name`` defaults to the current HERMES_HOME profile.
-    """
+    """True when a live default multiplexer already ticks this named profile (a satellite profile has no
+    gateway.pid; the multiplexer fires its jobs and serves its platforms). Defaults to the current profile."""
     try:
         suffix = profile_name if profile_name is not None else _profile_suffix()
     except Exception:
@@ -4055,11 +4021,8 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
 
 
 def _guard_named_profile_under_multiplexer(force: bool = False) -> None:
-    """Refuse a named-profile gateway when a multiplexing default gateway already serves it.
-
-    A separate named-profile gateway would double-bind its platforms (two pollers on one bot
-    token, port fights). Inert for the default profile or without a live multiplexer. ``--force`` overrides.
-    """
+    """Refuse a named-profile gateway when a multiplexing default gateway already serves it (a second one
+    would double-bind its platforms: two pollers on one token, port fights). ``--force`` overrides."""
     if force:
         return
     try:
@@ -4093,12 +4056,9 @@ def _guard_named_profile_under_multiplexer(force: bool = False) -> None:
 
 
 def _guard_supervised_gateway_conflict(force: bool = False) -> None:
-    """Refuse a foreground gateway when a service manager already supervises one.
-
-    A shell-launched ``gateway run`` on a systemd/launchd host becomes a second dispatcher that
-    escapes the service cgroup, survives ``systemctl restart``, and concurrently writes the shared
-    kanban DB (multi-writer SQLite WAL corruption). ``--force`` starts anyway.
-    """
+    """Refuse a foreground gateway when a service manager already supervises one: a shell-launched run
+    becomes a second dispatcher that escapes the cgroup, survives ``systemctl restart``, and writes the
+    shared kanban DB concurrently (multi-writer SQLite WAL corruption). ``--force`` starts anyway."""
     if force or _running_under_gateway_supervisor():
         return
     try:
@@ -4127,11 +4087,9 @@ def _guard_supervised_gateway_conflict(force: bool = False) -> None:
 
 
 def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
-    """Cheap PID-file preflight before the expensive ``gateway.run`` import (authoritative lock check).
-
-    Supervisor loops re-running bare ``gateway run`` burned memory on plugin discovery just to fail
-    "already running". Same user-facing contract; never scans other HERMES_HOME roots.
-    """
+    """Cheap PID-file preflight before the expensive ``gateway.run`` import (the authoritative lock check):
+    supervisor loops re-running bare ``gateway run`` burned memory on plugin discovery just to fail
+    "already running". Same user-facing contract; never scans other HERMES_HOME roots."""
     if replace or _running_under_gateway_supervisor():
         return
     try:
@@ -4185,13 +4143,10 @@ def _guard_official_docker_root_gateway() -> None:
 
 
 def _apply_startup_watchdog_config() -> None:
-    """Idempotent backstop arming of the startup-liveness watchdog (programmatic run_gateway callers).
-
-    Must run AFTER the process-conflict guards (a --replace loser must not arm one). config.yaml
-    gateway.startup_watchdog* is the user surface; env vars bridge it because the argv fast-path
-    arms before config loads, and explicit env wins. arm() is idempotent, so a config timeout
-    needs disarm+re-arm. GatewayRunner disarms once the event loop is live.
-    """
+    """Idempotent backstop arming of the startup-liveness watchdog. Must run AFTER the conflict guards (a
+    --replace loser must not arm one). config.yaml gateway.startup_watchdog* is the user surface; env
+    vars bridge it because the argv fast-path arms before config loads, and explicit env wins. arm() is
+    idempotent, so a config timeout needs disarm+re-arm. GatewayRunner disarms once the loop is live."""
     try:
         from hermes_startup_watchdog import (
             ENV_STARTUP_WATCHDOG, ENV_STARTUP_WATCHDOG_TIMEOUT_S, arm_startup_watchdog,
@@ -4237,11 +4192,8 @@ def _absorb_windows_console_controls() -> None:
 
 
 def _make_exit_diag():
-    """Return an ``_exit_diag(tag, **extra)`` recorder writing to ``logs/gateway-exit-diag.log``.
-
-    Captures every way ``asyncio.run()`` can return, for chasing silent Windows gateway deaths.
-    Opt out with HERMES_GATEWAY_EXIT_DIAG=0.
-    """
+    """``_exit_diag(tag, **extra)`` recorder writing ``logs/gateway-exit-diag.log`` — captures every way
+    ``asyncio.run()`` can return, for chasing silent Windows gateway deaths. HERMES_GATEWAY_EXIT_DIAG=0 opts out."""
     from datetime import datetime as _dt, timezone as _tz
 
     def _exit_diag(tag: str, **extra: object) -> None:
@@ -4264,11 +4216,9 @@ def _make_exit_diag():
 
 
 def _respawn_storm_backoff() -> None:
-    """Portable app-level respawn-storm circuit breaker (works where supervisors lack a floor).
-
-    Defaults mirror DEFAULT_CONFIG ``gateway.respawn_storm``; HERMES_GATEWAY_MAX_STARTS /
-    HERMES_GATEWAY_START_WINDOW_S override. max_starts <= 0 disables. Never blocks startup.
-    """
+    """Portable app-level respawn-storm breaker (for supervisors without a floor). Defaults mirror
+    DEFAULT_CONFIG ``gateway.respawn_storm``; HERMES_GATEWAY_MAX_STARTS / HERMES_GATEWAY_START_WINDOW_S
+    override; max_starts <= 0 disables. Never blocks startup."""
     try:
         from gateway.status import record_start_and_check_storm
         _max_starts = 5
@@ -4311,9 +4261,8 @@ def _respawn_storm_backoff() -> None:
 
 
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, force: bool = False):
-    """Run the gateway in foreground. verbose: 1=INFO, 2+=DEBUG on stderr; quiet: no stderr logs;
-    replace: kill an existing instance first (avoids systemd restart loops); force: skip the
-    supervised-gateway conflict guard."""
+    """Run the gateway in foreground. verbose 1=INFO/2+=DEBUG on stderr; quiet: no stderr logs; replace:
+    kill an existing instance first (avoids systemd restart loops); force: skip the supervised guard."""
     _guard_official_docker_root_gateway()
     _guard_named_profile_under_multiplexer(force=force)
     _guard_supervised_gateway_conflict(force=force)
