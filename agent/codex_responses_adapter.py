@@ -168,8 +168,15 @@ def _iter_content_parts(content: list) -> Iterator[tuple[str, Any]]:
                 yield "image", part
 
 
-def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
-    image_part: Dict[str, Any] = {"type": "input_image", "image_url": url}
+def _input_image_part(part: Dict[str, Any], *, keep_empty_url: bool) -> Optional[Dict[str, Any]]:
+    """``input_image`` from a chat/Responses image part (``image_url`` may be a str or ``{url, detail}``);
+    None for an empty url unless ``keep_empty_url``."""
+    url, detail = part.get("image_url"), part.get("detail")
+    if isinstance(url, dict):
+        url, detail = url.get("url"), url.get("detail", detail)
+    if not _nonempty_str(url) and not keep_empty_url:
+        return None
+    image_part: Dict[str, Any] = {"type": "input_image", "image_url": str(url or "")}
     if _nonblank(detail):
         image_part["detail"] = detail.strip()
     return image_part
@@ -177,15 +184,10 @@ def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
 
 def _image_part_for_role(part: Dict[str, Any], role: str, *, keep_empty_url: bool) -> Optional[Dict[str, Any]]:
     """Responses image part for ``role``: assistant → text placeholder (an assistant
-    ``input_image`` 400s every replay); user → ``input_image`` (None for an empty url unless kept)."""
+    ``input_image`` 400s every replay); user → ``input_image``."""
     if role == "assistant":
         return {"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER}
-    url, detail = part.get("image_url"), part.get("detail")  # ``image_url`` may be a str or ``{url, detail}``
-    if isinstance(url, dict):
-        url, detail = url.get("url"), url.get("detail", detail)
-    if _nonempty_str(url):
-        return _input_image_part(url, detail)
-    return _input_image_part(str(url or ""), detail) if keep_empty_url else None
+    return _input_image_part(part, keep_empty_url=keep_empty_url)
 
 
 def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> List[Dict[str, Any]]:
@@ -337,10 +339,7 @@ def _message_item(
 ) -> Dict[str, Any]:
     """Assistant ``message`` item; ``id``/``phase`` are added only when non-empty."""
     item: Dict[str, Any] = {"type": "message", "role": "assistant", "status": status, "content": content}
-    if item_id:
-        item["id"] = item_id
-    if phase:
-        item["phase"] = phase
+    item.update({k: v for k, v in (("id", item_id), ("phase", phase)) if v})
     return item
 
 
@@ -580,26 +579,22 @@ class _PreflightCtx(NamedTuple):
     seen_ids: set
 
 
-def _require_call_id(item: Dict[str, Any], idx: int, kind: str) -> str:
-    call_id = item.get("call_id")
-    if not _nonblank(call_id):
-        raise ValueError(f"Codex Responses input[{idx}] {kind} is missing call_id.")
-    return call_id.strip()
-
-
 def _preflight_function_call(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
-    call_id = _require_call_id(item, idx, "function_call")
-    name = item.get("name")
+    call_id, name = item.get("call_id"), item.get("name")
+    if not _nonblank(call_id):
+        raise ValueError(f"Codex Responses input[{idx}] function_call is missing call_id.")
     if not _nonblank(name):
         raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
     return {
-        "type": "function_call", "call_id": call_id, "name": _sanitize_replayed_fn_name(name),
+        "type": "function_call", "call_id": call_id.strip(), "name": _sanitize_replayed_fn_name(name),
         "arguments": ctx.sanitize_text(_coerce_arguments(item.get("arguments", "{}"))),
     }
 
 
 def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
-    call_id = _require_call_id(item, idx, "function_call_output")
+    call_id = item.get("call_id")
+    if not _nonblank(call_id):
+        raise ValueError(f"Codex Responses input[{idx}] function_call_output is missing call_id.")
     output = item.get("output", "")
     if isinstance(output, list):
         # Multimodal tool result: keep recognised input_text/input_image parts, drop the rest (4xx otherwise).
@@ -609,11 +604,11 @@ def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _Prefli
             if ptype == "input_text" and _nonempty_str(part.get("text")):
                 cleaned.append({"type": "input_text", "text": ctx.sanitize_text(part["text"])})
             elif ptype == "input_image" and _nonempty_str(part.get("image_url")):
-                cleaned.append(_input_image_part(part["image_url"], part.get("detail")))
+                cleaned.append(_input_image_part(part, keep_empty_url=False))
         output_value: Any = cleaned or ""
     else:
         output_value = ctx.sanitize_text(_str_or_empty(output))
-    return {"type": "function_call_output", "call_id": call_id, "output": output_value}
+    return {"type": "function_call_output", "call_id": call_id.strip(), "output": output_value}
 
 
 def _preflight_encrypted(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
