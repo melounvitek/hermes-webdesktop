@@ -168,6 +168,33 @@ def _normalize_nostr_allow_entries(entries: set) -> set:
     return expanded
 
 
+def _principal_matches_allowlist(source, user_id: str, allowed_ids: set) -> bool:
+    """Whether *user_id* (under any platform-specific alias) is in *allowed_ids*."""
+    check_ids = {user_id}
+    if "@" in user_id:
+        check_ids.add(user_id.split("@")[0])
+
+    # WhatsApp (Baileys + Cloud): phone<->LID / JID aliases match the same principal.
+    if source.platform in {Platform.WHATSAPP, Platform.WHATSAPP_CLOUD}:
+        allowed_ids = set().union(*(_expand_whatsapp_auth_aliases(a) for a in allowed_ids)) or allowed_ids
+        check_ids.update(_expand_whatsapp_auth_aliases(user_id))
+        normalized_user_id = _normalize_whatsapp_identifier(user_id)
+        if normalized_user_id:
+            check_ids.add(normalized_user_id)
+
+    platform_value = source.platform.value if source.platform is not None else None
+    # SimpleX: user_id is the numeric contactId but the UI only shows display names.
+    if platform_value == "simplex" and source.user_name:
+        check_ids.add(source.user_name)
+    # Buzz: allowlist may hold npub or hex; inbound pubkeys are hex.
+    if platform_value == "buzz":
+        allowed_ids = _normalize_nostr_allow_entries(allowed_ids)
+        hex_user = _npub_to_hex(user_id) if user_id.startswith("npub") else None
+        if hex_user:
+            check_ids.add(hex_user)
+    return bool(check_ids & allowed_ids)
+
+
 class GatewayAuthorizationMixin:
     """User/chat authorization methods for ``GatewayRunner``."""
 
@@ -397,6 +424,26 @@ class GatewayAuthorizationMixin:
             allowed = {normalize(entry) or entry for entry in allowed}
         return _allows(allowed, user_id)
 
+    def _adapter_resolved_allowlist_ids(self, source) -> set[str]:
+        """IDs an adapter resolved from username-shaped allowlist entries at connect time (Discord).
+
+        The per-turn .env hot-reload restores RAW usernames, so from the second turn on the
+        env allowlist holds usernames while user_id is numeric. Never a widening: the
+        empty-allowlist branch already returned and adapters only resolve operator-written
+        entries. Only called with a non-empty platform allowlist so group/global-only
+        configs never consult adapter memory; type-checked so mocks cannot auto-truthy in.
+        """
+        adapter = resolved_ids = None
+        with contextlib.suppress(Exception):
+            adapter = self._adapter_for_source(source)
+        resolver = getattr(adapter, "resolved_allowlist_user_ids", None)
+        if callable(resolver):
+            with contextlib.suppress(Exception):
+                resolved_ids = resolver()
+        if not isinstance(resolved_ids, (set, frozenset, list, tuple)):
+            return set()
+        return {str(entry).strip() for entry in resolved_ids if isinstance(entry, (str, int)) and str(entry).strip()}
+
     def _is_user_authorized(self, source: SessionSource, *, allow_adapter_delegation: bool = True) -> bool:
         """Whether a user may use the bot.
 
@@ -524,56 +571,9 @@ class GatewayAuthorizationMixin:
             | _coerce_allow_set(group_user_allowlist)
             | _coerce_allow_set(global_allowlist)
         )
-
-        # Adapters resolving username entries to numeric IDs at connect time (Discord)
-        # keep the set in memory; the per-turn .env hot-reload restores RAW usernames,
-        # so union in the adapter's resolved IDs. Never a widening: the empty-allowlist
-        # branch already returned and adapters only resolve operator-written entries.
-        # Guarded on ``platform_allowlist`` so group/global-only configs never consult
-        # adapter memory; type-checked so mock adapters cannot auto-truthy in.
         if platform_allowlist:
-            adapter = resolved_ids = None
-            with contextlib.suppress(Exception):
-                adapter = self._adapter_for_source(source)
-            resolver = getattr(adapter, "resolved_allowlist_user_ids", None)
-            if callable(resolver):
-                with contextlib.suppress(Exception):
-                    resolved_ids = resolver()
-                if isinstance(resolved_ids, (set, frozenset, list, tuple)):
-                    allowed_ids.update(
-                        str(entry).strip() for entry in resolved_ids if isinstance(entry, (str, int)) and str(entry).strip()
-                    )
-
-        if "*" in allowed_ids:
-            return True
-
-        check_ids = {user_id}
-        if "@" in user_id:
-            check_ids.add(user_id.split("@")[0])
-
-        # WhatsApp (Baileys + Cloud): phone<->LID / JID aliases match the same principal.
-        if source.platform in {Platform.WHATSAPP, Platform.WHATSAPP_CLOUD}:
-            allowed_ids = set().union(*(_expand_whatsapp_auth_aliases(a) for a in allowed_ids)) or allowed_ids
-
-            check_ids.update(_expand_whatsapp_auth_aliases(user_id))
-            normalized_user_id = _normalize_whatsapp_identifier(user_id)
-            if normalized_user_id:
-                check_ids.add(normalized_user_id)
-
-        platform_value = source.platform.value if source.platform is not None else None
-
-        # SimpleX: user_id is the numeric contactId but the UI only shows display names.
-        if platform_value == "simplex" and source.user_name:
-            check_ids.add(source.user_name)
-
-        # Buzz: allowlist may hold npub or hex; inbound pubkeys are hex.
-        if platform_value == "buzz":
-            allowed_ids = _normalize_nostr_allow_entries(allowed_ids)
-            hex_user = _npub_to_hex(user_id) if user_id.startswith("npub") else None
-            if hex_user:
-                check_ids.add(hex_user)
-
-        return bool(check_ids & allowed_ids)
+            allowed_ids |= self._adapter_resolved_allowlist_ids(source)
+        return "*" in allowed_ids or _principal_matches_allowlist(source, user_id, allowed_ids)
 
     def _get_unauthorized_dm_behavior(self, platform: Optional[Platform], *, profile: Optional[str] = None) -> str:
         """How unauthorized DMs are handled ("pair" / "ignore") for a platform.
