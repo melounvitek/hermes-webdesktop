@@ -5,7 +5,6 @@ invocation, whether an attached extension controller (via
 :mod:`gateway.browser_control_broker`) or the legacy backend executes it.
 
 Routing contract (see ``tests/tools/test_browser_extension_router.py``):
-
 - Feature off ⇒ legacy, broker never touched, ``fallback()`` called exactly once.
 - No server-bound identity ⇒ legacy.
 - Bound identity ⇒ authoritative extension lane; missing/ambiguous scope,
@@ -31,10 +30,10 @@ def _bound_identity() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """(session_id, principal_id, transport_family) from the session context."""
     from gateway.session_context import get_session_env
 
-    return (
-        get_session_env("HERMES_SESSION_ID", "") or None,
-        get_session_env("HERMES_BROWSER_CONTROL_PRINCIPAL", "") or None,
-        get_session_env("HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY", "") or None,
+    return tuple(  # type: ignore[return-value]
+        get_session_env(key, "") or None
+        for key in ("HERMES_SESSION_ID", "HERMES_BROWSER_CONTROL_PRINCIPAL",
+                    "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY")
     )
 
 
@@ -46,22 +45,18 @@ def _controller_unavailable(message: str) -> Exception:
 
 def extension_controller_available(action: str) -> bool:
     """Whether this request owns one exact controller capable of ``action``.
-
     Runs during tool-schema assembly inside the request's session context;
-    consults the process-local broker directly and fails closed on any gap.
-    """
+    consults the process-local broker directly and fails closed on any gap."""
     try:
         from gateway.browser_control_broker import browser_control_enabled, get_browser_control_broker
 
         if not browser_control_enabled():
             return False
-        session_id, principal_id, transport_family = _bound_identity()
-        if not session_id or not principal_id or not transport_family:
+        session_id, principal_id, transport_family = identity = _bound_identity()
+        if not all(identity):
             return False
         broker = get_browser_control_broker()
-        scope = broker.scope_for_session(
-            session_id=session_id, principal_id=principal_id, transport_family=transport_family,
-        )
+        scope = broker.scope_for_session(session_id=session_id, principal_id=principal_id, transport_family=transport_family)
         return scope is not None and broker.select(scope, action) is not None
     except Exception:
         logger.debug("browser extension availability check failed for %s", action, exc_info=True)
@@ -69,17 +64,9 @@ def extension_controller_available(action: str) -> bool:
 
 
 def route_browser_tool(
-    action: str,
-    args: Dict[str, Any],
-    *,
-    fallback: Callable[[], Any],
-    broker: Any,
-    enabled: bool,
-    session_id: Optional[str] = None,
-    task_id: Optional[str] = None,
-    principal_id: Optional[str] = None,
-    transport_family: Optional[str] = None,
-    tool_call_id: Optional[str] = "",
+    action: str, args: Dict[str, Any], *, fallback: Callable[[], Any], broker: Any, enabled: bool,
+    session_id: Optional[str] = None, task_id: Optional[str] = None, principal_id: Optional[str] = None,
+    transport_family: Optional[str] = None, tool_call_id: Optional[str] = "",
 ) -> Any:
     """Route one browser action through the extension-control broker.
 
@@ -91,9 +78,7 @@ def route_browser_tool(
     if not enabled or not str(principal_id or "").strip() or not str(transport_family or "").strip():
         return fallback()
 
-    identity = dict(
-        session_id=session_id, task_id=task_id, principal_id=principal_id, transport_family=transport_family,
-    )
+    identity = dict(session_id=session_id, task_id=task_id, principal_id=principal_id, transport_family=transport_family)
     scope = broker.scope_for_session(**identity)
     if scope is None:
         # A stamped identity only becomes authoritative once a controller has
@@ -125,20 +110,12 @@ def current_tool_call_id() -> str:
 
 
 def routed_browser_handler(
-    action: str,
-    args: Dict[str, Any],
-    *,
-    fallback: Callable[[], Any],
-    task_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    principal_id: Optional[str] = None,
-    transport_family: Optional[str] = None,
-    tool_call_id: Optional[str] = None,
+    action: str, args: Dict[str, Any], *, fallback: Callable[[], Any], task_id: Optional[str] = None,
+    session_id: Optional[str] = None, principal_id: Optional[str] = None,
+    transport_family: Optional[str] = None, tool_call_id: Optional[str] = None,
 ) -> Any:
     """Lazy registry-handler route wrapper for ``browser_*`` tools.
-
-    Feature off (or gateway unimportable) ⇒ the legacy handler runs unchanged.
-    """
+    Feature off (or gateway unimportable) ⇒ the legacy handler runs unchanged."""
     try:
         from gateway.browser_control_broker import browser_control_enabled, get_browser_control_broker
     except Exception as exc:  # pragma: no cover - defensive, gateway always present
@@ -153,14 +130,8 @@ def routed_browser_handler(
         env_session = env_principal = env_transport = None
 
     return route_browser_tool(
-        action,
-        args,
-        fallback=fallback,
-        broker=get_browser_control_broker(),
-        enabled=True,
-        session_id=session_id or env_session,
-        task_id=task_id,
-        principal_id=principal_id or env_principal,
+        action, args, fallback=fallback, broker=get_browser_control_broker(), enabled=True,
+        session_id=session_id or env_session, task_id=task_id, principal_id=principal_id or env_principal,
         transport_family=transport_family or env_transport,
         tool_call_id=current_tool_call_id() if tool_call_id is None else tool_call_id,
     )

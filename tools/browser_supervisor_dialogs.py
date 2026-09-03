@@ -1,17 +1,11 @@
 """Dialog capture + response half of the CDP supervisor.
 
-Two capture paths feed the same ``PendingDialog`` queue:
-
-* native ``Page.javascriptDialogOpening`` events (answered with
-  ``Page.handleJavaScriptDialog``), and
-* the injected *dialog bridge*: a page script that rewrites alert/confirm/prompt
-  into a sync XHR to a magic host we intercept via the CDP ``Fetch`` domain and
-  answer with ``Fetch.fulfillRequest``. Works on Browserbase, whose CDP proxy
-  auto-dismisses real native dialogs, because the native dialog never fires.
-
-``DialogSupervisionMixin`` is mixed into ``tools.browser_supervisor.CDPSupervisor``
-and relies on the state that class initialises (``_state_lock``,
-``_pending_dialogs``, ``_recent_dialogs``, ``_dialog_watchdogs``, ``_cdp`` ...).
+Two capture paths feed one ``PendingDialog`` queue: native ``Page.javascriptDialogOpening``
+events (answered with ``Page.handleJavaScriptDialog``), and the injected *dialog bridge* —
+a page script rewriting alert/confirm/prompt into a sync XHR to a magic host we intercept
+via the CDP ``Fetch`` domain and answer with ``Fetch.fulfillRequest``. The bridge works on
+Browserbase (whose CDP proxy auto-dismisses native dialogs) because the native dialog never fires.
+``DialogSupervisionMixin`` relies on state ``CDPSupervisor.__init__`` sets.
 """
 
 from __future__ import annotations
@@ -41,7 +35,13 @@ def _trim_ring(events: list, keep: int) -> list:
     return events[-keep:] if len(events) > keep * 2 else events
 
 
-# ── Policy / config defaults ─────────────────────────────────────────────────
+_REDACTED_FIELDS = frozenset({"message", "default_prompt"})
+
+
+def _dialog_dict(obj: Any, keys: tuple) -> Dict[str, Any]:
+    """Snapshot dict of ``keys`` with page-originated text fields redacted."""
+    return {k: _redact_supervisor_text(getattr(obj, k)) if k in _REDACTED_FIELDS else getattr(obj, k) for k in keys}
+
 
 DIALOG_POLICY_MUST_RESPOND = "must_respond"
 DIALOG_POLICY_AUTO_DISMISS = "auto_dismiss"
@@ -52,22 +52,19 @@ _VALID_POLICIES = frozenset(
 DEFAULT_DIALOG_POLICY = DIALOG_POLICY_MUST_RESPOND
 DEFAULT_DIALOG_TIMEOUT_S = 300.0
 
-# Last N closed dialogs kept in ``recent_dialogs`` so agents on backends that
-# auto-dismiss server-side (Browserbase) can still observe that a dialog fired.
+# Last N closed dialogs kept so agents on backends that auto-dismiss server-side
+# (Browserbase) can still observe that a dialog fired.
 RECENT_DIALOGS_MAX = 20
 
-# Magic host the injected dialog bridge XHRs to. Intercepted via the CDP Fetch
-# domain before any network resolution, so it never has to exist. Keep ASCII +
-# URL-safe; Fetch patterns are gated on it.
+# Magic host the bridge XHRs to; intercepted via CDP Fetch before any network
+# resolution, so it never has to exist. Keep ASCII + URL-safe (Fetch patterns gate on it).
 DIALOG_BRIDGE_HOST = "hermes-dialog-bridge.invalid"
 DIALOG_BRIDGE_URL_PATTERN = f"http://{DIALOG_BRIDGE_HOST}/*"
 
-# Injected into every frame via Page.addScriptToEvaluateOnNewDocument. Uses a
-# sync GET with query params so the Fetch interceptor never parses a body; if
-# the bridge is unreachable it returns null so the page still sees *some*
-# behavior (the backend auto-dismisses). onbeforeunload is left native — it
-# can't be prompted synchronously without racing navigation; the native-dialog
-# fallback path still surfaces it in recent_dialogs.
+# Injected into every frame via Page.addScriptToEvaluateOnNewDocument. Sync GET with
+# query params so the Fetch interceptor never parses a body; unreachable bridge → null
+# so the page still sees *some* behavior. onbeforeunload is left native (can't be
+# prompted synchronously without racing navigation); the native path still records it.
 _DIALOG_BRIDGE_SCRIPT = r"""
 (() => {
   if (window.__hermesDialogBridgeInstalled) return;
@@ -110,9 +107,6 @@ _DIALOG_BRIDGE_SCRIPT = r"""
 """
 
 
-# ── Data model ────────────────────────────────────────────────────────────────
-
-
 @dataclass
 class PendingDialog:
     """A JS dialog currently open on some frame's session."""
@@ -124,19 +118,11 @@ class PendingDialog:
     opened_at: float
     cdp_session_id: str  # which attached CDP session the dialog fired in
     frame_id: Optional[str] = None
-    # Set when captured via the bridge XHR path: respond via Fetch.fulfillRequest,
-    # NOT Page.handleJavaScriptDialog — the native dialog never fired.
+    # Bridge XHR path: respond via Fetch.fulfillRequest, NOT Page.handleJavaScriptDialog.
     bridge_request_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": self.type,
-            "message": _redact_supervisor_text(self.message),
-            "default_prompt": _redact_supervisor_text(self.default_prompt),
-            "opened_at": self.opened_at,
-            "frame_id": self.frame_id,
-        }
+        return _dialog_dict(self, ("id", "type", "message", "default_prompt", "opened_at", "frame_id"))
 
 
 @dataclass
@@ -152,18 +138,7 @@ class DialogRecord:
     frame_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": self.type,
-            "message": _redact_supervisor_text(self.message),
-            "opened_at": self.opened_at,
-            "closed_at": self.closed_at,
-            "closed_by": self.closed_by,
-            "frame_id": self.frame_id,
-        }
-
-
-# ── Mixin ─────────────────────────────────────────────────────────────────────
+        return _dialog_dict(self, ("id", "type", "message", "opened_at", "closed_at", "closed_by", "frame_id"))
 
 
 class DialogSupervisionMixin:
@@ -178,51 +153,34 @@ class DialogSupervisionMixin:
             logger.debug("%s failed (%s): %s", method, what, e)
 
     async def _install_dialog_bridge(self, session_id: str) -> None:
-        """Install the dialog-bridge init script + Fetch interceptor on a session.
-
-        The JS override runs in every frame before page scripts; Fetch.enable
-        scoped to the bridge URL catches the XHRs, which surface as pending
-        dialogs and are fulfilled when the agent responds. Idempotent at the CDP
-        level (Chromium de-dupes identical add-script calls; Fetch.enable
-        replaces prior patterns). The final Runtime.evaluate injects into the
-        already-loaded document so existing pages pick up the override on reconnect.
-        """
+        """Install the dialog-bridge init script + Fetch interceptor on a session. Idempotent at
+        the CDP level (Chromium de-dupes identical add-script calls; Fetch.enable replaces prior
+        patterns); the final Runtime.evaluate injects into the already-loaded document so
+        existing pages pick up the override on reconnect."""
         sid = (session_id or "")[:16]
-        await self._cdp_quiet(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": _DIALOG_BRIDGE_SCRIPT, "runImmediately": True},
-            session_id=session_id, timeout=5.0, what=f"dialog bridge sid={sid}",
+        steps = (
+            ("Page.addScriptToEvaluateOnNewDocument", {"source": _DIALOG_BRIDGE_SCRIPT, "runImmediately": True},
+             5.0, f"dialog bridge sid={sid}"),
+            ("Fetch.enable", {"patterns": [{"urlPattern": DIALOG_BRIDGE_URL_PATTERN, "requestStage": "Request"}],
+                              "handleAuthRequests": False}, 5.0, f"dialog bridge sid={sid}"),
+            ("Runtime.evaluate", {"expression": _DIALOG_BRIDGE_SCRIPT, "returnByValue": True},
+             3.0, f"dialog bridge inject sid={sid}"),
         )
-        await self._cdp_quiet(
-            "Fetch.enable",
-            {"patterns": [{"urlPattern": DIALOG_BRIDGE_URL_PATTERN, "requestStage": "Request"}],
-             "handleAuthRequests": False},
-            session_id=session_id, timeout=5.0, what=f"dialog bridge sid={sid}",
-        )
-        await self._cdp_quiet(
-            "Runtime.evaluate",
-            {"expression": _DIALOG_BRIDGE_SCRIPT, "returnByValue": True},
-            session_id=session_id, timeout=3.0, what=f"dialog bridge inject sid={sid}",
-        )
+        for method, params, timeout, what in steps:
+            await self._cdp_quiet(method, params, session_id=session_id, timeout=timeout, what=what)
 
     # ── Capture ──────────────────────────────────────────────────────────────
 
     async def _on_dialog_opening(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        self._admit_dialog(self._new_dialog(
-            type=str(params.get("type") or ""),
-            message=str(params.get("message") or ""),
-            default_prompt=str(params.get("defaultPrompt") or ""),
-            session_id=session_id,
-            frame_id=params.get("frameId"),
-        ))
+        self._admit_dialog(
+            type=str(params.get("type") or ""), message=str(params.get("message") or ""),
+            default_prompt=str(params.get("defaultPrompt") or ""), session_id=session_id, frame_id=params.get("frameId"),
+        )
 
     async def _on_fetch_paused(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        """Bridge XHR captured mid-flight — materialize as a pending dialog.
-
-        The page's JS thread is blocked on the XHR until we Fetch.fulfillRequest
-        (from ``respond_to_dialog`` or the watchdog). Requests for other hosts
-        are forwarded unchanged so the page sees its own request.
-        """
+        """Bridge XHR captured mid-flight — materialize as a pending dialog. The page's JS
+        thread is blocked on the XHR until we Fetch.fulfillRequest (agent or watchdog);
+        requests for other hosts are forwarded unchanged."""
         url = str(params.get("request", {}).get("url") or "")
         request_id = params.get("requestId")
         if not request_id:
@@ -231,40 +189,26 @@ class DialogSupervisionMixin:
             await self._cdp_quiet("Fetch.continueRequest", {"requestId": request_id},
                                   session_id=session_id, timeout=3.0, what="passthrough")
             return
-        q = parse_qs(urlparse(url).query)
-        self._admit_dialog(self._new_dialog(
-            type=q.get("kind", [""])[0] or "alert",
-            message=q.get("message", [""])[0],
-            default_prompt=q.get("default_prompt", [""])[0],
-            session_id=session_id,
-            frame_id=params.get("frameId"),
-            bridge_request_id=str(request_id),
-        ))
-
-    def _new_dialog(self, *, type: str, message: str, default_prompt: str, session_id: Optional[str],
-                    frame_id: Optional[str], bridge_request_id: Optional[str] = None) -> PendingDialog:
-        self._dialog_seq += 1
-        return PendingDialog(
-            id=f"d-{self._dialog_seq}",
-            type=type,
-            message=message,
-            default_prompt=default_prompt,
-            opened_at=time.time(),
-            cdp_session_id=session_id or self._page_session_id or "",
-            frame_id=frame_id,
-            bridge_request_id=bridge_request_id,
+        q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+        self._admit_dialog(
+            type=q.get("kind") or "alert", message=q.get("message", ""), default_prompt=q.get("default_prompt", ""),
+            session_id=session_id, frame_id=params.get("frameId"), bridge_request_id=str(request_id),
         )
 
-    def _admit_dialog(self, dialog: PendingDialog) -> None:
-        """Apply the dialog policy: auto-respond, or queue + arm the watchdog.
-
-        Auto policies archive FIRST (tagged ``auto_policy``) so the ``closed``
-        event that follows our own response isn't re-archived as ``remote``.
-        """
-        auto = {
-            DIALOG_POLICY_AUTO_DISMISS: (False, ""),
-            DIALOG_POLICY_AUTO_ACCEPT: (True, dialog.default_prompt),
-        }.get(self.dialog_policy)
+    def _admit_dialog(self, *, type: str, message: str, default_prompt: str, session_id: Optional[str],
+                      frame_id: Optional[str], bridge_request_id: Optional[str] = None) -> None:
+        """Create the dialog and apply the policy: auto-respond, or queue + arm the watchdog.
+        Auto policies archive FIRST (tagged ``auto_policy``) so the ``closed`` event that
+        follows our own response isn't re-archived as ``remote``."""
+        self._dialog_seq += 1
+        dialog = PendingDialog(
+            id=f"d-{self._dialog_seq}", type=type, message=message, default_prompt=default_prompt,
+            opened_at=time.time(), cdp_session_id=session_id or self._page_session_id or "",
+            frame_id=frame_id, bridge_request_id=bridge_request_id,
+        )
+        auto = {DIALOG_POLICY_AUTO_DISMISS: (False, ""), DIALOG_POLICY_AUTO_ACCEPT: (True, default_prompt)}.get(
+            self.dialog_policy
+        )
         if auto is not None:
             with self._state_lock:
                 self._archive_dialog_locked(dialog, "auto_policy")
@@ -280,37 +224,26 @@ class DialogSupervisionMixin:
     # ── Responding ───────────────────────────────────────────────────────────
 
     async def _respond(self, dialog: PendingDialog, *, accept: bool, prompt_text: Optional[str]) -> None:
-        """Bridge-fulfill for XHR-captured dialogs, else native CDP.
-
-        Native path sends ``promptText`` only for prompt dialogs when
-        ``prompt_text`` is given, and raises on CDP failure; the bridge path
-        (Fetch.fulfillRequest so the page unblocks) swallows failures.
-        """
+        """Bridge-fulfill for XHR-captured dialogs (swallows failures so the page
+        unblocks), else native CDP — ``promptText`` only for prompt dialogs when
+        given; raises on CDP failure."""
+        session_id = dialog.cdp_session_id or None
         if dialog.bridge_request_id:
-            body = json.dumps({
-                "accept": bool(accept),
-                "prompt_text": (prompt_text or "") if dialog.type == "prompt" else "",
-                "dialog_id": dialog.id,
-            }).encode()
+            body = json.dumps({"accept": bool(accept), "dialog_id": dialog.id,
+                               "prompt_text": (prompt_text or "") if dialog.type == "prompt" else ""}).encode()
             await self._cdp_quiet(
                 "Fetch.fulfillRequest",
-                {
-                    "requestId": dialog.bridge_request_id,
-                    "responseCode": 200,
-                    "responseHeaders": [
-                        {"name": "Content-Type", "value": "application/json"},
-                        {"name": "Access-Control-Allow-Origin", "value": "*"},
-                    ],
-                    "body": base64.b64encode(body).decode(),
-                },
-                session_id=dialog.cdp_session_id or None, timeout=5.0, what=f"bridge fulfill {dialog.id}",
+                {"requestId": dialog.bridge_request_id, "responseCode": 200,
+                 "responseHeaders": [{"name": "Content-Type", "value": "application/json"},
+                                     {"name": "Access-Control-Allow-Origin", "value": "*"}],
+                 "body": base64.b64encode(body).decode()},
+                session_id=session_id, timeout=5.0, what=f"bridge fulfill {dialog.id}",
             )
             return
         params: Dict[str, Any] = {"accept": accept}
         if prompt_text is not None and dialog.type == "prompt":
             params["promptText"] = prompt_text
-        await self._cdp("Page.handleJavaScriptDialog", params,
-                        session_id=dialog.cdp_session_id or None, timeout=5.0)
+        await self._cdp("Page.handleJavaScriptDialog", params, session_id=session_id, timeout=5.0)
 
     async def _respond_quiet(self, dialog: PendingDialog, *, accept: bool, prompt_text: Optional[str]) -> None:
         """Auto-policy / watchdog response (already archived by the caller); failures logged only."""
@@ -320,11 +253,8 @@ class DialogSupervisionMixin:
             logger.debug("auto response failed for %s: %s", dialog.id, e)
 
     async def _handle_dialog_cdp(self, dialog: PendingDialog, *, accept: bool, prompt_text: str) -> None:
-        """Agent response path.
-
-        The dialog is retired regardless of outcome — a CDP error usually means
-        it already closed (browser auto-dismissed after navigation, etc.).
-        """
+        """Agent response path. The dialog is retired regardless of outcome — a CDP
+        error usually means it already closed (browser auto-dismissed after navigation)."""
         try:
             await self._respond(dialog, accept=accept, prompt_text=prompt_text)
         finally:
@@ -335,14 +265,10 @@ class DialogSupervisionMixin:
             dialog = self._pending_dialogs.get(dialog_id)
         if dialog is None:
             return
-        logger.warning(
-            "CDP supervisor %s: dialog %s (%s) auto-dismissed after %ss timeout",
-            self.task_id, dialog_id, dialog.type, self.dialog_timeout_s,
-        )
+        logger.warning("CDP supervisor %s: dialog %s (%s) auto-dismissed after %ss timeout",
+                       self.task_id, dialog_id, dialog.type, self.dialog_timeout_s)
         # Archive with watchdog tag BEFORE unblocking the page.
-        with self._state_lock:
-            if self._pending_dialogs.pop(dialog_id, None) is not None:
-                self._archive_dialog_locked(dialog, "watchdog")
+        self._retire_dialog(dialog_id, "watchdog")
         await self._respond_quiet(dialog, accept=False, prompt_text=None)
 
     # ── Bookkeeping ──────────────────────────────────────────────────────────
@@ -359,24 +285,19 @@ class DialogSupervisionMixin:
 
     def _archive_dialog_locked(self, dialog: PendingDialog, closed_by: str) -> None:
         """Move a pending dialog to the recent_dialogs ring buffer. Must hold state_lock."""
-        self._recent_dialogs.append(DialogRecord(
-            id=dialog.id, type=dialog.type, message=dialog.message, opened_at=dialog.opened_at,
-            closed_at=time.time(), closed_by=closed_by, frame_id=dialog.frame_id,
-        ))
-        self._recent_dialogs = _trim_ring(self._recent_dialogs, RECENT_DIALOGS_MAX)
+        record = DialogRecord(id=dialog.id, type=dialog.type, message=dialog.message, opened_at=dialog.opened_at,
+                              closed_at=time.time(), closed_by=closed_by, frame_id=dialog.frame_id)
+        self._recent_dialogs = _trim_ring([*self._recent_dialogs, record], RECENT_DIALOGS_MAX)
 
     async def _on_dialog_closed(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        # ``Page.javascriptDialogClosed`` carries only ``result``/``userInput``, not
-        # the message. Match by session id and clear the oldest native dialog on
-        # it — the JS thread blocks while a dialog is up, so at most one is in
-        # flight per session. Bridge dialogs resolve via Fetch.fulfillRequest.
+        # ``Page.javascriptDialogClosed`` carries only ``result``/``userInput``: match by
+        # session id and clear the oldest native dialog on it (the JS thread blocks while
+        # a dialog is up, so at most one is in flight). Bridge dialogs resolve via Fetch.
         with self._state_lock:
-            candidate_ids = [
-                d.id for d in self._pending_dialogs.values()
-                if d.cdp_session_id == session_id and d.bridge_request_id is None
-            ]
-        if candidate_ids:
-            self._retire_dialog(candidate_ids[0], "remote")
+            candidate = next((d.id for d in self._pending_dialogs.values()
+                              if d.cdp_session_id == session_id and d.bridge_request_id is None), None)
+        if candidate:
+            self._retire_dialog(candidate, "remote")
 
     # CDP event → handler(self, params, session_id); merged into CDPSupervisor._EVENT_HANDLERS.
     EVENT_HANDLERS: Dict[str, Callable[..., Any]] = {
