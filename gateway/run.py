@@ -1077,8 +1077,7 @@ def build_resume_recovery_note(
             "Address the user's NEW message below FIRST and focus on what the user is asking now."
         )
         tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any "
-            "unfinished work from the conversation history."
+            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
         )
     elif interactive:
         resume_guidance = (
@@ -1086,8 +1085,7 @@ def build_resume_recovery_note(
             "successfully and ask what they would like to do next."
         )
         tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any "
-            "unfinished work from the conversation history."
+            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
         )
     else:
         resume_guidance = (
@@ -1104,8 +1102,7 @@ def build_resume_recovery_note(
         f"[System note: The previous turn was interrupted by "
         f"{reason_phrase}; the gateway is now back online. "
         f"Any restart/shutdown command in the history has already "
-        f"run — do NOT re-execute or verify it. {resume_guidance} "
-        f"{tail_guidance}]"
+        f"run — do NOT re-execute or verify it. {resume_guidance} {tail_guidance}]"
         + (f"\n\n{message}" if message else "")
     )
 
@@ -1369,9 +1366,7 @@ def _wrap_current_message_with_observed_context(message: Any, observed_context: 
         return message
 
     prefix = (
-        f"{_OBSERVED_GROUP_CONTEXT_HEADER}\n"
-        f"{observed_context}\n\n"
-        f"{_CURRENT_ADDRESSED_MESSAGE_HEADER}\n"
+        f"{_OBSERVED_GROUP_CONTEXT_HEADER}\n{observed_context}\n\n{_CURRENT_ADDRESSED_MESSAGE_HEADER}\n"
     )
 
     if isinstance(message, str):
@@ -2221,8 +2216,7 @@ if _config_path.exists():
     except Exception as _bridge_err:
         # stderr, not logger: the module logger is not initialized yet at import time.
         print(
-            f"  Warning: config.yaml → env bridge failed: "
-            f"{type(_bridge_err).__name__}: {_bridge_err}",
+            f"  Warning: config.yaml → env bridge failed: {type(_bridge_err).__name__}: {_bridge_err}",
             file=sys.stderr)
         print(
             "  Gateway will fall back to .env values, which may not match "
@@ -2733,8 +2727,7 @@ def _build_document_context_note(
     """
     if mtype.startswith("text/") and content_inlined:
         return (
-            f"[The user sent a text document: '{display_name}'. "
-            f"Its content has been included below. "
+            f"[The user sent a text document: '{display_name}'. Its content has been included below. "
             f"The file is also saved at: {agent_path}]"
         )
     if mtype.startswith("text/"):
@@ -3370,8 +3363,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
             f"watch pattern \"{_pat}\".\n"
-            f"Command: {_cmd}\n"
-            f"Matched output:\n{_out}"
+            f"Command: {_cmd}\nMatched output:\n{_out}"
         )
         if _sup:
             text += f"\n({_sup} earlier matches were suppressed by rate limit)"
@@ -4870,8 +4862,7 @@ class GatewayRunner(
                 served = {name for name, _home in _multiplex_profile_homes(config)}
             except Exception as exc:
                 logger.warning(
-                    "Rejecting profile route %r because the served-profile set "
-                    "could not be resolved",
+                    "Rejecting profile route %r because the served-profile set could not be resolved",
                     matched.name,
                     exc_info=True)
                 raise ProfileRouteRejected(matched.name) from exc
