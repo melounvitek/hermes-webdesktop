@@ -426,9 +426,9 @@ class TestNormalizationOrdering:
         """Ordering invariant, locked against regression."""
         import inspect
 
-        from agent import conversation_loop
+        from agent import turn_request_assembly
 
-        src = inspect.getsource(conversation_loop)
+        src = inspect.getsource(turn_request_assembly)
         # Anchor on the call-block request plan, not the retry helper.
         anchor = src.index("Build the request-local cache sections")
         mark = src.index("build_prompt_cache_plan(\n", anchor)

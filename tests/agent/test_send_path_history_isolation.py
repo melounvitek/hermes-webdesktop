@@ -173,12 +173,13 @@ class TestSendPathBuildIsWiredToTheClone:
         import inspect
 
         import agent.turn_context as tc
+        import agent.turn_request_assembly as ra
 
         # The history build lives in turn_context.build_api_messages; the
-        # prefill insert stays in conversation_loop. Scan both homes.
+        # prefill insert in turn_request_assembly.assemble_api_request. Scan all homes.
         nodes = [
             node
-            for mod in (cl, tc)
+            for mod in (cl, tc, ra)
             for node in ast.walk(ast.parse(inspect.getsource(mod)))
         ]
 
