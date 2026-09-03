@@ -306,10 +306,11 @@ def _refresh_credentials_after_401(
     Returns True when a refresh succeeded and the call should be retried."""
     from agent.conversation_loop import _is_copilot_provider
 
+    if status_code != 401:
+        return False
     if (
         agent.api_mode == "codex_responses"
         and agent.provider in {"openai-codex", "xai-oauth"}
-        and status_code == 401
         and not _retry.codex_auth_retry_attempted
     ):
         _retry.codex_auth_retry_attempted = True
@@ -317,12 +318,7 @@ def _refresh_credentials_after_401(
             _label = "xAI OAuth" if agent.provider == "xai-oauth" else "Codex"
             agent._buffer_vprint(f"🔐 {_label} auth refreshed after 401. Retrying request...")
             return True
-    if (
-        agent.api_mode == "chat_completions"
-        and agent.provider == "vertex"
-        and status_code == 401
-        and not _retry.vertex_auth_retry_attempted
-    ):
+    if agent.api_mode == "chat_completions" and agent.provider == "vertex" and not _retry.vertex_auth_retry_attempted:
         _retry.vertex_auth_retry_attempted = True
         if agent._try_refresh_vertex_client_credentials():
             agent._buffer_vprint("🔐 Vertex AI token refreshed after 401. Retrying request...")
@@ -330,7 +326,6 @@ def _refresh_credentials_after_401(
     if (
         agent.api_mode in ("chat_completions", "anthropic_messages")
         and agent.provider == "nous"
-        and status_code == 401
         and not _retry.nous_auth_retry_attempted
     ):
         _retry.nous_auth_retry_attempted = True
@@ -338,14 +333,13 @@ def _refresh_credentials_after_401(
             agent._buffer_vprint("🔐 Nous agent key refreshed after 401. Retrying request...")
             return True
         _print_nous_401_diagnostics(agent, api_error)
-    if _is_copilot_provider(agent) and status_code == 401 and not _retry.copilot_auth_retry_attempted:
+    if _is_copilot_provider(agent) and not _retry.copilot_auth_retry_attempted:
         _retry.copilot_auth_retry_attempted = True
         if agent._try_refresh_copilot_client_credentials():
             agent._buffer_vprint("🔐 Copilot credentials refreshed after 401. Retrying request...")
             return True
     if (
         agent.api_mode == "anthropic_messages"
-        and status_code == 401
         and hasattr(agent, '_anthropic_api_key')
         and not _retry.anthropic_auth_retry_attempted
     ):
@@ -441,10 +435,7 @@ def _recover_format_errors(
             from tools.schema_sanitizer import strip_pattern_and_format
             _, _stripped = strip_pattern_and_format(agent.tools)
         except Exception as _strip_exc:  # pragma: no cover — defensive
-            logger.warning(
-                "%sllama.cpp grammar recovery: strip helper failed: %s",
-                agent.log_prefix, _strip_exc,
-            )
+            logger.warning("%sllama.cpp grammar recovery: strip helper failed: %s", agent.log_prefix, _strip_exc)
             _stripped = 0
         if _stripped:
             _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped} pattern/format keyword(s), retrying...")
@@ -472,11 +463,8 @@ def recover_after_classification(
     generic retry path. Order is load-bearing (each branch may ``return`` early):
     Nous paid-entitlement refresh → credential-pool rotation → image shrink →
     multimodal-tool-content strip → corrupt-image strip → Anthropic OAuth 1M-beta
-    disable → per-provider 401 credential refresh (codex/xai, vertex, nous, copilot,
-    anthropic, with user-facing diagnostics when refresh fails) → thinking-signature
-    strip → invalid-encrypted-content replay disable → native-compaction reject →
-    llama.cpp grammar strip. Returns ``(retry_now, recovered_with_pool)``;
-    ``recovered_with_pool`` is read later by the Nous rate-limit guard."""
+    disable → per-provider 401 credential refresh → format-recovery strips.
+    Returns ``(retry_now, recovered_with_pool)``; the latter feeds the Nous rate-limit guard."""
     from agent.conversation_loop import _is_nous_inference_route
 
     if (
@@ -983,15 +971,14 @@ def compute_error_backoff(
     from agent.conversation_loop import adaptive_rate_limit_backoff, jittered_backoff
 
     _retry_after = None
-    if is_rate_limited:
-        _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
-        if _resp_headers and hasattr(_resp_headers, "get"):
-            _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
-            if _ra_raw:
-                try:
-                    _retry_after = min(float(_ra_raw), 600)
-                except (TypeError, ValueError):
-                    pass
+    _resp_headers = getattr(getattr(api_error, "response", None), "headers", None) if is_rate_limited else None
+    if _resp_headers and hasattr(_resp_headers, "get"):
+        _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
+        if _ra_raw:
+            try:
+                _retry_after = min(float(_ra_raw), 600)
+            except (TypeError, ValueError):
+                pass
     wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
     _backoff_policy = None
     _adaptive = is_rate_limited or is_zai_coding_overload
@@ -1132,13 +1119,10 @@ def _failure_hint_for(code: Optional[int], api_duration: float) -> str:
 
 @dataclass
 class ClassifiedErrorVerdict:
-    """Outcome of ``route_classified_error``.
-
-    ``action``: ``"return"`` (terminal result), ``"break"`` (restart armed on
-    ``_retry``), ``"continue"`` (re-enter the retry loop; Nous guard re-check) or
-    ``"fallthrough"`` (proceed to overflow / client-error / backoff handling). The
-    remaining fields are loop locals the router may have rebound or computed for the
-    later steps."""
+    """Outcome of ``route_classified_error``. ``action``: ``"return"`` (terminal result),
+    ``"break"`` (restart armed on ``_retry``), ``"continue"`` (re-enter the retry loop; Nous
+    guard re-check) or ``"fallthrough"`` (proceed to overflow / client-error / backoff
+    handling). The remaining fields are loop locals the router rebound or computed."""
 
     action: str
     result: Optional[Dict[str, Any]]
