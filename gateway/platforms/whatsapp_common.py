@@ -3,20 +3,10 @@ Transport-agnostic WhatsApp behavior shared by the Baileys bridge adapter and th
 Cloud API adapter: allow-list / DM / group gating, mention detection, quoted-reply-
 to-bot detection, broadcast filtering, WhatsApp markdown conversion, chunk budgeting.
 
-Mixin contract — the adapter must set these on ``self`` before any of the
-mixin's methods are called (typically in ``__init__``):
-
-    self.config        # gateway.config.PlatformConfig
-    self.name          # str — adapter name (used in log lines)
-    self._dm_policy             # str: "open" | "allowlist" | "disabled"
-    self._allow_from            # set[str]
-    self._group_policy          # str: "open" | "allowlist" | "disabled"
-    self._group_allow_from      # set[str]
-    self._mention_patterns      # list[re.Pattern]
-    self._reply_prefix          # Optional[str]
-
-Class attributes ``MAX_MESSAGE_LENGTH`` and ``DEFAULT_REPLY_PREFIX`` are
-defined on the mixin and may be overridden per-adapter if needed.
+Mixin contract — the host adapter sets these on ``self`` before calling any mixin
+method: ``config`` (PlatformConfig), ``name``, ``_dm_policy`` / ``_group_policy``
+("open" | "allowlist" | "disabled"), ``_allow_from`` / ``_group_allow_from`` (set[str]),
+``_mention_patterns`` (list[re.Pattern]), ``_reply_prefix`` (Optional[str]).
 """
 
 from __future__ import annotations
@@ -33,6 +23,27 @@ from gateway.platforms._shared import get_scoped_secret as _get_wsecret
 logger = logging.getLogger(__name__)
 
 _TRUTHY = {"true", "1", "yes", "on"}
+_OPTIN_TRUTHY = {"true", "1", "yes"}
+
+
+def _stash(pattern: str, text: str, tag: str) -> tuple[str, list[str]]:
+    """Replace every ``pattern`` match with a ``\\x00<tag><n>\\x00`` placeholder."""
+    saved: list[str] = []
+
+    def keep(m: re.Match) -> str:
+        saved.append(m.group(0))
+        return f"\x00{tag}{len(saved) - 1}\x00"
+
+    return re.sub(pattern, keep, text), saved
+
+
+def _header_to_bold(m: re.Match) -> str:
+    """``# Header`` → ``*Header*``, stripping already-bolded ``*...*`` so ``# **Title**``
+    doesn't render with literal asterisks."""
+    inner = m.group(1).strip()
+    while len(inner) > 1 and inner.startswith("*") and inner.endswith("*"):
+        inner = inner[1:-1].strip()
+    return f"*{inner}*"
 
 
 class WhatsAppBehaviorMixin:
@@ -54,8 +65,7 @@ class WhatsAppBehaviorMixin:
         spaces — WhatsApp renders them as mojibake prefixes. Emoji joiners are kept."""
         if not content:
             return content
-        content = cls._OUTBOUND_INVISIBLE_CHARS_RE.sub("", content)
-        return cls._OUTBOUND_ODD_SPACE_RE.sub(" ", content)
+        return cls._OUTBOUND_ODD_SPACE_RE.sub(" ", cls._OUTBOUND_INVISIBLE_CHARS_RE.sub("", content))
 
     @property
     def enforces_own_access_policy(self) -> bool:
@@ -64,8 +74,7 @@ class WhatsAppBehaviorMixin:
 
     def _effective_reply_prefix(self) -> str:
         """Prefix for outgoing replies in self-chat mode (Cloud API overrides to ``""``)."""
-        whatsapp_mode = _get_wsecret("WHATSAPP_MODE", default="self-chat") or "self-chat"
-        if whatsapp_mode != "self-chat":
+        if (_get_wsecret("WHATSAPP_MODE", default="self-chat") or "self-chat") != "self-chat":
             return ""
         if self._reply_prefix is not None:
             return self._reply_prefix.replace("\\n", "\n")
@@ -80,11 +89,11 @@ class WhatsAppBehaviorMixin:
 
     def _whatsapp_require_mention(self) -> bool:
         configured = self.config.extra.get("require_mention")
-        if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() in _TRUTHY
-            return bool(configured)
-        return (_get_wsecret("WHATSAPP_REQUIRE_MENTION", default="false") or "false").lower() in _TRUTHY
+        if configured is None:
+            configured = _get_wsecret("WHATSAPP_REQUIRE_MENTION", default="false") or "false"
+        if isinstance(configured, str):
+            return configured.lower() in _TRUTHY
+        return bool(configured)
 
     def _whatsapp_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
@@ -97,9 +106,8 @@ class WhatsAppBehaviorMixin:
         """Parse allow_from / group_allow_from from config (list) or env var (CSV)."""
         if raw is None:
             return set()
-        if isinstance(raw, list):
-            return {str(part).strip() for part in raw if str(part).strip()}
-        return {part.strip() for part in str(raw).split(",") if part.strip()}
+        parts = raw if isinstance(raw, list) else str(raw).split(",")
+        return {str(part).strip() for part in parts if str(part).strip()}
 
     def _select_dm_allowlist(self, extra: Dict[str, Any], env_keys, read_env) -> Any:
         """Pick the raw DM allowlist by key *presence*: ``allow_from``/``allowFrom`` in
@@ -127,9 +135,7 @@ class WhatsAppBehaviorMixin:
         """
         source = getattr(self, "_dm_allowlist_source", None)
         if isinstance(source, str) and source != "config":
-            if source in os.environ:
-                return self._coerce_allow_list(os.environ.get(source, ""))
-            return set()
+            return self._coerce_allow_list(os.environ[source]) if source in os.environ else set()
         return set(self._allow_from or ())
 
     # ------------------------------------------------------------------ JID helpers
@@ -146,16 +152,14 @@ class WhatsAppBehaviorMixin:
     def _is_broadcast_chat(chat_id: str) -> bool:
         """Status updates (Stories) and Channel/Newsletter broadcasts — never reply
         (answering a Story spams the status feed; Channel posts aren't addressable)."""
-        if not chat_id:
-            return False
-        cid = chat_id.strip().lower()
-        return cid == "status@broadcast" or cid.endswith("@broadcast") or cid.endswith("@newsletter")
+        cid = (chat_id or "").strip().lower()
+        return cid == "status@broadcast" or cid.endswith(("@broadcast", "@newsletter"))
 
     # ------------------------------------------------------------------ gating
     def _open_dm_opted_in(self) -> bool:
-        if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
+        if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in _OPTIN_TRUTHY:
             return True
-        return (_get_wsecret("WHATSAPP_ALLOW_ALL_USERS", default="") or "").lower() in {"true", "1", "yes"}
+        return (_get_wsecret("WHATSAPP_ALLOW_ALL_USERS", default="") or "").lower() in _OPTIN_TRUTHY
 
     @staticmethod
     def _matches_whatsapp_allowlist(candidate: str, allow_from) -> bool:
@@ -169,29 +173,22 @@ class WhatsAppBehaviorMixin:
             return False
         if candidate in allow_from:
             return True
-        from gateway.whatsapp_identity import (
-            expand_whatsapp_aliases,
-            normalize_whatsapp_identifier,
-        )
+        from gateway.whatsapp_identity import expand_whatsapp_aliases, normalize_whatsapp_identifier
         candidate_aliases = expand_whatsapp_aliases(candidate)
         if not candidate_aliases:
             return False
-        for entry in allow_from:
-            if entry == "*":
-                return True
-            if normalize_whatsapp_identifier(entry) in candidate_aliases:
-                return True
-            if expand_whatsapp_aliases(entry) & candidate_aliases:
-                return True
-        return False
+        return any(
+            entry == "*"
+            or normalize_whatsapp_identifier(entry) in candidate_aliases
+            or expand_whatsapp_aliases(entry) & candidate_aliases
+            for entry in allow_from
+        )
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         """Strict DM authorization — pairing does not imply access."""
         if self._dm_policy == "allowlist":
             return self._matches_whatsapp_allowlist(sender_id, self._live_dm_allow_from())
-        if self._dm_policy == "open":
-            return self._open_dm_opted_in()
-        return False
+        return self._dm_policy == "open" and self._open_dm_opted_in()
 
     def _is_dm_intake_allowed(self, sender_id: str) -> bool:
         """Whether a DM may reach the gateway intake (pairing handshake path)."""
@@ -202,9 +199,7 @@ class WhatsAppBehaviorMixin:
             return self._matches_whatsapp_allowlist(principal, self._live_dm_allow_from())
         if self._dm_policy == "pairing":
             return True
-        if self._dm_policy == "open":
-            return self._open_dm_opted_in()
-        return False
+        return self._dm_policy == "open" and self._open_dm_opted_in()
 
     def _is_group_allowed(self, chat_id: str) -> bool:
         """Check whether a group chat should be processed."""
@@ -220,9 +215,9 @@ class WhatsAppBehaviorMixin:
                 try:
                     patterns = json.loads(raw)
                 except Exception:
-                    patterns = [part.strip() for part in raw.splitlines() if part.strip()]
-                    if not patterns:
-                        patterns = [part.strip() for part in raw.split(",") if part.strip()]
+                    # Plain text: one pattern per line, else comma-separated.
+                    patterns = [p.strip() for p in raw.splitlines() if p.strip()]
+                    patterns = patterns or [p.strip() for p in raw.split(",") if p.strip()]
         if patterns is None:
             return []
         if isinstance(patterns, str):
@@ -246,36 +241,24 @@ class WhatsAppBehaviorMixin:
         return compiled
 
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
-        bot_ids = set()
-        for candidate in data.get("botIds") or []:
-            normalized = self._normalize_whatsapp_id(candidate)
-            if normalized:
-                bot_ids.add(normalized)
-        return bot_ids
+        return {nid for c in (data.get("botIds") or []) if (nid := self._normalize_whatsapp_id(c))}
 
     def _message_is_reply_to_bot(self, data: Dict[str, Any]) -> bool:
         quoted_participant = self._normalize_whatsapp_id(data.get("quotedParticipant"))
-        if not quoted_participant:
-            return False
-        return quoted_participant in self._bot_ids_from_message(data)
+        return bool(quoted_participant) and quoted_participant in self._bot_ids_from_message(data)
 
     def _message_mentions_bot(self, data: Dict[str, Any]) -> bool:
         bot_ids = self._bot_ids_from_message(data)
         if not bot_ids:
             return False
-        mentioned_ids = {
-            nid
-            for candidate in (data.get("mentionedIds") or [])
-            if (nid := self._normalize_whatsapp_id(candidate))
-        }
-        if mentioned_ids & bot_ids:
+        mentioned = {nid for c in (data.get("mentionedIds") or []) if (nid := self._normalize_whatsapp_id(c))}
+        if mentioned & bot_ids:
             return True
         lower_body = str(data.get("body") or "").lower()
-        for bot_id in bot_ids:
-            bare_id = bot_id.split("@", 1)[0].lower()
-            if bare_id and (f"@{bare_id}" in lower_body or bare_id in lower_body):
-                return True
-        return False
+        return any(
+            bare and (f"@{bare}" in lower_body or bare in lower_body)
+            for bare in (bot_id.split("@", 1)[0].lower() for bot_id in bot_ids)
+        )
 
     def _message_matches_mention_patterns(self, data: Dict[str, Any]) -> bool:
         if not self._mention_patterns:
@@ -300,23 +283,18 @@ class WhatsAppBehaviorMixin:
             return False
         if not data.get("isGroup", False):
             # DMs that pass the policy gate are always processed
-            sender_id = str(data.get("senderId") or data.get("from") or "")
-            return self._is_dm_intake_allowed(sender_id)
+            return self._is_dm_intake_allowed(str(data.get("senderId") or data.get("from") or ""))
         if not self._is_group_allowed(chat_id):
             return False
         # Group messages: check mention / free-response settings
-        if chat_id in self._whatsapp_free_response_chats():
+        if chat_id in self._whatsapp_free_response_chats() or not self._whatsapp_require_mention():
             return True
-        if not self._whatsapp_require_mention():
-            return True
-        body = str(data.get("body") or "").strip()
-        if body.startswith("/"):
-            return True
-        if self._message_is_reply_to_bot(data):
-            return True
-        if self._message_mentions_bot(data):
-            return True
-        return self._message_matches_mention_patterns(data)
+        return (
+            str(data.get("body") or "").strip().startswith("/")
+            or self._message_is_reply_to_bot(data)
+            or self._message_mentions_bot(data)
+            or self._message_matches_mention_patterns(data)
+        )
 
     # ------------------------------------------------------------------ formatting
     def format_message(self, content: str) -> str:
@@ -324,46 +302,19 @@ class WhatsAppBehaviorMixin:
         inline code are protected via placeholder substitution."""
         if not content:
             return content
-        content = self._sanitize_outbound_text(content)
-        _FENCE_PH = "\x00FENCE"
-        fences: list[str] = []
-
-        def _save_fence(m: re.Match) -> str:
-            fences.append(m.group(0))
-            return f"{_FENCE_PH}{len(fences) - 1}\x00"
-
-        result = re.sub(r"```[\s\S]*?```", _save_fence, content)
-        _CODE_PH = "\x00CODE"
-        codes: list[str] = []
-
-        def _save_code(m: re.Match) -> str:
-            codes.append(m.group(0))
-            return f"{_CODE_PH}{len(codes) - 1}\x00"
-
-        result = re.sub(r"`[^`\n]+`", _save_code, result)
-
+        result, fences = _stash(r"```[\s\S]*?```", self._sanitize_outbound_text(content), "FENCE")
+        result, codes = _stash(r"`[^`\n]+`", result, "CODE")
         # Italic *text* → _text_ BEFORE bold so **bold** doesn't become italic;
         # lookarounds skip list bullets and bold delimiters.
         result = re.sub(r"(?<!\*)\*(?!\s|\*)([^*\n]*?\S[^*\n]*?)\*(?!\*)", r"_\1_", result)
         result = re.sub(r"\*\*(.+?)\*\*", r"*\1*", result)
         result = re.sub(r"__(.+?)__", r"*\1*", result)
         result = re.sub(r"~~(.+?)~~", r"~\1~", result)
-
-        # "# Header" → *Header*, stripping *...* already produced above so
-        # "# **Title**" doesn't render with literal asterisks.
-        def _header_to_bold(m: re.Match) -> str:
-            inner = m.group(1).strip()
-            while len(inner) > 1 and inner.startswith("*") and inner.endswith("*"):
-                inner = inner[1:-1].strip()
-            return f"*{inner}*"
-
         result = re.sub(r"^#{1,6}\s+(.+)$", _header_to_bold, result, flags=re.MULTILINE)
-        # [text](url) → text (url)
-        result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", result)
-        for i, fence in enumerate(fences):
-            result = result.replace(f"{_FENCE_PH}{i}\x00", fence)
-        for i, code in enumerate(codes):
-            result = result.replace(f"{_CODE_PH}{i}\x00", code)
+        result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", result)  # [text](url) → text (url)
+        for tag, saved in (("FENCE", fences), ("CODE", codes)):
+            for i, original in enumerate(saved):
+                result = result.replace(f"\x00{tag}{i}\x00", original)
         return result
 
 
@@ -376,14 +327,11 @@ def resolve_whatsapp_bridge_dir() -> Path:
     install_bridge = _Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
     hermes_home_bridge = get_hermes_home() / "scripts" / "whatsapp-bridge"
     try:
-        test_file = install_bridge / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        install_writable = True
-    except (OSError, PermissionError):
-        install_writable = False
-    if install_writable:
+        (install_bridge / ".write_test").touch()
+        (install_bridge / ".write_test").unlink()
         return install_bridge
+    except OSError:
+        pass
     if hermes_home_bridge.exists():
         return hermes_home_bridge
     try:
