@@ -1,14 +1,11 @@
 """Output-pattern failure hints for the terminal tool.
 
-Extends the exit-code semantics table in ``terminal_tool`` with an
-output-pattern tier: a bounded scan of failed-command output mapped to one
-short, actionable recovery hint.
-
-Rules (keep when adding patterns): only fires on non-zero exit; at most ONE
-hint, first match wins, patterns ordered by observed production frequency;
-scans only the first ``_SCAN_CHARS`` so hints key on error headers, not deep
-context; hints state the *next action* in 1-2 sentences, not a diagnosis;
-pure function, no I/O or config reads.
+Extends the exit-code semantics table in ``terminal_tool`` with a bounded scan
+of failed-command output mapped to ONE short, actionable recovery hint.
+Rules: only fires on non-zero exit; first match wins, patterns ordered by
+observed production frequency; scans only the first ``_SCAN_CHARS`` so hints
+key on error headers, not deep context; hints state the *next action* in 1-2
+sentences; pure function, no I/O or config reads.
 """
 
 from __future__ import annotations
@@ -16,13 +13,11 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
-# Bounded scan window: error headers appear early; deep output is noise.
 _SCAN_CHARS = 4000
 
 
 def _regex_hint(pattern: str, message: str | Callable[[str], str], flags: int = 0) -> Callable[[str, str], Optional[str]]:
-    """Build a hint that fires when ``pattern`` matches; ``{0}`` = first capture group,
-    or ``message(group1)`` when a callable is given."""
+    """Hint firing when ``pattern`` matches; ``{0}`` = first group, or ``message(group1)`` if callable."""
     rx = re.compile(pattern, flags)
 
     def hint(command: str, output: str) -> Optional[str]:
@@ -103,8 +98,8 @@ _OUTPUT_HINTS: list[Callable[[str, str], Optional[str]]] = [
     ),
 ]
 
-# Exit-code-only hints for codes the semantics table in terminal_tool does
-# not cover per-command. Checked after output patterns.
+# Exit-code-only hints for codes the terminal_tool semantics table does not
+# cover per-command. Checked after output patterns.
 _EXIT_CODE_HINTS: dict[int, str] = {
     126: "Exit 126: the file was found but is not executable — `chmod +x` it or invoke it via its interpreter (e.g. `bash script.sh`).",
     137: "Exit 137: the process was SIGKILLed — usually out-of-memory or an external kill. Reduce memory use or check `dmesg | tail` before retrying.",
@@ -112,14 +107,10 @@ _EXIT_CODE_HINTS: dict[int, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Masked-success detection (exit 0 that probably isn't a success)
-# ---------------------------------------------------------------------------
-# `cargo build 2>&1 | tail -20` exits with tail's 0 (no pipefail) and
-# `cargo build || echo FAILED` exits with echo's 0, so the model can conclude
-# a build passed while the output says it failed. Conservative: BOTH the
-# command shape (top-level pipe into a passthrough consumer, or `|| <cheap
-# fallback>`) AND a strong tool-specific failure shape must hold, and
+# Masked-success detection: `cargo build 2>&1 | tail -20` exits with tail's 0
+# (no pipefail) and `cargo build || echo FAILED` with echo's 0, so the model can
+# conclude a build passed while the output says it failed. Conservative: BOTH a
+# masking command shape AND a strong tool-specific failure shape must hold, and
 # read-only heads (`grep ... | head`) are excluded because their output
 # legitimately contains error text. Advisory only — exit_code is never changed.
 
@@ -174,8 +165,8 @@ _FAILURE_SHAPES = re.compile(
 
 
 def _first_token(command: str) -> str:
+    """Basename of the command head, skipping leading env-var assignments."""
     for tok in (command or "").strip().split():
-        # Skip env-var assignments and common wrappers.
         if "=" in tok and not tok.startswith(("=", "./", "/")):
             continue
         return tok.rsplit("/", 1)[-1]
@@ -183,15 +174,10 @@ def _first_token(command: str) -> str:
 
 
 def annotate_masked_success(command: str, output: str) -> Optional[str]:
-    """Return a warning note when an exit-0 result likely masks a failure.
-
-    Caller gates on exit_code == 0. Advisory only; returns None otherwise.
-    """
+    """Warning note when an exit-0 result likely masks a failure (caller gates on exit 0)."""
     cmd = command or ""
     window = (output or "")[:_SCAN_CHARS]
-    if not cmd or not window or _first_token(cmd) in _READONLY_HEADS:
-        return None
-    if not _FAILURE_SHAPES.search(window):
+    if not cmd or not window or _first_token(cmd) in _READONLY_HEADS or not _FAILURE_SHAPES.search(window):
         return None
     return next((note for rx, note in _MASKING_SHAPES if rx.search(cmd)), None)
 
@@ -201,12 +187,11 @@ def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]
     if exit_code == 0:
         return None
     window = (output or "")[:_SCAN_CHARS]
-    if window:
-        for fn in _OUTPUT_HINTS:
-            try:
-                hint = fn(command or "", window)
-            except Exception:
-                continue
-            if hint:
-                return hint
+    for fn in _OUTPUT_HINTS if window else ():
+        try:
+            hint = fn(command or "", window)
+        except Exception:
+            continue
+        if hint:
+            return hint
     return _EXIT_CODE_HINTS.get(exit_code)

@@ -1,20 +1,13 @@
 """Per-turn terminal scope: profile-scoped TERMINAL_* policy.
 
-Multiplexed surfaces (gateway, dashboard/TUI, cron) serve several profiles
-from one process; mirroring terminal settings into ``os.environ`` let the
-first profile pin its backend onto everyone else (sandbox escape). Like
-``agent/secret_scope.py`` for credentials, a ContextVar holds the active
-profile's COMPLETE effective ``TERMINAL_*`` policy, installed at each
-in-process profile boundary.
-
-- **Authoritative projection.** While a scope is bound, ``terminal_env``
-  resolves ONLY from the policy (defaults + profile ``.env`` + its
-  ``config.yaml``); omitted keys yield the defined default, never ambient
-  ``os.environ`` (#68559).
-- **Fail closed.** If the policy cannot be resolved, callers install a
-  *refusal* scope and terminal execution under it raises
-  :class:`TerminalPolicyUnavailable` instead of falling back to ambient
-  authority.
+Multiplexed surfaces (gateway, dashboard/TUI, cron) serve several profiles from
+one process; mirroring terminal settings into ``os.environ`` let the first
+profile pin its backend onto everyone else (sandbox escape). Like
+``agent/secret_scope.py``, a ContextVar holds the active profile's COMPLETE
+effective ``TERMINAL_*`` policy. While bound, ``terminal_env`` resolves ONLY
+from it (omitted keys -> defined default, never ambient env). If the policy
+cannot be resolved a *refusal* scope is installed and terminal execution raises
+:class:`TerminalPolicyUnavailable` instead of falling back to ambient authority.
 """
 
 from __future__ import annotations
@@ -28,12 +21,13 @@ from typing import Any, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
-# None = no scope bound (historical process-env behavior); dict = the active
-# profile's complete policy; TerminalPolicyRefusal = resolution failed.
+# None = no scope bound (process-env behavior); dict = active profile's complete
+# policy; TerminalPolicyRefusal = resolution failed.
 _terminal_scope_var: ContextVar = ContextVar("hermes_terminal_scope", default=None)
 
-# Terminal keys whose config default lives in the consuming tool
-# (terminal_tool.py) rather than DEFAULT_CONFIG; DEFAULT_CONFIG wins on overlap.
+# Terminal keys whose config default lives in terminal_tool.py rather than
+# DEFAULT_CONFIG (DEFAULT_CONFIG wins on overlap). Without them the projection
+# is not total.
 _TOOL_LEVEL_DEFAULTS: Dict[str, Any] = {
     "cwd": ".",
     "ssh_host": "",
@@ -80,23 +74,23 @@ def get_terminal_scope() -> Optional[Dict[str, str]]:
     return _terminal_scope_var.get()
 
 
-def _raise_if_refusal(scope: Any) -> None:
+def enforce_no_refusal() -> None:
+    """Raise when the active scope is a refusal scope (fail closed)."""
+    scope = _terminal_scope_var.get()
     if isinstance(scope, TerminalPolicyRefusal):
-        raise TerminalPolicyUnavailable(
-            f"terminal policy unavailable for this profile: {scope.reason}"
-        )
+        raise TerminalPolicyUnavailable(f"terminal policy unavailable for this profile: {scope.reason}")
 
 
 def terminal_env(name: str, default: str = "") -> str:
     """Authoritative read of a ``TERMINAL_*`` variable.
 
-    No scope: process env, then *default*. Refusal scope: raise. Policy
-    scope: ONLY the policy; a missing key yields *default*, never os.environ.
+    No scope: process env, then *default*. Refusal scope: raise. Policy scope:
+    ONLY the policy; a missing key yields *default*, never os.environ.
     """
     scope = _terminal_scope_var.get()
     if scope is None:
         return os.environ.get(name, default)
-    _raise_if_refusal(scope)
+    enforce_no_refusal()
     value = scope.get(name)
     return default if value is None else str(value)
 
@@ -104,9 +98,9 @@ def terminal_env(name: str, default: str = "") -> str:
 def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
     """Build the COMPLETE effective ``TERMINAL_*`` policy for a profile home.
 
-    Projection: ``DEFAULT_CONFIG['terminal']`` <- profile ``.env`` TERMINAL_*
-    <- profile ``config.yaml`` ``terminal:`` keys. Total by construction, so a
-    bound scope never widens back to ambient process authority. Raises
+    Projection: ``DEFAULT_CONFIG['terminal']`` <- profile ``.env`` TERMINAL_* <-
+    profile ``config.yaml`` ``terminal:`` keys. Total by construction, so a bound
+    scope never widens back to ambient authority. Raises
     :class:`TerminalPolicyUnavailable` when either file exists but cannot be
     read/parsed.
     """
@@ -116,7 +110,6 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
     defaults = DEFAULT_CONFIG.get("terminal") if isinstance(DEFAULT_CONFIG, dict) else None
-    # Without the tool-level defaults the projection is not total.
     defaults = {**_TOOL_LEVEL_DEFAULTS, **(defaults if isinstance(defaults, dict) else {})}
 
     scope: Dict[str, str] = {}
@@ -146,22 +139,12 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
             if key.startswith("TERMINAL_"):
                 scope[key] = str(value)
 
-    # Read config.yaml through the HERMES_HOME override so the profile's own
-    # file is consulted; a present-but-unparseable file fails closed.
-    from hermes_constants import (
-        get_hermes_home_override,
-        reset_hermes_home_override,
-        set_hermes_home_override,
-    )
-
-    override_token = None
-    if get_hermes_home_override() != str(home):
-        override_token = set_hermes_home_override(home)
+    # The profile's own config.yaml is read directly (not read_raw_config(): it
+    # collapses "missing" and "unparseable" into {}); present-but-unparseable
+    # fails closed.
     try:
         config_path = home / "config.yaml"
         if config_path.exists():
-            # Not read_raw_config(): it collapses "missing" and "unparseable"
-            # into {}; the file exists, so a parse failure must fail closed.
             from hermes_cli.config import fast_safe_load
 
             try:
@@ -177,18 +160,12 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
         raise
     except Exception as exc:
         raise TerminalPolicyUnavailable(f"cannot resolve terminal config in {home}: {exc}") from exc
-    finally:
-        if override_token is not None:
-            reset_hermes_home_override(override_token)
 
     return scope
 
 
 def install_profile_terminal_scope(hermes_home: "Any") -> Token:
-    """Build AND install a profile's policy; on failure install the refusal scope.
-
-    Never raises. Returns the token for ``reset_terminal_scope``.
-    """
+    """Build AND install a profile's policy; on failure install the refusal scope. Never raises."""
     try:
         return set_terminal_scope(build_profile_terminal_scope(hermes_home))
     except TerminalPolicyUnavailable as exc:
@@ -196,15 +173,8 @@ def install_profile_terminal_scope(hermes_home: "Any") -> Token:
         return install_refusal_scope(str(exc))
 
 
-def enforce_no_refusal() -> None:
-    """Raise when the active scope is a refusal scope (fail closed, #68559)."""
-    _raise_if_refusal(_terminal_scope_var.get())
-
-
 @contextmanager
-def install_and_reset_profile_terminal_scope(
-    hermes_home: "Any",
-) -> Iterator[None]:
+def install_and_reset_profile_terminal_scope(hermes_home: "Any") -> Iterator[None]:
     """Install the profile's terminal policy for a bounded turn/fire. Never raises."""
     token = install_profile_terminal_scope(hermes_home)
     try:
