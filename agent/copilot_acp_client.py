@@ -33,18 +33,14 @@ from tools.environments.local import hermes_subprocess_env
 ACP_MARKER_BASE_URL = "acp://copilot"
 logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 900.0
-
 # Stderr fingerprint of the deprecated `gh copilot` extension. Require BOTH the product name
 # AND a deprecation marker: the NEW `@github/copilot` CLI legitimately mentions "copilot-cli".
 _DEPRECATION_REQUIRED = ("gh-copilot",)
 _DEPRECATION_MARKERS = ("has been deprecated", "no commands will be executed")
-
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool", "context": "Context"}
-
 # Probe verdicts per binary path (~50ms --help paid once per process). Only definitive
 # True/False is cached, so a CLI installed mid-session is picked up.
 _ACP_PROBE_CACHE: dict[str, bool] = {}
-
 _PROMPT_PREAMBLE = (
     "You are being used as the active ACP agent backend for Hermes.",
     "Use ACP capabilities to complete tasks.",
@@ -93,16 +89,15 @@ def _acp_supported(command: str, args: list[str]) -> bool | None:
         return cached
     try:
         probe = subprocess.run(
-            [command, "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=5, stdin=subprocess.DEVNULL,
+            [command, "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            stdin=subprocess.DEVNULL,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if probe.returncode != 0:
         return None
     # ``--acp`` as a flag token; tolerate spacing and ``[--acp]`` variants.
-    verdict = bool(re.search(r"(?:^|[\s\[])--acp(?:[\s=\],]|$)", probe.stdout, re.MULTILINE))
-    _ACP_PROBE_CACHE[command] = verdict
+    verdict = _ACP_PROBE_CACHE[command] = bool(re.search(r"(?:^|[\s\[])--acp(?:[\s=\],]|$)", probe.stdout, re.MULTILINE))
     return verdict
 
 
@@ -121,11 +116,12 @@ def _resolve_home_dir() -> str:
 
 
 def _build_subprocess_env() -> dict[str, str]:
+    from hermes_constants import apply_subprocess_home_env
+
     # Copilot ACP drives a model and needs LLM provider credentials; the central helper still
     # strips Tier-1 secrets (bot tokens, GitHub auth, infra).
     env = hermes_subprocess_env(inherit_credentials=True)
     env["HOME"] = _resolve_home_dir()
-    from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
     return env
 
@@ -140,11 +136,8 @@ def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
 
 def _enabled_ids(entries: Any, key: str) -> set[str]:
     """Ids of ``entries`` (dicts) whose ``_meta.copilotEnablement`` is not ``disabled``."""
-    return {
-        str(e.get(key) or "").strip()
-        for e in (entries or [])
-        if isinstance(e, dict) and str((e.get("_meta") or {}).get("copilotEnablement") or "").strip().lower() != "disabled"
-    }
+    return {str(e.get(key) or "").strip() for e in (entries or []) if isinstance(e, dict)
+            and str((e.get("_meta") or {}).get("copilotEnablement") or "").strip().lower() != "disabled"}
 
 
 def _model_selection_request(session: dict[str, Any], requested_model: str) -> tuple[str, dict[str, str]] | None:
@@ -180,12 +173,9 @@ def _format_messages_as_prompt(
     # one. Copilot has no tools of its own that collide with Hermes', so forward the whole toolset.
     sections: list[str] = [*_PROMPT_PREAMBLE, *_render_tool_bridge_sections(tools, tool_choice)]
     transcript: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
+    for message in (m for m in messages if isinstance(m, dict)):
         role = str(message.get("role") or "unknown").strip().lower()
-        rendered = _render_message_content(message.get("content"))
-        if rendered:
+        if rendered := _render_message_content(message.get("content")):
             transcript.append(f"{_ROLE_LABELS.get(role, 'Context')}:\n{rendered}")
     if transcript:
         sections.append("Conversation transcript:\n\n" + "\n\n".join(transcript))
@@ -201,11 +191,8 @@ def _render_message_content(content: Any) -> str:
             return str(content.get("text") or "").strip()
         return content["content"].strip() if isinstance(content.get("content"), str) else json.dumps(content, ensure_ascii=True)
     if isinstance(content, list):
-        parts = [
-            item if isinstance(item, str) else item["text"].strip()
-            for item in content
-            if isinstance(item, str) or (isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip())
-        ]
+        parts = [item if isinstance(item, str) else item["text"].strip() for item in content if isinstance(item, str)
+                 or (isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip())]
         return "\n".join(parts).strip()
     return str(content).strip()
 
@@ -251,9 +238,7 @@ def _fs_write_text_file(params: dict[str, Any], cwd: str) -> Any:
     path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
     if denied := get_write_denied_error(str(path)):
         raise PermissionError(denied)
-    # Approval-gated paths (e.g. ~/.ssh/config) are soft-gated for interactive tools; the ACP
-    # shim has no human channel to confirm — fail closed.
-    if is_write_approval_required(str(path)):
+    if is_write_approval_required(str(path)):  # soft-gated for interactive tools; the ACP shim has no human channel → fail closed
         raise PermissionError(f"Write denied: '{path}' requires interactive approval and cannot be written through the ACP file bridge.")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(params.get("content") or ""), encoding="utf-8")
