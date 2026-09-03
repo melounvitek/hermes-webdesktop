@@ -95,19 +95,15 @@ def _scratch_workspace(conn: sqlite3.Connection, task_id: str) -> Optional[Path]
 
 
 def _is_managed_scratch_path(p: Path) -> bool:
-    """Return True iff *p* is a strict descendant of a kanban-managed scratch root.
-
-    A managed root is exclusively a ``workspaces/`` directory:
-    ``HERMES_KANBAN_WORKSPACES_ROOT`` (dispatcher-injected worker override),
-    ``<kanban_home>/kanban/workspaces`` (legacy default board), or
-    ``<kanban_home>/kanban/boards/<slug>/workspaces`` per on-disk board.
-    Strict descendancy: a path EQUAL to a root is not managed (deleting it
-    would wipe every task's scratch dir), and ``<kanban_home>/kanban``,
-    ``.../logs`` or ``.../boards/<slug>`` are rejected because they hold
-    Hermes' own DB, metadata and logs. :func:`_cleanup_workspace` uses this to
-    refuse ``shutil.rmtree`` outside managed storage — a board
-    ``default_workdir`` pointing at a real source tree can otherwise pair with
-    ``workspace_kind='scratch'`` and make task completion delete user data.
+    """True iff *p* is a STRICT descendant of a kanban-managed ``workspaces/``
+    root (``HERMES_KANBAN_WORKSPACES_ROOT``, ``<kanban_home>/kanban/workspaces``,
+    or ``<kanban_home>/kanban/boards/<slug>/workspaces``). A path equal to a
+    root is not managed (deleting it would wipe every task's scratch dir);
+    ``<kanban_home>/kanban``, ``.../logs`` and ``.../boards/<slug>`` hold
+    Hermes' own DB and metadata. :func:`_cleanup_workspace` refuses
+    ``rmtree`` outside managed storage — a board ``default_workdir`` on a real
+    source tree paired with ``workspace_kind='scratch'`` would otherwise make
+    task completion delete user data.
     """
     return _managed_scratch_path_info(p)[0]
 
@@ -488,19 +484,13 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
-    - ``scratch``: fresh dir under ``<board-root>/workspaces/<id>/`` — the
-      same path for the dispatcher and every profile worker, so handoff is
-      path-stable.
-    - ``dir:<path>``: ``workspace_path``, created if missing. MUST be absolute
-      — relative paths are rejected to prevent confused-deputy traversal where
-      ``../../../tmp/attacker`` resolves against the dispatcher's CWD.
-    - ``worktree``: a real linked git worktree. A ``workspace_path`` naming a
-      repo root is an anchor (materializes ``<repo>/.worktrees/<task-id>``);
-      a concrete target path is created/reused; with none, the board's
-      ``default_workdir`` anchors it and raises if unset rather than guessing
-      from the dispatcher's CWD. Empty ``branch_name`` -> ``wt/<task-id>``.
-
-    Persist the resolved path via ``set_workspace_path`` so later runs reuse it.
+    ``scratch``: ``<board-root>/workspaces/<id>/`` — path-stable across the
+    dispatcher and every profile worker. ``dir``: ``workspace_path``, created
+    if missing; MUST be absolute (relative paths would resolve against the
+    dispatcher's CWD — confused-deputy traversal). ``worktree``: a linked git
+    worktree; a repo-root ``workspace_path`` anchors ``<repo>/.worktrees/<id>``,
+    a concrete path is created/reused, none -> the board's ``default_workdir``
+    (raises if unset rather than guessing). Persist via ``set_workspace_path``.
     """
     kind = task.workspace_kind or "scratch"
     if kind == "worktree":
