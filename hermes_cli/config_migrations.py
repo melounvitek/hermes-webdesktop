@@ -8,6 +8,7 @@ step may only persist values that differ from the schema default (plus removals/
 from __future__ import annotations
 
 import copy
+import functools
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -98,13 +99,13 @@ def _rewrite_key(
         _commit(config, results, quiet, added, message)
 
 
-def _rewrite_stale_default(results: Dict[str, Any], quiet: bool, *, old: Any, **kw: Any) -> None:
-    """Rewrite a key only while it still equals the OLD default.
+def _rewrite_stale_default(*, old: Any, **kw: Any) -> Callable[[Dict[str, Any], bool], None]:
+    """Step that rewrites a key only while it still equals the OLD default.
 
     Never clobbers a value the user deliberately customized; unset keys inherit the new default at
     read time.
     """
-    _rewrite_key(results, quiet, match=lambda cur: cur == old, **kw)
+    return functools.partial(_rewrite_key, match=lambda cur: cur == old, **kw)
 
 
 def _lower_is(word: str) -> Callable[[Any], bool]:
@@ -365,14 +366,6 @@ def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
                     f"({', '.join(added)}) — edit via `hermes config set`")
 
 
-def _migrate_to_25(results: Dict[str, Any], quiet: bool) -> None:
-    # 24 → 25: model_catalog TTL 24h → 1h (only the OLD default 24).
-    _rewrite_stale_default(
-        results, quiet, section="model_catalog", key="ttl_hours", old=24, new=1,
-        added="model_catalog.ttl_hours 24→1",
-        message="  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
-
-
 def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
     # 28 → 29: memory/skills tri-state write_mode (on|off|approve) → boolean write_approval.
     # Only "approve" carried gating intent → true; the old "off = block writes" mode is dropped
@@ -397,35 +390,6 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
 
 # 29 → 30 (curator.consolidate defaults to false) is schema-default-only: deep-merge supplies it
 # at read time and persisting a default would only bloat a lean config. No registry entry.
-
-
-def _migrate_to_31(results: Dict[str, Any], quiet: bool) -> None:
-    # 30 → 31: verify_on_stop OFF (one-time). The "auto" sentinel was more noise than signal.
-    # Rewrite only when missing or still "auto" — an explicit user true/false is preserved.
-    _rewrite_key(
-        results, quiet, section="agent", key="verify_on_stop", new=False, create_section=True,
-        match=lambda cur: cur is None or _lower_is("auto")(cur),
-        added="agent.verify_on_stop=false",
-        message=(
-            "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false). "
-            "Set it to true to re-enable, or \"auto\" for the legacy "
-            "surface-aware behavior."))
-
-
-def _migrate_to_32(results: Dict[str, Any], quiet: bool) -> None:
-    # 31 → 32: flip the BAKED-IN literal true to OFF (one-time). v30 defaulted verify_on_stop to a
-    # literal True and migrate_config persisted defaults, so installs that updated through v30 have
-    # `verify_on_stop: true` written literally — never a user choice (no off-switch existed until
-    # v31). A true set AFTER v32 is never touched.
-    _rewrite_stale_default(
-        results, quiet, section="agent", key="verify_on_stop", old=True, new=False,
-        added="agent.verify_on_stop=false",
-        message=(
-            "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false) — "
-            "the old default was written into your config as a literal "
-            "true. Set it to true again to re-enable, or \"auto\" for the "
-            "legacy surface-aware behavior."),
-        extra_guard=lambda raw: raw.get("verify_on_stop") is True)
 
 
 def _migrate_to_33(results: Dict[str, Any], quiet: bool) -> None:
@@ -511,45 +475,6 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
             "manual system prompts; personalities live in display.personality.")
 
 
-def _migrate_to_35(results: Dict[str, Any], quiet: bool) -> None:
-    # 34 → 35: background_process_notifications 'all' (old implicit default, rarely chosen on
-    # purpose) → 'concise'. Explicit result/error/off choices are preserved.
-    _rewrite_key(
-        results, quiet, section="display", key="background_process_notifications",
-        match=_lower_is("all"), new="concise",
-        added="display.background_process_notifications=concise (was: all)",
-        message=(
-            "  ✓ Background process notifications switched from 'all' to "
-            "'concise' — completions now show a one-line status message "
-            "instead of the raw output dump. Set "
-            "display.background_process_notifications: all to restore "
-            "the old behavior."))
-
-
-def _migrate_to_36(results: Dict[str, Any], quiet: bool) -> None:
-    # 35 → 36: subagent iteration cap 50 → 250 (50 truncated substantial delegated work).
-    _rewrite_stale_default(
-        results, quiet, section="delegation", key="max_iterations", old=50, new=250,
-        added="delegation.max_iterations=250 (was: 50)",
-        message=(
-            "  ✓ Raised delegation.max_iterations from 50 to 250 — subagents "
-            "now get a larger per-child tool-call budget so delegated work "
-            "finishes instead of truncating. Set delegation.max_iterations "
-            "back to 50 to restore the old cap."))
-
-
-def _migrate_to_37(results: Dict[str, Any], quiet: bool) -> None:
-    # 36 → 37: delegation concurrency 3 → 10 (stays at/below the high-cost warning threshold).
-    _rewrite_stale_default(
-        results, quiet, section="delegation", key="max_concurrent_children", old=3, new=10,
-        added="delegation.max_concurrent_children=10 (was: 3)",
-        message=(
-            "  ✓ Raised delegation.max_concurrent_children from 3 to 10 — "
-            "independent delegated children now fan out wider in parallel. "
-            "Each child consumes API tokens independently; set "
-            "delegation.max_concurrent_children back to 3 to restore the old cap."))
-
-
 def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
     # 37 → 38: the bundled observability/nemo_relay plugin was removed (Relay lifecycle moved
     # into the agent core); drop it from plugins.enabled.
@@ -600,21 +525,12 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
             "Video Generation (Nous Subscription or FAL).")
 
 
-def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
-    # 39 → 40: model_catalog.ttl_hours → ttl_minutes (default 20). Only the OLD default
-    # (ttl_hours: 1, written by v25) is dropped; any other explicit ttl_hours is still honoured.
-    _rewrite_stale_default(
-        results, quiet, section="model_catalog", key="ttl_hours", old=1, new=None,
-        added="model_catalog.ttl_hours 1 → ttl_minutes 20 (default)",
-        message="  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)",
-        extra_guard=lambda raw: "ttl_minutes" not in raw)
-
-
-#: Registry of (target_version, step), strictly ascending. Later steps observe earlier steps'
-#: writes via read_raw_config() (filesystem state). v12 is the support floor: configs already AT
-#: v12 still get every step below; only configs BELOW 12 are refused by the floor gate in
-#: run_migrations()'s caller. Versions absent here (15, 18-20, 22, 24, 26-28, 30) only added a
-#: schema default that runtime merging supplies without a write.
+#: Registry of (target_version, step), strictly ascending; simple default-flip steps are
+#: declared inline via _rewrite_stale_default / _rewrite_key partials. Later steps observe
+#: earlier steps' writes via read_raw_config() (filesystem state). v12 is the support floor:
+#: configs already AT v12 still get every step below; only configs BELOW 12 are refused by the
+#: floor gate in run_migrations()'s caller. Versions absent here (15, 18-20, 22, 24, 26-28, 30)
+#: only added a schema default that runtime merging supplies without a write.
 MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     (12, _migrate_to_12),
     (13, _migrate_to_13),
@@ -623,18 +539,77 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     (17, _migrate_to_17),
     (21, _migrate_to_21),
     (23, _migrate_to_23),
-    (25, _migrate_to_25),
+    # 24 → 25: model_catalog TTL 24h → 1h (only the OLD default 24).
+    (25, _rewrite_stale_default(
+        section="model_catalog", key="ttl_hours", old=24, new=1,
+        added="model_catalog.ttl_hours 24→1",
+        message="  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")),
     (29, _migrate_to_29),
-    (31, _migrate_to_31),
-    (32, _migrate_to_32),
+    # 30 → 31: verify_on_stop OFF (one-time). The "auto" sentinel was more noise than signal.
+    # Rewrite only when missing or still "auto" — an explicit user true/false is preserved.
+    (31, functools.partial(
+        _rewrite_key, section="agent", key="verify_on_stop", new=False, create_section=True,
+        match=lambda cur: cur is None or _lower_is("auto")(cur),
+        added="agent.verify_on_stop=false",
+        message=(
+            "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false). "
+            "Set it to true to re-enable, or \"auto\" for the legacy "
+            "surface-aware behavior."))),
+    # 31 → 32: flip the BAKED-IN literal true to OFF (one-time). v30 defaulted verify_on_stop to a
+    # literal True and migrate_config persisted defaults, so installs that updated through v30 have
+    # `verify_on_stop: true` written literally — never a user choice (no off-switch existed until
+    # v31). A true set AFTER v32 is never touched.
+    (32, _rewrite_stale_default(
+        section="agent", key="verify_on_stop", old=True, new=False,
+        added="agent.verify_on_stop=false",
+        message=(
+            "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false) — "
+            "the old default was written into your config as a literal "
+            "true. Set it to true again to re-enable, or \"auto\" for the "
+            "legacy surface-aware behavior."),
+        extra_guard=lambda raw: raw.get("verify_on_stop") is True)),
     (33, _migrate_to_33),
     (34, _migrate_to_34),
-    (35, _migrate_to_35),
-    (36, _migrate_to_36),
-    (37, _migrate_to_37),
+    # 34 → 35: background_process_notifications 'all' (old implicit default, rarely chosen on
+    # purpose) → 'concise'. Explicit result/error/off choices are preserved.
+    (35, functools.partial(
+        _rewrite_key, section="display", key="background_process_notifications",
+        match=_lower_is("all"), new="concise",
+        added="display.background_process_notifications=concise (was: all)",
+        message=(
+            "  ✓ Background process notifications switched from 'all' to "
+            "'concise' — completions now show a one-line status message "
+            "instead of the raw output dump. Set "
+            "display.background_process_notifications: all to restore "
+            "the old behavior."))),
+    # 35 → 36: subagent iteration cap 50 → 250 (50 truncated substantial delegated work).
+    (36, _rewrite_stale_default(
+        section="delegation", key="max_iterations", old=50, new=250,
+        added="delegation.max_iterations=250 (was: 50)",
+        message=(
+            "  ✓ Raised delegation.max_iterations from 50 to 250 — subagents "
+            "now get a larger per-child tool-call budget so delegated work "
+            "finishes instead of truncating. Set delegation.max_iterations "
+            "back to 50 to restore the old cap."))),
+    # 36 → 37: delegation concurrency 3 → 10 (stays at/below the high-cost warning threshold).
+    (37, _rewrite_stale_default(
+        section="delegation", key="max_concurrent_children", old=3, new=10,
+        added="delegation.max_concurrent_children=10 (was: 3)",
+        message=(
+            "  ✓ Raised delegation.max_concurrent_children from 3 to 10 — "
+            "independent delegated children now fan out wider in parallel. "
+            "Each child consumes API tokens independently; set "
+            "delegation.max_concurrent_children back to 3 to restore the old cap."))),
     (38, _migrate_to_38),
     (39, _migrate_to_39),
-    (40, _migrate_to_40))
+    # 39 → 40: model_catalog.ttl_hours → ttl_minutes (default 20). Only the OLD default
+    # (ttl_hours: 1, written by v25) is dropped; any other explicit ttl_hours is still honoured.
+    (40, _rewrite_stale_default(
+        section="model_catalog", key="ttl_hours", old=1, new=None,
+        added="model_catalog.ttl_hours 1 → ttl_minutes 20 (default)",
+        message="  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)",
+        extra_guard=lambda raw: "ttl_minutes" not in raw)),
+)
 
 
 def run_migrations(current_ver: int, results: Dict[str, Any], quiet: bool) -> None:
