@@ -71,8 +71,7 @@ class HostedRoomService:
         self, server: ModuleType, *, db_path: Path | str | None = None,
         peer_routes: Mapping[tuple[str, str], PeerMemberRoute] | None = None,
         peer_clients: Mapping[Any, HostedRoomPeerClient] | None = None) -> None:
-        self.server = server
-        self.db_path = Path(db_path or hosted_rooms.default_db_path())
+        self.server, self.db_path = server, Path(db_path or hosted_rooms.default_db_path())
         hosted_rooms.prune_disbanded_rooms(self.db_path)
         self._policy_lock = threading.RLock()
         self._pending_actions: dict[tuple[str, str], dict[str, Any]] = {}
@@ -89,9 +88,7 @@ class HostedRoomService:
         supplied_clients = dict(peer_clients or {})
         for key, route in dict(peer_routes or {}).items():
             self.peer_routes[key] = route
-            client = supplied_clients.get(key)
-            if client is None:
-                client = supplied_clients.get(route.target_install_id)
+            client = supplied_clients.get(key, supplied_clients.get(route.target_install_id))
             if client is not None:
                 self.peer_clients[key] = client
         self.runtime = HostedRoomRuntime(
@@ -131,8 +128,7 @@ class HostedRoomService:
         return self.db_path.parent
 
     def local_profiles(self) -> tuple[str, ...]:
-        profiles = {"default"}
-        profiles_dir = self.root / "profiles"
+        profiles, profiles_dir = {"default"}, self.root / "profiles"
         if profiles_dir.is_dir():
             profiles.update(path.name for path in profiles_dir.iterdir() if path.is_dir())
         return tuple(sorted(profiles))
@@ -213,9 +209,8 @@ class HostedRoomService:
             self._peer_route_status[key] = "ready"
 
     def revoke_room_routes(self, room_id: str) -> int:
-        """Revoke and forget every scoped peer route for one room. Remote revocation is the
-        boundary: an unreachable target leaves the room intact for retry rather than
-        reporting a false disband with a live grant."""
+        """Revoke and forget every scoped peer route for one room; an unreachable target
+        leaves the room intact for retry rather than a false disband with a live grant."""
         with self._policy_lock:
             routes = [(key, route) for key, route in self.peer_routes.items() if key[0] == room_id]
         for key, route in routes:
@@ -237,31 +232,31 @@ class HostedRoomService:
     def _resolve_member_transport(self, binding: HostedRoomBinding, task: Mapping[str, Any]):
         payload = task.get("payload", {})
         member_id = str(payload.get("target_member_id") or payload.get("target_profile") or "")
-        route = self.peer_routes.get((binding.room_id, member_id))
+        key = (binding.room_id, member_id)
+        route = self.peer_routes.get(key)
         if route is None:
             if self._member_is_peer(binding.room_id, member_id):
                 raise RuntimeError("peer room route is unavailable")
             return self.rpc
-        client = self.peer_clients.get((binding.room_id, member_id))
+        client = self.peer_clients.get(key)
         if client is None:
             raise RuntimeError("peer room client is unavailable")
         identity = task.get("identity")
         execution_generation = int(task.get("execution_generation") or 0)
         bind_observation = _hook(client, "bind_observation")
         if (
-            bind_observation is not None
-            and isinstance(identity, driver.TaskIdentity)
+            bind_observation is not None and isinstance(identity, driver.TaskIdentity)
             and execution_generation > 0):
             bind_observation(task_id=identity.task_id, execution_generation=execution_generation)
 
         def set_status(status: str):
-            return lambda: self._set_route_status(binding.room_id, member_id, status)
+            return lambda: self._set_route_status(*key, status)
         tracked_client = _RouteStatusPeerClient(
             client, on_ready=set_status("ready"),
             on_reauthorization=set_status("needs_reauthorization"),
             on_unavailable=set_status("unavailable"),
             on_refreshed=lambda grant, catalog=None: self._rotate_route_grant(
-                binding.room_id, member_id, grant, catalog))
+                *key, grant, catalog))
         self._recover_peer_admission(binding, task, route, tracked_client)
         return PeerHostedRoomTransport(
             binding=binding, route=route, client=tracked_client,
@@ -273,14 +268,11 @@ class HostedRoomService:
         client: Any) -> None:
         """Rediscover an admitted peer run without advancing its generation."""
         recover = _hook(client, "recover_dispatch")
-        identity = task.get("identity")
-        payload = task.get("payload")
+        identity, payload = task.get("identity"), task.get("payload")
         execution_generation = int(task.get("execution_generation") or 0)
         if (
-            recover is None
-            or not isinstance(identity, driver.TaskIdentity)
-            or not isinstance(payload, Mapping)
-            or execution_generation < 1
+            recover is None or not isinstance(identity, driver.TaskIdentity)
+            or not isinstance(payload, Mapping) or execution_generation < 1
             or task.get("status") not in {"running", "indeterminate", "stopping"}):
             return
         prompt = payload.get("prompt")
@@ -294,11 +286,10 @@ class HostedRoomService:
         recover(dispatch=dispatch.as_mapping(), grant=route.grant)
 
     def _member_is_peer(self, room_id: str, member_id: str) -> bool:
-        for member in self._room(room_id).get("members") or []:
-            if (
-                isinstance(member, Mapping)
-                and str(member.get("member_id") or member.get("profile") or "") == member_id):
-                target = member.get("target")
+        for m in self._room(room_id).get("members") or []:
+            if isinstance(m, Mapping) and str(
+                    m.get("member_id") or m.get("profile") or "") == member_id:
+                target = m.get("target")
                 return isinstance(target, Mapping) and target.get("kind") == "peer"
         return False
 
@@ -313,12 +304,11 @@ class HostedRoomService:
 
     def _set_pending_action(
         self, room_id: str, member_id: str, action: Mapping[str, Any] | None) -> None:
-        key = (room_id, member_id)
         with self._policy_lock:
             if action is None:
-                self._pending_actions.pop(key, None)
+                self._pending_actions.pop((room_id, member_id), None)
             else:
-                self._pending_actions[key] = {**action, "member_id": member_id}
+                self._pending_actions[(room_id, member_id)] = {**action, "member_id": member_id}
 
     def _rotate_route_grant(
         self, room_id: str, member_id: str, grant: str, catalog: GatewayRoomCatalog | None = None
@@ -338,8 +328,7 @@ class HostedRoomService:
                 catalog.installation_id != route.target_install_id
                 or catalog.execution_policy.target_profile != route.target_profile
                 or PROTOCOL_VERSION not in catalog.protocol_versions
-                or "direct" not in catalog.link_modes
-                or not catalog.text
+                or "direct" not in catalog.link_modes or not catalog.text
                 or catalog.execution_policy.policy_digest != route.execution_policy_digest):
                 self._set_route_status(room_id, member_id, "needs_reauthorization")
                 raise RuntimeError(
@@ -347,12 +336,11 @@ class HostedRoomService:
             digests = {
                 "capability_digest": catalog.catalog_digest,
                 "execution_policy_digest": catalog.execution_policy.policy_digest}
-        rotated_route = replace(route, grant=grant, **digests)
         self._save_link(
             room_id=room_id, member_id=member_id, target_url=stored.target_url,
             target_profile=stored.target_profile, grant=grant, catalog=catalog or stored.catalog,
             cancellation_scope_id=stored.cancellation_scope_id, trace_id=stored.trace_id)
-        self._publish_route(key, rotated_route)
+        self._publish_route(key, replace(route, grant=grant, **digests))
 
     def _route_statuses(self, room_id: str | None = None) -> list[dict[str, str]]:
         with self._policy_lock:
@@ -382,9 +370,7 @@ class HostedRoomService:
             room_id=str(room["room_id"]), latest_seq=int(room["latest_seq"]))
 
     def _publish_terminal_tasks(self, room: Mapping[str, Any]) -> bool:
-        changed = False
-        room_id = str(room["room_id"])
-        local_profiles = self.local_profiles()
+        changed, room_id, local_profiles = False, str(room["room_id"]), self.local_profiles()
         for status in _TERMINAL_STATUSES:
             for task in driver.list_tasks(self.db_path, room_id=room_id, status=status):
                 execution_generation = int(task["execution_generation"])
@@ -439,9 +425,8 @@ class HostedRoomService:
                 driver.admit_task(
                     self.db_path, decision.task.identity, payload=decision.task.payload,
                     clock=time.time)
-                # A stop can race the policy read from another process. Re-read after
-                # admission and cancel before the runtime can execute a task whose
-                # source event is now behind the room stop fence.
+                # A stop can race the policy read from another process: re-read after admission
+                # and cancel a task whose source event is now behind the room stop fence.
                 fence = self._policy_snapshot(self._room(binding.room_id)).stopped_through_seq
                 if decision.source_event_seq is not None and decision.source_event_seq < fence:
                     self.runtime.cancel(decision.task.identity, cancel_id=f"stop-fence:{fence}")
@@ -455,9 +440,7 @@ class HostedRoomService:
     def create_room(self, *, room_id: str, name: str, members: Any) -> dict[str, Any]:
         normalized = discussion.validate_roster(members, local_profiles=self.local_profiles())
         room = hosted_rooms.create_room(
-            self.db_path,
-            room_id=room_id,
-            name=name,
+            self.db_path, room_id=room_id, name=name,
             members=[
                 {
                     "member_id": member.member_id, "profile": member.profile,
@@ -494,17 +477,15 @@ class HostedRoomService:
                 (task["identity"].room_id, task["identity"].task_id): task
                 for task in self._list_tasks(room_id, _STOPPABLE_STATUSES)}
             for task in tasks.values():
-                task_cancel_id = (
-                    str(task.get("cancel_id") or "") if task.get("status") == "stopping" else "")
-                result = self.runtime.cancel(
-                    task["identity"], cancel_id=task_cancel_id or cancel_id)
+                own_cancel_id = (
+                    task.get("status") == "stopping" and str(task.get("cancel_id") or ""))
+                result = self.runtime.cancel(task["identity"], cancel_id=own_cancel_id or cancel_id)
                 if result["status"] == "stopping":
                     pending += 1
-        cancelled = len(tasks)
         if require_acknowledged and pending:
             raise RuntimeError("room work is still stopping; retry deletion after Stop completes")
         self.runtime.wakeup()
-        return cancelled
+        return len(tasks)
 
     def retry_room_task(self, room_id: str, *, task_id: str) -> dict[str, Any]:
         """Retry one uncertain or deferred task only after explicit user action."""
@@ -519,8 +500,7 @@ class HostedRoomService:
         choice: str, request_id: str | None = None) -> Mapping[str, Any]:
         """Resolve one exact local or peer approval and wake room observation."""
         key = (room_id, member_id)
-        route = self.peer_routes.get(key)
-        client = self.peer_clients.get(key)
+        route, client = self.peer_routes.get(key), self.peer_clients.get(key)
         with self._policy_lock:
             action = self._pending_actions.get(key)
         requested_approval_id = str(request_id or "")
@@ -572,12 +552,10 @@ class HostedRoomService:
                 for (action_room_id, _member_id), action in self._pending_actions.items()
                 if action_room_id == room_id)
         return {
-            "running": runtime["running"],
-            "working": any(counts.get(s) for s in _LIVE_STATUSES),
+            "running": runtime["running"], "working": any(counts.get(s) for s in _LIVE_STATUSES),
             "blocked": room_id in runtime["blocked_rooms"]
             or bool(counts.get("indeterminate") or counts.get("stopping")),
-            "counts": dict(counts),
-            "pending_actions": pending_actions,
+            "counts": dict(counts), "pending_actions": pending_actions,
             "peer_routes": self._route_statuses(room_id)}
 
 
@@ -586,11 +564,8 @@ class _RouteStatusPeerClient:
 
     def __init__(
         self, client, *, on_ready, on_reauthorization, on_unavailable, on_refreshed) -> None:
-        self._client = client
-        self._on_ready = on_ready
-        self._on_reauthorization = on_reauthorization
-        self._on_unavailable = on_unavailable
-        self._on_refreshed = on_refreshed
+        self._client, self._on_ready, self._on_refreshed = client, on_ready, on_refreshed
+        self._on_reauthorization, self._on_unavailable = on_reauthorization, on_unavailable
 
     def _refresh_grant(self, kwargs: dict) -> dict:
         """Rotate an expiring grant before dispatch; return the kwargs to send. Refresh
@@ -620,11 +595,11 @@ class _RouteStatusPeerClient:
         refreshed_catalog = None
         if refreshed.get("catalog") is not None:
             refreshed_catalog = GatewayRoomCatalog.from_mapping(refreshed.get("catalog"))
-            drift = None
-            if refreshed_catalog.execution_policy.policy_digest != checked.execution_policy_digest:
-                drift = _POLICY_DRIFT
-            elif refreshed_catalog.catalog_digest != checked.capability_digest:
-                drift = _CATALOG_DRIFT
+            policy_digest = refreshed_catalog.execution_policy.policy_digest
+            drift = (
+                _POLICY_DRIFT if policy_digest != checked.execution_policy_digest
+                else _CATALOG_DRIFT if refreshed_catalog.catalog_digest != checked.capability_digest
+                else None)
             if drift is not None:
                 self._on_reauthorization()
                 raise PeerRunsHTTPError(
