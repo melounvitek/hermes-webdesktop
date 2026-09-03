@@ -120,12 +120,8 @@ class GatewayInboundMixin:
     async def _hm_admit_event(
         self, event: "MessageEvent"
     ) -> Optional[Tuple["MessageEvent", SessionSource, bool]]:
-        """Ingress gates for ``_handle_message``: leak guard, profile route, ignored channels,
-        startup-restore queueing, ``pre_gateway_dispatch`` hook, authorization/pairing.
-
-        Returns ``None`` when the message is dropped, else ``(event, source, is_internal)`` —
-        the hook may have rewritten ``event``.
-        """
+        """Ingress gates for ``_handle_message``; None when dropped, else ``(event, source, is_internal)``
+        (the ``pre_gateway_dispatch`` hook may have rewritten ``event``)."""
         from gateway.run import _is_slack_ignored_channel
         source = event.source
 
@@ -259,11 +255,8 @@ class GatewayInboundMixin:
     def _hm_estop_gate(
         self, event: "MessageEvent", source: SessionSource, is_internal: bool
     ) -> Optional[str]:
-        """Return the global emergency-stop (`hermes pause`) notice when this turn must be blocked.
-
-        Placed after auth so unauthorized senders can't probe pause state. Internal events from
-        in-flight work always pass.
-        """
+        """Global emergency-stop (`hermes pause`) notice when this turn must be blocked, else None.
+        Placed after auth so unauthorized senders can't probe pause state."""
         if is_internal:
             return None
         try:
@@ -572,11 +565,8 @@ class GatewayInboundMixin:
     async def _hm_busy_slash_or_photo(
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
     ) -> Tuple[bool, Optional[str]]:
-        """Slash-command and photo-burst handling on the running-agent fast-path.
-
-        Returns ``(handled, result)``. Each command's mid-run behavior is declared on its CommandDef
-        (busy_policy / busy_handler in hermes_cli/commands.py) — no per-command if-chain here.
-        """
+        """Slash-command / photo-burst handling on the busy fast-path → ``(handled, result)``. Each
+        command's mid-run behavior is declared on its CommandDef (busy_policy / busy_handler)."""
         from hermes_cli.commands import resolve_command as _resolve_cmd_inner
         _evt_cmd = event.get_command()
         _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
@@ -693,11 +683,8 @@ class GatewayInboundMixin:
     async def _hm_handle_running_session_message(
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
     ) -> Optional[str]:
-        """Fast-path for a message that arrives while this session's agent is running.
-
-        Default is to interrupt immediately so user text/stop messages are handled with minimal
-        latency; busy_input_mode queue/steer, subagent and compression protection demote to queue.
-        """
+        """Fast-path while this session's agent is running: interrupt by default (minimal latency);
+        busy_input_mode queue/steer, subagent and compression protection demote to queue."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         _handled, _result = await self._hm_busy_slash_or_photo(event, source, _quick_key)
         if _handled:
@@ -839,11 +826,8 @@ class GatewayInboundMixin:
     async def _hm_resolve_command(
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
     ) -> Tuple[bool, Optional[str], Optional[str], Optional[str]]:
-        """Resolve the slash command (aliases, access gate, ``pre_command`` + ``command:<name>`` hooks).
-
-        Returns ``(handled, result, command, canonical)``; when ``handled`` the caller returns
-        ``result`` as-is (it may legitimately be None).
-        """
+        """Resolve the slash command (aliases, access gate, hooks) → ``(handled, result, command,
+        canonical)``; when ``handled`` the caller returns ``result`` as-is (may be None)."""
         command = event.get_command()
 
         from hermes_cli.commands import is_gateway_known_command, resolve_command as _resolve_cmd
@@ -907,11 +891,8 @@ class GatewayInboundMixin:
         return True, format_status_text()
 
     async def _hm_rewrite_turn_to_prompt(self, event, source, name: str, ack: str, build) -> Tuple[bool, Optional[str]]:
-        """Ack, then rewrite the turn to ``build()`` and fall through to normal agent processing.
-
-        Mirrors the /blueprint fall-through so role alternation is preserved; no engine, works on
-        any backend. A failing builder replies with a retry hint instead.
-        """
+        """Ack, then rewrite the turn to ``build()`` and fall through to the agent (keeps role
+        alternation; works on any backend). A failing builder replies with a retry hint."""
         await self._send_command_ack(source, ack, name)
         try:
             event.text = build()
@@ -1069,11 +1050,8 @@ class GatewayInboundMixin:
         self, event: "MessageEvent", source: SessionSource, _quick_key: str,
         canonical: Optional[str],
     ) -> Tuple[bool, Optional[str]]:
-        """Dispatch built-in idle-path commands (plain handlers, /new, /learn, /plan, /moa, ...).
-
-        Returns ``(handled, result)``. Prompt-rewriting commands (/learn, /plan, /init, /steer,
-        /moa, ...) mutate ``event.text`` and return ``(False, None)`` to fall through to the agent.
-        """
+        """Dispatch built-in idle-path commands → ``(handled, result)``; prompt-rewriting commands
+        mutate ``event.text`` and return ``(False, None)`` to fall through to the agent."""
         plain_handler = (
             self._gateway_plain_command_handlers().get(canonical)
             or self._gateway_idle_command_handlers().get(canonical)
@@ -1615,11 +1593,8 @@ class GatewayInboundMixin:
 
     @staticmethod
     def _inbound_attachment_display_name(path: str) -> Tuple[str, str]:
-        """``(display_name, agent_visible_path)`` for a downloaded attachment.
-
-        The cache filename is ``<id>_<id>_<original>``; the agent path is translated to the
-        in-container path under a Docker backend (cache dirs are auto-mounted there).
-        """
+        """``(display_name, agent_visible_path)``: cache filename is ``<id>_<id>_<original>``; the
+        path is translated to the in-container mount under a Docker backend."""
         from tools.credential_files import to_agent_visible_cache_path
         basename = os.path.basename(path)
         parts = basename.split("_", 2)
@@ -1717,11 +1692,8 @@ class GatewayInboundMixin:
         return message_text
 
     async def _inbound_model_context_length(self, source: SessionSource, session_key: str) -> int:
-        """Context length of the model this session's turn will run on (for @-reference budgeting).
-
-        A global ``model.context_length`` pin belongs to the configured model, not a session /model
-        or channel override; a matching per-custom-provider limit wins when available.
-        """
+        """Context length of the model this turn runs on. A global ``model.context_length`` pin
+        belongs to the configured model, not a /model or channel override; custom-provider limits win."""
         from gateway.run import _load_gateway_config
         from agent.model_metadata import get_model_context_length_async
 
@@ -1909,11 +1881,8 @@ class GatewayInboundMixin:
         return True
 
     async def _clear_durable_active_turn(self, event: "MessageEvent") -> bool:
-        """Best-effort CAS clear of the marker owned by *event* (3 attempts).
-
-        Never lets marker cleanup block agent/lease release; a stale marker is bounded by the
-        agent timeout and the clean-start orphan-marker discard path.
-        """
+        """Best-effort CAS clear of the marker owned by *event* (3 attempts; never blocks agent/lease
+        release — a stale marker is bounded by the agent timeout and clean-start discard)."""
         session_key = getattr(event, "_gateway_active_turn_session_key", None)
         token = getattr(event, "_gateway_active_turn_token", None)
         try:
@@ -2175,11 +2144,8 @@ class GatewayInboundMixin:
 
     @staticmethod
     def _untranscribed_audio_note(path: str) -> str:
-        """One minimal neutral marker for every STT failure.
-
-        Never mention "no STT provider", setup steps, or a DM sent — persisted in history they
-        poison later turns (the model keeps volunteering STT-setup advice).
-        """
+        """One minimal neutral marker for every STT failure. Never mention "no STT provider" or setup
+        steps — persisted in history they make the model keep volunteering STT-setup advice."""
         from tools.credential_files import to_agent_visible_cache_path
 
         agent_path = to_agent_visible_cache_path(os.path.abspath(path))
