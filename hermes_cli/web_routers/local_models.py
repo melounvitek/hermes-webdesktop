@@ -71,8 +71,7 @@ def _job(kind: str, target: str, model_id: str | None = None) -> Dict[str, Any]:
         "model_id": model_id,       # catalog id for downloads; None otherwise
         "status": "running",        # running | done | error
         "phase": "starting",        # human-readable step name
-        "detail": "", "total_bytes": None, "done_bytes": 0,
-        "started_at": time.time(), "error": None,
+        "detail": "", "total_bytes": None, "done_bytes": 0, "started_at": time.time(), "error": None,
     }
     with _JOBS_LOCK:
         _JOBS[job["job_id"]] = job
@@ -133,9 +132,8 @@ def _router_request(endpoint: Dict[str, Any], path: str, *, timeout: float,
     if payload is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        endpoint["base_url"].rsplit("/v1", 1)[0] + path, data=data, headers=headers,
-        method="POST" if payload is not None else None)
+    req = urllib.request.Request(endpoint["base_url"].rsplit("/v1", 1)[0] + path, data=data, headers=headers,
+                                 method="POST" if payload is not None else None)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return None if payload is not None else json.loads(r.read())
 
@@ -278,8 +276,7 @@ def _hf_url(repo: str, path: str) -> str:
 def _download_plan(entry, variant) -> list:
     """Everything a variant needs: split parts + mmproj/draft assets, as
     (url, dest, bytes) tuples."""
-    plan = [(_hf_url(entry.repo, a.path), _models_dir() / a.local_name, a.size_bytes)
-            for a in variant.files]
+    plan = [(_hf_url(entry.repo, a.path), _models_dir() / a.local_name, a.size_bytes) for a in variant.files]
     plan += [(_hf_url(entry.repo, a.path), bootstrap.assets_dir() / a.local_name, a.size_bytes)
              for a in (entry.mmproj, entry.draft) if a is not None]
     return plan
@@ -393,27 +390,21 @@ def _loaded_models(running: Dict[str, Any]) -> "tuple[Dict[str, str], Dict[str, 
     # Everything resident or becoming resident: 'loading' renders as its own
     # state in the pane (a 20-GB load in flight is the most important thing
     # the pane can show).
-    loaded = {
-        m["id"]: m.get("status", {}).get("value", "unknown")
-        for m in data.get("data", [])
-        if m.get("status", {}).get("value") in ("loaded", "ready", "loading")
-    }
+    loaded = {m["id"]: m.get("status", {}).get("value", "unknown") for m in data.get("data", [])
+              if m.get("status", {}).get("value") in ("loaded", "ready", "loading")}
     placement: Dict[str, Any] = {}
     decisions = presets.read_preset_decisions()
     for model_id, state in loaded.items():
         facts: Dict[str, Any] = {}
         plan = decisions.get(model_id)
         if plan is not None:
-            facts["window"] = plan.window
-            facts["window_label"] = _k_label(plan.window)
-            facts["spilled"] = plan.spilled
+            facts.update(window=plan.window, window_label=_k_label(plan.window), spilled=plan.spilled)
         if state in ("loaded", "ready"):
             try:
                 props = _router_request(running, f"/props?model={model_id}", timeout=3)
                 n_ctx = props.get("default_generation_settings", {}).get("n_ctx")
                 if n_ctx:
-                    facts["granted_window"] = int(n_ctx)
-                    facts["granted_window_label"] = _k_label(int(n_ctx))
+                    facts.update(granted_window=int(n_ctx), granted_window_label=_k_label(int(n_ctx)))
             except Exception:  # noqa: BLE001
                 pass
         if facts:
@@ -488,25 +479,17 @@ def local_models_status():
             # Never silent: an empty dict here renders as 'Not in memory'
             # on a machine whose VRAM is visibly full.
             logger.warning("loaded-models read failed: %r", exc)
-            loaded = {}
 
     return {
-        "enabled": bool(section.get("enabled")),
-        "tag": tag,
-        "configured_tag": configured_tag,
-        "update_available": update_available,
-        "runtime_installed": runtime_backend is not None,
-        "runtime_backend": runtime_backend,
-        "server_running": running is not None,
-        "server_base_url": (running or {}).get("base_url"),
-        "active_model_id": _active_llamacpp_model_id(),
+        "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
+        "update_available": update_available, "runtime_installed": runtime_backend is not None,
+        "runtime_backend": runtime_backend, "server_running": running is not None,
+        "server_base_url": (running or {}).get("base_url"), "active_model_id": _active_llamacpp_model_id(),
         "loaded_models": loaded,
         # Live load progress per model (SSE-fed): {model_id: {stage, value,
         # percent}}. The chat's loading bar and the picker rows poll this.
         "loading": _loading_progress(),
-        "placement": placement,
-        "models": staged,
-        "models_dir": str(mdir),
+        "placement": placement, "models": staged, "models_dir": str(mdir),
     }
 
 
@@ -527,9 +510,8 @@ def local_models_hardware():
     budget = hardware.probe_budget()
     ram_total, ram_avail = hardware._ram_bytes()
     out = {
-        "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes,
-        "vram_usable_bytes": budget.usable_vram_bytes, "ram_total_bytes": ram_total,
-        "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
+        "uma": budget.uma, "vram_total_bytes": budget.total_device_bytes, "vram_usable_bytes": budget.usable_vram_bytes,
+        "ram_total_bytes": ram_total, "ram_available_bytes": ram_avail, "vram_label": _human_gb(budget.total_device_bytes),
         "gpu_name": None, "gpu_util_percent": None, "vram_used_bytes": None,
     }
     # GPU identity + live utilization (NVIDIA; other vendors degrade to None
@@ -541,9 +523,7 @@ def local_models_hardware():
             capture_output=True, text=True, timeout=5) if smi_exe else None
         if smi and smi.returncode == 0 and smi.stdout.strip():
             name, util, used_mib = (x.strip() for x in smi.stdout.strip().splitlines()[0].split(","))
-            out["gpu_name"] = name
-            out["gpu_util_percent"] = int(util)
-            out["vram_used_bytes"] = int(used_mib) << 20
+            out.update(gpu_name=name, gpu_util_percent=int(util), vram_used_bytes=int(used_mib) << 20)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -566,14 +546,11 @@ def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> 
     dl = next((v for v in entry.variants if v.model_id in staged_ids), None)
     row: Dict[str, Any] = {
         "id": entry.id, "display_name": entry.display_name, "description": entry.description,
-        "native_context": entry.n_ctx_train,
-        "native_context_label": _k_label(entry.n_ctx_train),
+        "native_context": entry.n_ctx_train, "native_context_label": _k_label(entry.n_ctx_train),
         "recommended": entry.id == recommended,
         "recommended_reason": recommended_reason if entry.id == recommended else None,
-        "downloaded": dl is not None,
-        "downloaded_model_id": dl.model_id if dl else None,
-        "downloaded_quant": dl.quant if dl else None,
-        "mtp": entry.mtp, "vision": entry.mmproj is not None,
+        "downloaded": dl is not None, "downloaded_model_id": dl.model_id if dl else None,
+        "downloaded_quant": dl.quant if dl else None, "mtp": entry.mtp, "vision": entry.mmproj is not None,
         # Day-0 architectures need the llama.cpp release where their support
         # landed: True gates download/activate until the engine updates, but
         # the row still renders (visible + explained beats hidden).
@@ -609,9 +586,7 @@ def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> 
     if isinstance(decision, estimator.PhysicsRefusal):
         row["fit_summary"] = row["quant_reason"]
         return row
-    row["start_window"] = decision.window
-    row["start_window_label"] = _k_label(decision.window)
-    row["spilled"] = decision.spilled
+    row.update(start_window=decision.window, start_window_label=_k_label(decision.window), spilled=decision.spilled)
     if decision.window >= entry.n_ctx_train:
         shape = f"runs at its full {row['native_context_label']} context"
     else:
@@ -676,10 +651,8 @@ def _runtime_progress_hook(job: Dict[str, Any]):
             state["asset_total"] = total or done
             plan_done = state["banked"] + done
             plan_total = state["banked"] + (total or 0)
-            job["phase"] = "downloading-runtime"
-            job["detail"] = f"Downloading the local engine{suffix} — {_human_gb(plan_done)}"
-            if total:
-                job["detail"] += f" of {_human_gb(plan_total)}"
+            _step(job, "downloading-runtime", f"Downloading the local engine{suffix} — {_human_gb(plan_done)}"
+                  + (f" of {_human_gb(plan_total)}" if total else ""))
             job["done_bytes"] = plan_done
             job["total_bytes"] = plan_total or None
         elif stage == "extract":
@@ -829,8 +802,7 @@ def _quickstart_target(body: QuickstartBody, budget):
     else:
         picked = catalog.recommended_entry(budget, _eligible_entries())
         best = picked[0] if picked is not None else None
-        candidates = ([best] if best is not None else []) + [
-            e for e in catalog.CATALOG if best is None or e.id != best.id]
+        candidates = ([best] if best is not None else []) + [e for e in catalog.CATALOG if best is None or e.id != best.id]
     for candidate in candidates:
         choice = catalog.select_variant(candidate, budget)
         if choice is not None and not _engine_too_old(candidate.min_engine):
@@ -888,8 +860,7 @@ async def local_models_quickstart(body: QuickstartBody):
 
     _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s", on_exit=_QUICKSTART_LOCK.release)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
-            "needs_runtime": need_runtime, "needs_download": need_download,
-            "download_bytes": download_bytes}
+            "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
 
 
 # ── server lifecycle: turn the engine on/off ─────────────────

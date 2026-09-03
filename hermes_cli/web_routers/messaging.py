@@ -64,51 +64,42 @@ _telegram_onboarding_pairings = LateState("_telegram_onboarding_pairings")
 
 # Display labels for env vars not in OPTIONAL_ENV_VARS (HOME_CHANNEL_*, bridge
 # toggles, Twilio, HASS, Email, etc.) so the UI can still render a friendly label.
+# (key, description, prompt, extra flags: url / password / advanced)
 _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
-    "SIGNAL_HTTP_URL": {
-        "description": "signal-cli REST API base URL, e.g. http://127.0.0.1:8080", "prompt": "Signal bridge URL",
-        "url": "https://github.com/bbernhard/signal-cli-rest-api",
-    },
-    "SIGNAL_ACCOUNT": {"description": "Signal account phone number registered with the bridge", "prompt": "Signal account"},
-    "SIGNAL_ALLOWED_USERS": {"description": "Comma-separated Signal users allowed to use the bot", "prompt": "Allowed Signal users"},
-    "WHATSAPP_ENABLED": {"description": "Enable the WhatsApp gateway adapter", "prompt": "Enable WhatsApp", "advanced": True},
-    "WHATSAPP_MODE": {"description": "WhatsApp bridge mode", "prompt": "WhatsApp mode", "advanced": True},
-    "WHATSAPP_DM_POLICY": {"description": "How WhatsApp direct messages are authorized", "prompt": "WhatsApp DM policy", "advanced": True},
-    "WHATSAPP_ALLOWED_USERS": {"description": "Comma-separated WhatsApp users allowed to use the bot", "prompt": "Allowed WhatsApp users"},
-    "HASS_URL": {"description": "Home Assistant base URL, e.g. https://homeassistant.local:8123", "prompt": "Home Assistant URL"},
-    "HASS_TOKEN": {
-        "description": "Long-lived access token from Home Assistant (Profile → Security)",
-        "prompt": "Home Assistant access token", "password": True,
-    },
-    "EMAIL_ADDRESS": {"description": "Email address to send and receive from", "prompt": "Email address"},
-    "EMAIL_PASSWORD": {"description": "Email account password or app password", "prompt": "Email password", "password": True},
-    "EMAIL_IMAP_HOST": {"description": "IMAP server host (e.g. imap.gmail.com)", "prompt": "IMAP host"},
-    "EMAIL_SMTP_HOST": {"description": "SMTP server host (e.g. smtp.gmail.com)", "prompt": "SMTP host"},
-    "TWILIO_ACCOUNT_SID": {"description": "Twilio Account SID", "prompt": "Twilio Account SID", "url": "https://www.twilio.com/console"},
-    "TWILIO_AUTH_TOKEN": {"description": "Twilio Auth Token", "prompt": "Twilio Auth Token", "password": True},
-    "WECOM_BOT_ID": {"description": "WeCom group bot ID", "prompt": "WeCom Bot ID"},
-    "WECOM_SECRET": {"description": "WeCom group bot secret", "prompt": "WeCom Secret", "password": True},
-    "WECOM_CALLBACK_CORP_ID": {"description": "WeCom corp ID", "prompt": "WeCom Corp ID"},
-    "WECOM_CALLBACK_CORP_SECRET": {"description": "WeCom app corp secret", "prompt": "WeCom Corp Secret", "password": True},
-    "WECOM_CALLBACK_AGENT_ID": {"description": "WeCom app agent ID", "prompt": "WeCom Agent ID"},
-    "WECOM_CALLBACK_TOKEN": {"description": "WeCom callback verification token", "prompt": "WeCom Token"},
-    "WECOM_CALLBACK_ENCODING_AES_KEY": {"description": "WeCom callback AES encoding key", "prompt": "WeCom AES Key", "password": True},
-    "WEIXIN_ACCOUNT_ID": {
-        "description": "iLink Bot account ID obtained through QR login in hermes gateway setup", "prompt": "iLink Bot account ID",
-    },
-    "WEIXIN_TOKEN": {
-        "description": "iLink Bot token obtained through QR login in hermes gateway setup", "prompt": "iLink Bot token",
-        "password": True,
-    },
-    "WEIXIN_BASE_URL": {
-        "description": "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)", "prompt": "iLink API base URL",
-    },
-    "FEISHU_APP_ID": {"description": "Feishu / Lark app ID", "prompt": "App ID"},
-    "FEISHU_APP_SECRET": {"description": "Feishu / Lark app secret", "prompt": "App secret", "password": True},
-    "FEISHU_ENCRYPT_KEY": {"description": "Feishu / Lark encrypt key", "prompt": "Encrypt key", "password": True},
-    "FEISHU_VERIFICATION_TOKEN": {"description": "Feishu / Lark verification token", "prompt": "Verification token", "password": True},
-    "DINGTALK_CLIENT_ID": {"description": "DingTalk client ID (App key)", "prompt": "Client ID"},
-    "DINGTALK_CLIENT_SECRET": {"description": "DingTalk client secret (App secret)", "prompt": "Client secret", "password": True},
+    key: {"description": description, "prompt": prompt, **extra}
+    for key, description, prompt, extra in (
+        ("SIGNAL_HTTP_URL", "signal-cli REST API base URL, e.g. http://127.0.0.1:8080", "Signal bridge URL", {"url": "https://github.com/bbernhard/signal-cli-rest-api"}),
+        ("SIGNAL_ACCOUNT", "Signal account phone number registered with the bridge", "Signal account", {}),
+        ("SIGNAL_ALLOWED_USERS", "Comma-separated Signal users allowed to use the bot", "Allowed Signal users", {}),
+        ("WHATSAPP_ENABLED", "Enable the WhatsApp gateway adapter", "Enable WhatsApp", {"advanced": True}),
+        ("WHATSAPP_MODE", "WhatsApp bridge mode", "WhatsApp mode", {"advanced": True}),
+        ("WHATSAPP_DM_POLICY", "How WhatsApp direct messages are authorized", "WhatsApp DM policy", {"advanced": True}),
+        ("WHATSAPP_ALLOWED_USERS", "Comma-separated WhatsApp users allowed to use the bot", "Allowed WhatsApp users", {}),
+        ("HASS_URL", "Home Assistant base URL, e.g. https://homeassistant.local:8123", "Home Assistant URL", {}),
+        ("HASS_TOKEN", "Long-lived access token from Home Assistant (Profile → Security)", "Home Assistant access token", {"password": True}),
+        ("EMAIL_ADDRESS", "Email address to send and receive from", "Email address", {}),
+        ("EMAIL_PASSWORD", "Email account password or app password", "Email password", {"password": True}),
+        ("EMAIL_IMAP_HOST", "IMAP server host (e.g. imap.gmail.com)", "IMAP host", {}),
+        ("EMAIL_SMTP_HOST", "SMTP server host (e.g. smtp.gmail.com)", "SMTP host", {}),
+        ("TWILIO_ACCOUNT_SID", "Twilio Account SID", "Twilio Account SID", {"url": "https://www.twilio.com/console"}),
+        ("TWILIO_AUTH_TOKEN", "Twilio Auth Token", "Twilio Auth Token", {"password": True}),
+        ("WECOM_BOT_ID", "WeCom group bot ID", "WeCom Bot ID", {}),
+        ("WECOM_SECRET", "WeCom group bot secret", "WeCom Secret", {"password": True}),
+        ("WECOM_CALLBACK_CORP_ID", "WeCom corp ID", "WeCom Corp ID", {}),
+        ("WECOM_CALLBACK_CORP_SECRET", "WeCom app corp secret", "WeCom Corp Secret", {"password": True}),
+        ("WECOM_CALLBACK_AGENT_ID", "WeCom app agent ID", "WeCom Agent ID", {}),
+        ("WECOM_CALLBACK_TOKEN", "WeCom callback verification token", "WeCom Token", {}),
+        ("WECOM_CALLBACK_ENCODING_AES_KEY", "WeCom callback AES encoding key", "WeCom AES Key", {"password": True}),
+        ("WEIXIN_ACCOUNT_ID", "iLink Bot account ID obtained through QR login in hermes gateway setup", "iLink Bot account ID", {}),
+        ("WEIXIN_TOKEN", "iLink Bot token obtained through QR login in hermes gateway setup", "iLink Bot token", {"password": True}),
+        ("WEIXIN_BASE_URL", "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)", "iLink API base URL", {}),
+        ("FEISHU_APP_ID", "Feishu / Lark app ID", "App ID", {}),
+        ("FEISHU_APP_SECRET", "Feishu / Lark app secret", "App secret", {"password": True}),
+        ("FEISHU_ENCRYPT_KEY", "Feishu / Lark encrypt key", "Encrypt key", {"password": True}),
+        ("FEISHU_VERIFICATION_TOKEN", "Feishu / Lark verification token", "Verification token", {"password": True}),
+        ("DINGTALK_CLIENT_ID", "DingTalk client ID (App key)", "Client ID", {}),
+        ("DINGTALK_CLIENT_SECRET", "DingTalk client secret (App secret)", "Client secret", {"password": True}),
+    )
 }
 
 
