@@ -386,10 +386,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
         chunks: List[str] = []
         for para in (paragraphs or [text]):
-            if len(para) <= self.MAX_MESSAGE_LENGTH:
-                chunks.append(para)
-            else:
-                chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+            chunks.extend([para] if len(para) <= self.MAX_MESSAGE_LENGTH
+                          else self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
         last = SendResult(success=True)
         for chunk in chunks:
             guid = await self._resolve_chat_guid(chat_id)
@@ -567,26 +565,17 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             mime = (att.get("mimeType") or "").lower()
             media_urls.append(cached)
             media_types.append(mime)
-            if mime.startswith("image/"):
-                msg_type = MessageType.PHOTO
-            elif mime.startswith("audio/") or (att.get("uti") or "").endswith("caf"):
-                msg_type = MessageType.VOICE
-            elif mime.startswith("video/"):
-                msg_type = MessageType.VIDEO
-            else:
-                msg_type = MessageType.DOCUMENT
+            is_voice = mime.startswith("audio/") or (att.get("uti") or "").endswith("caf")
+            msg_type = (MessageType.PHOTO if mime.startswith("image/") else MessageType.VOICE if is_voice
+                        else MessageType.VIDEO if mime.startswith("video/") else MessageType.DOCUMENT)
         # With multiple attachments, prefer PHOTO if any images present
-        if len(media_urls) > 1 and "image" in {(m or "").split("/")[0] for m in media_types}:
+        if len(media_urls) > 1 and any(m.split("/")[0] == "image" for m in media_types):
             msg_type = MessageType.PHOTO
         return media_urls, media_types, msg_type
 
     def _webhook_token(self, request) -> Optional[str]:
-        return (
-            request.query.get("password")
-            or request.query.get("guid")
-            or request.headers.get("x-password")
-            or request.headers.get("x-guid")
-            or request.headers.get("x-bluebubbles-guid"))
+        return (request.query.get("password") or request.query.get("guid") or request.headers.get("x-password")
+                or request.headers.get("x-guid") or request.headers.get("x-bluebubbles-guid"))
 
     def _resolve_chat_and_sender(self, payload: Dict[str, Any], record: Dict[str, Any]):
         """Returns ``(chat_guid, chat_identifier, sender)`` from the many BlueBubbles payload shapes."""
@@ -594,10 +583,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             record.get("chatGuid"), payload.get("chatGuid"),
             record.get("chat_guid"), payload.get("chat_guid"), payload.get("guid"))
         # BlueBubbles v1.9+ payloads omit top-level chatGuid; it's nested under data.chats[0].guid.
-        if not chat_guid:
-            _chats = record.get("chats") or []
-            if _chats and isinstance(_chats[0], dict):
-                chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
+        _chats = record.get("chats") or []
+        if not chat_guid and _chats and isinstance(_chats[0], dict):
+            chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
         chat_identifier = self._value(
             record.get("chatIdentifier"), record.get("identifier"),
             payload.get("chatIdentifier"), payload.get("identifier"))
