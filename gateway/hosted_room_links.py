@@ -70,17 +70,11 @@ class StoredRoomLink:
         if not updated_at > 0:
             raise HostedRoomPeerError("updated_at must be positive")
         return cls(
-            room_id=room_id,
-            member_id=member_id,
-            target_url=target_url,
-            target_profile=target_profile,
-            grant=grant,
-            catalog=GatewayRoomCatalog.from_mapping(value["catalog"]),
+            room_id=room_id, member_id=member_id, target_url=target_url, target_profile=target_profile,
+            grant=grant, catalog=GatewayRoomCatalog.from_mapping(value["catalog"]),
             cancellation_scope_id=_short_string(value["cancellation_scope_id"], "cancellation_scope_id"),
-            trace_id=_short_string(value["trace_id"], "trace_id"),
-            transport_security=transport_security,  # type: ignore[arg-type]
-            status=status,
-            updated_at=updated_at)
+            trace_id=_short_string(value["trace_id"], "trace_id"), transport_security=transport_security,
+            status=status, updated_at=updated_at)
 
     @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> "StoredRoomLink":
@@ -124,15 +118,12 @@ def load_room_links(db_path: DbPath) -> tuple[StoredRoomLink, ...]:
 
 def load_room_links_tolerant(db_path: DbPath) -> tuple[tuple[StoredRoomLink, ...], tuple[str, ...]]:
     """Load healthy routes while quarantining malformed rows by identity."""
-    links = []
-    errors = []
+    links, errors = [], []
     for row in _link_rows(db_path):
         try:
             links.append(StoredRoomLink.from_record(row))
         except Exception:
-            room = str(row.get("room_id") or "unknown")
-            member = str(row.get("member_id") or "unknown")
-            errors.append(f"{room}:{member}:invalid")
+            errors.append(f"{row.get('room_id') or 'unknown'}:{row.get('member_id') or 'unknown'}:invalid")
     return tuple(links), tuple(errors)
 
 
