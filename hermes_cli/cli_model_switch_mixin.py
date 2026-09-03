@@ -4,9 +4,8 @@ Mixin split out of ``cli.py``; bound onto ``HermesCLI`` via the MRO. cli.py-inte
 symbols are imported LAZILY inside each method (``from cli import ...``) — the mixin
 never imports ``cli`` at module load time (import cycle).
 
-Test stubs drive the switch paths with ``object.__new__`` / SimpleNamespace objects that
-lack most mixin methods, so shared steps are module-level functions taking ``cli`` and
-sibling methods are invoked through ``HermesCLI.<name>(self, ...)``.
+Tests drive the switch paths with bare stubs lacking most mixin methods, so shared steps are
+module-level functions taking ``cli`` and siblings are called as ``HermesCLI.<name>(self, ...)``.
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ import threading
 from rich.markup import escape as _escape
 from utils import base_url_host_matches
 
-# CLI-level fields that together describe the active model route; snapshotted before a
-# switch / one-turn override and restored wholesale on rollback.
+# CLI-level fields describing the active model route; snapshotted before a switch / one-turn
+# override and restored wholesale on rollback.
 _RUNTIME_FIELDS = (
     "model", "provider", "requested_provider", "_explicit_api_key", "_explicit_base_url",
     "api_key", "base_url", "api_mode",
@@ -31,13 +30,9 @@ def _runtime_fields(cli) -> dict:
 
 
 def _heal_bare_custom_provider(provider, *, base_url, model):
-    """Bare ``custom`` is the resolved billing class, not a routable identity.
-
-    Persisting/restoring it verbatim makes a later resume hard-fail once the config default
-    has moved off the custom endpoint (resolve_runtime_provider only trusts config base_url
-    for bare custom while the config provider is still custom-ish). Recover the durable
-    ``custom:<name>`` menu key from the endpoint, else drop the provider (None).
-    """
+    """Bare ``custom`` is a billing class, not a routable identity: persisting/restoring it makes a
+    later resume hard-fail once the config default leaves the custom endpoint. Recover the durable
+    ``custom:<name>`` menu key from the endpoint, else drop the provider (None)."""
     if str(provider or "").strip().lower() != "custom":
         return provider
     try:
@@ -71,9 +66,9 @@ def _merge_preflight_warning(cli, result, custom_providers) -> None:
 def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_context: bool) -> None:
     """Record the next-turn switch note and print the "Model switched" block.
 
-    The note is prepended to the next user message (not injected as a system message
-    mid-history, which breaks providers and prompt caching). ``strict_context``: the
-    typed /model path lets context-resolution errors propagate; the picker path swallows them.
+    The note is prepended to the next user message (a mid-history system message would break
+    providers and prompt caching). ``strict_context``: the typed /model path lets
+    context-resolution errors propagate; the picker path swallows them.
     """
     from cli import _cprint
     from hermes_cli.model_switch import format_model_for_display, resolve_display_context_length
@@ -88,9 +83,8 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
     _cprint(f"  ✓ Model switched: {_display_new}")
     _cprint(f"    Provider: {result.provider_label or result.target_provider}")
 
-    # Context: always resolve via the provider-aware chain so Codex OAuth, Copilot, and
-    # Nous-enforced caps win over the raw models.dev entry (gpt-5.5 is 1.05M on openai
-    # but 272K on Codex OAuth).
+    # Provider-aware context chain: Codex OAuth / Copilot / Nous caps win over the raw
+    # models.dev entry (gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
     mi = result.model_info
     agent = cli.agent
     try:
@@ -151,10 +145,8 @@ def _commit_model_switch(
     cli, result, *, persist_global: bool, one_turn: bool = False, picker: bool = False
 ) -> None:
     """Stage + swap, print the summary, persist (session row unless --once; config on --global).
-
-    ``picker``: the picker path tolerates context-resolution errors and labels the config write
-    "(--global)"; the typed /model path additionally records the one-turn restore snapshot.
-    """
+    ``picker``: tolerate context-resolution errors and label the config write "(--global)"; the
+    typed path additionally records the one-turn restore snapshot."""
     from cli import HermesCLI, _cprint
     old_model = cli.model
     snapshot = cli._snapshot_model_runtime() if one_turn else None
@@ -170,20 +162,16 @@ def _commit_model_switch(
         _cprint("    (next turn only — restores after one response)")
     else:
         _cprint("    (session only — add --global to persist)")
-    # --global also updates config.yaml (future sessions), but the row still records what THIS
-    # session runs — otherwise a later resume would restore the stale creation-time model over
-    # the new global choice. --once is ephemeral and restored after one turn: never touch the row.
+    # The row records what THIS session runs even on --global (else a later resume restores the
+    # stale creation-time model); --once is restored after one turn and never touches the row.
     if not one_turn:
         HermesCLI._persist_model_switch_to_session(cli, result)
 
 
 def _persist_global_switch(cli, result) -> None:
-    """Write the switched route to config.yaml (--global).
-
-    base_url/api_mode are always freshly resolved for the target provider (model_switch.py),
-    so sync them every time; None clears a value the new provider doesn't need — otherwise a
-    global switch leaves the OLD provider's endpoint/wire-protocol in config.yaml (#25106).
-    """
+    """Write the switched route to config.yaml (--global). base_url/api_mode are freshly resolved
+    for the target provider, so sync them every time (None clears a value the new provider doesn't
+    need) — otherwise the OLD provider's endpoint/wire-protocol lingers in config.yaml."""
     from cli import HermesCLI, save_config_value
     HermesCLI._clear_persisted_context_for_model_switch(cli, result)
     save_config_value("model.default", result.new_model)
@@ -324,13 +312,10 @@ class CLIModelSwitchMixin:
     def _persist_model_switch_to_session(self, result) -> None:
         """Persist a session-scoped /model switch to the session DB row.
 
-        Writes the model column plus the runtime route so ``--resume`` (CLI, reads
-        ``gateway_runtime``) and ``session.resume`` (TUI/desktop, reads top-level
-        ``model_config`` keys) both restore the switched provider instead of recombining
-        the model with the ambient default. Mirrors the gateway's ``update_session_model()``.
-        Both shapes derive from one ``route`` dict with or-None values so stale keys from a
-        previous switch are DELETED (``_merge_model_config_json`` only deletes on explicit
-        None) and the two shapes can never diverge.
+        Writes the model column plus the route in both shapes readers use — nested
+        ``gateway_runtime`` (CLI --resume) and top-level keys (TUI session.resume) — from one
+        or-None dict so stale keys are DELETED (``_merge_model_config_json`` only deletes on
+        explicit None) and the shapes never diverge.
         """
         from cli import logger
         db = getattr(self, "_session_db", None)
@@ -351,22 +336,18 @@ class CLIModelSwitchMixin:
             logger.debug("Failed to persist model switch to session DB", exc_info=True)
 
     def _restore_session_model(self, session_meta: dict, *, quiet: bool = False) -> None:
-        """Restore model/provider from the session DB row on resume.
+        """Restore model/provider from the session DB row on every resume path.
 
-        Called from every resume path (startup ``--resume``/``-c`` and mid-chat ``/resume``);
-        without it a resumed session silently falls back to the config default model. Skips
-        when no model is recorded or the CLI was launched with an explicit ``-m`` (user intent
-        wins). When the stored provider differs from the ambient one, credentials are
-        re-resolved for it — the ambient ``api_key`` belongs to the config-default provider
-        and must not be sent to the session's endpoint; on failure the ambient credentials are
-        kept so the session still opens (the first turn surfaces the auth error).
+        Skips when no model is recorded or the CLI got an explicit ``-m`` (user intent wins).
+        A different stored provider gets its credentials re-resolved — the ambient ``api_key``
+        must not be sent to the session's endpoint; on failure the ambient credentials are kept
+        so the session still opens (the first turn surfaces the auth error).
         """
         from cli import logger
         stored_model = (session_meta or {}).get("model")
         if not stored_model or getattr(self, "_explicit_model_override", False):
             return
-        # Canonical row-level reader: prefers model_config.gateway_runtime, falls back to
-        # the TUI gateway's top-level keys.
+        # Canonical row reader: model_config.gateway_runtime, else the TUI's top-level keys.
         from hermes_state import SessionDB as _SessionDB
         _stored_runtime = _SessionDB.session_gateway_runtime(session_meta)
         stored_base_url = _stored_runtime.get("base_url") or None
@@ -389,13 +370,11 @@ class CLIModelSwitchMixin:
             if stored_api_mode:
                 self.api_mode = stored_api_mode
         if provider_changed:
-            # Stale launch-time explicit overrides belong to the AMBIENT provider; carrying
-            # them into the restored provider's resolution poisons
-            # _ensure_runtime_credentials on startup resume.
+            # Launch-time explicit overrides belong to the AMBIENT provider and would poison
+            # _ensure_runtime_credentials for the restored one. api_key is never persisted to
+            # the session DB — runtime provider resolution owns credentials.
             self._explicit_api_key = None
             self._explicit_base_url = stored_base_url
-            # api_key is never persisted to the session DB (by design) — runtime provider
-            # resolution owns credentials.
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
                 resolved = resolve_runtime_provider(requested=stored_provider)
@@ -412,8 +391,8 @@ class CLIModelSwitchMixin:
                     "%s failed; keeping ambient credentials",
                     stored_provider, exc_info=True,
                 )
-        # Mid-chat /resume: swap the live agent in place. On startup --resume the agent
-        # isn't built yet — _init_agent picks up self.model / self.provider.
+        # Mid-chat /resume swaps the live agent; on startup --resume _init_agent picks up
+        # self.model / self.provider.
         if self.agent is not None:
             try:
                 self.agent.switch_model(
@@ -533,12 +512,9 @@ class CLIModelSwitchMixin:
 
     @staticmethod
     def _filter_model_picker_entries(entries: list, query: str) -> list:
-        """Return (original_index, label) pairs for entries matching ``query``.
-
-        Case-insensitive subsequence match; an empty query matches everything. Pairs carry
-        the ORIGINAL index into ``entries`` so a selection in the filtered view resolves to
-        exactly one concrete model — filtering never introduces fuzzy *resolution*.
-        """
+        """Return (original_index, label) pairs matching ``query`` (case-insensitive subsequence;
+        empty matches all). The ORIGINAL index keeps a filtered selection resolving to exactly one
+        concrete model — filtering never introduces fuzzy *resolution*."""
         pairs = list(enumerate(entries))
         q = (query or "").strip().lower()
         if not q:
@@ -555,12 +531,9 @@ class CLIModelSwitchMixin:
         selected: int, scroll_offset: int, n: int, term_rows: int, reserved_below: int = 6,
         panel_chrome: int = 6, min_visible: int = 3,
     ) -> tuple[int, int]:
-        """Resolve (scroll_offset, visible) for the /model picker viewport.
-
-        ``reserved_below`` matches the approval / clarify panels (input area, status bar,
-        separators); ``panel_chrome`` is this panel's borders + blanks + hint row. The
-        offset slides to keep ``selected`` on screen.
-        """
+        """Resolve (scroll_offset, visible) for the /model picker viewport. ``reserved_below``
+        matches the approval/clarify panels (input, status bar, separators); ``panel_chrome`` is
+        borders + blanks + hint row. The offset slides to keep ``selected`` on screen."""
         max_visible = max(min_visible, term_rows - reserved_below - panel_chrome)
         if n <= max_visible:
             return 0, n
@@ -593,19 +566,17 @@ class CLIModelSwitchMixin:
     def _stage_and_swap_model(self, result, old_model) -> bool:
         """Stage ``result`` onto the CLI fields, then swap the live agent in place.
 
-        CLI-level fields are snapshotted first (mirrors the gateway) so a failed in-place
-        agent swap rolls the whole CLI back to the old working model — otherwise the broken
-        credentials staged here leak into the next turn's resolution even though the agent
-        itself rolled back. Returns False after printing the failure so the caller aborts
-        the rest of the commit (a failed switch is a no-op, not a dead session).
+        CLI fields are snapshotted first so a failed agent swap rolls the whole CLI back —
+        otherwise the staged broken credentials leak into the next turn even though the agent
+        rolled back. Returns False after printing the failure (a failed switch is a no-op).
         """
         from cli import _cprint
         _cli_snapshot = _runtime_fields(self)
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider
-        # Always overwrite explicit overrides so stale credentials from the previous
-        # provider (e.g. Ollama api_key/base_url) don't leak into the next resolution.
+        # Always overwrite explicit overrides so stale credentials from the previous provider
+        # (e.g. Ollama api_key/base_url) don't leak into the next resolution.
         self._explicit_api_key = result.api_key
         self._explicit_base_url = result.base_url
         if result.api_key:
@@ -655,9 +626,8 @@ class CLIModelSwitchMixin:
                 self._close_model_picker()
                 return
             provider_data = providers[selected]
-            # Curated list from list_authenticated_providers() (same as `hermes model` and
-            # gateway pickers); live catalog only when the curated list is empty
-            # (user-defined endpoints).
+            # Curated list (same as `hermes model` / gateway pickers); live catalog only when
+            # it is empty (user-defined endpoints).
             model_list = provider_data.get("models", [])
             if not model_list:
                 try:
@@ -674,8 +644,7 @@ class CLIModelSwitchMixin:
         if stage == "model":
             provider_data = state.get("provider_data") or {}
             model_list = state.get("model_list") or []
-            # Map the selected row through the active fuzzy filter; the filtered pair
-            # carries the ORIGINAL index, so the resolved model is one concrete entry.
+            # Map the row through the active fuzzy filter; pairs carry the ORIGINAL index.
             filtered_pairs = state.get("_filtered_pairs")
             if filtered_pairs is None:
                 filtered_pairs = list(enumerate(model_list))
@@ -721,15 +690,12 @@ class CLIModelSwitchMixin:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
 
-        Persistence defaults to off (``model.persist_switch_by_default``, default False —
-        switches are session-scoped). ``--global`` persists, ``--once`` is next-turn only.
+        Switches are session-scoped unless ``model.persist_switch_by_default`` or ``--global``.
         """
         from cli import _cprint
         from hermes_cli.model_switch import parse_model_switch_args, resolve_persist_behavior
 
         parts = cmd_original.split(None, 1)  # split off '/model'
-        # Single-owner flag parser (hermes_cli.model_switch): --provider/--global/--session/
-        # --once/--refresh.
         request = parse_model_switch_args(parts[1].strip() if len(parts) > 1 else "")
         if request.errors:
             # CLI decoration: "  ✗ " prefix over the canonical error copy.
@@ -741,8 +707,7 @@ class CLIModelSwitchMixin:
             explicit_provider=request.explicit_provider,
         )
 
-        # --refresh: wipe the on-disk picker cache so every authed provider's /v1/models
-        # is re-fetched live on this open.
+        # --refresh: wipe the picker cache so every authed provider's /v1/models is re-fetched.
         if request.force_refresh:
             try:
                 from hermes_cli.models import clear_provider_models_cache
@@ -751,8 +716,7 @@ class CLIModelSwitchMixin:
             except Exception:
                 pass
 
-        # Single inventory context; live session state overlaid via with_overrides
-        # (truthy-only) so empty self.* attrs don't clobber disk config.
+        # Live session state is overlaid truthy-only so empty self.* attrs don't clobber config.
         from hermes_cli.inventory import load_picker_context
         try:
             ctx = load_picker_context().with_overrides(
@@ -785,12 +749,8 @@ class CLIModelSwitchMixin:
     def _confirm_and_apply_cli_model_switch(
         self, result, persist_global: bool, one_turn: bool, custom_provs=None
     ) -> None:
-        """Confirm an expensive model switch and apply it to CLI state.
-
-        Runs on a worker thread when the TUI is active (see _run_confirm_and_apply) so the
-        confirmation modal can render. Updates requested_provider (via the swap) so
-        _ensure_runtime_credentials() doesn't overwrite the switch on the next turn.
-        """
+        """Confirm an expensive model switch and apply it (typed /model path). Runs on a worker
+        thread when the TUI is active (see _run_confirm_and_apply) so the modal can render."""
         from cli import _cprint
         if not self._confirm_expensive_model_switch(result):
             _cprint("  Model switch cancelled.")
@@ -843,9 +803,8 @@ class CLIModelSwitchMixin:
             return False
 
     def _cmd_moa(self, cmd_original: str):
-        """/moa is one-shot sugar: run one prompt through the default MoA preset, then restore
-        the prior model. Switching to MoA for the session is done via the model picker (MoA
-        presets surface as a virtual "Mixture of Agents" provider)."""
+        """/moa one-shot: run one prompt through the default MoA preset, then restore the prior
+        model (a session-long MoA switch goes through the picker's virtual MoA provider)."""
         from cli import _cprint, _slash_args
         from hermes_cli.moa_config import moa_usage, normalize_moa_config
 

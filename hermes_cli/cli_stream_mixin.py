@@ -19,7 +19,9 @@ from rich.markup import escape as _escape
 
 # Model-generated reasoning tags: suppressed during streaming (they'd display as raw XML;
 # the agent strips them from final_response too) unless show_reasoning routes them to the box.
-_OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>")
+_OPEN_TAGS = (
+    "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>",
+)
 _CLOSE_TAGS = tuple("</" + t[1:] for t in _OPEN_TAGS)
 _MAX_CLOSE_TAG_LEN = max(len(t) for t in _CLOSE_TAGS)
 
@@ -57,10 +59,9 @@ class CLIStreamMixin:
     def _on_notice(self, notice) -> None:
         """Queue an out-of-band AgentNotice for rendering at the next clean boundary.
 
-        Notices fire from inside the agent turn (cold-start seed during _init_agent, per-turn
-        _capture_credits after the API call) — printing immediately races the streaming
-        response and the line gets buried behind the prompt. Flushed by
-        _flush_credit_notices() right after run_conversation returns. Fail-soft.
+        Notices fire mid-turn (cold-start seed, per-turn _capture_credits); printing immediately
+        races the stream and buries the line behind the prompt. Flushed by _flush_credit_notices()
+        after run_conversation returns. Fail-soft.
         """
         try:
             text = getattr(notice, "text", "") or ""
@@ -107,9 +108,7 @@ class CLIStreamMixin:
         preview_text = reasoning_text.strip()
         if not preview_text:
             return
-        prefix = "  [thinking] "
-        wrap_width = max(30, _terminal_columns() - len(prefix) - 2)
-
+        wrap_width = max(30, _terminal_columns() - len("  [thinking] ") - 2)
         paragraphs = []
         for paragraph in re.split(r"\n\s*\n+", preview_text.replace("\r\n", "\n")):
             compact = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
@@ -151,9 +150,12 @@ class CLIStreamMixin:
                 flush_text, buf = buf[: line_break + 1], buf[line_break + 1 :]
             elif len(buf) >= target_width:
                 search_start = max(20, target_width // 2)
-                search_end = min(len(buf), max(target_width + (target_width // 3), target_width + 8))
+                search_end = min(
+                    len(buf), max(target_width + (target_width // 3), target_width + 8)
+                )
                 cut = max(
-                    buf.rfind(b, search_start, search_end) for b in (" ", "\t", ".", "!", "?", ",", ";", ":")
+                    buf.rfind(b, search_start, search_end)
+                    for b in (" ", "\t", ".", "!", "?", ",", ";", ":")
                 )
                 if cut != -1:
                     flush_text, buf = buf[: cut + 1], buf[cut + 1 :]
@@ -221,12 +223,11 @@ class CLIStreamMixin:
             ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(text)}[/]")
 
     def _stream_reasoning_delta(self, text: str) -> None:
-        """Stream reasoning/thinking tokens into a dim box above the response.
+        """Stream reasoning tokens into a dim box above the response.
 
-        Opens the box on the first token; closed automatically when content tokens arrive
-        (_stream_delta → _emit_stream_text). Once the response box is open, further
-        reasoning is suppressed — a late thinking block (e.g. after an interrupt) would
-        otherwise draw a reasoning box inside the response box.
+        Opened on the first token, closed when content arrives (_emit_stream_text). Once the
+        response box is open further reasoning is suppressed — a late thinking block (e.g. after
+        an interrupt) would otherwise draw a reasoning box inside the response box.
         """
         from cli import _DIM, _RST, _cprint
         if not text:
@@ -271,11 +272,9 @@ class CLIStreamMixin:
     def _stream_delta(self, text) -> None:
         """Line-buffered streaming callback for real-time token rendering.
 
-        Buffers partial lines and emits complete lines via _cprint (reliable under
-        prompt_toolkit's patch_stdout). Reasoning tags are suppressed — or routed to the
-        reasoning box when show_reasoning is on. ``None`` signals an intermediate turn
-        boundary (tools about to execute): flush open boxes and reset state so tool feed
-        lines render cleanly between turns.
+        Emits complete lines via _cprint (reliable under prompt_toolkit's patch_stdout);
+        reasoning tags are suppressed, or routed to the reasoning box when show_reasoning is on.
+        ``None`` = intermediate turn boundary (tools about to run): flush boxes and reset state.
         """
         if text is None:
             self._flush_stream()
@@ -286,16 +285,14 @@ class CLIStreamMixin:
         self._stream_started = True
         self._stream_prefilt = getattr(self, "_stream_prefilt", "") + text
 
-        # Open tags only count at a "block boundary": stream start, after a newline (plus
-        # optional whitespace), or when only whitespace has been emitted on the current
-        # line. Prevents false positives when models *mention* tags in prose like
-        # "(/think not producing <think> tags)". _stream_last_was_newline is True at
-        # stream start and whenever emitted text ends with '\n'.
+        # Open tags only count at a "block boundary" (stream start / after a newline plus
+        # optional whitespace) so prose that *mentions* a tag — "(/think not producing
+        # <think> tags)" — is not swallowed. _stream_last_was_newline tracks the boundary.
         if not hasattr(self, "_stream_last_was_newline"):
             self._stream_last_was_newline = True
 
         if not getattr(self, "_in_reasoning_block", False):
-            # Lowercased view so mixed-case variants (<Think>, <THINKING>, …) are caught.
+            # Lowercased view catches mixed-case variants (<Think>, <THINKING>, …).
             prefilt_lower = self._stream_prefilt.lower()
             for tag in _OPEN_TAGS:
                 tag_lower = tag.lower()
@@ -336,8 +333,8 @@ class CLIStreamMixin:
                     self._stream_prefilt = self._stream_prefilt[len(safe):]
                 return
 
-        # Inside a reasoning block — look for a close tag. Keep accumulating because close
-        # tags can arrive split across tokens ("</REASONING_SCRATCH" + "PAD>...").
+        # Inside a reasoning block — look for a close tag; keep accumulating because close tags
+        # can arrive split across tokens ("</REASONING_SCRATCH" + "PAD>...").
         if getattr(self, "_in_reasoning_block", False):
             prefilt_lower = self._stream_prefilt.lower()
             for tag in _CLOSE_TAGS:
@@ -350,13 +347,11 @@ class CLIStreamMixin:
                             self._stream_reasoning_delta(inner)
                     after = self._stream_prefilt[idx + len(tag):]
                     self._stream_prefilt = ""
-                    # Text after the close tag goes through full filtering (it could
-                    # contain another open tag).
-                    if after:
+                    if after:  # re-filter: the remainder could contain another open tag
                         self._stream_delta(after)
                     return
-            # Stream reasoning live when show_reasoning is on; keep only the tail that
-            # could be a partial close-tag prefix.
+            # Stream reasoning live when show_reasoning is on; keep only a possible partial
+            # close-tag tail.
             if len(self._stream_prefilt) > _MAX_CLOSE_TAG_LEN:
                 if self.show_reasoning:
                     self._stream_reasoning_delta(self._stream_prefilt[:-_MAX_CLOSE_TAG_LEN])
@@ -372,11 +367,8 @@ class CLIStreamMixin:
         )
 
     def _flush_stream_table_buf(self) -> None:
-        """Emit the held table block re-aligned as a whole.
-
-        Cell-level markdown (`code`, **bold**, ~~strike~~) is stripped FIRST so the
-        realigner pads to the final visible cell width, not the marker-decorated width.
-        """
+        """Emit the held table block re-aligned as a whole. Cell-level markdown is stripped FIRST
+        so the realigner pads to the final visible width, not the marker-decorated width."""
         from cli import (
             _strip_markdown_syntax, _terminal_width_for_streaming, realign_markdown_tables
         )
@@ -400,8 +392,7 @@ class CLIStreamMixin:
         )
         if not text:
             return
-        # While the reasoning box is still rendering, defer content so the reasoning block
-        # always appears BEFORE the response.
+        # Defer content while the reasoning box renders so reasoning always lands BEFORE it.
         if self.show_reasoning and getattr(self, "_reasoning_box_opened", False):
             self._deferred_content = getattr(self, "_deferred_content", "") + text
             return
@@ -421,8 +412,7 @@ class CLIStreamMixin:
             except Exception:
                 label = "⚕ Hermes"
                 _text_hex = "#FFF8DC"
-            # True-color ANSI escape so streamed content matches the Rich Panel appearance.
-            try:
+            try:  # true-color escape so streamed text matches the Rich Panel appearance
                 _r, _g, _b = (int(_text_hex[i:i + 2], 16) for i in (1, 3, 5))
                 self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
             except (ValueError, IndexError):
@@ -436,9 +426,8 @@ class CLIStreamMixin:
         self._stream_buf += text
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
-            # Table-shaped lines are held in a side-buffer and re-padded as a block once it
-            # ends (streaming line-by-line we cannot re-align already-printed rows); the
-            # table appears in one batch when the block closes.
+            # Table rows are held and re-padded as a block once it ends (already-printed rows
+            # can't be re-aligned), so a table appears in one batch when the block closes.
             if self._in_stream_table:
                 if looks_like_table_row(line) or is_table_divider(line):
                     self._stream_table_buf.append(line)
@@ -452,11 +441,9 @@ class CLIStreamMixin:
                 line = _strip_markdown_syntax(line)
             self._emit_stream_line(line)
 
-        # Long partial lines are emitted ONLY at real newlines — no hard-wrapping at
-        # terminal width: each logical line lands in scrollback as one line the terminal
-        # soft-wraps, so highlight-copy yields the original unwrapped text. For TTFT
-        # perception, mirror the tail of a long unfinished paragraph into the status-bar
-        # spinner so the user sees tokens arriving instead of a blank box.
+        # Partial lines are emitted ONLY at real newlines (no hard-wrapping — the terminal
+        # soft-wraps, so highlight-copy yields the original text). For TTFT perception, mirror
+        # the tail of a long unfinished paragraph into the status-bar spinner.
         if (
             self._stream_buf
             and not self._in_stream_table
@@ -478,18 +465,15 @@ class CLIStreamMixin:
         from cli import (
             _ACCENT, _RST, _cprint, _strip_markdown_syntax, is_table_divider, looks_like_table_row
         )
-        # Still inside a "reasoning block" at end-of-stream means a false positive — the
-        # model mentioned a tag like <think> in prose and never closed it. Recover the
-        # buffered content as regular text.
+        # Still inside a "reasoning block" at end-of-stream = false positive (the model
+        # mentioned a tag in prose and never closed it): recover the buffer as regular text.
         if getattr(self, "_in_reasoning_block", False) and getattr(self, "_stream_prefilt", ""):
             self._in_reasoning_block = False
             self._emit_stream_text(self._stream_prefilt)
             self._stream_prefilt = ""
-        # Close reasoning box if still open (in case no content tokens arrived)
-        self._close_reasoning_box()
-
-        # A trailing partial line that looks like a table row joins the table buffer so
-        # the whole block is re-aligned together (else the final row prints under-padded).
+        self._close_reasoning_box()  # in case no content tokens arrived
+        # A trailing partial table row joins the table buffer so the whole block is re-aligned
+        # together (else the final row prints under-padded).
         if (
             self._stream_buf
             and getattr(self, "_in_stream_table", False)
@@ -543,9 +527,8 @@ class CLIStreamMixin:
     def _busy_command(self, status: str, *, blocks_input: bool = True):
         """Expose a temporary busy state in the TUI while a slash command runs.
 
-        Most synchronous slash commands must reserve the composer because their completion
-        changes the active session state. Manual compression is safe to draft through: the
-        queued input is processed against the compacted history afterwards.
+        Most sync slash commands reserve the composer (their completion changes session state);
+        manual compression is safe to draft through (queued input runs against compacted history).
         """
         previous_blocks_input = getattr(self, "_command_blocks_input", False)
         self._command_running = True
@@ -562,17 +545,12 @@ class CLIStreamMixin:
             self._invalidate(min_interval=0.0)
 
     def _preprocess_images_with_vision(self, text: str, images: list, *, announce: bool = True) -> str:
-        """Analyze attached images via the vision tool and return enriched text.
-
-        Instead of embedding raw base64 ``image_url`` parts (vision-capable models only),
-        each image is described by the auxiliary vision model and the descriptions are
-        prepended to the user's message — the same approach the messaging gateway uses.
-        The local path is included so the agent can re-examine via ``vision_analyze``.
-        """
+        """Describe attached images via the auxiliary vision model and prepend the descriptions
+        to the user's text (works with non-vision models; same approach as the gateway). The
+        local path is included so the agent can re-examine via ``vision_analyze``."""
         from cli import _DIM, _RST, _cprint
         import asyncio as _asyncio
         from tools.vision_tools import vision_analyze_tool
-
         analysis_prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
@@ -631,11 +609,8 @@ class CLIStreamMixin:
         console.print(*args, **kwargs)
 
     def _on_tool_gen_start(self, tool_name: str) -> None:
-        """Called when the model begins generating tool-call arguments.
-
-        Closes any open streaming boxes exactly once, then prints a short status line so
-        the user sees activity while a large payload (e.g. 45 KB write_file) streams.
-        """
+        """Model began generating tool-call arguments: close open boxes once, then print a status
+        line so a large payload (e.g. 45 KB write_file) doesn't look like a frozen screen."""
         from cli import _cprint
         if getattr(self, "_stream_box_opened", False):
             self._flush_stream()
@@ -645,16 +620,14 @@ class CLIStreamMixin:
         _cprint(f"  ┊ {get_tool_emoji(tool_name, default='⚡')} preparing {tool_name}…")
 
     def _on_tool_progress(self, event_type: str, function_name: str = None, preview: str = None, function_args: dict = None, **kwargs):
-        """Called on tool lifecycle events (tool.started, tool.completed, reasoning.available, …).
+        """Tool lifecycle events (tool.started / tool.completed / reasoning.* / moa.*).
 
-        Updates the TUI spinner so the user can see what the agent is doing during tool
-        execution. tool.started records a monotonic timestamp for the live elapsed timer.
-        When tool_progress_mode is "all"/"new"/"verbose", tool.completed also prints a
-        persistent stacked scrollback line (full tool-call history, not just the spinner).
+        Drives the TUI spinner (tool.started stamps the elapsed timer); in "all"/"new"/"verbose"
+        progress modes tool.completed also commits a stacked scrollback line (tool history).
         """
         from cli import CLI_CONFIG, _DIM, _RST, _cprint, _hermes_home
-        # MoA reference-model outputs: display-only events from the MoA facade; render each
-        # reference's answer as a labelled thinking-style block BEFORE the aggregator acts.
+        # MoA reference outputs (display-only events from the MoA facade): render each answer
+        # as a labelled thinking-style block BEFORE the aggregator acts.
         if event_type == "moa.reference":
             label = function_name or "reference"
             text = preview or ""
@@ -679,8 +652,7 @@ class CLIStreamMixin:
             self._invalidate()
             return
 
-        # Feed the pet: tools mean "running" (not reasoning); a failed tool latches the
-        # turn so it ends on a sulk.
+        # Feed the pet: tools mean "running"; a failed tool latches the turn to end on a sulk.
         if event_type == "tool.started":
             self._pet_reasoning = False
         elif event_type == "tool.completed" and kwargs.get("is_error"):
@@ -690,20 +662,17 @@ class CLIStreamMixin:
 
         if event_type == "tool.completed":
             self._tool_start_time = 0.0
-            # Per-turn accounting: this feed sees every tool call with its result.
             self._turn_summary_record(
                 function_name, kwargs.get("result"), kwargs.get("is_error", False)
             )
-            # Focus view: count the scrollback line we are NOT printing so the post-turn
-            # recovery line can report how much was hidden.
+            # Focus view: count the hidden scrollback line for the post-turn recovery report.
             if getattr(self, "_focus_view_enabled", False):
                 try:
                     self._note_focus_hidden_line(function_name or "")
                 except Exception:
                     pass
-            # "verbose" must commit at least the same line as "all": non-streaming model
-            # calls (MoA aggregator, copilot-acp) never emit _on_tool_gen_start's
-            # "preparing" line, so without this no scrollable tool history accumulates.
+            # "verbose" must commit the same line as "all": non-streaming calls (MoA aggregator,
+            # copilot-acp) never emit the "preparing" line, so nothing else builds history.
             if function_name and self.tool_progress_mode in {"new", "all", "verbose"}:
                 duration = kwargs.get("duration", 0.0)
                 # Pop stored args from tool.started for this function
@@ -722,9 +691,8 @@ class CLIStreamMixin:
                     _cprint(f"  {line}")
                 except Exception:
                     pass
-                # First-touch onboarding: one-time /verbose hint on the first long tool in
-                # the noisiest mode. Latched on self (once per process) and persisted to
-                # config.yaml (never again across processes).
+                # One-time /verbose hint on the first long tool in the noisiest mode; latched
+                # on self and persisted to config.yaml.
                 try:
                     if (
                         not getattr(self, "_long_tool_hint_fired", False)
@@ -773,9 +741,8 @@ class CLIStreamMixin:
     def _on_tool_complete(self, tool_call_id: str, function_name: str, function_args: dict, function_result: str):
         """Render file edits with inline diff after write-capable tools complete."""
         from cli import _cprint, logger
-        # A top-level delegate_task dispatches in the background and re-enters as a fresh
-        # turn when done. Say so once — no spinner, nothing to poll — so the idle prompt
-        # doesn't read as "nothing happened" (⛓ tracks the work).
+        # A background delegate_task re-enters as a fresh turn when done; say so once so the
+        # idle prompt doesn't read as "nothing happened".
         if function_name == "delegate_task":
             try:
                 parsed = json.loads(function_result) if isinstance(function_result, str) else (function_result or {})
