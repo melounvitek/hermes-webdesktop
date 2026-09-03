@@ -55,10 +55,8 @@ def _codex_request_failure_details(error: BaseException) -> tuple[int | None, st
                 request_body_bytes = len(content.encode("utf-8"))
             elif isinstance(content, (bytes, bytearray, memoryview)):
                 request_body_bytes = len(content)
-        if current.__cause__ is None and not current.__suppress_context__:
-            current = current.__context__
-        else:
-            current = current.__cause__
+        implicit_chain = current.__cause__ is None and not current.__suppress_context__
+        current = current.__context__ if implicit_chain else current.__cause__
     return request_body_bytes, " <- ".join(exception_classes)
 
 
@@ -137,8 +135,10 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
         field: getattr(canonical_usage, field)
         for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
     }
-    usage_dict = {"prompt_tokens": prompt_tokens, "completion_tokens": canonical_usage.output_tokens,
-                  "total_tokens": total_tokens, **token_counts}
+    usage_dict = {
+        "prompt_tokens": prompt_tokens, "completion_tokens": canonical_usage.output_tokens, "total_tokens": total_tokens,
+        **token_counts,
+    }
 
     if compressor is not None:
         try:
@@ -221,12 +221,9 @@ def _record_codex_app_server_compaction(agent, turn, *, approx_tokens: int | Non
                   args=("session:compress", {
                       "platform": getattr(agent, "platform", None) or "",
                       "session_id": getattr(agent, "session_id", None) or "",
-                      "old_session_id": "",
-                      "in_place": False,
+                      "old_session_id": "", "in_place": False,
                       "compression_count": getattr(compressor, "compression_count", 0) if compressor is not None else 0,
-                      "runtime": "codex_app_server",
-                      "thread_id": thread_id,
-                      "turn_id": turn_id,
+                      "runtime": "codex_app_server", "thread_id": thread_id, "turn_id": turn_id,
                   }))
     return True
 
@@ -283,9 +280,7 @@ def _codex_item_to_args(item: dict) -> dict:
     if item_type in _MCP_LIKE_ITEM_TYPES:
         args = item.get("arguments") or {}
         return args if isinstance(args, dict) else {"arguments": args}
-    if item_type == "webSearch":
-        return {"query": item.get("query") or ""}
-    return {}
+    return {"query": item.get("query") or ""} if item_type == "webSearch" else {}
 
 
 def _codex_item_to_preview(item: dict) -> Any:
@@ -330,9 +325,8 @@ def _codex_item_completion_payload(item: dict) -> tuple[str, bool]:
     if item_type == "dynamicToolCall":
         content_items = item.get("contentItems") or []
         success = item.get("success", True)
-        if isinstance(content_items, list) and content_items:
-            return json.dumps(content_items, ensure_ascii=False)[:4000], not bool(success)
-        return f"success={success}", not bool(success)
+        has_items = isinstance(content_items, list) and content_items
+        return (json.dumps(content_items, ensure_ascii=False)[:4000] if has_items else f"success={success}"), not bool(success)
     return "", False
 
 
@@ -369,8 +363,7 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         _call_guarded(getattr(agent, attr, None), fail_msg, *fail_args, args=args, kwargs=kwargs)
 
     def _fire_tool_started(item: dict) -> None:
-        item_id = item.get("id") or ""
-        name = _codex_item_to_tool_name(item)
+        item_id, name = item.get("id") or "", _codex_item_to_tool_name(item)
         args = _codex_item_to_args(item)
         if item_id:
             started[item_id] = (name, args, time.monotonic())
@@ -381,9 +374,8 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
                  args=(_stable_call_id(item, name), name, args))
 
     def _fire_tool_completed(item: dict) -> None:
-        item_id = item.get("id") or ""
         name = _codex_item_to_tool_name(item)
-        prior = started.pop(item_id, None)
+        prior = started.pop(item_id, None) if (item_id := item.get("id") or "") else None
         # Prefer codex's durationMs; else our started timestamp; else None
         # (some codex versions only emit completed for fast items).
         duration: Any = None
@@ -488,11 +480,8 @@ def _ensure_codex_session(agent) -> None:
         logger.debug("codex app-server: approval-bypass lookup failed; keeping fail-closed default", exc_info=True)
 
     agent._codex_session = CodexAppServerSession(
-        cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()),
-        approval_callback=approval_callback,
-        request_routing=_ServerRequestRouting(
-            auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests,
-        ),
+        cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()), approval_callback=approval_callback,
+        request_routing=_ServerRequestRouting(auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests),
         on_event=make_codex_app_server_event_bridge(agent),
     )
 
@@ -542,8 +531,7 @@ def _finish_codex_turn(
 
     # Skill nudge check AFTER iters were incremented (same as chat_completions).
     should_review_skills = (
-        agent._skill_nudge_interval > 0 and agent._iters_since_skill >= agent._skill_nudge_interval
-        and "skill_manage" in agent.valid_tool_names
+        0 < agent._skill_nudge_interval <= agent._iters_since_skill and "skill_manage" in agent.valid_tool_names
     )
     if should_review_skills:
         agent._iters_since_skill = 0
@@ -603,9 +591,7 @@ def run_codex_app_server_turn(
         _close_codex_session(agent)
         return _turn_result(
             _consume_user_interrupt(agent), messages, api_calls=0, completed=False, error=str(exc),
-            final_response=(
-                f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`."
-            ),
+            final_response=f"Codex app-server turn failed: {exc}. Fall back to default runtime with `/codex-runtime auto`.",
         )
 
     interrupt = _consume_user_interrupt(agent, turn.interrupted)
@@ -640,15 +626,10 @@ def _turn_result(
     """Result shape shared with the chat_completions path (``partial`` == ``not completed``)."""
     user_interrupted, interrupt_message = interrupt
     return {
-        "final_response": final_response,
-        "messages": messages,
-        "api_calls": api_calls,
-        "completed": completed,
-        "partial": not completed,
-        "interrupted": user_interrupted,
+        "final_response": final_response, "messages": messages, "api_calls": api_calls,
+        "completed": completed, "partial": not completed, "interrupted": user_interrupted,
         **({"interrupt_message": interrupt_message} if interrupt_message else {}),
-        "error": error,
-        **extra,
+        "error": error, **extra,
     }
 
 
@@ -686,15 +667,23 @@ def _raise_stream_error(event: Any) -> None:
         return _event_field(nested, name) if value is None and nested is not None else value
 
     raw_message = _error_field("message")
-    if raw_message is not None and not isinstance(raw_message, str):
-        raw_message = str(raw_message)
-    message = (raw_message or "stream emitted error event").strip() or "stream emitted error event"
+    message = (str(raw_message) if raw_message is not None else "stream emitted error event").strip() or "stream emitted error event"
     raise _StreamErrorEvent(message, code=_error_field("code"), param=_error_field("param"))
 
 
 def _message_phase(item: Any) -> str | None:
     phase = _event_field(item, "phase", None)
     return phase.strip().lower() if isinstance(phase, str) else None
+
+
+def _output_text_of(item: Any) -> str:
+    """Concatenated ``output_text`` parts of a message item ("" if content is not a list)."""
+    content_parts = _event_field(item, "content", [])
+    if not isinstance(content_parts, list):
+        return ""
+    return "".join(
+        str(_event_field(part, "text", "") or "") for part in content_parts if _event_field(part, "type", "") == "output_text"
+    ).strip()
 
 
 class _CodexResponseAssembler:
@@ -724,11 +713,8 @@ class _CodexResponseAssembler:
     saw_response_completed = False
 
     def __init__(self, *, model, on_text_delta, on_reasoning_delta, on_commentary_message, on_first_delta):
-        self.model = model
-        self.on_text_delta = on_text_delta
-        self.on_reasoning_delta = on_reasoning_delta
-        self.on_commentary_message = on_commentary_message
-        self.on_first_delta = on_first_delta
+        self.model, self.on_text_delta, self.on_reasoning_delta = model, on_text_delta, on_reasoning_delta
+        self.on_commentary_message, self.on_first_delta = on_commentary_message, on_first_delta
         self.output_items: List[Any] = []
         # output_index / first-observed sequence per output item, in lockstep, so
         # settled pending calls merge back in stream order.
@@ -768,10 +754,8 @@ class _CodexResponseAssembler:
             if item_id:
                 announced_sequence, announced_index = self.announced_output_order[item_id]
                 self.pending_function_calls[item_id] = {
-                    "item": item,
-                    "arguments": str(_event_field(item, "arguments", "") or ""),
-                    "output_index": announced_index,
-                    "sequence": announced_sequence,
+                    "item": item, "arguments": str(_event_field(item, "arguments", "") or ""),
+                    "output_index": announced_index, "sequence": announced_sequence,
                 }
 
     def _on_text_delta(self, event: Any, event_type: str) -> None:
@@ -789,11 +773,12 @@ class _CodexResponseAssembler:
             self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
         else:
             self.text_deltas.append(delta_text)
-            if not self.has_tool_calls:
-                if not self.first_delta_fired:
-                    self.first_delta_fired = True
-                    self._safe(self.on_first_delta, "on_first_delta")
-                self._safe(self.on_text_delta, "on_text_delta", delta_text)
+            if self.has_tool_calls:
+                return
+            if not self.first_delta_fired:
+                self.first_delta_fired = True
+                self._safe(self.on_first_delta, "on_first_delta")
+            self._safe(self.on_text_delta, "on_text_delta", delta_text)
 
     def _on_function_call(self, event: Any, event_type: str) -> None:
         self.has_tool_calls = True
@@ -838,14 +823,7 @@ class _CodexResponseAssembler:
         # Confirmed by the authoritative done event; never settle it twice.
         self.pending_function_calls.pop(done_id, None)
         if _message_phase(done_item) == "commentary" and self.on_commentary_message is not None:
-            commentary_text = "".join(self.commentary_text_deltas).strip()
-            if not commentary_text:
-                content_parts = _event_field(done_item, "content", [])
-                if isinstance(content_parts, list):
-                    commentary_text = "".join(
-                        str(_event_field(part, "text", "") or "")
-                        for part in content_parts if _event_field(part, "type", "") == "output_text"
-                    ).strip()
+            commentary_text = "".join(self.commentary_text_deltas).strip() or _output_text_of(done_item)
             if commentary_text:
                 self._safe(self.on_commentary_message, "on_commentary_message", commentary_text)
             self.commentary_text_deltas = []
@@ -895,14 +873,11 @@ class _CodexResponseAssembler:
         for pending in self.pending_function_calls.values():
             item = pending["item"]
             indexed.append((pending.get("output_index"), pending["sequence"], SimpleNamespace(
-                type="function_call",
-                id=_event_field(item, "id", None),
-                call_id=_event_field(item, "call_id", None),
-                name=_event_field(item, "name", None),
+                type="function_call", id=_event_field(item, "id", None), call_id=_event_field(item, "call_id", None),
+                name=_event_field(item, "name", None), status="completed",
                 # Empty/whitespace arguments become "{}" so zero-delta calls stay
                 # executable; malformed non-empty JSON passes through untouched.
                 arguments=(pending["arguments"] or "").strip() or "{}",
-                status="completed",
             )))
 
         # output_index is optional and a partial ordering over mixed indexed/unindexed
@@ -921,10 +896,8 @@ class _CodexResponseAssembler:
         # synthesize a single message item for downstream normalization.
         output: List[Any] = list(self.output_items)
         if not output and self.text_deltas and not self.has_tool_calls:
-            output = [SimpleNamespace(
-                type="message", role="assistant", status="completed",
-                content=[SimpleNamespace(type="output_text", text="".join(self.text_deltas))],
-            )]
+            content = [SimpleNamespace(type="output_text", text="".join(self.text_deltas))]
+            output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
 
         # Done items stay authoritative; settlement only fills the gap left by
         # backends that omit per-item done events on a successful completion.
@@ -937,13 +910,8 @@ class _CodexResponseAssembler:
             raise RuntimeError("Codex Responses stream did not emit a terminal response")
 
         return SimpleNamespace(
-            output=output,
-            output_text="".join(self.text_deltas),
-            usage=self.terminal_usage,
-            status=self.terminal_status,
-            id=self.terminal_response_id,
-            model=self.model,
-            incomplete_details=self.terminal_incomplete_details,
+            output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
+            id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
             error=self.terminal_error,
         )
 
@@ -1109,8 +1077,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         agent._codex_streamed_text_parts.append(text)
         agent._fire_stream_delta(text)
 
-    def _on_event(event: Any) -> None:
-        # TTFB watchdog and activity touch — once per SSE event.
+    def _on_event(event: Any) -> None:  # TTFB watchdog and activity touch — once per SSE event.
         agent._codex_stream_last_event_ts = time.time()
         agent._touch_activity("receiving stream response")
 
@@ -1211,22 +1178,16 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     accept_chunk=_accept_codex_chunk,
                     completed_response_predicate=lambda r: bool(hasattr(r, "output") and not hasattr(r, "__iter__")),
                     metadata={
-                        "api_mode": "codex_responses",
+                        "api_mode": "codex_responses", "call_role": call_role, "retry_count": attempt,
                         "api_request_id": getattr(agent, "_current_api_request_id", None),
-                        "call_role": call_role,
-                        "retry_count": attempt,
                     },
                     defer_logical_completion=True,
                 )
                 final = _consume_codex_event_stream(
-                    event_stream,
-                    model=model,
-                    on_text_delta=_fenced(_on_text_delta),
+                    event_stream, model=model, on_text_delta=_fenced(_on_text_delta),
                     on_reasoning_delta=_fenced(lambda text: agent._fire_reasoning_delta(text)),
-                    on_commentary_message=on_commentary_message,
-                    on_first_delta=on_first_delta,
-                    on_event=_fenced(_on_event),
-                    interrupt_check=_interrupt_or_superseded,
+                    on_commentary_message=on_commentary_message, on_first_delta=on_first_delta,
+                    on_event=_fenced(_on_event), interrupt_check=_interrupt_or_superseded,
                 )
             except transport_errors as exc:
                 if attempt >= max_stream_retries:
