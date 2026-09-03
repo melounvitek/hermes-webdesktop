@@ -55,6 +55,15 @@ _FALSY = {"0", "false", "no", "off"}
 
 _SLACK = Platform.SLACK.value
 
+# Prompt option id -> in-channel ack label (the option set doubles as the choice allowlist).
+_EXEC_APPROVAL_LABELS = {
+    "once": "✅ Approved once",
+    "session": "✅ Approved for session",
+    "always": "✅ Approved permanently",
+    "deny": "❌ Denied",
+}
+_SLASH_CONFIRM_LABELS = {"once": "✅ Approved once", "always": "🔒 Always approve", "cancel": "❌ Cancelled"}
+
 
 def _utf16_len(text: str) -> int:
     """Count UTF-16 code units (Telegram's length unit)."""
@@ -704,13 +713,16 @@ class RelayAdapter(BasePlatformAdapter):
         platform = getattr(raw_platform, "value", raw_platform) or ""
         return f"{platform}:{chat_id}:{message_id}"
 
-    def _relay_slack_extra(self) -> Dict[str, Any]:
-        """``platforms.relay.extra.slack.*`` — relay-namespaced mirror of the native
-        Slack knobs (``platforms.slack`` keeps meaning native settings). Legacy
-        fallback: flat keys on the relay extra when no ``slack`` object exists."""
+    def _relay_platform_extra(self, platform: str) -> Dict[str, Any]:
+        """``platforms.relay.extra.<platform>.*`` — relay-namespaced mirror of a native
+        platform's knobs (``platforms.<platform>`` keeps meaning native settings).
+        Legacy fallback: flat keys on the relay extra when no ``<platform>`` object exists."""
         extra = getattr(self.config, "extra", None) or {}
-        sub = extra.get("slack")
+        sub = extra.get(platform)
         return sub if isinstance(sub, dict) else extra
+
+    def _relay_slack_extra(self) -> Dict[str, Any]:
+        return self._relay_platform_extra("slack")
 
     @staticmethod
     def _coerce_flag(raw: Any, default: bool) -> bool:
@@ -1150,21 +1162,20 @@ class RelayAdapter(BasePlatformAdapter):
         if descriptor is None or not getattr(descriptor, "supports_block_formatting", False):
             return None
         try:
-            extra = getattr(self.config, "extra", None) or {}
-            sub = extra.get(str(platform or "").lower())
-            knob_src = sub if isinstance(sub, dict) else extra
+            knob_src = self._relay_platform_extra(str(platform or "").lower())
         except Exception:  # noqa: BLE001 - config shape is operator-owned
             return None
-        hints: Dict[str, bool] = {}
-        for knob in ("rich_blocks", "markdown_blocks"):
-            if self._coerce_flag(knob_src.get(knob), False):
-                hints[knob] = True
+        hints = {knob: True for knob in ("rich_blocks", "markdown_blocks") if self._coerce_flag(knob_src.get(knob), False)}
         return hints or None
 
-    @staticmethod
     def _stamp_format_hints(
-        hints: Optional[Dict[str, bool]], metadata: Optional[Dict[str, Any]]
+        self,
+        descriptor: Optional[CapabilityDescriptor],
+        platform: Optional[str],
+        metadata: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
+        """``metadata`` with ``format_hints`` for the DESTINATION (descriptor, platform) stamped, if any."""
+        hints = self._format_hints(descriptor, platform)
         if not hints:
             return metadata
         merged = dict(metadata or {})
@@ -1174,22 +1185,19 @@ class RelayAdapter(BasePlatformAdapter):
     def _with_format_hints_for_chat(
         self, chat_id: str, metadata: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Metadata with ``format_hints`` stamped for a chat-addressed send (chat's
-        platform as seen inbound, falling back to the primary)."""
-        hints = self._format_hints(self._descriptor_for_chat(chat_id), self._chat_platform(chat_id))
-        return self._stamp_format_hints(hints, metadata)
+        """Hints for a chat-addressed send (chat's platform as seen inbound, else the primary)."""
+        return self._stamp_format_hints(self._descriptor_for_chat(chat_id), self._chat_platform(chat_id), metadata)
 
     def _with_format_hints_for_platform(
         self, platform_value: str, metadata: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Metadata with ``format_hints`` stamped for an explicit-platform send (the
-        scheduled/persisted-home lane). Falls back to the scalar descriptor only when
-        it IS that platform's — never stamp from another platform's capability bit."""
+        """Hints for an explicit-platform send (scheduled/persisted-home lane). Falls
+        back to the scalar descriptor only when it IS that platform's — never stamp
+        from another platform's capability bit."""
         descriptor = self._negotiated_descriptor(str(platform_value))
         if descriptor is None and self.descriptor.platform == str(platform_value):
             descriptor = self.descriptor
-        hints = self._format_hints(descriptor, str(platform_value))
-        return self._stamp_format_hints(hints, metadata)
+        return self._stamp_format_hints(descriptor, str(platform_value), metadata)
 
     async def send(
         self,
@@ -1216,9 +1224,7 @@ class RelayAdapter(BasePlatformAdapter):
             )
         if self._transport is None:
             return SendResult(success=False, error="no transport")
-        # Slack DM replies post flat at the DM root (native _resolve_thread_ts parity).
-        effective_reply_to = self._apply_slack_thread_anchor(chat_id, reply_to, send_metadata)
-        self._stamp_slack_unfurl(self._chat_platform(chat_id), send_metadata)
+        effective_reply_to = self._prepare_slack_egress(chat_id, reply_to, send_metadata)
         result = await self._outbound(
             chat_id,
             {
@@ -1329,6 +1335,15 @@ class RelayAdapter(BasePlatformAdapter):
             and not (metadata.get("thread_id") or metadata.get("thread_ts"))
         ):
             metadata["thread_id"] = str(effective_reply_to)
+        return effective_reply_to
+
+    def _prepare_slack_egress(
+        self, chat_id: str, reply_to: Optional[str], metadata: Dict[str, Any]
+    ) -> Optional[str]:
+        """Text/media egress prep: Slack thread anchor (DM replies post flat at the DM
+        root, native _resolve_thread_ts parity) + unfurl hints; mutates ``metadata``."""
+        effective_reply_to = self._apply_slack_thread_anchor(chat_id, reply_to, metadata)
+        self._stamp_slack_unfurl(self._chat_platform(chat_id), metadata)
         return effective_reply_to
 
     def _with_status_thread_anchor(
@@ -1531,8 +1546,7 @@ class RelayAdapter(BasePlatformAdapter):
         # Same Slack thread-anchor contract as the text lane: media frames go through
         # the connector's Slack sender too (threadTs() reads metadata only).
         media_metadata: Dict[str, Any] = dict(metadata or {})
-        effective_reply_to = self._apply_slack_thread_anchor(chat_id, reply_to, media_metadata)
-        self._stamp_slack_unfurl(self._chat_platform(chat_id), media_metadata)
+        effective_reply_to = self._prepare_slack_egress(chat_id, reply_to, media_metadata)
         action: Dict[str, Any] = {
             "op": "send_media",
             "chat_id": chat_id,
@@ -1570,9 +1584,9 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id, media_kind="image", source=image_url, source_is_path=False,
             caption=caption, reply_to=reply_to, metadata=metadata,
         )
-        if result is not None:
-            return result
-        return await super().send_image(chat_id, image_url, caption=caption, reply_to=reply_to, metadata=metadata)
+        return result if result is not None else await super().send_image(
+            chat_id, image_url, caption=caption, reply_to=reply_to, metadata=metadata
+        )
 
     async def send_image_file(
         self,
@@ -1587,9 +1601,7 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id, media_kind="image", source=image_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
         )
-        if result is not None:
-            return result
-        return await super().send_image_file(
+        return result if result is not None else await super().send_image_file(
             chat_id, image_path, caption=caption, reply_to=reply_to, metadata=metadata, **kwargs
         )
 
@@ -1606,9 +1618,7 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id, media_kind="voice", source=audio_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
         )
-        if result is not None:
-            return result
-        return await super().send_voice(
+        return result if result is not None else await super().send_voice(
             chat_id, audio_path, caption=caption, reply_to=reply_to, metadata=metadata, **kwargs
         )
 
@@ -1625,9 +1635,7 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id, media_kind="video", source=video_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
         )
-        if result is not None:
-            return result
-        return await super().send_video(
+        return result if result is not None else await super().send_video(
             chat_id, video_path, caption=caption, reply_to=reply_to, metadata=metadata, **kwargs
         )
 
@@ -1645,11 +1653,8 @@ class RelayAdapter(BasePlatformAdapter):
             chat_id, media_kind="document", source=file_path, source_is_path=True,
             caption=caption, filename=file_name, reply_to=reply_to, metadata=metadata,
         )
-        if result is not None:
-            return result
-        return await super().send_document(
-            chat_id, file_path, caption=caption, file_name=file_name,
-            reply_to=reply_to, metadata=metadata, **kwargs,
+        return result if result is not None else await super().send_document(
+            chat_id, file_path, caption=caption, file_name=file_name, reply_to=reply_to, metadata=metadata, **kwargs
         )
 
     # ── Phase 3 interactive: prompt + react ──────────────────────────────
@@ -1894,16 +1899,9 @@ class RelayAdapter(BasePlatformAdapter):
     async def _resolve_exec_approval(self, state, option_id, chat_id, ack_meta) -> None:
         from tools.approval import resolve_gateway_approval
 
-        choice = option_id if option_id in {"once", "session", "always", "deny"} else "deny"
+        choice = option_id if option_id in _EXEC_APPROVAL_LABELS else "deny"
         count = resolve_gateway_approval(str(state.get("session_key") or ""), choice)
-        label = {
-            "once": "✅ Approved once",
-            "session": "✅ Approved for session",
-            "always": "✅ Approved permanently",
-            "deny": "❌ Denied",
-        }.get(choice, "Resolved")
-        if not count:
-            label = "⌛ Approval expired — no command was waiting."
+        label = _EXEC_APPROVAL_LABELS[choice] if count else "⌛ Approval expired — no command was waiting."
         # In-channel ack preserves the audit trail the native edit gives (the
         # connector's prompt message can't be edited cross-platform yet).
         self._send_lifecycle_ack(chat_id, label, ack_meta)
@@ -1913,16 +1911,11 @@ class RelayAdapter(BasePlatformAdapter):
     async def _resolve_slash_confirm(self, state, option_id, chat_id, ack_meta) -> None:
         from tools import slash_confirm as slash_confirm_mod
 
-        choice = option_id if option_id in {"once", "always", "cancel"} else "cancel"
+        choice = option_id if option_id in _SLASH_CONFIRM_LABELS else "cancel"
         result_text = await slash_confirm_mod.resolve(
             str(state.get("session_key") or ""), str(state.get("confirm_id") or ""), choice
         )
-        label = {
-            "once": "✅ Approved once",
-            "always": "🔒 Always approve",
-            "cancel": "❌ Cancelled",
-        }.get(choice, "Resolved")
-        self._send_lifecycle_ack(chat_id, label, ack_meta)
+        self._send_lifecycle_ack(chat_id, _SLASH_CONFIRM_LABELS[choice], ack_meta)
         if result_text:
             self._send_lifecycle_ack(chat_id, str(result_text), ack_meta)
 
