@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -63,7 +64,8 @@ def normalize_query(query: str) -> str:
 
 
 def _host_slug(url: str) -> str:
-    """Filesystem-safe hostname slug for cache filenames (``"page"`` when hostless)."""
+    """Filesystem-safe hostname slug for cache filenames (``"page"`` when hostless). Shared with
+    tools.web_tools_truncate."""
     host = (urlparse(url).hostname or "page").replace(":", "_")
     return re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
 
@@ -200,10 +202,9 @@ def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional
     (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
     if (d := _cache_dir()) is None:
         return None
-    try:
+    slug = "page"
+    with suppress(Exception):
         slug = _host_slug(url)
-    except Exception:  # noqa: BLE001
-        slug = "page"
     return d / f"{slug}-{_url_digest(url, format, provider)}.cache.md"
 
 
