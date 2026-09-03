@@ -582,9 +582,7 @@ class _RowidRangeSalvage:
                 last_committed_rowid = int(fetched[-1][0])
                 if self.progress_cb is not None:
                     self.progress_cb({
-                        "table": self.table,
-                        "copied_rows": result["copied_rows"],
-                        "source_rows": self.source_rows,
+                        "table": self.table, "copied_rows": result["copied_rows"], "source_rows": self.source_rows,
                         "skipped_ranges": len(result["skipped_rowid_ranges"]),
                     })
         except sqlite3.DatabaseError as exc:
@@ -620,11 +618,9 @@ def _copy_table_salvage(
         result["status"] = "complete"
         return result
     if bounds.get("low") is None or bounds.get("high") is None:
-        result["status"] = "failed"
         details = "; ".join(bounds.get("errors") or [])
-        result["error"] = "could not determine a rowid range for salvage"
-        if details:
-            result["error"] += f": {details}"
+        result["status"] = "failed"
+        result["error"] = "could not determine a rowid range for salvage" + (f": {details}" if details else "")
         return result
 
     salvage = _RowidRangeSalvage(
@@ -639,12 +635,10 @@ def _copy_table_salvage(
     if skipped_ranges:
         result["status"] = "partial" if result["copied_rows"] else "failed"
         result["error"] = f"{len(skipped_ranges)} rowid range(s) skipped"
-    elif (source_rows is not None and result["copied_rows"] + result["excluded_rows"] != source_rows):
+    elif source_rows is not None and result["copied_rows"] + result["excluded_rows"] != source_rows:
         result["status"] = "partial"
-        result["error"] = (
-            f"copied {result['copied_rows']} and excluded "
-            f"{result['excluded_rows']} of {source_rows} source rows"
-        )
+        copied, excluded = result["copied_rows"], result["excluded_rows"]
+        result["error"] = f"copied {copied} and excluded {excluded} of {source_rows} source rows"
     else:
         result["status"] = "complete"
     return result
@@ -652,11 +646,8 @@ def _copy_table_salvage(
 
 def _state_meta_result(source_rows: Optional[int], **extra: Any) -> dict[str, Any]:
     return {
-        "source_meta_rows": source_rows,
-        "copied_rows": 0,
-        "columns": ["key", "value"],
-        "excluded_keys": sorted(_GENERATED_META_KEYS),
-        **extra,
+        "source_meta_rows": source_rows, "copied_rows": 0, "columns": ["key", "value"],
+        "excluded_keys": sorted(_GENERATED_META_KEYS), **extra,
     }
 
 
@@ -844,17 +835,13 @@ def _verify_structure(conn: sqlite3.Connection, verification: dict[str, Any]) ->
     if verification["schema_version"] != SCHEMA_VERSION:
         errors.append(f"schema version is {verification['schema_version']}, expected {SCHEMA_VERSION}")
 
-    meta = {
-        str(row[0]): row[1]
-        for row in conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall()
-    }
+    meta = dict(conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall())
+    meta = {str(key): value for key, value in meta.items()}
     verification["fts_meta"] = meta
     if meta.get("fts_storage_version") != str(FTS_STORAGE_VERSION):
         errors.append("fresh FTS storage version was not established")
     pending_keys = sorted(
-        key
-        for key in _GENERATED_META_KEYS
-        if key.startswith("fts_") and key != "fts_storage_version" and key in meta
+        key for key in _GENERATED_META_KEYS if key.startswith("fts_") and key != "fts_storage_version" and key in meta
     )
     verification["pending_fts_keys"] = pending_keys
     if pending_keys:
@@ -890,10 +877,7 @@ def _verify_row_counts(
         else:
             verification["errors"].append(message)
 
-    counts: dict[str, int] = {}
-    for table in _INVENTORY_TABLES:
-        if _table_columns(conn, table):
-            counts[table] = _count_rows(conn, table)
+    counts = {table: _count_rows(conn, table) for table in _INVENTORY_TABLES if _table_columns(conn, table)}
     verification["table_counts"] = counts
 
     for table in ("sessions", "messages", *_AUXILIARY_TABLES):
@@ -908,25 +892,18 @@ def _verify_row_counts(
     # A wholly unreadable sessions b-tree is recoverable when every output parent was rebuilt from
     # the surviving messages and none were dropped: data loss, but not structural failure.
     sessions_fully_reconstructed = bool(
-        rebuilt_sessions > 0
-        and counts.get("sessions") == rebuilt_sessions
-        and counts.get("messages") == retained_messages
-        and removed_messages == 0
+        rebuilt_sessions > 0 and counts.get("sessions") == rebuilt_sessions
+        and counts.get("messages") == retained_messages and removed_messages == 0
     )
-
     for table, table_report in copy_report.items():
         status = table_report.get("status")
         if status not in {"failed", "partial"}:
             continue
-        flag(
-            f"{table} copy status is {status}",
-            soft=allow_partial
-            and (
-                status == "partial"
-                or table not in {"sessions", "messages"}
-                or (table == "sessions" and sessions_fully_reconstructed)
-            ),
+        tolerable = (
+            status == "partial" or table not in {"sessions", "messages"}
+            or (table == "sessions" and sessions_fully_reconstructed)
         )
+        flag(f"{table} copy status is {status}", soft=allow_partial and tolerable)
 
     if orphan_cleanup:
         orphan_count = int(orphan_cleanup.get("total_removed_or_relinked") or 0)
@@ -935,10 +912,8 @@ def _verify_row_counts(
         if rebuilt_sessions:
             # Not a clean recovery: the conversation text survived but its session metadata did not.
             flag(
-                f"{rebuilt_sessions} session(s) could not be salvaged and "
-                f"were reconstructed as placeholders to retain "
-                f"{retained_messages} message(s); their metadata (title, model, "
-                "timestamps, cost) is lost",
+                f"{rebuilt_sessions} session(s) could not be salvaged and were reconstructed as placeholders to "
+                f"retain {retained_messages} message(s); their metadata (title, model, timestamps, cost) is lost",
                 soft=True,
             )
 
@@ -1009,22 +984,19 @@ def _recover_via_lost_and_found(
         run_cli_lost_and_found_recover, stub_missing_parent_sessions,
     )
 
+    missing = ", ".join(missing_required)
     sqlite3_bin = find_sqlite3_cli()
     if sqlite3_bin is None:
         raise SessionRecoverySourceError(
-            "Partial recovery still requires readable table schemas for: "
-            + ", ".join(missing_required)
-            + ". " + SQLITE3_CLI_GUIDANCE
+            f"Partial recovery still requires readable table schemas for: {missing}. {SQLITE3_CLI_GUIDANCE}"
         )
-
     lf_path = snapshot_dir / "lost_and_found.db"
     try:
         cli_report = run_cli_lost_and_found_recover(snapshot_source, lf_path, sqlite3_bin)
     except (LostAndFoundError, OSError) as exc:
         raise SessionRecoverySourceError(
-            "Partial recovery could not read the table schemas for: "
-            + ", ".join(missing_required)
-            + f", and page-level .recover salvage failed: {exc}"
+            f"Partial recovery could not read the table schemas for: {missing}, "
+            f"and page-level .recover salvage failed: {exc}"
         ) from exc
 
     lf_conn = sqlite3.connect(str(lf_path), isolation_level=None)
