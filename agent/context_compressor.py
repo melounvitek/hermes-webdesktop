@@ -1797,6 +1797,75 @@ def resolve_model_threshold(model: str, model_thresholds: dict[str, float] | Non
     return default
 
 
+# Per-section summarizer instructions, keyed by "the transcript has a real user turn". Wording
+# is deliberately plain: Azure/OpenAI content filters have flagged stronger "injection" /
+# "do not respond" framing. Prompt text is byte-pinned — restructure code around it only.
+_SECTION_INSTRUCTIONS: Dict[bool, Dict[str, str]] = {
+    True: {
+        "language": (
+            "Write the summary in the same language the user was using in the "
+            "conversation — do not translate or switch to English. "
+        ),
+        "historical_task": """[THE SINGLE MOST IMPORTANT FIELD. Capture the user's most recent unfulfilled
+input verbatim — the exact words they used. This includes:
+- Explicit task assignments ("<specific user task>")
+- Questions awaiting an answer ("<specific user question>")
+- Decisions awaiting input ("<option A or B?>")
+- Ongoing discussions where the assistant owes the next substantive reply
+A conversation where the user just asked a question IS an active task — the
+task is "answer that question with full context". Do NOT write "None" merely
+because the user did not issue an imperative command; reserve "None" for the
+rare case where the last exchange was fully resolved and the user said
+something like "thanks, that's all".
+If multiple items are outstanding, list only the ones NOT yet completed.
+This historical snapshot must identify the latest unresolved user input precisely. Examples:
+"User asked: '<exact latest user request>'"
+"User asked: '<exact latest user question>' — needs investigation + answer"
+"User chose <option>; awaiting implementation of <specific next step>"
+If the user's most recent message was a reverse signal (stop, undo, roll
+back, never mind, just verify, change of topic) that supersedes earlier
+work, write the reverse signal verbatim and DO NOT carry forward the
+cancelled task. Example: "User asked: '<exact reverse signal>' — earlier
+in-flight work is cancelled."
+If no outstanding task exists, write "None."]""",
+        "goal": "[What the user is trying to accomplish overall]",
+        "constraints": (
+            "[User preferences, coding style, constraints, important decisions. "
+            "Any security or safety constraint the user stated (files/data to "
+            "avoid, operations that must not be performed, credential-handling "
+            "rules) MUST be quoted VERBATIM here so it continues to apply "
+            "after compaction — never paraphrase those.]"
+        ),
+        "resolved_questions": (
+            "[Questions the user asked that were ALREADY answered — include the "
+            "answer so it is not repeated]"
+        ),
+    },
+    False: {
+        "language": (
+            "This session contains no user-authored turns. Write the summary "
+            "in the dominant language of the source turns; if they are mixed, "
+            "use the language of the most recent natural-language assistant "
+            "turn. Do not translate, invent a user, or attribute any request "
+            "to a user. "
+        ),
+        "historical_task": f"""[NO user-authored turn exists in this session. Write exactly:
+{_NO_USER_TASK_SENTINEL}
+Do not write "User asked:" or any translated equivalent anywhere in the summary.
+Describe agent/tool work only as completed actions, state, or historical work.]""",
+        "goal": (
+            "[Historical cron/agent objective inferred only from assistant and "
+            "tool activity. Never call it a user goal.]"
+        ),
+        "constraints": (
+            "[Runtime, configuration, and technical constraints only. Do not "
+            "invent user preferences.]"
+        ),
+        "resolved_questions": "[Write exactly: None. No user-authored questions exist.]",
+    },
+}
+
+
 class ContextCompressor(MicroCompactionMixin, ContextEngine):
     """Default context engine: prune tool results, protect head/tail, summarize the middle
     with an LLM, and iteratively update the previous summary on later compactions."""
@@ -3632,76 +3701,12 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         except Exception:  # pragma: no cover - clock resolution is best-effort
             _today_str = ""
 
-        # Shared preamble. Keep wording plain: Azure/OpenAI content filters have
-        # flagged stronger "injection" / "do not respond" framing.
-        if has_user_turn:
-            _language_and_provenance_rule = (
-                "Write the summary in the same language the user was using in the "
-                "conversation — do not translate or switch to English. "
-            )
-            _historical_task_instructions = """[THE SINGLE MOST IMPORTANT FIELD. Capture the user's most recent unfulfilled
-input verbatim — the exact words they used. This includes:
-- Explicit task assignments ("<specific user task>")
-- Questions awaiting an answer ("<specific user question>")
-- Decisions awaiting input ("<option A or B?>")
-- Ongoing discussions where the assistant owes the next substantive reply
-A conversation where the user just asked a question IS an active task — the
-task is "answer that question with full context". Do NOT write "None" merely
-because the user did not issue an imperative command; reserve "None" for the
-rare case where the last exchange was fully resolved and the user said
-something like "thanks, that's all".
-If multiple items are outstanding, list only the ones NOT yet completed.
-This historical snapshot must identify the latest unresolved user input precisely. Examples:
-"User asked: '<exact latest user request>'"
-"User asked: '<exact latest user question>' — needs investigation + answer"
-"User chose <option>; awaiting implementation of <specific next step>"
-If the user's most recent message was a reverse signal (stop, undo, roll
-back, never mind, just verify, change of topic) that supersedes earlier
-work, write the reverse signal verbatim and DO NOT carry forward the
-cancelled task. Example: "User asked: '<exact reverse signal>' — earlier
-in-flight work is cancelled."
-If no outstanding task exists, write "None."]"""
-            _goal_instructions = "[What the user is trying to accomplish overall]"
-            _constraints_instructions = (
-                "[User preferences, coding style, constraints, important decisions. "
-                "Any security or safety constraint the user stated (files/data to "
-                "avoid, operations that must not be performed, credential-handling "
-                "rules) MUST be quoted VERBATIM here so it continues to apply "
-                "after compaction — never paraphrase those.]"
-            )
-            _resolved_questions_instructions = (
-                "[Questions the user asked that were ALREADY answered — include the "
-                "answer so it is not repeated]"
-            )
-            _pending_asks_instructions = (
-                "[Questions or requests from the user that have NOT yet been answered "
-                "or fulfilled. These are STALE — they were from the compacted turns. "
-                "Write them here for reference only. The agent must NOT act on them "
-                "unless the latest user message explicitly requests it. If none, "
-                'write "None."]'
-            )
-        else:
-            _language_and_provenance_rule = (
-                "This session contains no user-authored turns. Write the summary "
-                "in the dominant language of the source turns; if they are mixed, "
-                "use the language of the most recent natural-language assistant "
-                "turn. Do not translate, invent a user, or attribute any request "
-                "to a user. "
-            )
-            _historical_task_instructions = f"""[NO user-authored turn exists in this session. Write exactly:
-{_NO_USER_TASK_SENTINEL}
-Do not write "User asked:" or any translated equivalent anywhere in the summary.
-Describe agent/tool work only as completed actions, state, or historical work.]"""
-            _goal_instructions = (
-                "[Historical cron/agent objective inferred only from assistant and "
-                "tool activity. Never call it a user goal.]"
-            )
-            _constraints_instructions = (
-                "[Runtime, configuration, and technical constraints only. Do not "
-                "invent user preferences.]"
-            )
-            _resolved_questions_instructions = "[Write exactly: None. No user-authored questions exist.]"
-            _pending_asks_instructions = "[Write exactly: None. No user-authored requests exist.]"
+        _section = _SECTION_INSTRUCTIONS[bool(has_user_turn)]
+        _language_and_provenance_rule = _section["language"]
+        _historical_task_instructions = _section["historical_task"]
+        _goal_instructions = _section["goal"]
+        _constraints_instructions = _section["constraints"]
+        _resolved_questions_instructions = _section["resolved_questions"]
 
         _summarizer_preamble = (
             "You are a summarization agent creating a context checkpoint. "
