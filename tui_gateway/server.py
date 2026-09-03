@@ -5,7 +5,7 @@ import contextvars
 import copy
 import hashlib
 import importlib
-import inspect
+import inspect  # noqa: F401  (split modules)
 import json
 import logging
 import os
@@ -17,23 +17,24 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional  # noqa: F401  (Callable: split modules)
 
-from agent.secret_scope import (build_profile_secret_scope, reset_secret_scope, set_secret_scope)
+# Several of these look unused here but are resolved BARE by split-module bodies rebound onto this
+# namespace (method_ctx.bind_module) — deleting one breaks a handler at call time, not import time.
+from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope  # noqa: F401
 from hermes_constants import (
-    DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, get_hermes_home, get_hermes_home_override,
-    reset_hermes_home_override, set_hermes_home_override,
+    get_hermes_home, get_hermes_home_override, reset_hermes_home_override, set_hermes_home_override,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
-from agent.compaction_display import project_compaction_message_for_display
-from agent.skill_commands import describe_skill_invocation
-from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
-from tui_gateway import git_probe
+from agent.compaction_display import project_compaction_message_for_display  # noqa: F401
+from agent.skill_commands import describe_skill_invocation  # noqa: F401
+from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX  # noqa: F401
+from tui_gateway import git_probe  # noqa: F401
 from tui_gateway._env import env_float, env_int
-from tui_gateway.turn_marker import (clear_turn_marker, read_turn_marker, record_turn_start)
+from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.transport import (
     StdioTransport, Transport, bind_transport, current_transport, reset_transport,
 )
@@ -51,53 +52,32 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.p
 _CRASH_LOG = os.path.join(_hermes_home, "logs", "tui_gateway_crash.log")
 
 
-def _panic_hook(exc_type, exc_value, exc_tb):
+def _record_crash(kind: str, exc_type, exc_value, exc_tb, *, thread_name: str | None = None) -> None:
+    """Append the trace to the crash log, then print the one-line stderr summary the TUI shows."""
     import traceback
     trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    suffix = f" · thread={thread_name}" if thread_name is not None else ""
     with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"\n=== unhandled exception · {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f.write(f"\n=== {kind} · {time.strftime('%Y-%m-%d %H:%M:%S')}{suffix} ===\n")
             f.write(trace)
-    # Stderr goes through to the TUI as a gateway.stderr Activity line —
-    # the first line here is what the user will see without opening any
-    # log files.  Rest of the stack is still in the log for full context.
-    first = (
-        str(exc_value).strip().splitlines()[0]
-        if str(exc_value).strip()
-        else exc_type.__name__
-    )
-    print(f"[gateway-crash] {exc_type.__name__}: {first}", file=sys.stderr, flush=True)
-    # Chain to the default hook so the process still terminates normally.
-    sys.__excepthook__(exc_type, exc_value, exc_tb)
+    # The first line is what the user sees (gateway.stderr Activity line); the rest stays in the log.
+    first = str(exc_value).strip().splitlines()[0] if str(exc_value).strip() else exc_type.__name__
+    who = f"thread {thread_name} raised " if thread_name is not None else ""
+    print(f"[gateway-crash] {who}{exc_type.__name__}: {first}", file=sys.stderr, flush=True)
 
 
-sys.excepthook = _panic_hook
+def _panic_hook(exc_type, exc_value, exc_tb):
+    _record_crash("unhandled exception", exc_type, exc_value, exc_tb)
+    sys.__excepthook__(exc_type, exc_value, exc_tb)  # chain so the process still terminates normally
 
 
 def _thread_panic_hook(args):
-    # threading.excepthook signature: SimpleNamespace(exc_type, exc_value, exc_traceback, thread)
-    import traceback
-    trace = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
-    with contextlib.suppress(Exception):
-        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(
-                f"\n=== thread exception · {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                f"· thread={args.thread.name} ===\n"
-            )
-            f.write(trace)
-    first_line = (
-        str(args.exc_value).strip().splitlines()[0]
-        if str(args.exc_value).strip()
-        else args.exc_type.__name__
-    )
-    print(
-        f"[gateway-crash] thread {args.thread.name} raised {args.exc_type.__name__}: {first_line}",
-        file=sys.stderr, flush=True,
-    )
+    _record_crash("thread exception", args.exc_type, args.exc_value, args.exc_traceback, thread_name=args.thread.name)
 
 
+sys.excepthook = _panic_hook
 threading.excepthook = _thread_panic_hook
 
 with contextlib.suppress(Exception):
@@ -105,7 +85,7 @@ with contextlib.suppress(Exception):
 
     prefetch_update_check()
 
-from tui_gateway.render import make_stream_renderer, render_diff, render_message
+from tui_gateway.render import make_stream_renderer, render_diff, render_message  # noqa: F401
 
 _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
@@ -132,63 +112,38 @@ _cfg_path = None
 _session_resume_lock = threading.Lock()
 _SLASH_WORKER_TIMEOUT_S = max(5.0, env_float("HERMES_TUI_SLASH_TIMEOUT_S", 45.0))
 
-# On WS disconnect ws.py parks the session for a quick reattach, but a browser
-# refresh creates a NEW sid and never reattaches the old one (leaking its slash
-# worker per refresh). After this grace an orphaned WS session is interrupted
-# if running, then reaped once turn finalization settles. 0 = park forever.
-def _resolve_ws_orphan_reap_grace() -> float:
-    """Resolve the WS-orphan reap grace window (seconds).
-
-    Config-driven via ``dashboard.ws_orphan_reap_grace_s`` (#79635); the
-    ``HERMES_TUI_WS_ORPHAN_REAP_GRACE_S`` env var is kept as an internal
-    override for backward compatibility and wins when set.
-    """
-    raw = os.environ.get("HERMES_TUI_WS_ORPHAN_REAP_GRACE_S")
+def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
+    """``dashboard.<cfg_key>`` seconds; the env var is an internal override that wins when set."""
+    raw = os.environ.get(env_var)
     if raw is None or not str(raw).strip():
         try:
             from hermes_cli.config import load_config
-            raw = (load_config().get("dashboard") or {}).get("ws_orphan_reap_grace_s")
+            raw = (load_config().get("dashboard") or {}).get(cfg_key)
         except Exception:
             raw = None
     try:
-        grace = float(raw) if raw is not None else 20.0
+        value = float(raw) if raw is not None else default
     except (ValueError, TypeError):
-        grace = 20.0
-    return max(0.0, grace)
+        value = default
+    return max(0.0, value)
+
+
+def _resolve_ws_orphan_reap_grace() -> float:
+    """Grace before an orphaned WS session is interrupted/reaped; 0 = park forever.
+
+    ws.py parks a disconnected session for a quick reattach, but a browser refresh
+    mints a NEW sid and never reattaches the old one (leaking its slash worker).
+    """
+    return _ws_orphan_setting("HERMES_TUI_WS_ORPHAN_REAP_GRACE_S", "ws_orphan_reap_grace_s", 20.0)
 
 
 _WS_ORPHAN_REAP_GRACE_S = _resolve_ws_orphan_reap_grace()
-
-
-def _resolve_ws_orphan_activity_stale() -> float:
-    """Resolve the detached-turn activity staleness threshold (seconds).
-
-    A detached RUNNING turn is only interrupted by the WS-orphan reaper once
-    its activity clock has been idle at least this long (#98028/#100325);
-    while the turn keeps producing (API waits, stream tokens, tool
-    heartbeats all stamp the clock) it runs to completion detached.
-    Config-driven via ``dashboard.ws_orphan_activity_stale_s``; the
-    ``HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S`` env var is an internal
-    override. Defaults to 600s, matching the turn-liveness watchdog's idle
-    bound (``agent.turn_liveness.timeout_s``) so "wedged" means the same
-    thing on both paths. ``0`` disables the gate (pre-#98028 behavior:
-    interrupt at grace regardless of activity).
-    """
-    raw = os.environ.get("HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S")
-    if raw is None or not str(raw).strip():
-        try:
-            from hermes_cli.config import load_config
-            raw = (load_config().get("dashboard") or {}).get("ws_orphan_activity_stale_s")
-        except Exception:
-            raw = None
-    try:
-        stale = float(raw) if raw is not None else 600.0
-    except (ValueError, TypeError):
-        stale = 600.0
-    return max(0.0, stale)
-
-
-_WS_ORPHAN_ACTIVITY_STALE_S = _resolve_ws_orphan_activity_stale()
+# A detached RUNNING turn is interrupted by the orphan reaper only once its activity
+# clock (API waits, stream tokens, tool heartbeats) has idled this long; 600s matches
+# the turn-liveness watchdog so "wedged" means the same on both paths. 0 disables the gate.
+_WS_ORPHAN_ACTIVITY_STALE_S = _ws_orphan_setting(
+    "HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S", "ws_orphan_activity_stale_s", 600.0
+)
 _WS_ORPHAN_INTERRUPT_REAP_POLL_S = 1.0
 # Budget for the interrupt-then-reap poll chain: an interrupted turn that never
 # settles (thread hung in a syscall) would reschedule the 1s poll forever. After
@@ -203,124 +158,42 @@ _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 # session.interrupt unread in the stdin pipe; only those go to a small thread
 # pool, everything else stays inline so fast-path ordering stays sane.
 # write_json is _stdout_lock-guarded, so concurrent response writes are safe.
-_LONG_HANDLERS = frozenset(
-    {
-        # Billing/usage reads each do a blocking portal HTTP fetch (state + usage
-        # is two serial round-trips); keep them off the main stdin loop so a slow
-        # portal can't stall approval.respond / session.interrupt / other RPCs.
-        "billing.state",
-        "subscription.state",
-        # Subscription change (V3): preview + the pending-change mutations + upgrade
-        # each do a blocking portal round-trip (preview + upgrade also hit Stripe,
-        # which can take seconds) — keep them off the main stdin loop.
-        "subscription.preview",
-        "subscription.change",
-        "subscription.resume",
-        "subscription.upgrade",
-        "usage.bars",
-        "session.usage",
-        "billing.step_up",
-        "browser.manage",
-        "cli.exec",
-        # complete.path spawns `git ls-files` + fuzzy-ranks the repo;
-        # complete.slash does first-call prompt_toolkit imports + a skill scan.
-        # Inline either freezes the TUI until the 120s RPC timeout.
-        "complete.path",
-        "complete.slash",
-        "llm.oneshot",
-        # model.options: credential pool checks, pricing fetch, tier check,
-        # provider probe — seconds inline, blocking the picker on every open.
-        "model.options",
-        # Pet RPCs hit the network or decode PNG frames; inline they serialize
-        # on the reader thread and the animation poll stutters.
-        "pet.cells",
-        "pet.gallery",
-        # Generation is the heaviest pet path by far — multiple image-model
-        # round-trips per call — so it must never block the reader thread.
-        "pet.generate",
-        "pet.hatch",
-        "pet.info",
-        "pet.select",
-        "pet.thumb",
-        "learning.frames",
-        "plugins.manage",
-        # reload.mcp shuts down and rediscovers every server (minutes with a
-        # flapping one); concurrent reloads serialize via _mcp_reload_lock.
-        "reload.mcp",
-        # MCP test/OAuth RPCs block on network (cold npx spawn; oauth.start
-        # waits up to ~30s for an authorization URL).
-        "mcp.servers.test",
-        "mcp.servers.oauth.start",
-        "process.list",
-        # profiles.list walks every profile's skill tree + opens its state.db;
-        # profiles.create copies skill bundles — seconds on cold disks.
-        "profiles.configure",
-        "profiles.create",
-        "profiles.describe",
-        "profiles.get_asset",
-        "profiles.list",
-        "profiles.set_asset",
-        # bot_relay.deliver runs a FULL one-turn agent conversation (up to
-        # 600s); all four stay off the reader thread together.
-        "bot_relay.roster.sync",
-        "bot_relay.outbox.drain",
-        "bot_relay.deliver",
-        "bot_relay.reply",
-        # image.generate is a multi-second remote API round-trip.
-        "image.generate",
-        "projects.discover_repos",
-        "projects.record_repos",
-        "projects.for_cwd",
-        "projects.tree",
-        "projects.project_sessions",
-        # Setup readiness RPCs (polled by the Desktop) may probe the provider
-        # endpoint / scan credential files; under GIL pressure they block the WS
-        # read loop and cause false "needs setup".
-        "setup.runtime_check",
-        "setup.status",
-        # Voice RPCs can trigger a SYNCHRONOUS faster-whisper lazy install
-        # (300s subprocess); inline that leaves prompt.submit unread for minutes.
-        "voice.toggle",
-        "voice.record",
-        "voice.tts",
-        # wake.* hit the same synchronous STT install chain plus lazy_deps for
-        # the wake engine; wake.status is polled on every gateway-ready.
-        "wake.start",
-        "wake.status",
-        # Polled every 15s by the Desktop; cheap normally, but under GIL
-        # pressure it can stall and block interrupts queued behind it.
-        "session.active_list",
-        "session.branch",
-        "session.compress",
-        "session.list",
-        "session.resume",
-        # Workspace re-home runs git branch/root subprocess probes against an
-        # arbitrary folder — inline they'd stall the reader on a slow mount.
-        "session.workspace.move",
-        "shell.exec",
-        "skills.manage",
-        "slash.exec",
-    }
-)
+# Why each is slow: billing/subscription/usage = blocking portal (+Stripe) round-trips;
+# complete.* = git ls-files / prompt_toolkit import + skill scan; model.options =
+# credential pool + pricing + provider probe; pet.* = network or PNG decode (generate
+# = several image-model round-trips); reload.mcp / mcp.servers.* = server rediscovery,
+# cold npx spawn, ~30s OAuth wait; profiles.* = skill-tree walk + state.db open;
+# bot_relay.* = a FULL one-turn agent conversation (600s); setup.* / session.active_list
+# = Desktop-polled and under GIL pressure block the WS read loop (false "needs setup",
+# stalled interrupts); voice.*/wake.* = SYNCHRONOUS faster-whisper install (300s);
+# session.workspace.move = git subprocess probes on an arbitrary (maybe slow) mount.
+_LONG_HANDLERS = frozenset({
+    "billing.state", "subscription.state", "subscription.preview", "subscription.change",
+    "subscription.resume", "subscription.upgrade", "usage.bars", "session.usage", "billing.step_up",
+    "browser.manage", "cli.exec", "complete.path", "complete.slash", "llm.oneshot", "model.options",
+    "pet.cells", "pet.gallery", "pet.generate", "pet.hatch", "pet.info", "pet.select", "pet.thumb",
+    "learning.frames", "plugins.manage", "reload.mcp", "mcp.servers.test", "mcp.servers.oauth.start",
+    "process.list", "profiles.configure", "profiles.create", "profiles.describe", "profiles.get_asset",
+    "profiles.list", "profiles.set_asset", "bot_relay.roster.sync", "bot_relay.outbox.drain",
+    "bot_relay.deliver", "bot_relay.reply", "image.generate", "projects.discover_repos",
+    "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
+    "setup.runtime_check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
+    "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
+    "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+})
 
 _rpc_pool_workers = max(2, env_int("HERMES_TUI_RPC_POOL_WORKERS", 8))
-_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=_rpc_pool_workers, thread_name_prefix="tui-rpc",
-)
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=_rpc_pool_workers, thread_name_prefix="tui-rpc")
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
 
 # Exact in-memory session generation executing on the current turn thread.
 # Unlike a public session id, this object identity cannot be supplied by RPC.
-_current_runtime_session_record: contextvars.ContextVar[dict | None] = (
-    contextvars.ContextVar("hermes_gateway_runtime_session_record", default=None)
+_current_runtime_session_record: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "hermes_gateway_runtime_session_record", default=None
 )
-
-# JSON-RPC method being dispatched on this thread/task. Diagnostic only (names
-# WHICH client poll is looping in the 4001 warning); never used for
-# authorization — the method string is client-supplied.
-_current_rpc_method: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "hermes_gateway_rpc_method", default=""
-)
+# JSON-RPC method being dispatched on this thread/task. Diagnostic only (names WHICH client
+# poll is looping in the 4001 warning); never authorization — the method string is client-supplied.
+_current_rpc_method: contextvars.ContextVar[str] = contextvars.ContextVar("hermes_gateway_rpc_method", default="")
 
 # Reserve real stdout for JSON-RPC only; redirect Python's stdout to stderr
 # so stray print() from libraries/tools becomes harmless gateway.stderr instead
