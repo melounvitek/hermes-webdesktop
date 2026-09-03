@@ -2131,21 +2131,11 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
 
 def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
-    """Point the cached system prompt's ``Model:``/``Provider:`` lines at
-    the active runtime after a provider switch.
+    """Rewrite the cached prompt's ``Model:``/``Provider:`` lines after a provider switch.
 
-    The system prompt is session-stable and replayed verbatim for prefix-cache
-    warmth, but after a failover the new backend's cache is cold anyway —
-    while a stale identity line makes the agent misreport which model it is
-    when asked.  Rewrite the lines in place WITHOUT persisting to the session
-    DB: the stored row keeps the primary's labels, so when the primary is
-    restored the prompt is byte-identical to the stored copy again and its
-    prefix cache still matches.
-
-    Only the LAST occurrence of each line is touched — the identity lines
-    live in the volatile tail of the prompt, and earlier matches could be
-    user content (memory snapshots, context files).
-    """
+    Not persisted: the stored row keeps the primary's labels so a restored primary replays a
+    byte-identical prompt (prefix cache intact). Only the LAST occurrence of each line is touched —
+    earlier matches may be user content (memory snapshots, context files)."""
     sp = getattr(agent, "_cached_system_prompt", None)
     if not isinstance(sp, str) or not sp:
         return
@@ -2160,143 +2150,108 @@ def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
 
 
 def _fallback_entry_key(fb: dict) -> tuple[str, str, str]:
-    return (
-        str(fb.get("provider") or "").strip().lower(),
-        str(fb.get("model") or "").strip(),
-        str(fb.get("base_url") or "").strip().rstrip("/"),
-    )
+    return (str(fb.get("provider") or "").strip().lower(), str(fb.get("model") or "").strip(),
+            str(fb.get("base_url") or "").strip().rstrip("/"))
 
 
 def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str]:
     """Return a skip reason for fallback entries known to be unusable locally."""
-    fb_provider = (fb.get("provider") or "").strip().lower()
-    if fb_provider != "nous":
+    if (fb.get("provider") or "").strip().lower() != "nous":
         return None
     try:
         from hermes_cli.auth import get_provider_auth_state
-
         state = get_provider_auth_state("nous") or {}
     except Exception as exc:
         return f"nous_auth_unreadable:{type(exc).__name__}"
-    access_value = state.get("access_token")
-    refresh_value = state.get("refresh_token")
-    has_access = isinstance(access_value, str) and bool(access_value.strip())
-    has_refresh = isinstance(refresh_value, str) and bool(refresh_value.strip())
-    if not (has_access or has_refresh):
-        return "nous_token_missing"
-    return None
+    if any(isinstance(t, str) and t.strip() for t in (state.get("access_token"), state.get("refresh_token"))):
+        return None
+    return "nous_token_missing"
+
+
+_FALLBACK_REASON_LABELS = {
+    FailoverReason.auth: "authentication failed",
+    FailoverReason.auth_permanent: "authentication permanently failed",
+    FailoverReason.billing: "billing or quota exhausted",
+    FailoverReason.rate_limit: "rate limit",
+    FailoverReason.upstream_rate_limit: "upstream model rate limit",
+    FailoverReason.overloaded: "provider overloaded",
+    FailoverReason.server_error: "provider server error",
+    FailoverReason.timeout: "request timeout",
+    FailoverReason.ssl_cert_verification: "TLS certificate verification failed",
+    FailoverReason.context_overflow: "context window exceeded",
+    FailoverReason.payload_too_large: "request payload too large",
+    FailoverReason.image_too_large: "image payload too large",
+    FailoverReason.model_not_found: "model not found",
+    FailoverReason.provider_policy_blocked: "provider policy blocked the request",
+    FailoverReason.content_policy_blocked: "content policy blocked the request",
+    FailoverReason.format_error: "request format rejected",
+    FailoverReason.invalid_encrypted_content: "encrypted reasoning state rejected",
+    FailoverReason.multimodal_tool_content_unsupported: "multimodal tool content unsupported",
+    FailoverReason.thinking_signature: "thinking signature rejected",
+    FailoverReason.long_context_tier: "long-context tier unavailable",
+    FailoverReason.oauth_long_context_beta_forbidden: "OAuth long-context beta unavailable",
+    FailoverReason.llama_cpp_grammar_pattern: "grammar pattern rejected",
+    FailoverReason.unknown: "provider failure",
+}
 
 
 def _fallback_reason_text(reason: "FailoverReason | None") -> str:
     """Return a concise operator-facing explanation for a fallback switch."""
-    if reason is None:
-        return "provider failure"
-    labels = {
-        FailoverReason.auth: "authentication failed",
-        FailoverReason.auth_permanent: "authentication permanently failed",
-        FailoverReason.billing: "billing or quota exhausted",
-        FailoverReason.rate_limit: "rate limit",
-        FailoverReason.upstream_rate_limit: "upstream model rate limit",
-        FailoverReason.overloaded: "provider overloaded",
-        FailoverReason.server_error: "provider server error",
-        FailoverReason.timeout: "request timeout",
-        FailoverReason.ssl_cert_verification: "TLS certificate verification failed",
-        FailoverReason.context_overflow: "context window exceeded",
-        FailoverReason.payload_too_large: "request payload too large",
-        FailoverReason.image_too_large: "image payload too large",
-        FailoverReason.model_not_found: "model not found",
-        FailoverReason.provider_policy_blocked: "provider policy blocked the request",
-        FailoverReason.content_policy_blocked: "content policy blocked the request",
-        FailoverReason.format_error: "request format rejected",
-        FailoverReason.invalid_encrypted_content: "encrypted reasoning state rejected",
-        FailoverReason.multimodal_tool_content_unsupported: "multimodal tool content unsupported",
-        FailoverReason.thinking_signature: "thinking signature rejected",
-        FailoverReason.long_context_tier: "long-context tier unavailable",
-        FailoverReason.oauth_long_context_beta_forbidden: "OAuth long-context beta unavailable",
-        FailoverReason.llama_cpp_grammar_pattern: "grammar pattern rejected",
-        FailoverReason.unknown: "provider failure",
-    }
-    label = labels.get(reason)
-    if label:
-        return label
-    value = getattr(reason, "value", None)
-    return str(value or reason or "provider failure").replace("_", " ")
+    label = _FALLBACK_REASON_LABELS.get(reason)
+    return label or str(getattr(reason, "value", None) or reason or "provider failure").replace("_", " ")
+
+
+def _is_anthropic_wire_url(url: str) -> bool:
+    """Same host match as determine_api_mode() / _detect_api_mode_for_url()."""
+    return url.rstrip("/").lower().endswith("/anthropic") or base_url_hostname(url) == "api.anthropic.com"
 
 
 def _fallback_api_mode_hint(fb: dict, fb_provider: str, fb_base_url_hint: Optional[str]) -> tuple[bool, str]:
-    """(explicit, api_mode) for a fallback entry from its ORIGINAL base_url.
-
-    resolve_provider_client() rewrites a dual-surface /anthropic base to /v1,
-    losing the Anthropic wire signal, so detection runs on the URL the user
-    configured (#79787). An explicit ``api_mode`` on the entry always wins —
-    including "chat_completions" — and suppresses all later re-detection.
-    ``provider: anthropic`` without a base_url uses the default endpoint and
-    must still resolve to anthropic_messages.
-    """
-    explicit = bool(str(fb.get("api_mode") or "").strip())
+    """(explicit, api_mode) for a fallback entry from its ORIGINAL base_url: resolve_provider_client()
+    rewrites a dual-surface /anthropic base to /v1, losing the Anthropic wire signal. An explicit
+    ``api_mode`` always wins (even "chat_completions") and suppresses later re-detection;
+    ``provider: anthropic`` without a base_url still resolves to anthropic_messages."""
+    explicit = str(fb.get("api_mode") or "").strip()
     if explicit:
-        return True, str(fb.get("api_mode")).strip()
-    if fb_provider == "anthropic":
-        return False, "anthropic_messages"
-    if fb_base_url_hint and (
-        fb_base_url_hint.rstrip("/").lower().endswith("/anthropic")
-        or base_url_hostname(fb_base_url_hint) == "api.anthropic.com"
-    ):
+        return True, explicit
+    if fb_provider == "anthropic" or (fb_base_url_hint and _is_anthropic_wire_url(fb_base_url_hint)):
         return False, "anthropic_messages"
     return False, "chat_completions"
 
 
 def _fallback_api_mode_resolved(agent, fb_provider: str, fb_model: str, fb_base_url: str) -> str:
-    """Re-detect api_mode from provider / resolved base URL / model once the
-    hint pass landed on the chat_completions default (never called when the
-    entry pinned api_mode explicitly)."""
+    """Re-detect api_mode from provider / resolved base URL / model when the hint pass
+    landed on the chat_completions default (never called for an explicit api_mode)."""
     if fb_provider == "openai-codex":
         return "codex_responses"
     if fb_provider in {"nous", "nous-portal", "nousresearch"}:
-        # Portal is dual-wire: anthropic/* must land on /v1/messages.
-        # resolve_provider_client still returns an OpenAI client for Nous; the
-        # anthropic_messages branch of the swap rebuilds the native client.
+        # Portal is dual-wire: anthropic/* must land on /v1/messages (the swap rebuilds the native client).
         from hermes_cli.providers import nous_api_mode
-
         return nous_api_mode(fb_model)
-    if (
-        fb_base_url.rstrip("/").lower().endswith("/anthropic")
-        or base_url_hostname(fb_base_url) == "api.anthropic.com"
-    ):
-        # Named custom providers (e.g. cron-anthropic) resolve base_url from
-        # config, so the hint pass never saw it. Same host match as
-        # determine_api_mode() / _detect_api_mode_for_url(). (#32243, #49247)
+    if _is_anthropic_wire_url(fb_base_url):
+        # Named custom providers (cron-anthropic) resolve base_url from config; the hint pass never saw it.
         return "anthropic_messages"
     if agent._is_azure_openai_url(fb_base_url):
-        # Azure serves gpt-5.x on /chat/completions — no Responses API.
-        return "chat_completions"
+        return "chat_completions"  # Azure serves gpt-5.x on /chat/completions — no Responses API.
     if agent._is_direct_openai_url(fb_base_url):
         return "codex_responses"
     if agent._provider_model_requires_responses_api(fb_model, provider=fb_provider):
-        # GPT-5.x usually needs Responses; provider exceptions (Copilot
-        # gpt-5-mini) stay on chat completions inside the predicate.
-        return "codex_responses"
-    if fb_provider == "bedrock" or (
-        base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
-        and base_url_host_matches(fb_base_url, "amazonaws.com")
-    ):
+        return "codex_responses"  # provider exceptions (Copilot gpt-5-mini) stay inside the predicate
+    host = base_url_hostname(fb_base_url)
+    if fb_provider == "bedrock" or (host.startswith("bedrock-runtime.") and base_url_host_matches(fb_base_url, "amazonaws.com")):
         return "bedrock_converse"
     return "chat_completions"
 
 
 def _rebind_fallback_credential_pool(agent, fb_provider: str, fb_model: str) -> None:
-    """Rebind the credential pool when the provider changes (#33163): keeping
-    the primary pool would let rate_limit/billing/auth recovery mutate the
-    wrong credential set and overwrite the fallback's base_url. A pool for the
-    same provider (two openrouter entries) is preserved; otherwise the
-    fallback provider's own pool is loaded so rotation keeps working."""
+    """Rebind the credential pool when the provider changes (else rate_limit/billing/auth recovery
+    mutates the wrong credentials and overwrites the fallback's base_url). Same-provider pool: kept."""
     existing_pool = getattr(agent, "_credential_pool", None)
     if existing_pool is not None:
         pool_provider = (getattr(existing_pool, "provider", "") or "").strip().lower()
         if pool_provider and pool_provider != fb_provider:
             logger.info(
-                "Fallback to %s/%s: clearing primary credential pool "
-                "(pool_provider=%s) to prevent cross-provider contamination",
+                "Fallback to %s/%s: clearing primary credential pool (pool_provider=%s) to prevent cross-provider contamination",
                 fb_provider, fb_model, pool_provider,
             )
             agent._credential_pool = None
@@ -2304,400 +2259,259 @@ def _rebind_fallback_credential_pool(agent, fb_provider: str, fb_model: str) -> 
     if getattr(agent, "_credential_pool", None) is None:
         try:
             from agent.credential_pool import load_pool
-
             fallback_pool = load_pool(fb_provider)
             if fallback_pool and fallback_pool.has_credentials():
                 agent._credential_pool = fallback_pool
-                logger.info(
-                    "Fallback to %s/%s: attached fallback credential pool",
-                    fb_provider, fb_model,
-                )
+                logger.info("Fallback to %s/%s: attached fallback credential pool", fb_provider, fb_model)
         except Exception as exc:
-            logger.debug(
-                "Fallback to %s/%s: could not attach credential pool: %s",
-                fb_provider, fb_model, exc,
-            )
+            logger.debug("Fallback to %s/%s: could not attach credential pool: %s", fb_provider, fb_model, exc)
 
 
-def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
-    """Switch to the next fallback model/provider in the chain.
+_RATE_LIMIT_FAILOVER_REASONS = frozenset({FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit})
 
-    Called when the current model is failing after retries.  Swaps the
-    OpenAI client, model slug, and provider in-place so the retry loop
-    can continue with the new backend.  Advances through the chain on
-    each call; returns False when exhausted.
 
-    Uses the centralized provider router (resolve_provider_client) for
-    auth resolution and client construction — no duplicated provider→key
-    mappings.
-    """
-    if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:
-        # Only start cooldown when leaving the primary provider.  If we're
-        # already on a fallback and chain-switching, the primary wasn't the
-        # source of the 429 so the cooldown should not be reset/extended.
-        fallback_already_active = bool(getattr(agent, "_fallback_activated", False))
-        current_provider = (getattr(agent, "provider", "") or "").strip().lower()
-        primary_provider = ((agent._primary_runtime or {}).get("provider") or "").strip().lower()
-        if (not fallback_already_active) or (primary_provider and current_provider == primary_provider):
-            # Exponential backoff: keep upstream's 60s first-hit cooldown and
-            # escalate on CONSECUTIVE rate-limits: 60s → 2m → 4m → 8m → ... →
-            # 4h cap. The first 429 must NOT bench the primary for half an
-            # hour — fast primary restore is the common case; escalation only
-            # punishes providers that keep 429ing.
-            # Counter is reset by restore_primary_runtime on successful restore.
-            backoff_count = getattr(agent, "_rate_limit_backoff_count", 0)
-            agent._rate_limit_backoff_count = backoff_count + 1
-            backoff_seconds = min(60 * (2 ** backoff_count), 14400)
-            agent._rate_limited_until = time.monotonic() + backoff_seconds
-            logging.info(
-                "Rate-limit backoff level %d: cooldown %d s (%.1f min, backoff#%d)",
-                backoff_count, backoff_seconds, backoff_seconds / 60, backoff_count + 1,
-            )
-    if agent._fallback_index >= len(agent._fallback_chain):
-        # Chain exhausted.  If we actually walked a non-empty chain and the
-        # failure was NOT a rate-limit/billing event (those already armed
-        # their own 60s cooldown above), arm a short cooldown so the next
-        # turn's restore_primary_runtime stays gated instead of resetting
-        # _fallback_index=0 and re-marshaling the whole context across every
-        # provider again.  Guards the cross-turn replay storm in #24996.
-        if (
-            len(agent._fallback_chain) > 0
-            and reason not in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}
-        ):
-            _existing_cooldown = getattr(agent, "_rate_limited_until", 0) or 0
-            agent._rate_limited_until = max(
-                _existing_cooldown,
-                time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S,
-            )
-        return False
-    fb = agent._fallback_chain[agent._fallback_index]
-    agent._fallback_index += 1
-    fb_key = _fallback_entry_key(fb)
-    unavailable = getattr(agent, "_unavailable_fallback_keys", None)
-    if unavailable is None:
-        unavailable = set()
-        agent._unavailable_fallback_keys = unavailable
+def _arm_rate_limit_cooldown(agent, reason: "FailoverReason | None") -> None:
+    """Arm the primary's exponential cooldown (60s → 2m → ... → 4h cap) on CONSECUTIVE rate-limits;
+    restore_primary_runtime resets the counter. Only when leaving the primary: chain-switching from
+    an active fallback means the primary was not the 429 source, so its cooldown is left alone."""
+    if reason not in _RATE_LIMIT_FAILOVER_REASONS:
+        return
+    current_provider = (getattr(agent, "provider", "") or "").strip().lower()
+    primary_provider = ((agent._primary_runtime or {}).get("provider") or "").strip().lower()
+    if getattr(agent, "_fallback_activated", False) and not (primary_provider and current_provider == primary_provider):
+        return
+    backoff_count = getattr(agent, "_rate_limit_backoff_count", 0)
+    agent._rate_limit_backoff_count = backoff_count + 1
+    backoff_seconds = min(60 * (2 ** backoff_count), 14400)
+    agent._rate_limited_until = time.monotonic() + backoff_seconds
+    logging.info("Rate-limit backoff level %d: cooldown %d s (%.1f min, backoff#%d)", backoff_count, backoff_seconds, backoff_seconds / 60, backoff_count + 1)
+
+
+def _fallback_chain_exhausted(agent, reason: "FailoverReason | None") -> bool:
+    """Chain exhausted (always False). A non-empty chain walked on a non-rate-limit failure arms a
+    short cooldown so next turn's restore_primary_runtime stays gated instead of replaying the whole
+    context across every provider again."""
+    if agent._fallback_chain and reason not in _RATE_LIMIT_FAILOVER_REASONS:
+        existing = getattr(agent, "_rate_limited_until", 0) or 0
+        agent._rate_limited_until = max(existing, time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S)
+    return False
+
+
+def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider: str, fb_model: str, unavailable: set) -> bool:
+    """True when the entry is already unavailable, malformed, locally unusable, or resolves
+    to the backend that just failed (falling back to it would loop the failure)."""
     if fb_key in unavailable:
         logger.debug("Fallback skip: %s previously marked unavailable", fb_key)
-        return agent._try_activate_fallback(reason)
-    fb_provider = (fb.get("provider") or "").strip().lower()
-    fb_model = (fb.get("model") or "").strip()
+        return True
     if not fb_provider or not fb_model:
-        return agent._try_activate_fallback(reason)  # skip invalid, try next
-
+        return True
     local_skip_reason = _fallback_entry_unavailable_without_network(agent, fb)
     if local_skip_reason:
         unavailable.add(fb_key)
-        logger.warning(
-            "Fallback skip: %s/%s is not locally usable (%s); suppressing for this session",
-            fb_provider,
-            fb_model,
-            local_skip_reason,
-        )
-        return agent._try_activate_fallback(reason)
-
-    # Skip entries that resolve to the same backend that just failed —
-    # falling back to it loops the failure. Identity semantics (which axes
-    # distinguish two backends, shim aliases, first-class credential
-    # surfaces, multi-endpoint pools) are owned by agent.backend_identity —
-    # see #22548, #70893, #62984. Do not re-implement comparisons here.
+        logger.warning("Fallback skip: %s/%s is not locally usable (%s); suppressing for this session", fb_provider, fb_model, local_skip_reason)
+        return True
+    # Identity semantics (axes, shim aliases, credential surfaces, multi-endpoint pools)
+    # are owned by agent.backend_identity — do not re-implement comparisons here.
     from agent.backend_identity import BackendIdentity, should_skip_candidate
-
     current_ident = BackendIdentity.build(
-        provider=getattr(agent, "provider", ""),
-        model=getattr(agent, "model", ""),
+        provider=getattr(agent, "provider", ""), model=getattr(agent, "model", ""),
         base_url=str(getattr(agent, "base_url", "") or ""),
     )
-    fb_ident = BackendIdentity.build(
-        provider=fb_provider,
-        model=fb_model,
-        base_url=(fb.get("base_url") or ""),
-    )
+    fb_ident = BackendIdentity.build(provider=fb_provider, model=fb_model, base_url=(fb.get("base_url") or ""))
     if should_skip_candidate(fb_ident, current_ident):
         logger.warning(
-            "Fallback skip: chain entry %s/%s resolves to the same backend "
-            "as the current one (%s)",
+            "Fallback skip: chain entry %s/%s resolves to the same backend as the current one (%s)",
             fb_provider, fb_model, current_ident.base_url or current_ident.provider,
         )
+        return True
+    return False
+
+
+def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb_base_url: str, fb_api_mode: str) -> None:
+    """Install the fallback client(s) in place, honoring request_timeout_seconds (None = SDK default)."""
+    timeout = get_provider_request_timeout(fb_provider, fb_model)
+    if fb_api_mode == "anthropic_messages":
+        from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+        is_anthropic = fb_provider == "anthropic"
+        effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if is_anthropic else (fb_client.api_key or "")
+        agent.api_key = effective_key
+        agent._anthropic_api_key = effective_key
+        agent._anthropic_base_url = fb_base_url
+        agent._anthropic_client = build_anthropic_client(effective_key, agent._anthropic_base_url, timeout=timeout)
+        agent._is_anthropic_oauth = _is_oauth_token(effective_key) if is_anthropic else False
+        agent.client = None
+        agent._client_kwargs = {}
+        return
+    agent.api_key = fb_client.api_key
+    agent.client = fb_client
+    # Keep provider headers resolve_provider_client() baked into fb_client (SDK: _custom_headers), else
+    # later request-client rebuilds drop them and User-Agent-sentinel providers (Kimi Coding) 403.
+    fb_headers = getattr(fb_client, "_custom_headers", None) or getattr(fb_client, "default_headers", None)
+    agent._client_kwargs = {"api_key": fb_client.api_key, "base_url": fb_base_url}
+    if fb_headers:
+        agent._client_kwargs["default_headers"] = dict(fb_headers)
+    if timeout is not None:
+        agent._client_kwargs["timeout"] = timeout
+        # Rebuild now so the timeout applies to the very next request, not only after a rotation rebuild.
+        agent._replace_primary_openai_client(reason="fallback_timeout_apply")
+
+
+def _update_fallback_context_compressor(agent) -> None:
+    """Point compression limits at the fallback model's context window (not the primary's),
+    respecting the explicit model.context_length config override."""
+    compressor = getattr(agent, "context_compressor", None)
+    if not compressor:
+        return
+    from agent.model_metadata import get_model_context_length
+    fb_context_length = get_model_context_length(
+        agent.model, base_url=agent.base_url,
+        api_key=agent.api_key if isinstance(agent.api_key, str) else "",  # callable (Entra ID) → probes need str
+        provider=agent.provider,
+        config_context_length=getattr(agent, "_config_context_length", None),
+        custom_providers=getattr(agent, "_custom_providers", None),
+    )
+    compressor.update_model(  # callable api_key preserved → call_llm
+        model=agent.model, context_length=fb_context_length, base_url=agent.base_url,
+        api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
+    )
+
+
+def _reresolve_fallback_reasoning_config(agent) -> None:
+    """Per-model override > global reasoning_effort (YAML False = disabled); a config load
+    failure keeps the current reasoning_config rather than killing the swap."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_constants import resolve_reasoning_config
+        agent.reasoning_config = resolve_reasoning_config(load_config() or {}, agent.model)
+        logger.info("Fallback %s: reasoning_config resolved: %s", agent.model, agent.reasoning_config)
+    except Exception as _reasoning_err:
+        logger.debug("Failed to resolve reasoning_config for fallback %s; keeping current: %s", agent.model, _reasoning_err)
+
+
+def _rescope_fallback_extra_body(agent, old_model: str, old_provider: str, old_base_url: str) -> None:
+    """Drop the OLD provider's custom_providers-contributed extra_body keys, then merge the fallback
+    provider's own. KEY-SCOPED: a key is dropped only if its value still equals what the old provider's
+    config injected — a caller override of the same key won at init and differs, so it survives;
+    keys the new provider redefines are re-added by the merge."""
+    try:
+        from agent.agent_init import _custom_provider_extra_body_for_agent, _merge_custom_provider_extra_body
+        custom_providers = getattr(agent, "_custom_providers", None) or []
+        old_provider_eb = _custom_provider_extra_body_for_agent(provider=old_provider, model=old_model, base_url=old_base_url, custom_providers=custom_providers) or {}
+        overrides = dict(getattr(agent, "request_overrides", {}) or {})
+        existing_eb = overrides.get("extra_body")
+        if isinstance(existing_eb, dict) and old_provider_eb:
+            scrubbed = {k: v for k, v in existing_eb.items() if not (k in old_provider_eb and v == old_provider_eb[k])}
+            if scrubbed:
+                overrides["extra_body"] = scrubbed
+            else:
+                overrides.pop("extra_body", None)
+            agent.request_overrides = overrides
+        _merge_custom_provider_extra_body(agent, custom_providers)
+        logger.info("Fallback %s: extra_body resolved: %s", agent.model, (getattr(agent, "request_overrides", {}) or {}).get("extra_body"))
+    except Exception as _eb_err:
+        logger.debug("Failed to resolve extra_body for fallback %s; keeping current: %s", agent.model, _eb_err)
+
+
+def _buffer_fallback_notice(agent, notice: str) -> None:
+    """Buffer the switch notice for terminal failure AND retain it as a durable one-shot for
+    _emit_pending_fallback_notice (a successful fallback clears retry chatter)."""
+    agent._buffer_status(notice)
+    pending = getattr(agent, "_pending_fallback_notice", None)
+    if isinstance(pending, list):
+        pending.append(notice)
+    else:
+        agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
+
+
+def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
+    """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
+    model slug and provider in place so the retry loop continues on the new backend; client
+    construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
+    _arm_rate_limit_cooldown(agent, reason)
+    if agent._fallback_index >= len(agent._fallback_chain):
+        return _fallback_chain_exhausted(agent, reason)
+    fb = agent._fallback_chain[agent._fallback_index]
+    agent._fallback_index += 1
+    fb_key = _fallback_entry_key(fb)
+    if getattr(agent, "_unavailable_fallback_keys", None) is None:
+        agent._unavailable_fallback_keys = set()
+    unavailable = agent._unavailable_fallback_keys
+    fb_provider = (fb.get("provider") or "").strip().lower()
+    fb_model = (fb.get("model") or "").strip()
+    if _should_skip_fallback_candidate(agent, fb, fb_key, fb_provider, fb_model, unavailable):
         return agent._try_activate_fallback(reason)
 
-    # Use centralized router for client construction.
-    # raw_codex=True because the main agent needs direct responses.stream()
-    # access for Codex providers.
     try:
         from agent.auxiliary_client import resolve_provider_client
-        # Pass base_url and api_key from fallback config so custom
-        # endpoints (e.g. Ollama Cloud) resolve correctly instead of
-        # falling through to OpenRouter defaults.
         from hermes_cli.fallback_config import resolve_entry_api_key
-
+        # Pass the entry's base_url/api_key so custom endpoints (Ollama Cloud) resolve instead
+        # of falling through to OpenRouter defaults.
         fb_base_url_hint = (fb.get("base_url") or "").strip() or None
         fb_api_key_hint = resolve_entry_api_key(fb)
         fb_api_mode_explicit, fb_api_mode = _fallback_api_mode_hint(fb, fb_provider, fb_base_url_hint)
-
-        # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
-        # when no explicit key is in the fallback config. Host match
-        # (not substring) — see GHSA-76xc-57q6-vm5m.
+        # Ollama Cloud: OLLAMA_API_KEY from env when the entry has no key. Host match, not
+        # substring — GHSA-76xc-57q6-vm5m.
         if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
             from agent.secret_scope import get_secret
-
             fb_api_key_hint = get_secret("OLLAMA_API_KEY") or None
+        # raw_codex=True: the main agent needs direct responses.stream() access for Codex providers.
         fb_client, _resolved_fb_model = resolve_provider_client(
-            fb_provider, model=fb_model, raw_codex=True,
-            explicit_base_url=fb_base_url_hint,
-            explicit_api_key=fb_api_key_hint,
-            api_mode=fb_api_mode)
+            fb_provider, model=fb_model, raw_codex=True, explicit_base_url=fb_base_url_hint, explicit_api_key=fb_api_key_hint, api_mode=fb_api_mode)
         if fb_client is None:
-            logger.warning(
-                "Fallback to %s failed: provider not configured",
-                fb_provider)
+            logger.warning("Fallback to %s failed: provider not configured", fb_provider)
             unavailable.add(fb_key)
-            return agent._try_activate_fallback(reason)  # try next in chain
+            return agent._try_activate_fallback(reason)
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
-
             fb_model = normalize_model_for_provider(fb_model, fb_provider)
         except Exception as _norm_err:
-            logger.warning(
-                "Could not normalize fallback model %r for provider %r: %s",
-                fb_model, fb_provider, _norm_err,
-            )
+            logger.warning("Could not normalize fallback model %r for provider %r: %s", fb_model, fb_provider, _norm_err)
 
         fb_base_url = str(fb_client.base_url)
         if not fb_api_mode_explicit and fb_api_mode == "chat_completions":
             fb_api_mode = _fallback_api_mode_resolved(agent, fb_provider, fb_model, fb_base_url)
 
-        old_model = agent.model
-        old_provider = agent.provider
-        old_base_url = agent.base_url
+        old_model, old_provider, old_base_url = agent.model, agent.provider, agent.base_url
 
-        # Clear the per-config context_length override so the fallback
-        # model's actual context window is resolved instead of inheriting
-        # the stale value from the previous model.  See #22387.
+        # Clear the per-config context_length override so the fallback model's own context
+        # window is resolved instead of the previous model's stale value.
         agent._config_context_length = None
-        agent.model = fb_model
-        agent.provider = fb_provider
-        agent.requested_provider = fb_provider
-        agent.base_url = fb_base_url
-        agent.api_mode = fb_api_mode
-        # Per-provider reasoning_content echo opt-in (see _reasoning_echo_opt_in).
-        # Read from the fallback entry so the flag travels with the active
-        # provider; restore_primary_runtime will revert it from the snapshot.
+        agent.model, agent.provider, agent.requested_provider = fb_model, fb_provider, fb_provider
+        agent.base_url, agent.api_mode = fb_base_url, fb_api_mode
+        # reasoning_content echo opt-in travels with the active provider; restore_primary_runtime reverts it.
         agent._reasoning_echo_flag = bool(fb.get("reasoning_echo", False))
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
 
         _rebind_fallback_credential_pool(agent, fb_provider, fb_model)
-
-        # Honor per-provider / per-model request_timeout_seconds for the
-        # fallback target (same knob the primary client uses).  None = use
-        # SDK default.
-        _fb_timeout = get_provider_request_timeout(fb_provider, fb_model)
-
-        if fb_api_mode == "anthropic_messages":
-            # Build native Anthropic client instead of using OpenAI client
-            from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
-            effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
-            agent.api_key = effective_key
-            agent._anthropic_api_key = effective_key
-            agent._anthropic_base_url = fb_base_url
-            agent._anthropic_client = build_anthropic_client(
-                effective_key, agent._anthropic_base_url, timeout=_fb_timeout,
-            )
-            agent._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
-            agent.client = None
-            agent._client_kwargs = {}
-        else:
-            # Swap OpenAI client and config in-place
-            agent.api_key = fb_client.api_key
-            agent.client = fb_client
-            # Preserve provider-specific headers that
-            # resolve_provider_client() may have baked into
-            # fb_client via the default_headers kwarg.  The OpenAI
-            # SDK stores these in _custom_headers.  Without this,
-            # subsequent request-client rebuilds (via
-            # _create_request_openai_client) drop the headers,
-            # causing 403s from providers like Kimi Coding that
-            # require a User-Agent sentinel.
-            fb_headers = getattr(fb_client, "_custom_headers", None)
-            if not fb_headers:
-                fb_headers = getattr(fb_client, "default_headers", None)
-            agent._client_kwargs = {
-                "api_key": fb_client.api_key,
-                "base_url": fb_base_url,
-                **({"default_headers": dict(fb_headers)} if fb_headers else {}),
-            }
-            if _fb_timeout is not None:
-                agent._client_kwargs["timeout"] = _fb_timeout
-                # Rebuild the shared OpenAI client so the configured
-                # timeout takes effect on the very next fallback request,
-                # not only after a later credential-rotation rebuild.
-                agent._replace_primary_openai_client(reason="fallback_timeout_apply")
+        _swap_fallback_clients(agent, fb_client, fb_provider, fb_model, fb_base_url, fb_api_mode)
 
         from agent.agent_runtime_helpers import sync_credential_pool_entry_id
         sync_credential_pool_entry_id(agent)
 
-        # Re-evaluate prompt caching for the new provider/model
-        agent._use_prompt_caching, agent._use_native_cache_layout = (
-            agent._anthropic_prompt_cache_policy(
-                provider=fb_provider,
-                base_url=fb_base_url,
-                api_mode=fb_api_mode,
-                model=fb_model,
-            )
-        )
-
-        # LM Studio: preload before probing the fallback's context length.
-        agent._ensure_lmstudio_runtime_loaded()
-
-        # Update context compressor limits for the fallback model.
-        # Without this, compression decisions use the primary model's
-        # context window (e.g. 200K) instead of the fallback's (e.g. 32K),
-        # causing oversized sessions to overflow the fallback.
-        # Also pass _config_context_length so the explicit config override
-        # (model.context_length in config.yaml) is respected — without this,
-        # the fallback activation drops to 128K even when config says 204800.
-        if hasattr(agent, 'context_compressor') and agent.context_compressor:
-            from agent.model_metadata import get_model_context_length
-            # ``agent.api_key`` may be callable (Entra ID); the
-            # context-length resolver expects a string for live
-            # probes. Foundry typically resolves via config/static
-            # catalogs anyway, so coerce defensively.
-            _fb_ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
-            fb_context_length = get_model_context_length(
-                agent.model, base_url=agent.base_url,
-                api_key=_fb_ctx_api_key, provider=agent.provider,
-                config_context_length=getattr(agent, "_config_context_length", None),
-                custom_providers=getattr(agent, "_custom_providers", None),
-            )
-            agent.context_compressor.update_model(
-                model=agent.model,
-                context_length=fb_context_length,
-                base_url=agent.base_url,
-                api_key=getattr(agent, "api_key", ""),  # callable preserved → call_llm
-                provider=agent.provider,
-                api_mode=agent.api_mode,
-            )
-
-        # Re-resolve reasoning_config for the new fallback model (Closes #21256).
-        # Shared chokepoint: per-model override > global reasoning_effort
-        # (YAML boolean False = disabled). Wrapped in try/except because a
-        # config load failure must not kill the swap.
-        try:
-            from hermes_cli.config import load_config
-            from hermes_constants import resolve_reasoning_config
-
-            agent.reasoning_config = resolve_reasoning_config(
-                load_config() or {}, agent.model
-            )
-            logger.info(
-                "Fallback %s: reasoning_config resolved: %s",
-                agent.model, agent.reasoning_config,
-            )
-        except Exception as _reasoning_err:
-            logger.debug(
-                "Failed to resolve reasoning_config for fallback %s; keeping current: %s",
-                agent.model, _reasoning_err,
-            )
-            # Keep whatever reasoning_config was active — don't break the fallback swap.
-
-        # Re-resolve extra_body for the fallback provider (Closes #75091).
-        # The OLD provider's custom_providers-contributed extra_body (e.g. a
-        # vendor-specific reasoning toggle) must not ride along onto the
-        # fallback provider, which is a different API that may reject those
-        # fields.  Removal is KEY-SCOPED: only keys the old provider's
-        # custom_providers entry contributed (value unchanged since init)
-        # are dropped; the fallback provider's own extra_body is then merged
-        # back in.  Caller/profile-provided extra_body keys
-        # (request_overrides passed at init, which win over provider config
-        # per _merge_custom_provider_extra_body precedence) MUST survive the
-        # swap untouched.
-        try:
-            from agent.agent_init import (
-                _custom_provider_extra_body_for_agent,
-                _merge_custom_provider_extra_body,
-            )
-            _custom_providers = getattr(agent, "_custom_providers", None) or []
-            # What did the OLD provider's config contribute?
-            _old_provider_eb = _custom_provider_extra_body_for_agent(
-                provider=old_provider,
-                model=old_model,
-                base_url=old_base_url,
-                custom_providers=_custom_providers,
-            ) or {}
-            _overrides = dict(getattr(agent, "request_overrides", {}) or {})
-            _existing_eb = _overrides.get("extra_body")
-            if isinstance(_existing_eb, dict) and _old_provider_eb:
-                _scrubbed = dict(_existing_eb)
-                for _k, _v in _old_provider_eb.items():
-                    # Drop only keys the old provider contributed: the value
-                    # must still match what its config injected — a caller
-                    # override of the same key would have won at init and
-                    # differ, so it survives.  Keys the new provider
-                    # redefines are re-added with the NEW provider's value
-                    # by the merge below.
-                    if _k in _scrubbed and _scrubbed[_k] == _v:
-                        _scrubbed.pop(_k)
-                if _scrubbed:
-                    _overrides["extra_body"] = _scrubbed
-                else:
-                    _overrides.pop("extra_body", None)
-                agent.request_overrides = _overrides
-            # Merge in the fallback provider's own extra_body (existing
-            # caller-provided keys win on conflict inside the merge helper).
-            _merge_custom_provider_extra_body(agent, _custom_providers)
-            logger.info(
-                "Fallback %s: extra_body resolved: %s",
-                agent.model,
-                (getattr(agent, "request_overrides", {}) or {}).get("extra_body"),
-            )
-        except Exception as _eb_err:
-            logger.debug(
-                "Failed to resolve extra_body for fallback %s; keeping current: %s",
-                agent.model, _eb_err,
-            )
-
-        # Keep the prompt's self-identity in sync with the model actually
-        # answering, so "what model are you?" doesn't report the primary.
+        agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
+            provider=fb_provider, base_url=fb_base_url, api_mode=fb_api_mode, model=fb_model)
+        agent._ensure_lmstudio_runtime_loaded()  # LM Studio: preload before probing context length
+        _update_fallback_context_compressor(agent)
+        _reresolve_fallback_reasoning_config(agent)
+        _rescope_fallback_extra_body(agent, old_model, old_provider, old_base_url)
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
 
-        notice = (
+        _buffer_fallback_notice(agent, (
             f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
-            f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}."
-        )
-        # The buffered switch is surfaced on terminal failure. A successful
-        # fallback clears retry chatter, so retain every switch as a durable
-        # one-shot notice for _emit_pending_fallback_notice (run_agent.py).
-        agent._buffer_status(notice)
-        pending = getattr(agent, "_pending_fallback_notice", None)
-        if isinstance(pending, list):
-            pending.append(notice)
-        elif pending:
-            agent._pending_fallback_notice = [str(pending), notice]
-        else:
-            agent._pending_fallback_notice = [notice]
-        # ``_fallback_activated`` is also reused by temporary `/model --once`
-        # restoration. Keep separate provenance so the restore path only emits
-        # a fallback-recovery notice after an actual provider fallback.
+            f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}."))
+        # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
+        # provenance so the restore path only emits a recovery notice after a real fallback.
         agent._provider_fallback_active = True
         agent._provider_fallback_route = (str(fb_model), str(fb_provider))
-        logger.info(
-            "Fallback activated: %s → %s (%s)",
-            old_model, fb_model, fb_provider,
-        )
-        # Reset the stale-call circuit breaker (#58962): the streak measured
-        # the OLD provider's unresponsiveness.  Carrying it over would
-        # short-circuit the freshly activated fallback before it gets a
-        # single stream attempt.
+        logger.info("Fallback activated: %s → %s (%s)", old_model, fb_model, fb_provider)
+        # The stale-call streak measured the OLD provider; carrying it over would
+        # short-circuit the fresh fallback before its first stream attempt.
         _reset_stale_streak(agent)
         from agent.native_compaction import resolve_native_compaction_capabilities
         agent.runtime_capabilities = resolve_native_compaction_capabilities(
-            model=agent.model,
-            base_url=agent.base_url,
-            provider=fb_provider,
-            is_codex_backend=fb_provider == "openai-codex",
-        )
+            model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
         return True
     except Exception as e:
         if fb_provider == "nous":
@@ -2706,16 +2520,179 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         return agent._try_activate_fallback(reason)  # try next in chain
 
 
+# Keys outside the Chat Completions schema that strict gateways (Fireworks-backed OpenCode
+# Go, Mistral, Moonshot/Kimi) reject with 422. The transport's convert_messages() drops them
+# in the main loop; the summary path calls chat.completions.create() directly, so mirror it.
+_SUMMARY_FOREIGN_MESSAGE_KEYS = (
+    "reasoning", "finish_reason", "tool_name", "codex_reasoning_items",
+    "codex_message_items", "timestamp", "platform_message_id",
+)
+_EMPTY_SUMMARY_RESPONSE = "I reached the iteration limit and couldn't generate a summary."
+
+
+def _iteration_summary_api_messages(agent, messages: list) -> list:
+    """Wire-ready messages for the summary call, mirroring the main loop's api_messages build
+    (sidecar substitution, tool-call repair, thinking-only drop, underscore-key sweep)."""
+    needs_sanitize = agent._should_sanitize_tool_calls()
+    sanitize_model = agent.model
+    if needs_sanitize and agent.provider == "moa":
+        # MoA: agent.model is the virtual preset; use the real aggregator so Gemini keeps thought_signature.
+        agg_slot = getattr(getattr(agent, "client", None), "last_aggregator_slot", None)
+        if agg_slot and agg_slot.get("model"):
+            sanitize_model = agg_slot["model"]
+    api_messages = []
+    for msg in messages:
+        api_msg = msg.copy()
+        agent._copy_reasoning_content_for_api(msg, api_msg)
+        for key in _SUMMARY_FOREIGN_MESSAGE_KEYS:
+            api_msg.pop(key, None)
+        # api_content holds the exact bytes the main loop sent; substituting (not popping)
+        # keeps the summary's prefix identical instead of re-prefilling the largest context.
+        substitute_api_content(api_msg)
+        if needs_sanitize:
+            agent._sanitize_tool_calls_for_strict_api(api_msg, model=sanitize_model)
+        api_messages.append(api_msg)
+
+    effective_system = agent._cached_system_prompt or ""
+    if agent.ephemeral_system_prompt:
+        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    if effective_system:
+        api_messages = [{"role": "system", "content": effective_system}] + api_messages
+    for idx, pfm in enumerate(agent.prefill_messages or ()):
+        api_messages.insert((1 if effective_system else 0) + idx, pfm.copy())
+
+    # Compression/resume can orphan a tool result whose parent tool_call was summarized away.
+    api_messages = agent._sanitize_api_messages(api_messages)
+    # Thinking-only assistant turns 400 on Anthropic-family providers; _thinking_prefill must
+    # survive until here so the drop pass recognizes stubs after reasoning is stripped.
+    api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+    for api_msg in api_messages:  # underscore scaffolding: the transport's sweeper is bypassed here
+        if isinstance(api_msg, dict):
+            for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
+                api_msg.pop(internal_key, None)
+    return api_messages
+
+
+def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
+    from agent import relay_llm
+    return relay_llm.execute_current(
+        request, callback,
+        name=str(getattr(agent, "provider", "") or "provider"), model_name=str(getattr(agent, "model", "") or ""),
+        metadata={
+            "api_mode": str(getattr(agent, "api_mode", "") or "chat_completions"), "api_request_id": api_request_id,
+            "call_role": "iteration_summary", "retry_count": retry_count,
+        },
+        defer_logical_completion=True,
+    )
+
+
+def _iteration_summary_chat_kwargs(agent, api_messages: list) -> dict:
+    """chat.completions.create kwargs for the summary, mirroring ChatCompletionsTransport.build_kwargs()."""
+    try:
+        from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
+    except Exception:
+        _fixed_temperature_for_model = _OMIT_TEMP = None
+    raw_temp = _fixed_temperature_for_model(agent.model, agent.base_url) if _fixed_temperature_for_model is not None else None
+    temperature = None if raw_temp is _OMIT_TEMP else raw_temp
+    provider_name = (agent.provider or "").strip().lower()
+    # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
+    is_lmstudio = provider_name == "lmstudio" and agent._supports_reasoning_extra_body()
+    lm_reasoning_effort = agent._resolve_lmstudio_summary_reasoning_effort() if is_lmstudio else None
+
+    extra_body = {}
+    if not is_lmstudio and agent._supports_reasoning_extra_body():
+        extra_body["reasoning"] = agent.reasoning_config if agent.reasoning_config is not None else {"enabled": True, "effort": "medium"}
+    if "nousresearch" in agent._base_url_lower:
+        from agent.portal_tags import nous_portal_tags
+        extra_body["tags"] = nous_portal_tags()
+
+    summary_kwargs = {"model": agent.model, "messages": api_messages}
+    if temperature is not None:
+        summary_kwargs["temperature"] = temperature
+    if agent.max_tokens is not None:
+        summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
+    if lm_reasoning_effort is not None:
+        summary_kwargs["reasoning_effort"] = lm_reasoning_effort
+
+    # Merge the profile's canonical body even when routing is unset (e.g. required Portal tags).
+    provider_preferences = _provider_preferences_for_agent(agent)
+    profile_extra_body = {}
+    try:
+        from providers import get_provider_profile
+        provider_profile = get_provider_profile(agent.provider)
+        if provider_profile is not None:
+            profile_extra_body = provider_profile.build_extra_body(
+                session_id=getattr(agent, "session_id", None), provider_preferences=provider_preferences or None,
+                model=agent.model, base_url=agent.base_url, reasoning_config=agent.reasoning_config)
+    except Exception:
+        pass
+    if profile_extra_body:
+        extra_body.update(profile_extra_body)
+
+    def _is_openrouter() -> bool:
+        return provider_name == "openrouter" or agent._is_openrouter_url()
+
+    if provider_preferences and "provider" not in profile_extra_body and _is_openrouter():
+        extra_body["provider"] = provider_preferences
+    # Pareto Code router plugin — model-gated, same shape as the main-loop emission.
+    if (
+        agent.model == "openrouter/pareto-code" and _is_openrouter()
+        and agent.openrouter_min_coding_score is not None and agent.openrouter_min_coding_score != ""
+    ):
+        try:
+            _ps = float(agent.openrouter_min_coding_score)
+        except (TypeError, ValueError):
+            _ps = None
+        if _ps is not None and 0.0 <= _ps <= 1.0:
+            extra_body["plugins"] = [{"id": "pareto-router", "min_coding_score": _ps}]
+    if extra_body:
+        summary_kwargs["extra_body"] = extra_body
+    return summary_kwargs
+
+
+def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
+    def _attempt(retry_count: int) -> str:
+        codex_kwargs = agent._build_api_kwargs(api_messages)
+        codex_kwargs.pop("tools", None)
+        response = agent._run_codex_stream(codex_kwargs)
+        return (agent._get_transport().normalize_response(response).content or "").strip()
+    return _attempt
+
+
+def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
+    def _attempt(retry_count: int) -> str:
+        transport = agent._get_transport()
+        ant_kw = transport.build_kwargs(
+            model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
+            reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
+            preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
+        ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
+        response = _managed_summary_call(agent, api_request_id, ant_kw, agent._anthropic_messages_create, retry_count=retry_count)
+        result = transport.normalize_response(response, strip_tool_prefix=agent._is_anthropic_oauth)
+        return (result.content or "").strip()
+    return _attempt
+
+
+def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+    summary_kwargs = _iteration_summary_chat_kwargs(agent, api_messages)
+
+    def _attempt(retry_count: int) -> str:
+        summary_client = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary")
+        response = _managed_summary_call(
+            agent, api_request_id, summary_kwargs, lambda request: summary_client.chat.completions.create(**request), retry_count=retry_count)
+        return (agent._get_transport().normalize_response(response).content or "").strip()
+    return _attempt
+
+
+_SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthropic_messages": _anthropic_summary_attempt}
+
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
     if getattr(agent, "suppress_status_output", False):
-        # Strict machine-readable mode (hermes chat -Q, oneshot, background
-        # review): keep diagnostics out of stdout so wrappers receive only
-        # the final assistant content (#93220 class). Note: plain quiet_mode
-        # is NOT the right gate — the interactive CLI runs quiet_mode=True by
-        # default and should still see this warning.
+        # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
+        # NOT the gate — the interactive CLI runs quiet_mode=True by default and must see this.
         logger.warning(warning)
     else:
         agent._safe_print(warning)
@@ -2723,276 +2700,36 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     summary_api_request_id = f"iteration-summary:{uuid.uuid4()}"
     summary_call_outcome = "failed"
 
-    def _managed_summary_call(request, callback, *, retry_count: int):
-        from agent import relay_llm
-
-        return relay_llm.execute_current(
-            request,
-            callback,
-            name=str(getattr(agent, "provider", "") or "provider"),
-            model_name=str(getattr(agent, "model", "") or ""),
-            metadata={
-                "api_mode": str(
-                    getattr(agent, "api_mode", "") or "chat_completions"
-                ),
-                "api_request_id": summary_api_request_id,
-                "call_role": "iteration_summary",
-                "retry_count": retry_count,
-            },
-            defer_logical_completion=True,
-        )
-
-    # Shared constant so compaction recognizers can identify this runtime nudge
-    # by its stable content after SessionDB projection strips metadata flags
-    # (see MAX_ITERATIONS_SUMMARY_REQUEST / _is_synthetic_compression_user_turn).
+    # Shared constant so compaction recognizers can identify this runtime nudge by its stable
+    # content after SessionDB projection strips metadata flags.
     from agent.context_compressor import MAX_ITERATIONS_SUMMARY_REQUEST
-
-    summary_request = MAX_ITERATIONS_SUMMARY_REQUEST
-    append_message(messages, {"role": "user", "content": summary_request})
+    append_message(messages, {"role": "user", "content": MAX_ITERATIONS_SUMMARY_REQUEST})
 
     try:
-        # Build API messages, stripping internal-only fields
-        # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
-        _needs_sanitize = agent._should_sanitize_tool_calls()
-        api_messages = []
-        for msg in messages:
-            api_msg = msg.copy()
-            agent._copy_reasoning_content_for_api(msg, api_msg)
-            for internal_field in ("reasoning", "finish_reason"):
-                api_msg.pop(internal_field, None)
-            # Strict OpenAI-compatible gateways (Fireworks-backed OpenCode Go,
-            # Mistral, Moonshot/Kimi) reject any message key outside the Chat
-            # Completions schema. The main loop drops these via
-            # ChatCompletionsTransport.convert_messages(), but the summary path
-            # hand-builds messages and calls chat.completions.create() directly,
-            # bypassing the transport — so mirror that sanitization here:
-            # tool_name (SQLite FTS bookkeeping), the codex_* reasoning carriers,
-            # timestamp (preserved on gateway user replay entries for the
-            # stale-confirmation expiry check — #47868 rejection class),
-            # and every Hermes-internal underscore-prefixed scaffolding key.
-            for schema_foreign in ("tool_name", "codex_reasoning_items", "codex_message_items", "timestamp", "platform_message_id"):
-                api_msg.pop(schema_foreign, None)
-            # api_content (the persist-what-you-send sidecar) carries the
-            # exact bytes every main-loop call sent for this message —
-            # substitute it before dropping the key (Hermes bookkeeping,
-            # never a provider field), mirroring the loop's api_messages
-            # build. Popping without substituting would send CLEAN content
-            # here, diverging the summary request's prefix at the EARLIEST
-            # sidecar-carrying message and re-prefilling the whole transcript
-            # at exactly the moment the context is largest.
-            substitute_api_content(api_msg)
-            if _needs_sanitize:
-                # In MoA mode, agent.model is the virtual preset name,
-                # not the actual aggregator model.  Resolve the real
-                # aggregator model so Gemini preserves thought_signature.
-                _sanitize_model = agent.model
-                if agent.provider == "moa":
-                    _moa_client = getattr(agent, "client", None)
-                    if _moa_client is not None:
-                        _agg_slot = getattr(_moa_client, "last_aggregator_slot", None)
-                        if _agg_slot and _agg_slot.get("model"):
-                            _sanitize_model = _agg_slot["model"]
-                agent._sanitize_tool_calls_for_strict_api(api_msg, model=_sanitize_model)
-            api_messages.append(api_msg)
+        api_messages = _iteration_summary_api_messages(agent, messages)
+        build_attempt = _SUMMARY_ATTEMPT_BUILDERS.get(agent.api_mode, _chat_summary_attempt)
+        attempt = build_attempt(agent, api_messages, summary_api_request_id)
 
-        effective_system = agent._cached_system_prompt or ""
-        if agent.ephemeral_system_prompt:
-            effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
-        if effective_system:
-            api_messages = [{"role": "system", "content": effective_system}] + api_messages
-        if agent.prefill_messages:
-            sys_offset = 1 if effective_system else 0
-            for idx, pfm in enumerate(agent.prefill_messages):
-                api_messages.insert(sys_offset + idx, pfm.copy())
-
-        # Same safety net as the main loop: repair tool-call/result
-        # pairing before asking for a final summary.  Compression and
-        # session resume can leave a tool result whose parent assistant
-        # tool_call was summarized away; Responses API rejects that as
-        # "No tool call found for function call output".
-        api_messages = agent._sanitize_api_messages(api_messages)
-
-        # Same safety net as the main loop: drop thinking-only assistant
-        # turns so Anthropic-family providers don't 400 the summary call.
-        # _thinking_prefill must survive until here so the drop pass can
-        # recognize stubs after reasoning fields are stripped.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
-
-        # Strip all remaining underscore-prefixed scaffolding keys before the
-        # wire. The summary path calls chat.completions.create() directly,
-        # bypassing the transport's universal underscore-key sweeper.
-        for api_msg in api_messages:
-            if isinstance(api_msg, dict):
-                for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
-                    api_msg.pop(internal_key, None)
-
-        summary_extra_body = {}
-        try:
-            from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
-        except Exception:
-            _fixed_temperature_for_model = None
-            _OMIT_TEMP = None
-        _raw_summary_temp = (
-            _fixed_temperature_for_model(agent.model, agent.base_url)
-            if _fixed_temperature_for_model is not None
-            else None
-        )
-        _omit_summary_temperature = _raw_summary_temp is _OMIT_TEMP
-        _summary_temperature = None if _omit_summary_temperature else _raw_summary_temp
-        _is_nous = "nousresearch" in agent._base_url_lower
-        # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
-        # Mirror ChatCompletionsTransport.build_kwargs() so the summary path
-        # — which calls chat.completions.create() directly without going
-        # through the transport — sends the same shape the transport does.
-        _is_lmstudio_summary = (
-            (agent.provider or "").strip().lower() == "lmstudio"
-            and agent._supports_reasoning_extra_body()
-        )
-        _lm_reasoning_effort: str | None = (
-            agent._resolve_lmstudio_summary_reasoning_effort()
-            if _is_lmstudio_summary else None
-        )
-        if not _is_lmstudio_summary and agent._supports_reasoning_extra_body():
-            if agent.reasoning_config is not None:
-                summary_extra_body["reasoning"] = agent.reasoning_config
-            else:
-                summary_extra_body["reasoning"] = {
-                    "enabled": True,
-                    "effort": "medium"
-                }
-        if _is_nous:
-            from agent.portal_tags import nous_portal_tags as _portal_tags
-            summary_extra_body["tags"] = _portal_tags()
-
-        if agent.api_mode == "codex_responses":
-            def _attempt(retry_count: int) -> str:
-                codex_kwargs = agent._build_api_kwargs(api_messages)
-                codex_kwargs.pop("tools", None)
-                response = agent._run_codex_stream(codex_kwargs)
-                return (agent._get_transport().normalize_response(response).content or "").strip()
-        elif agent.api_mode == "anthropic_messages":
-            def _attempt(retry_count: int) -> str:
-                transport = agent._get_transport()
-                ant_kw = transport.build_kwargs(
-                    model=agent.model,
-                    messages=api_messages,
-                    tools=None,
-                    max_tokens=agent.max_tokens,
-                    reasoning_config=agent.reasoning_config,
-                    is_oauth=agent._is_anthropic_oauth,
-                    preserve_dots=agent._anthropic_preserve_dots(),
-                    base_url=getattr(agent, "_anthropic_base_url", None),
-                )
-                ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
-                response = _managed_summary_call(
-                    ant_kw, agent._anthropic_messages_create, retry_count=retry_count,
-                )
-                result = transport.normalize_response(response, strip_tool_prefix=agent._is_anthropic_oauth)
-                return (result.content or "").strip()
-        else:
-            summary_kwargs = {
-                "model": agent.model,
-                "messages": api_messages,
-            }
-            if _summary_temperature is not None:
-                summary_kwargs["temperature"] = _summary_temperature
-            if agent.max_tokens is not None:
-                summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
-            if _lm_reasoning_effort is not None:
-                summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
-
-            # Merge the profile's canonical body even when routing is unset:
-            # profiles may always emit required metadata such as Portal tags.
-            provider_preferences = _provider_preferences_for_agent(agent)
-            profile_extra_body = {}
-            try:
-                from providers import get_provider_profile
-
-                provider_profile = get_provider_profile(agent.provider)
-                if provider_profile is not None:
-                    profile_extra_body = provider_profile.build_extra_body(
-                        session_id=getattr(agent, "session_id", None),
-                        provider_preferences=provider_preferences or None,
-                        model=agent.model,
-                        base_url=agent.base_url,
-                        reasoning_config=agent.reasoning_config,
-                    )
-            except Exception:
-                pass
-
-            if profile_extra_body:
-                summary_extra_body.update(profile_extra_body)
-            if provider_preferences and "provider" not in profile_extra_body and (
-                (agent.provider or "").strip().lower() == "openrouter"
-                or agent._is_openrouter_url()
-            ):
-                summary_extra_body["provider"] = provider_preferences
-
-            # Pareto Code router plugin — model-gated. Same shape as
-            # the main-loop emission so summary calls on
-            # openrouter/pareto-code respect the user's coding-score floor.
-            if (
-                agent.model == "openrouter/pareto-code"
-                and (
-                    (agent.provider or "").strip().lower() == "openrouter"
-                    or agent._is_openrouter_url()
-                )
-                and agent.openrouter_min_coding_score is not None
-                and agent.openrouter_min_coding_score != ""
-            ):
-                try:
-                    _ps = float(agent.openrouter_min_coding_score)
-                except (TypeError, ValueError):
-                    _ps = None
-                if _ps is not None and 0.0 <= _ps <= 1.0:
-                    summary_extra_body["plugins"] = [
-                        {"id": "pareto-router", "min_coding_score": _ps}
-                    ]
-
-            if summary_extra_body:
-                summary_kwargs["extra_body"] = summary_extra_body
-
-            def _attempt(retry_count: int) -> str:
-                summary_client = agent._ensure_primary_openai_client(
-                    reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary"
-                )
-                response = _managed_summary_call(
-                    summary_kwargs,
-                    lambda request: summary_client.chat.completions.create(**request),
-                    retry_count=retry_count,
-                )
-                return (agent._get_transport().normalize_response(response).content or "").strip()
-
-        # One retry on an empty summary; a summary that is empty once its
-        # <think> block is stripped is NOT retried (matches prior behavior).
+        # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
+        final_response = _EMPTY_SUMMARY_RESPONSE
         for retry_count in (0, 1):
-            final_response = _attempt(retry_count)
-            if not final_response:
+            text = attempt(retry_count)
+            if not text:
                 continue
-            if "<think>" in final_response:
-                final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
-            if final_response:
+            if "<think>" in text:
+                text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+            if text:
                 summary_call_outcome = "success"
-                append_message(
-                    messages,
-                    {"role": "assistant", "content": final_response},
-                )
-            else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
+                append_message(messages, {"role": "assistant", "content": text})
+                final_response = text
             break
-        else:
-            final_response = "I reached the iteration limit and couldn't generate a summary."
 
     except Exception as e:
         logger.warning("Failed to get summary response: %s", e)
         final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
     finally:
         from agent import relay_llm
-
-        relay_llm.complete_logical_call(
-            summary_api_request_id,
-            outcome=summary_call_outcome,
-        )
+        relay_llm.complete_logical_call(summary_api_request_id, outcome=summary_call_outcome)
 
     return final_response
 
