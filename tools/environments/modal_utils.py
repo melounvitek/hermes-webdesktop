@@ -1,16 +1,14 @@
 """Shared Hermes-side execution flow for Modal transports.
 
 Stops at the Hermes boundary: command preparation, cwd/timeout normalization,
-stdin/sudo shell wrapping, common result shape, interrupt/cancel polling.
-Direct and managed Modal keep transport, persistence and trust-boundary logic
-in their own modules.
+sudo shell wrapping, common result shape, interrupt/cancel polling. The managed
+transport keeps HTTP, persistence and trust-boundary logic in its own module.
 """
 
 from __future__ import annotations
 
 import shlex
 import time
-import uuid
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -37,19 +35,6 @@ class ModalExecStart:
     immediate_result: dict | None = None
 
 
-def wrap_modal_stdin_heredoc(command: str, stdin_data: str) -> str:
-    """Append stdin as a shell heredoc for transports without stdin piping."""
-    marker = f"HERMES_EOF_{uuid.uuid4().hex[:8]}"
-    while marker in stdin_data:
-        marker = f"HERMES_EOF_{uuid.uuid4().hex[:8]}"
-    return f"{command} << '{marker}'\n{stdin_data}\n{marker}"
-
-
-def wrap_modal_sudo_pipe(command: str, sudo_stdin: str) -> str:
-    """Feed sudo via a shell pipe for transports without direct stdin piping."""
-    return f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {command}"
-
-
 class BaseModalExecutionEnvironment(BaseEnvironment):
     """Execution flow for the *managed* Modal transport (gateway-owned sandbox).
 
@@ -66,10 +51,10 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
 
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None, stdin_data: str | None = None,
                 rewrite_compound_background: bool = True, bounded_capture: bool = False) -> dict:
-        # Signature parity with BaseEnvironment.execute only: the transport runs
-        # commands explicitly (no shell background rewriting) and returns the
-        # remote result in one payload, so streaming-time bounding does not apply
-        # (the terminal tool's final truncation still caps it).
+        # Signature parity with BaseEnvironment.execute only: the transport runs commands
+        # explicitly (no shell background rewriting) and returns the remote result in one
+        # payload, so streaming-time bounding does not apply (the terminal tool's final
+        # truncation still caps it).
         del rewrite_compound_background, bounded_capture
         self._before_execute()
         prepared = self._prepare_modal_exec(command, cwd=cwd, timeout=timeout, stdin_data=stdin_data)
@@ -99,7 +84,6 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
             if deadline is not None and time.monotonic() >= deadline:
                 self._cancel_quietly(start.handle)
                 return self._timeout_result_for_modal(prepared.timeout)
-
             # Periodic activity touch so the gateway knows we're alive (lazy import:
             # tests stub tools.environments.base with only BaseEnvironment)
             try:
@@ -120,15 +104,12 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
 
     def _prepare_modal_exec(self, command: str, *, cwd: str = "", timeout: int | None = None,
                             stdin_data: str | None = None) -> PreparedModalExec:
-        exec_command = command
-        exec_stdin = stdin_data if self._stdin_mode == "payload" else None
-        if stdin_data is not None and self._stdin_mode == "heredoc":
-            exec_command = wrap_modal_stdin_heredoc(exec_command, stdin_data)
-        exec_command, sudo_stdin = self._prepare_command(exec_command)
+        exec_command, sudo_stdin = self._prepare_command(command)
         if sudo_stdin is not None:
-            exec_command = wrap_modal_sudo_pipe(exec_command, sudo_stdin)
+            # Feed sudo via a shell pipe: the transport has no direct stdin piping.
+            exec_command = f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {exec_command}"
         return PreparedModalExec(command=exec_command, cwd=cwd or self.cwd, timeout=timeout or self.timeout,
-                                 stdin_data=exec_stdin)
+                                 stdin_data=stdin_data)
 
     def _result(self, output: str, returncode: int) -> dict:
         return {"output": output, "returncode": returncode}
