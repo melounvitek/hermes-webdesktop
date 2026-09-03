@@ -350,6 +350,12 @@ def is_current_session_yolo_enabled() -> bool:
     return is_session_yolo_enabled(get_current_session_key(default=""))
 
 
+def _yolo_active() -> bool:
+    """CLI ``--yolo`` (process-scoped, frozen at import) or gateway ``/yolo``
+    (session-scoped). Hardline / deny-rule floors run BEFORE this everywhere."""
+    return _YOLO_MODE_FROZEN or is_current_session_yolo_enabled()
+
+
 def is_approved(session_key: str, pattern_key: str) -> bool:
     """Check if a pattern is approved (session-scoped or permanent).
 
@@ -451,11 +457,8 @@ def is_approval_bypass_active() -> bool:
 # Result builders shared by the gates
 # =========================================================================
 
-_APPROVED = {"approved": True, "message": None}
-
-
 def _approved() -> dict:
-    return dict(_APPROVED)
+    return {"approved": True, "message": None}
 
 
 def _denied(message: str, *, pattern_key: str, description: str,
@@ -1003,7 +1006,7 @@ def _run_approval_gate(
     """
     # Hardline blocks are the caller's job BEFORE this gate, so yolo here only
     # skips the recoverable approval layer.
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+    if _yolo_active():
         return _approved()
     session_key = get_current_session_key()
     if is_approved(session_key, pattern_key):
@@ -1116,8 +1119,7 @@ def check_dangerous_command(command: str, env_type: str,
     blocked = _floor_block(command)
     if blocked is not None:
         return blocked
-    # Gateway /yolo is session-scoped; CLI --yolo is process-scoped.
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+    if _yolo_active():
         return _approved()
     if _command_matches_permanent_allowlist(command):
         return _approved()
@@ -1256,9 +1258,8 @@ def check_all_command_guards(command: str, env_type: str,
     if blocked is not None:
         return blocked
 
-    # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    if _yolo_active() or approval_mode == "off":
         return _approved()
     if _command_matches_permanent_allowlist(command):
         return _approved()
@@ -1359,7 +1360,7 @@ def check_execute_code_guard(code: str, env_type: str,
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _approved()
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    if _yolo_active() or approval_mode == "off":
         return _approved()
 
     is_gateway = _is_gateway_approval_context()
