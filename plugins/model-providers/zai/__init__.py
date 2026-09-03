@@ -4,8 +4,6 @@ GLM-4.5+ defaults to thinking ON, so ``reasoning_config`` is translated to
 ``extra_body.thinking``; GLM-5.2/5.3 also take a native ``reasoning_effort``.
 """
 
-from __future__ import annotations
-
 import re
 from typing import Any
 
@@ -27,14 +25,12 @@ def _model_supports_thinking(model: str | None) -> bool:
 
 def _has_token(model: str | None, tokens: tuple[str, ...]) -> bool:
     m = (model or "").strip().lower()
-    return bool(m) and any(token in m for token in tokens)
+    return any(token in m for token in tokens)
 
 
 def _glm_5_2_reasoning_effort(reasoning_config: dict | None, *, model: str | None = None) -> str | None:
-    """Map Hermes effort onto GLM's vocabulary (5.2: high/max; 5.3: low..max).
-
-    Below-floor efforts clamp to the floor; disabled/unset leaves the server default.
-    """
+    """Hermes effort -> GLM vocabulary (5.2: high/max; 5.3: low..max). Below-floor
+    efforts clamp to the floor; disabled/unset leaves the server default."""
     effort = re_.requested_effort(reasoning_config)
     if effort is None or effort == "none":
         return None
@@ -57,12 +53,10 @@ class ZaiProfile(ProviderProfile):
         is_5_2 = _has_token(model, _GLM_5_2_TOKENS)
         if not _model_supports_thinking(model) and not is_5_2:
             return extra_body, top_level
-
         # Only emit when the user expressed a preference (server default = enabled).
         if isinstance(reasoning_config, dict):
             enabled = reasoning_config.get("enabled") is not False
             extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-
         if is_5_2:
             effort = _glm_5_2_reasoning_effort(reasoning_config, model=model)
             if effort is not None:
@@ -71,14 +65,10 @@ class ZaiProfile(ProviderProfile):
 
 
 zai = ZaiProfile(
-    name="zai",
-    aliases=("glm", "z-ai", "z.ai", "zhipu"),
-    env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
-    display_name="Z.AI (GLM)",
-    description="Z.AI / GLM — Zhipu AI models",
-    signup_url="https://z.ai/",
-    fallback_models=("glm-5.2", "glm-5", "glm-4-9b"),
-    base_url="https://api.z.ai/api/paas/v4",
+    name="zai", aliases=("glm", "z-ai", "z.ai", "zhipu"),
+    env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), display_name="Z.AI (GLM)",
+    description="Z.AI / GLM — Zhipu AI models", signup_url="https://z.ai/",
+    fallback_models=("glm-5.2", "glm-5", "glm-4-9b"), base_url="https://api.z.ai/api/paas/v4",
     default_aux_model="glm-4.5-flash",
 )
 

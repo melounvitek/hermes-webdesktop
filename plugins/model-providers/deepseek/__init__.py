@@ -8,8 +8,6 @@ Retired ``deepseek-chat``/``deepseek-reasoner`` IDs are remapped in
 ``hermes_cli.model_normalize`` before reaching here.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from agent.reasoning_effort import DEEPSEEK_V4_EFFORTS, DEEPSEEK_V4_OVERRIDES, clamp_effort
@@ -24,12 +22,11 @@ class DeepSeekProfile(ProviderProfile):
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         m = (model or "").strip().lower()
-        # deepseek-v4-* and every later generation; v3 explicitly excluded.
-        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):
+        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):  # v4+ only; v3 excluded
             return {}, {}
         rc = reasoning_config if isinstance(reasoning_config, dict) else None
-        # Always set explicitly (default enabled, matching the API default) to
-        # avoid the reasoning_content echo trap on subsequent turns.
+        # Always set thinking explicitly (default enabled, matching the API default)
+        # to avoid the reasoning_content echo trap on subsequent turns.
         if rc is not None and rc.get("enabled") is False:
             return {"thinking": {"type": "disabled"}}, {}
         top_level: dict[str, Any] = {}
@@ -43,14 +40,9 @@ class DeepSeekProfile(ProviderProfile):
 
 
 deepseek = DeepSeekProfile(
-    name="deepseek",
-    aliases=("deepseek-chat",),
-    env_vars=("DEEPSEEK_API_KEY",),
-    display_name="DeepSeek",
-    description="DeepSeek — native DeepSeek API",
-    signup_url="https://platform.deepseek.com/",
-    fallback_models=("deepseek-v4-pro", "deepseek-v4-flash"),
-    base_url="https://api.deepseek.com/v1",
+    name="deepseek", aliases=("deepseek-chat",), env_vars=("DEEPSEEK_API_KEY",), display_name="DeepSeek",
+    description="DeepSeek — native DeepSeek API", signup_url="https://platform.deepseek.com/",
+    fallback_models=("deepseek-v4-pro", "deepseek-v4-flash"), base_url="https://api.deepseek.com/v1",
     default_aux_model="deepseek-v4-flash",
 )
 

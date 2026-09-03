@@ -16,9 +16,9 @@ from providers.base import ProviderProfile
 class OpenCodeFreeProfile(ProviderProfile):
     """OpenCode Free — keyless, with Ox Alpha reasoning controls.
 
-    Ox Alpha (x-preview-f-free) is also reachable via opencode-zen with the same
-    wire contract; the translation lives in the zen plugin and is resolved through
-    the registered zen profile's module so the two providers can never drift.
+    Ox Alpha (x-preview-f-free) is also reachable via opencode-zen with the same wire
+    contract; the translation lives in the zen plugin and is resolved through the
+    registered zen profile's module so the two providers can never drift.
     """
 
     def build_api_kwargs_extras(
@@ -36,15 +36,12 @@ class OpenCodeFreeProfile(ProviderProfile):
 
 
 opencode_free = OpenCodeFreeProfile(
-    name="opencode-free",
-    aliases=("free", "opencode_free"),
+    name="opencode-free", aliases=("free", "opencode_free"),
     env_vars=(),  # keyless — nothing to configure
-    base_url="https://opencode.ai/zen/v1",
-    display_name="OpenCode Free",
+    base_url="https://opencode.ai/zen/v1", display_name="OpenCode Free",
     description="OpenCode free models — keyless, no account needed",
-    # Attribution headers (same values as opencode-zen/go) plus the empty
-    # Authorization override that keeps the SDK's "Bearer <placeholder>" off the
-    # wire (the free tier 401s any unrecognized bearer).
+    # Attribution headers (same values as opencode-zen/go) plus the empty Authorization
+    # override that keeps the SDK's "Bearer <placeholder>" off the wire (free tier 401s it).
     default_headers={
         "Authorization": "",
         "HTTP-Referer": "https://hermes-agent.nousresearch.com",

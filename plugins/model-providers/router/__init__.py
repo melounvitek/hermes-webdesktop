@@ -1,21 +1,12 @@
-"""Ramp Router (router.com) provider profile: Responses-only LLM gateway.
+"""Ramp Router (router.com) provider profile: Responses-only LLM gateway (verified live).
 
-Wire notes (verified live against api.router.com):
-* Responses API is the native wire; ``/chat/completions`` is only a thin shim.
-  ``api_mode="codex_responses"`` plus the ``api.router.com`` host mandate in
-  ``hermes_cli/providers.py`` keep every path on it.
-* The catalog is account-scoped (BYOK accounts see extra IDs), so this profile
-  ships no ``fallback_models`` — the picker relies on ``fetch_models()``.
-* Router 400s on ``reasoning.effort`` levels outside a model's published
-  vocabulary and on any reasoning field for non-reasoning models. The efforts
-  map from ``GET /v1/models`` is cached (memory + disk mirror, background
-  warmer; never HTTP on the request hot path) and fed to the codex transport's
-  clamp via ``supported_reasoning_efforts``.
-* ``store: false``, ``prompt_cache_key``, encrypted reasoning replay, tools and
-  streaming pass through unchanged — no Router-specific request surgery.
+``api_mode="codex_responses"`` + the ``api.router.com`` host mandate in ``hermes_cli/providers.py``
+keep every path on the native wire. The catalog is account-scoped, so no ``fallback_models``
+(picker uses ``fetch_models()``). Router 400s on ``reasoning.effort`` levels outside a model's
+published vocabulary and on any reasoning field for non-reasoning models, so the efforts map
+from ``GET /v1/models`` is cached (memory + disk mirror, background warmer; never HTTP on the
+request hot path) and fed to the codex transport's clamp via ``supported_reasoning_efforts``.
 """
-
-from __future__ import annotations
 
 import json
 import logging
@@ -51,16 +42,13 @@ def _base_url() -> str:
 
 
 def _resolve_api_key() -> str:
-    """Resolve the Router key (documented var, then alias), preferring dotenv;
-    plain os.environ is the fallback when the dotenv resolver is unavailable or raises."""
-    resolvers: list = [lambda var: os.environ.get(var, "")]
+    """Router key (documented var, then alias), preferring dotenv; plain os.environ
+    is the fallback when the dotenv resolver is unavailable or raises."""
     try:
-        from hermes_cli.config import get_env_value_prefer_dotenv
-
-        resolvers.insert(0, get_env_value_prefer_dotenv)
+        from hermes_cli.config import get_env_value_prefer_dotenv as prefer_dotenv
     except Exception:
-        pass
-    for resolve in resolvers:
+        prefer_dotenv = None
+    for resolve in filter(None, (prefer_dotenv, os.environ.get)):
         for var in ("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY"):
             try:
                 value = str(resolve(var) or "").strip()
@@ -81,10 +69,9 @@ def _dig(obj: Any, *keys: str) -> Any:
 def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
     """Parse a ``/v1/models`` ``data`` array into the efforts map (None if unusable).
 
-    Ladder-unknown levels are dropped: clamp_effort ignores them, so an
-    all-unknown vocabulary would pass the effort through unclamped to a Router
-    400. ``supported=True`` with no recognized level leaves the model out
-    (unknown) so the transport keeps its default clamp behavior.
+    Ladder-unknown levels are dropped: clamp_effort ignores them, so an all-unknown
+    vocabulary would pass the effort through unclamped to a Router 400. ``supported=True``
+    with no recognized level leaves the model out (unknown -> transport default clamp).
     """
     if not isinstance(items, list):
         return None
@@ -102,10 +89,8 @@ def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
         unknown = [level for level in levels if level not in EFFORT_LADDER]
         if unknown:
             logger.info(
-                "router: model %s publishes unrecognized reasoning effort "
-                "level(s) %s; ignoring them (update agent/reasoning_effort "
-                "EFFORT_LADDER to adopt new vendor tiers)",
-                mid, unknown,
+                "router: model %s publishes unrecognized reasoning effort level(s) %s; ignoring them "
+                "(update agent/reasoning_effort EFFORT_LADDER to adopt new vendor tiers)", mid, unknown,
             )
             levels = [level for level in levels if level in EFFORT_LADDER]
         if levels:
@@ -116,7 +101,6 @@ def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
 def _disk_path() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
-
         return get_hermes_home() / "cache" / "router_catalog.json"
     except Exception:
         return None
@@ -128,7 +112,7 @@ def _save_disk(efforts_by_id: dict[str, list[str]]) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(".tmp")  # write-then-rename keeps readers from seeing a torn file
         tmp.write_text(json.dumps({"ts": time.time(), "efforts": efforts_by_id}), encoding="utf-8")
         tmp.replace(path)
     except Exception as exc:
@@ -166,9 +150,7 @@ def _seed_efforts(items: Any) -> Optional[dict[str, list[str]]]:
     return parsed
 
 
-def _fetch_catalog_items(
-    *, api_key: str = "", base_url: str = "", timeout: float = 8.0
-) -> Optional[list]:
+def _fetch_catalog_items(*, api_key: str = "", base_url: str = "", timeout: float = 8.0) -> Optional[list]:
     """Fetch the raw ``/v1/models`` ``data`` array. None on any failure."""
     import urllib.request
 
@@ -179,8 +161,7 @@ def _fetch_catalog_items(
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Accept", "application/json")
-    # Router's WAF rejects the default Python-urllib UA.
-    req.add_header("User-Agent", _profile_user_agent())
+    req.add_header("User-Agent", _profile_user_agent())  # Router's WAF rejects the default urllib UA
     try:
         with open_credentialed_url(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
@@ -203,9 +184,7 @@ def _efforts_cache_only() -> Optional[dict[str, list[str]]]:
     if parsed is None:
         return None
     with _efforts_lock:
-        if _efforts_cache is None:
-            _efforts_cache = parsed
-        cached = _efforts_cache
+        _efforts_cache = cached = _efforts_cache if _efforts_cache is not None else parsed
     if age >= _DISK_TTL_SECONDS:
         _warm_efforts_async()
     return cached
@@ -231,7 +210,6 @@ def _warm_efforts_async() -> None:
         items = _fetch_catalog_items()
         if items is not None:
             _seed_efforts(items)
-
     try:
         threading.Thread(target=_refresh, name="router-caps-warm", daemon=True).start()
     except Exception as exc:
@@ -244,14 +222,13 @@ class RouterProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: Optional[str] = None, base_url: Optional[str] = None, timeout: float = 8.0
     ) -> Optional[list[str]]:
-        """Fetch the live, key-scoped catalog; the same payload seeds the caps cache.
+        """Live, key-scoped catalog; the same payload seeds the caps cache.
         Deduped but not sorted: Router's listing order is deliberate presentation."""
         items = _fetch_catalog_items(api_key=api_key or "", base_url=base_url or "", timeout=timeout)
         if items is None:
             return None
         _seed_efforts(items)
-        ids = list(dict.fromkeys(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id")))
-        return ids or None
+        return list(dict.fromkeys(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id"))) or None
 
     def supported_reasoning_efforts(self, model: Optional[str]) -> Optional[tuple[str, ...]]:
         """Catalog-declared effort vocabulary (cache-only; cold cache -> None + warm)."""
@@ -262,25 +239,20 @@ class RouterProfile(ProviderProfile):
         if efforts_by_id is None:
             _warm_efforts_async()
             return None
-        return None if mid not in efforts_by_id else tuple(efforts_by_id[mid])
+        return tuple(efforts_by_id[mid]) if mid in efforts_by_id else None
 
 
 router = RouterProfile(
-    name="router",
-    aliases=("ramp-router", "ramp", "router.com"),
-    api_mode="codex_responses",
+    name="router", aliases=("ramp-router", "ramp", "router.com"), api_mode="codex_responses",
     display_name="Ramp Router",
     description="Ramp Router (router.com) — routes each request to the cheapest model that clears your quality bar",
     signup_url="https://app.router.com/keys",
-    env_vars=("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY", "RAMP_ROUTER_BASE_URL"),
-    base_url=_base_url(),
+    env_vars=("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY", "RAMP_ROUTER_BASE_URL"), base_url=_base_url(),
     auth_type="api_key",
     # Router attributes coding-agent clients by UA prefix; its WAF rejects default UAs.
     default_headers={"User-Agent": f"Hermes-Agent/{_HERMES_VERSION}"},
-    supports_vision=True,
-    default_aux_model="gpt-5.4-mini",
-    # Empty on purpose: model IDs are account-scoped; the picker uses fetch_models().
-    fallback_models=(),
+    supports_vision=True, default_aux_model="gpt-5.4-mini",
+    fallback_models=(),  # account-scoped IDs; the picker uses fetch_models()
 )
 
 register_provider(router)

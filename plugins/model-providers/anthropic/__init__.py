@@ -22,9 +22,8 @@ class AnthropicProfile(ProviderProfile):
             return None
         try:
             req = urllib.request.Request("https://api.anthropic.com/v1/models")
-            req.add_header("x-api-key", api_key)
-            req.add_header("anthropic-version", "2023-06-01")
-            req.add_header("Accept", "application/json")
+            for k, v in (("x-api-key", api_key), ("anthropic-version", "2023-06-01"), ("Accept", "application/json")):
+                req.add_header(k, v)
             with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             return [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
@@ -34,13 +33,9 @@ class AnthropicProfile(ProviderProfile):
 
 
 anthropic = AnthropicProfile(
-    name="anthropic",
-    aliases=("claude", "claude-oauth", "claude-code"),
-    api_mode="anthropic_messages",
+    name="anthropic", aliases=("claude", "claude-oauth", "claude-code"), api_mode="anthropic_messages",
     env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
-    base_url="https://api.anthropic.com",
-    auth_type="api_key",
-    default_aux_model="claude-haiku-4-5-20251001",
+    base_url="https://api.anthropic.com", auth_type="api_key", default_aux_model="claude-haiku-4-5-20251001",
 )
 
 register_provider(anthropic)

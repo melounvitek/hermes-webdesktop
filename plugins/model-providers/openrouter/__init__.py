@@ -37,13 +37,9 @@ def _anthropic_reasoning_is_mandatory(model: str | None) -> bool:
 
 def _sticky_key(session_id: str | None) -> str | None:
     """Declared routing scope, then ambient conversation, then explicit session_id.
-
     Aux call sites (compression, titles, vision, MoA…) pass no ``session_id``,
-    so the ambient lineage ROOT keeps them pinned to their conversation.
-    """
-    return _cache_scope_from_session_id(
-        get_affinity_scope() or get_conversation_context() or session_id
-    )
+    so the ambient lineage ROOT keeps them pinned to their conversation."""
+    return _cache_scope_from_session_id(get_affinity_scope() or get_conversation_context() or session_id)
 
 
 class OpenRouterProfile(ProviderProfile):
@@ -51,11 +47,8 @@ class OpenRouterProfile(ProviderProfile):
 
     @staticmethod
     def _clamp_reasoning_to_catalog(cfg: dict[str, Any], model: str | None) -> dict[str, Any]:
-        """Clamp ``cfg["effort"]`` to the nearest LOWER catalog-advertised level.
-
-        No-op when the catalog is unreachable, the model is unlisted, or no
-        supported_efforts list is published (None = all levels accepted).
-        """
+        """Clamp ``cfg["effort"]`` to the nearest LOWER catalog-advertised level. No-op when the
+        catalog is unreachable, the model is unlisted, or no supported_efforts list is published."""
         effort = cfg.get("effort")
         if not effort or cfg.get("enabled") is False:
             return cfg
@@ -70,8 +63,7 @@ class OpenRouterProfile(ProviderProfile):
             return cfg
         if clamped and clamped != effort:
             logger.debug(
-                "openrouter: clamped reasoning effort %r → %r for %s "
-                "(catalog supported_efforts=%s)",
+                "openrouter: clamped reasoning effort %r → %r for %s (catalog supported_efforts=%s)",
                 effort, clamped, model, caps.get("supported_efforts"),
             )
             cfg = {**cfg, "effort": clamped}
@@ -80,8 +72,8 @@ class OpenRouterProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """Fetch from the public OpenRouter catalog (no auth). Tool-call filtering
-        happens in hermes_cli/models.py, which the picker reaches first."""
+        """Public OpenRouter catalog (no auth), cached per process. Tool-call
+        filtering happens in hermes_cli/models.py, which the picker reaches first."""
         global _CACHE  # noqa: PLW0603
         if _CACHE is not None:
             return _CACHE
@@ -104,7 +96,6 @@ class OpenRouterProfile(ProviderProfile):
         prefs = context.get("provider_preferences")
         if prefs:
             body["provider"] = prefs
-
         # Pareto Code router plugin is only meaningful for openrouter/pareto-code.
         score = context.get("openrouter_min_coding_score")
         if (context.get("model") or "") == "openrouter/pareto-code" and score is not None and score != "":
@@ -117,13 +108,8 @@ class OpenRouterProfile(ProviderProfile):
         return body
 
     def build_api_kwargs_extras(
-        self,
-        *,
-        reasoning_config: dict | None = None,
-        supports_reasoning: bool = False,
-        model: str | None = None,
-        session_id: str | None = None,
-        **context: Any,
+        self, *, reasoning_config: dict | None = None, supports_reasoning: bool = False,
+        model: str | None = None, session_id: str | None = None, **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Pass reasoning_config as extra_body.reasoning; pin Grok's cache via x-grok-conv-id."""
         extra_body: dict[str, Any] = {}
@@ -143,7 +129,6 @@ class OpenRouterProfile(ProviderProfile):
                 extra_body["reasoning"] = self._clamp_reasoning_to_catalog(dict(reasoning_config), model)
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
-
         # xAI's prompt cache is pinned per backend server via this header.
         grok_conv_id = _sticky_key(session_id)
         if grok_conv_id and model and model.startswith(("x-ai/grok-", "xai/grok-")):
@@ -152,19 +137,11 @@ class OpenRouterProfile(ProviderProfile):
 
 
 openrouter = OpenRouterProfile(
-    name="openrouter",
-    aliases=("or",),
-    env_vars=("OPENROUTER_API_KEY",),
-    display_name="OpenRouter",
-    description="OpenRouter — unified API for 200+ models",
-    signup_url="https://openrouter.ai/keys",
-    base_url="https://openrouter.ai/api/v1",
-    models_url="https://openrouter.ai/api/v1/models",
+    name="openrouter", aliases=("or",), env_vars=("OPENROUTER_API_KEY",), display_name="OpenRouter",
+    description="OpenRouter — unified API for 200+ models", signup_url="https://openrouter.ai/keys",
+    base_url="https://openrouter.ai/api/v1", models_url="https://openrouter.ai/api/v1/models",
     fallback_models=(
-        "anthropic/claude-sonnet-4.6",
-        "openai/gpt-5.4",
-        "deepseek/deepseek-chat",
-        "google/gemini-3.8-flash",
+        "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "deepseek/deepseek-chat", "google/gemini-3.8-flash",
         "qwen/qwen3-plus",
     ),
 )
