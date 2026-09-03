@@ -352,10 +352,10 @@ def _api_key_display(entry: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
-def _raw_provider_api_key(endpoint_id: str) -> str:
-    """The on-disk (un-expanded) ``api_key`` of a providers entry, or ``""``."""
+def _raw_provider_api_key(endpoint_id: str) -> Any:
+    """The on-disk (un-expanded) ``api_key`` of a providers entry, or ``None``."""
     _stored, entry = find_provider_entry(read_raw_config().get("providers"), endpoint_id)
-    return str(entry.get("api_key") or "").strip() if isinstance(entry, dict) else ""
+    return entry.get("api_key") if isinstance(entry, dict) else None
 
 
 def _config_api_key_is_env_ref(endpoint_id: str) -> bool:
@@ -366,7 +366,8 @@ def _config_api_key_is_env_ref(endpoint_id: str) -> bool:
     an entry already keeps its secret out of config.yaml, so migrating it would
     only copy that secret into a second env var the user didn't ask for.
     """
-    return bool(re.search(r"\$\{[^}]+\}", _raw_provider_api_key(endpoint_id)))
+    raw_key = _raw_provider_api_key(endpoint_id)
+    return bool(isinstance(raw_key, str) and re.search(r"\$\{[^}]+\}", raw_key))
 
 
 def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -591,7 +592,7 @@ def activate_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
                 # `cfg` is env-expanded, so a raw `${VAR}` api_key would land as
                 # plaintext; copy the raw template when that's what's on disk.
                 try:
-                    _raw_key = _raw_provider_api_key(provider_key)
+                    _raw_key = str(_raw_provider_api_key(provider_key) or "").strip()
                 except Exception:
                     _raw_key = ""
                 if _raw_key.startswith("${") and _raw_key.endswith("}"):
