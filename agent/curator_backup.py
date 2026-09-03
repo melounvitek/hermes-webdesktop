@@ -1,20 +1,14 @@
-"""Curator snapshot + rollback.
-
-Before any mutating curator pass, ``~/.hermes/skills/`` is tar.gz'd under
-``~/.hermes/skills/.curator_backups/<utc-iso>/`` with a ``manifest.json``.
-Rollback first snapshots the CURRENT tree (so it is itself undoable), then
-extracts the chosen snapshot into place. Excluded: ``.curator_backups/``,
-``.hub/`` (hub-managed), ``.git/``. Included: skill dirs, ``.usage.json``,
-``.archive/``, ``.curator_state`` (so rollback also restores last-run-at and the
-curator doesn't re-fire), ``.bundled_manifest``, ``.curator_suppressed``.
-
-Each snapshot also copies ``~/.hermes/cron/jobs.json`` as ``cron-jobs.json``:
-the consolidation pass rewrites cron ``skills``/``skill`` references in place,
-so rollback restores those two fields (only) — the rest is live state.
-"""
+"""Curator snapshot + rollback. Before any mutating curator pass, ``~/.hermes/skills/`` is tar.gz'd under
+``~/.hermes/skills/.curator_backups/<utc-iso>/`` with a ``manifest.json``. Rollback first snapshots the CURRENT tree (so it is
+itself undoable), then extracts the chosen snapshot into place. Excluded: ``.curator_backups/``, ``.hub/`` (hub-managed), ``.git/``.
+Included: skill dirs, ``.usage.json``, ``.archive/``, ``.curator_state`` (so rollback also restores last-run-at and the curator
+doesn't re-fire), ``.bundled_manifest``, ``.curator_suppressed``. Each snapshot also copies ``~/.hermes/cron/jobs.json`` as
+``cron-jobs.json``: the consolidation pass rewrites cron ``skills``/``skill`` references in place, so rollback restores those two
+fields (only) — the rest is live state."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -22,6 +16,7 @@ import re
 import shutil
 import tarfile
 from datetime import datetime, timezone
+from itertools import chain, count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -32,20 +27,15 @@ from hermes_cli.sizefmt import format_bytes
 
 logger = logging.getLogger(__name__)
 
-
 DEFAULT_KEEP = 5
 
-# Never rolled into a snapshot: .hub/ is owned by the skills hub (rolling it
-# back breaks lockfile invariants); .curator_backups is the backup dir itself;
-# .git is repository metadata — rolling it back breaks git tracking, and
-# snapshots that include it grow with the full history (once backups are
-# committed back, each snapshot contains the prior ones: 38MB of skills
-# inflated to 24GB in weeks). ``_tar_filter`` applies the same set to nested
-# paths, so a ``.git`` inside an individual skill dir is skipped too.
+# Never rolled into a snapshot: .hub/ is owned by the skills hub (rolling it back breaks lockfile invariants); .curator_backups
+# is the backup dir itself; .git is repository metadata — rolling it back breaks git tracking, and snapshots that include it grow
+# with the full history (once backups are committed back, each snapshot contains the prior ones: 38MB of skills inflated to 24GB
+# in weeks). The tar filter in ``snapshot_skills`` applies the same set to nested paths, so a nested ``.git`` is skipped too.
 _EXCLUDE_TOP_LEVEL = {".curator_backups", ".hub", ".git"}
 
-# Snapshot id: UTC ISO with colons replaced by dashes (Windows-safe filename).
-# Optional ``-NN`` suffix disambiguates two snapshots in the same second.
+# Snapshot id: UTC ISO with colons replaced by dashes (Windows-safe filename); optional ``-NN`` suffix for same-second snapshots.
 _ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(-\d{2})?$")
 
 CRON_JOBS_FILENAME = "cron-jobs.json"
@@ -62,45 +52,35 @@ def _backups_dir() -> Path:
 
 
 def _jobs_list(parsed: Any) -> Optional[list]:
-    """jobs.json is ``{"jobs": [...], "updated_at": ...}``; also accept a bare
-    list for forward compat. None when neither shape matches."""
-    if isinstance(parsed, dict):
-        parsed = parsed.get("jobs")
+    """jobs.json is ``{"jobs": [...], "updated_at": ...}``; also accept a bare list for forward compat. None otherwise."""
+    parsed = parsed.get("jobs") if isinstance(parsed, dict) else parsed
     return parsed if isinstance(parsed, list) else None
 
 
 def _backup_cron_jobs_into(dest: Path) -> Dict[str, Any]:
-    """Copy the live ``~/.hermes/cron/jobs.json`` into ``dest`` as ``cron-jobs.json``.
-    Never raises: a missing/unreadable file yields ``backed_up=False`` plus a
-    reason, and the snapshot proceeds."""
+    """Copy the live ``~/.hermes/cron/jobs.json`` into ``dest`` as ``cron-jobs.json``. Never raises: a missing/unreadable
+    file yields ``backed_up=False`` plus a reason, and the snapshot proceeds."""
     src = get_hermes_home() / "cron" / "jobs.json"
     info: Dict[str, Any] = {"backed_up": False, "jobs_count": 0}
     if not src.exists():
-        info["reason"] = "no cron/jobs.json present"
-        return info
+        return {**info, "reason": "no cron/jobs.json present"}
     try:
-        # utf-8-sig, same dialect as cron/jobs.load_jobs: a Windows-editor BOM
-        # would otherwise break json.loads AND be written into the backup.
+        # utf-8-sig, same dialect as cron/jobs.load_jobs: a Windows-editor BOM would otherwise break json.loads
+        # AND be written into the backup.
         raw = src.read_text(encoding="utf-8-sig")
     except OSError as e:
         logger.debug("Failed to read cron/jobs.json for backup: %s", e)
-        info["reason"] = f"read error: {e}"
-        return info
-    # jobs_count is a diagnostic only — an unparseable file is still stored raw.
-    try:
-        jobs = _jobs_list(json.loads(raw))
-        if jobs is not None:
-            info["jobs_count"] = len(jobs)
+        return {**info, "reason": f"read error: {e}"}
+    try:  # jobs_count is a diagnostic only — an unparseable file is still stored raw.
+        info["jobs_count"] = len(_jobs_list(json.loads(raw)) or [])
     except (json.JSONDecodeError, TypeError):
         info["parse_warning"] = "jobs.json was not valid JSON at snapshot time"
     try:
         (dest / CRON_JOBS_FILENAME).write_text(raw, encoding="utf-8")
     except OSError as e:
         logger.debug("Failed to write cron backup file: %s", e)
-        info["reason"] = f"write error: {e}"
-        return info
-    info["backed_up"] = True
-    return info
+        return {**info, "reason": f"write error: {e}"}
+    return {**info, "backed_up": True}
 
 
 def _utc_id(now: Optional[datetime] = None) -> str:
@@ -120,14 +100,12 @@ def is_enabled() -> bool:
 
 def get_keep() -> int:
     try:
-        n = int(_load_config().get("keep", DEFAULT_KEEP))
+        return max(1, int(_load_config().get("keep", DEFAULT_KEEP)))
     except (TypeError, ValueError):
-        n = DEFAULT_KEEP
-    return max(1, n)
+        return DEFAULT_KEEP
 
 
 # --- Snapshot ---
-
 def _count_skill_files(base: Path) -> int:
     try:
         return sum(1 for p in base.rglob("SKILL.md") if not is_excluded_skill_path(p))
@@ -135,25 +113,15 @@ def _count_skill_files(base: Path) -> int:
         return 0
 
 
-def _write_manifest(dest: Path, reason: str, archive_path: Path, skills_counted: int,
-                    cron_info: Dict[str, Any]) -> None:
-    cron_jobs: Dict[str, Any] = {
-        "backed_up": bool(cron_info.get("backed_up", False)), "jobs_count": int(cron_info.get("jobs_count", 0)),
-    }
+def _write_manifest(dest: Path, reason: str, archive_path: Path, skills_counted: int, cron_info: Dict[str, Any]) -> None:
+    cron_jobs: Dict[str, Any] = {"backed_up": bool(cron_info.get("backed_up", False)), "jobs_count": int(cron_info.get("jobs_count", 0))}
     if not cron_info.get("backed_up"):
         cron_jobs["reason"] = cron_info.get("reason", "not captured")
     if cron_info.get("parse_warning"):
         cron_jobs["parse_warning"] = cron_info["parse_warning"]
-    manifest = {
-        "id": dest.name, "reason": reason, "created_at": datetime.now(timezone.utc).isoformat(),
-        "archive": archive_path.name, "archive_bytes": archive_path.stat().st_size,
-        "skill_files": skills_counted, "cron_jobs": cron_jobs,
-    }
+    manifest = {"id": dest.name, "reason": reason, "created_at": datetime.now(timezone.utc).isoformat(), "archive": archive_path.name,
+                "archive_bytes": archive_path.stat().st_size, "skill_files": skills_counted, "cron_jobs": cron_jobs}
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _rmtree_quiet(path: Path) -> None:
-    shutil.rmtree(path, ignore_errors=True)
 
 
 def _mkdir(path: Path, what: str, *, exist_ok: bool) -> bool:
@@ -165,32 +133,22 @@ def _mkdir(path: Path, what: str, *, exist_ok: bool) -> bool:
         return False
 
 
-def _tar_filter(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
-    return None if any(p in _EXCLUDE_TOP_LEVEL for p in Path(tarinfo.name).parts) else tarinfo
-
-
 def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] = None) -> Optional[Path]:
-    """Create a tar.gz snapshot of ``~/.hermes/skills/`` and prune old ones.
-    Returns the snapshot dir, or None when skipped (disabled, skills dir missing,
-    IO error) — logged at debug so the curator never aborts a pass over a backup
-    failure. ``protect_ids`` survive the prune step (rollback protects its target)."""
+    """Create a tar.gz snapshot of ``~/.hermes/skills/`` and prune old ones. Returns the snapshot dir, or None when
+    skipped (disabled, skills dir missing, IO error) — logged at debug so the curator never aborts a pass over a
+    backup failure. ``protect_ids`` survive the prune step (rollback protects its target)."""
     if not is_enabled():
         logger.debug("Curator backup disabled by config; skipping snapshot")
         return None
-    skills = _skills_dir()
+    skills, backups = _skills_dir(), _backups_dir()
     if not skills.exists():
         logger.debug("No ~/.hermes/skills/ directory — nothing to back up")
         return None
-    backups = _backups_dir()
     if not _mkdir(backups, "backups dir", exist_ok=True):
         return None
 
-    # Two curator runs in the same second must not clobber each other.
-    base_id = snap_id = _utc_id()
-    counter = 1
-    while (backups / snap_id).exists():
-        snap_id = f"{base_id}-{counter:02d}"
-        counter += 1
+    base_id = _utc_id()  # Two curator runs in the same second must not clobber each other: -NN suffix.
+    snap_id = next(i for i in chain([base_id], (f"{base_id}-{n:02d}" for n in count(1))) if not (backups / i).exists())
     dest = backups / snap_id
     if not _mkdir(dest, "snapshot dir", exist_ok=False):
         return None
@@ -200,14 +158,14 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
         with tarfile.open(archive, "w:gz", compresslevel=6) as tf:
             for entry in sorted(skills.iterdir()):
                 if entry.name not in _EXCLUDE_TOP_LEVEL:
-                    # arcname relative to skills/ so extraction drops back in cleanly.
-                    tf.add(str(entry), arcname=entry.name, recursive=True, filter=_tar_filter)
-        # Cron capture is additive and never fails the snapshot; the manifest
-        # records whether it happened so rollback can say "no cron data".
+                    # arcname relative to skills/ so extraction drops back in cleanly; the filter excludes nested _EXCLUDE_TOP_LEVEL paths too.
+                    tf.add(str(entry), arcname=entry.name, recursive=True,
+                           filter=lambda ti: None if any(p in _EXCLUDE_TOP_LEVEL for p in Path(ti.name).parts) else ti)
+        # Cron capture is additive and never fails the snapshot; the manifest records whether it happened so rollback can say "no cron data".
         _write_manifest(dest, reason, archive, _count_skill_files(skills), _backup_cron_jobs_into(dest))
     except (OSError, tarfile.TarError) as e:
         logger.debug("Curator snapshot failed: %s", e, exc_info=True)
-        _rmtree_quiet(dest)  # clean up partial snapshot
+        shutil.rmtree(dest, ignore_errors=True)  # clean up partial snapshot
         return None
 
     _prune_old(keep=get_keep(), protect=protect_ids)
@@ -216,10 +174,9 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
 
 
 def _prune_old(keep: int, protect: Optional[Set[str]] = None) -> List[str]:
-    """Delete regular snapshots beyond the newest *keep*; returns deleted ids.
-    Ids in *protect* are never deleted — rollback() uses this so the mandatory
-    pre-rollback safety snapshot cannot evict the snapshot being restored. Stale
-    ``.rollback-staging-*`` dirs (crashed rollback) are cleaned up on every call."""
+    """Delete regular snapshots beyond the newest *keep*; returns deleted ids. Ids in *protect* are never deleted —
+    rollback() uses this so the mandatory pre-rollback safety snapshot cannot evict the snapshot being restored.
+    Stale ``.rollback-staging-*`` dirs (crashed rollback) are cleaned up on every call."""
     protect = protect or set()
     backups = _backups_dir()
     if not backups.exists():
@@ -241,7 +198,6 @@ def _prune_old(keep: int, protect: Optional[Set[str]] = None) -> List[str]:
 
 
 # --- List + rollback ---
-
 def _read_manifest(snap_dir: Path) -> Dict[str, Any]:
     try:
         return json.loads((snap_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -257,23 +213,18 @@ def _is_restorable(child: Path) -> bool:
 def _restorable_snapshots() -> List[Path]:
     """Restorable snapshot dirs, newest first."""
     backups = _backups_dir()
-    if not backups.exists():
-        return []
-    return [c for c in sorted(backups.iterdir(), reverse=True) if _is_restorable(c)]
+    return [c for c in sorted(backups.iterdir(), reverse=True) if _is_restorable(c)] if backups.exists() else []
 
 
 def list_backups() -> List[Dict[str, Any]]:
     """All restorable snapshots (manifest dicts), newest first."""
     out: List[Dict[str, Any]] = []
     for child in _restorable_snapshots():
-        mf = _read_manifest(child)
-        mf.setdefault("id", child.name)
-        mf.setdefault("path", str(child))
-        if "archive_bytes" not in mf:
-            try:
-                mf["archive_bytes"] = (child / _ARCHIVE_NAME).stat().st_size
-            except OSError:
-                mf["archive_bytes"] = 0
+        mf = {"id": child.name, "path": str(child), **_read_manifest(child)}
+        try:
+            mf.setdefault("archive_bytes", (child / _ARCHIVE_NAME).stat().st_size)
+        except OSError:
+            mf.setdefault("archive_bytes", 0)
         out.append(mf)
     return out
 
@@ -283,66 +234,56 @@ def _resolve_backup(backup_id: Optional[str]) -> Optional[Path]:
     if backup_id:
         target = _backups_dir() / backup_id
         return target if _ID_RE.match(backup_id) and _is_restorable(target) else None
-    candidates = _restorable_snapshots()
-    return candidates[0] if candidates else None
+    return next(iter(_restorable_snapshots()), None)
 
 
 def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
-    """Reconcile backed-up cron skill links into the live ``cron/jobs.json``.
-    Only ``skills``/``skill`` are restored, and only on jobs that still exist
-    live (by ``id``) — everything else is live state. Backup-only jobs are
-    skipped and reported; live-only jobs untouched. Never raises; writes through
-    ``cron.jobs`` under the scheduler's lock so we don't race tick()."""
+    """Reconcile backed-up cron skill links into the live ``cron/jobs.json``. Only ``skills``/``skill`` are restored,
+    and only on jobs that still exist live (by ``id``) — everything else is live state. Backup-only jobs are skipped
+    and reported; live-only jobs untouched. Never raises; writes through ``cron.jobs`` under the scheduler's lock so
+    we don't race tick()."""
     report: Dict[str, Any] = {"attempted": False, "restored": [], "skipped_missing": [], "unchanged": 0, "error": None}
     backup_file = snapshot_dir / CRON_JOBS_FILENAME
     if not backup_file.exists():
-        report["error"] = f"snapshot has no {CRON_JOBS_FILENAME}"
-        return report
+        return {**report, "error": f"snapshot has no {CRON_JOBS_FILENAME}"}
     try:
         backup_jobs = _jobs_list(json.loads(backup_file.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as e:
-        report["error"] = f"failed to load backed-up jobs: {e}"
-        return report
+        return {**report, "error": f"failed to load backed-up jobs: {e}"}
     if backup_jobs is None:
-        report["error"] = "backed-up cron-jobs.json has no jobs list"
-        return report
+        return {**report, "error": "backed-up cron-jobs.json has no jobs list"}
 
     # Backed-up skill state keyed by job id (legacy single + modern list field).
     backup_by_id: Dict[str, Dict[str, Any]] = {
         job["id"]: {"skills": job.get("skills"), "skill": job.get("skill"), "name": job.get("name") or job["id"]}
-        for job in backup_jobs
-        if isinstance(job, dict) and isinstance(job.get("id"), str) and job.get("id")
+        for job in backup_jobs if isinstance(job, dict) and isinstance(job.get("id"), str) and job.get("id")
     }
     if not backup_by_id:
-        report["attempted"] = True  # we tried but there was nothing to do
-        return report
+        return {**report, "attempted": True}  # we tried but there was nothing to do
     try:
         from cron.jobs import load_jobs, save_jobs, _jobs_lock
     except ImportError as e:
-        report["error"] = f"cron module unavailable: {e}"
-        return report
+        return {**report, "error": f"cron module unavailable: {e}"}
 
     report["attempted"] = True
     try:
         with _jobs_lock():
             live_jobs = load_jobs()
-            changed = False
-            live_ids = set()
+            changed, live_ids = False, set()
             for live in live_jobs:
                 jid = live.get("id") if isinstance(live, dict) else None
                 if not isinstance(jid, str) or not jid:
                     continue
                 live_ids.add(jid)
                 backup = backup_by_id.get(jid)
-                if backup is None:
-                    continue  # live job didn't exist at snapshot time
+                if backup is None:  # live job didn't exist at snapshot time
+                    continue
                 cur = {"skills": live.get("skills"), "skill": live.get("skill")}
                 bkp = {"skills": backup.get("skills"), "skill": backup.get("skill")}
                 if cur == bkp:
                     report["unchanged"] += 1
                     continue
-                # Restore, preserving absence (don't add a key the backup lacked).
-                for key, value in bkp.items():
+                for key, value in bkp.items():  # Restore, preserving absence (don't add a key the backup lacked).
                     if value is None:
                         live.pop(key, None)
                     else:
@@ -351,10 +292,8 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
                 changed = True
 
             # Jobs in backup but not live = user deleted them after the snapshot.
-            report["skipped_missing"] = [
-                {"job_id": jid, "job_name": backup.get("name") or jid}
-                for jid, backup in backup_by_id.items() if jid not in live_ids
-            ]
+            report["skipped_missing"] = [{"job_id": jid, "job_name": b.get("name") or jid}
+                                         for jid, b in backup_by_id.items() if jid not in live_ids]
             if changed:
                 save_jobs(live_jobs)
     except Exception as e:  # noqa: BLE001 — rollback must not die mid-restore
@@ -371,35 +310,26 @@ def _remove_entry(entry: Path) -> None:
 
 
 def _restore_excluded_subtrees(staged: Path, skills: Path) -> None:
-    """Move excluded entries (nested ``.git``/``.hub``/...) from *staged* back
-    under *skills* after a successful extract. Snapshots never contain these, so
-    the staged copy of the live tree is the only source. ``.git`` may be a dir
-    or a file (submodule / worktree ``gitdir:`` pointer) — both are moved.
-    Best-effort and conditional: an entry is carried only when its parent skill
-    dir was restored and nothing sits at the target. If the target snapshot
-    predates the skill, the entry is dropped with the staging dir rather than
-    left orphaned; the safety snapshot excludes these paths too, so that case
-    is not undoable."""
-    def _carry(src: Path) -> None:
-        dest = skills / src.relative_to(staged)
-        if dest.parent.is_dir() and not dest.exists():
-            try:
-                shutil.move(str(src), str(dest))
-            except OSError as e:
-                logger.debug("Could not restore excluded entry %s: %s", src, e)
-
+    """Move excluded entries (nested ``.git``/``.hub``/...) from *staged* back under *skills* after a successful extract.
+    Snapshots never contain these, so the staged copy of the live tree is the only source. ``.git`` may be a dir or a file
+    (submodule / worktree ``gitdir:`` pointer) — both are moved. Best-effort and conditional: an entry is carried only when
+    its parent skill dir was restored and nothing sits at the target. If the target snapshot predates the skill, the entry
+    is dropped with the staging dir rather than left orphaned; the safety snapshot excludes these paths too, so not undoable."""
     for dirpath, dirnames, filenames in os.walk(staged):
-        for name in [*dirnames, *filenames]:
-            if name in _EXCLUDE_TOP_LEVEL:
-                _carry(Path(dirpath) / name)
+        for src in [Path(dirpath) / n for n in (*dirnames, *filenames) if n in _EXCLUDE_TOP_LEVEL]:
+            dest = skills / src.relative_to(staged)
+            if dest.parent.is_dir() and not dest.exists():
+                try:
+                    shutil.move(str(src), str(dest))
+                except OSError as e:
+                    logger.debug("Could not restore excluded entry %s: %s", src, e)
         dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_TOP_LEVEL]
 
 
 def _unstage(moved: List[Tuple[Path, Path]]) -> List[str]:
-    """Move staged entries back to their original paths; returns names that could
-    not be restored. ``shutil.move`` moves *into* an existing destination dir, so
-    partial-extract debris would bury the real skill (``skills/foo/foo/``) —
-    clear each original path first. The staged copy is authoritative."""
+    """Move staged entries back to their original paths; returns names that could not be restored. ``shutil.move``
+    moves *into* an existing destination dir, so partial-extract debris would bury the real skill
+    (``skills/foo/foo/``) — clear each original path first. The staged copy is authoritative."""
     failed: List[str] = []
     for orig, dest in moved:
         try:
@@ -408,20 +338,6 @@ def _unstage(moved: List[Tuple[Path, Path]]) -> List[str]:
         except OSError:
             failed.append(orig.name)
     return failed
-
-
-def _extract_snapshot(archive: Path, skills: Path) -> None:
-    """Extract into *skills*; raises ``tarfile.TarError`` on unsafe member paths."""
-    with tarfile.open(archive, "r:gz") as tf:
-        # Reject absolute paths and ".." defensively; Python 3.12+ also
-        # gets filter='data', older interpreters fall back unfiltered.
-        for member in tf.getmembers():
-            if member.name.startswith("/") or ".." in Path(member.name).parts:
-                raise tarfile.TarError(f"refusing to extract unsafe path: {member.name!r}")
-        try:
-            tf.extractall(str(skills), filter="data")  # type: ignore[call-arg]
-        except TypeError:
-            tf.extractall(str(skills))  # Python < 3.12 — no filter kwarg
 
 
 def _cron_summary(cron_report: Dict[str, Any]) -> Optional[str]:
@@ -439,43 +355,29 @@ def _cron_summary(cron_report: Dict[str, Any]) -> Optional[str]:
 
 
 def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]]:
-    """Restore ``~/.hermes/skills/`` from a snapshot (explicit id or newest):
-    safety-snapshot the CURRENT tree; stage current top-level entries; extract;
-    on failure move staged entries back. Returns ``(ok, message, snapshot_path)``."""
+    """Restore ``~/.hermes/skills/`` from a snapshot (explicit id or newest): safety-snapshot the CURRENT tree; stage
+    current top-level entries; extract; on failure move staged entries back. Returns ``(ok, message, snapshot_path)``."""
     target = _resolve_backup(backup_id)
     if target is None:
-        return (
-            False,
-            "no matching backup found"
-            + (f" for id '{backup_id}'" if backup_id else "")
-            + " (use `hermes curator rollback --list` to see available snapshots)",
-            None,
-        )
+        return (False, "no matching backup found" + (f" for id '{backup_id}'" if backup_id else "")
+                + " (use `hermes curator rollback --list` to see available snapshots)", None)
     archive = target / _ARCHIVE_NAME
     if not archive.exists():
         return (False, f"snapshot {target.name} has no skills.tar.gz — corrupted?", None)
 
-    skills = _skills_dir()
-    skills.mkdir(parents=True, exist_ok=True)
-    backups = _backups_dir()
-    backups.mkdir(parents=True, exist_ok=True)
+    skills, backups = _skills_dir(), _backups_dir()
+    backups.mkdir(parents=True, exist_ok=True)  # parents=True also creates skills/
 
-    # Safety snapshot FIRST; bail if it fails, else a failed extract could leave
-    # the user with no skills. Protect the target from this snapshot's prune step.
+    # Safety snapshot FIRST; bail if it fails, else a failed extract could leave the user with no skills. Protect the target from its prune.
     try:
         safety_snapshot = snapshot_skills(reason=f"pre-rollback to {target.name}", protect_ids={target.name})
     except Exception as e:
         return (False, f"pre-rollback safety snapshot failed: {e}", None)
     if safety_snapshot is None:
-        return (
-            False,
-            "pre-rollback safety snapshot failed; backups may be disabled "
-            "or unavailable, and current skills were not changed",
-            None,
-        )
+        return (False, "pre-rollback safety snapshot failed; backups may be disabled "
+                "or unavailable, and current skills were not changed", None)
 
-    # Stage current entries so the extract lands in an empty tree; the safety
-    # snapshot above (not staging) is the user-facing undo handle.
+    # Stage current entries so the extract lands in an empty tree; the safety snapshot above (not staging) is the user-facing undo handle.
     staged = backups / f"{_STAGING_PREFIX}{_utc_id()}"
     try:
         staged.mkdir(parents=True, exist_ok=False)
@@ -486,62 +388,53 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     try:
         for entry in list(skills.iterdir()):
             if entry.name not in _EXCLUDE_TOP_LEVEL:
-                dest = staged / entry.name
-                shutil.move(str(entry), str(dest))
-                moved.append((entry, dest))
+                shutil.move(str(entry), str(staged / entry.name))
+                moved.append((entry, staged / entry.name))
     except OSError as e:
         _unstage(moved)
-        _rmtree_quiet(staged)
+        shutil.rmtree(staged, ignore_errors=True)
         return (False, f"failed to stage current skills: {e}", None)
 
     try:
-        _extract_snapshot(archive, skills)
+        with tarfile.open(archive, "r:gz") as tf:
+            # Reject absolute paths and ".." defensively; Python 3.12+ also gets filter='data', older interpreters fall back unfiltered.
+            for member in tf.getmembers():
+                if member.name.startswith("/") or ".." in Path(member.name).parts:
+                    raise tarfile.TarError(f"refusing to extract unsafe path: {member.name!r}")
+            try:
+                tf.extractall(str(skills), filter="data")  # type: ignore[call-arg]
+            except TypeError:
+                tf.extractall(str(skills))  # Python < 3.12 — no filter kwarg
     except (OSError, tarfile.TarError) as e:
-        # A partial extract can leave entries the original tree never had;
-        # drop those first or the "restored" tree is skills + a slice of snapshot.
-        staged_names = {orig.name for orig, _ in moved}
-        for entry in list(skills.iterdir()):
-            if entry.name not in _EXCLUDE_TOP_LEVEL and entry.name not in staged_names:
-                try:
-                    _remove_entry(entry)
-                except OSError:
-                    pass
+        # A partial extract can leave entries the original tree never had; drop those first or the "restored" tree is skills + a slice of snapshot.
+        keep = _EXCLUDE_TOP_LEVEL | {orig.name for orig, _ in moved}
+        for entry in [e for e in skills.iterdir() if e.name not in keep]:
+            with contextlib.suppress(OSError):
+                _remove_entry(entry)
         unrestored = _unstage(moved)
-        if unrestored:
-            # Don't claim a clean restore; keep the staging dir for hand recovery.
-            return (
-                False,
-                f"snapshot extract failed: {e} - could not restore "
-                f"{', '.join(sorted(unrestored))}; staged copies kept at {staged}",
-                None,
-            )
-        _rmtree_quiet(staged)
+        if unrestored:  # Don't claim a clean restore; keep the staging dir for hand recovery.
+            return (False, f"snapshot extract failed: {e} - could not restore "
+                    f"{', '.join(sorted(unrestored))}; staged copies kept at {staged}", None)
+        shutil.rmtree(staged, ignore_errors=True)
         return (False, f"snapshot extract failed (state restored): {e}", None)
 
-    # Snapshots never contain excluded subtrees (nested ``.git``, ``.hub``, ...),
-    # so carry them over from the staged live tree (top-level ``.git`` is never
-    # staged). Then staging is done; the undo handle is the safety snapshot.
+    # Snapshots never contain excluded subtrees (nested ``.git``, ``.hub``, ...), so carry them over from the staged live tree
+    # (top-level ``.git`` is never staged). Then staging is done; the undo handle is the safety snapshot.
     _restore_excluded_subtrees(staged, skills)
-    _rmtree_quiet(staged)
+    shutil.rmtree(staged, ignore_errors=True)
 
-    # Cron reconciliation failures don't fail the rollback — the skills tree
-    # (the main guarantee) is already restored.
+    # Cron reconciliation failures don't fail the rollback — the skills tree (the main guarantee) is already restored.
     cron_report = _restore_cron_skill_links(target)
-    summary_bits = [f"restored from snapshot {target.name}", _cron_summary(cron_report)]
     logger.info("Curator rollback: restored from %s (cron_report=%s)", target.name, cron_report)
-    return (True, "; ".join(filter(None, summary_bits)), target)
+    return (True, "; ".join(filter(None, [f"restored from snapshot {target.name}", _cron_summary(cron_report)])), target)
 
 
 # --- Human-readable summary for CLI ---
-
 def summarize_backups() -> str:
     rows = list_backups()
     if not rows:
         return "No curator snapshots yet."
     header = f"{'id':<24}  {'reason':<40}  {'skills':>6}  {'size':>8}"
-    lines = [header, "─" * len(header)] + [
+    return "\n".join([header, "─" * len(header)] + [
         f"{r.get('id','?'):<24}  {(r.get('reason','?') or '?')[:40]:<40}  "
-        f"{r.get('skill_files', 0):>6}  {format_bytes(int(r.get('archive_bytes', 0))):>8}"
-        for r in rows
-    ]
-    return "\n".join(lines)
+        f"{r.get('skill_files', 0):>6}  {format_bytes(int(r.get('archive_bytes', 0))):>8}" for r in rows])
