@@ -190,7 +190,8 @@ def _resolve_fal_model() -> tuple:
     return model_id, FAL_MODELS[model_id]
 
 
-_SIZE_KEY_BY_STYLE = {"image_size_preset": "image_size", "gpt_literal": "image_size", "aspect_ratio": "aspect_ratio"}
+_SIZE_KEY_BY_STYLE = {"image_size_preset": "image_size", "gpt_literal": "image_size",
+                      "aspect_ratio": "aspect_ratio"}
 
 
 def _build_payload(model_id, prompt, aspect_ratio, seed, overrides, image_urls=None) -> Dict[str, Any]:
@@ -230,7 +231,8 @@ def _build_fal_payload(model_id, prompt, aspect_ratio=DEFAULT_ASPECT_RATIO, seed
     return _build_payload(model_id, prompt, aspect_ratio, seed, overrides)
 
 
-def _build_fal_edit_payload(model_id, prompt, image_urls, aspect_ratio=DEFAULT_ASPECT_RATIO, seed=None, overrides=None):
+def _build_fal_edit_payload(model_id, prompt, image_urls, aspect_ratio=DEFAULT_ASPECT_RATIO,
+                            seed=None, overrides=None):
     """FAL *edit* (image-to-image) payload: ``image_urls`` + prompt, filtered to ``edit_supports``."""
     return _build_payload(model_id, prompt, aspect_ratio, seed, overrides, image_urls=image_urls)
 
@@ -408,8 +410,8 @@ def image_generate_tool(
     "error", "error_type"}``.
     """
     model_id, meta = _resolve_fal_model()
-    candidates = [image_url, *(reference_image_urls if isinstance(reference_image_urls, (list, tuple)) else [])]
-    source_images = [c.strip() for c in candidates if isinstance(c, str) and c.strip()]
+    refs = reference_image_urls if isinstance(reference_image_urls, (list, tuple)) else []
+    source_images = [c.strip() for c in (image_url, *refs) if isinstance(c, str) and c.strip()]
     use_edit = bool(source_images) and bool(meta.get("edit_endpoint"))
     modality = "image" if use_edit else "text"
     overrides: Dict[str, Any] = {
@@ -462,7 +464,8 @@ def image_generate_tool(
         logger.error("%s", error_msg, exc_info=True)
         debug_call_data["error"] = error_msg
         generation_time = (datetime.datetime.now() - start_time).total_seconds()
-        return finish(generation_time, {"success": False, "image": None, "error": str(e), "error_type": type(e).__name__})
+        return finish(generation_time,
+                      {"success": False, "image": None, "error": str(e), "error_type": type(e).__name__})
 
 
 def check_fal_api_key() -> bool:
@@ -489,9 +492,11 @@ def _build_no_backend_setup_message() -> str:
         if gateway_message := nous_tool_gateway_unavailable_message("managed FAL image generation"):
             lines.append(f"  - {gateway_message}")
     lines += ["", "To enable image generation, do one of:",
-              "  1. Get a free API key at https://fal.ai and set FAL_KEY=<your-key> (then restart the session)"]
+              "  1. Get a free API key at https://fal.ai and set FAL_KEY=<your-key> "
+              "(then restart the session)"]
     if managed:
-        lines.append("  2. Sign in to a Nous account that has the managed FAL gateway enabled (`hermes setup`)")
+        lines.append("  2. Sign in to a Nous account that has the managed FAL gateway enabled "
+                     "(`hermes setup`)")
     lines.append("  3. Configure a different image_gen provider via `hermes tools` → Image Generation "
                  "(run `hermes plugins list` to see installed backends)")
     return "\n".join(lines)
@@ -621,7 +626,8 @@ def _dispatch_to_plugin_provider(
     pname = getattr(provider, "name", "?")
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
-        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=_read_configured_image_model())
+        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
+                             model=_read_configured_image_model())
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -635,7 +641,8 @@ def _dispatch_to_plugin_provider(
                 f"signature is out of date with the image_generate schema). Omit image_url for "
                 f"text-to-image, or pick a backend that supports editing via `hermes tools` → "
                 f"Image Generation.", "modality_unsupported")
-        logger.warning("Image gen provider '%s' raised%s: %s", pname, " TypeError" if is_type_error else "", exc)
+        logger.warning("Image gen provider '%s' raised%s: %s", pname,
+                       " TypeError" if is_type_error else "", exc)
         return _provider_error(f"Provider '{pname}' error: {exc}", "provider_exception")
     return _provider_result(result, "Provider returned a non-dict result")
 
@@ -813,7 +820,8 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
     max_refs = int(info.get("max_reference_images") or 0)
     can_edit = "image" in set(info.get("modalities") or ["text"])
     static_props = IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-    properties: Dict[str, Any] = {"prompt": static_props["prompt"], "aspect_ratio": static_props["aspect_ratio"]}
+    properties: Dict[str, Any] = {
+        "prompt": static_props["prompt"], "aspect_ratio": static_props["aspect_ratio"]}
     if can_edit:
         edit_clause = ", or edit / transform an existing image by passing image_url"
         properties["image_url"] = _IMAGE_URL_PARAM

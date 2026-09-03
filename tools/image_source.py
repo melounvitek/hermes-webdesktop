@@ -50,7 +50,8 @@ class ResolvedImage:
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
-async def resolve_image_source(src: str, ctx: ResolveContext, *, permitted: tuple = ("image",)) -> ResolvedImage:
+async def resolve_image_source(
+    src: str, ctx: ResolveContext, *, permitted: tuple = ("image",)) -> ResolvedImage:
     if not isinstance(src, str) or not src.strip():
         raise SourceNotFound("image_url is required", src=str(src))
     s = src.strip()
