@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -620,6 +621,37 @@ _TURN_STATE: Dict[str, Any] = {
     "_or_cache_hits": 0,  # X-OpenRouter-Cache-Status: HIT count
 }
 
+# Session persistence state.
+_SESSION_STATE: Dict[str, Any] = {
+    "_session_messages": list,
+    # Responses encrypted-reasoning replay: routes that 400 with ``invalid_encrypted_content``
+    # make the loop disable it for the session (stateless continuity).
+    "_codex_reasoning_replay_enabled": True,
+    "_memory_write_origin": "assistant_tool",
+    "_memory_write_context": "foreground",
+    # Cached system prompt (built once, rebuilt on compression) + its cross-session-stable
+    # prefix, kept separately only to place an early cache marker.
+    "_cached_system_prompt": None,
+    "_cached_system_prompt_static": None,
+    # Whether close() also closes _session_db. False: a caller-supplied handle is usually the
+    # SHARED launch handle; callers handing over a DEDICATED handle set True.
+    "_owns_session_db": False,
+    # Close flush and turn-start flush can overlap; the durable marker lives on each message
+    # dict, so its test-and-append is serialized per agent.
+    "_session_persist_lock": threading.RLock,
+    # CLI's just-accepted user dict, reused by turn setup so its durable marker survives a
+    # close-persistence race.
+    "_pending_cli_user_message": None,
+    "_last_flushed_db_idx": 0,  # DB-write cursor (prevents duplicate writes)
+    "_session_db_created": False,  # DB row deferred to run_conversation()
+    # False on helper agents (compression / hygiene / review forks) that hand the session to
+    # a continuation row that must stay open.
+    "_end_session_on_close": True,
+    # True on the background review fork: never persist, so its harness turn can't hijack
+    # the live session.
+    "_persist_disabled": False,
+}
+
 # Streaming delivery state.
 _STREAM_STATE: Dict[str, Any] = {
     "_stream_callback": None,  # streaming TTS; set early so _vprint can reference it
@@ -1174,16 +1206,7 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
     except Exception:
         pass
 
-    agent._session_messages: List[Dict[str, Any]] = []
-    # Responses encrypted-reasoning replay: routes that 400 with ``invalid_encrypted_content``
-    # make the loop disable it for the session (stateless continuity).
-    agent._codex_reasoning_replay_enabled = True
-    agent._memory_write_origin = "assistant_tool"
-    agent._memory_write_context = "foreground"
-    # Cached system prompt (built once, rebuilt on compression) + its cross-session-stable
-    # prefix, kept separately only to place an early cache marker.
-    agent._cached_system_prompt: Optional[str] = None
-    agent._cached_system_prompt_static: Optional[str] = None
+    _set_defaults(agent, _SESSION_STATE)
 
     # Filesystem checkpoint manager (transparent — not a tool)
     from tools.checkpoint_manager import CheckpointManager
@@ -1193,25 +1216,8 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
         max_file_size_mb=checkpoint_max_file_size_mb,
     )
 
-    # SQLite session store (optional; CLI/gateway-provided). _owns_session_db False: a
-    # caller-supplied handle is usually the SHARED launch handle; DEDICATED handles set True.
-    agent._session_db = session_db
-    agent._owns_session_db = False
+    agent._session_db = session_db  # optional SQLite store (CLI/gateway-provided)
     agent._parent_session_id = parent_session_id
-    # Close flush and turn-start flush can overlap; the durable marker lives on each message
-    # dict, so its test-and-append is serialized per agent.
-    agent._session_persist_lock = threading.RLock()
-    # CLI's just-accepted user dict, reused by turn setup so its durable marker survives a
-    # close-persistence race.
-    agent._pending_cli_user_message = None
-    agent._last_flushed_db_idx = 0  # DB-write cursor (prevents duplicate writes)
-    agent._session_db_created = False  # DB row deferred to run_conversation()
-    # False on helper agents (compression / hygiene / review forks) that hand the session to
-    # a continuation row that must stay open.
-    agent._end_session_on_close = True
-    # True on the background review fork: never persist, so its harness turn can't hijack
-    # the live session.
-    agent._persist_disabled = False
     agent._session_init_model_config = {
         "max_iterations": agent.max_iterations,
         "reasoning_config": reasoning_config,
@@ -2233,30 +2239,34 @@ def _init_usage_state(agent):
     from agent.runtime_cwd import scope_terminal_cwd as _scope_terminal_cwd
 
     agent._subdirectory_hints = SubdirectoryHintTracker(working_dir=_scope_terminal_cwd() or None)
-    agent._user_turn_count = 0
-    # Copilot x-initiator flag: first API call of a user turn sends "user".
-    agent._is_user_initiated_turn = False
+    _set_defaults(agent, _USAGE_STATE)
 
+
+# Per-session usage accounting.
+_USAGE_STATE: Dict[str, Any] = {
+    "_user_turn_count": 0,
+    "_is_user_initiated_turn": False,  # Copilot x-initiator: first call of a user turn = "user"
     # Usage anchors (agent/model_metadata.py): last response's exact usage + transcript
     # snapshot; invalidated on compaction/session switch so stale anchors never suppress compression.
-    agent._usage_anchor = None
-    agent._turn_base_usage_anchor = None
-
+    "_usage_anchor": None,
+    "_turn_base_usage_anchor": None,
     # Cumulative token usage for the session
-    for _counter in (
-        "session_prompt_tokens", "session_completion_tokens", "session_total_tokens",
-        "session_api_calls", "session_input_tokens", "session_output_tokens",
-        "session_cache_read_tokens", "session_cache_write_tokens", "session_reasoning_tokens",
-    ):
-        setattr(agent, _counter, 0)
-    agent.session_estimated_cost_usd = 0.0
-    agent.session_cost_status = "unknown"
-    agent.session_cost_source = "none"
+    "session_prompt_tokens": 0,
+    "session_completion_tokens": 0,
+    "session_total_tokens": 0,
+    "session_api_calls": 0,
+    "session_input_tokens": 0,
+    "session_output_tokens": 0,
+    "session_cache_read_tokens": 0,
+    "session_cache_write_tokens": 0,
+    "session_reasoning_tokens": 0,
+    "session_estimated_cost_usd": 0.0,
+    "session_cost_status": "unknown",
+    "session_cost_source": "none",
     # Status-bar latency/velocity history (last 10 calls), shared by loop + codex_runtime.
-    from collections import deque as _deque
-    agent._api_latency_history = _deque(maxlen=10)
-    agent._api_output_history = _deque(maxlen=10)
-
+    "_api_latency_history": lambda: deque(maxlen=10),
+    "_api_output_history": lambda: deque(maxlen=10),
+}
 
 # Constructor params stored verbatim under the same name.
 _PASSTHROUGH_PARAMS = (
