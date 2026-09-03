@@ -56,15 +56,12 @@ def _canon_key_combo(keys: str) -> frozenset:
 
 def _reject_unsafe(action: str, args: Dict[str, Any]) -> Optional[str]:
     """JSON error for hard-blocked input, else None. Runs BEFORE the approval prompt."""
-    if action == "type":
-        pat = next((p.pattern for p in _BLOCKED_TYPE_PATTERNS if p.search(args.get("text", ""))), None)
-        if pat:
-            return json.dumps({"error": f"blocked pattern in type text: {pat!r}",
-                               "hint": "Dangerous shell patterns cannot be typed via computer_use."})
+    if action == "type" and (pat := next((p.pattern for p in _BLOCKED_TYPE_PATTERNS if p.search(args.get("text", ""))), None)):
+        return json.dumps({"error": f"blocked pattern in type text: {pat!r}",
+                           "hint": "Dangerous shell patterns cannot be typed via computer_use."})
     if action == "key":
         combo = _canon_key_combo(args.get("keys", ""))
-        blocked = next((b for b in _BLOCKED_KEY_COMBOS if b.issubset(combo)), None)
-        if blocked is not None:
+        if (blocked := next((b for b in _BLOCKED_KEY_COMBOS if b.issubset(combo)), None)) is not None:
             return json.dumps({"error": f"blocked key combo: {sorted(blocked)}",
                                "hint": "Destructive system shortcuts are hard-blocked."})
     if args.get("bring_to_front") and args.get("delivery_mode") != "foreground":
@@ -97,22 +94,6 @@ _session_auto_approve: Dict[str, bool] = {}   # sid -> "always_approve everythin
 _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_mode) scope keys
 _escalation_warned: set = set()               # sids already warned that a bypass widened the driver mode
 
-def _warn_bypass_escalation(session_id: str) -> None:
-    """Warn once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted`` daemon,
-    dropping the configured ceiling. Deliberate (``unrestricted`` is intentionally not a config value) but
-    easy to trigger by accident."""
-    key = str(session_id or "")
-    with _approval_lock:
-        if key in _escalation_warned:
-            return
-        _escalation_warned.add(key)
-    configured = _configured_permission_mode()
-    logger.warning(
-        "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
-        "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
-        "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
-        "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
-
 def _configured_permission_mode() -> str:
     """Configured cua mode (standard | bounded); "standard" if unresolvable. bounded needs a
     computer_use.capability_manifest; the backend fails loudly without it."""
@@ -125,7 +106,9 @@ def _configured_permission_mode() -> str:
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's approval bypass onto Cua's immutable mode. Both identity namespaces are consulted — DB
     ``session_id`` and gateway ``session_key`` contextvar — or a gateway ``/yolo`` would be invisible here.
-    Fails closed."""
+    Fails closed. Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted``
+    daemon, dropping the configured ceiling: deliberate (``unrestricted`` is intentionally not a config value)
+    but easy to trigger by accident."""
     try:
         from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
         bypassed = is_approval_bypass_active_for_session(session_id)
@@ -133,7 +116,16 @@ def _cua_permission_mode(session_id: str) -> str:
             current_key = get_current_session_key(default="")
             bypassed = bool(current_key) and is_approval_bypass_active_for_session(current_key)
         if bypassed:
-            _warn_bypass_escalation(session_id)
+            with _approval_lock:
+                warn = (key := str(session_id or "")) not in _escalation_warned
+                _escalation_warned.add(key)
+            if warn:
+                configured = _configured_permission_mode()
+                logger.warning(
+                    "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
+                    "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
+                    "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
+                    "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
             return "unrestricted"
     except Exception:
         pass
@@ -202,8 +194,7 @@ def release_computer_use_session(session_id: str) -> bool:
     with _backend_lock:
         backend, call_lock = _detach_locked(sid)
     with _approval_lock:
-        _session_auto_approve.pop(sid, None)
-        _always_allow.pop(sid, None)
+        _session_auto_approve.pop(sid, None), _always_allow.pop(sid, None)
     if backend is None:
         return False
     try:
@@ -271,17 +262,19 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
         return self._record("set_value", {"value": value, "element": element})
 
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
-    """Main entry point (tools.registry). Returns a JSON string (text-only) or a dict marked `_multimodal`."""
+    """Main entry point (tools.registry). Returns a JSON string (text-only) or a dict marked `_multimodal`.
+    Order: hard blocks (_reject_unsafe) -> approval scopes (destructive action, then 'bring_to_front': persistent
+    focus is a separate visible side effect with its own scope) -> backend -> dispatch under the session call lock."""
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing `action`"})
     session_id = str(kwargs.get("session_id") or "")  # approval-state / daemon-mode isolation key
     if (err := _reject_unsafe(action, args)) is not None:
         return err
-    # Approval gate (destructive only). Persistent focus is a separate visible side effect with its own scope.
     spec = _ACTIONS.get(action)
     scopes = [action] if spec is not None and spec.destructive else []
     if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")):
@@ -308,13 +301,12 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
 def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -> Optional[str]:
     """None if approved, else a JSON error string. Scoped by (action, delivery_mode) AND session_id: foreground
     delivery is a visible focus change, so a background ``approve_session`` must NOT cover it; the blanket
-    ``always_approve`` does."""
+    ``always_approve`` does. No CLI approval wired -> default allow (gateway approval runs one layer out)."""
     scope_key = (action, "foreground" if args.get("delivery_mode") == "foreground" else "background")
     with _approval_lock:
         if _session_auto_approve.get(session_id) or scope_key in _always_allow.get(session_id, set()):
             return None
-    cb = _approval_callback
-    if cb is None:  # no CLI approval wired — default allow; gateway approval runs one layer out (tool-approval infra)
+    if (cb := _approval_callback) is None:
         return None
     try:
         verdict = cb(action, args, _summarize_action(action, args))
@@ -459,6 +451,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     res = spec.handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
                        bring_to_front=bool(args.get("bring_to_front")))
     return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
+
 
 # ── Response shaping ────────────────────────────────────────────────────────
 
@@ -620,16 +613,15 @@ def _capture_summary_lines(v: _CaptureView) -> List[str]:
         cap.note,
         v.elements_file and (f"full element tree with untruncated labels saved to {v.elements_file} — "
                              "read_file/search_files it if you need dropped label text or elements beyond the cap"),
-        v.dims_omitted and (f"screenshot omitted: {v.dims_omitted[0]}x{v.dims_omitted[1]} is below the "
-                            f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum"),
     )
     return [
         f"capture mode={cap.mode} {v.width}x{v.height}"
         + (f" app={cap.app}" if cap.app else "") + (f" window={cap.window_title!r}" if cap.window_title else ""),
         f"{v.total} interactable element(s):",
-        *(f"  ({note})" for note in notes[:4] if note),
+        *(f"  ({note})" for note in notes if note),
         *_format_elements(v.visible),
-        *(f"  ({note})" for note in notes[4:] if note),
+        *([f"  (screenshot omitted: {v.dims_omitted[0]}x{v.dims_omitted[1]} is below the "
+           f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum)"] if v.dims_omitted else []),
     ]
 
 def _multimodal_capture(v: _CaptureView, summary: str) -> Dict[str, Any]:
@@ -710,6 +702,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         data = {"capture": resp}
     return json.dumps({**data, **payload})
 
+
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
 
 def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int = 0):
@@ -755,6 +748,7 @@ def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache",
                              f"elements_{uuid.uuid4().hex}.json", "elements_*.json", _MAX_SPILL_FILES, write)
+
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
 
@@ -873,6 +867,7 @@ def _route_capture_through_aux_vision(
                         cap.width, cap.height, elements_file=elements_file, screenshot_path=screenshot_path)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
+
 
 # ── Availability check (used by the tool registry check_fn) ─────────────────
 
