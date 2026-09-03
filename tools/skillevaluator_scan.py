@@ -84,19 +84,19 @@ def _parse_report(report: dict) -> Tier1Report:
     validators are kept (partial evidence is evidence) but excluded from the pass/fail signal."""
     findings: List[Tier1Finding] = []
     incomplete: List[str] = []
-    any_complete_failed = False
+    failed = False
     for res in report.get("results", []) or []:
         validator = str(res.get("validator", "unknown"))
         if str(res.get("status", "")).lower() == "incomplete":
             incomplete.append(validator)
-        elif not res.get("passed", True):
-            any_complete_failed = True
+        else:
+            failed = failed or not res.get("passed", True)
         findings.extend(Tier1Finding(
             check=str(f.get("check_name", "")), validator=validator, severity=str(f.get("severity", "info")).lower(),
             message=str(f.get("message", ""))[:200], file=str(f.get("file_path", "")),
             line=int(f.get("line_number") or 0), suggestion=str(f.get("suggestion", ""))[:200])
             for f in res.get("findings", []) or [] if isinstance(f, dict))
-    return Tier1Report(available=True, passed=not any_complete_failed and not findings, findings=findings,
+    return Tier1Report(available=True, passed=not failed and not findings, findings=findings,
                        incomplete_checks=incomplete)
 
 

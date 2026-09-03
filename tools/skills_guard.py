@@ -67,8 +67,7 @@ MODIFY_VERB_RE = (
     r'|\bmodif(?:y|ies|ied|ying|ication)s?\b|\bupdat(?:e|es|ed|ing)\b'
     r'|\bappend(?:s|ed|ing)?\b|\bprepend(?:s|ed|ing)?\b'
     r'|\binject(?:s|ed|ing)?\b|\boverwrit(?:e|es|ing)\b|\boverwritten\b'
-    r'|\breplac(?:e|es|ed|ing)\b|\balter(?:s|ed|ing)?\b|\badd(?:s|ed|ing)\b)'
-)
+    r'|\breplac(?:e|es|ed|ing)\b|\balter(?:s|ed|ing)?\b|\badd(?:s|ed|ing)\b)')
 
 _AGENT_CONFIG_FILES = r'(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)'
 _HERMES_CONFIG_FILES = r'\.hermes/(?:config\.yaml|SOUL\.md)'
@@ -78,15 +77,14 @@ _OTHER_AGENT_CONFIG_FILES = r'\.(?:claude/settings|codex/config)[\w.]*'
 
 def _shell_write_re(file_alt: str) -> str:
     """Mechanical shell write into *file_alt*: ``>``/``>>``, ``sed -i``, ``tee`` (target as immediate argument, so
-    ``| tee output | AGENTS.md |`` cells miss), ``cp``/``mv`` with the file as destination (a source arg is required,
-    so ``cp AGENTS.md backup/`` misses; ``AGENTS.md.bak`` is not the file). A single ``>`` needs a preceding
-    word/quote/paren char so blockquotes (``> text``) and arrows (``-> file``) miss."""
+    ``| tee output | AGENTS.md |`` cells miss), ``cp``/``mv`` with the file as destination (source arg required, so
+    ``cp AGENTS.md backup/`` misses; ``AGENTS.md.bak`` is not the file). A single ``>`` needs a preceding word/quote/
+    paren char so blockquotes (``> text``) and arrows (``-> file``) miss."""
     return (
         rf'(?:>>|[\w"\'`)\]]\s*>)\s*[~\w./-]*{file_alt}(?!\.?\w)'
         rf'|\bsed\b[^\n]*\s(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b[^\n]*{file_alt}(?!\.?\w)'
         rf'|\btee\s+(?:-a\s+)?[~\w./"\'-]*{file_alt}(?!\.?\w)'
-        rf'|\b(?:cp|mv)\s+[^\s|;&]+\s+[^\n|;&]{{0,40}}?{file_alt}(?!\.?\w)'
-    )
+        rf'|\b(?:cp|mv)\s+[^\s|;&]+\s+[^\n|;&]{{0,40}}?{file_alt}(?!\.?\w)')
 
 
 def _prose_modify_re(file_alt: str) -> str:
@@ -97,8 +95,7 @@ def _prose_modify_re(file_alt: str) -> str:
         rf'^\s*(?:[-*+]\s+|\d+[.)]\s+)?{MODIFY_VERB_RE}[^\n,]{{0,80}}?{file_alt}\b'
         rf'|(?:\byou\s+(?:must|should|need\s+to)\s+|\bplease\s+'
         rf'|\bmake\s+sure\s+(?:to\s+|you\s+)|\bbe\s+sure\s+to\s+)'
-        rf'{MODIFY_VERB_RE}[^\n,]{{0,80}}?{file_alt}\b'
-    )
+        rf'{MODIFY_VERB_RE}[^\n,]{{0,80}}?{file_alt}\b')
 
 
 def _content_contract_re(file_alt: str) -> str:
@@ -106,8 +103,7 @@ def _content_contract_re(file_alt: str) -> str:
     separable statically, so the tier is scored high (caution → confirmation), never critical."""
     return (
         rf'{file_alt}\b[^\n]{{0,40}}?\b(?:should|must|needs?\s+to)\s+'
-        rf'(?:contain|say|include|have|list)\b'
-    )
+        rf'(?:contain|say|include|have|list)\b')
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
@@ -352,10 +348,7 @@ THREAT_PATTERNS = [
      "send_to_url", "high", "exfiltration", "instructs agent to send data to a URL"),
 ]
 
-_COMPILED_THREAT_PATTERNS = [
-    (re.compile(pattern, re.IGNORECASE), pid, severity, category, description)
-    for pattern, pid, severity, category, description in THREAT_PATTERNS
-]
+_COMPILED_THREAT_PATTERNS = [(re.compile(pattern, re.IGNORECASE), *rest) for pattern, *rest in THREAT_PATTERNS]
 
 # Structural limits for skill directories
 MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
@@ -393,13 +386,12 @@ def _compute_docstring_lines(lines: list) -> set:
     one-line docstrings), so ``os.environ`` in prose is not scored. Heuristic: a triple quote inside a string
     literal is miscounted, but the common false-positive shapes are covered."""
     doc_lines: set = set()
-    in_docstring = False
-    for i, line in enumerate(lines):
-        was_in = in_docstring
-        counts = [line.count(marker) for marker in ('"""', "'''")]
-        in_docstring ^= sum(counts) % 2 == 1  # each odd marker count toggles; two odd counts cancel
-        if was_in or in_docstring or any(counts):
-            doc_lines.add(i + 1)
+    inside = False
+    for i, line in enumerate(lines, start=1):
+        was_in, counts = inside, [line.count(marker) for marker in ('"""', "'''")]
+        inside ^= sum(counts) % 2 == 1  # each odd marker count toggles; two odd counts cancel
+        if was_in or inside or any(counts):
+            doc_lines.add(i)
     return doc_lines
 
 
@@ -505,8 +497,7 @@ def scan_skill_cached(
 def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool, str]:
     """``(allowed, reason)`` from verdict + trust; *force* overrides every block except a dangerous verdict on
     community/trusted sources. ``allowed`` is None when policy says "ask"."""
-    policy = INSTALL_POLICY.get(result.trust_level, INSTALL_POLICY["community"])
-    decision = policy[VERDICT_INDEX.get(result.verdict, 2)]
+    decision = INSTALL_POLICY.get(result.trust_level, INSTALL_POLICY["community"])[VERDICT_INDEX.get(result.verdict, 2)]
     n = len(result.findings)
     hard_block = result.verdict == "dangerous" and result.trust_level in ("community", "trusted")
     if decision == "allow":
@@ -515,11 +506,8 @@ def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool,
         return True, f"Force-installed despite {result.verdict} verdict ({n} findings)"
     if decision == "ask":
         return None, f"Requires confirmation ({result.trust_level} source + {result.verdict} verdict, {n} findings)"
-    if hard_block:
-        return False, (f"Blocked ({result.trust_level} source + dangerous verdict, {n} findings). "
-                       "--force does not override a dangerous verdict.")
-    return False, (f"Blocked ({result.trust_level} source + {result.verdict} verdict, {n} findings). "
-                   "Use --force to override.")
+    blocked = f"Blocked ({result.trust_level} source + {result.verdict} verdict, {n} findings). "
+    return False, blocked + ("--force does not override a dangerous verdict." if hard_block else "Use --force to override.")
 
 
 def format_scan_report(result: ScanResult) -> str:
@@ -533,8 +521,7 @@ def format_scan_report(result: ScanResult) -> str:
         lines.append("")
     allowed, reason = should_allow_install(result)
     status = "ALLOWED" if allowed is True else "NEEDS CONFIRMATION" if allowed is None else "BLOCKED"
-    lines.append(f"Decision: {status} — {reason}")
-    return "\n".join(lines)
+    return "\n".join(lines + [f"Decision: {status} — {reason}"])
 
 
 def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
@@ -560,9 +547,10 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
                 add("broken_symlink", "medium", "traversal", rel, "broken symlink", "broken or circular symlink")
             continue
         try:
-            size = f.stat().st_size
+            st = f.stat()
         except OSError:
             continue
+        size = st.st_size
         total_size += size
         if size > MAX_SINGLE_FILE_KB * 1024:
             add("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
@@ -571,7 +559,7 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
             add("binary_file", "critical", "structural", rel, f"binary: {ext}",
                 f"binary/executable file ({ext}) should not be in a skill")
-        if ext not in _SCRIPT_EXTENSIONS and f.stat().st_mode & 0o111:
+        if ext not in _SCRIPT_EXTENSIONS and st.st_mode & 0o111:
             add("unexpected_executable", "medium", "structural", rel, "executable bit set",
                 "file has executable permission but is not a recognized script type")
     if file_count > MAX_FILE_COUNT:
@@ -585,8 +573,6 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
 
 # `.skillignore` is Hermes-native; `.clawhubignore` is honored for skills published through ClawHub.
 _SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
-_ALWAYS_IGNORED_NAMES = set(_SKILL_IGNORE_FILENAMES)
-_NEVER_IGNORABLE = {"SKILL.md"}
 
 
 def _load_skill_ignore(skill_dir: Path):
@@ -605,9 +591,9 @@ def _load_skill_ignore(skill_dir: Path):
         rel_posix = Path(rel).as_posix()
         segs = rel_posix.split("/")
         base = segs[-1]
-        if base in _NEVER_IGNORABLE:
+        if base == "SKILL.md":
             return False
-        if base in _ALWAYS_IGNORED_NAMES:
+        if base in _SKILL_IGNORE_FILENAMES:
             return True
         for pat in patterns:
             anchored = pat.startswith("/")

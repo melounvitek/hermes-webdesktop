@@ -77,10 +77,8 @@ def ast_scan_path(path: Path) -> List[Finding]:
     """Scan one .py file or every .py under a directory; [] for non-Python/missing paths."""
     if path.is_file():
         return _scan_file(path, path.name) if path.suffix.lower() == ".py" else []
-    if not path.is_dir():
-        return []
     return [f for py in sorted(path.rglob("*.py")) if not set(py.parent.parts) & _IGNORED_DIRS
-            for f in _scan_file(py, py.relative_to(path).as_posix())]
+            for f in _scan_file(py, py.relative_to(path).as_posix())] if path.is_dir() else []
 
 
 def format_ast_report(findings: List[Finding], skill_name: str = "") -> str:
@@ -88,8 +86,7 @@ def format_ast_report(findings: List[Finding], skill_name: str = "") -> str:
     header = f"AST deep scan: {skill_name}" if skill_name else "AST deep scan"
     if not findings:
         return f"{header}\n  No dynamic import/access patterns detected."
-    lines = [header, f"  {len(findings)} finding(s):"]
-    current = None
+    lines, current = [header, f"  {len(findings)} finding(s):"], None
     for f, line, pid, desc in sorted(findings):
         if f != current:
             current = f

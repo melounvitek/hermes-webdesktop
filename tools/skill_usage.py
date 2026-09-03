@@ -120,6 +120,10 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def _non_negative_int(value: Any) -> int:
+    return 0 if isinstance(value, bool) else max(0, _int_or_zero(value))
+
+
 def activity_count(record: Dict[str, Any]) -> int:
     """Total observed use+view+patch events."""
     return sum(_int_or_zero(record.get(key)) for key in ("use_count", "view_count", "patch_count"))
@@ -136,12 +140,10 @@ def _read_hub_installed_names() -> Set[str]:
     """Hub-installed names (``.hub/lock.json``) plus the frontmatter name of each in-tree ``install_path``."""
     skills_dir = _skills_dir()
     lock_path = skills_dir / ".hub" / "lock.json"
-    if not lock_path.exists():
-        return set()
     try:
         # errors="replace": hub descriptions can carry Windows-1252 high bytes; a strict read raises
         # UnicodeDecodeError (a ValueError, not caught below) and would 500 the whole /api/skills endpoint.
-        data = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+        data = json.loads(lock_path.read_text(encoding="utf-8", errors="replace")) if lock_path.exists() else {}
     except (OSError, json.JSONDecodeError) as e:
         logger.debug("Failed to read hub lock file: %s", e)
         return set()
@@ -202,9 +204,8 @@ def _scan_local_skills(keep: Callable[[str, Path, Set[str], Dict[str, Any]], boo
     if not base.exists():
         return []
     hub, bundled, usage = _read_hub_installed_names(), _read_bundled_manifest_names(), load_usage()
-    return sorted({
-        name for name, skill_md in _iter_skill_mds(base, local_only=True)
-        if name not in hub and not is_protected_builtin(name) and keep(name, skill_md, bundled, usage)})
+    return sorted({name for name, skill_md in _iter_skill_mds(base, local_only=True)
+                   if name not in hub and not is_protected_builtin(name) and keep(name, skill_md, bundled, usage)})
 
 
 def list_agent_created_skill_names() -> List[str]:
@@ -230,8 +231,7 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
     if "---" not in lines:
         return fallback
     block = lines[lines.index("---") + 1:]  # frontmatter runs to the closing --- or (truncated) end of text
-    if "---" in block:
-        block = block[:block.index("---")]
+    block = block[:block.index("---")] if "---" in block else block
     values = (line.split(":", 1)[1].strip().strip("\"'") for line in block if line.startswith("name:"))
     return next((v for v in values if v), fallback)
 
@@ -306,9 +306,9 @@ def adopt_skill(skill_name: str) -> Tuple[bool, str]:
     if is_bundled(skill_name):  # governed by prune_builtins; stamping created_by=agent would change nothing
         return False, f"'{skill_name}' is a bundled built-in — it is governed by curator.prune_builtins, not by adoption"
     skill_dir = _find_skill_dir(skill_name)
-    if skill_dir is None and _find_external_skill_dir(skill_name) is not None:
-        return False, f"'{skill_name}' lives in skills.external_dirs and is read-only to the curator"
     if skill_dir is None:
+        if _find_external_skill_dir(skill_name) is not None:
+            return False, f"'{skill_name}' lives in skills.external_dirs and is read-only to the curator"
         return False, f"skill '{skill_name}' not found"
     if is_external_skill_path(skill_dir):
         return False, _external_read_only_message(skill_name)
@@ -331,9 +331,7 @@ def _backfilled(rec: Any) -> Dict[str, Any]:
     """*rec* with every missing default key filled in (a fresh record when not a dict)."""
     if not isinstance(rec, dict):
         return _empty_record()
-    for k, v in _empty_record().items():
-        rec.setdefault(k, v)
-    return rec
+    return {**rec, **{k: v for k, v in _empty_record().items() if k not in rec}}  # rec's key order first
 
 
 def _report_row(name: str, raw: Any, **extra: Any) -> Dict[str, Any]:
@@ -369,9 +367,8 @@ def get_record(skill_name: str) -> Dict[str, Any]:
     return _backfilled(load_usage().get(skill_name))
 
 
-def _locked_update(
-    skill_name: str, op: Callable[[Dict[str, Dict[str, Any]]], Tuple[Any, bool]], fail_log: str,
-    guard: Optional[Callable[[], bool]] = None) -> Any:
+def _locked_update(skill_name: str, op: Callable[[Dict[str, Dict[str, Any]]], Tuple[Any, bool]], fail_log: str,
+                   guard: Optional[Callable[[], bool]] = None) -> Any:
     """Run *op(data) -> (result, dirty)* under the file lock, saving only when dirty; *guard* runs before locking.
     None when the guard failed, the save did not land, or anything raised (DEBUG-logged via *fail_log*)."""
     try:
@@ -401,18 +398,14 @@ def _mutate(skill_name: str, mutator, *, require_curation_eligible: bool = False
     a skill the curator can't manage."""
     if not skill_name:
         return None
-    guard = (lambda: is_curation_eligible(skill_name)) if require_curation_eligible else None
     return _locked_update(skill_name, lambda data: (mutator(data.setdefault(skill_name, _empty_record())), True),
-                          "skill_usage._mutate(%s) failed: %s", guard)
+                          "skill_usage._mutate(%s) failed: %s",
+                          (lambda: is_curation_eligible(skill_name)) if require_curation_eligible else None)
 
 
 def _set_field(skill_name: str, key: str, value: Any) -> bool:
     """Curation-gated single-field write; True only when the write landed."""
     return bool(_mutate(skill_name, lambda rec: rec.update({key: value}) or True, require_curation_eligible=True))
-
-
-def _non_negative_int(value: Any) -> int:
-    return 0 if isinstance(value, bool) else max(0, _int_or_zero(value))
 
 
 def _bump(rec: Dict[str, Any], count_key: str, ts_key: str) -> None:
@@ -479,18 +472,19 @@ def bump_use(skill_name: str, *, task_id: Optional[str] = None, session_id: Opti
     _mutate_and_emit(skill_name, "loaded", _apply, task_id=task_id, session_id=session_id)
 
 
-def bump_patch(
-    skill_name: str, *, action: str = "patch", task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+def bump_patch(skill_name: str, *, action: str = "patch", task_id: Optional[str] = None,
+               session_id: Optional[str] = None) -> None:
     """Called from skill_manage (patch/edit)."""
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
         _bump(rec, "patch_count", "last_patched_at")
         rec["patch_generation"] = _non_negative_int(rec.get("patch_generation")) + 1
         return {"created_by": rec.get("created_by")}
-    _mutate_and_emit(skill_name, "patched" if action == "patch" else "edited", _apply, task_id=task_id, session_id=session_id)
+    _mutate_and_emit(skill_name, "patched" if action == "patch" else "edited", _apply, task_id=task_id,
+                     session_id=session_id)
 
 
-def record_created(
-    skill_name: str, *, agent_created: bool, task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+def record_created(skill_name: str, *, agent_created: bool, task_id: Optional[str] = None,
+                   session_id: Optional[str] = None) -> None:
     """Persist creation provenance and emit a create fact; the record is reset (a create is a new logical skill
     even if stale sidecar state survived an earlier deletion)."""
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
@@ -528,12 +522,11 @@ def set_state(skill_name: str, state: str) -> None:
                 rec["archived_at"] = _now_iso() if state == STATE_ARCHIVED else None
         return {"changed": previous != state, "created_by": rec.get("created_by"), "previous_state": previous}
     facts = _mutate(skill_name, _apply, require_curation_eligible=True)
-    if not isinstance(facts, dict) or not facts["changed"]:
-        return
-    restored = state == STATE_ACTIVE and facts["previous_state"] == STATE_ARCHIVED
-    action = "restored" if restored else {STATE_ARCHIVED: "archived", STATE_STALE: "stale"}.get(state)
-    if action is not None:
-        _emit_skill_lifecycle(skill_name, action, record=facts)
+    if isinstance(facts, dict) and facts["changed"]:
+        restored = state == STATE_ACTIVE and facts["previous_state"] == STATE_ARCHIVED
+        action = "restored" if restored else {STATE_ARCHIVED: "archived", STATE_STALE: "stale"}.get(state)
+        if action is not None:
+            _emit_skill_lifecycle(skill_name, action, record=facts)
 
 
 def set_pinned(skill_name: str, pinned: bool) -> bool:
@@ -600,13 +593,11 @@ def archive_skill(skill_name: str) -> Tuple[bool, str]:
         return False, f"skill '{skill_name}' not found"
     if is_external_skill_path(skill_dir):
         return False, _external_read_only_message(skill_name)
-
-    archive_root = _archive_dir()
+    dest = _archive_dir() / skill_dir.name
     try:
-        archive_root.mkdir(parents=True, exist_ok=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return False, f"failed to create archive dir: {e}"
-    dest = archive_root / skill_dir.name
     if dest.exists():
         dest = dest.with_name(f"{skill_dir.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
     # complete_package: consolidation may have re-homed support files first, so a disk-only capture can come
