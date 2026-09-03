@@ -172,17 +172,17 @@ def _coerce_content_to_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-def _inline_data_part(url: Any) -> Optional[Dict[str, Any]]:
-    """``inlineData`` part for a ``data:`` URL; None for remote/malformed URLs."""
-    if not isinstance(url, str) or not url.startswith("data:"):
+def _inline_data_part(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``inlineData`` part for an ``image_url`` item carrying a ``data:`` URL; None otherwise."""
+    url = (item.get("image_url") or {}).get("url") or ""
+    if item.get("type") != "image_url" or not isinstance(url, str) or not url.startswith("data:"):
         return None
     try:
         header, encoded = url.split(",", 1)
         mime = header.split(":", 1)[1].split(";", 1)[0]
-        data = base64.b64encode(base64.b64decode(encoded)).decode("ascii")
+        return {"inlineData": {"mimeType": mime, "data": base64.b64encode(base64.b64decode(encoded)).decode("ascii")}}
     except Exception:
         return None
-    return {"inlineData": {"mimeType": mime, "data": data}}
 
 
 def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
@@ -194,17 +194,17 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
         text = _text_of(item)
         if text or isinstance(item, str):
             parts.append({"text": text})
-        elif isinstance(item, dict) and item.get("type") == "image_url" and (
-            image := _inline_data_part((item.get("image_url") or {}).get("url") or "")
-        ):
+        elif isinstance(item, dict) and (image := _inline_data_part(item)):
             parts.append(image)
     return parts
 
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:
+    """Replayed Gemini thoughtSignature from ``extra_content`` (``google.thought_signature`` or flat)."""
     extra = tool_call.get("extra_content") or {}
-    google = (extra.get("google") or extra.get("thought_signature")) if isinstance(extra, dict) else None
-    sig = (google.get("thought_signature") or google.get("thoughtSignature")) if isinstance(google, dict) else google
+    sig = (extra.get("google") or extra.get("thought_signature")) if isinstance(extra, dict) else None
+    if isinstance(sig, dict):
+        sig = sig.get("thought_signature") or sig.get("thoughtSignature")
     return sig if isinstance(sig, str) and sig else None
 
 
@@ -367,13 +367,11 @@ def _thinking_requests_output_headroom(thinking_config: Any) -> bool:
     """True when Gemini will spend output tokens on thinking: thought tokens bill against
     ``maxOutputTokens``, so a global 4096/16384 cap can be consumed entirely by high
     thinking, leaving ``finishReason=MAX_TOKENS`` with no answer."""
-    normalized = _normalize_thinking_config(thinking_config)
-    if not normalized:
-        return False
+    normalized = _normalize_thinking_config(thinking_config) or {}
+    budget, has_level = normalized.get("thinkingBudget"), "thinkingLevel" in normalized
     if normalized.get("includeThoughts") is False:
-        return "thinkingLevel" in normalized or bool(normalized.get("thinkingBudget"))
-    budget = normalized.get("thinkingBudget")
-    return not (isinstance(budget, int) and budget <= 0 and "thinkingLevel" not in normalized)
+        return has_level or bool(budget)
+    return bool(normalized) and not (isinstance(budget, int) and budget <= 0 and not has_level)
 
 
 def _effective_gemini_max_output_tokens(max_tokens: Optional[int], thinking_config: Any) -> int:
@@ -478,15 +476,14 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
         cand = candidates[0] if isinstance(candidates[0], dict) else {}
         content_obj = cand.get("content")
         parts = content_obj.get("parts") if isinstance(content_obj, dict) else []
-    text_pieces: List[str] = []
-    reasoning_pieces: List[str] = []
+    pieces: Dict[bool, List[str]] = {False: [], True: []}  # is_thought → text pieces
     tool_calls: List[SimpleNamespace] = []
     for index, part in enumerate(parts or []):
         if not isinstance(part, dict):
             continue
         text, is_thought = _part_text(part)
         if text is not None:
-            (reasoning_pieces if is_thought else text_pieces).append(text)
+            pieces[is_thought].append(text)
         elif fc := _part_function_call(part):
             tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
 
@@ -495,9 +492,9 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
     else:
         finish_reason = "tool_calls" if tool_calls else _map_gemini_finish_reason(str(cand.get("finishReason") or ""))
         usage = _usage_from_metadata(resp.get("usageMetadata") or {})
-    reasoning = "".join(reasoning_pieces) or None
+    reasoning = "".join(pieces[True]) or None
     message = SimpleNamespace(
-        role="assistant", content="".join(text_pieces) if text_pieces else ("" if cand is None else None),
+        role="assistant", content="".join(pieces[False]) if pieces[False] else ("" if cand is None else None),
         tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None,
     )
     return _envelope(model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason), usage)
@@ -529,10 +526,9 @@ def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
         buffer += chunk or ""
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            line = line.rstrip("\r")
-            if not line.startswith("data: "):
+            data = line.rstrip("\r")[6:] if line.rstrip("\r").startswith("data: ") else None
+            if data is None:
                 continue
-            data = line[6:]
             if data == "[DONE]":
                 return
             try:
@@ -564,9 +560,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
             name = str(fc["name"])
             args_str = _dump_call_args(fc, sort_keys=True)
             thought_signature = part.get("thoughtSignature") if isinstance(part.get("thoughtSignature"), str) else ""
-            call_key = json.dumps(
-                {"part_index": part_index, "name": name, "thought_signature": thought_signature}, sort_keys=True
-            )
+            call_key = json.dumps({"part_index": part_index, "name": name, "thought_signature": thought_signature}, sort_keys=True)
             if (slot := tool_call_indices.get(call_key)) is None:
                 slot = tool_call_indices[call_key] = {"index": len(tool_call_indices), "id": _new_call_id(fc), "last_arguments": ""}
             # Gemini re-sends the full args each event; emit only the new suffix.
@@ -602,20 +596,17 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     err_status = str(err_obj.get("status") or "").strip()
     err_message = str(err_obj.get("message") or "").strip()
     details_list = err_obj.get("details")
-
     # First google.rpc.ErrorInfo detail supplies reason/metadata (later ones only fill gaps until reason is set).
     reason, metadata = "", {}
     for detail in details_list if isinstance(details_list, list) else []:
         if isinstance(detail, dict) and not reason and str(detail.get("@type") or "").endswith("/google.rpc.ErrorInfo"):
             reason = detail["reason"] if isinstance(detail.get("reason"), str) else reason
             metadata = detail["metadata"] if isinstance(detail.get("metadata"), dict) else metadata
-
     retry_after: Optional[float] = None
     try:
         retry_after = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
     except (TypeError, ValueError):
         pass
-
     message = (
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"
@@ -686,18 +677,15 @@ class GeminiNativeClient:
         extra_body: Optional[Dict[str, Any]] = None, timeout: Any = None, **_: Any,
     ) -> Any:
         extra = extra_body if isinstance(extra_body, dict) else {}
-        thinking_config = extra.get("thinking_config") or extra.get("thinkingConfig")
         request = build_gemini_request(
-            messages=messages or [], tools=tools, tool_choice=tool_choice, temperature=temperature,
-            max_tokens=max_tokens, top_p=top_p, stop=stop, thinking_config=thinking_config, model=model,
+            messages=messages or [], tools=tools, tool_choice=tool_choice, temperature=temperature, max_tokens=max_tokens,
+            top_p=top_p, stop=stop, thinking_config=extra.get("thinking_config") or extra.get("thinkingConfig"), model=model,
         )
         model = bare_gemini_model_id(model)
+        url = f"{self.base_url}/models/{model}:"
         if stream:
-            return self._stream_completion(model=model, request=request, timeout=timeout)
-
-        response = self._http.post(
-            f"{self.base_url}/models/{model}:generateContent", json=request, headers=self._headers(), timeout=timeout
-        )
+            return self._stream_completion(model, url + "streamGenerateContent?alt=sse", request, timeout)
+        response = self._http.post(url + "generateContent", json=request, headers=self._headers(), timeout=timeout)
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:
@@ -708,8 +696,7 @@ class GeminiNativeClient:
             ) from exc
         return translate_gemini_response(payload, model=model)
 
-    def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
-        url = f"{self.base_url}/models/{model}:streamGenerateContent?alt=sse"
+    def _stream_completion(self, model: str, url: str, request: Dict[str, Any], timeout: Any) -> Iterator[_GeminiStreamChunk]:
         headers = {**self._headers(), "Accept": "text/event-stream"}
         try:
             with self._http.stream("POST", url, json=request, headers=headers, timeout=timeout) as response:
