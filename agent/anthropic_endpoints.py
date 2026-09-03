@@ -56,12 +56,8 @@ _KIMI_FAMILY_EXACT_SLUGS = frozenset({"k3"})
 def _model_name_is_kimi_family(model: str | None) -> bool:
     if not isinstance(model, str):
         return False
-    m = model.strip().lower()
-    if not m:
-        return False
-    if "/" in m:  # ``moonshotai/kimi-k2.5`` -> ``kimi-k2.5``
-        m = m.rsplit("/", 1)[-1]
-    return m in _KIMI_FAMILY_EXACT_SLUGS or m.startswith(_KIMI_FAMILY_MODEL_PREFIXES)
+    m = model.strip().lower().rsplit("/", 1)[-1]  # ``moonshotai/kimi-k2.5`` -> ``kimi-k2.5``
+    return bool(m) and (m in _KIMI_FAMILY_EXACT_SLUGS or m.startswith(_KIMI_FAMILY_MODEL_PREFIXES))
 
 
 def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> bool:
@@ -69,11 +65,11 @@ def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> 
     moonshot.ai / moonshot.cn host, or any endpoint (e.g. a private gateway) whose *model* is in
     the Kimi family — the upstream enforces Kimi's thinking semantics regardless of hostname.
     Decides whether unsigned reasoning_content-derived thinking blocks are preserved on replay."""
-    if _is_kimi_coding_endpoint(base_url):
-        return True
-    if any(base_url_host_matches(base_url or "", d) for d in ("api.kimi.com", "moonshot.ai", "moonshot.cn")):
-        return True
-    return _model_name_is_kimi_family(model)
+    return (
+        _is_kimi_coding_endpoint(base_url)
+        or any(base_url_host_matches(base_url or "", d) for d in ("api.kimi.com", "moonshot.ai", "moonshot.cn"))
+        or _model_name_is_kimi_family(model)
+    )
 
 
 def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
@@ -81,9 +77,7 @@ def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     blocks to round-trip while the generic third-party path strips them; its blocks are unsigned,
     so it gets the same strip-signed / keep-unsigned policy as Kimi. Pinned to the ``/anthropic``
     path so the OpenAI-compatible base URL is not misclassified."""
-    if not base_url_host_matches(base_url or "", "api.deepseek.com"):
-        return False
-    return "/anthropic" in _normalized_lower(base_url)
+    return base_url_host_matches(base_url or "", "api.deepseek.com") and "/anthropic" in _normalized_lower(base_url)
 
 
 def _is_nous_portal_endpoint(base_url: str | None) -> bool:
@@ -99,9 +93,7 @@ def _is_nous_portal_endpoint(base_url: str | None) -> bool:
         override = _nous_inference_env_override()
     except Exception:
         return False
-    if not override:
-        return False
-    override_host = base_url_hostname(override)
+    override_host = base_url_hostname(override) if override else ""
     return bool(override_host) and base_url_hostname(base_url or "") == override_host
 
 
@@ -109,13 +101,10 @@ def _requires_bearer_auth(base_url: str | None) -> bool:
     """Providers needing ``Authorization: Bearer`` instead of ``x-api-key``: MiniMax, Azure AI
     Foundry, Palantir Foundry's LLM proxy, CommandCode, Nous Portal. Palantir/CommandCode use
     hostname matching (not substring) so ``evil.com/palantirfoundry`` paths don't trigger it."""
-    if _is_nous_portal_endpoint(base_url):
-        return True
     normalized = _normalized_lower(base_url)
-    if not normalized:
-        return False
     return (
-        normalized.startswith(_MINIMAX_ANTHROPIC_PREFIXES)
+        _is_nous_portal_endpoint(base_url)
+        or normalized.startswith(_MINIMAX_ANTHROPIC_PREFIXES)
         or "azure.com" in normalized
         or base_url_host_matches(normalized, "palantirfoundry.com")
         or base_url_host_matches(normalized, "api.commandcode.ai")

@@ -12,6 +12,7 @@ import logging
 import math
 import re
 import subprocess
+from contextlib import suppress
 from pathlib import Path  # noqa: F401  (tests patch ``anthropic_adapter.Path.home``)
 from typing import Any, Dict, List, Optional
 
@@ -51,11 +52,9 @@ def _get_anthropic_sdk():
     """Return the ``anthropic`` SDK module, importing lazily. None if not installed."""
     global _anthropic_sdk
     if _anthropic_sdk is ...:
-        try:
+        with suppress(Exception):  # ImportError or FeatureUnavailable — fall through to the import below
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("provider.anthropic", prompt=False)
-        except Exception:  # ImportError or FeatureUnavailable — fall through to the import below
-            pass
         try:
             import anthropic as _sdk
             _anthropic_sdk = _sdk
@@ -603,6 +602,10 @@ def _thinking_kwargs(reasoning_config: Dict[str, Any], model: str, effective_max
     }
 
 
+# OpenAI tool_choice -> Anthropic; any other string is a forced tool name.
+_TOOL_CHOICE_MAP = {None: {"type": "auto"}, "auto": {"type": "auto"}, "required": {"type": "any"}}
+
+
 def build_anthropic_kwargs(
     model: str, messages: List[Dict], tools: Optional[List[Dict]], max_tokens: Optional[int],
     reasoning_config: Optional[Dict[str, Any]], tool_choice: Optional[str] = None,
@@ -644,17 +647,14 @@ def build_anthropic_kwargs(
 
     if anthropic_tools:
         kwargs["tools"] = anthropic_tools
-        if tool_choice == "auto" or tool_choice is None:
-            kwargs["tool_choice"] = {"type": "auto"}
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = {"type": "any"}
-        elif tool_choice == "none":
+        if tool_choice == "none":
             kwargs.pop("tools", None)  # no Anthropic "none" — omit tools to prevent use
-        elif isinstance(tool_choice, str):
-            # Under OAuth every tools[] entry is mcp__-prefixed/aliased; the forced name must go
-            # through the same normalizer or it (a) leaks the literal trigger string and (b) names
-            # a tool that no longer exists -> 400.
-            kwargs["tool_choice"] = {"type": "tool", "name": to_wire(tool_choice) if to_wire else tool_choice}
+        elif tool_choice is None or isinstance(tool_choice, str):
+            # A forced tool name goes through the OAuth normalizer too: every tools[] entry is
+            # mcp__-prefixed/aliased there, so the literal would leak and name a nonexistent tool.
+            kwargs["tool_choice"] = _TOOL_CHOICE_MAP.get(tool_choice) or {
+                "type": "tool", "name": to_wire(tool_choice) if to_wire else tool_choice
+            }
 
     if reasoning_config and isinstance(reasoning_config, dict):
         kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens))

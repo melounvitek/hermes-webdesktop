@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -112,8 +112,7 @@ def _interrupt_background_review(review_agent: Any) -> None:
             from agent.interrupt_compat import request_hard_interrupt
 
             request_hard_interrupt(
-                review_agent, "superseded by a new live turn",
-                tool_reason="background review superseded",
+                review_agent, "superseded by a new live turn", tool_reason="background review superseded"
             )
         except Exception:
             logger.debug("Failed to cancel in-flight background review for a new turn", exc_info=True)
@@ -255,13 +254,9 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = Non
         return {
             "provider": rp.get("provider") or task_provider,
             "model": rp.get("model") or task_model,
-            "api_key": rp.get("api_key"),
-            "base_url": rp.get("base_url"),
-            "api_mode": rp.get("api_mode"),
-            "credential_pool": rp.get("credential_pool"),
+            **{key: rp.get(key) for key in ("api_key", "base_url", "api_mode", "credential_pool", "command")},
             "request_overrides": dict(rp.get("request_overrides") or {}),
             "max_tokens": rp.get("max_output_tokens"),
-            "command": rp.get("command"),
             "args": list(rp.get("args") or []),
             "routed": True,
         }
@@ -296,14 +291,13 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
     messages verbatim (extended so the kept run never starts on a tool result) and collapse older
     turns into one synthetic user-role digest, preserving role alternation."""
     msgs = list(messages_snapshot or [])
-    if len(msgs) <= tail:
-        return msgs
-    keep = msgs[-tail:]
-    while keep and isinstance(keep[0], dict) and keep[0].get("role") == "tool":
-        tail += 1
-        if len(msgs) <= tail:
-            return msgs
+    while len(msgs) > tail:
         keep = msgs[-tail:]
+        if not (isinstance(keep[0], dict) and keep[0].get("role") == "tool"):
+            break
+        tail += 1
+    else:
+        return msgs
     lines: List[str] = []
     for m in msgs[:-len(keep)]:
         if not isinstance(m, dict):
@@ -626,13 +620,11 @@ def _verbose_skill_line(data: Dict, detail: Dict, message: str) -> str:
     new_string = change.get("new", "") or detail.get("new_string", "")
     description = change.get("description", "")
     if action == "patch" and (old_string or new_string):
-        old_preview = _preview(old_string, 80).replace("\n", " ")
-        new_preview = _preview(new_string, 80).replace("\n", " ")
+        old_preview, new_preview = (_preview(t, 80).replace("\n", " ") for t in (old_string, new_string))
         return f"📝 Skill '{skill_name}' patched: \"{old_preview}\" → \"{new_preview}\""
-    if action == "create" and description:
-        return f"📝 Skill '{skill_name}' created: {description}"
-    if action == "edit" and description:
-        return f"📝 Skill '{skill_name}' rewritten: {description}"
+    verb = {"create": "created", "edit": "rewritten"}.get(action)
+    if verb and description:
+        return f"📝 Skill '{skill_name}' {verb}: {description}"
     return f"📝 {message}" if message else f"Skill {action}"
 
 
@@ -837,16 +829,9 @@ def _classify_review_result(actions: List[str]) -> str:
     ``📝 Skill …``, ``Memory …``, ``User profile …``), so a free-text line like ``Skipped: no
     skill worth saving`` stays ``none``.
     """
-    has_skill = has_memory = False
-    for action in actions or []:
-        text = str(action).lstrip()
-        if text.startswith("📝"):
-            text = text[1:].lstrip()
-        lower = text.lower()
-        if lower.startswith("skill"):
-            has_skill = True
-        elif lower.startswith("memory") or lower.startswith("user profile"):
-            has_memory = True
+    lowers = [str(action).lstrip().removeprefix("📝").lstrip().lower() for action in actions or []]
+    has_skill = any(t.startswith("skill") for t in lowers)
+    has_memory = any(t.startswith(("memory", "user profile")) for t in lowers)
     return "+".join(kind for kind, hit in (("skill", has_skill), ("memory", has_memory)) if hit) or "none"
 
 
@@ -986,15 +971,13 @@ def build_cache_parity_fork(
     _rt = _resolve_review_runtime(agent, task_cfg)
     _routed = bool(_rt.get("routed"))
     review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations))
-    review_agent._memory_write_origin = write_origin
-    review_agent._memory_write_context = write_origin
+    review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
     # The between-turns MCP refresh would add late-connecting MCP tools and break tools[] parity.
     review_agent._skip_mcp_refresh = True
     review_agent._memory_store = agent._memory_store
     review_agent._memory_enabled = agent._memory_enabled
     review_agent._user_profile_enabled = agent._user_profile_enabled
-    review_agent._memory_nudge_interval = 0
-    review_agent._skill_nudge_interval = 0
+    review_agent._memory_nudge_interval = review_agent._skill_nudge_interval = 0
     # PERSISTENCE ISOLATION (curator-takeover root cause): sharing the parent's session_id, the
     # fork would otherwise write its harness turn into the REAL session, which the next live turn
     # re-reads as a standing instruction.
@@ -1030,10 +1013,8 @@ def _bg_review_auto_deny(command, description, **kwargs):
 def _set_thread_approval_callback(callback: Any) -> None:
     from tools.terminal_tool import set_approval_callback
 
-    try:
+    with suppress(Exception):
         set_approval_callback(callback)
-    except Exception:
-        pass
 
 
 def _track_review_fork(agent: Any, review_agent: Any, *, register: bool) -> None:
@@ -1084,10 +1065,9 @@ def _review_tool_whitelist(review_agent: Any, task_cfg: Optional[Dict[str, Any]]
         _extra_raw = _background_review_task_config(task_cfg).get("extra_tools", [])
         if isinstance(_extra_raw, list):
             configured_extra_tools = {name.strip() for name in _extra_raw if isinstance(name, str) and name.strip()}
-            whitelist |= configured_extra_tools
     except Exception:
         logger.debug("background_review extra_tools parse failed", exc_info=True)
-    return whitelist, configured_extra_tools
+    return whitelist | configured_extra_tools, configured_extra_tools
 
 
 @dataclass
@@ -1102,10 +1082,8 @@ class _ReviewForkState:
 def _release_fork_clients(review_agent: Any) -> None:
     """The fork shares the foreground session ID: close() / shutdown_memory_provider() are
     session-bound (close() kills that session's terminal processes), so release only clients."""
-    try:
+    with suppress(Exception):
         review_agent.release_clients()
-    except Exception:
-        pass
 
 
 def _finish_request_phase(agent: Any, review_agent: Any, review_run: Optional[_BackgroundReviewRun]) -> None:
@@ -1128,6 +1106,8 @@ def _run_review_fork(
 
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg)
     extra_list = ", ".join(sorted(configured_extra_tools))
+    deny_extra = f" Configured extra tools also allowed: {extra_list}." if configured_extra_tools else ""
+    prompt_extra = f" Exception — these configured tools are also allowed: {extra_list}." if configured_extra_tools else ""
     set_thread_tool_whitelist(
         review_whitelist,
         deny_msg_fmt=(
@@ -1135,37 +1115,22 @@ def _run_review_fork(
             "{tool_name}. Allowed here: skill_view/skills_list/"
             "read_file/search_files to read, "
             "skill_manage(action='patch'|...) to change skills, and "
-            "memory for notes."
-            + (
-                " Configured extra tools also allowed: " + extra_list + "."
-                if configured_extra_tools
-                else ""
-            )
-            + " Do not retry {tool_name}."
+            "memory for notes." + deny_extra + " Do not retry {tool_name}."
         ),
     )
-    try:
+    with suppress(Exception):
         from tools.skill_manager_tool import _reset_background_review_read_marks
 
         _reset_background_review_read_marks()
-    except Exception:
-        pass
 
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
             st.review_agent.run_conversation(
                 user_message=(
-                    prompt
-                    + "\n\nYou can only call memory and skill "
+                    prompt + "\n\nYou can only call memory and skill "
                     "management tools. Other tools will be denied "
-                    "at runtime — do not attempt them."
-                    + (
-                        " Exception — these configured tools are "
-                        "also allowed: " + extra_list + "."
-                        if configured_extra_tools
-                        else ""
-                    )
+                    "at runtime — do not attempt them." + prompt_extra
                 ),
                 conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
             )
@@ -1191,10 +1156,8 @@ def _publish_review_summary(agent: Any, actions: List[str]) -> None:
     agent._safe_print(f"  💾 Self-improvement review: {summary}")
     _bg_cb = agent.background_review_callback
     if _bg_cb:
-        try:
+        with suppress(Exception):
             _bg_cb(f"💾 Self-improvement review: {summary}")
-        except Exception:
-            pass
 
 
 def _run_review_in_thread(
@@ -1263,11 +1226,8 @@ def _run_review_in_thread(
         # cleanup output stays quiet without blanking other threads.
         _finish_request_phase(agent, st.review_agent, review_run)
         if st.review_agent is not None:
-            try:
-                with thread_scoped_silence():
-                    _release_fork_clients(st.review_agent)
-            except Exception:
-                pass
+            with suppress(Exception), thread_scoped_silence():
+                _release_fork_clients(st.review_agent)
         # Clear the approval callback so a recycled thread-id doesn't inherit it.
         _set_thread_approval_callback(None)
 
@@ -1310,11 +1270,6 @@ def spawn_background_review_thread(
 
 
 __all__ = [
-    "_MEMORY_REVIEW_PROMPT",
-    "_SKILL_REVIEW_PROMPT",
-    "_COMBINED_REVIEW_PROMPT",
-    "load_background_review_settings",
-    "spawn_background_review_thread",
-    "summarize_background_review_actions",
-    "build_memory_write_metadata",
+    "_MEMORY_REVIEW_PROMPT", "_SKILL_REVIEW_PROMPT", "_COMBINED_REVIEW_PROMPT", "load_background_review_settings",
+    "spawn_background_review_thread", "summarize_background_review_actions", "build_memory_write_metadata",
 ]

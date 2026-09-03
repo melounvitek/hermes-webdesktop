@@ -29,8 +29,6 @@ _BEDROCK_REGION_PREFIXES = (
 )
 
 
-# ----- small shared predicates -----
-
 
 def _block_type(b: Any) -> Any:
     """``type`` of a dict block, None for non-dicts."""
@@ -59,6 +57,14 @@ def _text_block(text: str) -> Dict[str, str]:
     return {"type": "text", "text": text}
 
 
+def _text_block_with_citations(text: Any, cits: Any) -> Dict[str, Any]:
+    """Text block carrying ``citations`` only when it is a non-empty list (the only input-valid shape)."""
+    block: Dict[str, Any] = _text_block(text)
+    if isinstance(cits, list) and cits:
+        block["citations"] = cits
+    return block
+
+
 def _parse_tool_args(raw: Any) -> Any:
     """JSON-decode a tool_call ``arguments`` string; non-strings pass through, bad JSON -> {}."""
     try:
@@ -71,7 +77,32 @@ def _strip_thinking(blocks: List[Any]) -> List[Any]:
     return [b for b in blocks if _block_type(b) not in _THINKING_TYPES]
 
 
-# ----- model / tool conversion -----
+def _block_ids(blocks: List[Any], btype: str, key: str) -> set:
+    return {b.get(key) for b in blocks if _block_type(b) == btype}
+
+
+def _carry_cache_control(out: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy a dict-valued ``cache_control`` marker from ``b`` onto ``out`` (returned)."""
+    if _cache_control_of(b) is not None:
+        out["cache_control"] = b["cache_control"]
+    return out
+
+
+def _split_blank_text_blocks(blocks: List[Any]) -> Tuple[List[Any], Any, List[int]]:
+    """``(kept, relocated_cache_control, dropped_indexes)``: drop blank text blocks, remembering
+    the cache_control of the last one dropped so the caller can relocate the breakpoint."""
+    kept: List[Any] = []
+    relocated_cc = None
+    dropped: List[int] = []
+    for i, blk in enumerate(blocks):
+        if _is_blank_text_block(blk):
+            if _cache_control_of(blk) is not None:
+                relocated_cc = blk["cache_control"]
+            dropped.append(i)
+        else:
+            kept.append(blk)
+    return kept, relocated_cc, dropped
+
 
 
 def _is_bedrock_model_id(model: str) -> bool:
@@ -97,6 +128,10 @@ def _sanitize_tool_id(tool_id: str) -> str:
     if not tool_id:
         return "tool_0"
     return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id) or "tool_0"
+
+
+def _tool_use_block(tool_id: Any, name: Any, tool_input: Any) -> Dict[str, Any]:
+    return {"type": "tool_use", "id": _sanitize_tool_id(tool_id), "name": name, "input": tool_input}
 
 
 def _normalize_tool_input_schema(schema: Any) -> Dict[str, Any]:
@@ -149,8 +184,6 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
     return result
 
 
-# ----- content-part conversion -----
-
 
 def _image_source_from_openai_url(url: str) -> Dict[str, str]:
     """OpenAI image URL / data URL -> Anthropic image ``source``."""
@@ -176,10 +209,7 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
     if ptype in ("input_text", "text"):
         # Rebuild from whitelisted fields only: stored SDK text blocks carry output-only siblings
         # (parsed_output, citations=None) that the INPUT schema rejects with 400.
-        block: Dict[str, Any] = _text_block(part.get("text", ""))
-        cits = part.get("citations")
-        if ptype == "text" and isinstance(cits, list) and cits:
-            block["citations"] = cits
+        block = _text_block_with_citations(part.get("text", ""), part.get("citations") if ptype == "text" else None)
     elif ptype in {"image_url", "input_image"}:
         image_value = part.get("image_url", {})
         url = image_value.get("url", "") if isinstance(image_value, dict) else str(image_value or "")
@@ -269,14 +299,9 @@ def _safe_text(text: Any) -> str:
     """``text`` if non-whitespace, else the placeholder. A blank text block stored in history (e.g.
     by compression) is replayed on every turn and wedges the session with HTTP 400; the placeholder
     is self-healing. Mirrors ``bedrock_adapter._safe_text`` (kept separate on purpose)."""
-    if text is None:
-        return _EMPTY_TEXT_PLACEHOLDER
-    if not isinstance(text, str):
-        text = str(text)
+    text = "" if text is None else str(text)
     return text if text.strip() else _EMPTY_TEXT_PLACEHOLDER
 
-
-# ----- replay-block sanitizing (per-type whitelist) -----
 
 
 def _replay_text(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -285,13 +310,7 @@ def _replay_text(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # model-visible noise next to real blocks.
     if _is_blank_text_block(b):
         return None
-    out: Dict[str, Any] = _text_block(b["text"])
-    cits = b.get("citations")  # input-valid ONLY as a non-empty list
-    if isinstance(cits, list) and cits:
-        out["citations"] = cits
-    if _cache_control_of(b) is not None:
-        out["cache_control"] = b["cache_control"]
-    return out
+    return _carry_cache_control(_text_block_with_citations(b["text"], b.get("citations")), b)
 
 
 def _replay_thinking(b: Dict[str, Any]) -> Dict[str, Any]:
@@ -306,13 +325,7 @@ def _replay_redacted_thinking(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _replay_tool_use(b: Dict[str, Any]) -> Dict[str, Any]:
-    out = {
-        "type": "tool_use", "id": _sanitize_tool_id(b.get("id", "")), "name": b.get("name", ""),
-        "input": b.get("input", {}),
-    }
-    if _cache_control_of(b) is not None:
-        out["cache_control"] = b["cache_control"]
-    return out
+    return _carry_cache_control(_tool_use_block(b.get("id", ""), b.get("name", ""), b.get("input", {})), b)
 
 
 def _replay_image(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -346,8 +359,6 @@ def _apply_assistant_cache_control_to_last_cacheable_block(blocks: List[Dict[str
             block.setdefault("cache_control", dict(cache_control))
             break
 
-
-# ----- per-message conversion -----
 
 
 def _replay_ordered_blocks(m: Dict[str, Any], ordered_blocks: List[Any]) -> Optional[List[Dict[str, Any]]]:
@@ -411,22 +422,15 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     # exactly the blank block).
     relocated_cc = None
     if isinstance(content, list):
-        for blk in _convert_content_to_anthropic(content):
-            if _is_blank_text_block(blk):
-                if _cache_control_of(blk) is not None:
-                    relocated_cc = blk["cache_control"]
-                continue
-            blocks.append(blk)
+        kept, relocated_cc, _ = _split_blank_text_blocks(_convert_content_to_anthropic(content))
+        blocks.extend(kept)
     elif content and str(content).strip():
         blocks.append(_text_block(str(content)))
     for tc in m.get("tool_calls", []):
         if not tc or not isinstance(tc, dict):
             continue
         fn = tc.get("function", {})
-        blocks.append({
-            "type": "tool_use", "id": _sanitize_tool_id(tc.get("id", "")), "name": fn.get("name", ""),
-            "input": _parse_tool_args(fn.get("arguments", "{}")),
-        })
+        blocks.append(_tool_use_block(tc.get("id", ""), fn.get("name", ""), _parse_tool_args(fn.get("arguments", "{}"))))
     # Kimi's /coding endpoint requires reasoning_content on replayed tool-call turns — even ""
     # (injected as a fallback upstream). Prepend, since thinking must precede text/tool_use. Skip
     # when reasoning_details already supplied (signed) thinking blocks: a duplicate unsigned one
@@ -499,8 +503,6 @@ def _convert_user_message(content: Any) -> Dict[str, Any]:
     return {"role": "user", "content": content}
 
 
-# ----- whole-list passes -----
-
 
 def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
     """Strip tool_use blocks with no matching tool_result, and vice versa. Compression/truncation
@@ -511,14 +513,14 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
     for i, m in enumerate(result):
         if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
             continue
-        tool_use_ids_in_turn = {b.get("id") for b in m["content"] if _block_type(b) == "tool_use"}
+        tool_use_ids_in_turn = _block_ids(m["content"], "tool_use", "id")
         if not tool_use_ids_in_turn:
             continue
         adjacent_result_ids: set = set()
         if i + 1 < len(result):
             nxt = result[i + 1]
             if nxt.get("role") == "user" and isinstance(nxt.get("content"), list):
-                adjacent_result_ids = {b.get("tool_use_id") for b in nxt["content"] if _block_type(b) == "tool_result"}
+                adjacent_result_ids = _block_ids(nxt["content"], "tool_result", "tool_use_id")
         orphaned = tool_use_ids_in_turn - adjacent_result_ids
         if not orphaned:
             continue
@@ -531,13 +533,10 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
         m["content"] = kept if kept else [_text_block("(tool call removed)")]
 
     # Pass 2: tool_result whose tool_use no longer exists anywhere.
-    surviving_tool_use_ids = {
-        b.get("id")
-        for m in result
-        if m.get("role") == "assistant" and isinstance(m.get("content"), list)
-        for b in m["content"]
-        if _block_type(b) == "tool_use"
-    }
+    surviving_tool_use_ids: set = set()
+    for m in result:
+        if m.get("role") == "assistant" and isinstance(m.get("content"), list):
+            surviving_tool_use_ids |= _block_ids(m["content"], "tool_use", "id")
     for m in result:
         if m.get("role") != "user" or not isinstance(m.get("content"), list):
             continue
@@ -674,19 +673,13 @@ def _fix_blank_text_blocks_in_list(
     """Drop blank text blocks; relocate any cache_control they carried onto the last surviving
     cacheable block; if nothing survives, substitute one placeholder block (carrying the relocated
     marker). Non-text blocks and order are untouched. Returns a new list; logs structure only."""
-    kept: List[Any] = []
-    relocated_cache_control = None
-    for block_index, blk in enumerate(blocks):
-        if _is_blank_text_block(blk):
-            if _cache_control_of(blk) is not None:
-                relocated_cache_control = blk["cache_control"]
-            logger.warning(
-                "Pre-call sanitizer: dropped blank text content block "
-                "(message_index=%d role=%s location=%s block_index=%d block_type=text)",
-                msg_index, role, location, block_index,
-            )
-            continue
-        kept.append(blk)
+    kept, relocated_cache_control, dropped = _split_blank_text_blocks(blocks)
+    for block_index in dropped:
+        logger.warning(
+            "Pre-call sanitizer: dropped blank text content block "
+            "(message_index=%d role=%s location=%s block_index=%d block_type=text)",
+            msg_index, role, location, block_index,
+        )
     if not kept:
         kept.append(_text_block(placeholder_text))
     _apply_assistant_cache_control_to_last_cacheable_block(kept, relocated_cache_control)
