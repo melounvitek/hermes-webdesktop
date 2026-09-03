@@ -78,6 +78,16 @@ def _accent_line(text: str) -> str:
     return f"  {_accent(text)}"
 
 
+def _probe(module: str, name: str, default, *args):
+    """``<module>.<name>(*args)`` or ``default`` when the import or the call fails (optional
+    subsystems: browser backends, async delegations, wake word, ...)."""
+    try:
+        import importlib
+        return getattr(importlib.import_module(module), name)(*args)
+    except Exception:
+        return default
+
+
 def _say_block(*lines: str) -> None:
     """print() the lines framed by a blank line above and below (the /browser output style)."""
     print()
@@ -541,14 +551,6 @@ def _browser_disconnect(cli) -> None:
             "Browser tools are back to default mode (headless local browser or cloud provider).]")
 
 
-def _browser_tool_attr(name: str, default):
-    """``tools.browser_tool.<name>()`` or ``default`` when the import/call fails."""
-    try:
-        import tools.browser_tool as bt
-        return getattr(bt, name)()
-    except Exception:
-        return default
-
 
 # /browser status headline per local browser.engine value.
 _LOCAL_ENGINE_LINES = {
@@ -562,12 +564,7 @@ _LOCAL_ENGINE_LINES = {
 def _browser_status() -> None:
     current = os.environ.get("BROWSER_CDP_URL", "").strip()
     print()
-    try:
-        from tools.browser_use_cli import is_browser_use_cli_mode
-        _bu_mode = is_browser_use_cli_mode()
-    except Exception:
-        _bu_mode = False
-    if _bu_mode:
+    if _probe("tools.browser_use_cli", "is_browser_use_cli_mode", False):
         _pr("🌐 Browser: Browser Use mode (browser_exec via the Browser Use CLI 3.0)",
             "   Local Chrome via CDP, or Browser Use cloud browsers")
         _print_lightpanda_engine_status()
@@ -586,12 +583,12 @@ def _browser_status() -> None:
         except Exception:
             print("   Status: ⚠ not reachable (browser may not be running)")
     else:
-        provider = _browser_tool_attr("_get_cloud_provider", None)
+        provider = _probe("tools.browser_tool", "_get_cloud_provider", None)
         if provider is not None:
             print(f"🌐 Browser: {provider.provider_name()} (cloud)")
             _print_lightpanda_engine_status()
         else:
-            engine = _browser_tool_attr("_get_browser_engine", "auto")
+            engine = _probe("tools.browser_tool", "_get_browser_engine", "auto")
             _pr(*_LOCAL_ENGINE_LINES.get(engine, _LOCAL_ENGINE_LINES["auto"]))
             if engine == "lightpanda":
                 _print_lightpanda_engine_status()
@@ -922,11 +919,7 @@ class CLICommandsMixin:
         if finished:
             _cp(f"  Recently finished: {len(finished)}")
         # Background (async) delegations — delegate_task(background=true)
-        try:
-            from tools.async_delegation import list_async_delegations
-            delegations = list_async_delegations()
-        except Exception:
-            delegations = []
+        delegations = _probe("tools.async_delegation", "list_async_delegations", [])
         if delegations:
             running_d = [d for d in delegations if d.get("status") in ("running", "stalling")]
             _cp(f"  Background delegations: {len(running_d)} running")
