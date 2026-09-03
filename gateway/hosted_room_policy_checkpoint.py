@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from gateway import hosted_rooms
+from gateway.hosted_rooms_common import compact_json
 
 
 MAX_ACTIVE_POLICY_EVENTS = 64
@@ -52,7 +53,7 @@ _SCHEMA_DDL = (
         room_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL)""",
 )
 
-_ROOM_EVENT_COLUMNS = ("room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at")
+_ROOM_EVENT_COLUMNS = hosted_rooms._EVENT_COLUMNS
 _DELETE_ACTIVE_EVENTS_SQL = ("DELETE FROM hosted_room_policy_events WHERE room_id=? AND discussion_event_id=?")
 _TRANSCRIPT_EVENTS_SQL = f"""WITH transcript_events(seq) AS (
         SELECT seq FROM hosted_room_policy_transcript WHERE room_id=? AND thread_id=?
@@ -121,7 +122,7 @@ class HostedRoomPolicyCheckpoint:
                ) VALUES (?, ?, ?, ?, ?)""",
             (
                 event["room_id"], thread_id, discussion_event_id, int(event["seq"]),
-                json.dumps(dict(event), ensure_ascii=True, sort_keys=True, separators=(",", ":"))))
+                compact_json(dict(event))))
 
     @staticmethod
     def _store_transcript_event(
