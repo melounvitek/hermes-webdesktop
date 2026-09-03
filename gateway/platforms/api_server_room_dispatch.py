@@ -33,9 +33,7 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
     session_id = f"room_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
     def atomic(conn):
-        row = conn.execute(
-            "SELECT id, title, source FROM sessions WHERE id=?", (session_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id, title, source FROM sessions WHERE id=?", (session_id,)).fetchone()
         if row is not None:
             if row["title"] != title or row["source"] != "bot_room":
                 raise RuntimeError("room session identity conflicts with existing data")
@@ -60,7 +58,7 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
 
 
 def _room_dispatch_error(exc: Exception, *, _openai_error) -> "web.Response":
-    message = str(exc)
+    message, code = str(exc), "invalid_room_dispatch"
     lowered = message.lower()
     if "execution policy" in lowered or "remote room execution requires" in lowered:
         message = "Room execution policy changed; reauthorization is required."
@@ -68,26 +66,17 @@ def _room_dispatch_error(exc: Exception, *, _openai_error) -> "web.Response":
     elif "capability catalog changed" in lowered:
         message = "Room capability catalog changed; reauthorization is required."
         code = "room_capability_catalog_changed"
-    else:
-        code = "invalid_room_dispatch"
     return _json_error(_openai_error, message, code=code, status=403)
 
 
 async def _normalize_room_dispatch(
-    self,
-    request: "web.Request",
-    body: Any,
-    *,
-    _api_server,
+    self, request: "web.Request", body: Any, *, _api_server
 ) -> tuple[Any, "web.Response | None"]:
     """Validate and normalize a scoped RoomLink dispatch request."""
-    _api_request_profile = _api_server._api_request_profile
     _openai_error = _api_server._openai_error
-
     room_token = self._room_grant_token(request)
     if not room_token:
         return body, None
-
     if not isinstance(body, dict) or set(body) - {"input", "hosted_room_dispatch"}:
         return body, _json_error(
             _openai_error, "Room dispatch accepts only input and hosted_room_dispatch.",
@@ -95,22 +84,15 @@ async def _normalize_room_dispatch(
         )
     try:
         from gateway import hosted_rooms
-        from gateway.hosted_room_peer import (
-            GatewayRoomCatalog,
-            HostedMemberDispatch,
-            verify_room_grant,
-        )
+        from gateway.hosted_room_peer import GatewayRoomCatalog, HostedMemberDispatch, verify_room_grant
         from gateway.hosted_room_execution_policy import RoomExecutionPolicy
         from gateway.platforms.api_server_room_grants import _local_room_catalog
 
         dispatch = HostedMemberDispatch.from_mapping(body.get("hosted_room_dispatch"))
         verify_room_grant(self._room_grant_secret(), room_token, dispatch, permission="dispatch")
-        active_profile = _api_request_profile.get() or "default"
+        active_profile = _api_server._api_request_profile.get() or "default"
         local_install = hosted_rooms.local_authority_gateway_id()
-        if (
-            dispatch.target_profile != active_profile
-            or dispatch.target_install_id != local_install
-        ):
+        if dispatch.target_profile != active_profile or dispatch.target_install_id != local_install:
             raise ValueError("room dispatch target does not match this profile")
         _, catalog_map = _local_room_catalog(self, active_profile, local_install)
         catalog = GatewayRoomCatalog.from_mapping(catalog_map)

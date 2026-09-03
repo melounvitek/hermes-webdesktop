@@ -164,9 +164,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
 
     def _push(event: Dict[str, Any]) -> None:
         self._set_run_status(
-            run_id,
-            self._run_statuses.get(run_id, {}).get("status", "running"),
-            last_event=event.get("event"),
+            run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event")
         )
         q = self._run_streams.get(run_id)
         if q is None:
@@ -180,8 +178,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
         elif event_type == "tool.completed":
             _push(_run_event(
                 run_id, event_type, tool=tool_name,
-                duration=round(kwargs.get("duration", 0), 3),
-                error=kwargs.get("is_error", False),
+                duration=round(kwargs.get("duration", 0), 3), error=kwargs.get("is_error", False),
             ))
         elif event_type == "reasoning.available":
             _push(_run_event(run_id, event_type, text=preview or ""))
@@ -241,6 +238,21 @@ def _check_run_auth(self, request: "web.Request", *, permission: str, _api_serve
     return None
 
 
+def _owner_alive(owner_pid: int, owner_started: int) -> bool:
+    """True when the recorded owner pid still exists and is the same process incarnation."""
+    if owner_pid <= 0:
+        return False
+    try:
+        from gateway.status import _pid_exists, get_process_start_time
+
+        alive = bool(_pid_exists(owner_pid))
+        if alive and owner_started:
+            alive = int(get_process_start_time(owner_pid) or 0) == owner_started
+        return alive
+    except Exception:
+        return False
+
+
 def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
     """Hydrate a scoped run status and fail stale owners closed."""
     status = self._run_statuses.get(run_id)
@@ -258,20 +270,9 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         return None
 
     status = dict(record["status"])
-    owner_pid = int(record.get("owner_pid") or 0)
-    owner_started = int(record.get("owner_started") or 0)
-    owner_alive = False
-    if owner_pid > 0:
-        try:
-            from gateway.status import _pid_exists, get_process_start_time
-
-            owner_alive = bool(_pid_exists(owner_pid))
-            if owner_alive and owner_started:
-                owner_alive = int(get_process_start_time(owner_pid) or 0) == owner_started
-        except Exception:
-            owner_alive = False
-
-    if status.get("status") not in TERMINAL_STATUSES and not owner_alive:
+    if status.get("status") not in TERMINAL_STATUSES and not _owner_alive(
+        int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0)
+    ):
         status.update({
             "status": "interrupted",
             "error": "The gateway restarted before this run settled.",
@@ -301,8 +302,7 @@ def _resolve_conversation_history(
     if raw_history:
         if not isinstance(raw_history, list):
             return [], instructions, None, _json_error(
-                _openai_error, "'conversation_history' must be an array of message objects",
-                status=400,
+                _openai_error, "'conversation_history' must be an array of message objects", status=400
             )
         for i, entry in enumerate(raw_history):
             if not isinstance(entry, dict) or "role" not in entry or "content" not in entry:
@@ -345,8 +345,7 @@ def _replay_response(self, request: "web.Request", record: dict, gateway_session
         headers["X-Hermes-Session-Key"] = gateway_session_key
     return web.json_response(
         {"run_id": original_id, "status": status.get("status", "queued"), "replayed": True},
-        status=202,
-        headers=headers,
+        status=202, headers=headers,
     )
 
 
@@ -380,6 +379,50 @@ class _RunLaunch:
     event_cb: Callable
 
 
+def _idempotency_key_from(request: "web.Request", _openai_error) -> "tuple[str, web.Response | None]":
+    """Return ``(key, error)``; an absent header yields ``("", None)``."""
+    key = request.headers.get("Idempotency-Key", "").strip()
+    if key and (len(key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in key)):
+        return "", _json_error(
+            _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
+            code="invalid_idempotency_key", status=400,
+        )
+    return key, None
+
+
+def _optional_dict(body: Any, key: str) -> Optional[dict]:
+    value = body.get(key) if isinstance(body, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def _last_user_message(raw_input: Any) -> str:
+    if isinstance(raw_input, str):
+        return raw_input
+    return raw_input[-1].get("content", "") if isinstance(raw_input, list) else ""
+
+
+def _forget_run(self, run_id: str, *tables) -> None:
+    """Drop *run_id* from the given run-keyed dicts/sets, then release its owner stamp."""
+    for table in tables:
+        if isinstance(table, set):
+            table.discard(run_id)
+        else:
+            table.pop(run_id, None)
+    self._release_run_owner_if_forgotten(run_id)
+
+
+def _retire_live_run(self, run_id: str) -> None:
+    """Retire agent/task/approval control state once the executor-backed task is done."""
+    _forget_run(
+        self, run_id, self._active_run_agents, self._active_run_tasks,
+        self._run_approval_sessions, self._stopping_run_ids,
+    )
+
+
+def _drop_run_transport(self, run_id: str) -> None:
+    _forget_run(self, run_id, self._run_streams, self._run_streams_created)
+
+
 async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs — start an agent run, return run_id immediately."""
     _openai_error = _api_server._openai_error
@@ -397,36 +440,24 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
-    room_dispatch = body.get("hosted_room_dispatch") if isinstance(body, dict) else None
-    room_dispatch = room_dispatch if isinstance(room_dispatch, dict) else None
-    room_execution_policy = body.get("_room_execution_policy") if isinstance(body, dict) else None
-    room_execution_policy = room_execution_policy if isinstance(room_execution_policy, dict) else None
+    room_dispatch = _optional_dict(body, "hosted_room_dispatch")
+    room_execution_policy = _optional_dict(body, "_room_execution_policy")
 
-    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
-    if idempotency_key and (
-        len(idempotency_key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in idempotency_key)
-    ):
-        return _json_error(
-            _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
-            code="invalid_idempotency_key", status=400,
-        )
+    idempotency_key, key_err = _idempotency_key_from(request, _openai_error)
+    if key_err is not None:
+        return key_err
     idempotency_scope = idempotency_fingerprint = ""
     if idempotency_key:
         idempotency_scope = self._run_idempotency_scope(request)
-        idempotency_fingerprint = hashlib.sha256(
-            json.dumps(
-                {"body": body, "gateway_session_key": gateway_session_key or ""},
-                sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-            ).encode()
-        ).hexdigest()
+        idempotency_fingerprint = hashlib.sha256(json.dumps(
+            {"body": body, "gateway_session_key": gateway_session_key or ""},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()).hexdigest()
 
     raw_input = body.get("input")
     if not raw_input:
         return _json_error(_openai_error, "Missing 'input' field", status=400)
-    if isinstance(raw_input, str):
-        user_message = raw_input
-    else:
-        user_message = raw_input[-1].get("content", "") if isinstance(raw_input, list) else ""
+    user_message = _last_user_message(raw_input)
     if not user_message:
         return _json_error(_openai_error, "No user message found in input", status=400)
 
@@ -441,11 +472,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     route = self._resolve_route(body.get("model"))
     agent_overrides = _api_server._request_agent_overrides(body, virtual_model=self._model_name)
     selection_error = self._request_route_conflict_error(
-        session_id=session_id,
-        gateway_session_key=gateway_session_key,
+        session_id=session_id, gateway_session_key=gateway_session_key,
         requested_model=agent_overrides.get("requested_model"),
-        requested_provider=agent_overrides.get("requested_provider"),
-        route=route,
+        requested_provider=agent_overrides.get("requested_provider"), route=route,
     )
     if selection_error:
         return _json_error(_openai_error, selection_error, status=400)
@@ -490,7 +519,6 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     self._run_streams[run_id] = q
     self._run_streams_created[run_id] = created_at
     self._run_approval_sessions[run_id] = approval_session_key
-
     event_cb = self._make_run_event_callback(run_id, loop)
 
     def _put_event_if_active(event: Optional[Dict]) -> None:
@@ -502,19 +530,15 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         if delta is None or run_id not in self._run_streams:
             return
         with suppress(Exception):
-            loop.call_soon_threadsafe(
-                _put_event_if_active, _run_event(run_id, "message.delta", delta=delta)
-            )
+            loop.call_soon_threadsafe(_put_event_if_active, _run_event(run_id, "message.delta", delta=delta))
 
     initial_status = self._set_run_status(
-        run_id, "queued", created_at=created_at, session_id=session_id,
-        model=body.get("model", self._model_name),
+        run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name)
     )
     if idempotency_key:
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
-            owner_pid=self._run_owner_pid,
-            owner_started=self._run_owner_started,
+            owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
             retention_until=_room_retention_until(request),
         )
         if outcome != "created":
@@ -529,46 +553,35 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self._run_idempotency_ids.add(run_id)
 
     launch = _RunLaunch(
-        run_id=run_id,
-        queue=q,
-        loop=loop,
-        put_event=_put_event_if_active,
-        session_id=session_id,
-        gateway_session_key=gateway_session_key,
-        declared_selected=_declared_selected,
-        approval_session_key=approval_session_key,
-        user_message=user_message,
-        conversation_history=conversation_history,
-        ephemeral_system_prompt=instructions,
-        agent_overrides=agent_overrides,
-        route=route,
-        room_dispatch=room_dispatch,
+        run_id=run_id, queue=q, loop=loop, put_event=_put_event_if_active, session_id=session_id,
+        gateway_session_key=gateway_session_key, declared_selected=_declared_selected,
+        approval_session_key=approval_session_key, user_message=user_message,
+        conversation_history=conversation_history, ephemeral_system_prompt=instructions,
+        agent_overrides=agent_overrides, route=route, room_dispatch=room_dispatch,
         room_execution_policy=room_execution_policy,
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
-        browser_control_transport_family=(
-            _api_server._api_request_browser_control_transport_family.get()
-        ),
-        text_cb=_text_cb,
-        event_cb=event_cb,
+        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
+        text_cb=_text_cb, event_cb=event_cb,
+    )
+    _start_run_task(self, launch, _api_server=_api_server)
+    response_headers = {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
+    return web.json_response(
+        {"run_id": run_id, "status": "started", "replayed": False}, status=202, headers=response_headers
     )
 
+
+def _start_run_task(self, launch: _RunLaunch, *, _api_server) -> None:
+    """Admit the run and schedule its background task, tracked for shutdown drain."""
     self._activate_admitted_request()
     task = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
-    self._active_run_tasks[run_id] = task
+    self._active_run_tasks[launch.run_id] = task
     try:
         self._background_tasks.add(task)
     except TypeError:
         pass
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
-
-    response_headers = {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
-    return web.json_response(
-        {"run_id": run_id, "status": "started", "replayed": False},
-        status=202,
-        headers=response_headers,
-    )
 
 
 def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server):
@@ -596,17 +609,12 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             # tools.async_delegation sees an empty HERMES_SESSION_CHAT_ID and
             # background delegations stay forced-sync (no wake target).
             session_tokens = self._bind_api_server_session(
-                chat_id=session_id or "",
-                session_key=run.approval_session_key,
-                session_id=session_id or "",
+                chat_id=session_id or "", session_key=run.approval_session_key, session_id=session_id or "",
                 browser_control_principal=run.browser_control_principal,
                 browser_control_transport_family=run.browser_control_transport_family,
             )
             if run.room_dispatch is not None:
-                from gateway.hosted_room_execution_policy import (
-                    RoomExecutionPolicy,
-                    bind_room_execution_policy,
-                )
+                from gateway.hosted_room_execution_policy import RoomExecutionPolicy, bind_room_execution_policy
 
                 policy = RoomExecutionPolicy.from_mapping(run.room_execution_policy or {})
                 room_policy_token = bind_room_execution_policy(policy)
@@ -616,8 +624,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             # background processes this run created.
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             r = agent.run_conversation(
-                user_message=run.user_message,
-                conversation_history=run.conversation_history,
+                user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id,
             )
         finally:
@@ -652,121 +659,113 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
         return r, u
 
 
+def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Dict[str, Any]], None]:
+    """Approval-request bridge: redact, stamp the event envelope, park the run status, enqueue."""
+    run_id, q, loop = run.run_id, run.queue, run.loop
+
+    def _approval_notify(approval_data: Dict[str, Any]) -> None:
+        event = dict(approval_data or {})
+        # Redact credentials before the command enters the SSE/API stream;
+        # API/desktop clients must never receive the raw flagged command.
+        if "command" in event:
+            from gateway.run import _redact_approval_command
+
+            event["command"] = _redact_approval_command(event.get("command"))
+        event.update({
+            "event": "approval.request",
+            "run_id": run_id,
+            "timestamp": time.time(),
+            "choices": _api_server._approval_event_choices(
+                smart_denied=bool(event.get("smart_denied")),
+                allow_session=event.get("allow_session") is not False,
+                allow_permanent=event.get("allow_permanent") is not False,
+            ),
+        })
+        self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
+        with suppress(Exception):
+            loop.call_soon_threadsafe(q.put_nowait, event)
+
+    return _approval_notify
+
+
 async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     """Background task for one admitted run: drives the agent, then publishes
     the terminal event/status and releases live state."""
     _redact_api_error_text = _api_server._redact_api_error_text
-    run_id, q, loop = run.run_id, run.queue, run.loop
+    run_id = run.run_id
 
-    def _emit(name: str, **fields: Any) -> None:
-        run.put_event(_run_event(run_id, name, **fields))
+    def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
+        """Publish a terminal status, then the matching ``run.<status>`` event (best effort).
 
-    def _fail(error_msg: str) -> None:  # status first, then best-effort event
-        self._set_run_status(run_id, "failed", error=error_msg, last_event="run.failed")
+        Field order is part of the pollable status shape: *fields*, ``last_event``, then *extra*.
+        """
+        extra = extra or {}
+        self._set_run_status(run_id, status, **fields, last_event=f"run.{status}", **extra)
         with suppress(Exception):
-            _emit("run.failed", error=error_msg)
+            run.put_event(_run_event(run_id, f"run.{status}", **fields, **extra))
 
     try:
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
-            _emit("run.cancelled")
-            self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
+            _finish("cancelled")
             return
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
-                ephemeral_system_prompt=run.ephemeral_system_prompt,
-                session_id=run.session_id,
-                stream_delta_callback=run.text_cb,
-                tool_progress_callback=run.event_cb,
+                ephemeral_system_prompt=run.ephemeral_system_prompt, session_id=run.session_id,
+                stream_delta_callback=run.text_cb, tool_progress_callback=run.event_cb,
                 gateway_session_key=run.gateway_session_key,
                 requested_model=run.agent_overrides.get("requested_model"),
                 requested_provider=run.agent_overrides.get("requested_provider"),
-                model_options=run.agent_overrides.get("model_options"),
-                route=run.route,
-                room_dispatch=run.room_dispatch,
-                room_execution_policy=run.room_execution_policy,
+                model_options=run.agent_overrides.get("model_options"), route=run.route,
+                room_dispatch=run.room_dispatch, room_execution_policy=run.room_execution_policy,
             )
         self._active_run_agents[run_id] = agent
-
-        def _approval_notify(approval_data: Dict[str, Any]) -> None:
-            event = dict(approval_data or {})
-            # Redact credentials before the command enters the SSE/API stream;
-            # API/desktop clients must never receive the raw flagged command.
-            if "command" in event:
-                from gateway.run import _redact_approval_command
-
-                event["command"] = _redact_approval_command(event.get("command"))
-            event.update({
-                "event": "approval.request",
-                "run_id": run_id,
-                "timestamp": time.time(),
-                "choices": _api_server._approval_event_choices(
-                    smart_denied=bool(event.get("smart_denied")),
-                    allow_session=event.get("allow_session") is not False,
-                    allow_permanent=event.get("allow_permanent") is not False,
-                ),
-            })
-            self._set_run_status(
-                run_id, "waiting_for_approval", last_event="approval.request", approval=event
-            )
-            with suppress(Exception):
-                loop.call_soon_threadsafe(q.put_nowait, event)
-
+        approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: _run_agent_sync(self, run, agent, _approval_notify, _api_server=_api_server)
+            None, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server)
         )
-        if (
-            run_id in self._stopping_run_ids
-            and isinstance(result, dict)
-            and result.get("interrupted") is True
-        ):
-            _emit("run.cancelled")
-            self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
-        elif isinstance(result, dict) and result.get("failed"):
+        if not isinstance(result, dict):
+            result = {}
+        if run_id in self._stopping_run_ids and result.get("interrupted") is True:
+            _finish("cancelled")
+        elif result.get("failed"):
             # Non-retryable client errors (401/400) return failed=True instead
             # of raising, so the except branches below never fire for them.
-            error_msg = _redact_api_error_text(result.get("error") or "agent run failed")
-            _emit("run.failed", error=error_msg)
-            self._set_run_status(run_id, "failed", error=error_msg, last_event="run.failed")
+            _finish("failed", error=_redact_api_error_text(result.get("error") or "agent run failed"))
         else:
-            final_response = result.get("final_response", "") if isinstance(result, dict) else ""
             # Undelivered steer text (accepted after the final response) rides on
             # the terminal event/status so the client can replay it as the next turn.
-            pending_steer = result.get("pending_steer") if isinstance(result, dict) else None
+            pending_steer = result.get("pending_steer")
             extra = {"pending_steer": pending_steer} if pending_steer else {}
-            _emit("run.completed", output=final_response, usage=usage, **extra)
-            self._set_run_status(
-                run_id, "completed", output=final_response, usage=usage,
-                last_event="run.completed", **extra,
-            )
+            _finish("completed", extra, output=result.get("final_response", ""), usage=usage)
     except asyncio.CancelledError:
-        self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
-        with suppress(Exception):
-            _emit("run.cancelled")
+        _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
         # /v1/runs bypasses _run_agent(), so it needs its own branch to surface
         # the same controlled provider-auth message the other endpoints give.
         logger.warning("Provider authentication failed for run=%s: %s", run_id, exc)
-        _fail(f"⚠️ Provider authentication failed: {exc}")
+        _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
-        _fail(_redact_api_error_text(exc))
+        _finish("failed", error=_redact_api_error_text(exc))
     finally:
         # If the asyncio wrapper is cancelled (e.g. via /stop) the executor
         # thread may still block on an approval Event; unregistering here
         # releases it. Harmlessly idempotent on normal completion.
-        with suppress(Exception):
-            from tools.approval import unregister_gateway_notify
-
-            unregister_gateway_notify(run.approval_session_key)
+        _unregister_approval_notify(run.approval_session_key)
         with suppress(Exception):
             run.put_event(None)  # sentinel: close the SSE stream
-        self._active_run_agents.pop(run_id, None)
-        self._active_run_tasks.pop(run_id, None)
-        self._run_approval_sessions.pop(run_id, None)
-        self._stopping_run_ids.discard(run_id)
-        self._release_run_owner_if_forgotten(run_id)
+        _retire_live_run(self, run_id)
+
+
+def _unregister_approval_notify(approval_session_key: Optional[str]) -> None:
+    """Best-effort release of a run's approval waiter (no-op without a key)."""
+    with suppress(Exception):
+        from tools.approval import unregister_gateway_notify
+
+        if approval_session_key:
+            unregister_gateway_notify(approval_session_key)
 
 
 def _release_run_owner_if_forgotten(self, run_id: str) -> None:
@@ -854,11 +853,7 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
 
     response = web.StreamResponse(
         status=200,
-        headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
     await response.prepare(request)
 
@@ -877,9 +872,7 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
         logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
     finally:
         self._run_stream_subscribers.discard(run_id)
-        self._run_streams.pop(run_id, None)
-        self._run_streams_created.pop(run_id, None)
-        self._release_run_owner_if_forgotten(run_id)
+        _drop_run_transport(self, run_id)
 
     return response
 
@@ -891,6 +884,15 @@ def _emit_to_stream(self, run_id: str, event: Dict[str, Any]) -> None:
             q.put_nowait(event)
 
 
+def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
+    """Record a control-plane event on the run status and its SSE stream."""
+    self._set_run_status(run_id, "running", last_event=name)
+    _emit_to_stream(self, run_id, _run_event(run_id, name, **fields))
+
+
+_APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "once"}
+
+
 async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
     _coerce_request_bool = _api_server._coerce_request_bool
@@ -899,9 +901,7 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
     auth_err = self._check_run_auth(request, permission="approve")
     if auth_err:
         return auth_err
-    run_id, _, _, _, err = _load_owned_run(
-        self, request, _openai_error=_openai_error, active_fallback=False
-    )
+    run_id, _, _, _, err = _load_owned_run(self, request, _openai_error=_openai_error, active_fallback=False)
     if err is not None:
         return err
 
@@ -911,15 +911,13 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
         return _json_error(_openai_error, "Invalid JSON", status=400)
 
     raw_choice = str(body.get("choice", "")).strip().lower()
-    aliases = {"approve": "once", "approved": "once", "allow": "once"}
-    choice = aliases.get(raw_choice, raw_choice)
+    choice = _APPROVAL_CHOICE_ALIASES.get(raw_choice, raw_choice)
     room_scoped = bool(self._room_grant_token(request))
     raw_request_id = body.get("request_id")
     request_id = raw_request_id.strip() if isinstance(raw_request_id, str) else ""
     if raw_request_id is not None and (not request_id or len(request_id) > 256):
         return _json_error(
-            _openai_error, "Approval request_id is invalid.",
-            code="invalid_approval_request", status=400,
+            _openai_error, "Approval request_id is invalid.", code="invalid_approval_request", status=400
         )
     allowed = {"once", "deny"} if room_scoped else {"once", "session", "always", "deny"}
     if choice not in allowed:
@@ -961,16 +959,11 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
 
     if resolved <= 0:
         return _json_error(
-            _openai_error, f"Run has no pending approval: {run_id}",
-            code="approval_not_pending", status=409,
+            _openai_error, f"Run has no pending approval: {run_id}", code="approval_not_pending", status=409
         )
 
-    self._set_run_status(run_id, "running", last_event="approval.responded")
     request_id_field = {"request_id": request_id} if request_id else {}
-    _emit_to_stream(
-        self, run_id,
-        _run_event(run_id, "approval.responded", choice=choice, **request_id_field, resolved=resolved),
-    )
+    _mark_run_event(self, run_id, "approval.responded", choice=choice, **request_id_field, resolved=resolved)
     return web.json_response({
         "object": "hermes.run.approval_response",
         "run_id": run_id,
@@ -983,7 +976,6 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/steer — inject guidance into a running agent."""
     _openai_error = _api_server._openai_error
-    _redact_api_error_text = _api_server._redact_api_error_text
 
     auth_err = self._check_auth(request)
     if auth_err:
@@ -1018,16 +1010,14 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
     except Exception as exc:
         logger.exception("[api_server] steer failed for run %s", run_id)
         return _json_error(
-            _openai_error, _redact_api_error_text(exc), code="steer_failed", status=500
+            _openai_error, _api_server._redact_api_error_text(exc), code="steer_failed", status=500
         )
     if not accepted:
         return _json_error(
-            _openai_error, f"Run did not accept steer text: {run_id}",
-            code="steer_not_accepted", status=409,
+            _openai_error, f"Run did not accept steer text: {run_id}", code="steer_not_accepted", status=409
         )
 
-    self._set_run_status(run_id, "running", last_event="run.steered")
-    _emit_to_stream(self, run_id, _run_event(run_id, "run.steered", accepted=True))
+    _mark_run_event(self, run_id, "run.steered", accepted=True)
     return web.json_response({"object": "hermes.run.steer", "run_id": run_id, "accepted": True})
 
 
@@ -1087,22 +1077,12 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         task = self._active_run_tasks.get(run_id)
         task_done = task is None or task.done()
         if task_done:
-            with suppress(Exception):
-                from tools.approval import unregister_gateway_notify
-
-                approval_session_key = self._run_approval_sessions.get(run_id)
-                if approval_session_key:
-                    unregister_gateway_notify(approval_session_key)
+            _unregister_approval_notify(self._run_approval_sessions.get(run_id))
         # The transport TTL always bounds buffering. Live control state is
         # independent and survives until the executor-backed task returns.
-        self._run_streams.pop(run_id, None)
-        self._run_streams_created.pop(run_id, None)
+        _drop_run_transport(self, run_id)
         if task_done:
-            self._active_run_agents.pop(run_id, None)
-            self._active_run_tasks.pop(run_id, None)
-            self._run_approval_sessions.pop(run_id, None)
-            self._stopping_run_ids.discard(run_id)
-        self._release_run_owner_if_forgotten(run_id)
+            _retire_live_run(self, run_id)
 
     stale_statuses = [
         run_id
@@ -1111,6 +1091,4 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
     ]
     for run_id in stale_statuses:
-        self._run_statuses.pop(run_id, None)
-        self._run_idempotency_ids.discard(run_id)
-        self._release_run_owner_if_forgotten(run_id)
+        _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)
