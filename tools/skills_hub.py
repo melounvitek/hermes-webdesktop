@@ -208,19 +208,16 @@ def _write_index_cache(key: str, data: Any) -> None:
 # ---------------------------------------------------------------------------
 
 class _JsonStateFile:
-    """A JSON file under the hub dir with a fixed empty shape."""
+    """A JSON file under the hub dir with a fixed empty shape (``EMPTY``, deep-copied
+    on every miss/corrupt read); ``DEFAULT_PATH`` is the hub path resolver."""
 
     EMPTY: dict = {}
+    DEFAULT_PATH: Any = None
 
     def __init__(self, path: Optional[Path] = None):
-        self.path = path if path is not None else self._default_path()
-
-    def _default_path(self) -> Path:
-        raise NotImplementedError
+        self.path = path if path is not None else type(self).DEFAULT_PATH()
 
     def _read(self) -> dict:
-        if not self.path.exists():
-            return json.loads(json.dumps(self.EMPTY))
         try:
             return json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -235,9 +232,7 @@ class HubLockFile(_JsonStateFile):
     """skills/.hub/lock.json — provenance of installed hub skills."""
 
     EMPTY = {"version": 1, "installed": {}}
-
-    def _default_path(self) -> Path:
-        return _lock_file()
+    DEFAULT_PATH = staticmethod(_lock_file)
 
     def load(self) -> dict:
         return self._read()
@@ -295,9 +290,7 @@ class TapsManager(_JsonStateFile):
     """skills/.hub/taps.json — custom GitHub repo sources."""
 
     EMPTY = {"taps": []}
-
-    def _default_path(self) -> Path:
-        return _taps_file()
+    DEFAULT_PATH = staticmethod(_taps_file)
 
     def load(self) -> List[dict]:
         return self._read().get("taps", [])
@@ -323,8 +316,7 @@ class TapsManager(_JsonStateFile):
         self.save(new_taps)
         return True
 
-    def list_taps(self) -> List[dict]:
-        return self.load()
+    list_taps = load
 
 
 def append_audit_log(action: str, skill_name: str, source: str,
@@ -359,14 +351,4 @@ def ensure_hub_dirs() -> None:
     ):
         if not path.exists():
             path.write_text(initial, encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# Hermes centralized index (data source for HermesIndexSource)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Source router + parallel search
-# ---------------------------------------------------------------------------
 

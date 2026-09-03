@@ -195,6 +195,19 @@ def _skip_bundle_file(rel_path: str) -> bool:
     return base.startswith(".") or base.endswith(".pyc") or "__pycache__" in rel_path.split("/")
 
 
+def _tree_members(entries: List[dict], prefix: str):
+    """``(rel_path, item_path, is_regular_blob)`` for every git-tree entry under ``prefix``.
+
+    Symlinks (mode 120000) and non-blobs report ``is_regular_blob=False`` so callers
+    can reject a SKILL.md-linked symlink instead of silently following it.
+    """
+    for item in entries:
+        item_path = item.get("path", "")
+        if item_path.startswith(prefix):
+            regular = item.get("type") == "blob" and item.get("mode") != "120000"
+            yield item_path[len(prefix):], item_path, regular
+
+
 class GitHubSource(SkillSource):
     """Fetch skills from GitHub repos via the Contents API."""
 
@@ -330,12 +343,8 @@ class GitHubSource(SkillSource):
         """
         prefix = f"{skill_path}/"
         symlinked: set = set()
-        for item in entries:
-            item_path = item.get("path", "")
-            if not item_path.startswith(prefix):
-                continue
-            rel_path = item_path[len(prefix):]
-            if item.get("type") != "blob" or item.get("mode") == "120000":
+        for rel_path, item_path, regular in _tree_members(entries, prefix):
+            if not regular:
                 symlinked.add(rel_path)
                 continue
             if rel_path == "SKILL.md" or _skip_bundle_file(rel_path):

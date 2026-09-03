@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Union
 
 from agent.skill_utils import is_excluded_skill_path
-from tools.skills_hub_github import GitHubAuth, GitHubSource, _skip_bundle_file
+from tools.skills_hub_github import GitHubAuth, GitHubSource, _skip_bundle_file, _tree_members
 from tools.skills_hub_models import (
     SkillBundle, SkillMeta, SkillSource, _hermes_tags, _matches_query, _memo_json, _parse_frontmatter, hub,
 )
@@ -221,18 +221,9 @@ class OptionalSkillSource(SkillSource):
         tree = github._get_repo_tree(self.OFFICIAL_REPO)
         if tree is None:
             return None
-        _branch, entries = tree
-        prefix = f"{repo_path}/"
         files: Dict[str, Union[str, bytes]] = {}
-        for item in entries:
-            item_path = item.get("path", "")
-            if (
-                item.get("type") != "blob" or item.get("mode") == "120000"
-                or not item_path.startswith(prefix)
-            ):
-                continue
-            rel_file = item_path[len(prefix):]
-            if _skip_bundle_file(rel_file):
+        for rel_file, item_path, regular in _tree_members(tree[1], f"{repo_path}/"):
+            if not regular or _skip_bundle_file(rel_file):
                 continue
             content = github._fetch_file_bytes(self.OFFICIAL_REPO, item_path)
             if content is None:
