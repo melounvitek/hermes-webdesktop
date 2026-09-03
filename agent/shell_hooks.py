@@ -156,11 +156,8 @@ class ShellHookSpec(_ToolMatcherMixin):
 # --- Public API ---
 
 def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = False) -> List[ShellHookSpec]:
-    """Register every configured shell hook on the plugin manager; idempotent.
-
-    Returns the specs that were newly wired up. Skipped entries (unknown events, malformed, not
-    allowlisted, already registered) are logged only.
-    """
+    """Register every configured shell hook on the plugin manager; idempotent. Returns the specs
+    newly wired up; skipped entries (unknown, malformed, not allowlisted, registered) are logged only."""
     if not isinstance(cfg, dict):
         return []
 
@@ -210,10 +207,8 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
             _registered.add(key)
             registered.append(spec)
             logger.info(
-                "shell hook registered: %s -> %s (matcher=%s, timeout=%ds, "
-                "fail_closed=%s)",
-                spec.event, spec.command, spec.matcher, spec.timeout,
-                spec.fail_closed,
+                "shell hook registered: %s -> %s (matcher=%s, timeout=%ds, fail_closed=%s)",
+                spec.event, spec.command, spec.matcher, spec.timeout, spec.fail_closed,
             )
 
     return registered
@@ -277,10 +272,7 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
         if entries is None:
             continue
         if not isinstance(entries, list):
-            logger.warning(
-                "hooks.%s must be a list of hook definitions; got %s",
-                event_name, type(entries).__name__,
-            )
+            logger.warning("hooks.%s must be a list of hook definitions; got %s", event_name, type(entries).__name__)
             continue
         for i, raw in enumerate(entries):
             spec = _parse_single_entry(event_name, i, raw)
@@ -343,10 +335,7 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
         )
         fail_closed = False
 
-    return ShellHookSpec(
-        event=event, command=command.strip(), matcher=matcher,
-        timeout=timeout, fail_closed=fail_closed,
-    )
+    return ShellHookSpec(event=event, command=command.strip(), matcher=matcher, timeout=timeout, fail_closed=fail_closed)
 
 
 # --- Subprocess callback ---
@@ -371,9 +360,7 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     # Own process group on POSIX so a timed-out hook's descendants are reaped with it; Windows tree
     # cleanup goes through kill_process_tree (taskkill /T). Hooks that finish in time keep detached
     # helpers alive.
-    popen_kwargs: Dict[str, Any] = (
-        {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
-    )
+    popen_kwargs: Dict[str, Any] = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
     try:
         proc = subprocess.Popen(
             argv,
@@ -446,18 +433,12 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
         logger.warning("shell hook failed (event=%s command=%s): %s", spec.event, spec.command, r["error"])
         return _fail_closed_block(spec, r["error"]) if fail_closed else None
     if r["timed_out"]:
-        logger.warning(
-            "shell hook timed out after %.2fs (event=%s command=%s)",
-            r["elapsed_seconds"], spec.event, spec.command,
-        )
+        logger.warning("shell hook timed out after %.2fs (event=%s command=%s)", r["elapsed_seconds"], spec.event, spec.command)
         return _fail_closed_block(spec, f"timed out after {spec.timeout}s") if fail_closed else None
 
     stderr = r["stderr"].strip()
     if stderr:
-        logger.debug(
-            "shell hook stderr (event=%s command=%s): %s",
-            spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT],
-        )
+        logger.debug("shell hook stderr (event=%s command=%s): %s", spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT])
 
     if r["returncode"] == BLOCK_EXIT_CODE and blocking_event:
         parsed = _parse_response(spec.event, r["stdout"])
@@ -474,8 +455,7 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
     if r["returncode"] != 0:
         logger.warning(
             "shell hook exited %d (event=%s command=%s); stderr=%s",
-            r["returncode"], spec.event, spec.command,
-            stderr[:_STDERR_MESSAGE_LIMIT],
+            r["returncode"], spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT],
         )
 
     stdout = (r["stdout"] or "").strip()
@@ -632,7 +612,7 @@ def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
     """Approve an unseen ``(event, command)`` pair; True iff granted and recorded."""
     if accept_hooks:
         _record_approval(event, command)
-        logger.info("shell hook auto-approved via --accept-hooks / env / config: " "%s -> %s", event, command)
+        logger.info("shell hook auto-approved via --accept-hooks / env / config: %s -> %s", event, command)
         return True
 
     if not sys.stdin.isatty():
@@ -652,10 +632,10 @@ def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
         print()  # keep the terminal tidy after ^C
         return False
 
-    if answer in {"y", "yes"}:
-        _record_approval(event, command)
-        return True
-    return False
+    if answer not in {"y", "yes"}:
+        return False
+    _record_approval(event, command)
+    return True
 
 
 def _record_approval(event: str, command: str) -> None:
@@ -666,9 +646,7 @@ def _record_approval(event: str, command: str) -> None:
         "script_mtime_at_approval": script_mtime_iso(command),
     }
     with _locked_update_approvals() as data:
-        data["approvals"] = [
-            e for e in data.get("approvals", []) if not _entry_matches(e, event, command)
-        ] + [entry]
+        data["approvals"] = [e for e in data.get("approvals", []) if not _entry_matches(e, event, command)] + [entry]
 
 
 def revoke(command: str) -> int:
