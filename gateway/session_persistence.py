@@ -302,9 +302,7 @@ class SessionPersistenceMixin:
 
         self._loaded = True
         self._routing_db_loaded = db_load_succeeded
-        self._routing_fallback_baseline = (
-            None if db_load_succeeded else self._entries_as_dicts()
-        )
+        self._routing_fallback_baseline = None if db_load_succeeded else self._entries_as_dicts()
 
         # A hard crash skips graceful shutdown and leaves sessions.json
         # pointing at ended sessions; self-heal before the first message.
@@ -374,10 +372,7 @@ class SessionPersistenceMixin:
                     self._entries[key] = verdict
                     recovered_keys += 1
         except Exception as exc:
-            logger.warning(
-                "gateway.session: stale-entry pruning skipped due to DB error: %s",
-                exc,
-            )
+            logger.warning("gateway.session: stale-entry pruning skipped due to DB error: %s", exc)
             return
 
         for key in stale_keys:

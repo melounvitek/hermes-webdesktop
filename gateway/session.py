@@ -404,11 +404,7 @@ _PLATFORM_NOTES = {
 }
 
 
-def build_session_context_prompt(
-    context: SessionContext,
-    *,
-    redact_pii: bool = False,
-) -> str:
+def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = False) -> str:
     """Build the "Current Session Context" system prompt section.
 
     With *redact_pii* and a PII-safe platform (builtin set or plugin registry
@@ -675,10 +671,7 @@ class SessionEntry:
         )
 
 
-def build_channel_continuity_note(
-    entry: "SessionEntry",
-    source: SessionSource,
-) -> Optional[str]:
+def build_channel_continuity_note(entry: "SessionEntry", source: SessionSource) -> Optional[str]:
     """One-line continuity hint for long-lived Slack/Discord channels/threads.
 
     After an auto-reset the agent could bind a new request to an unrelated
@@ -867,8 +860,7 @@ class SessionStore(
     """Session storage/retrieval: SQLite (SessionDB) for metadata and
     transcripts, legacy JSONL fallback when SQLite is unavailable."""
 
-    def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}

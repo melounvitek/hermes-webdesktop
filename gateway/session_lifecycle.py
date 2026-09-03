@@ -263,10 +263,7 @@ class SessionLifecycleMixin:
             self._set_turn_marker_locked(session_key, entry, None, None)
         return True
 
-    def recover_interrupted_turns(
-        self,
-        max_age_seconds: int = 60 * 60,
-    ) -> int:
+    def recover_interrupted_turns(self, max_age_seconds: int = 60 * 60) -> int:
         """Promote crash-left turn markers into ``resume_pending`` (unclean startup only).
 
         Old/invalid markers are cleared without resuming; suspended sessions

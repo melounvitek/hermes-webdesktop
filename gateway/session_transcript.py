@@ -255,9 +255,7 @@ class SessionTranscriptMixin:
         if _hints:
             _hints.pop(child_id, None)
 
-    def _append_to_transcript_serialized(
-        self, session_id: str, message: Dict[str, Any]
-    ) -> None:
+    def _append_to_transcript_serialized(self, session_id: str, message: Dict[str, Any]) -> None:
         """Append a message to a session's transcript (SQLite), draining the
         per-session retry queue."""
         with self._transcript_retry_lock:
@@ -461,9 +459,7 @@ class SessionTranscriptMixin:
             self._dirty_transcripts.pop(session_id, None)
             self._transcript_append_failures.pop(session_id, None)
 
-    def has_platform_message_id(
-        self, session_id: str, platform_message_id: str
-    ) -> bool:
+    def has_platform_message_id(self, session_id: str, platform_message_id: str) -> bool:
         """Whether a message with this platform_message_id is persisted (False without a DB)."""
         db = self._db_for_session_id(session_id)
         if not db:
