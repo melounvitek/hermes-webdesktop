@@ -211,10 +211,7 @@ class FileSyncManager:
             self._delete_fn(to_delete)
             logger.debug("file_sync: deleted %s", to_delete)
 
-    # ------------------------------------------------------------------
-    # Sync-back: pull remote changes to host on teardown
-    # ------------------------------------------------------------------
-
+    # --- Sync-back: pull remote changes to host on teardown ---
     def sync_back(self, hermes_home: Path | None = None) -> None:
         """Pull remote changes back to the host: download the remote ``.hermes/`` as a tar and
         apply only files whose SHA-256 differs from what was pushed. SIGINT is deferred until
@@ -360,8 +357,7 @@ class FileSyncManager:
         if pushed_hash is not None and os.path.exists(host_path) and _sha256_file(host_path) != pushed_hash:
             logger.warning(
                 "sync_back: conflict on %s — host modified "
-                "since push, remote also changed. Applying "
-                "remote version (last-write-wins).",
+                "since push, remote also changed. Applying remote version (last-write-wins).",
                 remote_path)
 
         os.makedirs(os.path.dirname(host_path), exist_ok=True)

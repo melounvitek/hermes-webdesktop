@@ -36,50 +36,42 @@ def _cwd_marker_printf(marker: str) -> str:
 
 
 def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[str] = ()) -> str:
-    """Shell snippet dumping ``export -p`` to *tmp_path* minus the per-session bridged vars
-    (see ``_SNAPSHOT_EXCLUDED_ENV_REGEX``) and *excluded_names*.
-
-    The vars are ``unset`` in a subshell BEFORE ``export -p``: a line-based ``grep -vE`` is
-    unsafe because bash 3.2 prints a value containing a newline as a multi-line ``declare -x``
-    block, so smuggled continuation lines would survive into the snapshot and execute on the
-    next ``source``. ``|| true`` keeps the success contract. The dump is a brace group with the
-    redirection on the group: *tmp_path* is usually a shell-variable expansion, and a redirect
-    on a pipeline segment would expand it inside that segment's subshell, inconsistently with
-    the parent that expands the follow-up ``mv``.
-    """
+    """Shell snippet dumping ``export -p`` to *tmp_path* minus the per-session bridged vars (see
+    ``_SNAPSHOT_EXCLUDED_ENV_REGEX``) and *excluded_names*. The vars are ``unset`` in a subshell
+    BEFORE ``export -p``: a line-based ``grep -vE`` is unsafe because bash 3.2 prints a value
+    containing a newline as a multi-line ``declare -x`` block, so smuggled continuation lines would
+    survive into the snapshot and execute on the next ``source``. ``|| true`` keeps the success
+    contract. The dump is a brace group with the redirection on the group: *tmp_path* is usually a
+    shell-variable expansion, and a redirect on a pipeline segment would expand it inside that
+    segment's subshell, inconsistently with the parent that expands the follow-up ``mv``."""
     # ${!PREFIX*} is bash 3.2+ name-prefix expansion; empty matches are ignored
     # under 2>/dev/null. Caller names are quoted so malformed config can never
     # become shell syntax (valid names stay unquoted by shlex.quote()).
     safe_names = {name for name in excluded_names if isinstance(name, str) and name}
     extra_unset = "".join(f" {shlex.quote(name)}" for name in sorted(safe_names))
     return (
-        "{ ( "
-        "unset ${!HERMES_SESSION_*} ${!HERMES_CRON_AUTO_DELIVER_*} "
+        "{ ( unset ${!HERMES_SESSION_*} ${!HERMES_CRON_AUTO_DELIVER_*} "
         "${!HERMES_BROWSER_CONTROL_*} "
         # AI_AGENT / HERMES_AGENT are per-command attribution markers re-exported
         # by every wrapper with ${VAR:-default} semantics; persisting them would
         # let the FIRST command's value override a later outer-harness value.
         "AI_AGENT HERMES_AGENT "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
-        "export -p; "
-        ") || true; } "
+        "export -p; ) || true; } "
         f"> {tmp_path}")
 
 
 def _snapshot_bootstrap_script(
     *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str, excluded_names: Iterable[str], cwd_marker: str,
 ) -> str:
-    """Login-shell bootstrap that captures env/functions/aliases into the snapshot.
-
-    Atomic publish: assemble in a ``mktemp`` file, then ``mv`` over the final path so a
-    concurrent ``source`` never reads a half-written snapshot (``$$`` is the parent PID in
-    ``&``-launched subshells and macOS bash 3.2 lacks ``$BASHPID``, so only ``mktemp`` is
-    portable). Functions are filtered by NAME via ``declare -F`` (a line-based
-    ``declare -f | grep -v`` strips the header and leaves an orphaned body that breaks every
-    sourced command); the non-empty guard matters because bare ``declare -f`` dumps ALL
-    functions. The trailing ``cd`` restores the configured cwd after profile scripts
-    (e.g. ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory.
-    """
+    """Login-shell bootstrap that captures env/functions/aliases into the snapshot. Atomic publish:
+    assemble in a ``mktemp`` file, then ``mv`` over the final path so a concurrent ``source`` never
+    reads a half-written snapshot (``$$`` is the parent PID in ``&``-launched subshells and macOS
+    bash 3.2 lacks ``$BASHPID``, so only ``mktemp`` is portable). Functions are filtered by NAME via
+    ``declare -F`` (a line-based ``declare -f | grep -v`` strips the header and leaves an orphaned
+    body that breaks every sourced command); the non-empty guard matters because bare ``declare -f``
+    dumps ALL functions. The trailing ``cd`` restores the configured cwd after profile scripts (e.g.
+    ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory."""
     return (
         "umask 077\n"
         f"__hermes_snap_tmp=$(mktemp {snap_tmp_template}) || exit 1\n"
@@ -116,7 +108,6 @@ def _wrap_command_script(
     command: str, *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str,
     passthrough_names: Iterable[str], snapshot_ready: bool, cwd_marker: str) -> str:
     """Per-command bash script: source snapshot, cd, run, re-dump env, emit CWD marker.
-
     ``source`` stdout goes to /dev/null because macOS bash 3.2 / some Homebrew builds echo
     ``declare -x`` lines when sourcing. AI_AGENT/HERMES_AGENT advertise the harness to remote
     backends (whose env is not inherited); ``${VAR:-default}`` never clobbers an outer harness.

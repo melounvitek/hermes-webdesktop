@@ -146,27 +146,20 @@ def _critical_egress_env_names(env_overrides: dict[str, str]) -> set[str]:
 def _extra_args_egress_collisions(extra_args: list[str], critical_names: set[str]) -> list[str]:
     """Return docker_extra_args entries that can override egress controls."""
     collisions: list[str] = []
-    env_flags = {"-e", "--env", "--env-file"}
-    network_flags = {"--network", "--net"}
     i = 0
     while i < len(extra_args):
         arg = extra_args[i]
-        nxt = extra_args[i + 1] if i + 1 < len(extra_args) else ""
-        if arg in env_flags:
-            if arg == "--env-file":
-                collisions.append(arg)
-            elif nxt.split("=", 1)[0] in critical_names:
-                collisions.append(nxt.split("=", 1)[0])
-            i += 2
+        flag, sep, inline_value = arg.partition("=")  # ``-e NAME=v`` vs ``-e=NAME=v`` / ``--env-file=f``
+        if flag in ("-e", "--env", "--env-file"):
+            value = inline_value if sep else (extra_args[i + 1] if i + 1 < len(extra_args) else "")
+            name = value.split("=", 1)[0]
+            if flag == "--env-file":
+                collisions.append(flag)
+            elif name in critical_names:
+                collisions.append(name)
+            i += 1 if sep else 2
             continue
-        if any(arg.startswith(f"{flag}=") for flag in env_flags):
-            if arg.startswith("--env-file="):
-                collisions.append("--env-file")
-            else:
-                name = arg.split("=", 1)[1].split("=", 1)[0]
-                if name in critical_names:
-                    collisions.append(name)
-        elif arg in network_flags or any(arg.startswith(f"{flag}=") for flag in network_flags):
+        if flag in ("--network", "--net"):
             collisions.append(arg)
         i += 1
     return sorted(set(collisions))

@@ -22,31 +22,18 @@ from typing import Callable, Iterable
 from hermes_constants import get_hermes_home
 from tools.interrupt import is_interrupted, is_thread_interrupted
 from tools.environments.base_output import (  # noqa: F401
-    ProcessHandle,
-    _BoundedOutputCollector,
-    _ThreadedProcessHandle,
-    _UNBOUNDED_CAPTURE_CHARS,
-    _finalize_wait_result,
-    _new_output_collector,
-    _pipe_stdin,
-    _popen_bash,
-    _start_drain_thread)
+    ProcessHandle, _BoundedOutputCollector, _ThreadedProcessHandle, _UNBOUNDED_CAPTURE_CHARS,
+    _finalize_wait_result, _new_output_collector, _pipe_stdin, _popen_bash, _start_drain_thread,
+)
 from tools.environments.base_session_env import (  # noqa: F401
-    _SHELL_ENV_NAME_RE,
-    _SNAP_TMP,
-    _SNAP_TMP_SUFFIX,
-    _SNAPSHOT_EXCLUDED_ENV_REGEX,
-    _cwd_marker,
-    _export_dump_excluding_session_vars,
-    _snapshot_bootstrap_script,
-    _split_cwd_marker,
-    _wrap_command_script)
+    _SHELL_ENV_NAME_RE, _SNAP_TMP, _SNAP_TMP_SUFFIX, _SNAPSHOT_EXCLUDED_ENV_REGEX, _cwd_marker,
+    _export_dump_excluding_session_vars, _snapshot_bootstrap_script, _split_cwd_marker,
+    _wrap_command_script,
+)
 from tools.environments.base_wait import _WaitTrace
 from tools.environments.path_utils import (  # noqa: F401
-    _SANDBOX_DIR_HASH_LEN,
-    _SANDBOX_DIR_MAX_LEN,
-    _SANDBOX_DIR_UNSAFE_RE,
-    sanitize_task_id_for_path)
+    _SANDBOX_DIR_HASH_LEN, _SANDBOX_DIR_MAX_LEN, _SANDBOX_DIR_UNSAFE_RE, sanitize_task_id_for_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,10 +170,7 @@ class BaseEnvironment(ABC):
         # so execute() must fall back to non-login ``bash -c``, not ``bash -l``.
         self._prefer_nonlogin = False
 
-    # ------------------------------------------------------------------
-    # Abstract methods
-    # ------------------------------------------------------------------
-
+    # --- Abstract methods ---
     def _run_bash(
         self, cmd_string: str, *, login: bool = False, timeout: int = 120, stdin_data: str | None = None,
     ) -> ProcessHandle:
@@ -198,10 +182,7 @@ class BaseEnvironment(ABC):
         """Release backend resources (container, instance, connection)."""
         ...
 
-    # ------------------------------------------------------------------
-    # Session snapshot (init_session)
-    # ------------------------------------------------------------------
-
+    # --- Session snapshot (init_session) ---
     def _additional_profile_scoped_passthrough_names(self) -> Iterable[str]:
         """Return backend-specific names that must not persist in snapshots."""
         return ()
@@ -258,8 +239,7 @@ class BaseEnvironment(ABC):
                     self._session_id, exc)
             else:
                 logger.warning(
-                    "init_session failed (session=%s): %s — "
-                    "falling back to bash -l per command",
+                    "init_session failed (session=%s): %s — falling back to bash -l per command",
                     self._session_id, detail)
 
     def _probe_nonlogin_fallback(self, detail: str) -> tuple[bool, str]:
@@ -275,10 +255,7 @@ class BaseEnvironment(ABC):
         except Exception as probe_exc:
             return False, f"{detail}; non-login probe: {probe_exc}"
 
-    # ------------------------------------------------------------------
-    # Command wrapping
-    # ------------------------------------------------------------------
-
+    # --- Command wrapping ---
     @staticmethod
     def _quote_cwd_for_cd(cwd: str) -> str:
         """Quote a ``cd`` target while preserving ``~`` expansion (``~/...``
@@ -310,29 +287,24 @@ class BaseEnvironment(ABC):
         delimiter = f"HERMES_STDIN_{uuid.uuid4().hex[:12]}"
         return f"{command} << '{delimiter}'\n{stdin_data}\n{delimiter}"
 
-    # ------------------------------------------------------------------
-    # Process lifecycle
-    # ------------------------------------------------------------------
-
+    # --- Process lifecycle ---
     def _wait_for_process(
         self, proc: ProcessHandle, timeout: int = 120, *,
         bounded_capture: bool = False, watch_interrupt_tid: int | None = None) -> dict:
         """Poll-based wait with interrupt checking and stdout draining (shared, not overridden).
-
         ``bounded_capture=True`` (foreground terminal-tool path only) retains at most
         ``tool_output.max_bytes`` in a head/tail window so a verbose subprocess cannot OOM the
-        process; the default keeps full fidelity for internal consumers where truncation
-        corrupts data. Fires the activity callback every 10s so the gateway's inactivity
-        timeout doesn't kill long commands. ``watch_interrupt_tid`` is the tool-worker thread
-        that submitted this wait: ``execute()`` may move the wait onto a ``run_bounded_sync``
-        worker while ``/stop`` still interrupts the original tid, so both bits are honored.
-        ``KeyboardInterrupt``/``SystemExit`` mid-poll kills the process first — the local
-        backend spawns into its own process group, so an unkilled child would be orphaned.
-        """
+        process; the default keeps full fidelity for internal consumers. Fires the activity
+        callback every 10s so the gateway's inactivity timeout doesn't kill long commands.
+        ``watch_interrupt_tid`` is the tool-worker thread that submitted this wait: ``execute()``
+        may move the wait onto a ``run_bounded_sync`` worker while ``/stop`` still interrupts the
+        original tid, so both bits are honored. ``KeyboardInterrupt``/``SystemExit`` mid-poll
+        kills the process first — the local backend spawns into its own process group, so an
+        unkilled child would be orphaned."""
         output = _new_output_collector(proc, bounded_capture)
         drain_thread = _start_drain_thread(proc, output)
-        deadline = time.monotonic() + timeout
         _now = time.monotonic()
+        deadline = _now + timeout
         _activity_state = {"last_touch": _now, "start": _now}
         trace = _WaitTrace(proc, timeout, enabled=_DEBUG_INTERRUPT, logger=logger)
         trace.enter()
@@ -388,10 +360,8 @@ class BaseEnvironment(ABC):
             stdin_thread.join(timeout=5)
         rendered = output.render()
         result = self._finalize_wait_result(output, rendered, proc.returncode)
-        stdin_errors = getattr(proc, "_hermes_stdin_errors", None)
-        if stdin_errors:
-            err = str(stdin_errors[0])
-            result["stdin_error"] = err
+        if stdin_errors := getattr(proc, "_hermes_stdin_errors", None):
+            result["stdin_error"] = err = str(stdin_errors[0])
             result["output"] = rendered + f"\n[stdin write failed: {err}]"
         return result
 
@@ -404,10 +374,7 @@ class BaseEnvironment(ABC):
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
-    # ------------------------------------------------------------------
-    # CWD extraction
-    # ------------------------------------------------------------------
-
+    # --- CWD extraction ---
     def _update_cwd(self, result: dict):
         """Extract CWD from command output. Override for local file-based read."""
         self._extract_cwd_from_output(result)
@@ -428,19 +395,13 @@ class BaseEnvironment(ABC):
             result["cwd"] = cwd_path
         result["output"] = cleaned
 
-    # ------------------------------------------------------------------
-    # Hooks
-    # ------------------------------------------------------------------
-
+    # --- Hooks ---
     def _before_execute(self) -> None:
         """Hook before each command. Remote backends (SSH, Modal, Daytona)
         trigger their FileSyncManager here; bind-mount backends and Local don't."""
         pass
 
-    # ------------------------------------------------------------------
-    # Unified execute()
-    # ------------------------------------------------------------------
-
+    # --- Unified execute() ---
     def execute(
         self,
         command: str,
@@ -450,15 +411,12 @@ class BaseEnvironment(ABC):
         stdin_data: str | None = None,
         rewrite_compound_background: bool = True,
         bounded_capture: bool = False) -> dict:
-        """Execute a command, return {"output": str, "returncode": int}.
-
-        ``bounded_capture=True`` caps retention at ``tool_output.max_bytes`` WHILE draining;
-        only the foreground terminal tool may set it — internal full-fidelity consumers
-        (file-op ``cat`` reads feeding the patch engine, RPC reads, log reads) MUST leave it
-        False or data is corrupted. The wait is bounded by ``agent.deadline.run_bounded_sync``
-        so a wedged poll loop cannot hang past ``timeout`` and silently disable every asyncio
-        timer in the process.
-        """
+        """Execute a command, return {"output": str, "returncode": int}. ``bounded_capture=True``
+        caps retention at ``tool_output.max_bytes`` WHILE draining; only the foreground terminal
+        tool may set it — internal full-fidelity consumers (file-op ``cat`` reads feeding the
+        patch engine, RPC reads, log reads) MUST leave it False or data is corrupted. The wait is
+        bounded by ``agent.deadline.run_bounded_sync`` so a wedged poll loop cannot hang past
+        ``timeout`` and silently disable every asyncio timer in the process."""
         self._before_execute()
 
         exec_command, sudo_stdin = self._prepare_command(command)
@@ -508,10 +466,10 @@ class BaseEnvironment(ABC):
         from agent.deadline import run_bounded_sync
 
         try:
-            bound_s = float(effective_timeout) + _EXECUTE_WAIT_BOUND_GRACE_S
+            bound_s = float(effective_timeout)
         except (TypeError, ValueError):
-            # A non-numeric timeout must not disable the backstop; use the 120s default.
-            bound_s = 120.0 + _EXECUTE_WAIT_BOUND_GRACE_S
+            bound_s = 120.0  # a non-numeric timeout must not disable the backstop
+        bound_s += _EXECUTE_WAIT_BOUND_GRACE_S
 
         try:
             bounded = run_bounded_sync(
@@ -520,11 +478,9 @@ class BaseEnvironment(ABC):
             _on_timeout()
             raise
 
-        if bounded.timed_out:
-            timeout_msg = f"\n[Command timed out after {effective_timeout}s]"
-            result = {"output": timeout_msg.lstrip(), "returncode": 124}
-        else:
-            result = bounded.value
+        result = (
+            {"output": f"[Command timed out after {effective_timeout}s]", "returncode": 124}
+            if bounded.timed_out else bounded.value)
         self._update_cwd(result)
         return result
 
@@ -543,10 +499,7 @@ class BaseEnvironment(ABC):
         except Exception:
             logger.debug("terminal wait-bound kill_process_tree failed", exc_info=True)
 
-    # ------------------------------------------------------------------
-    # Shared helpers
-    # ------------------------------------------------------------------
-
+    # --- Shared helpers ---
     def stop(self):
         """Alias for cleanup (compat with older callers)."""
         self.cleanup()
