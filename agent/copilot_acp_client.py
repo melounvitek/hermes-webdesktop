@@ -58,18 +58,13 @@ _INITIALIZE_PARAMS = {
     "clientInfo": {"name": "hermes-agent", "title": "Hermes Agent", "version": "0.0.0"},
 }
 _DEPRECATED_CLI_ERROR = (
-    "Hermes ACP mode requires the NEW GitHub Copilot CLI "
-    "(github.com/github/copilot-cli), but the binary it just "
+    "Hermes ACP mode requires the NEW GitHub Copilot CLI (github.com/github/copilot-cli), but the binary it just "
     "spawned is the deprecated `gh copilot` extension.\n\n"
-    "Install the new CLI:\n"
-    "  npm install -g @github/copilot\n"
-    "  # then verify with: copilot --help\n\n"
-    "If `copilot` already resolves to the new CLI but you still see this,\n"
-    "point Hermes at it explicitly:\n"
+    "Install the new CLI:\n  npm install -g @github/copilot\n  # then verify with: copilot --help\n\n"
+    "If `copilot` already resolves to the new CLI but you still see this,\npoint Hermes at it explicitly:\n"
     "  export HERMES_COPILOT_ACP_COMMAND=/path/to/new/copilot\n\n"
-    "Alternative: use the `copilot` provider (no ACP, hits the Copilot API\n"
-    "directly with a Copilot subscription token) via `hermes setup`.\n\n"
-    "Original error:\n"
+    "Alternative: use the `copilot` provider (no ACP, hits the Copilot API\ndirectly with a Copilot subscription "
+    "token) via `hermes setup`.\n\nOriginal error:\n"
 )
 
 
@@ -275,10 +270,7 @@ def _fs_write_text_file(params: dict[str, Any], cwd: str) -> Any:
     # Approval-gated paths (e.g. ~/.ssh/config) are only soft-gated for interactive
     # tools, but the ACP shim has no human channel to confirm — fail closed.
     if is_write_approval_required(str(path)):
-        raise PermissionError(
-            f"Write denied: '{path}' requires interactive approval "
-            "and cannot be written through the ACP file bridge."
-        )
+        raise PermissionError(f"Write denied: '{path}' requires interactive approval and cannot be written through the ACP file bridge.")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(params.get("content") or ""), encoding="utf-8")
     return None
@@ -352,14 +344,10 @@ class CopilotACPClient:
         if _acp_supported(self._acp_command, self._acp_args) is False:
             preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
             raise RuntimeError(
-                f"ACP transport not supported by '{self._acp_command}': "
-                f"`{preview}` is rejected as an unknown option. "
-                f"This usually means the CLI is an older release (e.g. "
-                f"Claude Code v2.x) or a different tool than expected. "
-                f"Either install a CLI that ships with --acp support "
-                f"(e.g. `@github/copilot` late 2025+), or set "
-                f"HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS "
-                f"to a working pair."
+                f"ACP transport not supported by '{self._acp_command}': `{preview}` is rejected as an unknown option. "
+                "This usually means the CLI is an older release (e.g. Claude Code v2.x) or a different tool than expected. "
+                "Either install a CLI that ships with --acp support (e.g. `@github/copilot` late 2025+), or set "
+                "HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS to a working pair."
             )
         try:
             # Hide the console the child would flash on Windows; stdio pipes stay intact.
@@ -373,8 +361,8 @@ class CopilotACPClient:
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
-                f"Could not start Copilot ACP command '{self._acp_command}'. "
-                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+                f"Could not start Copilot ACP command '{self._acp_command}'. Install GitHub Copilot CLI or set "
+                "HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
             ) from exc
         if proc.stdin is None or proc.stdout is None:
             proc.kill()

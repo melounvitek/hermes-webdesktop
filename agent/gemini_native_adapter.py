@@ -32,6 +32,7 @@ try:
     _HERMES_VERSION = str(_hermes_cli.__version__)
 except Exception:
     _HERMES_VERSION = "0.0.0"
+_API_CLIENT = f"hermes-agent/{_HERMES_VERSION}"  # client context per Gemini's partner-integration guidance
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -108,7 +109,7 @@ def probe_gemini_tier(
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
                 f"{base}/models/{model}:generateContent", params={"key": key}, json=payload,
-                headers={"Content-Type": "application/json", "X-Goog-Api-Client": f"hermes-agent/{_HERMES_VERSION}"},
+                headers={"Content-Type": "application/json", "X-Goog-Api-Client": _API_CLIENT},
             )
     except Exception as exc:
         logger.debug("probe_gemini_tier: network error: %s", exc)
@@ -164,19 +165,15 @@ class GeminiAPIError(Exception):
 
 def _text_of(item: Any) -> Optional[str]:
     """Text of an OpenAI content item (plain str or ``{"type": "text"}`` dict), else None."""
-    if isinstance(item, str):
-        return item
     if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
         return item["text"]
-    return None
+    return item if isinstance(item, str) else None
 
 
 def _coerce_content_to_text(content: Any) -> str:
-    if content is None:
-        return ""
     if isinstance(content, list):
         return "\n".join(t for t in map(_text_of, content) if t is not None)
-    return content if isinstance(content, str) else str(content)
+    return "" if content is None else str(content)
 
 
 def _inline_data_part(url: Any) -> Optional[Dict[str, Any]]:
@@ -186,10 +183,10 @@ def _inline_data_part(url: Any) -> Optional[Dict[str, Any]]:
     try:
         header, encoded = url.split(",", 1)
         mime = header.split(":", 1)[1].split(";", 1)[0]
-        raw = base64.b64decode(encoded)
+        data = base64.b64encode(base64.b64decode(encoded)).decode("ascii")
     except Exception:
         return None
-    return {"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}}
+    return {"inlineData": {"mimeType": mime, "data": data}}
 
 
 def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
@@ -202,8 +199,7 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
         if text or isinstance(item, str):
             parts.append({"text": text})
         elif isinstance(item, dict) and item.get("type") == "image_url":
-            image = _inline_data_part((item.get("image_url") or {}).get("url") or "")
-            if image:
+            if image := _inline_data_part((item.get("image_url") or {}).get("url") or ""):
                 parts.append(image)
     return parts
 
@@ -228,9 +224,7 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any], include_ids: bool 
         args = json.loads(args_raw) if isinstance(args_raw, str) and args_raw else {}
     except json.JSONDecodeError:
         args = {"_raw": args_raw}
-    if not isinstance(args, dict):
-        args = {"_value": args}
-    call: Dict[str, Any] = {"name": str(fn.get("name") or ""), "args": args}
+    call: Dict[str, Any] = {"name": str(fn.get("name") or ""), "args": args if isinstance(args, dict) else {"_value": args}}
     if include_ids and _tool_call_id(tool_call):
         call["id"] = _tool_call_id(tool_call)
     return {"functionCall": call, "thoughtSignature": _tool_call_extra_signature(tool_call) or _SKIP_SIGNATURE}
@@ -267,13 +261,12 @@ def _translate_tool_result_to_gemini(
         parsed = json.loads(content) if content.strip().startswith(("{", "[")) else None
     except json.JSONDecodeError:
         parsed = None
-    response = parsed if isinstance(parsed, dict) and not _looks_like_json_schema(parsed) else {"output": content}
-    function_response: Dict[str, Any] = {"name": name, "response": response}
+    structured = isinstance(parsed, dict) and not _looks_like_json_schema(parsed)
+    function_response: Dict[str, Any] = {"name": name, "response": parsed if structured else {"output": content}}
     if include_ids and tool_call_id:
         function_response["id"] = tool_call_id
     # Gemini 3.x accepts images inside functionResponse.parts; 2.x rejects the field.
-    image_parts = [p for p in _extract_multimodal_parts(raw_content) if "inlineData" in p] if is_gemini3 else []
-    if image_parts:
+    if image_parts := [p for p in _extract_multimodal_parts(raw_content) if "inlineData" in p] if is_gemini3 else []:
         function_response["parts"] = image_parts
     return {"functionResponse": function_response}
 
@@ -467,11 +460,10 @@ def _dump_call_args(fc: Dict[str, Any], **kwargs: Any) -> str:
 
 
 def _usage_from_metadata(usage_meta: Dict[str, Any]) -> SimpleNamespace:
+    count = lambda key: int(usage_meta.get(key) or 0)  # noqa: E731
     return SimpleNamespace(
-        prompt_tokens=int(usage_meta.get("promptTokenCount") or 0),
-        completion_tokens=int(usage_meta.get("candidatesTokenCount") or 0),
-        total_tokens=int(usage_meta.get("totalTokenCount") or 0),
-        prompt_tokens_details=SimpleNamespace(cached_tokens=int(usage_meta.get("cachedContentTokenCount") or 0)),
+        prompt_tokens=count("promptTokenCount"), completion_tokens=count("candidatesTokenCount"),
+        total_tokens=count("totalTokenCount"), prompt_tokens_details=SimpleNamespace(cached_tokens=count("cachedContentTokenCount")),
     )
 
 
@@ -491,6 +483,17 @@ def _tool_call_ns(name: str, arguments: str, index: int, call_id: str, extra_con
     return tool_call
 
 
+def _part_text(part: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """``(text, is_thought)`` for a candidate part; ``(None, False)`` when it carries no text."""
+    text = part.get("text")
+    return (text, part.get("thought") is True) if isinstance(text, str) else (None, False)
+
+
+def _part_function_call(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    fc = part.get("functionCall")
+    return fc if isinstance(fc, dict) and fc.get("name") else None
+
+
 def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespace:
     candidates = resp.get("candidates") or []
     cand = parts = None
@@ -504,11 +507,10 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
     for index, part in enumerate(parts or []):
         if not isinstance(part, dict):
             continue
-        if part.get("thought") is True and isinstance(part.get("text"), str):
-            reasoning_pieces.append(part["text"])
-        elif isinstance(part.get("text"), str):
-            text_pieces.append(part["text"])
-        elif isinstance(fc := part.get("functionCall"), dict) and fc.get("name"):
+        text, is_thought = _part_text(part)
+        if text is not None:
+            (reasoning_pieces if is_thought else text_pieces).append(text)
+        elif fc := _part_function_call(part):
             tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
 
     if cand is None:
@@ -532,10 +534,10 @@ def _make_stream_chunk(
     *, model: str, content: str = "", tool_call_delta: Optional[Dict[str, Any]] = None,
     finish_reason: Optional[str] = None, reasoning: str = "",
 ) -> _GeminiStreamChunk:
-    tool_calls = None
-    if tool_call_delta is not None:
-        d = tool_call_delta
-        tool_calls = [_tool_call_ns(d.get("name") or "", d.get("arguments") or "", d.get("index", 0), _new_call_id(d), d.get("extra_content"))]
+    d = tool_call_delta
+    tool_calls = None if d is None else [
+        _tool_call_ns(d.get("name") or "", d.get("arguments") or "", d.get("index", 0), _new_call_id(d), d.get("extra_content"))
+    ]
     delta = SimpleNamespace(
         role="assistant", content=content or None, tool_calls=tool_calls,
         reasoning=reasoning or None, reasoning_content=reasoning or None,
@@ -575,21 +577,20 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
     for part_index, part in enumerate(parts):
         if not isinstance(part, dict):
             continue
-        if part.get("thought") is True and isinstance(part.get("text"), str):
-            chunks.append(_make_stream_chunk(model=model, reasoning=part["text"]))
+        text, is_thought = _part_text(part)
+        if is_thought:
+            chunks.append(_make_stream_chunk(model=model, reasoning=text))
             continue
-        if isinstance(part.get("text"), str) and part["text"]:
-            chunks.append(_make_stream_chunk(model=model, content=part["text"]))
-        fc = part.get("functionCall")
-        if isinstance(fc, dict) and fc.get("name"):
+        if text:
+            chunks.append(_make_stream_chunk(model=model, content=text))
+        if fc := _part_function_call(part):
             name = str(fc["name"])
             args_str = _dump_call_args(fc, sort_keys=True)
             thought_signature = part.get("thoughtSignature") if isinstance(part.get("thoughtSignature"), str) else ""
             call_key = json.dumps(
                 {"part_index": part_index, "name": name, "thought_signature": thought_signature}, sort_keys=True
             )
-            slot = tool_call_indices.get(call_key)
-            if slot is None:
+            if (slot := tool_call_indices.get(call_key)) is None:
                 slot = tool_call_indices[call_key] = {"index": len(tool_call_indices), "id": _new_call_id(fc), "last_arguments": ""}
             # Gemini re-sends the full args each event; emit only the new suffix.
             last_arguments = str(slot.get("last_arguments") or "")
@@ -600,8 +601,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
                 "extra_content": _tool_call_extra_from_part(part),
             }))
 
-    finish_reason_raw = str(cand.get("finishReason") or "")
-    if finish_reason_raw:
+    if finish_reason_raw := str(cand.get("finishReason") or ""):
         finish_chunk = _make_stream_chunk(
             model=model, finish_reason="tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
         )
@@ -622,19 +622,17 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
         err_obj = parsed.get("error") if isinstance(parsed, dict) else None
     except (ValueError, TypeError):
         pass
-    if not isinstance(err_obj, dict):
-        err_obj = {}
+    err_obj = err_obj if isinstance(err_obj, dict) else {}
     err_status = str(err_obj.get("status") or "").strip()
     err_message = str(err_obj.get("message") or "").strip()
     details_list = err_obj.get("details")
 
-    # First google.rpc.ErrorInfo detail supplies reason/metadata.
+    # First google.rpc.ErrorInfo detail supplies reason/metadata (later ones only fill gaps until reason is set).
     reason, metadata = "", {}
     for detail in details_list if isinstance(details_list, list) else []:
         if isinstance(detail, dict) and not reason and str(detail.get("@type") or "").endswith("/google.rpc.ErrorInfo"):
-            reason_value, md = detail.get("reason"), detail.get("metadata")
-            reason = reason_value if isinstance(reason_value, str) else reason
-            metadata = md if isinstance(md, dict) else metadata
+            reason = detail["reason"] if isinstance(detail.get("reason"), str) else reason
+            metadata = detail["metadata"] if isinstance(detail.get("metadata"), dict) else metadata
 
     retry_after: Optional[float] = None
     try:
@@ -642,10 +640,10 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     except (TypeError, ValueError):
         pass
 
-    if err_message:
-        message = f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}"
-    else:
-        message = f"Gemini returned HTTP {status}: {body_text[:500]}"
+    message = (
+        f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
+        else f"Gemini returned HTTP {status}: {body_text[:500]}"
+    )
     # Users who bypassed the setup wizard (raw GOOGLE_API_KEY in .env) still
     # need to learn that the free tier cannot sustain an agent session.
     if status == 429 and is_free_tier_quota_error(err_message or body_text):
@@ -685,9 +683,7 @@ class GeminiNativeClient:
         self._default_headers = dict(default_headers or {})
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
         self.is_closed = False
-        self._http = http_client or httpx.Client(
-            timeout=timeout or httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0)
-        )
+        self._http = http_client or httpx.Client(timeout=timeout or httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0))
 
     def close(self) -> None:
         self.is_closed = True
@@ -698,13 +694,8 @@ class GeminiNativeClient:
 
     def _headers(self) -> Dict[str, str]:
         return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "x-goog-api-key": self.api_key,
-            # Client context per Gemini's partner-integration guidance.
-            "User-Agent": f"hermes-agent/{_HERMES_VERSION} (gemini-native)",
-            "X-Goog-Api-Client": f"hermes-agent/{_HERMES_VERSION}",
-            **self._default_headers,
+            "Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,
+            "User-Agent": f"{_API_CLIENT} (gemini-native)", "X-Goog-Api-Client": _API_CLIENT, **self._default_headers,
         }
 
     @staticmethod
@@ -739,8 +730,7 @@ class GeminiNativeClient:
             payload = response.json()
         except ValueError as exc:
             raise GeminiAPIError(
-                f"Invalid JSON from Gemini native API: {exc}", code="gemini_invalid_json",
-                status_code=response.status_code, response=response,
+                f"Invalid JSON from Gemini native API: {exc}", code="gemini_invalid_json", status_code=response.status_code, response=response,
             ) from exc
         return translate_gemini_response(payload, model=model)
 
