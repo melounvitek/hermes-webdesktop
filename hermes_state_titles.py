@@ -174,8 +174,7 @@ class SessionTitlesMixin:
         row = self._read_one(
             "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
             "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-            "WHERE s.title = ?", (title,),
-        )
+            "WHERE s.title = ?", (title,))
         return self._session_row_dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
@@ -186,8 +185,7 @@ class SessionTitlesMixin:
         numbered = self._read_all(
             "SELECT id, title, started_at FROM sessions "
             "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
-            (f"{_escape_like(title)} #%",),
-        )
+            (f"{_escape_like(title)} #%",))
         if numbered:
             return numbered[0]["id"]
         return exact["id"] if exact else None
@@ -199,8 +197,7 @@ class SessionTitlesMixin:
         base = match.group(1) if match else base_title
         rows = self._read_all(
             "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-            (base, f"{_escape_like(base)} #%"),
-        )
+            (base, f"{_escape_like(base)} #%"))
         if not rows:
             return base
         # The unnumbered original counts as #1.

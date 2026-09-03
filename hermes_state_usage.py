@@ -83,8 +83,7 @@ _MODEL_USAGE_UPSERT_SQL = """INSERT INTO session_model_usage (
 _MODEL_USAGE_FIELDS = frozenset((
     "model", "billing_provider", "billing_base_url", "billing_mode", "input_tokens", "output_tokens",
     "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
-    "actual_cost_usd", "cost_status", "cost_source", "api_call_count",
-))
+    "actual_cost_usd", "cost_status", "cost_source", "api_call_count"))
 
 
 class SessionUsageMixin:
@@ -128,8 +127,7 @@ class SessionUsageMixin:
                     # leftovers. ``not is_alive()`` (not ``is None``) respawns a writer
                     # that died from an unexpected escape.
                     thread = threading.Thread(
-                        target=self._token_writer_loop, name="session-db-token-writer", daemon=True,
-                    )
+                        target=self._token_writer_loop, name="session-db-token-writer", daemon=True)
                     self._token_writer_thread = thread
                     thread.start()
                     if self._token_atexit_hook is None:
@@ -255,8 +253,7 @@ class SessionUsageMixin:
                 # Writer stuck mid-apply: leave deltas unapplied rather than race it.
                 logger.warning(
                     "async token accounting: writer did not stop within %.0fs; "
-                    "%d queued delta(s) not persisted", join_timeout, len(self._token_queue),
-                )
+                    "%d queued delta(s) not persisted", join_timeout, len(self._token_queue))
                 return
         # Writer gone: apply leftovers synchronously under the same busy protocol. Wait
         # out a flush caller-drain that already claimed busy — close() nulls the
@@ -269,8 +266,7 @@ class SessionUsageMixin:
                     logger.warning(
                         "async token accounting: concurrent drain did not "
                         "finish within %.0fs; %d queued delta(s) not persisted",
-                        join_timeout, len(self._token_queue),
-                    )
+                        join_timeout, len(self._token_queue))
                     return
                 self._token_queue_cond.wait(remaining)
             # busy BEFORE clearing the queue (same ordering as the writer loop).
@@ -315,8 +311,7 @@ class SessionUsageMixin:
             billing_provider if has_accounted_usage else None,
             billing_base_url if has_accounted_usage else None,
             billing_mode if has_accounted_usage else None, model if has_accounted_usage else None,
-            api_call_count, session_id,
-        )
+            api_call_count, session_id)
         # Per-model attribution: the sessions row keeps one (model, provider) pair, so a
         # mid-session /model switch would attribute every token to the initial model.
         # Only the incremental path records here — absolute cumulative updates cannot be
@@ -378,9 +373,7 @@ class SessionUsageMixin:
                 billing_mode or sess.get("billing_mode") or "", task or "",
                 api_call_count or 0, *counts,
                 float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0),
-                cost_status, cost_source, now, now,
-            ),
-        )
+                cost_status, cost_source, now, now))
 
     def record_auxiliary_usage(
         self, session_id: str, task: str, *, model: Optional[str] = None,
