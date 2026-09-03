@@ -50,10 +50,7 @@ def _scan_context_content(content: str, filename: str) -> str:
 def _find_git_root(start: Path) -> Optional[Path]:
     """Nearest ancestor (or *start* itself) containing ``.git``, else None."""
     current = start.resolve()
-    for parent in [current, *current.parents]:
-        if (parent / ".git").exists():
-            return parent
-    return None
+    return next((p for p in (current, *current.parents) if (p / ".git").exists()), None)
 
 
 def _find_hermes_md(cwd: Path) -> Optional[Path]:
@@ -73,12 +70,8 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
 def _strip_yaml_frontmatter(content: str) -> str:
     """Drop optional ``---`` YAML frontmatter so only the markdown body is injected."""
     content = content.lstrip("\ufeff")
-    if content.startswith("---"):
-        end = content.find("\n---", 3)
-        if end != -1:
-            body = content[end + 4:].lstrip("\n")
-            return body if body else content
-    return content
+    end = content.find("\n---", 3) if content.startswith("---") else -1
+    return (content[end + 4:].lstrip("\n") or content) if end != -1 else content
 
 
 DEFAULT_AGENT_IDENTITY = (
@@ -371,6 +364,8 @@ def execution_guidance_text(valid_tool_names=None) -> str:
         text = text.replace("- Current facts (weather, news, versions) → use web_search\n", "")
         text = text.replace("(search_files, web_search, read_file, etc.)", "(search_files, read_file, etc.)")
     return text
+
+
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
 GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
@@ -675,7 +670,6 @@ def _plugin_backend_attr(backend: str, attr: str, default=None):
     """*attr* of a plugin-registered terminal backend, fail-soft (unknown backend / raising plugin -> *default*)."""
     try:
         from agent.terminal_env_registry import provider_flag
-
         return provider_flag(backend, attr, default)
     except Exception:
         return default
@@ -683,19 +677,16 @@ def _plugin_backend_attr(backend: str, attr: str, default=None):
 
 def _plugin_backend_is_remote(backend: str) -> bool:
     """Whether a plugin-registered terminal backend runs commands remotely (unknown names are local)."""
-    if not backend or backend in _REMOTE_TERMINAL_BACKENDS or backend == "local":
-        return False
-    return bool(_plugin_backend_attr(backend, "is_remote", False))
+    return bool(backend and backend != "local" and backend not in _REMOTE_TERMINAL_BACKENDS
+                and _plugin_backend_attr(backend, "is_remote", False))
 
 
 def _windows_marketing_version() -> str:
     """"10"/"11" (``platform.release()`` says 10 for both; 11 is build >= 22000)."""
     try:
-        build = sys.getwindowsversion().build  # type: ignore[attr-defined]
-        return "11" if build >= 22000 else "10"
+        return "11" if sys.getwindowsversion().build >= 22000 else "10"  # type: ignore[attr-defined]
     except Exception:
         import platform
-
         return platform.release()
 
 
@@ -750,17 +741,12 @@ def _run_backend_probe(env_type: str, terminal_tool) -> str:
     # Mirrors tools/terminal_tool.py's live-command assembly (`_create_environment` is the factory).
     image_key = _BACKEND_IMAGE_KEYS.get(env_type)
     env = terminal_tool._create_environment(
-        env_type=env_type,
-        image=config.get(image_key, "") if image_key else "",
-        cwd=config.get("cwd", ""),
+        env_type=env_type, image=config.get(image_key, "") if image_key else "", cwd=config.get("cwd", ""),
         timeout=config.get("timeout", 180),
         ssh_config=terminal_tool._ssh_config_from_config(config) if env_type == "ssh" else None,
-        container_config=(
-            {k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
-            if terminal_tool._is_container_backend(env_type) else None
-        ),
-        task_id="prompt-backend-probe",
-        host_cwd=config.get("host_cwd"),
+        container_config=({k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
+                          if terminal_tool._is_container_backend(env_type) else None),
+        task_id="prompt-backend-probe", host_cwd=config.get("host_cwd"),
     )
     result = env.execute(_BACKEND_PROBE_CMD, timeout=4)
     if result.get("returncode") != 0:
@@ -783,20 +769,19 @@ def _format_backend_probe(output: str) -> str:
 def _probe_remote_backend(env_type: str) -> str | None:
     """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)."""
     cache_key = (env_type, _tenv_read("TERMINAL_CWD", ""))
-    cached = _BACKEND_PROBE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached or None
-    formatted = ""
-    try:
-        import tools.terminal_tool as terminal_tool  # heavy; only needed for non-local backends
-    except Exception as e:
-        logger.debug("Backend probe unavailable (import failed): %s", e)
-    else:
+    formatted = _BACKEND_PROBE_CACHE.get(cache_key)
+    if formatted is None:
+        formatted = ""
         try:
-            formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
+            import tools.terminal_tool as terminal_tool  # heavy; only needed for non-local backends
         except Exception as e:
-            logger.debug("Backend probe failed: %s", e)
-    _BACKEND_PROBE_CACHE[cache_key] = formatted
+            logger.debug("Backend probe unavailable (import failed): %s", e)
+        else:
+            try:
+                formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
+            except Exception as e:
+                logger.debug("Backend probe failed: %s", e)
+        _BACKEND_PROBE_CACHE[cache_key] = formatted
     return formatted or None
 
 
@@ -815,17 +800,14 @@ def _local_host_hints() -> list[str]:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
     except OSError:
         pass
-    native_windows = sys.platform == "win32" and not is_wsl()
-    if native_windows:
-        host_lines.append(
-            "Note: on Windows, the machine hostname (e.g. from `hostname` or uname) is NOT the username. "
-            "Use the 'User home directory' above to construct paths under C:\\Users\\<user>\\, never the hostname."
-        )
-    hints = ["\n".join(host_lines)]
+    if not (sys.platform == "win32" and not is_wsl()):
+        return ["\n".join(host_lines)]
+    host_lines.append(
+        "Note: on Windows, the machine hostname (e.g. from `hostname` or uname) is NOT the username. "
+        "Use the 'User home directory' above to construct paths under C:\\Users\\<user>\\, never the hostname."
+    )
     # Windows-local terminal runs bash, not PowerShell — without this the model issues PowerShell syntax.
-    if native_windows:
-        hints.append(_WINDOWS_BASH_SHELL_HINT)
-    return hints
+    return ["\n".join(host_lines), _WINDOWS_BASH_SHELL_HINT]
 
 
 def _remote_backend_hint(backend: str) -> str:
@@ -856,7 +838,6 @@ def _config_readonly(what: str) -> dict:
     """config.yaml as a dict, or {} when unreadable (logged at debug with *what* for context)."""
     try:
         from hermes_cli.config import load_config_readonly
-
         return load_config_readonly()
     except Exception as e:
         logger.debug("Could not read %s from config: %s", what, e)
@@ -866,10 +847,8 @@ def _config_readonly(what: str) -> dict:
 def _embedder_environment_hint() -> str:
     """Embedder-supplied environment description: HERMES_ENVIRONMENT_HINT (container ENV)
     wins over config.yaml ``agent.environment_hint``. Read once at prompt-build time."""
-    extra = (os.getenv("HERMES_ENVIRONMENT_HINT") or "").strip()
-    if not extra:
-        extra = str((_config_readonly("agent.environment_hint").get("agent", {}) or {}).get("environment_hint", "")).strip()
-    return extra
+    return (os.getenv("HERMES_ENVIRONMENT_HINT") or "").strip() or str(
+        (_config_readonly("agent.environment_hint").get("agent", {}) or {}).get("environment_hint", "")).strip()
 
 
 def build_environment_hints() -> str:
@@ -905,9 +884,7 @@ def _dynamic_context_file_max_chars(context_length: Optional[int]) -> int:
 def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
     """Context-file truncation limit: explicit config.yaml ``context_file_max_chars`` wins, else the dynamic cap."""
     val = _config_readonly("context_file_max_chars").get("context_file_max_chars")
-    if isinstance(val, (int, float)) and val > 0:
-        return int(val)
-    return _dynamic_context_file_max_chars(context_length)
+    return int(val) if isinstance(val, (int, float)) and val > 0 else _dynamic_context_file_max_chars(context_length)
 
 
 # Truncation warnings for run_agent to surface. A ContextVar so concurrent gateway prompt builds cannot
@@ -915,13 +892,6 @@ def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
 _truncation_warnings: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "context_file_truncation_warnings", default=None
 )
-
-
-def _record_truncation_warning(msg: str) -> None:
-    warnings = _truncation_warnings.get()
-    if warnings is None:
-        _truncation_warnings.set(warnings := [])
-    warnings.append(msg)
 
 
 def drain_truncation_warnings() -> list:
@@ -949,10 +919,9 @@ def clear_skills_system_prompt_cache(*, clear_snapshot: bool = False) -> None:
     """Drop the in-process skills prompt cache (and optionally the disk snapshot)."""
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE.clear()
-    if not clear_snapshot:
-        return
     try:
-        _skills_prompt_snapshot_path().unlink(missing_ok=True)
+        if clear_snapshot:
+            _skills_prompt_snapshot_path().unlink(missing_ok=True)
     except OSError as e:
         logger.debug("Could not remove skills prompt snapshot: %s", e)
 
@@ -976,18 +945,15 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             dirs.remove(ORG_MIRROR_DIR_NAME)
         elif root == org_root:
             dirs[:] = [d for d in dirs if d == active_org]
-        dirs[:] = [
-            d for d in dirs
-            if d not in EXCLUDED_SKILL_DIRS and not (has_skill_md and d in SKILL_SUPPORT_DIRS)
-        ]
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS and not (has_skill_md and d in SKILL_SUPPORT_DIRS)]
         for filename in ("SKILL.md", "DESCRIPTION.md"):
             path = os.path.join(root, filename)
             try:
-                st = os.stat(path) if filename in files else None
+                if filename in files:
+                    st = os.stat(path)
+                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
             except OSError:
-                st = None
-            if st is not None:
-                manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
+                pass
     return manifest
 
 
@@ -1000,11 +966,8 @@ def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if (
-        isinstance(snapshot, dict)
-        and snapshot.get("version") == _SKILLS_SNAPSHOT_VERSION
-        and snapshot.get("manifest") == _build_skills_manifest(skills_dir)
-    ):
+    if (isinstance(snapshot, dict) and snapshot.get("version") == _SKILLS_SNAPSHOT_VERSION
+            and snapshot.get("manifest") == _build_skills_manifest(skills_dir)):
         return snapshot
     return None
 
@@ -1023,11 +986,8 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
     entry = {
-        "skill_name": skill_name,
-        "category": category,
-        "frontmatter_name": str(frontmatter.get("name", skill_name)),
-        "description": description,
-        "platforms": [str(p).strip() for p in platforms if str(p).strip()],
+        "skill_name": skill_name, "category": category, "frontmatter_name": str(frontmatter.get("name", skill_name)),
+        "description": description, "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
     }
     if org_id:
@@ -1054,9 +1014,7 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
 
 
 def _skill_should_show(
-    conditions: dict,
-    available_tools: "set[str] | None",
-    available_toolsets: "set[str] | None",
+    conditions: dict, available_tools: "set[str] | None", available_toolsets: "set[str] | None",
     session_platform: "str | None" = None,
 ) -> bool:
     """False if the skill's conditional activation rules exclude it."""
@@ -1089,10 +1047,8 @@ def _current_session_platform_hint() -> str:
 
 
 def build_skills_system_prompt(
-    available_tools: "set[str] | None" = None,
-    available_toolsets: "set[str] | None" = None,
-    compact_categories: "frozenset[str] | None" = None,
-    skills_dir_override: "Path | None" = None,
+    available_tools: "set[str] | None" = None, available_toolsets: "set[str] | None" = None,
+    compact_categories: "frozenset[str] | None" = None, skills_dir_override: "Path | None" = None,
 ) -> str:
     """Compact skill index for the system prompt.
 
@@ -1114,7 +1070,8 @@ def build_skills_system_prompt(
         project_dirs = get_project_skills_dirs()
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
-        return _build_skills_system_prompt_inner(skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+        return _build_skills_system_prompt_inner(
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1139,14 +1096,8 @@ def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
 
 
 def _collect_extra_skills(
-    root: Path,
-    skill_files,
-    hides,
-    claimed: set[str],
-    skills_by_category: dict[str, list[tuple[str, str]]],
-    *,
-    desc_prefix: str,
-    log_fmt: str,
+    root: Path, skill_files, hides, claimed: set[str], skills_by_category: dict[str, list[tuple[str, str]]],
+    *, desc_prefix: str, log_fmt: str,
 ) -> None:
     """Add visible skills from a project/external dir; names already in *claimed* are skipped."""
     for skill_file in skill_files:
@@ -1180,10 +1131,8 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 
 
 def _render_skills_index(
-    skills_by_category: dict[str, list[tuple[str, str]]],
-    category_descriptions: dict[str, str],
-    compact_categories: "frozenset[str] | None",
-    available_tools: "set[str] | None",
+    skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
+    compact_categories: "frozenset[str] | None", available_tools: "set[str] | None",
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list."""
     if not skills_by_category:
@@ -1235,11 +1184,8 @@ def _render_skills_index(
 
 
 def _build_skills_system_prompt_inner(
-    skills_dir: "Path",
-    external_dirs: "list[Path]",
-    available_tools: "set[str] | None",
-    available_toolsets: "set[str] | None",
-    compact_categories: "frozenset[str] | None",
+    skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
+    available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
     project_dirs: "list[Path] | None" = None,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
@@ -1247,14 +1193,10 @@ def _build_skills_system_prompt_inner(
     disabled = get_disabled_skill_names(_platform_hint or None)
     project_dirs = project_dirs or []
     cache_key = (
-        str(skills_dir),
-        tuple(str(d) for d in external_dirs),
-        tuple(str(d) for d in project_dirs),
+        str(skills_dir), tuple(str(d) for d in external_dirs), tuple(str(d) for d in project_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
-        _platform_hint,
-        tuple(sorted(disabled)),
-        tuple(sorted(compact_categories or ())),
+        _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1264,19 +1206,16 @@ def _build_skills_system_prompt_inner(
 
     def hides(frontmatter_name: str, skill_name: str, conditions: dict) -> bool:
         """Per-build visibility rule shared by every skill source (snapshot, scan, project, external)."""
-        if frontmatter_name in disabled or skill_name in disabled:
-            return True
-        return not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None)
+        return (frontmatter_name in disabled or skill_name in disabled
+                or not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None))
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
     # Disk snapshot (fast path) vs. full scan: both yield (entry, is_compatible) pairs so labeling runs identically.
     snapshot = _load_skills_snapshot(skills_dir)
     if snapshot is not None:
-        candidates = [
-            (entry, skill_matches_platform_list(entry.get("platforms") or []))
-            for entry in snapshot.get("skills", []) if isinstance(entry, dict)
-        ]
+        candidates = [(entry, skill_matches_platform_list(entry.get("platforms") or []))
+                      for entry in snapshot.get("skills", []) if isinstance(entry, dict)]
         category_descriptions = {str(k): str(v) for k, v in (snapshot.get("category_descriptions") or {}).items()}
     else:
         candidates = []
@@ -1292,13 +1231,9 @@ def _build_skills_system_prompt_inner(
     project_names: set[str] = set()
     if project_dirs:
         from agent.skill_utils import iter_project_skill_files
-
-        for proj_dir in project_dirs:
-            if proj_dir.exists():
-                _collect_extra_skills(
-                    proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
-                    desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s",
-                )
+        for proj_dir in (d for d in project_dirs if d.exists()):
+            _collect_extra_skills(proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
+                                  desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s")
     # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
     _label_visible_entries([e for e in visible_entries if _entry_name(e) not in project_names], skills_by_category)
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
@@ -1314,10 +1249,8 @@ def _build_skills_system_prompt_inner(
     # External skill directories: scanned directly (read-only, small); names already indexed are skipped.
     seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
     for ext_dir in (d for d in external_dirs if d.exists()):
-        _collect_extra_skills(
-            ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names, skills_by_category,
-            desc_prefix="", log_fmt="Error reading external skill %s: %s",
-        )
+        _collect_extra_skills(ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names,
+                              skills_by_category, desc_prefix="", log_fmt="Error reading external skill %s: %s")
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
@@ -1334,10 +1267,7 @@ def _build_skills_system_prompt_inner(
 
 
 def _truncate_content(
-    content: str,
-    filename: str,
-    max_chars: Optional[int] = None,
-    context_length: Optional[int] = None,
+    content: str, filename: str, max_chars: Optional[int] = None, context_length: Optional[int] = None,
     read_path: Optional[str] = None,
 ) -> str:
     """Head/tail truncation with a marker in the middle; ``read_path`` (default ``filename``) is what the
@@ -1351,7 +1281,9 @@ def _truncate_content(
         f"trim the file, pin a larger context_file_max_chars, or use a larger-context model!"
     )
     logger.warning(msg)
-    _record_truncation_warning(msg)
+    if (warnings := _truncation_warnings.get()) is None:
+        _truncation_warnings.set(warnings := [])
+    warnings.append(msg)
     head_chars = int(max_chars * CONTEXT_TRUNCATE_HEAD_RATIO)
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
     marker = (
@@ -1380,14 +1312,17 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
         content = soul_path.read_text(encoding="utf-8").strip()
         if not content:
             return None
-        return _truncate_content(_scan_context_content(content, "SOUL.md"), "SOUL.md", context_length=context_length, read_path=str(soul_path))
+        return _truncate_content(_scan_context_content(content, "SOUL.md"), "SOUL.md", context_length=context_length,
+                                 read_path=str(soul_path))
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 
 
 def _read_context_file(path: Path) -> str:
-    """Stripped text of *path*; "" when empty or unreadable (logged at debug)."""
+    """Stripped text of *path*; "" when missing, empty or unreadable (logged at debug)."""
+    if not path.exists():
+        return ""
     try:
         return path.read_text(encoding="utf-8").strip()
     except Exception as e:
@@ -1395,18 +1330,8 @@ def _read_context_file(path: Path) -> str:
         return ""
 
 
-def _context_section(
-    content: str,
-    label: str,
-    warn_name: str,
-    path: Path,
-    context_length: Optional[int],
-    *,
-    strip_frontmatter: bool = False,
-) -> str:
+def _context_section(content: str, label: str, warn_name: str, path: Path, context_length: Optional[int]) -> str:
     """Threat-scan *content*, render it as ``## <label>``, cap it to the budget (*warn_name* labels warnings)."""
-    if strip_frontmatter:
-        content = _strip_yaml_frontmatter(content)
     body = f"## {label}\n\n{_scan_context_content(content, label)}"
     return _truncate_content(body, warn_name, context_length=context_length, read_path=str(path))
 
@@ -1418,7 +1343,7 @@ def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     if not content:
         return ""
     label = str(hermes_md_path.relative_to(cwd_path)) if hermes_md_path.is_relative_to(cwd_path) else hermes_md_path.name
-    return _context_section(content, label, ".hermes.md", hermes_md_path, context_length, strip_frontmatter=True)
+    return _context_section(_strip_yaml_frontmatter(content), label, ".hermes.md", hermes_md_path, context_length)
 
 
 def _agents_md_directory_chain(cwd_path: Path) -> list[Path]:
@@ -1443,27 +1368,25 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     for directory in _agents_md_directory_chain(cwd_resolved):
         for name in ("AGENTS.override.md", "AGENTS.md", "agents.md"):
             candidate = directory / name
-            if not candidate.exists():
-                continue
             content = _read_context_file(candidate)
             if not content:
                 continue
-            if content in seen_content:
-                break  # identical copy along the chain
-            seen_content.add(content)
-            label = name if directory == cwd_resolved else os.path.relpath(candidate, cwd_resolved)
-            sections.append(_context_section(content, label, label, candidate, context_length))
+            if content not in seen_content:  # else: identical copy along the chain
+                seen_content.add(content)
+                label = name if directory == cwd_resolved else os.path.relpath(candidate, cwd_resolved)
+                sections.append(_context_section(content, label, label, candidate, context_length))
             break  # first name match wins per directory
     if len(sections) <= 1:
         return sections[0] if sections else ""
     # Per-file budgets applied above; also cap the merged chain so a deep monorepo can't multiply the budget.
-    return _truncate_content("\n\n".join(sections), "AGENTS.md (directory chain)", context_length=context_length, read_path=str(cwd_resolved / "AGENTS.md"))
+    return _truncate_content("\n\n".join(sections), "AGENTS.md (directory chain)", context_length=context_length,
+                             read_path=str(cwd_resolved / "AGENTS.md"))
 
 
 def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ("CLAUDE.md", "claude.md"):
-        content = _read_context_file(cwd_path / name) if (cwd_path / name).exists() else ""
+        content = _read_context_file(cwd_path / name)
         if content:
             return _context_section(content, name, "CLAUDE.md", cwd_path / name, context_length)
     return ""
@@ -1475,22 +1398,19 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
     cursor_rules_dir = cwd_path / ".cursor" / "rules"
     if cursor_rules_dir.is_dir():
         candidates += [(f, f".cursor/rules/{f.name}") for f in sorted(cursor_rules_dir.glob("*.mdc"))]
-    cursorrules_content = ""
-    for path, label in candidates:
-        content = _read_context_file(path) if path.exists() else ""
-        if content:
-            cursorrules_content += f"## {label}\n\n{_scan_context_content(content, label)}\n\n"
+    cursorrules_content = "".join(
+        f"## {label}\n\n{_scan_context_content(content, label)}\n\n"
+        for path, label in candidates if (content := _read_context_file(path))
+    )
     if not cursorrules_content:
         return ""
-    return _truncate_content(cursorrules_content, ".cursorrules", context_length=context_length, read_path=str(cwd_path / ".cursorrules"))
+    return _truncate_content(cursorrules_content, ".cursorrules", context_length=context_length,
+                             read_path=str(cwd_path / ".cursorrules"))
 
 
 def build_context_files_prompt(
-    cwd: Optional[str] = None,
-    skip_soul: bool = False,
-    context_length: Optional[int] = None,
-    allow_install_tree_fallback: bool = False,
-    home_override: "Path | None" = None,
+    cwd: Optional[str] = None, skip_soul: bool = False, context_length: Optional[int] = None,
+    allow_install_tree_fallback: bool = False, home_override: "Path | None" = None,
 ) -> str:
     """Discover and load context files for the system prompt (each capped, see ``_get_context_file_max_chars``).
 
@@ -1502,24 +1422,19 @@ def build_context_files_prompt(
     # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
     # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.
     from agent.runtime_cwd import _is_install_tree
-
     if cwd is None and not allow_install_tree_fallback and _is_install_tree(cwd_path):
         logger.warning(
             "skipping project-context discovery: working-directory resolution fell back to the Hermes "
-            "install tree (%s) — set terminal.cwd to your project directory",
-            cwd_path,
+            "install tree (%s) — set terminal.cwd to your project directory", cwd_path,
         )
         sections = []
     else:
-        sections = [
-            _load_hermes_md(cwd_path, context_length)
-            or _load_agents_md(cwd_path, context_length)
-            or _load_claude_md(cwd_path, context_length)
-            or _load_cursorrules(cwd_path, context_length)
-        ]
+        sections = [_load_hermes_md(cwd_path, context_length) or _load_agents_md(cwd_path, context_length)
+                    or _load_claude_md(cwd_path, context_length) or _load_cursorrules(cwd_path, context_length)]
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))
     sections = [s for s in sections if s]
     if not sections:
         return ""
-    return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+    return ("# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n"
+            + "\n".join(sections))
