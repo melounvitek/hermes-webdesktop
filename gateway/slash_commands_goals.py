@@ -42,7 +42,6 @@ class GatewayGoalCommandsMixin:
         """
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
-
         mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
@@ -192,7 +191,6 @@ class GatewayGoalCommandsMixin:
             headline, parsed = parse_contract(args)
             args = headline or args
             contract = parsed if not parsed.is_empty() else None
-
         try:
             state = mgr.set(args, contract=contract)
         except ValueError as exc:
@@ -217,7 +215,6 @@ class GatewayGoalCommandsMixin:
         from hermes_cli.heartbeat import parse_interval, format_interval, MIN_INTERVAL_SECONDS
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
-
         mgr, _session_entry = await self._get_heartbeat_manager_for_event(event)
         if mgr is None:
             return "Heartbeats unavailable (no session)."
@@ -353,7 +350,6 @@ class GatewayGoalCommandsMixin:
         tokens = args.split(None, 1)
         verb = tokens[0].lower()
         rest = tokens[1].strip() if len(tokens) > 1 else ""
-
         if verb == "remove":
             if not rest:
                 return "Usage: /subgoal remove <n>"
@@ -409,7 +405,6 @@ class GatewayGoalCommandsMixin:
                 route = {k: v for k, v in route.items() if v}
         except Exception:
             route = {}
-
         result = dispatch_loop_command(mgr, (event.get_command_args() or "").strip(), route=route)
         output = result.get("output") or ""
         if result.get("created") and _quiet_bool(lambda: goal_blocks_loop_tick(mgr.session_id)):

@@ -95,7 +95,6 @@ def _status_model_route(status_agent, persisted_route: dict, session_row: dict, 
     # First fully-resolved (model AND provider) route wins; the SessionDB row is used even if partial.
     model_name, provider_name = next((r for r in routes if r[0] and r[1]), row_route)
     context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
-
     user_config: dict[str, Any] = {}
     if not model_name or not provider_name or not context_total:
         user_config = _quiet_sync(_load_gateway_config, {})
@@ -389,7 +388,6 @@ class GatewayStatusCommandsMixin:
         now = time.time()
         current_session_key = self._session_key_for_source(event.source)
         running_started: dict = getattr(self, "_running_agents_ts", {}) or {}
-
         agent_rows: list[dict] = []
         for session_key, agent in (getattr(self, "_running_agents", {}) or {}).items():
             pending = agent is _AGENT_PENDING_SENTINEL
@@ -401,10 +399,8 @@ class GatewayStatusCommandsMixin:
                 "model": "" if pending else str(getattr(agent, "model", "") or ""),
             })
         agent_rows.sort(key=lambda row: row["elapsed"], reverse=True)
-
         procs = _quiet_sync(process_registry.list_sessions, [])
         running_processes = [p for p in procs if p.get("status") == "running"]
-
         background_tasks = [
             task for task in (getattr(self, "_background_tasks", set()) or set())
             if hasattr(task, "done") and not task.done()
@@ -513,7 +509,6 @@ class GatewayStatusCommandsMixin:
         account/credit blocks; ``/usage reset [--force]`` redeems a banked Codex reset credit."""
         source = event.source
         session_key = self._session_key_for_source(source)
-
         raw_args = event.get_command_args().strip()
         args = [a.lower() for a in raw_args.split()] if raw_args else []
         wants_reset = bool(args) and args[0] == "reset"
@@ -530,7 +525,6 @@ class GatewayStatusCommandsMixin:
         )
         if not provider and getattr(self, "_session_db", None) is not None:
             provider, base_url = await self._persisted_billing_route(source)
-
         if wants_reset:
             if str(provider or "").strip().lower() != "openai-codex":
                 return t("gateway.usage.reset_wrong_provider")

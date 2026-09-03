@@ -277,7 +277,6 @@ class GatewaySlashCommandsMixin(
             user_config.setdefault(section, {})["write_approval"] = bool(enabled)
             atomic_config_write(config_path, user_config)
             self._evict_cached_agent(session_key)
-
         return _set_approval
 
     async def _deliver_approval_confirmation(self, event: MessageEvent, confirmation_text: str, verb: str):
@@ -375,7 +374,6 @@ class GatewaySlashCommandsMixin(
         text = (event.text or "").strip().lstrip("/")
         if text.startswith("kanban"):
             text = text[len("kanban"):].lstrip()
-
         requested_board = action = None
         tokens = iter(shlex.split(text) if text else [])
         for tok in tokens:  # leading --board/--board=<b> options, then the action verb
@@ -588,7 +586,6 @@ class GatewaySlashCommandsMixin(
         # .restart_notify.json (unlinked once the new gateway sends its notification) this persists
         # so a delayed Telegram redelivery is still detectable. Overwritten on every /restart.
         await _write_marker(".restart_last_processed.json", lambda: _restart_dedup_payload(event), "dedup marker")
-
         active_agents = self._running_agent_count()
         # Under a service manager (systemd/launchd) or Docker/Podman, exit 75 so the supervisor /
         # restart policy restarts us — detached setsid+bash fails there (systemd KillMode=mixed kills
@@ -636,7 +633,6 @@ class GatewaySlashCommandsMixin(
             ):
                 return t("gateway.set_home.save_failed",
                          error="Relay does not authenticate this logical home target")
-
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
             platform=source.platform, chat_id=str(chat_id), name=chat_name,
@@ -729,7 +725,6 @@ class GatewaySlashCommandsMixin(
         tokens = event.get_command_args().strip().split()
         restore_all = any(tok.lower() in ("--all", "--force") for tok in tokens)
         arg = " ".join(tok for tok in tokens if tok.lower() not in ("--all", "--force"))
-
         checkpoints = mgr.list_checkpoints(cwd)
         if not arg:
             return format_checkpoint_list(checkpoints, cwd)
@@ -745,7 +740,6 @@ class GatewaySlashCommandsMixin(
             if not 0 <= idx < len(checkpoints):
                 return t("gateway.rollback.invalid_number", max=len(checkpoints))
             target_hash = checkpoints[idx]["hash"]
-
         result = mgr.restore(cwd, target_hash, safe=not restore_all)
         if not result["success"]:
             return t("gateway.rollback.restore_failed", error=result["error"])
@@ -770,7 +764,6 @@ class GatewaySlashCommandsMixin(
                 stat_only = True
             else:
                 mode = _DIFF_MODE_BY_ARG.get(low, mode)
-
         cwd = self._terminal_cwd()
         if mode == "session":
             # Cumulative checkpoint-baseline diff.
@@ -916,7 +909,6 @@ class GatewaySlashCommandsMixin(
             return ("Skill write approval is off (skills.write_approval). "
                     "Enable it with /skills approval on, then review staged "
                     "writes here with /skills pending.")
-
         out = handle_pending_subcommand(
             wa.SKILLS, args, set_mode_fn=self._write_approval_setter("skills", event)
         )
@@ -1022,7 +1014,6 @@ class GatewaySlashCommandsMixin(
         adapter = self._adapter_for_source(event.source)
         if adapter is not None:
             adapter._busy_text_mode = self._effective_busy_text_mode(event.source)
-
         return EphemeralReply(
             f"Busy input mode set to **`{arg}`** (saved)." + "\n" f"_{_BUSY_MODE_BEHAVIOR[arg][1]}_"
         )
@@ -1032,7 +1023,6 @@ class GatewaySlashCommandsMixin(
         from gateway.run import _load_gateway_config, _resolve_gateway_model
         from gateway.runtime_footer import format_runtime_footer, resolve_footer_config
         config_path, platform_key = self._display_config_target(event)
-
         arg = ""
         try:
             text = (getattr(event, "message", None) or "").strip()
@@ -1124,7 +1114,6 @@ class GatewaySlashCommandsMixin(
             result = await self._run_in_executor_with_context(reload_skills)
             added, removed = result.get("added", []), result.get("removed", [])  # [{"name", "description"}]
             total = result.get("total", 0)
-
             # Let adapters refresh platform-side state that cached the skill list at startup (today:
             # Discord /skill autocomplete — otherwise new skills stay invisible and deleted ones
             # error). Adapters without refresh_skill_group are skipped; the in-process reload suffices.
@@ -1164,7 +1153,6 @@ class GatewaySlashCommandsMixin(
                     sections += ["", note_header] + formatted
             lines.append(t("gateway.reload_skills.total", count=total))
             sections += ["", "Use skills_list to see the updated catalog.]"]
-
             session_key = self._session_key_for_source(event.source)
             if not hasattr(self, "_pending_skills_reload_notes"):
                 self._pending_skills_reload_notes = {}
@@ -1327,7 +1315,6 @@ class GatewaySlashCommandsMixin(
         _tmp_pending.write_text(json.dumps(pending), encoding="utf-8")
         _tmp_pending.replace(pending_path)
         exit_code_path.unlink(missing_ok=True)
-
         try:
             _spawn_detached_update(hermes_cmd, output_path, exit_code_path)
         except Exception as e:
