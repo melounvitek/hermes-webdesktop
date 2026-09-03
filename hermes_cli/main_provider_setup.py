@@ -376,7 +376,6 @@ def _prompt_provider_choice(choices, *, default=0, title="Select provider:"):
 _DEFAULT_QWEN_PORTAL_MODELS = [
     "qwen3-coder-plus", "qwen3-coder"]
 
-
 # (mode value, label, description, accepted answers); "" = auto-detect
 _CUSTOM_API_MODES = (
     ("", "Auto-detect", "Use Hermes URL heuristics; best for standard OpenAI-compatible endpoints.",

@@ -16,7 +16,6 @@ from hermes_cli.model_setup_flows_common import (
 # regardless of credentials); global.* routes from everywhere.
 BEDROCK_GEO_PREFIXES = ("us.", "eu.", "ap.", "apac.", "jp.", "ca.", "sa.", "me.", "af.")
 
-
 # region-name prefixes -> inference-profile geo prefix
 _REGION_GEO = (("us.", ("us-", "us_gov")), ("eu.", ("eu-",)), ("ap.", ("ap-",)), ("ca.", ("ca-",)),
                ("sa.", ("sa-",)), ("me.", ("me-",)), ("af.", ("af-",)))
@@ -108,12 +107,9 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
 _BEDROCK_EXCLUDE_PREFIXES = ("stability.", "cohere.embed", "twelvelabs.", "us.stability.", "us.cohere.embed",
                              "us.twelvelabs.", "global.cohere.embed", "global.twelvelabs.")
 
-
 _BEDROCK_EXCLUDE_SUBSTRINGS = ("safeguard", "voxtral", "palmyra-vision")
 
-
 _BEDROCK_PROFILE_PREFIXES = BEDROCK_GEO_PREFIXES + ("global.",)
-
 
 # Recommended models, matched geo-agnostically so an EU (eu.*) or APAC (apac.*)
 # picker pins its own region's profile rather than a us.* one.
