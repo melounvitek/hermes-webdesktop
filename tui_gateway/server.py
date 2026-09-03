@@ -201,7 +201,7 @@ class _DropTransport:
         return False
 
     def close(self) -> None:
-        return None
+        pass
 
 
 # Module-level stdio transport — fallback sink when no transport is bound via contextvar or session.
@@ -260,10 +260,8 @@ class _SlashWorker:
 
     def _drain_stdout(self):
         for line in self.proc.stdout or []:
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 self.stdout_queue.put(json.loads(line))
-            except json.JSONDecodeError:
-                continue
         self.stdout_queue.put(None)
 
     def _drain_stderr(self):
@@ -381,8 +379,7 @@ def _get_db():
     if _db is None:
         from hermes_state import get_shared_session_db
         try:
-            _db = get_shared_session_db()
-            _db_error = None
+            _db, _db_error = get_shared_session_db(), None
         except Exception as exc:
             _db_error = str(exc)
             logger.warning("TUI session store unavailable — continuing without state.db features: %s", exc)
@@ -624,16 +621,12 @@ def _approval_request_payload(data: dict | None) -> dict:
     """Build the client-safe representation of a pending approval."""
     payload = dict(data or {})
     if "choices" not in payload:
-        if payload.get("smart_denied"):
-            payload["choices"] = ["once", "deny"]
-        else:
-            choices = ["once"]
-            if payload.get("allow_session") is not False:
-                choices.append("session")
-                if payload.get("allow_permanent") is not False:
-                    choices.append("always")
-            choices.append("deny")
-            payload["choices"] = choices
+        choices = ["once"]
+        if not payload.get("smart_denied") and payload.get("allow_session") is not False:
+            choices.append("session")
+            if payload.get("allow_permanent") is not False:
+                choices.append("always")
+        payload["choices"] = choices + ["deny"]
     if "command" in payload:
         from gateway.run import _redact_approval_command
         payload["command"] = _redact_approval_command(payload.get("command"))
@@ -713,9 +706,7 @@ def _image_meta(path: Path) -> dict:
         from PIL import Image
         with Image.open(path) as img:
             width, height = img.size
-        meta["width"] = int(width)
-        meta["height"] = int(height)
-        meta["token_estimate"] = _estimate_image_tokens(int(width), int(height))
+        meta.update(width=int(width), height=int(height), token_estimate=_estimate_image_tokens(int(width), int(height)))
     return meta
 
 
@@ -741,8 +732,7 @@ def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:
     """Validate a JSON-RPC request enough for safe local dispatch."""
     if not isinstance(req, dict):
         return _err(None, -32600, "invalid request: expected an object")
-    rid = req.get("id")
-    method = req.get("method")
+    rid, method = req.get("id"), req.get("method")
     if not isinstance(method, str) or not method:
         return _err(rid, -32600, "invalid request: method must be a non-empty string")
     params = req.get("params", {})
@@ -1117,9 +1107,7 @@ def _sess_nowait(params, rid):
 
 def _sess(params, rid):
     s, err = _sess_building(params, rid)
-    if err:
-        return (None, err)
-    return (s, _wait_agent(s, rid))
+    return (None, err) if err else (s, _wait_agent(s, rid))
 
 
 def _sess_building(params, rid):
@@ -1239,8 +1227,7 @@ def _save_cfg(cfg: dict):
     # configs); fails closed on an unreadable existing config.yaml like atomic_config_write.
     atomic_roundtrip_yaml_save(path, cfg)
     with _cfg_lock:
-        _cfg_cache = copy.deepcopy(cfg)
-        _cfg_path = path
+        _cfg_cache, _cfg_path = copy.deepcopy(cfg), path
         try:
             _cfg_mtime = path.stat().st_mtime
         except Exception:
@@ -1776,14 +1763,13 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
 def _write_config_key(key_path: str, value):
     # Write-back round-trip: raw read is mandatory — saving the managed-overlaid / env-expanded
     # view would persist those values into the file.
-    cfg = _load_cfg_raw()
-    current = cfg
-    keys = key_path.split(".")
-    for key in keys[:-1]:
-        if key not in current or not isinstance(current.get(key), dict):
+    cfg = current = _load_cfg_raw()
+    *parents, leaf = key_path.split(".")
+    for key in parents:
+        if not isinstance(current.get(key), dict):
             current[key] = {}
         current = current[key]
-    current[keys[-1]] = value
+    current[leaf] = value
     _save_cfg(cfg)
 
 
@@ -1810,9 +1796,7 @@ def _load_approval_mode() -> str:
 def _coerce_statusbar(raw) -> str:
     if raw is False:
         return "off"
-    if isinstance(raw, str) and (s := raw.strip().lower()) in _STATUSBAR_MODES:
-        return s
-    return "top"
+    return s if isinstance(raw, str) and (s := raw.strip().lower()) in _STATUSBAR_MODES else "top"
 
 
 _MOUSE_TRACKING_ALIASES = {
@@ -1906,12 +1890,9 @@ def _enabled_mcp_server_names() -> tuple[set[str], set[str]]:
         mcp_servers = raw_cfg.get("mcp_servers") if isinstance(raw_cfg.get("mcp_servers"), dict) else {}
         enabled, disabled = set(), set()
         for name, server_cfg in mcp_servers.items():
-            if not isinstance(server_cfg, dict):
-                continue
-            if _parse_enabled_flag(server_cfg.get("enabled", True), default=True):
-                enabled.add(str(name))
-            else:
-                disabled.add(str(name))
+            if isinstance(server_cfg, dict):
+                on = _parse_enabled_flag(server_cfg.get("enabled", True), default=True)
+                (enabled if on else disabled).add(str(name))
         return enabled, disabled
     except Exception:
         return set(), set()
@@ -2291,10 +2272,9 @@ def _tool_ctx(name: str, args: dict) -> str:
 
 def _emit_session_info_for_session(sid: str, session: dict) -> None:
     agent = session.get("agent")
-    if agent is None and not _metadata_mirror(session):
-        return
-    with contextlib.suppress(Exception):
-        _emit("session.info", sid, _session_info(agent, session))
+    if agent is not None or _metadata_mirror(session):
+        with contextlib.suppress(Exception):
+            _emit("session.info", sid, _session_info(agent, session))
 
 
 def broadcast_session_info() -> None:
@@ -3052,17 +3032,16 @@ def _pet_row_frame_counts(spritesheet) -> dict:
         from agent.pet import constants, render
         with Image.open(spritesheet) as opened:
             image = opened.convert("RGBA")
-        cols = max(1, image.width // constants.FRAME_W)
-        row_count = max(1, image.height // constants.FRAME_H)
+        W, H = constants.FRAME_W, constants.FRAME_H
+        cols = max(1, image.width // W)
+        row_count = max(1, image.height // H)
         rows = constants.state_rows_for_grid(row_count)
         out: dict[str, int] = {}
         for row_idx, name in enumerate(rows[:row_count]):
-            top = row_idx * constants.FRAME_H
+            top = row_idx * H
             count = 0
             for col in range(cols):
-                left = col * constants.FRAME_W
-                frame = image.crop((left, top, left + constants.FRAME_W, top + constants.FRAME_H))
-                if render._frame_is_blank(frame):
+                if render._frame_is_blank(image.crop((col * W, top, col * W + W, top + H))):
                     break
                 count += 1
             out[name] = count
@@ -3167,8 +3146,7 @@ def _pet_gen_sweep(root, *, max_age_s: float = 3600.0) -> None:
 
 def _pet_png_data_uri(path, *, max_px: int = 160) -> str:
     """Downscaled PNG data URI for a draft image (small preview payload)."""
-    import base64
-    import io
+    import base64, io
     from PIL import Image
     with Image.open(path) as opened:
         img = opened.convert("RGBA")
@@ -3191,8 +3169,7 @@ except (TypeError, ValueError):
 
 def _pet_reference_images_from_data_url(ref_raw: str, stage) -> list:
     """Decode + validate a reference-image data URL into the stage dir."""
-    import base64
-    import binascii
+    import base64, binascii
     import re as _re
     match = _re.match(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.*)$", ref_raw, _re.DOTALL)
     if not match:
@@ -3439,9 +3416,7 @@ def _skill_usage_lookup():
     try:
         from tools.skill_usage import (
             _read_bundled_manifest_names, _read_hub_installed_names, activity_count, load_usage)
-        records = load_usage()
-        bundled = _read_bundled_manifest_names()
-        hub = _read_hub_installed_names()
+        records, bundled, hub = load_usage(), _read_bundled_manifest_names(), _read_hub_installed_names()
     except Exception as e:
         logger.debug("skill usage lookup unavailable: %s", e)
         return (lambda _name: 0), (lambda _name: "local")
@@ -3453,11 +3428,7 @@ def _skill_usage_lookup():
             return 0
 
     def origin(name: str) -> str:
-        if name in hub:
-            return "hub"
-        if name in bundled:
-            return "bundled"
-        return "local"
+        return "hub" if name in hub else "bundled" if name in bundled else "local"
     return usage, origin
 
 
