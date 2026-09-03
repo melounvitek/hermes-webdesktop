@@ -323,26 +323,23 @@ def _v(reason: FailoverReason, **hints: Any) -> Verdict:
 
 
 _ROTATE_FALLBACK = {"should_rotate_credential": True, "should_fallback": True}
+_ABORT_FALLBACK = {"retryable": False, "should_fallback": True}
+_R = FailoverReason
 
-_V_BILLING = _v(FailoverReason.billing, retryable=False, **_ROTATE_FALLBACK)
-_V_RATE_LIMIT = _v(FailoverReason.rate_limit, **_ROTATE_FALLBACK)
-_V_OVERLOADED = _v(FailoverReason.overloaded)
-_V_SERVER_ERROR = _v(FailoverReason.server_error)
-_V_CONTEXT_OVERFLOW = _v(FailoverReason.context_overflow, should_compress=True)
-_V_PAYLOAD_TOO_LARGE = _v(FailoverReason.payload_too_large, should_compress=True)
-_V_MODEL_NOT_FOUND = _v(FailoverReason.model_not_found, retryable=False, should_fallback=True)
-_V_POLICY_BLOCKED = _v(FailoverReason.provider_policy_blocked, retryable=False)
-_V_CONTENT_BLOCKED = _v(FailoverReason.content_policy_blocked, retryable=False, should_fallback=True)
-_V_FORMAT_ERROR = _v(FailoverReason.format_error, retryable=False, should_fallback=True)
-_V_AUTH_ROTATE = _v(FailoverReason.auth, retryable=False, **_ROTATE_FALLBACK)
-_V_AUTH_FALLBACK = _v(FailoverReason.auth, retryable=False, should_fallback=True)
-_V_TIMEOUT = _v(FailoverReason.timeout)
-_V_SSL_CERT = _v(FailoverReason.ssl_cert_verification, retryable=False)
-_V_IMAGE_TOO_LARGE = _v(FailoverReason.image_too_large)
-_V_IMAGE_CORRUPT = _v(FailoverReason.image_corrupt)
-_V_MULTIMODAL = _v(FailoverReason.multimodal_tool_content_unsupported)
-_V_INVALID_ENCRYPTED = _v(FailoverReason.invalid_encrypted_content)
-_V_UNKNOWN = _v(FailoverReason.unknown)
+_V_BILLING = _v(_R.billing, retryable=False, **_ROTATE_FALLBACK)
+_V_RATE_LIMIT = _v(_R.rate_limit, **_ROTATE_FALLBACK)
+_V_AUTH_ROTATE = _v(_R.auth, retryable=False, **_ROTATE_FALLBACK)
+_V_AUTH_FALLBACK = _v(_R.auth, **_ABORT_FALLBACK)
+_V_MODEL_NOT_FOUND = _v(_R.model_not_found, **_ABORT_FALLBACK)
+_V_CONTENT_BLOCKED = _v(_R.content_policy_blocked, **_ABORT_FALLBACK)
+_V_FORMAT_ERROR = _v(_R.format_error, **_ABORT_FALLBACK)
+_V_POLICY_BLOCKED = _v(_R.provider_policy_blocked, retryable=False)
+_V_SSL_CERT = _v(_R.ssl_cert_verification, retryable=False)
+_V_CONTEXT_OVERFLOW = _v(_R.context_overflow, should_compress=True)
+_V_PAYLOAD_TOO_LARGE = _v(_R.payload_too_large, should_compress=True)
+_V_OVERLOADED, _V_SERVER_ERROR, _V_TIMEOUT, _V_UNKNOWN = map(_v, (_R.overloaded, _R.server_error, _R.timeout, _R.unknown))
+_V_IMAGE_TOO_LARGE, _V_IMAGE_CORRUPT = _v(_R.image_too_large), _v(_R.image_corrupt)
+_V_MULTIMODAL, _V_INVALID_ENCRYPTED = _v(_R.multimodal_tool_content_unsupported), _v(_R.invalid_encrypted_content)
 
 
 def _billing_hints(error_msg: str) -> Verdict:

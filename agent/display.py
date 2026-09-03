@@ -210,18 +210,13 @@ def _scan_quoted(text: str) -> Iterator[tuple[int, str, bool]]:
 
 
 def _split_shell_words(segment: str) -> list[str]:
-    words: list[str] = []
-    buf: list[str] = []
+    parts: list[list[str]] = [[]]
     for _, ch, quoted in _scan_quoted(segment):
         if not quoted and ch.isspace():
-            if buf:
-                words.append("".join(buf))
-                buf = []
+            parts.append([])
         else:
-            buf.append(ch)
-    if buf:
-        words.append("".join(buf))
-    return words
+            parts[-1].append(ch)
+    return ["".join(p) for p in parts if p]
 
 
 def _strip_shell_pipe_tail(segment: str) -> str:
@@ -236,30 +231,20 @@ def _strip_shell_pipe_tail(segment: str) -> str:
 
 def _split_shell_compound(command: str) -> list[str]:
     """Split on unquoted ``&&`` / ``||`` / ``;`` / newline, dropping pipe tails per segment."""
-    segments: list[str] = []
-    buf: list[str] = []
+    raw: list[list[str]] = [[]]
     skip = False
-
-    def _flush() -> None:
-        segment = _strip_shell_pipe_tail("".join(buf).strip())
-        if segment:
-            segments.append(segment)
-        buf.clear()
-
     for i, ch, quoted in _scan_quoted(command):
         if skip:
             skip = False
-            continue
-        if not quoted and (command.startswith("&&", i) or command.startswith("||", i)):
-            _flush()
+        elif not quoted and (command.startswith("&&", i) or command.startswith("||", i)):
+            raw.append([])
             skip = True
-            continue
-        if not quoted and ch in {";", "\n"}:
-            _flush()
-            continue
-        buf.append(ch)
-    _flush()
-    return segments
+        elif not quoted and ch in {";", "\n"}:
+            raw.append([])
+        else:
+            raw[-1].append(ch)
+    segments = (_strip_shell_pipe_tail("".join(buf).strip()) for buf in raw)
+    return [s for s in segments if s]
 
 
 def _shell_head_word(segment: str) -> str:
@@ -278,13 +263,12 @@ def _clean_shell_segment(segment: str) -> str:
     while i < len(words):
         word = words[i]
         if re.match(r"^\d*(?:>>?|<)$", word):
-            i += 2
-            continue
-        if re.match(r"^\d*(?:>&|<&)\d+$", word) or re.match(r"^\d*>&\d+$", word):
+            i += 2  # operator + target
+        elif re.match(r"^\d*(?:>&|<&)\d+$", word):
             i += 1
-            continue
-        out.append(word)
-        i += 1
+        else:
+            out.append(word)
+            i += 1
     return " ".join(out).strip()
 
 
