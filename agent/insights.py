@@ -469,8 +469,14 @@ class InsightsEngine:
             period_label += f" ({report['source_filter']})"
         padding = 58 - len(period_label) - 2
         left_pad = padding // 2
-        lines = ["", "  ╔══════════════════════════════════════════════════════════╗", "  ║                    📊 Hermes Insights                    ║",
-                 f"  ║{' ' * left_pad} {period_label} {' ' * (padding - left_pad)}║", "  ╚══════════════════════════════════════════════════════════╝", ""]
+        lines = [
+            "",
+            "  ╔══════════════════════════════════════════════════════════╗",
+            "  ║                    📊 Hermes Insights                    ║",
+            f"  ║{' ' * left_pad} {period_label} {' ' * (padding - left_pad)}║",
+            "  ╚══════════════════════════════════════════════════════════╝",
+            "",
+        ]
         if o.get("date_range_start") and o.get("date_range_end"):
             start_str = datetime.fromtimestamp(o["date_range_start"]).strftime("%b %d, %Y")
             end_str = datetime.fromtimestamp(o["date_range_end"]).strftime("%b %d, %Y")
