@@ -1,12 +1,9 @@
-"""Background memory/skill review — fork the agent to evaluate the turn.
-
-After every turn ``AIAgent.run_conversation`` may spawn a daemon thread that replays the
-conversation snapshot in a forked :class:`AIAgent` and asks "should any skill/memory be saved
-or updated?". Writes go straight to the memory + skill stores; the main conversation and prompt
-cache are never touched. The fork inherits the parent's live runtime (provider, model,
-credentials, cached system prompt) so it hits the same prefix cache, and runs under a
-dispatch-side tool whitelist limited to memory/skill tools.
-"""
+"""Background memory/skill review — fork the agent to evaluate the turn. After every turn
+``AIAgent.run_conversation`` may spawn a daemon thread that replays the conversation snapshot in a
+forked :class:`AIAgent` and asks "should any skill/memory be saved or updated?". Writes go
+straight to the memory + skill stores; the main conversation and prompt cache are never touched.
+The fork inherits the parent's live runtime (provider, model, credentials, cached system prompt)
+so it hits the same prefix cache, and runs under a dispatch-side tool whitelist."""
 
 from __future__ import annotations
 
@@ -22,7 +19,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from agent.thread_scoped_output import thread_scoped_silence
 
 logger = logging.getLogger(__name__)
-
 
 _BACKGROUND_REVIEW_CANCEL_TIMEOUT_SECONDS = 2.0
 
@@ -124,24 +120,17 @@ def _interrupt_background_review(review_agent: Any) -> None:
 
 
 def cancel_background_review_for_live_turn(agent: Any) -> None:
-    """Cancel the current review and await its request-phase acknowledgement.
-
-    Foreground priority: past the bounded deadline, warn and let the live turn proceed —
-    self-improvement work must never block a user-facing turn.
-    """
+    """Cancel the current review and await its request-phase acknowledgement. Foreground priority:
+    past the bounded deadline, warn and let the live turn proceed — self-improvement work must
+    never block a user-facing turn."""
     with _optional_lock(agent, "_background_review_lock"):
         run = getattr(agent, "_background_review_run", None)
         legacy_agent = getattr(agent, "_background_review_agent", None)
-
-    if run is None:
-        if legacy_agent is not None:
-            _interrupt_background_review(legacy_agent)
-        return
-
-    review_agent = run.cancel()
+    review_agent = legacy_agent if run is None else run.cancel()
     if review_agent is not None:
         _interrupt_background_review(review_agent)
-
+    if run is None:
+        return
     if not run.request_done.wait(timeout=_BACKGROUND_REVIEW_CANCEL_TIMEOUT_SECONDS):
         logger.warning(
             "Background review did not acknowledge cancellation within %.1fs; "
@@ -153,9 +142,7 @@ def cancel_background_review_for_live_turn(agent: Any) -> None:
 # Aux-model routing: by default ("auto") the fork runs on the MAIN model and replays the full
 # conversation as warm cache reads. When auxiliary.background_review.{provider,model} routes it
 # to a DIFFERENT model the cache is cold anyway, so the fork replays a compact digest instead.
-
 _REVIEW_MAX_ITERATIONS = 16
-
 # Aggregate INPUT-token budget for one review fork (checked in conversation_loop's
 # ``_review_input_budget_exhausted``). Request #1 replays the full snapshot as a warm cache read
 # (both compression gates deferred until the first response); compaction then bounds each
@@ -213,38 +200,29 @@ def load_background_review_settings() -> tuple[bool, Dict[str, Any]]:
 
 
 def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Resolve provider/model/credentials for the review fork.
-
-    Default (auto / unset / same as parent): the parent's live runtime with ``routed=False``
-    (codex_app_server -> codex_responses downgrade applied). When
-    ``auxiliary.background_review.{provider,model}`` names a different concrete model, resolve
-    that runtime and set ``routed=True``.
-    """
+    """Resolve provider/model/credentials for the review fork. Default (auto / unset / same as
+    parent): the parent's live runtime with ``routed=False`` (codex_app_server -> codex_responses
+    downgrade applied). When ``auxiliary.background_review.{provider,model}`` names a different
+    concrete model, resolve that runtime and set ``routed=True``."""
     parent_runtime = agent._current_main_runtime()
     parent_api_mode = parent_runtime.get("api_mode") or None
-    if parent_api_mode == "codex_app_server":
-        parent_api_mode = "codex_responses"
     parent = {
-        "provider": agent.provider,
-        "model": agent.model,
-        "api_key": parent_runtime.get("api_key") or None,
-        "base_url": parent_runtime.get("base_url") or None,
-        "api_mode": parent_api_mode,
+        "provider": agent.provider, "model": agent.model,
+        "api_key": parent_runtime.get("api_key") or None, "base_url": parent_runtime.get("base_url") or None,
+        "api_mode": "codex_responses" if parent_api_mode == "codex_app_server" else parent_api_mode,
         "credential_pool": getattr(agent, "_credential_pool", None),
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
-        "max_tokens": getattr(agent, "max_tokens", None),
-        "command": getattr(agent, "acp_command", None),
-        "args": list(getattr(agent, "acp_args", []) or []),
-        "routed": False,
+        "max_tokens": getattr(agent, "max_tokens", None), "command": getattr(agent, "acp_command", None),
+        "args": list(getattr(agent, "acp_args", []) or []), "routed": False,
     }
     task = _background_review_task_config(task_cfg)
     task_provider, task_model, task_base_url, task_api_key = (
         str(task.get(key, "")).strip() or None for key in ("provider", "model", "base_url", "api_key")
     )
-    if not (task_provider and task_provider != "auto" and task_model):
+    if not (task_provider and task_provider != "auto" and task_model) or (
+        task_provider == (agent.provider or "") and task_model == (agent.model or "")  # same as parent
+    ):
         return parent
-    if task_provider == (agent.provider or "") and task_model == (agent.model or ""):
-        return parent  # same model/provider as parent -> not routed
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rp = resolve_runtime_provider(
@@ -252,13 +230,10 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = Non
             explicit_api_key=task_api_key, explicit_base_url=task_base_url,
         )
         return {
-            "provider": rp.get("provider") or task_provider,
-            "model": rp.get("model") or task_model,
+            "provider": rp.get("provider") or task_provider, "model": rp.get("model") or task_model,
             **{key: rp.get(key) for key in ("api_key", "base_url", "api_mode", "credential_pool", "command")},
             "request_overrides": dict(rp.get("request_overrides") or {}),
-            "max_tokens": rp.get("max_output_tokens"),
-            "args": list(rp.get("args") or []),
-            "routed": True,
+            "max_tokens": rp.get("max_output_tokens"), "args": list(rp.get("args") or []), "routed": True,
         }
     except Exception as e:
         logger.debug("background-review aux routing failed (%s); using main model", e)
@@ -308,21 +283,16 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
             lines.append(f"USER: {text[:300]}")
         elif role == "assistant":
             if m.get("tool_calls"):
-                names = [
-                    (tc.get("function") or {}).get("name", "?") for tc in m["tool_calls"] if isinstance(tc, dict)
-                ]
+                names = [(tc.get("function") or {}).get("name", "?") for tc in m["tool_calls"] if isinstance(tc, dict)]
                 lines.append(f"ASSISTANT[tools: {', '.join(names)}]")
             if text:
                 lines.append(f"ASSISTANT: {text[:200]}")
-    digest = {
-        "role": "user",
-        "content": (
-            "[Earlier conversation digest — older turns summarised to bound the "
-            "review's cold-write cost on the routed aux model. Recent turns "
-            "follow verbatim below.]\n" + "\n".join(lines)
-        ),
-    }
-    return [digest] + keep
+    digest = (
+        "[Earlier conversation digest — older turns summarised to bound the "
+        "review's cold-write cost on the routed aux model. Recent turns "
+        "follow verbatim below.]\n" + "\n".join(lines)
+    )
+    return [{"role": "user", "content": digest}] + keep
 
 
 # Review prompts. AIAgent exposes them as class attributes
@@ -527,11 +497,8 @@ _MEMORY_OP_FORMATS: Dict[str, Tuple[str, str, int]] = {
 
 def _memory_op_line(label: str, action: str, fields: Dict[str, str]) -> Optional[str]:
     """Verbose line for one memory add/replace/remove, or None when no preview text."""
-    fmt = _MEMORY_OP_FORMATS.get(action)
-    if fmt is None:
-        return None
-    glyph, field_name, limit = fmt
-    text = fields.get(field_name) or ""
+    glyph, field_name, limit = _MEMORY_OP_FORMATS.get(action) or (None, "", 0)
+    text = fields.get(field_name) or "" if glyph else ""
     return f"{label} {glyph} {_preview(text, limit)}" if text else None
 
 
@@ -556,12 +523,10 @@ def _verbose_skill_line(data: Dict, detail: Dict, message: str) -> str:
 def _verbose_memory_lines(label: str, detail: Dict) -> List[str]:
     # ``operations`` may be any JSON value; only a list of dicts is usable.
     ops_raw = detail.get("operations")
-    operations: list = ops_raw if isinstance(ops_raw, list) else []
-    if operations:
-        lines = [_memory_op_line(label, op.get("action", ""), op) for op in operations if isinstance(op, dict)]
+    if isinstance(ops_raw, list) and ops_raw:
+        lines = [_memory_op_line(label, op.get("action", ""), op) for op in ops_raw if isinstance(op, dict)]
         return [line for line in lines if line]
-    line = _memory_op_line(label, detail.get("action", ""), detail)
-    return [line or f"{label} updated"]
+    return [_memory_op_line(label, detail.get("action", ""), detail) or f"{label} updated"]
 
 
 # Tool-call argument fields surfaced in action summaries, with their defaults.
@@ -572,12 +537,9 @@ _CALL_DETAIL_DEFAULTS = (
 
 
 def _collect_review_call_details(review_messages: List[Dict]) -> Tuple[set, dict]:
-    """Map review-agent tool_call ids -> parsed call arguments for notify tools.
-
-    Result JSON only says "Entry added"; the call arguments carry action, target and content
-    previews. Restricting to notify tools keeps helper tools from surfacing as memory work just
-    because they succeeded.
-    """
+    """Map review-agent tool_call ids -> parsed call arguments for notify tools. Result JSON only
+    says "Entry added"; the call arguments carry action, target and content previews. Restricting
+    to notify tools keeps helper tools from surfacing as memory work just because they succeeded."""
     notify_tools = {"memory", "skill_manage"}
     all_tool_call_ids: set = set()
     call_details: dict = {}
@@ -592,32 +554,28 @@ def _collect_review_call_details(review_messages: List[Dict]) -> Tuple[set, dict
             tcid = tc.get("id")
             if tcid:
                 all_tool_call_ids.add(tcid)
-            if fn_name not in notify_tools:
+            if fn_name not in notify_tools or not tcid:
                 continue
             try:
                 args = json.loads(fn.get("arguments", "{}"))
             except (json.JSONDecodeError, TypeError):
                 args = {}
-            if tcid:
-                call_details[tcid] = {
-                    "tool": fn_name, "operations": args.get("operations") or [],
-                    **{k: args.get(k, default) for k, default in _CALL_DETAIL_DEFAULTS},
-                }
+            call_details[tcid] = {
+                "tool": fn_name, "operations": args.get("operations") or [],
+                **{k: args.get(k, default) for k, default in _CALL_DETAIL_DEFAULTS},
+            }
     return all_tool_call_ids, call_details
+
+
+def _tool_messages(messages: List[Dict]) -> Iterator[Dict]:
+    return (m for m in messages or [] if isinstance(m, dict) and m.get("role") == "tool")
 
 
 def _prior_tool_keys(prior_snapshot: List[Dict]) -> Tuple[set, set]:
     """``(tool_call_ids, contents)`` of tool messages already in the parent snapshot."""
-    ids: set = set()
-    contents: set = set()
-    for prior in prior_snapshot or []:
-        if not isinstance(prior, dict) or prior.get("role") != "tool":
-            continue
-        tcid = prior.get("tool_call_id")
-        if tcid:
-            ids.add(tcid)
-        elif isinstance(prior.get("content"), str):
-            contents.add(prior["content"])
+    priors = list(_tool_messages(prior_snapshot))
+    ids = {m["tool_call_id"] for m in priors if m.get("tool_call_id")}
+    contents = {m["content"] for m in priors if not m.get("tool_call_id") and isinstance(m.get("content"), str)}
     return ids, contents
 
 
@@ -649,13 +607,11 @@ def _action_lines(data: Dict, detail: Dict, verbose: bool) -> List[str]:
 def summarize_background_review_actions(
     review_messages: List[Dict], prior_snapshot: List[Dict], notification_mode: str = "on"
 ) -> List[str]:
-    """Build the human-facing action summary for a background review pass.
-
-    Collects successful memory / skill-management tool results from the review agent's messages,
-    skipping tool messages already present in ``prior_snapshot`` so inherited results are not
-    re-surfaced as fresh work. ``notification_mode``: ``off`` -> no actions; ``on`` -> generic
-    "Memory updated"/tool messages; ``verbose`` -> content previews from the tool-call arguments.
-    """
+    """Human-facing action summary for a background review pass: successful memory /
+    skill-management tool results from the review agent's messages, skipping tool messages already
+    present in ``prior_snapshot`` so inherited results are not re-surfaced as fresh work.
+    ``notification_mode``: ``off`` -> no actions; ``on`` -> generic "Memory updated"/tool messages;
+    ``verbose`` -> content previews from the tool-call arguments."""
     mode = str(notification_mode or "on").lower()
     if mode == "off":
         return []
@@ -664,17 +620,12 @@ def summarize_background_review_actions(
     all_tool_call_ids, call_details = _collect_review_call_details(review_messages)
 
     actions: List[str] = []
-    for msg in review_messages or []:
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
+    for msg in _tool_messages(review_messages):
         tcid = msg.get("tool_call_id")
-        if tcid and tcid in existing_tool_call_ids:
-            continue
-        if not tcid:
-            content_str = msg.get("content")
-            if isinstance(content_str, str) and content_str in existing_tool_contents:
+        if tcid:
+            if tcid in existing_tool_call_ids or (all_tool_call_ids and tcid not in call_details):
                 continue
-        if tcid and all_tool_call_ids and tcid not in call_details:
+        elif isinstance(msg.get("content"), str) and msg["content"] in existing_tool_contents:
             continue
         try:
             data = json.loads(msg.get("content", "{}"))
@@ -700,11 +651,9 @@ def build_memory_write_metadata(
         "parent_session_id": agent._parent_session_id or "",
         "platform": agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
         "tool_name": "memory",
+        "task_id": task_id or None,
+        "tool_call_id": tool_call_id or None,
     }
-    if task_id:
-        metadata["task_id"] = task_id
-    if tool_call_id:
-        metadata["tool_call_id"] = tool_call_id
     return {k: v for k, v in metadata.items() if v not in {None, ""}}
 
 
@@ -715,20 +664,18 @@ _USAGE_COUNTERS = (
 
 def _snapshot_review_usage(review_agent: Any) -> Dict[str, Any]:
     """Snapshot in-memory usage counters from a review fork (pre-close)."""
-    usage: Dict[str, Any] = {key: getattr(review_agent, key, None) for key in ("model", "provider", "base_url")}
-    for key in _USAGE_COUNTERS:
-        usage[key] = int(getattr(review_agent, f"session_{key}", 0) or 0)
-    usage["estimated_cost_usd"] = getattr(review_agent, "session_estimated_cost_usd", None)
-    return usage
+    return {
+        **{key: getattr(review_agent, key, None) for key in ("model", "provider", "base_url")},
+        **{key: int(getattr(review_agent, f"session_{key}", 0) or 0) for key in _USAGE_COUNTERS},
+        "estimated_cost_usd": getattr(review_agent, "session_estimated_cost_usd", None),
+    }
 
 
 def _record_review_usage_to_parent(parent_agent: Any, usage: Dict[str, Any]) -> None:
-    """Record a fork's usage against the parent session (best-effort, never raises).
-
-    The fork has ``_session_db = None`` so conversation_loop's DB-gated accounting never sees its
-    calls; route them through the aux-accounting chokepoint, which writes only
-    ``session_model_usage`` — never the transcript or ``sessions`` row.
-    """
+    """Record a fork's usage against the parent session (best-effort, never raises). The fork has
+    ``_session_db = None`` so conversation_loop's DB-gated accounting never sees its calls; route
+    them through the aux-accounting chokepoint, which writes only ``session_model_usage`` — never
+    the transcript or ``sessions`` row."""
     try:
         session_db = getattr(parent_agent, "_session_db", None)
         session_id = getattr(parent_agent, "session_id", None)
@@ -749,11 +696,9 @@ def _record_review_usage_to_parent(parent_agent: Any, usage: Dict[str, Any]) -> 
 
 def _classify_review_result(actions: List[str]) -> str:
     """Map a review action summary to ``none`` / ``skill`` / ``memory`` / ``skill+memory``.
-
     Prefix-based on the formats :func:`summarize_background_review_actions` emits (``Skill …``,
     ``📝 Skill …``, ``Memory …``, ``User profile …``), so a free-text line like ``Skipped: no
-    skill worth saving`` stays ``none``.
-    """
+    skill worth saving`` stays ``none``."""
     lowers = [str(action).lstrip().removeprefix("📝").lstrip().lower() for action in actions or []]
     has_skill = any(t.startswith("skill") for t in lowers)
     has_memory = any(t.startswith(("memory", "user profile")) for t in lowers)
@@ -765,10 +710,7 @@ def _log_review_completion(usage: Dict[str, Any], result: str) -> None:
     logger.info(
         "Background review complete: thread=bg-review calls=%d in=%d out=%d "
         "cache_read=%d result=%s",
-        int(usage.get("api_calls") or 0),
-        int(usage.get("input_tokens") or 0),
-        int(usage.get("output_tokens") or 0),
-        int(usage.get("cache_read_tokens") or 0),
+        *(int(usage.get(k) or 0) for k in ("api_calls", "input_tokens", "output_tokens", "cache_read_tokens")),
         result,
     )
 
@@ -783,17 +725,14 @@ _PROVIDER_PIN_ATTRS = (
 
 
 def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
-    """AIAgent kwargs that keep a SAME-model fork's request bytes identical to the parent's.
-
-    Only for the un-routed path: on a different model the cache is cold anyway, and the parent's
+    """AIAgent kwargs that keep a SAME-model fork's request bytes identical to the parent's. Only
+    for the un-routed path: on a different model the cache is cold anyway, and the parent's
     reasoning-effort vocabulary may be invalid for the routed provider (OpenRouter forwards
-    ``reasoning.effort`` unclamped; codex_responses passes ``max``/``ultra`` through unmapped).
-    """
+    ``reasoning.effort`` unclamped; codex_responses passes ``max``/``ultra`` through unmapped)."""
     kwargs: Dict[str, Any] = {
-        # Anthropic's cache key is namespaced by ``thinking`` presence.
+        # Anthropic's cache key is namespaced by ``thinking`` presence; the gateway session context
+        # is appended to the cached system prompt at API-call time (without it the prompt diverges).
         "reasoning_config": getattr(agent, "reasoning_config", None),
-        # Gateway session context appended to the cached system prompt at API-call time;
-        # without it the effective system prompt diverges.
         "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None),
     }
     # Prefill sits right after the system message, so a parent with prefill would diverge at
@@ -810,15 +749,13 @@ def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
 
 
 def _detach_fork_compression(review_agent: Any) -> None:
-    """Detached in-memory compaction for a fork sharing the parent's session_id.
-
-    Disabling compression (the old guard against compacting the parent's live session) removed
-    the only bound on the review's snapshot. Persistence is already off, so compaction can only
-    rewrite the fork's transcript — but the compressor's own SessionDB/session_id binding must be
-    severed too, or cooldown/streak counters land on the parent's row. Force in-place mode and
-    re-enable compression ONLY after the rebind succeeded (fail-closed); gates stay deferred
-    until the first response so request #1 is a warm cache read.
-    """
+    """Detached in-memory compaction for a fork sharing the parent's session_id. Disabling
+    compression (the old guard against compacting the parent's live session) removed the only
+    bound on the review's snapshot. Persistence is already off, so compaction can only rewrite the
+    fork's transcript — but the compressor's own SessionDB/session_id binding must be severed too,
+    or cooldown/streak counters land on the parent's row. Force in-place mode and re-enable
+    compression ONLY after the rebind succeeded (fail-closed); gates stay deferred until the first
+    response so request #1 is a warm cache read."""
     bind = getattr(getattr(review_agent, "context_compressor", None), "bind_session_state", None)
     detached = False
     if callable(bind):
@@ -843,28 +780,19 @@ def _detach_fork_compression(review_agent: Any) -> None:
 
 
 def _fork_init_kwargs(agent: Any, rt: Dict[str, Any], routed: bool, max_iterations: int) -> Dict[str, Any]:
-    """AIAgent constructor kwargs for the review fork.
-
-    skip_memory=True: an external memory plugin scoped to the parent's session_id would leak the
-    harness prompt into the user's real memory namespace; built-in MEMORY.md/USER.md state is
-    re-bound by the caller. Toolsets match the parent so ``tools[]`` is byte-identical
-    (Anthropic's cache key includes it); the runtime whitelist restricts dispatch.
-    """
+    """AIAgent constructor kwargs for the review fork. skip_memory=True: an external memory plugin
+    scoped to the parent's session_id would leak the harness prompt into the user's real memory
+    namespace; built-in MEMORY.md/USER.md state is re-bound by the caller. Toolsets match the
+    parent so ``tools[]`` is byte-identical (Anthropic's cache key includes it); the runtime
+    whitelist restricts dispatch."""
     kwargs: Dict[str, Any] = {
-        "model": rt.get("model") or agent.model,
-        "max_iterations": max_iterations,
-        "quiet_mode": True,
-        "platform": agent.platform,
-        "provider": rt.get("provider") or agent.provider,
-        "api_mode": rt.get("api_mode"),
-        "base_url": rt.get("base_url") or None,
-        "api_key": rt.get("api_key") or None,
-        "credential_pool": rt.get("credential_pool"),
-        "request_overrides": rt.get("request_overrides") or {},
-        "parent_session_id": agent.session_id,
+        "model": rt.get("model") or agent.model, "max_iterations": max_iterations, "quiet_mode": True,
+        "platform": agent.platform, "provider": rt.get("provider") or agent.provider,
+        "api_mode": rt.get("api_mode"), "base_url": rt.get("base_url") or None,
+        "api_key": rt.get("api_key") or None, "credential_pool": rt.get("credential_pool"),
+        "request_overrides": rt.get("request_overrides") or {}, "parent_session_id": agent.session_id,
         "enabled_toolsets": getattr(agent, "enabled_toolsets", None),
-        "disabled_toolsets": getattr(agent, "disabled_toolsets", None),
-        "skip_memory": True,
+        "disabled_toolsets": getattr(agent, "disabled_toolsets", None), "skip_memory": True,
     }
     if isinstance(rt.get("max_tokens"), int):
         kwargs["max_tokens"] = rt["max_tokens"]
@@ -880,15 +808,13 @@ def build_cache_parity_fork(
     agent: Any, task_cfg: Optional[Dict[str, Any]] = None, *, max_iterations: int,
     write_origin: str = "background_review",
 ) -> Tuple[Any, Dict[str, Any], bool]:
-    """Construct a detached AIAgent fork with warm prompt-cache parity (shared with ``/btw``).
-
-    Same runtime/credentials as the parent, byte-identical system prompt / tools[] / reasoning
-    config on the same-model path, shared session_id for prefix warmth, full persistence
-    detachment (no state.db writes, rotation, or external memory providers; in-place-only
-    compaction). Returns ``(fork_agent, runtime_dict, routed)``; ``routed`` means a different
-    model (cache cold — replay a digest). The caller owns registration, whitelisting, running,
-    usage attribution and teardown.
-    """
+    """Construct a detached AIAgent fork with warm prompt-cache parity (shared with ``/btw``): same
+    runtime/credentials as the parent, byte-identical system prompt / tools[] / reasoning config on
+    the same-model path, shared session_id for prefix warmth, full persistence detachment (no
+    state.db writes, rotation, or external memory providers; in-place-only compaction). Returns
+    ``(fork_agent, runtime_dict, routed)``; ``routed`` means a different model (cache cold —
+    replay a digest). The caller owns registration, whitelisting, running, usage attribution and
+    teardown."""
     from run_agent import AIAgent  # local: avoids a circular import at load
 
     # Inherit the parent's live runtime: AIAgent.__init__'s env auto-resolution fails for
@@ -953,15 +879,12 @@ def _track_review_fork(agent: Any, review_agent: Any, *, register: bool) -> None
             elif agent._background_review_agent is review_agent:
                 agent._background_review_agent = None
     if hasattr(agent, "_active_children"):
-        try:
-            with _optional_lock(agent, "_active_children_lock"):
-                if register:
-                    agent._active_children.append(review_agent)
-                else:
-                    agent._active_children.remove(review_agent)
-        except (ValueError, AttributeError):
+        with _optional_lock(agent, "_active_children_lock"):
             if register:
-                raise
+                agent._active_children.append(review_agent)
+            else:
+                with suppress(ValueError, AttributeError):
+                    agent._active_children.remove(review_agent)
 
 
 def _review_tool_whitelist(review_agent: Any, task_cfg: Optional[Dict[str, Any]]) -> Tuple[set, set]:
@@ -1151,28 +1074,27 @@ def _run_review_in_thread(
         _set_thread_approval_callback(None)
 
 
+# (review_memory, review_skills) -> prompt attribute name; skills-only is also the default.
+_PROMPT_NAME_BY_SCOPE = {
+    (True, True): "_COMBINED_REVIEW_PROMPT", (True, False): "_MEMORY_REVIEW_PROMPT",
+    (False, True): "_SKILL_REVIEW_PROMPT", (False, False): "_SKILL_REVIEW_PROMPT",
+}
+
+
 def spawn_background_review_thread(
     agent: Any, messages_snapshot: List[Dict], review_memory: bool = False,
     review_skills: bool = False, focus: Optional[str] = None,
     task_cfg: Optional[Dict[str, Any]] = None, review_run: Optional[_BackgroundReviewRun] = None,
 ):
     """Return ``(target, prompt)``; the caller builds the ``threading.Thread`` so test patches of
-    ``run_agent.threading.Thread`` keep working.
-
-    ``focus`` (``/refine [instructions]``) is appended to the chosen prompt; automatic reviews
-    pass ``None``. ``task_cfg`` is the pre-loaded ``auxiliary.background_review`` block; when
-    omitted it is read once here.
-    """
+    ``run_agent.threading.Thread`` keep working. ``focus`` (``/refine [instructions]``) is appended
+    to the chosen prompt; automatic reviews pass ``None``. ``task_cfg`` is the pre-loaded
+    ``auxiliary.background_review`` block; when omitted it is read once here."""
     if task_cfg is None:
         task_cfg = _background_review_task_config()
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
-    name = (
-        "_COMBINED_REVIEW_PROMPT" if review_memory and review_skills
-        else "_MEMORY_REVIEW_PROMPT" if review_memory
-        else "_SKILL_REVIEW_PROMPT"
-    )
+    name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
-
     focus = (focus or "").strip()
     if focus:
         prompt = (
