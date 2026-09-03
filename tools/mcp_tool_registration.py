@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
-from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout
+from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout, mcp_field
 from tools.mcp_tool_handlers import (
     _make_check_fn, _make_get_prompt_handler, _make_list_prompts_handler,
     _make_list_resources_handler, _make_read_resource_handler)
@@ -244,11 +244,21 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
     """Write-through: persist the manifest so the next startup registers this server lazily (no spawn). Never raises."""
     try:
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
-        tools_payload = [{
-            "name": t.name, "description": t.description or "",
-            "inputSchema": t.inputSchema if isinstance(getattr(t, "inputSchema", None), dict) else {},
-            "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},  # lazy path trust-gates identically
-        } for t in server._tools if should_register(t.name)]
+        tools_payload = []
+        for t in server._tools:
+            if not should_register(t.name):
+                continue
+            # mcp 2.0 renamed every Tool model field to snake_case and left camelCase as a
+            # *serialization* alias only, which pydantic does not apply to attribute access: a bare
+            # camelCase getattr returns None on 2.x instead of raising. That silently wrote an empty
+            # ``inputSchema`` into the schema cache on every write-through, so a ``lazy: true`` server
+            # registered from cache with every parameter stripped. ``mcp_field`` reads both spellings.
+            schema_obj = mcp_field(t, "input_schema", "inputSchema")
+            tools_payload.append({
+                "name": t.name, "description": t.description or "",
+                "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
+                "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},  # lazy path trust-gates identically
+            })
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]
         cache_meta = getattr(server, "_list_cache_meta", None) or {}
