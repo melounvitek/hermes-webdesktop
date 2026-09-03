@@ -1,10 +1,9 @@
 """browser_vision helpers: Lightpanda pre-route, native provider vision, auxiliary-LLM screenshot analysis.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there so
-``tools.browser_tool.<name>`` keeps resolving (and monkeypatching). Origin
-symbols and module state are read/written through ``_bt`` (the origin module,
-resolved per call by :func:`tools.browser_tool_origin.origin_module`) so
-``patch("tools.browser_tool.X")`` is honoured and no import cycle exists.
+Split out of ``tools/browser_tool.py``; every name is re-imported there. Origin
+symbols are read through ``_bt`` (the
+:data:`tools.browser_tool_origin.origin` proxy) so ``patch("tools.browser_tool.X")``
+is honoured and no import cycle exists.
 """
 
 import os
@@ -12,11 +11,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from tools.browser_tool_origin import origin_module as _origin
+from tools.browser_tool_origin import origin as _bt
 
 
 def _vision_mode_label() -> str:
-    _bt = _origin()
     _cp = _bt._get_cloud_provider()
     return "local" if _cp is None else f"cloud ({_cp.provider_name()})"
 
@@ -24,15 +22,10 @@ def _vision_mode_label() -> str:
 def _lightpanda_vision_preroute(
     effective_task_id: str, annotate: bool, screenshot_path: Path,
 ) -> Tuple[bool, Optional[str], Path]:
-    """Capture the vision screenshot through the Chrome fallback when Lightpanda is the engine.
-
-    Lightpanda has no graphical renderer, so the normal path would fail with a
-    CDP error or return a placeholder PNG. Returns ``(prerouted, fallback_warning,
-    screenshot_path)``; on fallback failure ``prerouted`` is False and the caller
-    takes the normal screenshot path (forcing Chrome) so ``_run_browser_command``
-    still produces the standard fallback metadata/error.
-    """
-    _bt = _origin()
+    """Capture the vision screenshot via the Chrome fallback when Lightpanda is the engine
+    (it has no graphical renderer). Returns ``(prerouted, fallback_warning, path)``;
+    on fallback failure ``prerouted`` is False and the caller takes the normal
+    screenshot path (forcing Chrome) so the standard fallback metadata still applies."""
     engine = _bt._get_browser_engine()
     if engine != "lightpanda" or not _bt._should_inject_engine(engine):
         return False, None, screenshot_path
@@ -62,11 +55,9 @@ def _native_vision_result(
 ) -> Dict[str, Any]:
     """Multimodal tool-result envelope: the main model inspects the pixels itself.
 
-    History-reuse cap: this embed is baked into the tool result and re-sent on
-    every later turn, exactly like vision_analyze's native path — apply the same
-    proactive resize so full-res screenshots can't enter immutable history
-    uncapped. The helper's stat/dimension quick-estimate skips the resize when
-    already under both caps; without Pillow it fails open to the raw bytes.
+    The embed is baked into history and re-sent every later turn, so apply the same
+    proactive resize as vision_analyze's native path (skipped when already under
+    both caps; without Pillow it fails open to the raw bytes).
     """
     from tools.vision_tools import (
         _EMBED_MAX_DIMENSION,
@@ -103,12 +94,10 @@ def _native_vision_result(
 def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> str:
     """One-shot aux vision-LLM analysis (not baked into history), secret-redacted.
 
-    Encodes at full resolution; on a size-related provider rejection the image
-    is downscaled once and retried. Timeout/temperature come from
-    ``auxiliary.vision.*`` — local vision models (llama.cpp, ollama) can take
-    well over 30s, so the default timeout is generous.
+    Full resolution first; on a size-related provider rejection the image is
+    downscaled once and retried. ``auxiliary.vision.timeout/temperature`` — local
+    vision models can take well over 30s, so the default timeout is generous.
     """
-    _bt = _origin()
     import base64
 
     vision_prompt = (
@@ -131,12 +120,10 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     try:
         from hermes_cli.config import load_config
         _vision_cfg = _bt.cfg_get(load_config(), "auxiliary", "vision", default={})
-        _vt = _vision_cfg.get("timeout")
-        if _vt is not None:
-            vision_timeout = float(_vt)
-        _vtemp = _vision_cfg.get("temperature")
-        if _vtemp is not None:
-            vision_temperature = float(_vtemp)
+        if _vision_cfg.get("timeout") is not None:
+            vision_timeout = float(_vision_cfg["timeout"])
+        if _vision_cfg.get("temperature") is not None:
+            vision_temperature = float(_vision_cfg["temperature"])
     except Exception:
         pass
 
@@ -157,7 +144,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     if vision_model:
         call_kwargs["model"] = vision_model
     try:
-        response = _bt._lazy_call_llm(**call_kwargs)
+        response = _bt.call_llm(**call_kwargs)
     except Exception as _api_err:
         from tools.vision_tools import (
             _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES,
@@ -172,9 +159,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
         )
         data_url = _resize_image_for_vision(screenshot_path, mime_type="image/png")
         call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
-        response = _bt._lazy_call_llm(**call_kwargs)
+        response = _bt.call_llm(**call_kwargs)
 
-    analysis = (response.choices[0].message.content or "").strip()
-    # Redact secrets the vision LLM may have read from the screenshot.
-    from agent.redact import redact_sensitive_text
-    return redact_sensitive_text(analysis)
+    from agent.redact import redact_sensitive_text  # the LLM may have read secrets off the screenshot
+    return redact_sensitive_text((response.choices[0].message.content or "").strip())
