@@ -1,19 +1,16 @@
 """Focus view — display-only reduced output: "just my prompt and the answer, and tell me what you hid".
-
 ON snaps ``tool_progress_mode`` to ``"off"`` and remembers the configured mode so the *existing* suppression
 path does the hiding; OFF restores it verbatim. Focus adds a per-turn hidden-line count with a recovery
-hint and a persistent ``focus`` status-bar segment.
-"""
+hint and a persistent ``focus`` status-bar segment."""
 
 from __future__ import annotations
 
 from typing import Optional
 
 FOCUS_CONFIG_KEY = "display.focus_view"  # plain boolean under ``display``, like /battery /timestamps /footer
-#: The SAME value ``/verbose off`` uses so both features share one suppression path.
-FOCUS_TOOL_PROGRESS_MODE = "off"
-#: Modes in which the CLI commits a per-tool scrollback line. Mirrors the gate in
-#: ``HermesCLI._on_tool_progress`` so the hidden-line counter and the renderer never drift apart.
+FOCUS_TOOL_PROGRESS_MODE = "off"  # the SAME value ``/verbose off`` uses so both features share one suppression path
+# Modes in which the CLI commits a per-tool scrollback line. Mirrors the gate in
+# ``HermesCLI._on_tool_progress`` so the hidden-line counter and the renderer never drift apart.
 TOOL_PROGRESS_VISIBLE_MODES = frozenset({"new", "all", "verbose"})
 TOOL_PROGRESS_MODES = ("off", "new", "all", "verbose")  # ``log`` is a gateway-only extra step
 FOCUS_STATUSBAR_LABEL = "◉ focus"  # short on purpose — the bar is width-constrained
@@ -38,11 +35,8 @@ def normalize_tool_progress_mode(mode: object, default: str = "all") -> str:
 
 
 def resolve_focus_arg(arg: str, current: bool) -> tuple[str, Optional[bool]]:
-    """Map a ``/focus`` argument onto ``(action, target)``.
-
-    ``action`` is ``"set"``, ``"status"`` or ``"usage"``; ``target`` is the requested enabled-state
-    for ``"set"`` and ``None`` otherwise.
-    """
+    """Map a ``/focus`` argument onto ``(action, target)``: action is ``"set"``, ``"status"`` or ``"usage"``;
+    target is the requested enabled-state for ``"set"`` and ``None`` otherwise."""
     text = str(arg or "").strip().lower()
     if text in ("", "toggle"):
         return "set", not bool(current)
@@ -50,11 +44,9 @@ def resolve_focus_arg(arg: str, current: bool) -> tuple[str, Optional[bool]]:
 
 
 def would_display_tool_line(mode: object, function_name: str, last_tool_name: Optional[str] = None) -> bool:
-    """Would the CLI have committed a scrollback line for this tool call?
-
-    Counts honestly: with ``/verbose off`` focus view hides nothing extra and must not claim
-    otherwise. ``new`` mode skips consecutive repeats of the same tool, so the counter does too.
-    """
+    """Would the CLI have committed a scrollback line for this tool call? Counts honestly: with ``/verbose off``
+    focus view hides nothing extra and must not claim otherwise. ``new`` mode skips consecutive repeats of the
+    same tool, so the counter does too."""
     if not function_name:
         return False
     normalized = normalize_tool_progress_mode(mode)
