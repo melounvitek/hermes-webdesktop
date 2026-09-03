@@ -28,14 +28,11 @@ def available() -> bool:
 
 
 def user_enabled(setting: str, default: bool) -> bool:
-    """Read one of the desktop's Appearance switches from ``display.<setting>``.
-
-    The renderer mirrors these toggles onto the CONNECTED gateway's config, so this
-    is the user's real answer for local/SSH/URL/cloud gateways alike. ``check_fn``s
-    use it to withdraw a tool from the schema when the feature is switched off.
-    Unreadable config -> ``default`` so a shipped-on feature does not vanish on a
-    transient read error.
-    """
+    """Read a desktop Appearance switch from ``display.<setting>``. The renderer mirrors
+    these toggles onto the CONNECTED gateway's config, so this is the user's real answer
+    for local/SSH/URL/cloud gateways alike; ``check_fn``s use it to withdraw a tool from
+    the schema. Unreadable config -> ``default`` so a shipped-on feature does not vanish
+    on a transient read error."""
     try:
         from hermes_cli.config import load_config_readonly
         display = load_config_readonly().get("display")
@@ -48,10 +45,9 @@ def user_enabled(setting: str, default: bool) -> bool:
 
 def emit(event: str, payload: dict) -> bool:
     """Route ``event`` to the window owning the current turn; False when no emitter."""
-    fn = _emit
-    if fn is None:
+    if _emit is None:
         return False
-    fn(get_session_env("HERMES_UI_SESSION_ID", ""), event, payload)
+    _emit(get_session_env("HERMES_UI_SESSION_ID", ""), event, payload)
     return True
 
 
@@ -63,9 +59,7 @@ def emit_or_error(event: str, payload: dict, fail_prefix: str, desktop_only: str
         ok = emit(event, payload)
     except Exception as exc:
         return tool_error(f"{fail_prefix}{exc}")
-    if not ok:
-        return tool_error(desktop_only)
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False) if ok else tool_error(desktop_only)
 
 
 def passthrough_json(raw) -> str:

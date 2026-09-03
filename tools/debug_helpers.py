@@ -47,13 +47,8 @@ class DebugSession:
         try:
             filepath = self.log_dir / f"{self.tool_name}_debug_{self.session_id}.json"
             payload = {
-                "session_id": self.session_id,
-                "start_time": self._start_time,
-                "end_time": _now(),
-                "debug_enabled": True,
-                "total_calls": len(self._calls),
-                "tool_calls": self._calls,
-            }
+                "session_id": self.session_id, "start_time": self._start_time, "end_time": _now(),
+                "debug_enabled": True, "total_calls": len(self._calls), "tool_calls": self._calls}
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
             logger.debug("%s debug log saved: %s", self.tool_name, filepath)

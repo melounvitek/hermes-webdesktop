@@ -42,34 +42,31 @@ def _profile_has_kanban_toolset() -> bool:
         return False
 
 
-def _is_delegated_child_context() -> bool:
+def _delegation_ctx(predicate: str, default: bool) -> bool:
+    """``agent.delegation_context.<predicate>()``; ``default`` when it cannot be evaluated."""
     try:
-        from agent.delegation_context import is_delegated_child_context
-        return is_delegated_child_context()
+        from agent import delegation_context
+        return getattr(delegation_context, predicate)()
     except Exception:
-        return False
+        return default
+
+
+def _is_delegated_child_context() -> bool:
+    return _delegation_ctx("is_delegated_child_context", False)
 
 
 def _is_dispatcher_owned_worker() -> bool:
     """False for delegate_task children AND for cron jobs fired in-process from
     a worker — i.e. whenever HERMES_KANBAN_* is present but not ours."""
-    try:
-        from agent.delegation_context import is_dispatcher_owned_worker_context
-        return is_dispatcher_owned_worker_context()
-    except Exception:
-        return True
-
-
-def _is_env_worker() -> bool:
-    """True only for a dispatcher-spawned worker scoped to HERMES_KANBAN_TASK."""
-    return bool(os.environ.get("HERMES_KANBAN_TASK")) and _is_dispatcher_owned_worker()
+    return _delegation_ctx("is_dispatcher_owned_worker_context", True)
 
 
 def _visible(*, to_env_worker: bool) -> bool:
-    """check_fn core: never for delegate children; env workers per flag; else profile toolset."""
+    """check_fn core: never for delegate children; dispatcher-spawned env workers
+    (HERMES_KANBAN_TASK) per flag; else the profile toolset decides."""
     if _is_delegated_child_context():
         return False
-    if _is_env_worker():
+    if os.environ.get("HERMES_KANBAN_TASK") and _is_dispatcher_owned_worker():
         return to_env_worker
     return _profile_has_kanban_toolset()
 
@@ -80,15 +77,11 @@ def _check_kanban_mode() -> bool:
 
 
 def _check_kanban_orchestrator_mode() -> bool:
-    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers,
-    who close their own task via complete/block/heartbeat."""
+    """Board-routing tools (kanban_list, kanban_unblock): hidden from task workers."""
     return _visible(to_env_worker=False)
 
 
 # --- Shared helpers: validation failures raise _Reject; _kanban_handler renders it ---
-
-_TASK_ID_REQUIRED = "task_id is required (or set HERMES_KANBAN_TASK in the env)"
-
 
 class _Reject(Exception):
     """Carries a finished ``tool_error`` payload out of a validation helper."""
@@ -123,9 +116,8 @@ def _kanban_handler(tool_name: str) -> Callable:
 
 
 def _reject_delegated_child_mutation(tool_name: str) -> None:
-    """A delegate_task child shares the parent's process, so inherited
-    HERMES_KANBAN_* env is not proof of ownership: it may report findings but
-    must not mutate board state."""
+    """A delegate_task child shares the parent's process, so inherited HERMES_KANBAN_*
+    env is not proof of ownership: it may report findings but must not mutate."""
     if _is_delegated_child_context():
         raise _Reject(
             f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
@@ -145,27 +137,28 @@ def _default_task_id(arg: Optional[str]) -> Optional[str]:
 
 def _require_task_id(args: dict) -> str:
     tid = _default_task_id(args.get("task_id"))
-    _check(tid, _TASK_ID_REQUIRED)
+    _check(tid, "task_id is required (or set HERMES_KANBAN_TASK in the env)")
     return tid
+
+
+def _own_task_env(task_id: str, var: str) -> Optional[str]:
+    """``$var`` only when this worker is scoped to ``task_id``; else None."""
+    return os.environ.get(var) if os.environ.get("HERMES_KANBAN_TASK") == task_id else None
 
 
 def _worker_run_id(task_id: str) -> Optional[int]:
     """This worker's dispatcher run id when it is scoped to task_id."""
-    raw = os.environ.get("HERMES_KANBAN_RUN_ID")
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id or not raw:
-        return None
+    raw = _own_task_env(task_id, "HERMES_KANBAN_RUN_ID")
     try:
-        return int(raw)
+        return int(raw) if raw else None
     except ValueError:
         return None
 
 
 def _stamp_worker_session_metadata(task_id: str, metadata: Optional[dict]) -> Optional[dict]:
     """Add trusted worker session id metadata for this worker's own task."""
-    session_id = os.environ.get("HERMES_SESSION_ID")
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id or not session_id:
-        return metadata
-    return {**(metadata or {}), "worker_session_id": session_id}
+    session_id = _own_task_env(task_id, "HERMES_SESSION_ID")
+    return {**(metadata or {}), "worker_session_id": session_id} if session_id else metadata
 
 
 def _enforce_worker_task_ownership(tid: str) -> None:
@@ -213,6 +206,12 @@ def _board(board: Optional[str], *, quiet_close: bool = False):
         except Exception:
             if not quiet_close:
                 raise
+
+
+def _existing_task(kb, conn, tid: str):
+    task = kb.get_task(conn, tid)
+    _check(task is not None, f"task {tid} not found")
+    return task
 
 
 def _ok(**fields: Any) -> str:
@@ -264,10 +263,9 @@ def _require_dict_metadata(metadata: Any) -> None:
 
 
 def _merge_artifacts(metadata: Any, artifacts: list[str]) -> dict:
-    """Fold ``artifacts`` into ``metadata["artifacts"]`` (merged with, never
-    overwriting, a list the worker passed manually). Artifacts ride inside
-    metadata so the completed-event payload needs no DB schema change; the
-    gateway notifier uploads each path as a native attachment."""
+    """Fold ``artifacts`` into ``metadata["artifacts"]`` (merged with, never overwriting, a
+    list the worker passed manually). Artifacts ride inside metadata so the completed-event
+    payload needs no DB schema change; the gateway notifier uploads each as an attachment."""
     _require_dict_metadata(metadata)
     metadata = {} if metadata is None else metadata
     existing = metadata.get("artifacts")
@@ -314,10 +312,12 @@ _COMMENT_FIELDS = ("author", "body", "created_at")
 _EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
+_CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id")
 
 
 def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
-    return {n: getattr(obj, n) for n in names}
+    """``{name: getattr(obj, name)}``; every value None when ``obj`` is None."""
+    return {n: getattr(obj, n) if obj is not None else None for n in names}
 
 
 def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
@@ -474,8 +474,7 @@ def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
-        task = kb.get_task(conn, tid)
-        _check(task is not None, f"task {tid} not found")
+        task = _existing_task(kb, conn, tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -578,12 +577,11 @@ def _handle_block(args: dict, **kw) -> str:
         # would be an escape hatch around the completion judge: goal_mode tasks
         # may only block on genuine external blockers.
         task = kb.get_task(conn, tid)
-        if task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS:
-            return tool_error(
-                f"goal_mode tasks can only block with kind in "
-                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
-                f"finished or cannot proceed for another reason, call kanban_complete instead — "
-                f"the completion judge will evaluate it.")
+        _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
+               f"goal_mode tasks can only block with kind in "
+               f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
+               f"finished or cannot proceed for another reason, call kanban_complete instead — "
+               f"the completion judge will evaluate it.")
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         return _ok_landed(kb, conn, tid, "blocked", block_kind=kind)
@@ -602,10 +600,8 @@ def _handle_request_review(args: dict, **kw) -> str:
         metadata = _redact_metadata(metadata)
         _check(metadata is not None, "metadata could not be safely serialized")
     metadata = _stamp_worker_session_metadata(tid, metadata)
-    reviewer = args.get("reviewer") or None
-    if reviewer:
-        # Model-supplied free text stored durably on the event payload.
-        reviewer = _redact(reviewer)
+    # Reviewer is model-supplied free text stored durably on the event payload.
+    reviewer = _redact_opt(args.get("reviewer") or None)
     with _board(args.get("board")) as (kb, conn):
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
         ok, fail_reason = kb.request_review(
@@ -693,12 +689,10 @@ _MAX_ATTACH_URL_REDIRECTS = 5
 
 def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[str]]:
     """Fetch ``url`` over http(s) capped at ``max_bytes`` -> ``(data, content_type)``.
-
-    Every hop is SSRF-checked (redirects followed manually) so a model-controlled URL,
-    or a public host 302ing, cannot reach loopback/private/cloud-metadata ranges.
-    ``ValueError`` for bad scheme, blocked target, too many redirects, or a body over
-    the cap (checked while streaming, so nothing oversize is buffered).
-    """
+    Every hop is SSRF-checked (redirects followed manually) so a model-controlled URL, or a
+    public host 302ing, cannot reach loopback/private/cloud-metadata ranges. ``ValueError``
+    for bad scheme, blocked target, too many redirects, or a body over the cap (checked
+    while streaming, so nothing oversize is buffered)."""
     from urllib.parse import urljoin, urlparse
     import httpx
     from tools.url_safety import is_safe_url
@@ -741,8 +735,7 @@ def _handle_attach_url(args: dict, **kw) -> str:
     if not filename or not str(filename).strip():
         # Derive a name from the URL path's leaf component.
         from urllib.parse import unquote, urlparse
-        leaf = unquote(urlparse(url).path.rsplit("/", 1)[-1]).strip()
-        filename = leaf or "download"
+        filename = unquote(urlparse(url).path.rsplit("/", 1)[-1]).strip() or "download"
     try:
         data, fetched_ct = _download_url_with_cap(url, kb.KANBAN_ATTACHMENT_MAX_BYTES)
     except ValueError as e:
@@ -759,7 +752,7 @@ def _handle_attachments(args: dict, **kw) -> str:
     """List a task's attachments (read-only; no ownership restriction)."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.get_task(conn, tid) is not None, f"task {tid} not found")
+        _existing_task(kb, conn, tid)
         return json.dumps({
             "ok": True, "task_id": tid,
             "attachments": [
@@ -784,25 +777,21 @@ def _handle_create(args: dict, **kw) -> str:
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing
     # to inherit implicitly (the DB turns it into a fresh per-task worktree).
-    workspace_kind = args.get("workspace_kind")
-    workspace_path = args.get("workspace_path")
+    workspace_kind, workspace_path = args.get("workspace_kind"), args.get("workspace_path")
     project_id = args.get("project") or args.get("project_id")
     project_source_task_id = None
-    inherit_project = workspace_kind is None and workspace_path is None
-    triage = _parse_bool_arg(args, "triage")
-    skills = _coerce_str_list(args.get("skills"), "skills", "skill names")
-    goal_mode = _parse_bool_arg(args, "goal_mode")
-    model_override = args.get("model")
-    provider_override = args.get("provider")
+    triage, skills, goal_mode = (
+        _parse_bool_arg(args, "triage"), _coerce_str_list(args.get("skills"), "skills", "skill names"),
+        _parse_bool_arg(args, "goal_mode"))
+    model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
-        if inherit_project and project_id is None:
+        if project_id is None and workspace_kind is None and workspace_path is None:
             self_tid = os.environ.get("HERMES_KANBAN_TASK")
             self_task = kb.get_task(conn, self_tid) if self_tid else None
             if self_task is not None and self_task.project_id:
-                project_id = self_task.project_id
-                project_source_task_id = self_task.id
+                project_id, project_source_task_id = self_task.project_id, self_task.id
         new_tid = kb.create_task(
             conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
             parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
@@ -816,48 +805,35 @@ def _handle_create(args: dict, **kw) -> str:
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
-        new_task = kb.get_task(conn, new_tid)
-        subscribed = _maybe_auto_subscribe(conn, new_tid)
-        return _ok(
-            task_id=new_tid, status=new_task.status if new_task else None,
-            workspace_kind=new_task.workspace_kind if new_task else None,
-            workspace_path=new_task.workspace_path if new_task else None,
-            project_id=new_task.project_id if new_task else None, subscribed=subscribed)
+        landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
+        return _ok(task_id=new_tid, **landed, subscribed=_maybe_auto_subscribe(conn, new_tid))
 
 
 def _resolve_notify_target() -> Optional[dict[str, Any]]:
     """``kanban_db.add_notify_sub`` kwargs for the calling session, or None (CLI/cron/tests).
-
     Gateway sessions: ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` ContextVars. TUI/desktop:
     those are cleared but the subprocess inherits ``HERMES_SESSION_KEY`` -> ``platform="tui"``
     for the TUI poller. ``HERMES_SESSION_ID`` is deliberately NOT a fallback: it is set for
-    every CLI/ACP invocation and would auto-subscribe every CLI run.
-    """
-    from gateway.session_context import get_session_env
-    platform = get_session_env("HERMES_SESSION_PLATFORM", "")
-    chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    every CLI/ACP invocation and would auto-subscribe every CLI run."""
+    from gateway.session_context import get_session_env as env
+    platform, chat_id = env("HERMES_SESSION_PLATFORM", ""), env("HERMES_SESSION_CHAT_ID", "")
     if not platform or not chat_id:
-        session_key = (
-            get_session_env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", ""))
+        session_key = env("HERMES_SESSION_KEY", "") or os.environ.get("HERMES_SESSION_KEY", "")
         if not session_key:
             return None
         platform, chat_id = "tui", session_key
-    chat_type = get_session_env("HERMES_SESSION_CHAT_TYPE", "") or None
-    thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "") or None
-    message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "") or ""
-    notifier_profile = (
-        get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE"))
+    chat_type = env("HERMES_SESSION_CHAT_TYPE", "") or None
+    thread_id = env("HERMES_SESSION_THREAD_ID", "") or None
+    message_id = env("HERMES_SESSION_MESSAGE_ID", "") or ""
+    notifier_profile = env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE")
     if not notifier_profile:
         try:
             from hermes_cli.profiles import get_active_profile_name
             notifier_profile = get_active_profile_name() or "default"
         except Exception:
             notifier_profile = "default"
-    delivery_metadata: dict[str, Any] = {}
-    if thread_id:
-        delivery_metadata["thread_id"] = thread_id
-    if chat_type:
-        delivery_metadata["chat_type"] = chat_type
+    delivery_metadata: dict[str, Any] = {
+        k: v for k, v in (("thread_id", thread_id), ("chat_type", chat_type)) if v}
     if (platform.lower() == "telegram" and thread_id
             and (chat_type or "").lower() in {"dm", "direct", "private"}):
         delivery_metadata["telegram_dm_topic_reply_fallback"] = True
@@ -867,8 +843,8 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
             delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
     return dict(
         platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
-        user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None,
-        user_id_alt=get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None,
+        user_id=env("HERMES_SESSION_USER_ID", "") or None,
+        user_id_alt=env("HERMES_SESSION_USER_ID_ALT", "") or None,
         notifier_profile=notifier_profile,
         delivery_mode="notify+wake" if platform != "tui" else None,
         delivery_metadata=delivery_metadata or None)
@@ -880,8 +856,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     ``kanban_notify-subscribe``). Gated by ``kanban.auto_subscribe_on_create`` (default
     True). Failures are logged and swallowed: bookkeeping must never fail kanban_create."""
     try:
-        cfg = load_config()
-        if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
+        if not cfg_get(load_config(), "kanban", "auto_subscribe_on_create", default=True):
             return False
     except Exception:
         pass  # unreadable config keeps the user-friendly default (True)
@@ -907,11 +882,11 @@ def _handle_unblock(args: dict, **kw) -> str:
     _require_orchestrator_tool("kanban_unblock")
     tid = args.get("task_id")
     _check(tid, "task_id is required")
-    _enforce_worker_task_ownership(str(tid))
+    tid = str(tid)
+    _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, str(tid)), f"could not unblock {tid} (not blocked or unknown)")
-        task = kb.get_task(conn, str(tid))
-        return _ok(task_id=str(tid), status=task.status if task else None)
+        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
+        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 
 @_kanban_handler("kanban_link")

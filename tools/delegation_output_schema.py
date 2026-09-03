@@ -24,12 +24,11 @@ def coerce_output_schema(raw: Any) -> Tuple[Optional[Dict[str, Any]], Optional[s
     if isinstance(raw, str):
         # Models sometimes double-encode the schema as a JSON string.
         try:
-            parsed = json.loads(raw)
+            raw = json.loads(raw)
         except (ValueError, TypeError):
             return None, "output_schema must be a JSON Schema object, got a non-JSON string."
-        if not isinstance(parsed, dict):
+        if not isinstance(raw, dict):
             return None, "output_schema must be a JSON Schema object."
-        raw = parsed
     if not isinstance(raw, dict):
         return None, f"output_schema must be a JSON Schema object, got {type(raw).__name__}."
     try:
@@ -49,12 +48,10 @@ def append_output_contract(context: Optional[str], schema: Dict[str, Any]) -> st
         schema_text = json.dumps(schema, indent=2, ensure_ascii=False)
     except (TypeError, ValueError):
         schema_text = str(schema)
-    block = (
-        "OUTPUT CONTRACT (machine-validated):\n"
-        "Your FINAL response must be a single JSON object that validates "
-        "against this JSON Schema. No prose before or after the JSON; a "
-        "```json code fence is acceptable but not required.\n"
-        f"{schema_text}")
+    block = ("OUTPUT CONTRACT (machine-validated):\n"
+             "Your FINAL response must be a single JSON object that validates "
+             "against this JSON Schema. No prose before or after the JSON; a "
+             "```json code fence is acceptable but not required.\n" f"{schema_text}")
     base = (context or "").rstrip()
     return f"{base}\n\n{block}" if base else block
 
@@ -104,9 +101,7 @@ def validate_output(text: str, schema: Dict[str, Any]) -> Tuple[bool, List[str]]
 def build_retry_message(errors: List[str]) -> str:
     """Single bounded retry turn: errors verbatim, schema deliberately NOT re-pasted."""
     error_block = "\n".join(f"- {e}" for e in errors)
-    return (
-        "Your previous final response was rejected by the output contract "
-        "validator. Validation errors:\n"
-        f"{error_block}\n\n"
-        "Reply with ONLY the corrected JSON object matching the OUTPUT "
-        "CONTRACT schema from your task context. No prose, no explanations.")
+    return ("Your previous final response was rejected by the output contract "
+            "validator. Validation errors:\n" f"{error_block}\n\n"
+            "Reply with ONLY the corrected JSON object matching the OUTPUT "
+            "CONTRACT schema from your task context. No prose, no explanations.")

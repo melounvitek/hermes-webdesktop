@@ -1,10 +1,7 @@
-"""Per-thread interrupt signaling for all tools.
-
-Thread-scoped so interrupting one agent session does not kill tools running in
-other sessions (the gateway runs many agents in one process). The agent stores
-its execution thread id at the start of run_conversation() and passes it to
-set_interrupt(); tools call is_interrupted(), which checks the CURRENT thread.
-"""
+"""Per-thread interrupt signaling for all tools: thread-scoped so interrupting one
+agent session does not kill tools in other sessions (the gateway runs many agents in one
+process). The agent passes its execution thread id to set_interrupt(); tools call
+is_interrupted(), which checks the CURRENT thread."""
 
 import logging
 import os
@@ -26,8 +23,8 @@ _lock = threading.Lock()
 
 
 def set_interrupt(active: bool, thread_id: int | None = None, *, reason: str | None = None) -> None:
-    """Set or clear the interrupt for *thread_id* (default: current thread, for
-    CLI/tests).  ``reason`` is an optional user-safe cause."""
+    """Set or clear the interrupt for *thread_id* (default: current thread); ``reason`` is
+    an optional user-safe cause."""
     tid = thread_id if thread_id is not None else threading.current_thread().ident
     with _lock:
         (_interrupted_threads.add if active else _interrupted_threads.discard)(tid)
@@ -44,7 +41,6 @@ def set_interrupt(active: bool, thread_id: int | None = None, *, reason: str | N
 
 
 def is_interrupted() -> bool:
-    """Check if an interrupt has been requested for the current thread."""
     return is_thread_interrupted(threading.current_thread().ident)
 
 
@@ -65,21 +61,18 @@ def get_interrupt_reason() -> str | None:
 
 
 def clear_current_thread_interrupt() -> None:
-    """Clear any interrupt bit on the CURRENT thread.
-
-    Gives a user-approved command a clean slate right before it spawns its child,
-    so a stale bit that landed during the blocking approval-wait cannot SIGINT the
-    just-approved run.  Single-thread ordering keeps the invariant: a *genuine*
-    interrupt arriving after this call re-sets the bit and is still observed by the
-    executor's poll loop.  Call directly, never via the _interrupt_event proxy (its
-    .clear() binds to whatever thread runs it).
-    """
+    """Clear any interrupt bit on the CURRENT thread: gives a user-approved command a clean
+    slate right before it spawns its child, so a stale bit that landed during the blocking
+    approval-wait cannot SIGINT the just-approved run. A *genuine* interrupt arriving after
+    this call re-sets the bit and is still observed by the executor's poll loop. Call
+    directly, never via the _interrupt_event proxy (its .clear() binds to whatever thread
+    runs it)."""
     set_interrupt(False)
 
 
 class _ThreadAwareEventProxy:
-    """Backward-compatible ``_interrupt_event``: legacy call sites call
-    .is_set()/.set()/.clear(); the shim maps those to the per-thread API."""
+    """Backward-compatible ``_interrupt_event``: legacy .is_set()/.set()/.clear()/.wait()
+    call sites mapped onto the per-thread API (``wait`` returns the current state at once)."""
 
     def is_set(self) -> bool:
         return is_interrupted()
@@ -91,7 +84,6 @@ class _ThreadAwareEventProxy:
         set_interrupt(False)
 
     def wait(self, timeout: float | None = None) -> bool:
-        """Not truly supported — returns current state immediately."""
         return self.is_set()
 
 
