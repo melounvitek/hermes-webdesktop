@@ -1,7 +1,4 @@
-"""CLI commands for Honcho integration management.
-
-Handles: hermes honcho setup | status | sessions | map | peer
-"""
+"""``hermes honcho`` subcommands: setup wizard, status, peers, sessions, identity, migrate."""
 
 from __future__ import annotations
 
@@ -29,6 +26,9 @@ _CLONE_KEYS = _INHERITED_KEYS[:3] + ("sessionPeerPrefix",) + _INHERITED_KEYS[3:]
     "pinUserPeer", "userPeerAliases", "runtimePeerPrefix",
 )
 _IDENTITY_MAPPING_KEYS = ("pinPeerName", "pinUserPeer", "userPeerAliases", "runtimePeerPrefix")
+# Setup-wizard answer -> identity-mapping shape ("2"/pooled answers are handled inline).
+_SHAPE_CHOICES = {"1": "single", "me": "single", "just-me": "single", "3": "multi", "others": "multi",
+                  "e": "raw", "edit": "raw", "raw": "raw"}
 _MODES = {
     "hybrid": "auto-injected context + Honcho tools available (default)",
     "context": "auto-injected context only, Honcho tools hidden",
@@ -48,33 +48,27 @@ _profile_override: str | None = None
 
 
 def _host_key() -> str:
-    """Return the active Honcho host key, derived from the current Hermes profile."""
+    """Active Honcho host key (``--target-profile`` override, else the active profile)."""
     if _profile_override:
-        if _profile_override in {"default", "custom"}:
-            return HOST
-        return profile_host_key(_profile_override)
+        return HOST if _profile_override in {"default", "custom"} else profile_host_key(_profile_override)
     return resolve_active_host()
 
 
 def _config_path() -> Path:
-    """Return the active Honcho config path for reading (instance-local or global)."""
+    """Active Honcho config path for reading (instance-local, default profile, or global)."""
     return resolve_config_path()
 
 
 def _local_config_path() -> Path:
-    """Instance-local write path ($HERMES_HOME/honcho.json). The global
-    ~/.honcho/config.json is only a read fallback for cross-app interop."""
+    """Instance-local write path; ~/.honcho/config.json is only a read fallback for cross-app interop."""
     return get_hermes_home() / "honcho.json"
 
 
 def _read_config() -> dict:
-    path = _config_path()
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+    try:
+        return json.loads(_config_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def _write_config(cfg: dict, path: Path | None = None) -> None:
@@ -115,18 +109,15 @@ def _save(cfg: dict) -> None:
 
 def _default_block_and_key(cfg: dict) -> tuple[dict, bool]:
     """(default host block, whether an API key is configured at root or env)."""
-    default_block = cfg_get(cfg, "hosts", HOST, default={})
-    has_key = bool(cfg.get("apiKey") or os.environ.get("HONCHO_API_KEY"))
-    return default_block, has_key
+    return cfg_get(cfg, "hosts", HOST, default={}), bool(cfg.get("apiKey") or os.environ.get("HONCHO_API_KEY"))
 
 
 def _resolve_api_key(cfg: dict) -> str:
-    """Resolve API key with host -> root -> env fallback. A self-hosted ``baseUrl``
-    without a key yields ``"local"`` so credential guards accept it: the URL is
-    scheme-validated (http/https) so ``baseUrl: true`` can't pass, while schemeless
-    host:port shapes (legacy ``localhost:8000``) still pass — the SDK rejects them."""
-    host_key = _host_block(cfg, _host_key()).get("apiKey")
-    key = host_key or cfg.get("apiKey", "") or os.environ.get("HONCHO_API_KEY", "")
+    """API key with host -> root -> env fallback. A self-hosted ``baseUrl`` without a key
+    yields ``"local"`` so credential guards accept it: the URL must be http/https (so
+    ``baseUrl: true`` can't pass) or a schemeless host:port (legacy ``localhost:8000``;
+    the SDK rejects those itself)."""
+    key = _host_block(cfg, _host_key()).get("apiKey") or cfg.get("apiKey", "") or os.environ.get("HONCHO_API_KEY", "")
     if key:
         return key
     base_url = (cfg.get("baseUrl") or cfg.get("base_url") or os.environ.get("HONCHO_BASE_URL", "") or "").strip()
@@ -164,7 +155,7 @@ def _yes(answer: str) -> bool:
 # ── Honcho connection ──────────────────────────────────────────────────────
 
 def _connect(host: str | None, *, reset: bool = False):
-    """(hcfg, client) for ``host``; imports are lazy so tests can patch client.*."""
+    """(hcfg, client) for ``host``; lazy imports so tests can patch client.*."""
     from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client, reset_honcho_client
     if reset:
         reset_honcho_client()
@@ -260,9 +251,7 @@ def _sync_profiles(verbose: bool) -> int:
         return 0
 
     created = skipped = 0
-    for p in profiles:
-        if p.name == "default":
-            continue
+    for p in (p for p in profiles if p.name != "default"):
         if clone_honcho_for_profile(p.name):
             say(f"  + {p.name} -> {profile_host_key(p.name)}")
             created += 1
@@ -328,12 +317,9 @@ def _resolve_effective_identity_mapping(cfg: dict, hermes_host: dict) -> tuple[b
     host, mirroring ``HonchoClientConfig.from_global_config`` precedence (root-level
     overrides; ``pinUserPeer`` beats ``pinPeerName``) so setup classifies the shape
     the gateway actually runs with. ``*_from_root`` lets writes skip inherited values."""
-    pin = False
-    for val in (hermes_host.get("pinUserPeer"), hermes_host.get("pinPeerName"),
-                cfg.get("pinUserPeer"), cfg.get("pinPeerName")):
-        if val is not None:
-            pin = bool(val)
-            break
+    pin_sources = (hermes_host.get("pinUserPeer"), hermes_host.get("pinPeerName"),
+                   cfg.get("pinUserPeer"), cfg.get("pinPeerName"))
+    pin = bool(next((v for v in pin_sources if v is not None), False))
 
     def _inherit(key):
         if key in hermes_host:
@@ -470,8 +456,7 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
         pooled = _prompt("  Keep my own memory pooled across platforms? (Y/n)", default="y").strip().lower()
         shape = "hybrid" if pooled in {"y", "yes", ""} else "multi"
     else:
-        shape = {"1": "single", "me": "single", "just-me": "single", "3": "multi", "others": "multi",
-                 "e": "raw", "edit": "raw", "raw": "raw"}.get(choice, "skip")
+        shape = _SHAPE_CHOICES.get(choice, "skip")
 
     # Un-pinning without aliasing strands the pooled peerName history; steer toward pooling.
     if current_pin and shape == "multi":
@@ -534,10 +519,8 @@ def _ensure_sdk_installed() -> bool:
     if result.ok:
         print("  Installed.\n")
         return True
-    if result.blocked:
-        print(f"  Cannot install: {result.reason}\n")
-    else:
-        print(f"  Install failed:\n{(result.stderr or '').strip()}\n  Run manually: uv pip install 'honcho-ai==2.2.0'\n")
+    print(f"  Cannot install: {result.reason}\n" if result.blocked else
+          f"  Install failed:\n{(result.stderr or '').strip()}\n  Run manually: uv pip install 'honcho-ai==2.2.0'\n")
     return False
 
 
@@ -681,8 +664,8 @@ def _setup_cloud_auth(cfg: dict, hermes_host: dict, write_path: Path) -> bool:
             default_method = "device"
         else:
             print("  (no usable local browser detected — browser sign-in may need an SSH tunnel to 127.0.0.1:8765)")
-    prompt_label = "oauth, device, or apikey?" if device_available else "OAuth or API key?"
-    method = _prompt(prompt_label, default=default_method).strip().lower()
+    method = _prompt("oauth, device, or apikey?" if device_available else "OAuth or API key?",
+                     default=default_method).strip().lower()
 
     if device_available and method in {"device", "d"}:
         return _setup_device_login(hermes_host, write_path, open_browser=can_browse and not is_remote)
@@ -988,8 +971,7 @@ def _show_peer_cards(hcfg, client) -> None:
         card = mgr.get_peer_card(session_key)
         if card:
             print(f"\n  User peer card ({len(card)} facts):")
-            for fact in card[:10]:
-                print(f"    - {fact}")
+            print("\n".join(f"    - {fact}" for fact in card[:10]))
             if len(card) > 10:
                 print(f"    ... and {len(card) - 10} more")
         ai_text = mgr.get_ai_representation(session_key).get("representation", "")
@@ -1053,8 +1035,7 @@ def cmd_sessions(args) -> None:
 def cmd_map(args) -> None:
     """Map current directory to a Honcho session name."""
     if not args.session_name:
-        cmd_sessions(args)
-        return
+        return cmd_sessions(args)
     session_name = args.session_name.strip()
     if not session_name:
         print("  Session name cannot be empty.\n")
@@ -1076,10 +1057,7 @@ def cmd_map(args) -> None:
 def cmd_peer(args) -> None:
     """Show or update peer names and dialectic reasoning level."""
     cfg = _read_config()
-    user_name = getattr(args, "user", None)
-    ai_name = getattr(args, "ai", None)
-    reasoning = getattr(args, "reasoning", None)
-
+    user_name, ai_name, reasoning = (getattr(args, k, None) for k in ("user", "ai", "reasoning"))
     if user_name is None and ai_name is None and reasoning is None:
         hermes = _active_block(cfg)
         print(f"""
@@ -1102,8 +1080,7 @@ Honcho peers
         _set_field(cfg, "aiPeer", ai_name.strip(), f"AI peer   -> {ai_name.strip()}")
     if reasoning is not None:
         if reasoning not in REASONING_LEVELS:
-            print(f"  Invalid reasoning level '{reasoning}'. Options: {', '.join(REASONING_LEVELS)}")
-            return
+            return print(f"  Invalid reasoning level '{reasoning}'. Options: {', '.join(REASONING_LEVELS)}")
         _set_field(cfg, "dialecticReasoningLevel", reasoning, f"Dialectic reasoning level -> {reasoning}")
     _save(cfg)
 
@@ -1144,8 +1121,7 @@ def cmd_strategy(args) -> None:
 def cmd_tokens(args) -> None:
     """Show or set token budget settings."""
     cfg = _read_config()
-    context = getattr(args, "context", None)
-    dialectic = getattr(args, "dialectic", None)
+    context, dialectic = getattr(args, "context", None), getattr(args, "dialectic", None)
     if context is None and dialectic is None:
         hermes = _active_block(cfg)
         print(f"""
@@ -1198,11 +1174,8 @@ def cmd_identity(args) -> None:
             print(f"  Honcho authentication failed: {e}\n")
             return
         print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + RULE)
-        if user_card:
-            for fact in user_card:
-                print(f"  {fact}")
-        else:
-            print("  No user peer card yet. Send a few messages to build one.")
+        print("\n".join(f"  {fact}" for fact in user_card) if user_card
+              else "  No user peer card yet. Send a few messages to build one.")
         print(f"\nAI peer ({hcfg.ai_peer})\n" + RULE)
         print(ai_rep.get("representation") or ai_rep.get("card")
               or "  No representation built yet.\n  Run 'hermes honcho identity <file>' to seed one.")
@@ -1223,12 +1196,10 @@ Honcho identity management
 
     p = Path(file_path).expanduser()
     if not p.exists():
-        print(f"  File not found: {p}\n")
-        return
+        return print(f"  File not found: {p}\n")
     content = p.read_text(encoding="utf-8").strip()
     if not content:
-        print(f"  File is empty: {p}\n")
-        return
+        return print(f"  File is empty: {p}\n")
     if mgr.seed_ai_identity(session_key, content, source=p.name):
         print(f"  Seeded AI peer identity from {p.name} into session '{session_key}'\n"
               f"  Honcho will incorporate this into {hcfg.ai_peer}'s representation over time.\n")
@@ -1309,14 +1280,11 @@ Step 1  Create a Honcho account
 
     print("\nStep 2  Detected OpenClaw memory files\n")
     if user_files or agent_files:
-        if user_files:
-            print(f"  User memory ({len(user_files)} file(s)) — will go to Honcho user peer:")
-            for f in user_files:
-                print(f"    {f}")
-        if agent_files:
-            print(f"  Agent identity ({len(agent_files)} file(s)) — will go to Honcho AI peer:")
-            for f in agent_files:
-                print(f"    {f}")
+        for files, label in ((user_files, "User memory"), (agent_files, "Agent identity")):
+            if files:
+                peer = "user" if files is user_files else "AI"
+                print(f"  {label} ({len(files)} file(s)) — will go to Honcho {peer} peer:")
+                print("\n".join(f"    {f}" for f in files))
     else:
         print("  No OpenClaw native memory files found in cwd or ~/.openclaw/.\n"
               "  If your files are elsewhere, copy them here before continuing,\n"
@@ -1365,8 +1333,7 @@ Step 4  Seed AI identity files → Honcho AI peer
             _offer("  Seed AI identity from all detected files now?", _migrate_seed, agent_files)
         else:
             print("  Run 'hermes honcho setup' first, then seed manually:")
-            for f in agent_files:
-                print(f"    hermes honcho identity {f}")
+            print("\n".join(f"    hermes honcho identity {f}" for f in agent_files))
     else:
         print("  No agent identity files detected.\n  To seed manually:  hermes honcho identity <path/to/SOUL.md>")
 
