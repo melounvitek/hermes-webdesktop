@@ -39,16 +39,12 @@ def _strip_edge_silence_punctuation(text: str) -> str:
 
 def _canonical_silence_candidates(text: Any) -> tuple[str, ...]:
     """Canonical forms of a short marker-sized response; ``()`` when not a candidate at all."""
-    if not isinstance(text, str):
-        return ()
-    stripped = text.strip()
+    stripped = text.strip() if isinstance(text, str) else ""
     if not 0 < len(stripped) <= _MARKER_LENGTH_CAP:
         return ()
-    exact = _canonical_silence_candidate(stripped)
     depunctuated = _strip_edge_silence_punctuation(stripped)
-    if depunctuated == stripped:
-        return (exact,)
-    return (exact, _canonical_silence_candidate(depunctuated))
+    forms = (stripped,) if depunctuated == stripped else (stripped, depunctuated)
+    return tuple(_canonical_silence_candidate(f) for f in forms)
 
 
 def is_intentional_silence_response(response: Any) -> bool:
@@ -69,29 +65,19 @@ def is_autonomous_silence_response(response: Any) -> bool:
     changes detected``).  A token buried mid-sentence is still delivered.
     Shares :data:`LIVE_GATEWAY_SILENT_MARKERS` so the two sets cannot drift.
     """
-    if not isinstance(response, str):
-        return False
-    stripped = response.strip()
+    stripped = response.strip() if isinstance(response, str) else ""
     if not stripped:
         return False
-
-    def _is_token(line: str) -> bool:
-        return _canonical_silence_candidate(line) in LIVE_GATEWAY_SILENT_MARKERS
-
-    if _is_token(stripped):
-        return True
     lines = [ln for ln in stripped.splitlines() if ln.strip()]
-    if lines and (_is_token(lines[0]) or _is_token(lines[-1])):
-        return True
-    # Bracketed form only, so a bare "Silent retry succeeded" is NOT swallowed.
-    return stripped.upper().startswith("[SILENT]")
+    # Bracketed form only for the prefix rule, so a bare "Silent retry succeeded" is NOT swallowed.
+    return stripped.upper().startswith("[SILENT]") or any(
+        _canonical_silence_candidate(c) in LIVE_GATEWAY_SILENT_MARKERS for c in (stripped, lines[0], lines[-1])
+    )
 
 
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:
     """Silence markers suppress delivery only for successful agent turns."""
-    if not isinstance(agent_result, dict) or agent_result.get("failed"):
-        return False
-    return is_intentional_silence_response(response)
+    return isinstance(agent_result, dict) and not agent_result.get("failed") and is_intentional_silence_response(response)
 
 
 def is_partial_silence_marker(text: Any) -> bool:

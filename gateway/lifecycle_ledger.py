@@ -26,12 +26,10 @@ logger = logging.getLogger(__name__)
 
 def _process_hermes_home() -> Path:
     """HERMES_HOME for process-level identity files (ignore task overrides)."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    if val:
-        return Path(val)
     from hermes_constants import get_hermes_home
 
-    return get_hermes_home()
+    val = os.environ.get("HERMES_HOME", "").strip()
+    return Path(val) if val else get_hermes_home()
 
 
 def _home_path(home: Optional[Path], *relative: str) -> Path:
@@ -64,11 +62,8 @@ def _proc_fields(path: str, wanted: Dict[str, str]) -> Dict[str, int]:
 
 
 def sample_memory() -> Dict[str, Any]:
-    """Cheap /proc snapshot (KiB, kernel units): own RSS + MemTotal/MemAvailable + swap used.
-
-    Linux-only (``{}`` elsewhere), never raises; embedded in the 30s loop
-    heartbeat so OOM crash cycles are classifiable from the volume alone.
-    """
+    """Cheap /proc snapshot (KiB): own RSS + MemTotal/MemAvailable + swap used.  Linux-only
+    (``{}`` elsewhere), never raises; the 30s heartbeat embeds it so OOM cycles are classifiable."""
     sample = _proc_fields("/proc/self/status", {"VmRSS": "rss_kib"})
     mem = _proc_fields("/proc/meminfo", {"MemTotal": "mem_total_kib", "MemAvailable": "mem_available_kib",
                                          "SwapTotal": "SwapTotal", "SwapFree": "SwapFree"})
@@ -88,10 +83,10 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _write_sentinel(payload: Dict[str, Any], home: Optional[Path]) -> None:
-    path = get_lifecycle_sentinel_path(home)
     try:
         from utils import atomic_json_write
 
+        path = get_lifecycle_sentinel_path(home)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(path, payload, indent=None)
     except Exception:
@@ -100,8 +95,8 @@ def _write_sentinel(payload: Dict[str, Any], home: Optional[Path]) -> None:
 
 def _append_exit_diag(record: Dict[str, Any], home: Optional[Path]) -> None:
     """Append a JSON line to gateway-exit-diag.log (same format as the CLI's ``_exit_diag``)."""
-    path = _home_path(home, "logs", "gateway-exit-diag.log")
     try:
+        path = _home_path(home, "logs", "gateway-exit-diag.log")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
@@ -110,11 +105,8 @@ def _append_exit_diag(record: Dict[str, Any], home: Optional[Path]) -> None:
 
 
 def _pid_alive_with_start_time(pid: Any, start_time: Any) -> bool:
-    """True when ``pid`` is a live process matching ``start_time`` (±2s).
-
-    Guards the ``--replace`` takeover race: a live matching owner mid-teardown
-    is a planned handover, not an unclean death.
-    """
+    """True when ``pid`` is a live process matching ``start_time`` (±2s) — guards the
+    ``--replace`` race: a live matching owner mid-teardown is a handover, not a death."""
     try:
         pid_int = int(pid)
         # NOT os.kill(pid, 0): on Windows that sends CTRL_C_EVENT to the target's console group.
@@ -124,11 +116,9 @@ def _pid_alive_with_start_time(pid: Any, start_time: Any) -> bool:
             return False
     except Exception:
         return False
-    if start_time is None:
-        return True  # alive; can't disambiguate PID reuse — err on "alive"
     try:
-        actual = get_process_start_time(pid_int)
-        return actual is None or abs(float(actual) - float(start_time)) <= 2.0
+        actual = None if start_time is None else get_process_start_time(pid_int)
+        return actual is None or abs(float(actual) - float(start_time)) <= 2.0  # None: can't disambiguate PID reuse
     except Exception:
         return True
 
@@ -139,9 +129,10 @@ def _suspected_oom(mem: Dict[str, Any]) -> bool:
     from gateway.memory_status import _CRITICAL_AVAILABLE_FRACTION, _CRITICAL_AVAILABLE_KIB
 
     total, avail = mem.get("mem_total_kib"), mem.get("mem_available_kib")
-    return isinstance(avail, int) and (
-        avail < _CRITICAL_AVAILABLE_KIB
-        or (isinstance(total, int) and total > 0 and avail / total < _CRITICAL_AVAILABLE_FRACTION)
+    if not isinstance(avail, int):
+        return False
+    return avail < _CRITICAL_AVAILABLE_KIB or (
+        isinstance(total, int) and total > 0 and avail / total < _CRITICAL_AVAILABLE_FRACTION
     )
 
 
@@ -160,16 +151,16 @@ def detect_unclean_exit(home: Optional[Path] = None) -> Optional[Dict[str, Any]]
     try:
         from gateway.shutdown_watchdog import get_loop_heartbeat_path
 
-        hb = _read_json(get_loop_heartbeat_path(home))
+        hb = _read_json(get_loop_heartbeat_path(home)) or {}
     except Exception:
-        hb = None
+        hb = {}
     if hb:
         evidence["last_heartbeat_at"] = hb.get("updated_at")
-        mem = hb.get("mem")
-        if isinstance(mem, dict):
-            evidence["last_heartbeat_mem"] = mem
-            if _suspected_oom(mem):
-                evidence["suspected_oom"] = True
+    mem = hb.get("mem")
+    if isinstance(mem, dict):
+        evidence["last_heartbeat_mem"] = mem
+        if _suspected_oom(mem):
+            evidence["suspected_oom"] = True
     return evidence
 
 
@@ -212,11 +203,8 @@ def _report_unclean_exit(evidence: Dict[str, Any], home: Optional[Path]) -> None
 
 
 def record_startup(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    """Boot entry point: report any unclean previous exit, then claim the sentinel.
-
-    Returns the evidence dict (also persisted to ``gateway-exit-diag.log`` and
-    logged at WARNING) or ``None``.  Never raises.
-    """
+    """Boot entry point: report any unclean previous exit (evidence dict, also persisted
+    to ``gateway-exit-diag.log`` and logged at WARNING) then claim the sentinel.  Never raises."""
     evidence: Optional[Dict[str, Any]] = None
     try:
         evidence = detect_unclean_exit(home)
@@ -250,20 +238,15 @@ def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdow
         sentinel = _read_json(get_lifecycle_sentinel_path(home))
         if sentinel is not None and sentinel.get("pid") != os.getpid():
             return
-        _write_sentinel(
-            {"phase": "exited", "pid": os.getpid(), "exit_code": exit_code, "exit_reason": reason, "exited_at": _now_iso()},
-            home,
-        )
+        _write_sentinel({"phase": "exited", "pid": os.getpid(), "exit_code": exit_code, "exit_reason": reason,
+                         "exited_at": _now_iso()}, home)
     except Exception:
         logger.debug("Failed to mark lifecycle sentinel exited", exc_info=True)
 
 
 def read_prior_exit_label(profile_home: Path) -> str:
-    """``clean`` / ``unclean`` / ``unknown`` for how the profile's last gateway life ended.
-
-    Read-only, exception-free; annotates ``container-boot.log``.  ``running`` is
-    unclean because the old PID namespace is gone at container boot.
-    """
+    """``clean``/``unclean``/``unknown`` for the profile's last gateway life; annotates
+    ``container-boot.log``.  ``running`` is unclean: the old PID namespace is gone at container boot."""
     try:
         phase = (_read_json(get_lifecycle_sentinel_path(profile_home)) or {}).get("phase")
         return {"exited": "clean", "running": "unclean"}.get(phase, "unknown")

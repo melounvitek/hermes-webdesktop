@@ -16,15 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
-# Shed well under the limit: once cgroup ``memory.high`` throttling kicks in
-# (swap full), a SIGTERM flush cannot finish inside systemd's stop timeout.
+# Shed well under the limit: once cgroup ``memory.high`` throttling kicks in (swap full),
+# a SIGTERM flush cannot finish inside systemd's stop timeout.
 _AUTO_BUDGET_FRACTION = 0.65
-# Below this a budget is noise — small containers would evict every pass and
-# never keep a warm prefix.
+# Below this a budget is noise — small containers would evict every pass and never keep a warm prefix.
 _AUTO_BUDGET_FLOOR_MB = 512
 _DEFAULT_MAX_EVICTIONS_PER_PASS = 16
-# Never shed the hottest sessions: their prompt cache is worth the most, and
-# evicting them just moves the cost to the next turn.
+# Never shed the hottest sessions: their prompt cache is worth the most; evicting them
+# just moves the cost to the next turn.
 _DEFAULT_PROTECT_RECENT = 8
 _BYTES_PER_MB = 1024 * 1024
 _OFF_WORDS = frozenset({"", "off", "none", "false", "disabled"})
@@ -48,13 +47,11 @@ def _is_int(value: Any) -> bool:
 
 def _positive(value: Any, cast: Callable[[Any], Any] = int) -> Any:
     """``cast(value)`` if it is a positive number (bools rejected), else None."""
-    if isinstance(value, bool) or value is None:
-        return None
     try:
-        parsed = cast(value)
+        parsed = None if isinstance(value, bool) or value is None else cast(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _cgroup_limit_bytes() -> Optional[int]:
@@ -73,10 +70,8 @@ def _cgroup_limit_bytes() -> Optional[int]:
         own = _own_cgroup_path()
     except Exception:
         own = None
-    roots = [f"/sys/fs/cgroup{own}"] if own and own != "/" else []
-    roots.append("/sys/fs/cgroup")
-    candidates = [f"{r}/memory.{f}" for r in roots for f in ("high", "max")] + ["/sys/fs/cgroup/memory/memory.limit_in_bytes"]
-    for candidate in candidates:
+    roots = ([f"/sys/fs/cgroup{own}"] if own and own != "/" else []) + ["/sys/fs/cgroup"]
+    for candidate in [f"{r}/memory.{f}" for r in roots for f in ("high", "max")] + ["/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
         try:
             limit = int(Path(candidate).read_text(encoding="utf-8").strip())
         except (OSError, ValueError):  # unreadable, empty, or "max"
@@ -106,12 +101,10 @@ def resolve_memory_high_mb(setting: Any) -> Optional[int]:
         normalized = setting.strip().lower()
         if normalized != "auto":
             return None if normalized in _OFF_WORDS else _positive(normalized)
-    elif isinstance(setting, bool):
-        if not setting:
-            return None
-    else:
+    elif setting is False:
+        return None
+    elif setting is not True:
         return _positive(setting)
-
     limit = _cgroup_limit_bytes() or _total_memory_bytes()
     if not limit:
         return None
@@ -127,9 +120,8 @@ def resolve_agent_cache_bounds(config: Any) -> AgentCacheBounds:
         section = {}
     protect_recent = section.get("protect_recent")
     protect_parsed = _positive(protect_recent)
-    # 0 means "shed anything" — distinct from unset.  The bool guard keeps
-    # `protect_recent: false` (False == 0) on the default instead of silently
-    # disabling MRU protection.
+    # 0 means "shed anything" — distinct from unset.  The bool guard keeps `protect_recent: false`
+    # (False == 0) on the default instead of silently disabling MRU protection.
     if protect_parsed is None and _is_int(protect_recent) and protect_recent == 0:
         protect_parsed = 0
     return AgentCacheBounds(
@@ -170,8 +162,7 @@ def transcript_persistence_caught_up(agent: Any) -> bool:
     up.  Unknown shapes are *not* caught up: a skipped eviction costs memory, a
     wrong one costs the conversation.
     """
-    messages = getattr(agent, "_session_messages", None)
-    flushed = getattr(agent, "_last_flushed_db_idx", None)
+    messages, flushed = getattr(agent, "_session_messages", None), getattr(agent, "_last_flushed_db_idx", None)
     return isinstance(messages, list) and _is_int(flushed) and flushed >= len(messages)
 
 

@@ -23,34 +23,29 @@ from hermes_cli.config import get_hermes_home
 HOOKS_DIR = get_hermes_home() / "hooks"
 
 
+def _skip(name: str, reason: str) -> None:
+    print(f"[hooks] Skipping {name}: {reason}", flush=True)
+
+
 def _load_hook_dir(hook_dir: Path) -> Optional[tuple]:
     """``(name, events, handle_fn, description)`` for a valid hook dir, else None (reason printed)."""
-    manifest_path = hook_dir / "HOOK.yaml"
-    handler_path = hook_dir / "handler.py"
+    manifest_path, handler_path = hook_dir / "HOOK.yaml", hook_dir / "handler.py"
     if not manifest_path.exists() or not handler_path.exists():
         return None
-
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     if not manifest or not isinstance(manifest, dict):
-        print(f"[hooks] Skipping {hook_dir.name}: invalid HOOK.yaml", flush=True)
-        return None
-
+        return _skip(hook_dir.name, "invalid HOOK.yaml")
     hook_name = manifest.get("name", hook_dir.name)
     events = manifest.get("events", [])
     if not events:
-        print(f"[hooks] Skipping {hook_name}: no events declared", flush=True)
-        return None
-
-    # Register in sys.modules BEFORE exec_module so Pydantic/dataclass forward
-    # references (from ``from __future__ import annotations``) resolve; otherwise
-    # a handler declaring a BaseModel fails at first dispatch with
-    # "TypeAdapter ... is not fully defined".
+        return _skip(hook_name, "no events declared")
+    # Register in sys.modules BEFORE exec_module so Pydantic/dataclass forward references
+    # (``from __future__ import annotations``) resolve; otherwise a handler declaring a
+    # BaseModel fails at first dispatch with "TypeAdapter ... is not fully defined".
     module_name = f"hermes_hook_{hook_name}"
     spec = importlib.util.spec_from_file_location(module_name, handler_path)
     if spec is None or spec.loader is None:
-        print(f"[hooks] Skipping {hook_name}: could not load handler.py", flush=True)
-        return None
-
+        return _skip(hook_name, "could not load handler.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
@@ -58,11 +53,9 @@ def _load_hook_dir(hook_dir: Path) -> Optional[tuple]:
     except Exception:
         sys.modules.pop(module_name, None)
         raise
-
     handle_fn = getattr(module, "handle", None)
     if handle_fn is None:
-        print(f"[hooks] Skipping {hook_name}: no 'handle' function found", flush=True)
-        return None
+        return _skip(hook_name, "no 'handle' function found")
     return hook_name, events, handle_fn, manifest.get("description", "")
 
 
@@ -79,7 +72,6 @@ class HookRegistry:
 
     def _register_builtin_hooks(self) -> None:
         """Extension point for always-on built-in hooks; currently none shipped."""
-        return
 
     def discover_and_load(self) -> None:
         """Register built-in hooks, then load every valid hook dir under HOOKS_DIR."""
@@ -105,11 +97,8 @@ class HookRegistry:
             print(f"[hooks] Loaded hook '{hook_name}' for events: {events}", flush=True)
 
     def _resolve_handlers(self, event_type: str) -> List[Callable]:
-        """Exact-match handlers first, then ``<base>:*`` wildcard handlers.
-
-        A handler registered for a bare base type ("agent") does NOT fire for
-        "agent:start" — only exact matches and explicit wildcards.
-        """
+        """Exact-match handlers first, then ``<base>:*`` wildcards.  A bare base type
+        ("agent") does NOT fire for "agent:start" — only exact matches and explicit wildcards."""
         handlers = list(self._handlers.get(event_type, []))
         if ":" in event_type:
             handlers.extend(self._handlers.get(f"{event_type.split(':')[0]}:*", []))
@@ -120,20 +109,15 @@ class HookRegistry:
         await self.emit_collect(event_type, context)
 
     async def emit_collect(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> List[Any]:
-        """Fire handlers and return their non-None return values in order.
-
-        Used for decision-style hooks (e.g. ``command:<name>`` policies that
-        allow/deny/rewrite a command). A failing handler is logged and does not
-        abort the remaining handlers.
-        """
+        """Fire handlers and return their non-None return values in order (decision-style
+        hooks, e.g. ``command:<name>`` policies).  A failing handler is logged, not fatal."""
         if context is None:
             context = {}
         results: List[Any] = []
         for fn in self._resolve_handlers(event_type):
             try:
                 result = fn(event_type, context)
-                if asyncio.iscoroutine(result):  # sync and async handlers both supported
-                    result = await result
+                result = await result if asyncio.iscoroutine(result) else result  # sync or async handlers
                 if result is not None:
                     results.append(result)
             except Exception as e:

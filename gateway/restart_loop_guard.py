@@ -54,7 +54,7 @@ def _save_boots(boots: List[float]) -> None:
 
 
 def _chain_gap(window_seconds: int, max_gap_seconds: int) -> float:
-    """Inter-boot gap that still links two boots.  Floored by ``window_seconds`` so
+    """Inter-boot gap that still links two boots; floored by ``window_seconds`` so
     widening the window never makes the breaker *less* sensitive."""
     return float(max(1, window_seconds, max_gap_seconds))
 
@@ -67,17 +67,14 @@ def _chain_ending_at(boots: List[float], ts: float, gap: float) -> List[float]:
     chain: List[float] = []
     prev = ts
     for t in sorted(boots, reverse=True):
-        if t > ts:
-            # Clock moved backwards (NTP step, restored state file): treat the
-            # future entry as adjacent rather than dropping the whole chain.
+        if t > ts:  # clock moved backwards (NTP step, restored file): future entry is adjacent, not a break
             chain.append(t)
             continue
         if prev - t > gap:
             break
         chain.append(t)
         prev = t
-    chain.reverse()
-    return chain
+    return chain[::-1]
 
 
 def record_restart_interrupted_boot(
@@ -87,8 +84,7 @@ def record_restart_interrupted_boot(
     """Record a restart-interrupted boot; return the pruned chain + now (most recent
     last).  A persistence failure returns the in-memory list without raising."""
     ts = time.time() if now is None else now
-    boots = _chain_ending_at(_load_boots(), ts, _chain_gap(window_seconds, max_gap_seconds))
-    boots.append(ts)
+    boots = _chain_ending_at(_load_boots(), ts, _chain_gap(window_seconds, max_gap_seconds)) + [ts]
     _save_boots(boots[-_MAX_STORED_BOOTS:])
     return boots
 

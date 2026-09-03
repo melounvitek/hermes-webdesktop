@@ -37,16 +37,12 @@ def record_boot_fingerprint() -> None:
 def _short(fingerprint: str) -> str:
     """Render a ``git:<ref>:<sha>`` fingerprint as a compact label."""
     sha = fingerprint.rsplit(":", 1)[-1]
-    if sha and sha != "unresolved" and len(sha) > 10:
-        return sha[:10]
-    return sha or fingerprint
+    return sha[:10] if sha and sha != "unresolved" and len(sha) > 10 else (sha or fingerprint)
 
 
 def detect_code_skew() -> tuple[str, str] | None:
     """``(boot_rev, disk_rev)`` short labels if the checkout drifted since boot, else ``None``."""
-    if _boot_fingerprint is None:
-        return None
-    current = _fingerprint()
+    current = _fingerprint() if _boot_fingerprint is not None else None
     if current is None or current == _boot_fingerprint:
         return None
     return _short(_boot_fingerprint), _short(current)

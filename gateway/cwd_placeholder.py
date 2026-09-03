@@ -28,7 +28,6 @@ def resolve_placeholder_terminal_cwd(
     """
     if configured_cwd and configured_cwd not in CWD_PLACEHOLDERS:
         return configured_cwd
-
     backend = (terminal_backend or "local").strip().lower()
     messaging = (messaging_cwd or "").strip()
     if backend == "local":

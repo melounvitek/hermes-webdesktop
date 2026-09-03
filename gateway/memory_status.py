@@ -9,12 +9,9 @@ coarse numbers (MB), enums and booleans.  A missing/corrupt file degrades to
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
-
-logger = logging.getLogger(__name__)
 
 # Thresholds on system MemAvailable.  ``critical`` doubles as the lifecycle
 # ledger's OOM-suspicion heuristic: a level that makes a later unclean death
@@ -39,27 +36,23 @@ def _nonneg_int(value: Any) -> Optional[int]:
 
 
 def _mb(kib: Any) -> Optional[int]:
-    kib = _nonneg_int(kib)
-    return None if kib is None else kib // 1024
+    return None if _nonneg_int(kib) is None else kib // 1024
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
-    if not isinstance(value, str) or not value:
-        return None
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value) if isinstance(value, str) and value else None
     except ValueError:
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parsed.replace(tzinfo=timezone.utc) if parsed is not None and parsed.tzinfo is None else parsed
 
 
 def classify_pressure(available_kib: Any, total_kib: Any) -> str:
     """``ok``/``elevated``/``critical`` from MemAvailable/MemTotal; ``unknown`` when the
     sample is missing/malformed — "could not read it" must never read as "fine"."""
-    available = _nonneg_int(available_kib)
+    available, total = _nonneg_int(available_kib), _nonneg_int(total_kib)
     if available is None:
         return "unknown"
-    total = _nonneg_int(total_kib)
     fraction = available / total if total else None
     for level, kib_floor, frac_floor in _PRESSURE_TIERS:
         if available < kib_floor or (fraction is not None and fraction < frac_floor):
@@ -97,8 +90,7 @@ def collect_memory_status(
 
     heartbeat, sentinel = _read_state_files(home)
     if heartbeat:
-        sampled_at = _parse_iso(heartbeat.get("updated_at"))
-        mem = heartbeat.get("mem")
+        sampled_at, mem = _parse_iso(heartbeat.get("updated_at")), heartbeat.get("mem")
         if isinstance(mem, dict):
             for dst, src in (("gateway_rss_mb", "rss_kib"), ("system_total_mb", "mem_total_kib"),
                              ("system_available_mb", "mem_available_kib"), ("swap_used_mb", "swap_used_kib")):
@@ -115,7 +107,6 @@ def collect_memory_status(
         status["last_boot_unclean"] = bool(sentinel.get("prior_unclean_exit"))
         status["last_boot_suspected_oom"] = bool(sentinel.get("prior_suspected_oom"))
         started_at = sentinel.get("started_at")
-        if isinstance(started_at, str) and started_at:
-            status["boot_id"] = started_at
+        status["boot_id"] = started_at if isinstance(started_at, str) and started_at else None
 
     return status

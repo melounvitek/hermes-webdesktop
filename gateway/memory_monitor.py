@@ -34,8 +34,7 @@ def _get_rss_mb() -> Optional[int]:
         import resource
 
         # ru_maxrss is KB on Linux but bytes on macOS.
-        maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return int(maxrss / (_BYTES_TO_MB if sys.platform == "darwin" else 1024))
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (_BYTES_TO_MB if sys.platform == "darwin" else 1024))
     except Exception:
         pass
     try:
@@ -66,11 +65,8 @@ def _monitor_loop(stop_event: threading.Event, interval: float) -> None:
 
 
 def start_memory_monitoring(interval_seconds: float = 300.0) -> bool:
-    """Start periodic memory logging in a daemon thread (baseline logged immediately).
-
-    Returns True if a fresh monitor was started; False if one is already running
-    or RSS introspection is unavailable (warned once).
-    """
+    """Start periodic logging in a daemon thread (baseline logged immediately).  False if
+    already running or RSS introspection is unavailable (warned once)."""
     global _monitor_thread, _stop_event, _start_time
 
     with _lock:
@@ -104,9 +100,7 @@ def stop_memory_monitoring(timeout: float = 2.0) -> None:
             log_memory_usage(prefix="shutdown")
         _stop_event.set()
         thread, _monitor_thread, _stop_event = _monitor_thread, None, None
-
-    # Join outside the lock so a stuck log call can't deadlock shutdown.
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception):  # join outside the lock so a stuck log call can't deadlock the stop path
         thread.join(timeout=timeout)
     logger.info("[MEMORY] Periodic memory monitoring stopped")
 

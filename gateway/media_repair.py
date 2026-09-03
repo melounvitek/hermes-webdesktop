@@ -47,8 +47,7 @@ def tool_name_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
 
 def _computer_use_capture_basename(path: Any) -> str:
     """Canonical (lowercased) capture basename for either separator style, or ''."""
-    value = str(path or "").strip().strip("`\"'")
-    basename = re.split(r"[/\\]", value)[-1]
+    basename = re.split(r"[/\\]", str(path or "").strip().strip("`\"'"))[-1]
     return basename.lower() if _COMPUTER_USE_CAPTURE_BASENAME_RE.fullmatch(basename) else ""
 
 
@@ -58,32 +57,28 @@ def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
     line since the envelope's ``meta`` is not stored in the tool message)."""
     if isinstance(content, str):
         stripped = content.strip()
-        if stripped.startswith(("{", "[")):
-            # Parse JSON first, never regex-scan it: JSON escaping doubles
-            # backslashes, so a raw-text hit would yield a path that exists
-            # nowhere. Fail closed on unparseable (truncated) JSON.
-            try:
-                payload = json.loads(stripped)
-            except Exception:
-                return
-            if isinstance(payload, (dict, list)):
-                yield from _iter_computer_use_capture_paths(payload)
+        if not stripped.startswith(("{", "[")):
+            for match in _COMPUTER_USE_CAPTURE_SUMMARY_RE.finditer(content):
+                yield match.group("path").strip()
             return
-        for match in _COMPUTER_USE_CAPTURE_SUMMARY_RE.finditer(content):
-            yield match.group("path").strip()
+        # Parse JSON, never regex-scan it: JSON escaping doubles backslashes, so a raw-text
+        # hit would yield a path that exists nowhere.  Fail closed on truncated JSON.
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            return
+        if isinstance(payload, (dict, list)):
+            yield from _iter_computer_use_capture_paths(payload)
     elif isinstance(content, list):
         for part in content:
             yield from _iter_computer_use_capture_paths(part)
     elif isinstance(content, dict):
-        screenshot_path = content.get("screenshot_path")
-        if isinstance(screenshot_path, str):
-            yield screenshot_path
         meta = content.get("meta")
-        if isinstance(meta, dict) and isinstance(meta.get("screenshot_path"), str):
-            yield meta["screenshot_path"]
-        # Producer shapes (tools/computer_use/tool.py::_capture_response):
-        # content/text = multimodal parts; text_summary/summary = the line carrying
-        # "(shareable screenshot saved to ...)".
+        for holder in (content, meta if isinstance(meta, dict) else {}):
+            if isinstance(holder.get("screenshot_path"), str):
+                yield holder["screenshot_path"]
+        # Producer shapes (computer_use ``_capture_response``): content/text = multimodal
+        # parts; text_summary/summary = the "(shareable screenshot saved to ...)" line.
         for field in ("content", "text", "text_summary", "summary"):
             nested = content.get(field)
             if isinstance(nested, (str, dict, list)):
@@ -91,23 +86,18 @@ def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
 
 
 def _current_turn_messages(messages: List[Dict[str, Any]], history_offset: int) -> List[Dict[str, Any]]:
-    if not history_offset:
-        return messages
-    if len(messages) >= history_offset:
+    if not history_offset or len(messages) >= history_offset:
         return messages[history_offset:]
-    # Compression can invalidate the slice boundary: recover the turn from its
-    # last user message, fail closed if none remains. Deliberately narrower than
-    # gateway/run.py::_collect_auto_append_media_tags' scan-everything fallback —
-    # that decides whether to ATTACH; this only rewrites paths already emitted.
+    # Compression can invalidate the slice boundary: recover the turn from its last user
+    # message, fail closed if none remains.  Narrower than run.py's scan-everything fallback
+    # for auto-attach — that decides whether to ATTACH; this only rewrites emitted paths.
     for index in range(len(messages) - 1, -1, -1):
         if messages[index].get("role") == "user":
             return messages[index:]
     return []
 
 
-def repair_explicit_computer_use_media_paths(
-    response: str, messages: List[Dict[str, Any]], history_offset: int = 0
-) -> str:
+def repair_explicit_computer_use_media_paths(response: str, messages: List[Dict[str, Any]], history_offset: int = 0) -> str:
     """Recover model-mangled paths in explicit ``MEDIA:`` directives whose basename
     matches (case-insensitively) a canonical screenshot path from this turn.
     Fail-open: the repair is cosmetic, so any error returns the response unchanged."""
@@ -135,22 +125,18 @@ def _canonical_capture_paths(turn_messages: List[Dict[str, Any]]) -> Dict[str, s
     return canonical
 
 
-def _repair_explicit_computer_use_media_paths_inner(
-    response: str, messages: List[Dict[str, Any]], history_offset: int = 0
-) -> str:
+def _repair_explicit_computer_use_media_paths_inner(response: str, messages: List[Dict[str, Any]], history_offset: int = 0) -> str:
     if "MEDIA:" not in response:
         return response
     canonical_by_basename = _canonical_capture_paths(_current_turn_messages(messages, history_offset))
     if not canonical_by_basename:
         return response
 
-    # Lazy: keeps `import gateway.media_repair` cheap for standalone cron
-    # processes that may never hit a MEDIA: response. No import cycle either way.
+    # Lazy: keeps the import cheap for standalone cron processes that may never hit MEDIA:.
     from gateway.platforms.base import BasePlatformAdapter
 
-    media_files, _ = BasePlatformAdapter.extract_media(response)
     repaired = response
-    for emitted_path, _is_voice in media_files:
+    for emitted_path, _is_voice in BasePlatformAdapter.extract_media(response)[0]:
         canonical = canonical_by_basename.get(_computer_use_capture_basename(emitted_path))
         if canonical and emitted_path != canonical:
             repaired = repaired.replace(emitted_path, canonical)

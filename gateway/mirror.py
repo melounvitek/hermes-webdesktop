@@ -89,11 +89,9 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
 
     def _matches(entry: dict) -> bool:
         origin = entry.get("origin") or {}
-        return (
-            (origin.get("platform") or entry.get("platform", "")).lower() == platform.lower()
-            and str(origin.get("chat_id", "")) == str(chat_id)
-            and (thread_id is None or str(origin.get("thread_id") or "") == str(thread_id))
-        )
+        return ((origin.get("platform") or entry.get("platform", "")).lower() == platform.lower()
+                and str(origin.get("chat_id", "")) == str(chat_id)
+                and (thread_id is None or str(origin.get("thread_id") or "") == str(thread_id)))
 
     # Keys starting with "_" (e.g. the gateway's "_README") are metadata sentinels.
     candidates = [e for k, e in data.items() if not str(k).startswith("_") and isinstance(e, dict) and _matches(e)]
@@ -105,11 +103,8 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
             candidates = exact_user_matches
         elif len(candidates) > 1:
             return None
-    elif len(candidates) > 1:
-        distinct_user_ids = {uid.strip() for uid in map(_origin_user_id, candidates) if uid.strip()}
-        if len(distinct_user_ids) > 1:
-            return None
-
+    elif len(candidates) > 1 and len({u.strip() for u in map(_origin_user_id, candidates) if u.strip()}) > 1:
+        return None
     return max(candidates, key=lambda entry: entry.get("updated_at", "")).get("session_id")
 
 
@@ -117,6 +112,7 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
     """Append a message to the SQLite session database."""
     try:
         from hermes_state import get_shared_session_db, release_or_close
+
         db = get_shared_session_db()
         try:
             db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))

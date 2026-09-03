@@ -35,14 +35,12 @@ def _localize(dt: datetime, tz) -> float:
 
 def _parse_iso(text: str, tz=None) -> Optional[float]:
     """Parse an ISO-8601 string (incl. ``+0200`` offsets fromisoformat rejects)."""
-    try:
-        dt = datetime.fromisoformat(text)
-    except (TypeError, ValueError):
+    for parse in (datetime.fromisoformat, lambda t: datetime.strptime(t, "%Y-%m-%dT%H:%M:%S%z")):
         try:
-            dt = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S%z")
+            return _localize(parse(text), tz)
         except (TypeError, ValueError):
-            return None
-    return _localize(dt, tz)
+            continue
+    return None
 
 
 def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
@@ -58,8 +56,6 @@ def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
 def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
     """Epoch seconds from a number, datetime, ISO string, or the gateway's bracketed
     format; ``None`` when uninterpretable."""
-    if ts_value is None:
-        return None
     if isinstance(ts_value, (int, float)):
         return float(ts_value)
     if hasattr(ts_value, "timestamp"):
@@ -67,16 +63,13 @@ def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
             return float(ts_value.timestamp())
         except Exception:
             return None
-    if not isinstance(ts_value, str):
-        return None
-    text = ts_value.strip()
+    text = ts_value.strip() if isinstance(ts_value, str) else ""
     if not text:
         return None
     match = _TIMESTAMP_PREFIX_RE.match(text)
-    if match is not None:
-        parsed = _parse_timestamp_match(match, tz=tz)
-        if parsed is not None:
-            return parsed
+    parsed = _parse_timestamp_match(match, tz=tz) if match is not None else None
+    if parsed is not None:
+        return parsed
     try:
         return float(text)
     except (TypeError, ValueError):
@@ -89,7 +82,7 @@ def format_message_timestamp(ts_value: Any, tz=None) -> str:
     if epoch is None:
         return ""
     dt = datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
-    return "[" + dt.strftime("%a %Y-%m-%d %H:%M:%S %Z") + "]"
+    return f"[{dt.strftime('%a %Y-%m-%d %H:%M:%S %Z')}]"
 
 
 def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Optional[float]]:
@@ -98,8 +91,7 @@ def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Option
     time of legacy rows like ``[processing time] [platform time] [sender] message``."""
     if not isinstance(content, str) or not content:
         return content, None
-    text = content
-    embedded_epoch: Optional[float] = None
+    text, embedded_epoch = content, None
     while (match := _TIMESTAMP_PREFIX_RE.match(text)) is not None:
         parsed = _parse_timestamp_match(match, tz=tz)
         if parsed is not None:
@@ -112,8 +104,5 @@ def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=No
     """Render a user message for LLM context with exactly one timestamp prefix; an
     existing prefix is stripped and its parsed time wins over ``ts_value``."""
     clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
-    effective_ts = embedded_epoch if embedded_epoch is not None else ts_value
-    prefix = format_message_timestamp(effective_ts, tz=tz)
-    if not prefix:
-        return clean_content
-    return f"{prefix} {clean_content}" if clean_content else prefix
+    prefix = format_message_timestamp(ts_value if embedded_epoch is None else embedded_epoch, tz=tz)
+    return f"{prefix} {clean_content}" if prefix and clean_content else (prefix or clean_content)

@@ -17,9 +17,8 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_STRICT_ENV = "HERMES_MEDIA_DELIVERY_STRICT"
+_FLAG_ENVS = (("strict", "HERMES_MEDIA_DELIVERY_STRICT"), ("trust_recent_files", "HERMES_MEDIA_TRUST_RECENT_FILES"))
 _ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
-_TRUST_RECENT_ENV = "HERMES_MEDIA_TRUST_RECENT_FILES"
 
 
 def _load_gateway_cfg(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -41,25 +40,19 @@ def _set_env_default(env: str, value: str) -> None:
 
 
 def _allow_dirs_str(allow_dirs: Any) -> str:
-    if isinstance(allow_dirs, str):
-        return allow_dirs
     if isinstance(allow_dirs, (list, tuple)):
         return os.pathsep.join(str(p) for p in allow_dirs if p)
-    return ""
+    return allow_dirs if isinstance(allow_dirs, str) else ""
 
 
 def apply_media_policy_env(config: Optional[Dict[str, Any]] = None) -> None:
-    """Bridge gateway media-policy settings from config.yaml into the env.
-
-    Idempotent and env-wins: a variable already present is never overwritten.
-    Never raises — a policy-bridge failure must not break delivery; the
-    validator falls back to its defaults exactly as before.
-    """
+    """Bridge gateway media-policy settings from config.yaml into the env.  Idempotent,
+    env-wins, never raises — a bridge failure must not break delivery (validator defaults apply)."""
     try:
         gateway_cfg = _load_gateway_cfg(config)
         if not gateway_cfg:
             return
-        for key, env in (("strict", _STRICT_ENV), ("trust_recent_files", _TRUST_RECENT_ENV)):
+        for key, env in _FLAG_ENVS:
             flag = gateway_cfg.get(key)
             if flag is not None:
                 _set_env_default(env, "1" if flag else "0")

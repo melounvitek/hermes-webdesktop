@@ -27,11 +27,11 @@ from utils import atomic_json_write
 _log = logging.getLogger(__name__)
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
-# Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a
-# leaked marker can cause. Long drains refresh the marker instead of raising this.
+# Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a leaked
+# marker can cause. Long drains refresh the marker instead of raising this.
 DRAIN_REQUEST_MAX_AGE_SECONDS = 3600.0
-# Dedup for the expired-marker warning (the watcher re-reads every second).
-# Keyed by ``requested_at`` so a keep-alive re-write that later expires logs again.
+# Dedup for the expired-marker warning (the watcher re-reads every second); keyed by
+# ``requested_at`` so a keep-alive re-write that later expires logs again.
 _expiry_logged_for: Optional[str] = None
 
 
@@ -48,8 +48,8 @@ def current_instantiation_epoch() -> str:
     with contextlib.suppress(OSError):
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     with contextlib.suppress(OSError, IndexError):
-        # "<pid> (<comm>) <state> ...": comm may contain spaces/parens, so split
-        # on the LAST ')'. starttime is field 22 (1-indexed) = tail index 19.
+        # "<pid> (<comm>) <state> ...": comm may contain spaces/parens, so split on the
+        # LAST ')'. starttime is field 22 (1-indexed) = tail index 19.
         pid1_start = Path("/proc/1/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     return f"{boot_id}:{pid1_start}" if (boot_id or pid1_start) else ""
 
@@ -84,10 +84,9 @@ def clear_drain_request(*, home: Optional[Path] = None) -> bool:
     try:
         path.unlink()
         return True
-    except FileNotFoundError:
-        return False
     except OSError as e:
-        _log.warning("drain-control: failed to remove %s: %s", path, e)
+        if not isinstance(e, FileNotFoundError):
+            _log.warning("drain-control: failed to remove %s: %s", path, e)
         return False
 
 
@@ -146,10 +145,9 @@ def read_drain_request(*, home: Optional[Path] = None) -> Optional[dict[str, Any
     path = drain_request_path(home)
     try:
         raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
     except OSError as e:
-        _log.warning("drain-control: failed to read %s: %s", path, e)
+        if not isinstance(e, FileNotFoundError):
+            _log.warning("drain-control: failed to read %s: %s", path, e)
         return None
     try:
         data = json.loads(raw)
