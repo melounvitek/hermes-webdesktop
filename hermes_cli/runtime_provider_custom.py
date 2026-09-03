@@ -1,12 +1,9 @@
-"""Custom-provider resolution: ``providers:`` / ``custom_providers:`` lookup, identity
-recovery, custom credential pools, and the named-custom runtime builder.
-
-Extracted from :mod:`hermes_cli.runtime_provider`; every name here is re-exported there.
-Origin-internal collaborators (``load_config``, ``_get_model_config``, ``load_pool``,
-``has_usable_secret``, ``custom_provider_pool_key_candidates``, …) are looked up on the origin
-module AT CALL TIME via :func:`_rp` so ``monkeypatch.setattr(runtime_provider, name, …)`` keeps
-working for moved bodies.
-"""
+"""Custom-provider resolution: ``providers:`` / ``custom_providers:`` lookup, identity recovery,
+custom credential pools, and the named-custom runtime builder. Extracted from
+:mod:`hermes_cli.runtime_provider` (every name re-exported there); origin-internal collaborators
+(``load_config``, ``_get_model_config``, ``load_pool``, ``has_usable_secret``, …) are looked up on
+the origin module AT CALL TIME via :func:`_rp` so ``monkeypatch.setattr(runtime_provider, name, …)``
+keeps working for moved bodies."""
 
 from __future__ import annotations
 
@@ -83,9 +80,8 @@ def _lift_extra_headers(entry: Dict[str, Any], result: Dict[str, Any]) -> None:
         result["extra_headers"] = extra_headers
 
 
-def _lift_common_custom_fields(
-    entry: Dict[str, Any], result: Dict[str, Any], *, provider_key: str, key_env: str, api_mode: Optional[str]
-) -> None:
+def _lift_common_custom_fields(entry: Dict[str, Any], result: Dict[str, Any], *, provider_key: str, key_env: str,
+                               api_mode: Optional[str]) -> None:
     """Copy the optional fields shared by ``providers:`` and legacy ``custom_providers:`` entries."""
     if key_env:
         result["key_env"] = key_env
@@ -98,23 +94,19 @@ def _lift_common_custom_fields(
     if api_mode:
         result["api_mode"] = api_mode
     _lift_max_output_tokens(entry, result)
-    capabilities = _filter_capabilities(entry.get("capabilities"))
-    if capabilities:
-        result["capabilities"] = capabilities
+    _lift_model_capabilities(entry, None, result)
 
 
 # ── config lookup ──────────────────────────────────────────────────────────────────────────
 
 
 def _shadowed_by_builtin(requested_norm: str) -> bool:
-    """Raw names map to custom providers only when they are not canonical built-ins.
-
-    Explicit ``custom:<name>`` keys always target the saved entry, and bare ``custom`` is exempt: a
-    user may literally name a ``providers:`` entry "custom" (returning None before the config scan
-    made such cron jobs fail with ``auth_unavailable``). Defer to the built-in only when the raw
-    name IS the canonical provider (``nous``); an entry matching merely an alias (``kimi`` →
-    ``kimi-coding``) is the user's target.
-    """
+    """Raw names map to custom providers only when they are not canonical built-ins. Explicit
+    ``custom:<name>`` keys always target the saved entry, and bare ``custom`` is exempt: a user may
+    literally name a ``providers:`` entry "custom" (returning None before the config scan made such
+    cron jobs fail with ``auth_unavailable``). Defer to the built-in only when the raw name IS the
+    canonical provider (``nous``); an entry matching merely an alias (``kimi`` → ``kimi-coding``)
+    is the user's target."""
     if requested_norm == "custom" or requested_norm.startswith("custom:"):
         return False
     rp = _rp()
@@ -143,10 +135,8 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
         if not base_url:
             continue
         result: Dict[str, Any] = {
-            "name": entry.get("name", ep_name),
-            "base_url": base_url.strip(),
-            "api_key": api_key or _clean(entry.get("api_key", "")),
-            "model": entry.get("default_model", ""),
+            "name": entry.get("name", ep_name), "base_url": base_url.strip(),
+            "api_key": api_key or _clean(entry.get("api_key", "")), "model": entry.get("default_model", ""),
         }
         # Command that PRINTS a short-lived credential; wrapped in a per-request token provider.
         key_cmd = _clean(entry.get("key_cmd", ""))
@@ -177,10 +167,8 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Opti
         model_name = _clean(entry.get("model", ""))
         if model_name:
             result["model"] = model_name
-        _lift_common_custom_fields(
-            entry, result, provider_key=provider_key, key_env=_clean(entry.get("key_env", "")),
-            api_mode=_rp()._parse_api_mode(entry.get("api_mode")),
-        )
+        _lift_common_custom_fields(entry, result, provider_key=provider_key, key_env=_clean(entry.get("key_env", "")),
+                                   api_mode=_rp()._parse_api_mode(entry.get("api_mode")))
         return result
     return None
 
@@ -285,18 +273,15 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
     return _find_custom_identity(_entry_serves_model)
 
 
-def canonical_custom_identity(
-    *, base_url: Optional[str] = None, config_provider: Optional[str] = None, model: Optional[str] = None
-) -> Optional[str]:
-    """Recover a routable ``custom:<name>`` identity for a bare custom provider.
-
-    Every path that persists or restores a session's provider override must run the resolved
-    provider through this so a bare ``"custom"`` is upgraded back to its durable ``custom:<name>``
-    menu key. Sources in priority order: (1) ``base_url`` reverse lookup — the one fact that always
-    survives the round-trip when a URL was recorded; (2) ``model`` reverse lookup
-    (``model``/``default_model``/``models`` catalog); (3) the configured provider (arg, then
-    ``model.provider``, then ``HERMES_INFERENCE_PROVIDER``) when it names a real entry.
-    """
+def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider: Optional[str] = None,
+                              model: Optional[str] = None) -> Optional[str]:
+    """Recover a routable ``custom:<name>`` identity for a bare custom provider. Every path that
+    persists or restores a session's provider override must run the resolved provider through this
+    so a bare ``"custom"`` is upgraded back to its durable menu key. Sources in priority order:
+    (1) ``base_url`` reverse lookup — the one fact that always survives the round-trip when a URL
+    was recorded; (2) ``model`` reverse lookup (``model``/``default_model``/``models`` catalog);
+    (3) the configured provider (arg, ``model.provider``, ``HERMES_INFERENCE_PROVIDER``) when it
+    names a real entry."""
     rp = _rp()
     if base_url:
         identity = find_custom_provider_identity(base_url)
@@ -319,31 +304,28 @@ def canonical_custom_identity(
     if not candidate_norm or candidate_norm in {"custom", "auto", "openrouter"}:
         return None
     # Only when it resolves to a configured entry — never invent a ``custom:<x>`` resolution
-    # can't honor.
+    # can't honor. ``candidate`` may be the entry's DISPLAY NAME, not the durable identity of a
+    # keyed ``providers:`` entry — re-resolve via its endpoint so every path returns the same
+    # config-key slug.
     try:
         entry = rp._get_named_custom_provider(candidate)
-        if entry is not None:
-            # ``candidate`` may be the entry's DISPLAY NAME, not the durable identity of a keyed
-            # ``providers:`` entry — re-resolve via its endpoint so every path returns the same
-            # config-key slug.
-            identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
-            if identity:
-                return identity
-            return candidate_norm if candidate_norm.startswith("custom:") else f"custom:{candidate_norm}"
     except Exception:
-        pass
-    return None
+        return None
+    if entry is None:
+        return None
+    try:
+        identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
+    except Exception:
+        return None
+    return identity or custom_provider_slug(candidate_norm)
 
 
 def is_routable_provider(provider: Optional[str]) -> bool:
-    """Whether a provider name currently resolves to a routable route.
-
-    Empty/None/``auto`` is vacuously routable (agent build falls back to the configured default).
-    Bare ``custom`` is the resolved billing class shared by every named entry — not a routable
-    identity; restore paths must heal it (:func:`canonical_custom_identity`) or fall back. Anything
-    else is routable iff the full chain (built-in -> ``providers:`` -> ``custom_providers:`` ->
-    models.dev) resolves it.
-    """
+    """Whether a provider name currently resolves to a routable route. Empty/None/``auto`` is
+    vacuously routable (agent build falls back to the configured default). Bare ``custom`` is the
+    resolved billing class shared by every named entry — not a routable identity; restore paths
+    must heal it (:func:`canonical_custom_identity`) or fall back. Anything else is routable iff the
+    full chain (built-in -> ``providers:`` -> ``custom_providers:`` -> models.dev) resolves it."""
     name = str(provider or "").strip()
     if not name or name.lower() == "auto":
         return True
@@ -388,10 +370,8 @@ def _try_resolve_from_custom_pool(
                 # services; has_usable_secret's 4-char floor rejects them. Every other path
                 # substitutes "no-key-required" for a loopback endpoint — this was the one gap.
                 pool_api_key = "no-key-required"
-            return rp._runtime(
-                provider_label, api_mode_override or rp._detect_api_mode_for_url(base_url) or "chat_completions",
-                base_url, pool_api_key, source=f"pool:{pool_key}", credential_pool=pool,
-            )
+            return rp._runtime(provider_label, api_mode_override or rp._detect_api_mode_for_url(base_url) or "chat_completions",
+                               base_url, pool_api_key, source=f"pool:{pool_key}", credential_pool=pool)
         except Exception:
             continue
     return None
@@ -404,9 +384,7 @@ def _custom_provider_request_overrides(custom_provider: Dict[str, Any]) -> Dict[
     return {"extra_body": dict(extra_body)}
 
 
-def _apply_custom_provider_extras(
-    custom_provider: Dict[str, Any], target_model: Optional[str], result: Dict[str, Any]
-) -> None:
+def _apply_custom_provider_extras(custom_provider: Dict[str, Any], target_model: Optional[str], result: Dict[str, Any]) -> None:
     """Copy model / capabilities / max_output_tokens / extra_headers / request_overrides onto a
     resolved custom runtime. An explicit ``target_model`` wins over the provider's configured
     default (auxiliary slots / background-review resolve a concrete model and must not fall back to
@@ -426,11 +404,9 @@ def _apply_custom_provider_extras(
 
 def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
     """Managed llama.cpp runtime: the supervised (or detected external) server, or a typed error.
-
     No server => say so and stop; falling through to the generic custom path would surface "local
     server is off" as OpenRouter's baffling "401 Invalid API key". The switch's state picks the
-    message (server off → point at the switch; else the setup pane).
-    """
+    message (server off → point at the switch; else the setup pane)."""
     rp = _rp()
     try:
         from hermes_cli.local_runtime.endpoint import resolve_llamacpp_endpoint
@@ -438,11 +414,9 @@ def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optiona
     except Exception:  # noqa: BLE001 — resolution is best-effort
         endpoint = None
     if endpoint:
-        return rp._runtime(
-            "custom", "chat_completions", endpoint["base_url"],
-            (explicit_api_key or "").strip() or endpoint["api_key"] or "no-key-required",
-            source="local-runtime", requested_provider=requested_provider,
-        )
+        return rp._runtime("custom", "chat_completions", endpoint["base_url"],
+                           (explicit_api_key or "").strip() or endpoint["api_key"] or "no-key-required", source="local-runtime",
+                           requested_provider=requested_provider)
     try:
         enabled = bool((rp.load_config().get("local_runtime") or {}).get("enabled"))
     except Exception:  # noqa: BLE001
@@ -462,15 +436,12 @@ def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optiona
 
 def _custom_runtime(rp, base_url: str, api_key: Any, api_mode: Optional[str], **extra: Any) -> Dict[str, Any]:
     """``custom`` runtime dict with URL-detected api_mode fallback and the no-auth placeholder."""
-    return rp._runtime(
-        "custom", api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
-        api_key or "no-key-required", **extra,
-    )
+    return rp._runtime("custom", api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
+                       api_key or "no-key-required", **extra)
 
 
-def _resolve_direct_alias_runtime(
-    requested_provider: str, explicit_api_key: Optional[str], explicit_base_url: str
-) -> Dict[str, Any]:
+def _resolve_direct_alias_runtime(requested_provider: str, explicit_api_key: Optional[str],
+                                  explicit_base_url: str) -> Dict[str, Any]:
     """Bare ``custom`` + explicit base_url (e.g. a ``model_aliases:`` direct alias)."""
     rp = _rp()
     base_url = explicit_base_url.strip().rstrip("/")
@@ -501,16 +472,13 @@ def _opencode_family_for_custom(requested_provider: str, base_url: str) -> Optio
     return None
 
 
-def _resolve_named_custom_runtime(
-    *, requested_provider: str, explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
-    target_model: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: Optional[str] = None,
+                                  explicit_base_url: Optional[str] = None,
+                                  target_model: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Runtime for a llamacpp alias, a bare-custom direct alias, or a configured custom entry.
-
-    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``.
-    A llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
-    base_url always wins.
-    """
+    Aliases resolving to "custom" (ollama, vllm, llamacpp, …) are treated like bare ``custom``. A
+    llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
+    base_url always wins."""
     rp = _rp()
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm in _LLAMACPP_ALIASES and not explicit_base_url:
@@ -547,15 +515,12 @@ def _resolve_named_custom_runtime(
     key_cmd = _clean(custom_provider.get("key_cmd", ""))
     if key_cmd and not rp.has_usable_secret(explicit_key):
         from agent.command_token_source import build_command_token_provider
-        token_provider = build_command_token_provider(
-            key_cmd, str(custom_provider.get("name", requested_provider) or "custom")
-        )
+        token_provider = build_command_token_provider(key_cmd, str(custom_provider.get("name", requested_provider) or "custom"))
         if token_provider is not None:
             api_key = token_provider
-    result = _custom_runtime(
-        rp, base_url, api_key, custom_provider.get("api_mode"),
-        source=f"custom_provider:{custom_provider.get('name', requested_provider)}", requested_provider=requested_provider,
-    )
+    result = _custom_runtime(rp, base_url, api_key, custom_provider.get("api_mode"),
+                             source=f"custom_provider:{custom_provider.get('name', requested_provider)}",
+                             requested_provider=requested_provider)
     _apply_custom_provider_extras(custom_provider, target_model, result)
     # OpenCode-family custom providers (opencode-go/zen names, or opencode.ai hosts) serve models
     # on different API surfaces — a static api_mode 503s for /v1/responses-only models. Re-derive

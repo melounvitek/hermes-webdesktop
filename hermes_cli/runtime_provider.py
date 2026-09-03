@@ -1,10 +1,9 @@
-"""Shared runtime provider resolution for CLI, gateway, cron, and helpers.
-
-This module owns the resolution ORDER (:func:`resolve_runtime_provider`), the api_mode / base_url
-helpers and the pool / OAuth / explicit paths. Custom-provider lookup lives in
-:mod:`hermes_cli.runtime_provider_custom`; Azure Foundry, OpenRouter/bare-custom, Bedrock and
-external-process builders in :mod:`hermes_cli.runtime_provider_backends`. Both are re-exported
-here so ``hermes_cli.runtime_provider.<name>`` imports and test patches keep working."""
+"""Shared runtime provider resolution for CLI, gateway, cron, and helpers: the resolution ORDER
+(:func:`resolve_runtime_provider`), api_mode / base_url helpers and the pool / OAuth / explicit paths.
+Custom-provider lookup lives in :mod:`hermes_cli.runtime_provider_custom`; Azure Foundry,
+OpenRouter/bare-custom, Bedrock and external-process builders in
+:mod:`hermes_cli.runtime_provider_backends` — both re-exported here so
+``hermes_cli.runtime_provider.<name>`` imports and test patches keep working."""
 
 from __future__ import annotations
 
@@ -72,12 +71,11 @@ def _resolves_to_custom(name: str) -> bool:
 
 
 def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider: str) -> bool:
-    """Whether ``model.base_url`` may back bare ``custom`` runtime resolution.
-
-    The model picker can select Custom while ``model.provider`` still reflects a previous provider.
-    Non-loopback URLs are rejected unless the YAML provider is already ``custom`` or a local-server
-    alias (ollama/vllm/llamacpp — else a legit LAN ollama endpoint silently falls through to
-    OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions."""
+    """Whether ``model.base_url`` may back bare ``custom`` runtime resolution. The picker can select
+    Custom while ``model.provider`` still names a previous provider, so non-loopback URLs are rejected
+    unless the YAML provider is already ``custom`` or a local-server alias (ollama/vllm/llamacpp —
+    else a legit LAN ollama endpoint falls through to OpenRouter): a stale OpenRouter/Z.ai base_url
+    cannot hijack local sessions."""
     cfg_provider_norm = (cfg_provider or "").strip().lower()
     bu = (cfg_base_url or "").strip()
     if not bu:
@@ -105,11 +103,10 @@ _VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages",
 
 
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
-    """Auto-detect api_mode from the resolved base URL, or None.
-
-    Exact-hostname matches reject lookalike subdomains (api.anthropic.com.attacker.test) and
-    path-segment spoofing (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. the
-    data-residency us./eu. regional hosts) need Responses for GPT-5.x tool calls with reasoning."""
+    """Auto-detect api_mode from the resolved base URL, or None. Exact-hostname matches reject
+    lookalike subdomains (api.anthropic.com.attacker.test) and path-segment spoofing
+    (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. us./eu. data-residency hosts)
+    need Responses for GPT-5.x tool calls with reasoning."""
     normalized = (base_url or "").strip().lower().rstrip("/")
     hostname = base_url_hostname(base_url)
     mandated = _HOST_MANDATED_API_MODES.get(hostname)
@@ -150,9 +147,7 @@ def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> 
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
     detected_mode = _detect_api_mode_for_url(base_url)
     if configured_mode == "codex_responses" and detected_mode != "codex_responses":
-        logger.info(
-            "Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s", base_url or "(unknown)",
-        )
+        logger.info("Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s", base_url or "(unknown)")
         configured_mode = None
     return configured_mode or detected_mode or "chat_completions"
 
@@ -210,11 +205,9 @@ def _azure_inferred_api_mode(effective_model: str, api_mode: str) -> str:
     return inferred or api_mode
 
 
-def _configured_or_fallback_api_mode(
-    provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *, opencode_by_model: bool
-) -> str:
+def _configured_or_fallback_api_mode(provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *,
+                                     opencode_by_model: bool) -> str:
     """Persisted ``model.api_mode`` when it belongs to this provider, else URL/transport fallback.
-
     OpenCode Zen/Go serve both anthropic_messages and chat_completions models, so (when
     ``opencode_by_model``) their mode is always re-derived from the effective model."""
     if opencode_by_model and _models.opencode_provider_family(provider) is not None:
@@ -222,9 +215,8 @@ def _configured_or_fallback_api_mode(
     return _configured_api_mode(provider, model_cfg) or _fallback_api_mode(provider, base_url, effective_model)
 
 
-def _api_key_provider_api_mode(
-    provider: str, model_cfg: Dict[str, Any], api_key: str, base_url: str, effective_model: Any, *, opencode_by_model: bool
-) -> str:
+def _api_key_provider_api_mode(provider: str, model_cfg: Dict[str, Any], api_key: str, base_url: str, effective_model: Any, *,
+                               opencode_by_model: bool) -> str:
     """api_mode for a registry ``api_key`` provider (explicit and env/config paths)."""
     if provider == "copilot":
         return _copilot_runtime_api_mode(model_cfg, api_key, target_model=effective_model)
@@ -320,10 +312,9 @@ def _host_derived_api_key(base_url: str) -> str:
 
 def _host_gated_env_key_candidates(base_url: str, *, ollama: bool) -> list:
     """Env API keys gated on their authoritative hosts, then the host-derived ``<VENDOR>_API_KEY``.
-
     Sending OPENAI/OPENROUTER/OLLAMA keys to an unrelated endpoint leaks credentials
-    (GHSA-76xc-57q6-vm5m); match on HOST, not substring. ``_host_derived_api_key`` skips OLLAMA,
-    so callers that want it opt in via ``ollama``."""
+    (GHSA-76xc-57q6-vm5m); match on HOST, not substring. ``_host_derived_api_key`` skips OLLAMA, so
+    callers that want it opt in via ``ollama``."""
     is_openai = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
     candidates = []
     if ollama:
@@ -344,13 +335,8 @@ def _pool_entry_base_url(entry: Any) -> str:
     return getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or ""
 
 
-def _nous_pool_state(entry: Any) -> Dict[str, Any]:
-    return {k: getattr(entry, k, None) for k in ("agent_key", "agent_key_expires_at", "scope")}
-
-
-def _registry_base_url(provider: str) -> str:
-    pconfig = PROVIDER_REGISTRY.get(provider)
-    return pconfig.inference_base_url if pconfig else ""
+def _nous_entry_key_usable(entry: Any, min_ttl: int) -> bool:
+    return _agent_key_is_usable({k: getattr(entry, k, None) for k in ("agent_key", "agent_key_expires_at", "scope")}, min_ttl)
 
 
 def _nous_min_key_ttl() -> int:
@@ -474,7 +460,8 @@ from hermes_cli.runtime_provider_backends import (  # noqa: E402,F401
 _POOL_ENTRY_SIMPLE_MODES: Dict[str, tuple] = {
     "openai-codex": ("codex_responses", DEFAULT_CODEX_BASE_URL), "xai-oauth": ("codex_responses", DEFAULT_XAI_OAUTH_BASE_URL),
     "qwen-oauth": ("chat_completions", DEFAULT_QWEN_BASE_URL), "openrouter": ("chat_completions", OPENROUTER_BASE_URL),
-    "minimax-oauth": ("anthropic_messages", lambda: _registry_base_url("minimax-oauth")), "xai": ("codex_responses", ""),
+    "minimax-oauth": ("anthropic_messages", lambda: getattr(PROVIDER_REGISTRY.get("minimax-oauth"), "inference_base_url", "")),
+    "xai": ("codex_responses", ""),
 }
 
 
@@ -507,20 +494,16 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
     return _configured_or_fallback_api_mode(provider, model_cfg, base_url, effective_model, opencode_by_model=True), base_url
 
 
-def _resolve_runtime_from_pool_entry(
-    *, provider: str, entry: PooledCredential, requested_provider: str, model_cfg: Optional[Dict[str, Any]] = None,
-    pool: Optional[CredentialPool] = None, target_model: Optional[str] = None,
-) -> Dict[str, Any]:
+def _resolve_runtime_from_pool_entry(*, provider: str, entry: PooledCredential, requested_provider: str,
+                                     model_cfg: Optional[Dict[str, Any]] = None, pool: Optional[CredentialPool] = None,
+                                     target_model: Optional[str] = None) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
-    api_mode, base_url = _pool_entry_mode_and_url(
-        provider, entry, model_cfg, _effective_model(model_cfg, target_model), _pool_entry_base_url(entry).rstrip("/")
-    )
+    api_mode, base_url = _pool_entry_mode_and_url(provider, entry, model_cfg, _effective_model(model_cfg, target_model),
+                                                  _pool_entry_base_url(entry).rstrip("/"))
     base_url = _finalize_base_url(provider, api_mode, base_url)
     api_mode = _maybe_apply_codex_app_server_runtime(provider=provider, api_mode=api_mode, model_cfg=model_cfg)
-    return _runtime(
-        provider, api_mode, base_url, _pool_entry_api_key(entry),
-        source=getattr(entry, "source", "pool"), credential_pool=pool, requested_provider=requested_provider,
-    )
+    return _runtime(provider, api_mode, base_url, _pool_entry_api_key(entry), source=getattr(entry, "source", "pool"),
+                    credential_pool=pool, requested_provider=requested_provider)
 
 
 def _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key, explicit_base_url) -> bool:
@@ -528,9 +511,7 @@ def _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key,
     cfg_base_url = str(model_cfg.get("base_url") or "").strip()
     env_openai_base_url = _getenv("OPENAI_BASE_URL", "").strip()
     env_openrouter_base_url = _getenv("OPENROUTER_BASE_URL", "").strip()
-    has_custom_endpoint = bool(explicit_base_url or env_openai_base_url or env_openrouter_base_url) or bool(
-        cfg_base_url and _cfg_provider(model_cfg) in {"auto", "custom"}
-    )
+    has_custom_endpoint = bool(explicit_base_url or env_openai_base_url or env_openrouter_base_url) or bool(cfg_base_url and _cfg_provider(model_cfg) in {"auto", "custom"})
     return requested_provider in {"openrouter", "auto"} and not has_custom_endpoint and not bool(explicit_api_key or explicit_base_url)
 
 
@@ -539,7 +520,7 @@ def _refresh_nous_pool_entry(pool: CredentialPool, entry: Any, pool_api_key: str
     selection (avoids network calls in `hermes auth list`); refresh here before falling back to
     singleton auth resolution. Returns (entry, pool_api_key) — key "" when still unusable."""
     min_ttl = _nous_min_key_ttl()
-    if _agent_key_is_usable(_nous_pool_state(entry), min_ttl):
+    if _nous_entry_key_usable(entry, min_ttl):
         return entry, pool_api_key
     logger.debug("Nous pool entry agent_key expired/missing, refreshing selected pool entry")
     try:
@@ -550,19 +531,17 @@ def _refresh_nous_pool_entry(pool: CredentialPool, entry: Any, pool_api_key: str
     if refreshed is not None:
         entry = refreshed
         pool_api_key = _pool_entry_api_key(entry)
-    if not pool_api_key or not _agent_key_is_usable(_nous_pool_state(entry), min_ttl):
+    if not pool_api_key or not _nous_entry_key_usable(entry, min_ttl):
         logger.debug("Nous pool entry agent_key still unavailable, falling through to runtime resolution")
         pool_api_key = ""
     return entry, pool_api_key
 
 
-def _resolve_from_pool(
-    provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key, explicit_base_url, target_model
-) -> Optional[Dict[str, Any]]:
+def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key, explicit_base_url,
+                       target_model) -> Optional[Dict[str, Any]]:
     """Runtime from the provider's credential pool, or None to continue down the ladder."""
-    should_use_pool = provider != "openrouter" or _openrouter_should_use_pool(
-        requested_provider, model_cfg, explicit_api_key, explicit_base_url
-    )
+    should_use_pool = provider != "openrouter" or _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key,
+                                                                             explicit_base_url)
     try:
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
@@ -570,18 +549,14 @@ def _resolve_from_pool(
     if not (pool and pool.has_credentials()):
         return None
     entry = pool.select()
-    pool_api_key = _pool_entry_api_key(entry) if entry is not None else ""
-    if provider == "nous" and entry is not None:
+    if entry is None:
+        return None
+    pool_api_key = _pool_entry_api_key(entry)
+    if provider == "nous":
         entry, pool_api_key = _refresh_nous_pool_entry(pool, entry, pool_api_key)
-    if (
-        entry is not None
-        and pool_api_key
-        and credential_pool_matches_provider(pool, provider, base_url=_pool_entry_base_url(entry))
-    ):
-        return _resolve_runtime_from_pool_entry(
-            provider=provider, entry=entry, requested_provider=requested_provider,
-            model_cfg=model_cfg, pool=pool, target_model=target_model,
-        )
+    if pool_api_key and credential_pool_matches_provider(pool, provider, base_url=_pool_entry_base_url(entry)):
+        return _resolve_runtime_from_pool_entry(provider=provider, entry=entry, requested_provider=requested_provider,
+                                                model_cfg=model_cfg, pool=pool, target_model=target_model)
     return None
 
 
@@ -604,14 +579,10 @@ def _creds_fallback(api_key, explicit_base_url, base_url, expiry, expiry_key, re
 
 
 def _explicit_codex(requested_provider, model_cfg, api_key, explicit_base_url, target_model):
-    api_key, base_url, last_refresh = _creds_fallback(
-        api_key, explicit_base_url, explicit_base_url or DEFAULT_CODEX_BASE_URL, None, "last_refresh",
-        resolve_codex_runtime_credentials,
-    )
-    return _runtime(
-        "openai-codex", "codex_responses", base_url, api_key,
-        source="explicit", last_refresh=last_refresh, requested_provider=requested_provider,
-    )
+    api_key, base_url, last_refresh = _creds_fallback(api_key, explicit_base_url, explicit_base_url or DEFAULT_CODEX_BASE_URL,
+                                                      None, "last_refresh", resolve_codex_runtime_credentials)
+    return _runtime("openai-codex", "codex_responses", base_url, api_key, source="explicit", last_refresh=last_refresh,
+                    requested_provider=requested_provider)
 
 
 def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, target_model):
@@ -623,23 +594,17 @@ def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, ta
     )
     # The agent_key compatibility field is used for inference only when it holds a NAS invoke JWT;
     # raw OAuth access_token fallback is handled by resolve_nous_runtime_credentials().
-    api_key = api_key or (
-        str(state.get("agent_key") or "").strip() if _agent_key_is_usable(state, _nous_min_key_ttl()) else ""
-    )
-    api_key, base_url, expires_at = _creds_fallback(
-        api_key, explicit_base_url, base_url, state.get("agent_key_expires_at") or state.get("expires_at"), "expires_at",
-        _resolve_nous_creds,
-    )
-    return _runtime(
-        "nous", nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key,
-        source="explicit", expires_at=expires_at, requested_provider=requested_provider,
-    )
+    api_key = api_key or (str(state.get("agent_key") or "").strip() if _agent_key_is_usable(state, _nous_min_key_ttl()) else "")
+    api_key, base_url, expires_at = _creds_fallback(api_key, explicit_base_url, base_url,
+                                                    state.get("agent_key_expires_at") or state.get("expires_at"), "expires_at",
+                                                    _resolve_nous_creds)
+    return _runtime("nous", nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key, source="explicit",
+                    expires_at=expires_at, requested_provider=requested_provider)
 
 
 def _explicit_azure_foundry(requested_provider, model_cfg, api_key, base_url, target_model):
-    return _resolve_azure_foundry_runtime(
-        requested_provider=requested_provider, model_cfg=model_cfg, explicit_api_key=api_key, explicit_base_url=base_url
-    )
+    return _resolve_azure_foundry_runtime(requested_provider=requested_provider, model_cfg=model_cfg, explicit_api_key=api_key,
+                                          explicit_base_url=base_url)
 
 
 def _actual_local_key(provider: str, api_key: str, base_url: str) -> str:
@@ -665,9 +630,8 @@ def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg,
             base_url = creds.get("base_url", "").rstrip("/")
             if provider == "actual":
                 base_url = normalize_actual_base_url(base_url)
-    api_mode = _api_key_provider_api_mode(
-        provider, model_cfg, api_key, base_url, target_model or model_cfg.get("default", ""), opencode_by_model=False
-    )
+    api_mode = _api_key_provider_api_mode(provider, model_cfg, api_key, base_url, target_model or model_cfg.get("default", ""),
+                                          opencode_by_model=False)
     api_key = _actual_local_key(provider, api_key, base_url)
     return _runtime(provider, api_mode, base_url.rstrip("/"), api_key, source="explicit", requested_provider=requested_provider)
 
@@ -680,10 +644,9 @@ _EXPLICIT_RESOLVERS: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-def _resolve_explicit_runtime(
-    *, provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+def _resolve_explicit_runtime(*, provider: str, requested_provider: str, model_cfg: Dict[str, Any],
+                              explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
+                              target_model: Optional[str] = None) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
     if not explicit_api_key and not explicit_base_url:
@@ -693,9 +656,8 @@ def _resolve_explicit_runtime(
         return resolver(requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        return _explicit_api_key_provider(
-            provider, pconfig, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model
-        )
+        return _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, explicit_api_key,
+                                          explicit_base_url, target_model)
     return None
 
 
@@ -744,11 +706,9 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
     api_mode = spec.api_mode
     if callable(api_mode):
         api_mode = api_mode(_effective_model(model_cfg, target_model))
-    return _runtime(
-        provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
-        creds.get("api_key", ""), source=creds.get("source", spec.default_source),
-        **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider,
-    )
+    return _runtime(provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
+                    creds.get("api_key", ""), source=creds.get("source", spec.default_source),
+                    **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider)
 
 
 def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, Any]]:
@@ -756,10 +716,8 @@ def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, A
     if not (pconfig and pconfig.auth_type == "oauth_minimax"):
         return None
     creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
-    return _runtime(
-        provider, "anthropic_messages", creds["base_url"], creds["api_key"],
-        source=creds.get("source", "oauth"), requested_provider=requested_provider,
-    )
+    return _runtime(provider, "anthropic_messages", creds["base_url"], creds["api_key"], source=creds.get("source", "oauth"),
+                    requested_provider=requested_provider)
 
 
 # ── env/config paths for anthropic and registry api_key providers ──────────────────────────
@@ -822,9 +780,8 @@ def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, 
     base_url = _config_base_url_for_provider(model_cfg, provider) or creds.get("base_url", "").rstrip("/")
     if provider == "actual":
         base_url = normalize_actual_base_url(base_url)
-    api_mode = _api_key_provider_api_mode(
-        provider, model_cfg, creds.get("api_key", ""), base_url, target_model or model_cfg.get("default", ""), opencode_by_model=True
-    )
+    api_mode = _api_key_provider_api_mode(provider, model_cfg, creds.get("api_key", ""), base_url,
+                                          target_model or model_cfg.get("default", ""), opencode_by_model=True)
     base_url = _finalize_base_url(provider, api_mode, base_url)
     api_key = _actual_local_key(provider, creds.get("api_key", ""), base_url)
     return _runtime(provider, api_mode, base_url, api_key, source=creds.get("source", "env"), requested_provider=requested_provider)
@@ -871,30 +828,21 @@ def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
 def _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model) -> Optional[Dict[str, Any]]:
     """Providers decided on the REQUESTED name alone, before custom / pool / generic paths."""
     if requested_provider == "moa":
-        return _runtime(
-            "moa", "chat_completions", "moa://local", "moa-virtual-provider",
-            source="moa-virtual-provider", requested_provider=requested_provider,
-        )
+        return _runtime("moa", "chat_completions", "moa://local", "moa-virtual-provider", source="moa-virtual-provider",
+                        requested_provider=requested_provider)
     # Azure Anthropic short-circuit: an explicit Azure endpoint with provider="anthropic" must
     # bypass _resolve_named_custom_runtime (which would yield custom/chat_completions/no key).
     eff_base = (explicit_base_url or "").strip()
     if requested_provider == "anthropic" and base_url_host_matches(eff_base, "azure.com"):
-        azure_key = (
-            (explicit_api_key or "").strip()
-            or _getenv("AZURE_ANTHROPIC_KEY", "").strip()
-            or _getenv("ANTHROPIC_API_KEY", "").strip()
-        )
-        return _runtime(
-            "anthropic", "anthropic_messages", eff_base.rstrip("/"), azure_key,
-            source="azure-explicit", requested_provider=requested_provider,
-        )
+        azure_key = (explicit_api_key or "").strip() or _getenv("AZURE_ANTHROPIC_KEY", "").strip() or _getenv("ANTHROPIC_API_KEY", "").strip()
+        return _runtime("anthropic", "anthropic_messages", eff_base.rstrip("/"), azure_key, source="azure-explicit",
+                        requested_provider=requested_provider)
     # Azure Foundry resolves before the custom-runtime / pool / generic paths so its config is
     # always picked up from model.base_url + model.api_mode, with or without explicit_* args.
     if requested_provider == "azure-foundry":
-        return _resolve_azure_foundry_runtime(
-            requested_provider=requested_provider, model_cfg=_get_model_config(),
-            explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url, target_model=target_model,
-        )
+        return _resolve_azure_foundry_runtime(requested_provider=requested_provider, model_cfg=_get_model_config(),
+                                              explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url,
+                                              target_model=target_model)
     if requested_provider in _VERTEX_NAMES:
         return _resolve_vertex_runtime(requested_provider)
     return None
@@ -915,9 +863,8 @@ def _local_endpoint_bypass(requested_provider: str, explicit_api_key, explicit_b
 
 
 def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url) -> Dict[str, Any]:
-    runtime = _resolve_openrouter_runtime(
-        requested_provider=requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url
-    )
+    runtime = _resolve_openrouter_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
+                                          explicit_base_url=explicit_base_url)
     runtime["requested_provider"] = requested_provider
     return runtime
 
@@ -935,13 +882,10 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
     return free_runtime
 
 
-def resolve_runtime_provider(
-    *, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Resolve runtime provider credentials for agent execution.
-
-    Ladder (order is behavior — each rung returns or raises, else falls to the next):
+def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
+                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> Dict[str, Any]:
+    """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
+    rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
       2. requested-name shortcuts: moa, anthropic@azure, azure-foundry, vertex
       3. named custom provider / llamacpp alias / bare-custom direct alias
@@ -951,18 +895,15 @@ def resolve_runtime_provider(
       7. OAuth specs (nous/codex/xai/qwen; "auto" swallows AuthError and logs) → minimax-oauth
          → external-process → anthropic env → bedrock → registry api_key providers
       8. OpenRouter / bare-custom fallback
-
-    target_model: overrides model_cfg["default"] when computing provider-specific api_mode
-    (e.g. OpenCode Zen/Go where different models route through different API surfaces)."""
+    target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
+    OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
     runtime = _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
     if runtime:
         return runtime
-    runtime = _resolve_named_custom_runtime(
-        requested_provider=requested_provider, explicit_api_key=explicit_api_key,
-        explicit_base_url=explicit_base_url, target_model=target_model,
-    )
+    runtime = _resolve_named_custom_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
+                                            explicit_base_url=explicit_base_url, target_model=target_model)
     if runtime:
         runtime["requested_provider"] = requested_provider
         return runtime
@@ -979,10 +920,9 @@ def _provider_rungs(provider, requested_provider, explicit_api_key, explicit_bas
     returned nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
     model_cfg = _get_model_config()
     yield _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
-    yield _resolve_explicit_runtime(
-        provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
-        explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url, target_model=target_model,
-    )
+    yield _resolve_explicit_runtime(provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
+                                    explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url,
+                                    target_model=target_model)
     yield _resolve_from_pool(provider, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
     if provider in _OAUTH_RUNTIME_PROVIDERS:
         yield _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model)
