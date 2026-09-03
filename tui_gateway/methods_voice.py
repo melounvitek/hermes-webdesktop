@@ -365,14 +365,11 @@ _wake_resume_retry_active = False
 
 def _wake_resume_if_owner(owner: "Transport", *, retry_seconds: float = 15.0,
                           retry_interval: float = 1.0) -> bool:
-    """Resume the wake detector for ``owner``; self-heal a busy microphone.
-
-    Reopening the mic right after a voice turn can fail while the device is still being
-    released (browser WebRTC tracks release async): on an exception retry in a background
-    thread until it sticks, the lease changes hands, or ``retry_seconds`` elapses. ``False``
-    from ``resume_listening`` (lease gone / other owner) is final — never retried, so this
-    can't steal another surface's mic.
-    """
+    """Resume the wake detector for ``owner``; self-heal a busy microphone. Reopening the mic
+    right after a voice turn can fail while the device is still being released (browser WebRTC
+    tracks release async): on an exception retry in a background thread until it sticks, the
+    lease changes hands, or ``retry_seconds`` elapses. ``False`` from ``resume_listening``
+    (lease gone / other owner) is final — never retried, so this can't steal another's mic."""
     from tools.wake_word import resume_listening
     try:
         return resume_listening(owner=owner)
@@ -422,6 +419,10 @@ def _wake_prefers_client(params: dict, surface: str) -> bool:
     return surface in ("gui", "desktop") or bool(params.get("client_capture"))
 
 
+def _frame_fields(frame: dict) -> dict:
+    return {"sample_rate": frame.get("sample_rate", 16000), "frame_length": frame.get("frame_length", 1280)}
+
+
 def _wake_probe(cfg: dict, prefer_client: bool) -> tuple[str, dict]:
     """``(capture_mode, requirements)``; capture stamped so the probe matches what would arm."""
     from tools.wake_word import check_wake_word_requirements, resolve_capture_mode
@@ -454,26 +455,24 @@ def _wake_detect_handler(transport, sid: str, phrase: str, new_session: bool):
 
 @method("gateway.capabilities")
 def _(rid, params: dict) -> dict:
-    """Advertise what THIS BUILD enforces: a client can't tell a gateway that fences concurrent
-    writers from one that doesn't, so it withholds unless advertised. Sourced from the enforcing
-    module, never config: a believed-but-absent capability is worse than none."""
+    """Advertise what THIS BUILD enforces (a client withholds unless the guarantee is advertised).
+    Sourced from the enforcing module, never config: a believed-but-absent capability is worse."""
     from hermes_cli.active_sessions import PER_SESSION_EXCLUSIVE_SUBMIT
     return _ok(rid, {"per_session_exclusive_submit": bool(PER_SESSION_EXCLUSIVE_SUBMIT)})
 
 
 @method("ping")
 def _(rid, params: dict) -> dict:
-    """Cheapest liveness probe, answered on the WS reader thread so it works while every agent
-    is mid-turn: lets the desktop tell a half-open socket after sleep/wake and reconnect."""
+    """Cheapest liveness probe, answered on the WS reader thread (works while every agent is
+    mid-turn) so the desktop can tell a half-open socket after sleep/wake and reconnect."""
     return _ok(rid, {"pong": True})
 
 
 @method("wake.start")
 def _(rid, params: dict) -> dict:
-    """Arm the wake-word listener for the calling surface ("tui" | "gui"). Idempotent and gated:
-    ``{started: False, reason}`` when disabled, scoped to another surface, or deps/mic aren't
-    ready. ``persist: true`` marks an explicit user gesture: when disabled in config it flips
-    ``wake_word.enabled`` on before arming; passive auto-arm callers omit it."""
+    """Arm the wake-word listener for the calling surface ("tui" | "gui"); ``{started: False,
+    reason}`` when disabled, owned by another surface, or deps/mic aren't ready. ``persist: true``
+    (explicit gesture) flips ``wake_word.enabled`` on before arming; auto-arm callers omit it."""
     surface = str(params.get("surface") or "auto").strip().lower()
     persist = bool(params.get("persist"))
     transport = _caller_transport()
@@ -530,8 +529,7 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "started": True, "phrase": reqs["phrase"], "provider": reqs["provider"],
         "owner_surface": surface, "enabled_persisted": enabled_persisted, "capture": capture_mode,
-        "sample_rate": frame.get("sample_rate", 16000),
-        "frame_length": frame.get("frame_length", 1280)})
+        **_frame_fields(frame)})
 
 
 @method("wake.stop")
@@ -614,18 +612,15 @@ def _(rid, params: dict) -> dict:
             "enabled": bool(cfg.get("enabled")),
             # Armed but deaf despite an open stream; see platform-specific hint.
             "audio_silent": silent, "capture": capture,
-            "local_input_available": bool(reqs.get("local_input_available")),
-            "sample_rate": frame.get("sample_rate", 16000),
-            "frame_length": frame.get("frame_length", 1280),
-        })
+            "local_input_available": bool(reqs.get("local_input_available")), **_frame_fields(frame)})
     except Exception as e:
         return _err(rid, 5026, str(e))
 
 
 @method("wake.feed")
 def _(rid, params: dict) -> dict:
-    """Push client-captured PCM (``pcm``/``pcm_b64``: base64 int16 mono LE, 16 kHz only) into
-    the armed detector — for ``capture: "client"`` so mic-less remote backends run openWakeWord."""
+    """Push client-captured PCM (``pcm``/``pcm_b64``: base64 int16 mono LE, 16 kHz only) into the
+    armed detector (``capture: "client"``) so mic-less remote backends can run openWakeWord."""
     transport = _caller_transport()
     raw_b64 = params.get("pcm") or params.get("pcm_b64") or ""
     if not isinstance(raw_b64, str) or not raw_b64.strip():
@@ -758,9 +753,8 @@ def _vr_on_status(state):
 
 @method("voice.record")
 def _(rid, params: dict) -> dict:
-    """VAD-bounded push-to-talk capture. ``start`` begins one capture and emits
-    ``voice.transcript`` when silence stops it; ``stop`` forces transcription of the active
-    buffer. No-speech counts persist across starts: three silent captures emit ``no_speech_limit``."""
+    """VAD-bounded push-to-talk. ``start`` emits ``voice.transcript`` when silence stops the
+    capture; ``stop`` forces transcription. Three silent captures emit ``no_speech_limit``."""
     action = params.get("action", "start")
     wake_paused = False
     if action not in {"start", "stop"}:
@@ -827,12 +821,12 @@ def _(rid, params: dict) -> dict:
     try:
         # Import check up front so a missing voice module returns 5026, not a silent thread death.
         import hermes_cli.voice  # noqa: F401
-        threading.Thread(target=_speak_text_with_barge, args=(text,), daemon=True).start()
-        return _ok(rid, {"status": "speaking"})
     except ImportError:
         return _err(rid, 5026, "voice module not available")
     except Exception as e:
         return _err(rid, 5026, str(e))
+    threading.Thread(target=_speak_text_with_barge, args=(text,), daemon=True).start()
+    return _ok(rid, {"status": "speaking"})
 
 
 def register(server) -> None:

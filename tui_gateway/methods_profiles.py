@@ -256,29 +256,30 @@ def _has_real_env_content(env_path) -> bool:
     return any(s and not s.startswith("#") for s in map(str.strip, lines))
 
 
-def _copy_secret_file(src, dst) -> None:
+def _copy_secret_file(src, dst, wanted: bool) -> bool:
+    """Copy ``src`` -> ``dst`` (0600) when ``src`` exists and ``wanted``; True if copied."""
+    if not (src.is_file() and wanted):
+        return False
     import shutil
     shutil.copy2(src, dst)
     with contextlib.suppress(OSError):
         os.chmod(str(dst), 0o600)
+    return True
 
 
 def _mirror_env(path, launch_home) -> bool:
     """Copy the launch .env only over the seeded comment-only stub (never a clone's secrets)."""
     src, dst = launch_home / ".env", path / ".env"
-    if not (src.is_file() and _has_real_env_content(src) and not _try(lambda: _has_real_env_content(dst), False)):
-        return False
-    _copy_secret_file(src, dst)
-    return True
+    return _copy_secret_file(
+        src, dst, _has_real_env_content(src) and not _try(lambda: _has_real_env_content(dst), False))
 
 
 def _mirror_auth(path, launch_home) -> bool:
     """Copy the launch auth.json when absent (skipped under ``share_auth``: a copy forks token
     state and the first refresh in either store strands the other)."""
     src, dst = launch_home / "auth.json", path / "auth.json"
-    if not (src.is_file() and not dst.exists()):
+    if not _copy_secret_file(src, dst, not dst.exists()):
         return False
-    _copy_secret_file(src, dst)
     # Drop single-use OAuth grants (first refresh strands every sibling); they read from
     # the root grant via the pool fallback. API keys stay.
     _best_effort(lambda: _lazy("hermes_cli.auth", "strip_cloned_single_use_oauth_grants")(path))

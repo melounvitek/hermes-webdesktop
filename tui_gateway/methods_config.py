@@ -11,67 +11,71 @@ method = _registry.method
 _profile_scoped = _registry.profile_scoped
 
 
+def _projects_handler(name: str):
+    """``@method(name)`` (profile-scoped) whose body's uncaught exception becomes ``_err(rid, 5061)``."""
+    def deco(fn):
+        def handler(rid, params: dict) -> dict:
+            try:
+                return fn(rid, params)
+            except Exception as e:
+                return _err(rid, 5061, str(e))
+        return method(name)(_profile_scoped(handler))
+    return deco
+
+
 def _reconcile_repo_discovery(pdb, conn, policy, policy_key):
     pdb.reconcile_discovered_repos_policy(
         conn, policy_key, preserve_unversioned=_repo_discovery_policy_is_default(policy))
 
 
-@method("projects.discover_repos")
-@_profile_scoped
+@_projects_handler("projects.discover_repos")
 def _(rid, params: dict) -> dict:
     """Repos for the desktop overview: scanned-from-disk (cached) ∪ session-derived."""
-    try:
-        with _profile_db(params) as db:
-            if db is None:
-                return _ok(rid, {"repos": []})
-            from hermes_cli import projects_db as pdb
-            policy = _repo_discovery_policy()
-            with pdb.connect_closing() as conn:
-                _reconcile_repo_discovery(pdb, conn, policy, _repo_discovery_policy_key(policy))
-                # `scan=true` (remote-gateway desktop): its native scan only sees its own
-                # filesystem, so the host scans the policy roots so zero-session repos surface.
-                if params.get("scan") and policy["enabled"]:
-                    _scan_discovered_repos_remote(conn, policy)
-                repos = _discover_repos_payload(db, conn=conn, include_cached=policy["enabled"])
-            return _ok(rid, {"repos": repos, "discovery_policy": policy})
-    except Exception as e:
-        return _err(rid, 5061, str(e))
-
-
-@method("projects.record_repos")
-@_profile_scoped
-def _(rid, params: dict) -> dict:
-    """Persist repo roots found by the client's (desktop-side) scan; return the merged list."""
-    try:
+    with _profile_db(params) as db:
+        if db is None:
+            return _ok(rid, {"repos": []})
         from hermes_cli import projects_db as pdb
         policy = _repo_discovery_policy()
-        policy_key = _repo_discovery_policy_key(policy)
-        incoming_raw = params.get("discovery_policy")
-        incoming_policy = (
-            _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None)
-        incoming_matches = (incoming_policy is not None
-                            and _repo_discovery_policy_key(incoming_policy) == policy_key)
-        accept_legacy_default = (incoming_policy is None
-                                 and _repo_discovery_policy_is_default(policy))
-        pairs: list[tuple[str, str | None]] = []
-        for item in params.get("repos") or []:
-            if isinstance(item, str):
-                pairs.append((item, None))
-            elif isinstance(item, dict) and item.get("root"):
-                pairs.append((str(item["root"]), item.get("label")))
         with pdb.connect_closing() as conn:
-            _reconcile_repo_discovery(pdb, conn, policy, policy_key)
-            accepted = bool(policy["enabled"] and (incoming_matches or accept_legacy_default))
-            if accepted:
-                pdb.record_discovered_repos(conn, pairs, replace=True, policy_key=policy_key)
-            elif not policy["enabled"]:
-                pdb.clear_discovered_repos(conn, policy_key=policy_key)
-        with _profile_db(params) as db:
-            repos = ([] if db is None
-                     else _discover_repos_payload(db, include_cached=policy["enabled"]))
-            return _ok(rid, {"repos": repos, "accepted": accepted, "discovery_policy": policy})
-    except Exception as e:
-        return _err(rid, 5061, str(e))
+            _reconcile_repo_discovery(pdb, conn, policy, _repo_discovery_policy_key(policy))
+            # `scan=true` (remote-gateway desktop): its native scan only sees its own
+            # filesystem, so the host scans the policy roots so zero-session repos surface.
+            if params.get("scan") and policy["enabled"]:
+                _scan_discovered_repos_remote(conn, policy)
+            repos = _discover_repos_payload(db, conn=conn, include_cached=policy["enabled"])
+        return _ok(rid, {"repos": repos, "discovery_policy": policy})
+
+
+@_projects_handler("projects.record_repos")
+def _(rid, params: dict) -> dict:
+    """Persist repo roots found by the client's (desktop-side) scan; return the merged list."""
+    from hermes_cli import projects_db as pdb
+    policy = _repo_discovery_policy()
+    policy_key = _repo_discovery_policy_key(policy)
+    incoming_raw = params.get("discovery_policy")
+    incoming_policy = (
+        _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None)
+    incoming_matches = (incoming_policy is not None
+                        and _repo_discovery_policy_key(incoming_policy) == policy_key)
+    accept_legacy_default = (incoming_policy is None
+                             and _repo_discovery_policy_is_default(policy))
+    pairs: list[tuple[str, str | None]] = []
+    for item in params.get("repos") or []:
+        if isinstance(item, str):
+            pairs.append((item, None))
+        elif isinstance(item, dict) and item.get("root"):
+            pairs.append((str(item["root"]), item.get("label")))
+    with pdb.connect_closing() as conn:
+        _reconcile_repo_discovery(pdb, conn, policy, policy_key)
+        accepted = bool(policy["enabled"] and (incoming_matches or accept_legacy_default))
+        if accepted:
+            pdb.record_discovered_repos(conn, pairs, replace=True, policy_key=policy_key)
+        elif not policy["enabled"]:
+            pdb.clear_discovered_repos(conn, policy_key=policy_key)
+    with _profile_db(params) as db:
+        repos = ([] if db is None
+                 else _discover_repos_payload(db, include_cached=policy["enabled"]))
+        return _ok(rid, {"repos": repos, "accepted": accepted, "discovery_policy": policy})
 
 
 def _stamped_project_tree(db, params, **kwargs):
@@ -82,45 +86,37 @@ def _stamped_project_tree(db, params, **kwargs):
     return tree, active_id
 
 
-@method("projects.tree")
-@_profile_scoped
+@_projects_handler("projects.tree")
 def _(rid, params: dict) -> dict:
     """Project -> repo -> lane overview with counts + a few preview sessions per project, plus
     the flat set of session ids claimed by any project (excluded from flat Recents). Lanes carry
     no session rows here; drill-in uses ``projects.project_sessions``."""
-    try:
-        with _profile_db(params) as db:
-            if db is None:
-                return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
-            tree, active_id = _stamped_project_tree(
-                db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
-                session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
-            return _ok(rid, {
-                "projects": tree["projects"], "active_id": active_id,
-                "scoped_session_ids": tree["scoped_session_ids"]})
-    except Exception as e:
-        return _err(rid, 5061, str(e))
+    with _profile_db(params) as db:
+        if db is None:
+            return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
+        tree, active_id = _stamped_project_tree(
+            db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
+            session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
+        return _ok(rid, {
+            "projects": tree["projects"], "active_id": active_id,
+            "scoped_session_ids": tree["scoped_session_ids"]})
 
 
-@method("projects.project_sessions")
-@_profile_scoped
+@_projects_handler("projects.project_sessions")
 def _(rid, params: dict) -> dict:
     """Fully hydrated lanes for one project, from the same grouping as ``projects.tree``."""
-    try:
-        project_id = str(params.get("project_id") or "")
-        if not project_id:
-            return _err(rid, 5063, "project_id required")
-        with _profile_db(params) as db:
-            if db is None:
-                return _ok(rid, {"project": None})
-            # Drill-in only needs the entered project: skip the zero-session discovery tier.
-            tree, _active = _stamped_project_tree(
-                db, params, preview_limit=0, hydrate=True,
-                session_limit=int(params.get("session_limit") or 5000), include_discovered=False)
-            proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
-            return _ok(rid, {"project": proj})
-    except Exception as e:
-        return _err(rid, 5061, str(e))
+    project_id = str(params.get("project_id") or "")
+    if not project_id:
+        return _err(rid, 5063, "project_id required")
+    with _profile_db(params) as db:
+        if db is None:
+            return _ok(rid, {"project": None})
+        # Drill-in only needs the entered project: skip the zero-session discovery tier.
+        tree, _active = _stamped_project_tree(
+            db, params, preview_limit=0, hydrate=True,
+            session_limit=int(params.get("session_limit") or 5000), include_discovered=False)
+        proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
+        return _ok(rid, {"project": proj})
 
 
 # ── config.get — one getter per key; returns the result payload or a full ``_err`` response
