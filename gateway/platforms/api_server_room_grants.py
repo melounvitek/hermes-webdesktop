@@ -55,7 +55,6 @@ def _room_identity(source: dict[str, Any], *, coerce: bool = False) -> dict[str,
 def _local_target(claims: dict[str, Any] | None, _api_request_profile) -> tuple[str, str]:
     """Return ``(profile, installation_id)`` for this gateway; *claims* must target it."""
     from gateway import hosted_rooms
-
     profile = _api_request_profile.get() or "default"
     installation_id = hosted_rooms.local_authority_gateway_id()
     if claims is not None and (
@@ -68,7 +67,6 @@ def _local_room_catalog(self, profile: str, installation_id: str) -> tuple[dict,
     """Return ``(execution_policy, catalog)`` for this gateway's *profile*."""
     from gateway.hosted_room_peer import PROTOCOL_VERSION, catalog_mapping
     from gateway.hosted_room_execution_policy import execution_policy_mapping
-
     with self._profile_scope(profile):
         execution_policy = execution_policy_mapping(target_profile=profile)
     catalog = catalog_mapping(
@@ -96,14 +94,12 @@ def _room_grant_token(request: "web.Request") -> str:
 
 def _room_grant_secret(self) -> bytes:
     from gateway.hosted_room_peer import gateway_room_grant_secret
-
     return gateway_room_grant_secret()
 
 
 def _decode_request_grant(self, request: "web.Request", *, permission: str) -> dict[str, Any]:
     """Signature/scope/horizon check only (no revocation lookup)."""
     from gateway.hosted_room_peer import decode_room_grant
-
     token = self._room_grant_token(request)
     if not token:
         raise ValueError("room grant is missing")
@@ -113,7 +109,6 @@ def _decode_request_grant(self, request: "web.Request", *, permission: str) -> d
 def _room_grant_claims(self, request: "web.Request", *, permission: str) -> dict[str, Any]:
     claims = _decode_request_grant(self, request, permission=permission)
     from gateway import hosted_rooms
-
     db_path = hosted_rooms.default_db_path()
     if hosted_rooms.room_grant_is_revoked(db_path, claims=claims):
         raise RoomGrantReauthorizationRequired("room grant is revoked")
@@ -140,7 +135,6 @@ async def _handle_room_member_invitation(
     try:
         from gateway import hosted_rooms
         from gateway.hosted_room_peer import decode_room_grant, issue_room_grant
-
         profile, target_install_id = _local_target(None, _api_request_profile)
         ttl = float(body.get("ttl_seconds", 3600))
         if not 60 <= ttl <= 24 * 60 * 60:
@@ -198,7 +192,6 @@ async def _handle_room_member_grant_refresh(
     try:
         from gateway.hosted_room_peer import MAX_DISPATCH_GRANT_TTL_SECONDS, issue_room_grant
         from gateway.hosted_room_execution_policy import execution_policy_mapping
-
         # A status-only bearer must never mint dispatch authority: renewal needs live "dispatch".
         claims = self._room_grant_claims(request, permission="dispatch")
         profile, installation_id = _local_target(claims, _api_request_profile)
@@ -240,7 +233,6 @@ async def _handle_room_member_grant_revoke(
             code="invalid_room_grant_revoke", status=400)
     try:
         from gateway import hosted_rooms
-
         # Idempotent: a response-lost retry authenticates with the grant just denylisted, so
         # verify signature/scope/horizon directly (not _room_grant_claims) and upsert the id.
         claims = _decode_request_grant(self, request, permission="status")

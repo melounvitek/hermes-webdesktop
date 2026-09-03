@@ -65,7 +65,6 @@ class RunIdempotencyStore:
         if db_path is None:
             try:
                 from hermes_cli.config import get_hermes_home
-
                 db_path = str(get_hermes_home() / "runs_idempotency.db")
             except Exception:
                 db_path = ":memory:"
@@ -79,7 +78,6 @@ class RunIdempotencyStore:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
         from hermes_state import apply_wal_with_fallback
-
         apply_wal_with_fallback(self._conn, db_label="runs_idempotency.db")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS run_idempotency (
