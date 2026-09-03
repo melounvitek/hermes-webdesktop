@@ -20,9 +20,7 @@ def _version_tuple(parts: Iterable[object]) -> tuple[int, int, int]:
     return tuple(values[:3])
 
 
-def is_sqlite_wal_reset_vulnerable(
-    version_info: tuple[int, ...],
-) -> bool:
+def is_sqlite_wal_reset_vulnerable(version_info: tuple[int, ...]) -> bool:
     """Return whether *version_info* contains SQLite's WAL-reset bug."""
     info = _version_tuple(version_info)
     return not (
@@ -75,33 +73,18 @@ def isolated_interpreter_env() -> dict[str, str]:
     """Copy of ``os.environ`` with conda/uv/venv/PYTHON* overrides stripped, so a child interpreter
     reports its *own* runtime rather than the caller's."""
     env = dict(os.environ)
-    for key in (
-        "CONDA_DEFAULT_ENV",
-        "CONDA_PREFIX",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "UV_PROJECT_ENVIRONMENT",
-        "UV_PYTHON",
-        "VIRTUAL_ENV",
-    ):
+    for key in ("CONDA_DEFAULT_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT",
+                "UV_PYTHON", "VIRTUAL_ENV"):
         env.pop(key, None)
     return env
 
 
-def probe_sqlite_runtime(
-    python: str | Path,
-    *,
-    timeout: float = 30.0,
-) -> SQLiteRuntimeInfo | None:
+def probe_sqlite_runtime(python: str | Path, *, timeout: float = 30.0) -> SQLiteRuntimeInfo | None:
     """Probe SQLite in *python*, never the caller's linked SQLite."""
     try:
         result = subprocess.run(
-            [str(python), "-I", "-c", _PROBE_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=isolated_interpreter_env(),
+            [str(python), "-I", "-c", _PROBE_SCRIPT], capture_output=True, text=True, timeout=timeout,
+            check=False, env=isolated_interpreter_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

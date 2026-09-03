@@ -15,7 +15,6 @@ from typing import BinaryIO, Sequence, TextIO
 
 EXTERNAL_SUPERVISOR_FLAG = "--external-supervisor"
 
-
 _TIMESTAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}(?:\s|$)")
 
 
@@ -73,10 +72,7 @@ def _is_hermes_gateway_run_argv(command: Sequence[str]) -> bool:
     return bool(looks_like_gateway_command_line(" ".join(str(part) for part in command)))
 
 
-def _prepare_child_command(
-    command: Sequence[str],
-    environ: Mapping[str, str] | None = None,
-) -> list[str]:
+def _prepare_child_command(command: Sequence[str], environ: Mapping[str, str] | None = None) -> list[str]:
     """Return the argv to exec, upgrading stale launchd-wrapped gateway commands.
 
     launchd stamps ``XPC_SERVICE_NAME=<job label>`` only on this wrapper (its direct child; an
@@ -87,19 +83,13 @@ def _prepare_child_command(
     argv = [str(part) for part in command]
     env = os.environ if environ is None else environ
     xpc_service = str(env.get("XPC_SERVICE_NAME", "")).strip()
-    if (
-        EXTERNAL_SUPERVISOR_FLAG not in argv
-        and xpc_service and xpc_service != "0"
-        and _is_hermes_gateway_run_argv(argv)
-    ):
+    if EXTERNAL_SUPERVISOR_FLAG not in argv and xpc_service and xpc_service != "0" and _is_hermes_gateway_run_argv(argv):
         argv.append(EXTERNAL_SUPERVISOR_FLAG)
     return argv
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run a command and timestamp each stderr line into a log file."
-    )
+    parser = argparse.ArgumentParser(description="Run a command and timestamp each stderr line into a log file.")
     parser.add_argument("--error-log", required=True, type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)

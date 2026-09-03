@@ -16,20 +16,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Multiplexer / terminal-emulator identity env vars, checked in order when
-# no real tty path is available (e.g. stdin piped but stdout still a pty
-# owned by a known terminal).
-_TERMINAL_ENV_VARS = (
-    "ZELLIJ_PANE_ID",
-    "TMUX_PANE",
-    "KITTY_WINDOW_ID",
-    "WEZTERM_PANE",
-    "TERM_SESSION_ID",
-    "WT_SESSION",
-)
+# Multiplexer / terminal-emulator identity env vars, checked in order when no real tty path is
+# available (e.g. stdin piped but stdout still a pty owned by a known terminal).
+_TERMINAL_ENV_VARS = ("ZELLIJ_PANE_ID", "TMUX_PANE", "KITTY_WINDOW_ID", "WEZTERM_PANE", "TERM_SESSION_ID", "WT_SESSION")
 
-# Breadcrumbs older than this are pruned opportunistically on each write —
-# a pane id from a tmux server restarted last month means nothing today.
+# Breadcrumbs older than this are pruned opportunistically on each write — a pane id from a tmux
+# server restarted last month means nothing today.
 _STALE_AFTER_SECONDS = 30 * 24 * 60 * 60
 
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -47,12 +39,8 @@ def _sanitize(raw: str) -> str:
 
 
 def get_terminal_id() -> Optional[str]:
-    """Derive a stable identity for the terminal this process runs in.
-
-    Prefers the real tty device path (stdin, then stdout), else the first present
-    multiplexer/emulator env var. Returns ``None`` when neither is available — callers must then
-    skip breadcrumbs entirely.
-    """
+    """Stable identity for this terminal: the tty device path (stdin, then stdout), else the first
+    present multiplexer/emulator env var; ``None`` when neither exists (callers skip breadcrumbs)."""
     for fd in (sys.stdin, sys.stdout):
         try:
             name = os.ttyname(fd.fileno())
@@ -105,11 +93,7 @@ def write_breadcrumb(session_id: str, cwd: Optional[str] = None) -> None:
         directory = _breadcrumbs_dir()
         directory.mkdir(parents=True, exist_ok=True)
         now = time.time()
-        payload = {
-            "session_id": session_id,
-            "cwd": cwd or os.getcwd(),
-            "ts": now,
-        }
+        payload = {"session_id": session_id, "cwd": cwd or os.getcwd(), "ts": now}
         tmp = directory / f".{terminal_id}.tmp"
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, directory / terminal_id)
@@ -119,10 +103,7 @@ def write_breadcrumb(session_id: str, cwd: Optional[str] = None) -> None:
 
 
 def read_breadcrumb() -> Optional[dict]:
-    """Return this terminal's breadcrumb payload, or ``None``.
-
-    Ignores breadcrumbs older than the staleness window. Never raises.
-    """
+    """This terminal's breadcrumb payload, or ``None`` (missing, corrupt, or stale). Never raises."""
     try:
         terminal_id = get_terminal_id()
         if not terminal_id:
@@ -154,23 +135,23 @@ def resolve_breadcrumb_session() -> Optional[str]:
     session_id = str(crumb.get("session_id") or "").strip()
     if not session_id:
         return None
-    db = None
     try:
         from hermes_state import SessionDB
 
         db = SessionDB()
+    except Exception:
+        return None
+    try:
         if not db.get_session(session_id):
             return None  # session was deleted — fall back to latest
         try:
-            session_id = db.get_compression_tip(session_id) or session_id
+            return db.get_compression_tip(session_id) or session_id
         except Exception:
-            pass
-        return session_id
+            return session_id
     except Exception:
         return None
     finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                pass
+        try:
+            db.close()
+        except Exception:
+            pass
