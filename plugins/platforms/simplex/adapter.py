@@ -650,6 +650,15 @@ async def _standalone_send(
         return {"error": f"SimpleX send failed: {e}"}
 
 
+_SETUP_PROMPTS = (
+    ("SIMPLEX_WS_URL", "Daemon WebSocket URL (default ws://127.0.0.1:5225)"),
+    ("SIMPLEX_ALLOWED_USERS", "Allowed contactIds or display names (comma-separated; blank=skip)"),
+    ("SIMPLEX_GROUP_ALLOWED", "Allowed group IDs (comma-separated, or '*' for any; blank=disable groups)"),
+    ("SIMPLEX_AUTO_ACCEPT", "Auto-accept incoming contact requests? (true/false, default true)"),
+    ("SIMPLEX_HOME_CHANNEL", "Home channel contact/group ID (or empty)"),
+)
+
+
 def interactive_setup() -> None:
     """Minimal stdin wizard for ``hermes setup gateway`` → SimpleX; writes ``~/.hermes/.env``."""
     print(
@@ -662,22 +671,16 @@ def interactive_setup() -> None:
         print("hermes_cli.config not available; set SIMPLEX_* vars manually in ~/.hermes/.env")
         return
 
-    def _prompt(var: str, prompt: str) -> None:
+    for var, prompt in _SETUP_PROMPTS:
         existing = get_env_value(var) if callable(get_env_value) else None
         suffix = " [keep current]" if existing else ""
         try:
             value = input(f"{prompt}{suffix}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return
+            continue
         if value:
             save_env_value(var, value)
-
-    _prompt("SIMPLEX_WS_URL", "Daemon WebSocket URL (default ws://127.0.0.1:5225)")
-    _prompt("SIMPLEX_ALLOWED_USERS", "Allowed contactIds or display names (comma-separated; blank=skip)")
-    _prompt("SIMPLEX_GROUP_ALLOWED", "Allowed group IDs (comma-separated, or '*' for any; blank=disable groups)")
-    _prompt("SIMPLEX_AUTO_ACCEPT", "Auto-accept incoming contact requests? (true/false, default true)")
-    _prompt("SIMPLEX_HOME_CHANNEL", "Home channel contact/group ID (or empty)")
     print("Done. Make sure the simplex-chat daemon is running before starting the gateway.")
 
 

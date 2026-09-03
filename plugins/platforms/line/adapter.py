@@ -870,10 +870,8 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         return None
     seeded: Dict[str, Any] = {}
     if os.getenv("LINE_PORT"):
-        try:
+        with contextlib.suppress(ValueError):
             seeded["port"] = int(os.environ["LINE_PORT"])
-        except ValueError:
-            pass
     for env, key in (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel")):
         if os.getenv(env):
             seeded[key] = os.environ[env]
@@ -901,19 +899,25 @@ async def _standalone_send(
         return {"error": str(exc)}
 
 
+_SETUP_PROMPTS = (  # (env var, prompt, masked)
+    ("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token", True),
+    ("LINE_CHANNEL_SECRET", "Channel secret", True),
+    ("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)", False),
+    ("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)", False),
+)
+
+
 def interactive_setup() -> None:
     """Minimal stdin wizard for ``hermes setup line`` (writes ``~/.hermes/.env``)."""
-    print(
-        "\nLINE Messaging API setup\n------------------------\n"
-        "Create a Messaging API channel at https://developers.line.biz/console/\nthen copy the values below.\n"
-    )
+    print("\nLINE Messaging API setup\n------------------------\n"
+          "Create a Messaging API channel at https://developers.line.biz/console/\nthen copy the values below.\n")
     try:
         from hermes_cli.config import get_env_value as _get_env, save_env_value as _set_env
     except ImportError:
         print("hermes_cli.config not available; set LINE_* vars manually in ~/.hermes/.env")
         return
 
-    def _prompt(var: str, prompt: str, *, secret: bool = False) -> None:
+    for var, prompt, secret in _SETUP_PROMPTS:
         existing = _get_env(var) if callable(_get_env) else None
         suffix = " [keep current]" if existing else ""
         try:
@@ -924,14 +928,9 @@ def interactive_setup() -> None:
                 value = input(f"{prompt}{suffix}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return
+            continue
         if value:
             _set_env(var, value)
-
-    _prompt("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token", secret=True)
-    _prompt("LINE_CHANNEL_SECRET", "Channel secret", secret=True)
-    _prompt("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)")
-    _prompt("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)")
     print("Done. Set the webhook URL in the LINE console to <your-public-url>/line/webhook and enable 'Use webhook'.")
 
 
