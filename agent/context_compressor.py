@@ -759,9 +759,10 @@ def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:
         if remaining <= 0:
             break
         text = content.strip()
-        cap = min(_LEAN_USER_MESSAGE_MAX_CHARS, remaining)
-        if len(text) > cap:
-            text = text[:cap].rstrip() + " …[truncated]"
+        if len(text) > _LEAN_USER_MESSAGE_MAX_CHARS:
+            text = text[:_LEAN_USER_MESSAGE_MAX_CHARS].rstrip() + " …[truncated]"
+        if len(text) > remaining:
+            text = text[:remaining].rstrip() + " …[truncated]"
         collected.append("> " + text.replace("\n", "\n> "))
         used += len(text)
     if not collected:
@@ -2763,16 +2764,12 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
             if len(content) > self._CONTENT_MAX:
                 content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
-
             if role == "tool":
                 parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
                 continue
-
             if role == "assistant" and msg.get("tool_calls", []):
-                tc_parts = [self._render_tool_call_for_summary(tc) for tc in msg["tool_calls"]]
-                content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
+                content += "\n[Tool calls:\n" + "\n".join(map(self._render_tool_call_for_summary, msg["tool_calls"])) + "\n]"
             parts.append(f"[{role.upper()}]: {content}")
-
         return "\n\n".join(parts)
 
     def _fallback_anchors(self, turns_to_summarize: List[Dict[str, Any]]) -> Dict[str, list[str]]:
@@ -2783,33 +2780,28 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         relevant_files: list[str] = []
         blockers: list[str] = []
         last_dropped_turns: list[str] = []
-
         call_id_to_tool: dict[str, tuple[str, str]] = {}
         for msg in turns_to_summarize:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg.get("tool_calls") or []:
-                    name, raw_args = _extract_tool_call_name_and_args(tc)
-                    args = _redact_compaction_text(raw_args)
-                    call_id = str(_tc_get(tc, "id") or "")
-                    if call_id:
-                        call_id_to_tool[call_id] = (name, args)
-                    if args:
-                        try:
-                            parsed = json.loads(args)
-                        except Exception:
-                            parsed = args
-                        _collect_paths_from_jsonish(parsed, relevant_files)
-
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                name, raw_args = _extract_tool_call_name_and_args(tc)
+                args = _redact_compaction_text(raw_args)
+                call_id = str(_tc_get(tc, "id") or "")
+                if call_id:
+                    call_id_to_tool[call_id] = (name, args)
+                if args:
+                    try:
+                        parsed = json.loads(args)
+                    except Exception:
+                        parsed = args
+                    _collect_paths_from_jsonish(parsed, relevant_files)
         for msg in turns_to_summarize:
             role = msg.get("role", "unknown")
             text = _compact_fallback_turn(msg.get("content"))
             _collect_path_mentions(text, relevant_files)
             synthetic_user = role == "user" and self._is_synthetic_compression_user_turn(msg)
-            tool_names = [
-                _extract_tool_call_name_and_args(tc)[0]
-                for tc in (msg.get("tool_calls") or [])
-            ] if role == "assistant" else []
-
+            tool_names = [_extract_tool_call_name_and_args(tc)[0] for tc in (msg.get("tool_calls") or [])] if role == "assistant" else []
             turn_text = text
             if tool_names:
                 prefix = "tool calls: " + ", ".join(tool_names[:6])
@@ -2818,7 +2810,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if turn_text.strip():
                 last_dropped_turns.append(f"{turn_label}: {turn_text.strip()}")
                 del last_dropped_turns[:-8]
-
             if len(text) > 600:
                 text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
 
@@ -2857,10 +2848,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if self._previous_summary:
             previous_summary = redact_sensitive_text(self._previous_summary.strip())
             if len(previous_summary) > _FALLBACK_PREVIOUS_SUMMARY_MAX_CHARS:
-                previous_summary = (
-                    previous_summary[: _FALLBACK_PREVIOUS_SUMMARY_MAX_CHARS - 45].rstrip()
-                    + "\n...[previous summary snapshot truncated]"
-                )
+                previous_summary = (previous_summary[: _FALLBACK_PREVIOUS_SUMMARY_MAX_CHARS - 45].rstrip()
+                                    + "\n...[previous summary snapshot truncated]")
             previous_summary_note = (
                 "\n\n## Previous Summary Snapshot\n"
                 f"{previous_summary}\n\n"
@@ -2919,18 +2908,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         Keeps the newest ``_LEAN_TAIL_KEEP_TOOL_ROUNDS`` rounds verbatim; skill-marker rows are never
         touched. Returns a new list (untouched messages shared, demoted copied)."""
         session_id = getattr(self, "_session_id", "") or ""
-        tool_indices = [i for i in range(len(messages) - 1, tail_start - 1, -1) if messages[i].get("role") == "tool"]
         rounds_seen = 0
         protected: set[int] = set()
         prev_idx = None
-        for i in tool_indices:
-            if prev_idx is None or prev_idx - i > 1:
-                rounds_seen += 1
+        for i in (i for i in range(len(messages) - 1, tail_start - 1, -1) if messages[i].get("role") == "tool"):
+            rounds_seen += prev_idx is None or prev_idx - i > 1
             prev_idx = i
-            if rounds_seen <= _LEAN_TAIL_KEEP_TOOL_ROUNDS:
-                protected.add(i)
-            else:
+            if rounds_seen > _LEAN_TAIL_KEEP_TOOL_ROUNDS:
                 break
+            protected.add(i)
         result = list(messages)
         demoted = 0
         for i in range(tail_start, len(messages)):
@@ -2952,12 +2938,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
-        if _LEAN_ANCHOR_HEADING not in summary:
-            summary += _redact_compaction_text(_build_anchor_index(turns_to_summarize))
-        if _LEAN_USER_MESSAGES_HEADING not in summary:
-            summary += _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))
-        if _LEAN_RECOVERY_HEADING not in summary:
-            summary += _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))
+        for heading, build in (
+            (_LEAN_ANCHOR_HEADING, lambda: _redact_compaction_text(_build_anchor_index(turns_to_summarize))),
+            (_LEAN_USER_MESSAGES_HEADING, lambda: _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))),
+            (_LEAN_RECOVERY_HEADING, lambda: _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))),
+        ):
+            if heading not in summary:
+                summary += build()
         return summary
 
     @classmethod
@@ -2971,15 +2958,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             "{omitted:,} chars from the middle to keep compression prompt bounded]...\n\n"
         )
         # Marker width can change with the omitted count; estimate, then rebuild once.
-        marker = marker_template.format(omitted=len(content))
-        remaining = max(cls._SUMMARY_INPUT_MAX_CHARS - len(marker), 0)
-        head_chars = int(remaining * 0.45)
-        tail_chars = remaining - head_chars
-        omitted = max(len(content) - head_chars - tail_chars, 0)
-        marker = marker_template.format(omitted=omitted)
-        remaining = max(cls._SUMMARY_INPUT_MAX_CHARS - len(marker), 0)
-        head_chars = int(remaining * 0.45)
-        tail_chars = remaining - head_chars
+        omitted = len(content)
+        for _ in range(2):
+            marker = marker_template.format(omitted=omitted)
+            remaining = max(cls._SUMMARY_INPUT_MAX_CHARS - len(marker), 0)
+            head_chars = int(remaining * 0.45)
+            tail_chars = remaining - head_chars
+            omitted = max(len(content) - head_chars - tail_chars, 0)
         tail = content[-tail_chars:].lstrip() if tail_chars else ""
         return content[:head_chars].rstrip() + marker + tail
 
@@ -3038,24 +3023,20 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
         Raises RuntimeError for empty content or a length-truncated (PARTIAL) summary so the failure
         routes through main-model fallback + cooldown instead of wiping the compacted turns."""
+        # call_llm writes the route it actually selected; never pre-resolve a second, stale pair.
+        _aux_route: Dict[str, str] = {}
         call_kwargs: Dict[str, Any] = {
             "task": "compression",
             "main_runtime": {
-                "model": self.model,
-                "provider": self.provider,
-                "base_url": self.base_url,
-                "api_key": self.api_key,
+                "model": self.model, "provider": self.provider, "base_url": self.base_url, "api_key": self.api_key,
                 "api_mode": self.api_mode,
             },
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": prompt}], "route_info": _aux_route,
             # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
             # (thinking models burn it on reasoning). Timeout comes from call_llm config.
         }
         if self.summary_model:
             call_kwargs["model"] = self.summary_model
-        # call_llm writes the route it actually selected; never pre-resolve a second, stale pair.
-        _aux_route: Dict[str, str] = {}
-        call_kwargs["route_info"] = _aux_route
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
         call_kwargs.update(_pinned_summary_call_kwargs())
         _aux_call_start = time.monotonic()
@@ -3082,19 +3063,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             raise AuxiliaryExplicitCancellation()
         # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
         content = extract_content_or_reasoning(response, max_reasoning_chars=8000)
+        where = f"(provider={self.provider or 'auto'} model={self.summary_model or self.model})"
         if not content.strip():
-            raise RuntimeError(
-                "Context compression LLM returned empty content "
-                f"(provider={self.provider or 'auto'} "
-                f"model={self.summary_model or self.model})"
-            )
+            raise RuntimeError(f"Context compression LLM returned empty content {where}")
         if _response_finish_reason(response) == "length":
             raise RuntimeError(
-                "Context compression summary was truncated "
-                f"({_TRUNCATED_SUMMARY_MARKER}): generation hit the output "
-                "token cap and the summary is incomplete "
-                f"(provider={self.provider or 'auto'} "
-                f"model={self.summary_model or self.model})"
+                f"Context compression summary was truncated ({_TRUNCATED_SUMMARY_MARKER}): generation hit the output "
+                f"token cap and the summary is incomplete {where}"
             )
         return content
 
@@ -3115,32 +3090,24 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 self._summary_failure_cooldown_until - prompt_started_at,
             )
             return None
-
         # Strict-redact inputs that bypass _serialize_for_summary (focus string, prior summary).
         if focus_topic:
             focus_topic = _redact_compaction_text(focus_topic)
         if self._previous_summary:
             self._previous_summary = _redact_compaction_text(self._previous_summary)
-
         summary_budget = self._compute_summary_budget(turns_to_summarize)
-        content_to_summarize = self._serialize_for_summary(turns_to_summarize)
         # Ghost-skill defense: LLMs paraphrase [SKILL_PRUNED] markers away; collect the names
         # deterministically BEFORE the call (from the turn LIST, not the bounded text), re-inject after.
-        _pruned_skill_names = _collect_ghosted_skill_names(turns_to_summarize)
-        for _name in _extract_pruned_skill_names(self._previous_summary or ""):
-            if _name not in _pruned_skill_names:
-                _pruned_skill_names.append(_name)
-        del _pruned_skill_names[_MAX_PRUNED_SKILL_MARKERS:]
+        _pruned_skill_names = list(dict.fromkeys(
+            _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
+        ))[:_MAX_PRUNED_SKILL_MARKERS]
         # Lean mode even-samples oversized input (one bounded request, never a second).
         bound = self._sample_summary_input if getattr(self, "tail_mode", "lean") == "lean" else self._bound_summary_input
-        content_to_summarize = bound(content_to_summarize)
+        content_to_summarize = bound(self._serialize_for_summary(turns_to_summarize))
         has_user_turn = getattr(self, "_summary_has_user_turn", None)
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
-        prompt = self._build_summary_prompt(
-            content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn,
-        )
-
+        prompt = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
         try:
             content = self._call_summary_llm(prompt, prompt_started_at)
             # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
@@ -3307,9 +3274,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Only a genuine no-provider RuntimeError gets the long cooldown; empty/invalid-response
         # RuntimeErrors are transient and must get the main-model retry below first.
         if isinstance(e, RuntimeError) and "no llm provider configured" in str(e).lower():
-            self._record_compression_failure_cooldown(
-                _SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured",
-            )
+            self._record_compression_failure_cooldown(_SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured")
             self._last_summary_error = "no auxiliary LLM provider configured"
             logger.warning(
                 "Context compression: no provider available for summary. Middle turns will be dropped without "
@@ -3331,11 +3296,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # A distinct summary model gets ONE main-model retry: a specific reason for known transient classes,
         # else a best-effort "failed" retry — losing N turns is worse than one extra summary attempt.
-        if (
-            self.summary_model
-            and self.summary_model != self.model
-            and not getattr(self, "_summary_model_fallen_back", False)
-        ):
+        if self.summary_model and self.summary_model != self.model and not getattr(self, "_summary_model_fallen_back", False):
             self._fallback_to_main_for_compression(e, kind.fallback_reason())
             # Retry immediately on the main model.
             return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)
@@ -3344,10 +3305,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         # 60s→300s→900s (structural repeat offenders) and take precedence over the short rung.
         if kind.timeout:
             _transient_cooldown = _next_timeout_cooldown(self)
-        elif kind.json_decode or kind.streaming_closed or kind.empty_content or kind.truncated:
-            _transient_cooldown = 30
         else:
-            _transient_cooldown = 60
+            _transient_cooldown = 30 if (kind.json_decode or kind.streaming_closed or kind.empty_content or kind.truncated) else 60
         err_text = _short_error_text(e)
         self._record_compression_failure_cooldown(_transient_cooldown, err_text)
         self._last_summary_error = err_text
@@ -3392,9 +3351,7 @@ Write only the summary body. Do not include any preamble or prefix."""
     @staticmethod
     def _starts_with_summary_prefix(text: str) -> bool:
         """Return True if *text* begins with any known handoff prefix."""
-        if text.startswith(SUMMARY_PREFIX) or text.startswith(LEGACY_SUMMARY_PREFIX):
-            return True
-        return any(text.startswith(p) for p in _HISTORICAL_SUMMARY_PREFIXES)
+        return text.startswith((SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX, *_HISTORICAL_SUMMARY_PREFIXES))
 
     @classmethod
     def classify_summary_content(cls, content: Any) -> Optional[str]:
@@ -3416,20 +3373,15 @@ Write only the summary body. Do not include any preamble or prefix."""
     @staticmethod
     def _has_compressed_summary_metadata(message: Any) -> bool:
         """Return True if *message* carries the in-process compressed-summary flag."""
-        if not isinstance(message, dict):
-            return False
-        return bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
+        return isinstance(message, dict) and bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
 
     @classmethod
     def _transcript_has_real_user_turn(cls, messages: List[Dict[str, Any]]) -> bool:
         """Return whether *messages* contain a user-authored (not synthetic summary) turn."""
-        for message in messages:
-            if not isinstance(message, dict) or message.get("role") != "user":
-                continue
-            if cls._is_synthetic_compression_user_turn(message):
-                continue
-            return True
-        return False
+        return any(
+            isinstance(m, dict) and m.get("role") == "user" and not cls._is_synthetic_compression_user_turn(m)
+            for m in messages
+        )
 
     @classmethod
     def _is_synthetic_compression_user_turn(cls, message: Any) -> bool:
@@ -3485,9 +3437,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Return True for summary handoff messages by metadata or content."""
         if not isinstance(message, dict):
             return False
-        return cls._has_compressed_summary_metadata(
-            message
-        ) or cls._is_context_summary_content(message.get("content"))
+        return cls._has_compressed_summary_metadata(message) or cls._is_context_summary_content(message.get("content"))
 
     @classmethod
     def _is_blank_user_turn(cls, message: Any) -> bool:
@@ -3501,19 +3451,15 @@ Write only the summary body. Do not include any preamble or prefix."""
             return True
         if not isinstance(content, list):
             return False
-        if not content:
-            return True
-        for part in content:
+
+        def _blank_part(part: Any) -> bool:
             if isinstance(part, str):
-                if part.strip():
-                    return False
-                continue
+                return not part.strip()
             if isinstance(part, dict) and part.get("type") in {"text", "input_text"}:
-                text = part.get("text")
-                if isinstance(text, str) and not text.strip():
-                    continue
+                return isinstance(part.get("text"), str) and not part["text"].strip()
             return False
-        return True
+
+        return all(map(_blank_part, content))
 
     @classmethod
     def _is_actionable_user_turn(cls, message: Any) -> bool:
@@ -3544,17 +3490,11 @@ Write only the summary body. Do not include any preamble or prefix."""
     def _derive_auto_focus_topic(cls, messages: List[Dict[str, Any]]) -> Optional[str]:
         """Infer a compact focus hint from the most recent real user turns."""
         candidates: list[str] = []
-        for idx in range(len(messages) - 1, -1, -1):
-            msg = messages[idx]
-            if msg.get("role") != "user":
-                continue
-            if cls._is_synthetic_compression_user_turn(msg):
-                continue
+        for msg in reversed(messages):
             # display_kind notices are operational traffic, not user intent.
-            if msg.get("display_kind"):
+            if msg.get("role") != "user" or cls._is_synthetic_compression_user_turn(msg) or msg.get("display_kind"):
                 continue
-            content = msg.get("content")
-            text = _redact_compaction_text(_content_text_for_contains(content).strip())
+            text = _redact_compaction_text(_content_text_for_contains(msg.get("content")).strip())
             if not text:
                 continue
             text = " ".join(text.split())
@@ -3563,10 +3503,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             candidates.append(text)
             if len(candidates) >= _AUTO_FOCUS_MAX_TURNS:
                 break
-
         if not candidates:
             return None
-
         candidates.reverse()
         focus = "Recent user focus:\n" + "\n".join(f"- {item}" for item in candidates)
         if len(focus) > _AUTO_FOCUS_MAX_CHARS:
@@ -3583,12 +3521,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         from agent.conversation_compression import _is_real_user_message
 
         for msg in reversed(messages):
-            if msg.get("role") != "user":
+            if msg.get("role") != "user" or not _is_real_user_message(msg):
                 continue
-            if not _is_real_user_message(msg):
-                continue
-            content = msg.get("content")
-            text = _redact_compaction_text(_content_text_for_contains(content).strip())
+            text = _redact_compaction_text(_content_text_for_contains(msg.get("content")).strip())
             if not text:
                 continue
             text = re.sub(r"\s+", " ", text)
@@ -3612,8 +3547,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # this regex on the next compaction (deleting every following section).
         replacement = f"{HISTORICAL_TASK_HEADING}\n{snapshot}\n\n"
         if _HISTORICAL_TASK_SECTION_RE.search(body):
-            grounded = _HISTORICAL_TASK_SECTION_RE.sub(lambda _m: replacement, body, count=1)
-            return grounded.strip()
+            return _HISTORICAL_TASK_SECTION_RE.sub(lambda _m: replacement, body, count=1).strip()
         return f"{replacement}{body}".strip()
 
     @classmethod
@@ -3623,12 +3557,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Clamp: callers may pass end = len(messages)+1.
         start = max(0, min(start, n))
         end = max(start, min(end, n))
-        summaries: list[tuple[int, str]] = []
-        for idx in range(start, end):
-            content = messages[idx].get("content")
-            if cls._is_context_summary_message(messages[idx]):
-                summaries.append((idx, cls._strip_summary_prefix(_content_text_for_contains(content))))
-        return summaries
+        return [
+            (idx, cls._strip_summary_prefix(_content_text_for_contains(messages[idx].get("content"))))
+            for idx in range(start, end) if cls._is_context_summary_message(messages[idx])
+        ]
 
     @classmethod
     def _find_latest_context_summary(
@@ -3636,9 +3568,7 @@ Write only the summary body. Do not include any preamble or prefix."""
     ) -> tuple[Optional[int], str]:
         """Find the newest handoff summary inside a compression window."""
         summaries = cls._find_context_summaries(messages, start, end)
-        if summaries:
-            return summaries[-1]
-        return None, ""
+        return summaries[-1] if summaries else (None, "")
 
     @classmethod
     def _strip_context_summary_handoff_message(cls, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3648,10 +3578,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         (delimiter form, or legacy end-marker form), and ``None`` for standalone ones."""
         if not isinstance(message, dict):
             return message
-
-        content = message.get("content")
         if not cls._is_context_summary_message(message):
             return message.copy()
+        content = message.get("content")
 
         def _unwrapped(new_content: Any) -> Dict[str, Any]:
             unwrapped = {**message, "content": new_content}
@@ -3663,15 +3592,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                 prior = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0].strip()
                 if prior.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
                     prior = prior[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
-                if prior:
-                    return _unwrapped(prior)
+            elif _SUMMARY_END_MARKER in content:
+                prior = content.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
             else:
-                marker_idx = content.find(_SUMMARY_END_MARKER)
-                if marker_idx >= 0:
-                    remainder = content[marker_idx + len(_SUMMARY_END_MARKER):].lstrip()
-                    if remainder:
-                        return _unwrapped(remainder)
-
+                prior = ""
+            return _unwrapped(prior) if prior else None
         if isinstance(content, list):
             prior_blocks: list[Any] = []
             found_delimiter = False
@@ -3708,17 +3633,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                 else:
                     prior_blocks.pop(index)
                 break
-            if prior_blocks:
-                return _unwrapped(prior_blocks)
-
+            return _unwrapped(prior_blocks) if prior_blocks else None
         return None
 
     @staticmethod
     def _get_tool_call_id(tc) -> str:
         """Canonical call ID for logging only; matching must use _tool_call_id_variants."""
-        if isinstance(tc, dict):
-            return (tc.get("call_id", "") or tc.get("id", "") or "").strip()
-        return (getattr(tc, "call_id", "") or getattr(tc, "id", "") or "").strip()
+        return (_tc_get(tc, "call_id") or _tc_get(tc, "id") or "").strip()
 
     @staticmethod
     def _tool_call_id_variants(tc) -> set:
@@ -3735,12 +3656,10 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         _, result_call_ids, orphaned_result_msgs, missing_tool_calls = _classify_tool_call_orphans(messages)
         orphaned_results = {id(m) for m in orphaned_result_msgs}
-
         if orphaned_results:
             messages = [m for m in messages if id(m) not in orphaned_results]
             if not self.quiet_mode:
                 logger.info("Compression sanitizer: removed %d orphaned tool result(s)", len(orphaned_results))
-
         # Strip orphaned tool_calls (not stub them: stubs get dropped by repair_message_sequence
         # when call_id != id). A call survives if ANY id variant still has a result.
         if not missing_tool_calls:
@@ -3749,9 +3668,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # last non-tool assistant's calls are presumed pending and kept verbatim. Skip trailing tool
         # results first: a multi-call batch snapshot between appends is still in flight. Unanswered
         # survivors are stubbed pre-API by sanitize_api_messages.
-        idx = len(messages) - 1
-        while idx >= 0 and messages[idx].get("role") == "tool":
-            idx -= 1
+        idx = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") != "tool"), -1)
         trailing_inflight = messages[idx] if idx >= 0 and messages[idx].get("role") == "assistant" else None
         stripped_count = 0
         for msg in messages:
@@ -3771,9 +3688,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 if not content or (isinstance(content, str) and not content.strip()):
                     msg["content"] = "(tool call removed)"
         if stripped_count and not self.quiet_mode:
-            logger.info(
-                "Compression sanitizer: stripped %d orphaned tool_call(s) from assistant messages", stripped_count,
-            )
+            logger.info("Compression sanitizer: stripped %d orphaned tool_call(s) from assistant messages", stripped_count)
         return messages
 
     def _align_boundary_forward(self, messages: List[Dict[str, Any]], idx: int) -> int:
@@ -3787,9 +3702,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         if not messages or self.protect_first_n <= 0:
             return 0, 0
         first_non_system = 1 if messages[0].get("role") == "system" else 0
-        return first_non_system, min(
-            len(messages), first_non_system + self.protect_first_n + _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES,
-        )
+        return first_non_system, min(len(messages), first_non_system + self.protect_first_n + _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES)
 
     def _effective_protect_first_n(self, messages: Optional[List[Dict[str, Any]]] = None) -> int:
         """``protect_first_n`` decayed to 0 once the session has been compressed.
@@ -3800,8 +3713,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             return 0
         if messages and self.protect_first_n > 0:
             # Probe only the early resumed-handoff shape; summary-like tail content must not decay protection.
-            first_non_system, restart_probe_end = self._restart_handoff_probe_bounds(messages)
-            if any(self._is_context_summary_message(msg) for msg in messages[first_non_system:restart_probe_end]):
+            probe_start, probe_end = self._restart_handoff_probe_bounds(messages)
+            if any(map(self._is_context_summary_message, messages[probe_start:probe_end])):
                 return 0
         return self.protect_first_n
 
@@ -3811,9 +3724,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         The system prompt (index 0, if present) is always protected; ``protect_first_n`` counts
         ADDITIONAL messages and decays after the first compaction so early turns don't fossilize (see
         _effective_protect_first_n)."""
-        head = 0
-        if messages and messages[0].get("role") == "system":
-            head = 1
+        head = 1 if messages and messages[0].get("role") == "system" else 0
         return head + self._effective_protect_first_n(messages)
 
     def _align_boundary_backward(self, messages: List[Dict[str, Any]], idx: int) -> int:
@@ -3822,12 +3733,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         A split group leaves orphaned tail results that ``_sanitize_tool_pairs`` then drops."""
         if idx <= 0 or idx >= len(messages):
             return idx
-        check = idx - 1
-        while check >= 0 and messages[check].get("role") == "tool":
-            check -= 1
+        check = next((i for i in range(idx - 1, -1, -1) if messages[i].get("role") != "tool"), -1)
         # Landed on the parent assistant: move before it so the group is summarised together.
         if check >= 0 and messages[check].get("role") == "assistant" and messages[check].get("tool_calls"):
-            idx = check
+            return check
         return idx
 
     @classmethod
@@ -3857,13 +3766,11 @@ Write only the summary body. Do not include any preamble or prefix."""
             if last_any < 0:
                 last_any = i
             content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return i
             # Multimodal content: any non-empty text block counts.
-            if isinstance(content, list) and any(
+            if (isinstance(content, str) and content.strip()) or (isinstance(content, list) and any(
                 isinstance(p, dict) and isinstance(t := (p.get("text") or p.get("content")), str) and t.strip()
                 for p in content
-            ):
+            )):
                 return i
         return last_any
 
@@ -3900,10 +3807,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         # needlessly pull the cut into the preceding tool group.
         if not self.quiet_mode:
             logger.debug(
-                "Anchoring tail cut to last user message at index %d "
-                "(was %d) to prevent active-task loss after compression",
-                last_user_idx,
-                cut_idx,
+                "Anchoring tail cut to last user message at index %d (was %d) to prevent active-task loss after compression",
+                last_user_idx, cut_idx,
             )
         adjusted = max(last_user_idx, head_end + 1)
         if adjusted > last_user_idx:
@@ -3912,9 +3817,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not self.quiet_mode:
                 logger.debug(
                     "Causal Coupling: cut would split turn-pair at user %d; pushing cut forward to "
-                    "pair_end %d so the completed pair is summarised together (#22523)",
-                    last_user_idx,
-                    pair_end,
+                    "pair_end %d so the completed pair is summarised together (#22523)", last_user_idx, pair_end,
                 )
             return max(pair_end, head_end + 1)
         return adjusted
@@ -3942,16 +3845,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Return the index after the turn-pair (user -> assistant -> tools) at *user_idx*.
 
         Returns ``user_idx + 1`` when there is no reply yet."""
-        n = len(messages)
         idx = user_idx + 1
-        if idx >= n:
-            return idx  # user is the very last message — no reply yet
-        if messages[idx].get("role") != "assistant":
+        if idx >= len(messages) or messages[idx].get("role") != "assistant":
             return idx  # no assistant reply immediately following
-        idx += 1
-        while idx < n and messages[idx].get("role") == "tool":
-            idx += 1
-        return idx
+        return self._align_boundary_forward(messages, idx + 1)
 
     def _stale_thinking_on_wire(self) -> bool:
         """Whether the active route replays stale thinking text on every turn.
@@ -3961,8 +3858,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             from agent.message_sanitization import stale_thinking_reaches_wire
 
             return stale_thinking_reaches_wire(
-                getattr(self, "api_mode", "") or "", getattr(self, "provider", "") or "",
-                getattr(self, "model", "") or "", getattr(self, "base_url", "") or "",
+                *(getattr(self, attr, "") or "" for attr in ("api_mode", "provider", "model", "base_url"))
             )
         except Exception:
             return False
@@ -3993,17 +3889,13 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         fallback_cut = n - min_tail
         cut_idx = min(cut_idx, fallback_cut)
-
         # Small conversations: force a cut after the head so compression still removes something.
         if cut_idx <= head_end:
             cut_idx = max(fallback_cut, head_end + 1)
-
         cut_idx = self._align_boundary_backward(messages, cut_idx)
-
-        # Latest user message must stay in the tail (active task).
+        # Latest user message must stay in the tail (active task). Latest assistant reply must stay too;
+        # anchors only walk backward, so chaining is monotonic.
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
-
-        # Latest assistant reply must stay in the tail; anchors only walk backward, so chaining is monotonic.
         cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
 
         # Optional multi-user anchor; n<=1 is gated here (not delegated) so the default path stays
@@ -4056,9 +3948,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         summary_idx, summary_body = summary_hits[-1]
         if not self._previous_summary:
-            summary_bodies = [body for _, body in summary_hits if body]
-            if summary_bodies:
-                self._previous_summary = "\n\n".join(summary_bodies)
+            self._previous_summary = "\n\n".join(body for _, body in summary_hits if body) or self._previous_summary
         # Zero-user provenance (#64650) rides on the newest handoff hit.
         provenance = messages[summary_idx].get(COMPRESSED_SUMMARY_HAS_USER_TURN_KEY)
         if real_user_present:
@@ -4078,16 +3968,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                 return msg
             return self._strip_context_summary_handoff_message(_fresh_compaction_message_copy(msg))
 
-        pre_summary_turns = [
-            row for idx, msg in enumerate(messages[compress_start:summary_idx], start=compress_start)
-            if (row := _window_row(idx, msg)) is not None
-        ]
-        newest_stripped = _window_row(summary_idx, messages[summary_idx])
-        scan.turns_to_summarize = (
-            pre_summary_turns
-            + ([newest_stripped] if newest_stripped is not None else [])
-            + messages[summary_idx + 1:compress_end]
-        )
+        window = [_window_row(idx, msg) for idx, msg in enumerate(messages[compress_start:summary_idx], start=compress_start)]
+        window.append(_window_row(summary_idx, messages[summary_idx]))
+        scan.turns_to_summarize = [row for row in window if row is not None] + messages[summary_idx + 1:compress_end]
         if summary_idx >= compress_end:
             scan.tail_start = summary_idx + 1
         return scan
@@ -4121,11 +4004,8 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     def _drop_blank_echoes(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remove blank platform echoes trailing the latest actionable user turn."""
-        latest_actionable_idx = self._find_last_user_message_idx(messages, 0)
-        blank_echo_indices = self._blank_echo_indices_after(messages, latest_actionable_idx)
-        if blank_echo_indices:
-            messages = [m for idx, m in enumerate(messages) if idx not in blank_echo_indices]
-        return messages
+        blank = self._blank_echo_indices_after(messages, self._find_last_user_message_idx(messages, 0))
+        return [m for idx, m in enumerate(messages) if idx not in blank] if blank else messages
 
     def _compress_window(self, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Return ``(compress_start, compress_end)`` for the summarizable middle."""
@@ -4169,8 +4049,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Reuse the telemetry estimate so log and telemetry agree; None means the regions helper
         # no-op'd (0 is valid).
         middle_tokens = telemetry.get("middle_window_tokens")
-        if middle_tokens is None:
-            middle_tokens = estimate_messages_tokens_rough(turns_to_summarize)
+        middle_tokens = estimate_messages_tokens_rough(turns_to_summarize) if middle_tokens is None else middle_tokens
         if middle_tokens >= int(self.threshold_tokens * _FEASIBILITY_SKIP_MIDDLE_FRACTION):
             return False
         self._last_feasibility_skip = True
@@ -4194,11 +4073,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         Access/quota, network, truncated and empty-content failures ALWAYS abort (#29559); otherwise
         ``abort_on_summary_failure`` decides between abort and the static fallback."""
         terminal_failure = next(
-            (
-                (failure_class, message)
-                for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES
-                if getattr(self, flag)
-            ),
+            ((failure_class, message) for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES if getattr(self, flag)),
             None,
         )
         if terminal_failure is None and not self.abort_on_summary_failure:
@@ -4230,10 +4105,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
                 if self._COMPRESSION_NOTE not in _content_text_for_contains(existing):
-                    msg["content"] = _append_text_to_content(
-                        existing,
-                        "\n\n" + self._COMPRESSION_NOTE if isinstance(existing, str) and existing else self._COMPRESSION_NOTE,
-                    )
+                    sep = "\n\n" if isinstance(existing, str) and existing else ""
+                    msg["content"] = _append_text_to_content(existing, sep + self._COMPRESSION_NOTE)
             stripped = self._strip_context_summary_handoff_message(msg)
             if stripped is not None:
                 compressed.append(stripped)
@@ -4244,11 +4117,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         n_dropped: int, feasibility_skip: bool,
     ) -> str:
         """Deterministic fallback so the model gets recoverable continuity anchors."""
-        if not self.quiet_mode:
-            if feasibility_skip:
-                logger.info("Feasibility skip — inserting deterministic fallback context summary")
-            else:
-                logger.warning("Summary generation failed — inserting deterministic fallback context summary")
+        if not self.quiet_mode and feasibility_skip:
+            logger.info("Feasibility skip — inserting deterministic fallback context summary")
+        elif not self.quiet_mode:
+            logger.warning("Summary generation failed — inserting deterministic fallback context summary")
         self._last_summary_dropped_count = n_dropped
         self._last_summary_fallback_used = True
         telemetry["fallback_used"] = True
@@ -4288,20 +4160,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         last_head_role: Optional[str] = "user"
         if compressed:
             # None = all-exempt head: the summary opens the visible sequence and must be "user".
-            last_head_role = next(
-                (r for r in (_template_visible_role(m) for m in reversed(compressed)) if r is not None), None,
-            )
-        first_tail_role = None
-        first_tail_visible_idx: Optional[int] = None
-        if tail_messages:
-            first_tail_visible_idx, first_tail_role = next(
-                (
-                    (idx, role)
-                    for idx, role in ((idx, _template_visible_role(m)) for idx, m in enumerate(tail_messages))
-                    if role is not None
-                ),
-                (None, None),
-            )
+            last_head_role = next((r for r in map(_template_visible_role, reversed(compressed)) if r is not None), None)
+        first_tail_visible_idx, first_tail_role = next(
+            ((idx, role) for idx, role in enumerate(map(_template_visible_role, tail_messages)) if role is not None),
+            (None, None),
+        )
         # System-only head: the summary is the first visible message and Anthropic requires role=user
         # (#52160). Zero-user-turn guard (#58753): if no user row with non-empty TEXT survives, the
         # summary must be role="user" or OpenAI-compatible backends reject. Image-only rows don't count.
@@ -4310,10 +4173,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             for m in (*compressed, *tail_messages)
         )
         # Alternate against head first, then tail; None (all-exempt head) means "user".
-        if last_head_role is None or last_head_role in {"assistant", "tool"} or force_user_leading:
-            summary_role = "user"
-        else:
-            summary_role = "assistant"
+        summary_role = "user" if last_head_role in {None, "assistant", "tool"} or force_user_leading else "assistant"
         merge_into_tail = False
         # Flip on a tail collision only if that doesn't collide with the head.
         if first_tail_role is not None and summary_role == first_tail_role:
@@ -4334,9 +4194,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         if force_user_leading and summary_role == "user":
             # Anthropic/Bedrock: summary must lead the first visible message; the real request
             # follows the end marker.
-            msg["content"] = _append_text_to_content(
-                old_content, summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n", prepend=True,
-            )
+            msg["content"] = _append_text_to_content(old_content, summary + "\n\n" + _SUMMARY_END_MARKER + "\n\n", prepend=True)
         else:
             # Old tail content is kept as delimited reference BEFORE the summary; the end marker goes last.
             suffix = "\n\n" + _MERGED_SUMMARY_DELIMITER + "\n\n" + summary + "\n\n" + _SUMMARY_END_MARKER
@@ -4363,16 +4221,12 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Like-for-like savings: current_tokens includes system prompt/tool schemas, new_estimate is
         # messages-only; comparing them fakes ~96% savings and kills the anti-thrashing guard.
         # Message-only savings are diagnostic; the verdict belongs to the next provider prompt count.
-        new_estimate = estimate_messages_tokens_rough(compressed)
         pre_estimate = estimate_messages_tokens_rough(messages)
-        saved_estimate = pre_estimate - new_estimate
+        saved_estimate = pre_estimate - estimate_messages_tokens_rough(compressed)
         savings_pct = (saved_estimate / pre_estimate * 100) if pre_estimate > 0 else 0
         self._last_compression_savings_pct = savings_pct
         if not self.quiet_mode:
-            logger.info(
-                "Compressed: %d -> %d messages (~%d tokens saved, %.0f%%)",
-                n_messages, len(compressed), saved_estimate, savings_pct,
-            )
+            logger.info("Compressed: %d -> %d messages (~%d tokens saved, %.0f%%)", n_messages, len(compressed), saved_estimate, savings_pct)
             logger.info("Compression #%d complete", self.compression_count)
 
         # Invariant (#57491): no compacted message leaves compress() with a persistence marker.
@@ -4418,9 +4272,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 telemetry, "insufficient_messages", f"only {n_messages} messages (need > {_min_for_compress})",
             )
             return messages
-
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
-
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=self.tail_token_budget,
@@ -4429,7 +4281,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
         messages = self._drop_blank_echoes(messages)
         n_messages = len(messages)
-
         # Phase 2: Determine boundaries
         compress_start, compress_end = self._compress_window(messages)
         if compress_start >= compress_end:
@@ -4438,21 +4289,17 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
             self._structural_no_op_result(
                 telemetry, "no_compressible_window",
-                f"compress_start ({compress_start}) >= compress_end "
-                f"({compress_end}) - transcript fits within tail budget",
+                f"compress_start ({compress_start}) >= compress_end ({compress_end}) - transcript fits within tail budget",
             )
             return messages
-
         turns_to_summarize = messages[compress_start:compress_end]
         # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
         scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
         turns_to_summarize = scan.turns_to_summarize
-
         self._record_compression_regions(
-            head_messages=messages[:compress_start], middle_messages=turns_to_summarize,
-            tail_messages=messages[compress_end:],
+            head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
         )
         telemetry["chunk_count"] = 1 if turns_to_summarize else 0
         if not turns_to_summarize:
@@ -4469,35 +4316,46 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
 
         # Phase 3: Generate structured summary (or skip the LLM when the middle is too small to matter)
-        feasibility_skip = not force and self._feasibility_skip(
-            telemetry, turns_to_summarize, compress_start, compress_end,
-        )
-        if feasibility_skip:
-            summary = None  # No LLM call; Phase 4 inserts the deterministic fallback
-        else:
-            # Focus-topic derivation scans user turns; only pay when a summary is generated.
-            try:
-                summary = self._generate_summary(
-                    turns_to_summarize, focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
-                    memory_context=memory_context, bypass_cooldown=bypass_cooldown,
-                )
-            except AuxiliaryExplicitCancellation:
-                # Cancellation is a true no-op: restore the self-heal scan's mutation before the
-                # exception escapes.
-                self._previous_summary = scan.previous_summary_before
-                self._summary_has_user_turn = scan.has_user_turn_before
-                raise
+        feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)
+        summary = None  # feasibility skip: no LLM call; Phase 4 inserts the deterministic fallback
+        if not feasibility_skip:
+            summary = self._summarize_window(
+                messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
+            )
             if not summary and self._abort_on_summary_failure(
                 telemetry, compress_end - compress_start, scan.previous_summary_before,
             ):
                 return messages
-
-        # Phase 4: Assemble compressed message list
-        compressed = self._assemble_head(messages, compress_start)
         if not summary:
             summary = self._fallback_summary_for_window(
                 telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
             )
+        # Phase 4: Assemble compressed message list
+        compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
+        return self._finalize_compressed(compressed, messages, n_messages)
+
+    def _summarize_window(
+        self, messages: List[Dict[str, Any]], turns_to_summarize: List[Dict[str, Any]], scan: "_HandoffScan",
+        focus_topic: Optional[str], memory_context: str, bypass_cooldown: bool,
+    ) -> Optional[str]:
+        """Run the summary LLM; a cancellation rolls back the handoff scan's self-heal mutation first."""
+        # Focus-topic derivation scans user turns; only pay when a summary is generated.
+        try:
+            return self._generate_summary(
+                turns_to_summarize, focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
+                memory_context=memory_context, bypass_cooldown=bypass_cooldown,
+            )
+        except AuxiliaryExplicitCancellation:
+            # Cancellation is a true no-op: restore the scan's mutation before the exception escapes.
+            self._previous_summary = scan.previous_summary_before
+            self._summary_has_user_turn = scan.has_user_turn_before
+            raise
+
+    def _assemble_compressed(
+        self, messages: List[Dict[str, Any]], compress_start: int, compress_end: int, scan: "_HandoffScan", summary: str,
+    ) -> List[Dict[str, Any]]:
+        """Head + summary row (or merged carrier) + tail, with alternation-safe summary placement."""
+        compressed = self._assemble_head(messages, compress_start)
         tail_messages = self._assemble_tail(messages, compress_end, scan.tail_start, scan.summary_indices)
         summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx = (
             self._summary_placement(compressed, tail_messages, compress_start)
@@ -4506,8 +4364,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             # End marker stops weak models treating the quoted summary as fresh input (#11475) or
             # regurgitating it (#33256).
             compressed.append({
-                "role": summary_role,
-                "content": summary + "\n\n" + _SUMMARY_END_MARKER,
+                "role": summary_role, "content": summary + "\n\n" + _SUMMARY_END_MARKER,
                 COMPRESSED_SUMMARY_METADATA_KEY: True,
                 COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(self._summary_has_user_turn),
             })
@@ -4522,7 +4379,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             if merge_into_tail and tail_idx == merge_target_idx:
                 self._merge_summary_into_tail_row(msg, summary, summary_role, force_user_leading)
             compressed.append(msg)
-        return self._finalize_compressed(compressed, messages, n_messages)
+        return compressed
 
 
 def is_compaction_summary_message(message: Any) -> bool:
@@ -4530,9 +4387,8 @@ def is_compaction_summary_message(message: Any) -> bool:
 
     Public API. Uses the metadata key, falling back to content heuristics because the key is stripped by
     wire sanitizers and some session-store round-trips."""
-    if isinstance(message, dict):
-        return ContextCompressor._is_context_summary_message(message)
-    return ContextCompressor._is_context_summary_content(message)
+    cls = ContextCompressor
+    return cls._is_context_summary_message(message) if isinstance(message, dict) else cls._is_context_summary_content(message)
 
 
 # Display metadata that survives projection; other metadata may describe synthetic events and must
@@ -4552,7 +4408,6 @@ def _handoff_only_content(content: Any) -> Any:
         return _through_end_marker(content)
     if not isinstance(content, list):
         return content
-
     # Ordinary merge: summary suffix starts in the delimiter part; later parts may carry live media
     # — never retain.
     for item in content:
@@ -4607,14 +4462,11 @@ def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], 
             return None, None
         candidate = message.copy()
 
-    candidate.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
-    candidate.pop(COMPRESSED_SUMMARY_HAS_USER_TURN_KEY, None)
-    candidate.pop(MICRO_COMPACT_MARKER_KEY, None)
-    candidate.pop(_DB_PERSISTED_MARKER, None)
-    if is_summary:
-        candidate.pop("_row_id", None)
-    candidate.pop("display_kind", None)
-    candidate.pop("display_metadata", None)
+    for key in (
+        COMPRESSED_SUMMARY_METADATA_KEY, COMPRESSED_SUMMARY_HAS_USER_TURN_KEY, MICRO_COMPACT_MARKER_KEY,
+        _DB_PERSISTED_MARKER, *(("_row_id",) if is_summary else ()), "display_kind", "display_metadata",
+    ):
+        candidate.pop(key, None)
     carrier_metadata = message.get("display_metadata")
     if isinstance(carrier_metadata, dict):
         durable_metadata = {
@@ -4625,9 +4477,8 @@ def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], 
         if durable_metadata:
             candidate["display_metadata"] = durable_metadata
     drop_stale_api_content(candidate)
-    if ContextCompressor._is_synthetic_compression_user_turn(candidate):
-        return handoff, None
-    if not ContextCompressor._is_actionable_user_turn(candidate):
+    cls = ContextCompressor
+    if cls._is_synthetic_compression_user_turn(candidate) or not cls._is_actionable_user_turn(candidate):
         return handoff, None
     return handoff, candidate
 
@@ -4689,9 +4540,7 @@ def _handoff_carries_live_user_content(message: Any) -> bool:
     """Return True when a summary-bearing row still carries a live user ask.
 
     Callers must pre-filter with ``is_compaction_summary_message``."""
-    if not isinstance(message, dict):
-        return False
-    return ContextCompressor._strip_context_summary_handoff_message(message) is not None
+    return isinstance(message, dict) and ContextCompressor._strip_context_summary_handoff_message(message) is not None
 
 
 def reference_handoff_would_drive_next_model_call(messages: Optional[List[Dict[str, Any]]]) -> bool:
@@ -4706,40 +4555,27 @@ def reference_handoff_would_drive_next_model_call(messages: Optional[List[Dict[s
         if not is_compaction_summary_message(message):
             continue
         merged_completed_assistant = (
-            isinstance(message, dict)
-            and message.get("role") == "assistant"
-            and ContextCompressor.classify_summary_content(
-                message.get("content")
-            )
-            == "merged"
-            and message.get("finish_reason") == "stop"
-            and not message.get("tool_calls")
+            isinstance(message, dict) and message.get("role") == "assistant"
+            and ContextCompressor.classify_summary_content(message.get("content")) == "merged"
+            and message.get("finish_reason") == "stop" and not message.get("tool_calls")
         )
-        if (
-            _handoff_carries_live_user_content(message)
-            and not merged_completed_assistant
-        ):
-            # Embedded live ask or pending tool_calls -> not a sole-handoff driver.
-            continue
-        last_driving_handoff = index
-
+        # Embedded live ask or pending tool_calls -> not a sole-handoff driver.
+        if not (_handoff_carries_live_user_content(message) and not merged_completed_assistant):
+            last_driving_handoff = index
     if last_driving_handoff < 0:
         return False
-
     for message in messages[last_driving_handoff + 1 :]:
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        if role == "tool":
-            return False
-        if role == "assistant" and message.get("tool_calls"):
-            return False
         if (
-            ContextCompressor._is_actionable_user_turn(message)
-            and not ContextCompressor._is_synthetic_compression_user_turn(message)
+            role == "tool" or (role == "assistant" and message.get("tool_calls"))
+            or (
+                ContextCompressor._is_actionable_user_turn(message)
+                and not ContextCompressor._is_synthetic_compression_user_turn(message)
+            )
+            or (is_compaction_summary_message(message) and _handoff_carries_live_user_content(message))
         ):
-            return False
-        if is_compaction_summary_message(message) and _handoff_carries_live_user_content(message):
             return False
     return True
 
