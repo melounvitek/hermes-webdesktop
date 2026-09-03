@@ -1,7 +1,7 @@
 """Sudo password plumbing and shell-command rewrites for the terminal tool: the
-per-scope interactive password cache, the /dev/tty prompt, real-sudo tokenizer
-(sudo -S -p '' rewrite), NOPASSWD probe, and the compound-background brace-
-group rewrite.
+per-scope interactive password cache, the /dev/tty prompt, the quote-aware shell
+scanner behind the real-sudo rewrite (``sudo -S -p ''``) and the compound-background
+brace-group rewrite, and the NOPASSWD probe.
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -15,6 +15,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
+
 from utils import env_var_enabled
 
 # Log-record parity with the origin module.
@@ -35,16 +37,14 @@ def _get_sudo_password_cache_scope() -> str:
     session_key = _current_session_key()
     if session_key:
         return f"session:{session_key}"
-
     callback = _get_sudo_password_callback()
-    if callback is not None:
-        owner = getattr(callback, "__self__", None)
-        func = getattr(callback, "__func__", None)
-        if owner is not None and func is not None:
-            return f"callback-owner:{id(owner)}:{id(func)}"
-        return f"callback:{id(callback)}"
-
-    return f"thread:{threading.get_ident()}"
+    if callback is None:
+        return f"thread:{threading.get_ident()}"
+    owner = getattr(callback, "__self__", None)
+    func = getattr(callback, "__func__", None)
+    if owner is not None and func is not None:
+        return f"callback-owner:{id(owner)}:{id(func)}"
+    return f"callback:{id(callback)}"
 
 
 def _get_cached_sudo_password() -> str:
@@ -74,11 +74,10 @@ def _in_delegated_child_context() -> bool:
     """True while running inside a delegate_task child.
 
     Subagents run on parent-process worker threads and inherit process-wide
-    ``HERMES_INTERACTIVE=1``, which does NOT mean this context can reach the
-    user: a raw ``/dev/tty`` sudo prompt from a child races the TUI for the
-    tty and blocks the child for the full timeout. Children must always be
-    headless for sudo prompting. The ContextVar is set by
-    ``delegated_child_context()`` and propagates via ``copy_context``.
+    ``HERMES_INTERACTIVE=1``, which does NOT mean this context can reach the user: a raw
+    ``/dev/tty`` sudo prompt from a child races the TUI for the tty and blocks the child for
+    the full timeout. Children must always be headless for sudo prompting. The ContextVar is
+    set by ``delegated_child_context()`` and propagates via ``copy_context``.
     """
     try:
         from agent.delegation_context import is_delegated_child_context
@@ -88,33 +87,28 @@ def _in_delegated_child_context() -> bool:
         return False
 
 
+_SUDO_HEADLESS_FAILURES = (
+    "sudo: a password is required",
+    "sudo: no tty present",
+    "sudo: a terminal is required",
+)
+
+
 def _handle_sudo_failure(output: str, env_type: str) -> str:
     """Append a SUDO_PASSWORD tip when sudo failed in a headless context
     (gateway session or delegate_task child); otherwise return *output* as is."""
     is_gateway = env_var_enabled("HERMES_GATEWAY_SESSION")
     is_delegated_child = _in_delegated_child_context()
-
-    if not is_gateway and not is_delegated_child:
+    if not (is_gateway or is_delegated_child) or not any(f in output for f in _SUDO_HEADLESS_FAILURES):
         return output
-
-    sudo_failures = [
-        "sudo: a password is required",
-        "sudo: no tty present",
-        "sudo: a terminal is required",
-    ]
-    
-    for failure in sudo_failures:
-        if failure in output:
-            from hermes_constants import display_hermes_home as _dhh
-            if is_delegated_child:
-                return output + (
-                    "\n\n💡 Tip: Subagents cannot prompt for a sudo password. "
-                    f"Add SUDO_PASSWORD to {_dhh()}/.env on the agent machine, "
-                    "or run the command without sudo."
-                )
-            return output + f"\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
-    
-    return output
+    from hermes_constants import display_hermes_home as _dhh
+    if is_delegated_child:
+        return output + (
+            "\n\n💡 Tip: Subagents cannot prompt for a sudo password. "
+            f"Add SUDO_PASSWORD to {_dhh()}/.env on the agent machine, "
+            "or run the command without sudo."
+        )
+    return output + f"\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
 
 
 # sudo -S rejects a bad cached/interactive password with these messages.
@@ -143,16 +137,66 @@ def _invalidate_cached_sudo_on_auth_failure(
     operator choice, not an interactive cache entry.
     """
     from tools.terminal_tool import _count_real_sudo_invocations, _sudo_wrong_password_failure
-    if "SUDO_PASSWORD" in os.environ:
-        return False
-    if not _sudo_wrong_password_failure(output):
-        return False
-    if _count_real_sudo_invocations(command or "") == 0:
-        return False
-    if not _get_cached_sudo_password():
+    if (
+        "SUDO_PASSWORD" in os.environ
+        or not _sudo_wrong_password_failure(output)
+        or _count_real_sudo_invocations(command or "") == 0
+        or not _get_cached_sudo_password()
+    ):
         return False
     _set_cached_sudo_password("")
     return True
+
+
+def _release_tty(tty_fd, old_attrs) -> None:
+    """Restore echo and close the /dev/tty fd opened by the password reader (best effort)."""
+    if tty_fd is None:
+        return
+    if old_attrs is not None:
+        try:
+            import termios as _termios
+            _termios.tcsetattr(tty_fd, _termios.TCSAFLUSH, old_attrs)
+        except Exception as e:
+            logger.debug("Failed to restore terminal attributes: %s", e)
+    try:
+        os.close(tty_fd)
+    except Exception as e:
+        logger.debug("Failed to close tty fd: %s", e)
+
+
+def _read_hidden_password(result: dict) -> None:
+    """Read one line with echo disabled into ``result``. Uses msvcrt on Windows, /dev/tty on Unix."""
+    tty_fd = old_attrs = None
+    try:
+        chars = []
+        if platform.system() == "Windows":
+            import msvcrt
+            while True:
+                c = msvcrt.getwch()
+                if c in {"\r", "\n"}:
+                    break
+                if c == "\x03":
+                    raise KeyboardInterrupt
+                chars.append(c)
+            result["password"] = "".join(chars)
+        else:
+            import termios
+            tty_fd = os.open("/dev/tty", os.O_RDONLY)
+            old_attrs = termios.tcgetattr(tty_fd)
+            new_attrs = termios.tcgetattr(tty_fd)
+            new_attrs[3] = new_attrs[3] & ~termios.ECHO
+            termios.tcsetattr(tty_fd, termios.TCSAFLUSH, new_attrs)
+            while True:
+                b = os.read(tty_fd, 1)
+                if not b or b in {b"\n", b"\r"}:
+                    break
+                chars.append(b)
+            result["password"] = b"".join(chars).decode("utf-8", errors="replace")
+    except (KeyboardInterrupt, Exception):
+        result["password"] = ""
+    finally:
+        _release_tty(tty_fd, old_attrs)
+        result["done"] = True
 
 
 def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
@@ -173,97 +217,42 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
             return ""
 
     result = {"password": None, "done": False}
-    
-    def read_password_thread():
-        """Read password with echo disabled. Uses msvcrt on Windows, /dev/tty on Unix."""
-        tty_fd = None
-        old_attrs = None
-        try:
-            if platform.system() == "Windows":
-                import msvcrt
-                chars = []
-                while True:
-                    c = msvcrt.getwch()
-                    if c in {"\r", "\n"}:
-                        break
-                    if c == "\x03":
-                        raise KeyboardInterrupt
-                    chars.append(c)
-                result["password"] = "".join(chars)
-            else:
-                import termios
-                tty_fd = os.open("/dev/tty", os.O_RDONLY)
-                old_attrs = termios.tcgetattr(tty_fd)
-                new_attrs = termios.tcgetattr(tty_fd)
-                new_attrs[3] = new_attrs[3] & ~termios.ECHO
-                termios.tcsetattr(tty_fd, termios.TCSAFLUSH, new_attrs)
-                chars = []
-                while True:
-                    b = os.read(tty_fd, 1)
-                    if not b or b in {b"\n", b"\r"}:
-                        break
-                    chars.append(b)
-                result["password"] = b"".join(chars).decode("utf-8", errors="replace")
-        except (EOFError, KeyboardInterrupt, OSError):
-            result["password"] = ""
-        except Exception:
-            result["password"] = ""
-        finally:
-            if tty_fd is not None and old_attrs is not None:
-                try:
-                    import termios as _termios
-                    _termios.tcsetattr(tty_fd, _termios.TCSAFLUSH, old_attrs)
-                except Exception as e:
-                    logger.debug("Failed to restore terminal attributes: %s", e)
-            if tty_fd is not None:
-                try:
-                    os.close(tty_fd)
-                except Exception as e:
-                    logger.debug("Failed to close tty fd: %s", e)
-            result["done"] = True
-    
     try:
         os.environ["HERMES_SPINNER_PAUSE"] = "1"
         time.sleep(0.2)
-        
-        print()
-        print("┌" + "─" * 58 + "┐")
-        print("│  🔐 SUDO PASSWORD REQUIRED" + " " * 30 + "│")
-        print("├" + "─" * 58 + "┤")
-        print("│  Enter password below (input is hidden), or:            │")
-        print("│    • Press Enter to skip (command fails gracefully)     │")
-        print(f"│    • Wait {timeout_seconds}s to auto-skip" + " " * 27 + "│")
-        print("└" + "─" * 58 + "┘")
-        print()
+        print("\n".join((
+            "",
+            "┌" + "─" * 58 + "┐",
+            "│  🔐 SUDO PASSWORD REQUIRED" + " " * 30 + "│",
+            "├" + "─" * 58 + "┤",
+            "│  Enter password below (input is hidden), or:            │",
+            "│    • Press Enter to skip (command fails gracefully)     │",
+            f"│    • Wait {timeout_seconds}s to auto-skip" + " " * 27 + "│",
+            "└" + "─" * 58 + "┘",
+            "",
+        )))
         print("  Password (hidden): ", end="", flush=True)
-        
-        password_thread = threading.Thread(target=read_password_thread, daemon=True)
+
+        password_thread = threading.Thread(target=_read_hidden_password, args=(result,), daemon=True)
         password_thread.start()
         from tools.approval import human_wait_window
         with human_wait_window():
             password_thread.join(timeout=timeout_seconds)
-        
-        if result["done"]:
-            password = result["password"] or ""
-            print()  # newline after hidden input
-            if password:
-                print("  ✓ Password received (cached for this session)")
-            else:
-                print("  ⏭ Skipped - continuing without sudo")
-            print()
-            sys.stdout.flush()
-            return password
-        else:
-            print("\n  ⏱ Timeout - continuing without sudo")
-            print("    (Press Enter to dismiss)")
-            print()
+
+        if not result["done"]:
+            print("\n  ⏱ Timeout - continuing without sudo\n    (Press Enter to dismiss)\n")
             sys.stdout.flush()
             return ""
-            
+        password = result["password"] or ""
+        # Newline after the hidden input, then the outcome line.
+        if password:
+            print("\n  ✓ Password received (cached for this session)\n")
+        else:
+            print("\n  ⏭ Skipped - continuing without sudo\n")
+        sys.stdout.flush()
+        return password
     except (EOFError, KeyboardInterrupt):
-        print()
-        print("  ⏭ Cancelled - continuing without sudo")
-        print()
+        print("\n  ⏭ Cancelled - continuing without sudo\n")
         sys.stdout.flush()
         return ""
     except Exception as e:
@@ -287,100 +276,101 @@ def _read_shell_token(command: str, start: int) -> tuple[str, int]:
     """Read one shell token, preserving quotes/escapes, starting at *start*."""
     i = start
     n = len(command)
-
     while i < n:
         ch = command[i]
         if ch.isspace() or ch in ";|&()":
             break
         if ch == "'":
+            i = command.find("'", i + 1)
+            i = n if i == -1 else i + 1
+        elif ch == '"':
             i += 1
-            while i < n and command[i] != "'":
-                i += 1
-            if i < n:
-                i += 1
-            continue
-        if ch == '"':
-            i += 1
-            while i < n:
-                inner = command[i]
-                if inner == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                if inner == '"':
-                    i += 1
-                    break
-                i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
+            while i < n and command[i] != '"':
+                i += 2 if command[i] == "\\" and i + 1 < n else 1
+            i = min(i + 1, n)
+        elif ch == "\\" and i + 1 < n:
             i += 2
-            continue
-        i += 1
-
+        else:
+            i += 1
     return command[start:i], i
+
+
+def _scan_shell(command: str, background: bool = False) -> Iterator[tuple[str, int, int, bool]]:
+    """Quote-aware shell scanner shared by the sudo and compound-background rewriters.
+
+    Yields ``(kind, start, end, at_command_start)`` events that tile *command* exactly:
+    ``ws`` (one whitespace char), ``comment`` (``#`` up to, not including, the newline),
+    ``op`` (``&& || ;; ; | & ( )``), ``word`` (one ``_read_shell_token`` token). Comments open
+    only at command start (after newline, an operator, or a leading ``VAR=val``) in sudo mode.
+    Background mode (compound-background semantics) additionally opens comments anywhere
+    outside a token, emits ``escape`` for a bare ``\\x``, ops ``&>``, ``{ `` and a closing
+    ``}``, and tracks ``(...)``/``{ ... }`` depth: inside a group nothing is an operator, so
+    every non-structural char (whitespace included) surfaces as a single ``skip`` event.
+    """
+    i, n = 0, len(command)
+    at_start = True
+    parens = braces = 0
+    two_char_ops = ("&&", "||") if background else ("&&", "||", ";;")
+    while i < n:
+        ch = command[i]
+        grouped = parens or braces
+        if ch.isspace():
+            yield ("skip" if grouped else "ws"), i, i + 1, at_start
+            at_start = at_start or ch == "\n"
+            i += 1
+        elif ch == "#" and (background or at_start):
+            end = command.find("\n", i)
+            end = n if end == -1 else end
+            yield "comment", i, end, at_start
+            i = end
+        elif background and ch == "\\" and i + 1 < n:
+            yield "escape", i, i + 2, at_start
+            i += 2
+        elif background and ch in "'\"":
+            end = _read_shell_token(command, i)[1]
+            yield "word", i, end, at_start
+            i = end
+        elif background and (
+            ch in "()" or (ch == "{" and i + 1 < n and command[i + 1].isspace()) or (ch == "}" and braces)
+        ):
+            parens += ch == "("
+            parens = max(0, parens - (ch == ")"))
+            braces += (ch == "{") - (ch == "}")
+            yield "op", i, i + 1, at_start
+            i += 1
+        elif background and grouped:
+            yield "skip", i, i + 1, at_start
+            i += 1
+        elif command.startswith(two_char_ops, i) or (background and command.startswith("&>", i)):
+            yield "op", i, i + 2, at_start
+            at_start = True
+            i += 2
+        elif ch in ";|&()":
+            yield "op", i, i + 1, at_start
+            at_start = ch != ")"
+            i += 1
+        else:
+            token, end = _read_shell_token(command, i)
+            yield "word", i, end, at_start
+            at_start = bool(at_start and _looks_like_env_assignment(token))
+            i = end
 
 
 def _rewrite_real_sudo_invocations(command: str) -> tuple[str, int]:
     """Rewrite only real unquoted sudo command words, not plain text mentions.
 
-    Walks the command with the shared tokenizer, tracking whether the cursor
-    sits at a command-start position (after newline, ``;``/``|``/``&``/``(``,
-    ``&&``/``||``/``;;``, or a leading ``VAR=val`` assignment); comments at
-    command start are copied through verbatim. Returns the rewritten command
-    and the number of sudo invocations rewritten.
+    A word is a sudo invocation only at a command-start position (see ``_scan_shell``);
+    comments there are copied through verbatim. Returns the rewritten command and the
+    number of sudo invocations rewritten.
     """
     out: list[str] = []
-    i = 0
-    n = len(command)
-    command_start = True
     sudo_count = 0
-
-    while i < n:
-        ch = command[i]
-
-        if ch.isspace():
-            out.append(ch)
-            if ch == "\n":
-                command_start = True
-            i += 1
-            continue
-
-        if ch == "#" and command_start:
-            comment_end = command.find("\n", i)
-            if comment_end == -1:
-                out.append(command[i:])
-                break
-            out.append(command[i:comment_end])
-            i = comment_end
-            continue
-
-        if command.startswith(("&&", "||", ";;"), i):
-            out.append(command[i:i + 2])
-            i += 2
-            command_start = True
-            continue
-
-        if ch in ";|&(":
-            out.append(ch)
-            i += 1
-            command_start = True
-            continue
-
-        if ch == ")":
-            out.append(ch)
-            i += 1
-            command_start = False
-            continue
-
-        token, next_i = _read_shell_token(command, i)
-        if command_start and token == "sudo":
-            out.append("sudo -S -p ''")
+    for kind, start, end, at_start in _scan_shell(command):
+        text = command[start:end]
+        if kind == "word" and at_start and text == "sudo":
+            text = "sudo -S -p ''"
             sudo_count += 1
-        else:
-            out.append(token)
-
-        command_start = bool(command_start and _looks_like_env_assignment(token))
-        i = next_i
-
+        out.append(text)
     return "".join(out), sudo_count
 
 
@@ -400,7 +390,6 @@ def _sudo_nopasswd_works() -> bool:
     terminal_env = _tenv("TERMINAL_ENV", "local").strip().lower() or "local"
     if terminal_env != "local":
         return False
-
     try:
         probe = subprocess.run(
             ["sudo", "-n", "true"],
@@ -418,173 +407,67 @@ def _sudo_nopasswd_works() -> bool:
 def _rewrite_compound_background(command: str) -> str:
     """Wrap `A && B &` (or `A || B &`) to `A && { B & }` at depth 0.
 
-    Bash binds `&&` tighter than `&`, so `A && B &` backgrounds a subshell
-    that runs B in the foreground and waits for it; a long-running B leaves
-    that subshell stuck in ``wait4`` forever, and its open stdout pipe can
-    keep the terminal tool from returning. The brace group keeps `&&`'s
-    skip-B-on-failure semantics without a fork: bash backgrounds B as a
+    Bash binds `&&` tighter than `&`, so `A && B &` backgrounds a subshell that runs B in the
+    foreground and waits for it; a long-running B leaves that subshell stuck in ``wait4``
+    forever, and its open stdout pipe can keep the terminal tool from returning. The brace
+    group keeps `&&`'s skip-B-on-failure semantics without a fork: bash backgrounds B as a
     simple command and exits immediately, orphaning B normally.
 
-    Handles redirects (``&>``, ``2>&1``) and skips quoted strings and
-    parenthesised subshells. Simple ``cmd &`` is left alone — it doesn't
-    have the subshell-wait bug.
+    Redirects (``&>``, ``2>&1``), quoted strings, comments and ``(...)``/``{ ... }`` group
+    bodies never count as the backgrounding ``&`` (see ``_scan_shell``); tracking brace depth
+    also makes the rewrite idempotent. `(...)` subshells have the same bug class but are not
+    the common agent pattern; left for a follow-up. Simple ``cmd &`` is left alone — it
+    doesn't have the subshell-wait bug.
     """
-    n = len(command)
-    i = 0
-    paren_depth = 0
-    brace_depth = 0
-    # Position in *command* just after the most recent `&&` / `||` at depth 0
-    # in the current statement; -1 when no chain operator is active.
-    last_chain_op_end = -1
+    # Position just after the most recent `&&` / `||` at depth 0 in the current
+    # statement; -1 when no chain operator is active.
+    chain_end = -1
     rewrites: list[tuple[int, int]] = []  # (chain_op_end, amp_pos)
-
-    while i < n:
-        ch = command[i]
-
-        # Newline terminates a statement at depth 0 — reset chain state.
-        # Checked before the whitespace skip so we don't miss it.
-        if ch == "\n" and paren_depth == 0 and brace_depth == 0:
-            last_chain_op_end = -1
-            i += 1
-            continue
-
-        if ch.isspace():
-            i += 1
-            continue
-
-        # Comments (only at statement start — conservative: any `#` not inside
-        # a token ends the line). `_read_shell_token` handles quoted strings
-        # below so `#` inside quotes is safe.
-        if ch == "#":
-            nl = command.find("\n", i)
-            if nl == -1:
-                break
-            i = nl
-            continue
-
-        if ch == "\\" and i + 1 < n:
-            i += 2
-            continue
-
-        # Quoted tokens — consume whole string via the shared tokenizer.
-        if ch in {"'", '"'}:
-            _, next_i = _read_shell_token(command, i)
-            i = max(next_i, i + 1)
-            continue
-
-        if ch == "(":
-            paren_depth += 1
-            i += 1
-            continue
-
-        if ch == ")":
-            paren_depth = max(0, paren_depth - 1)
-            i += 1
-            continue
-
-        # Brace groups: `{ ... }` is a group (no subshell fork), and bash
-        # requires whitespace after `{`. We track depth so already-rewritten
-        # output (`A && { B & }`) is idempotent — the inner `&` is part of
-        # the group, not a new compound to rewrite. Also skip content inside
-        # the group since `A && B &` there is separately well-formed.
-        if ch == "{" and i + 1 < n and (command[i + 1].isspace() or command[i + 1] == "\n"):
-            brace_depth += 1
-            i += 1
-            continue
-        if ch == "}" and brace_depth > 0:
-            brace_depth -= 1
-            # Closing a group completes a compound statement; reset chain.
-            last_chain_op_end = -1
-            i += 1
-            continue
-
-        # Inside parens or brace groups, skip operators — they parse in their
-        # own scope. `(...)` subshells have the same bug class but are not the
-        # common agent pattern; leave for a follow-up.
-        if paren_depth > 0 or brace_depth > 0:
-            i += 1
-            continue
-
-        # Chain operators at depth 0
-        if command.startswith("&&", i) or command.startswith("||", i):
-            last_chain_op_end = i + 2
-            i += 2
-            continue
-
-        # Statement terminators reset the chain state
-        if ch == ";":
-            last_chain_op_end = -1
-            i += 1
-            continue
-
-        # Single `|` (pipe) starts a new pipeline stage; don't rewrite
-        # across it. `||` handled above.
-        if ch == "|":
-            last_chain_op_end = -1
-            i += 1
-            continue
-
-        # `&` handling: distinguish `&&`, `&>`, fd redirect (`>&`, `<&`),
-        # and a true backgrounding `&`.
-        if ch == "&":
-            # `&&` handled above; won't reach here
-            if i + 1 < n and command[i + 1] == ">":
-                # `&>` redirect — consume
-                i += 2
-                continue
-            # `>&` / `<&` fd target — look back past whitespace
-            j = i - 1
+    for kind, start, end, _ in _scan_shell(command, background=True):
+        text = command[start:end]
+        if kind == "op" and text in ("&&", "||"):
+            chain_end = end
+        elif kind == "ws" and text == "\n" or kind == "op" and text in (";", "|", "}"):
+            # Newline / `;` end a statement, `|` starts a pipeline stage, `}` closes a group.
+            chain_end = -1
+        elif kind == "op" and text == "&":
+            # `&&` and `&>` never reach here; `>&` / `<&` fd targets (look back past
+            # whitespace) are redirects, anything else is the real background operator.
+            j = start - 1
             while j >= 0 and command[j].isspace():
                 j -= 1
             if j >= 0 and command[j] in "<>":
-                i += 1
                 continue
-            # Real background operator
-            if last_chain_op_end >= 0:
-                rewrites.append((last_chain_op_end, i))
-            last_chain_op_end = -1
-            i += 1
-            continue
-
-        # Regular unquoted token — advance past it via the shared tokenizer
-        _, next_i = _read_shell_token(command, i)
-        i = max(next_i, i + 1)
-
-    if not rewrites:
-        return command
+            if chain_end >= 0:
+                rewrites.append((chain_end, start))
+            chain_end = -1
 
     # Apply rewrites back-to-front so earlier indices remain valid.
     result = command
     for chain_end, amp_pos in reversed(rewrites):
-        # Skip whitespace right after the `&&`/`||` so the brace group
-        # opens flush against the inner command.
+        # Skip whitespace right after the `&&`/`||` so the brace group opens flush
+        # against the inner command.
         insert_pos = chain_end
         while insert_pos < amp_pos and result[insert_pos].isspace():
             insert_pos += 1
-        prefix = result[:insert_pos]
-        middle = result[insert_pos:amp_pos]  # inner command + trailing space
-        suffix = result[amp_pos + 1 :]
-        # `{` needs a trailing space in bash; the closing `}` needs to be
-        # preceded by `;` or `&` — we're providing `&` from the backgrounding.
-        result = prefix + "{ " + middle + "& }" + suffix
-
+        # `{` needs a trailing space in bash; the closing `}` needs to be preceded by
+        # `;` or `&` — we're providing `&` from the backgrounding.
+        result = result[:insert_pos] + "{ " + result[insert_pos:amp_pos] + "& }" + result[amp_pos + 1 :]
     return result
 
 
 def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None]:
     """Rewrite bare ``sudo`` to ``sudo -S -p ''`` when a password is available.
 
-    Shared by every execution environment. Returns ``(command, sudo_stdin)``:
-    ``sudo_stdin`` is one password line per sudo invocation that the caller
-    must PREPEND to the process stdin (sudo -S consumes exactly one line and
-    passes the rest through, so it's safe alongside the caller's own
-    stdin_data). Backends that can't pipe stdin (modal, daytona,
-    vercel_sandbox) embed the password in the command string themselves.
-    With no password available the command is returned unchanged and
-    ``sudo_stdin`` is None, so it fails gracefully with
-    "sudo: a password is required". Password sources, in order: configured
-    SUDO_PASSWORD, the session cache, then an interactive prompt (45s
-    timeout, cached on success) when a UI is reachable.
+    Shared by every execution environment. Returns ``(command, sudo_stdin)``: ``sudo_stdin``
+    is one password line per sudo invocation that the caller must PREPEND to the process
+    stdin (sudo -S consumes exactly one line and passes the rest through, so it's safe
+    alongside the caller's own stdin_data). Backends that can't pipe stdin (modal, daytona,
+    vercel_sandbox) embed the password in the command string themselves. With no password
+    available the command is returned unchanged and ``sudo_stdin`` is None, so it fails
+    gracefully with "sudo: a password is required". Password sources, in order: configured
+    SUDO_PASSWORD, the session cache, then an interactive prompt (45s timeout, cached on
+    success) when a UI is reachable.
     """
     from tools.terminal_tool import _get_sudo_password_callback, _prompt_for_sudo_password, _sudo_nopasswd_works
     if command is None:
@@ -593,36 +476,28 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     if sudo_count == 0:
         return command, None
 
-    # Scope-aware read: under multiplex the process env may hold another
-    # profile's SUDO_PASSWORD; unscoped callers keep the os.environ read.
+    # Scope-aware read: under multiplex the process env may hold another profile's
+    # SUDO_PASSWORD; unscoped callers (UnscopedSecretError) keep the os.environ read.
     try:
-        from agent.secret_scope import UnscopedSecretError, get_secret
+        from agent.secret_scope import get_secret
 
-        try:
-            _configured_password = get_secret("SUDO_PASSWORD")
-        except UnscopedSecretError:
-            _configured_password = os.environ.get("SUDO_PASSWORD")
+        _configured_password = get_secret("SUDO_PASSWORD")
     except Exception:
         _configured_password = os.environ.get("SUDO_PASSWORD")
     has_configured_password = _configured_password is not None
-    sudo_password = (
-        _configured_password
-        if has_configured_password
-        else _get_cached_sudo_password()
-    )
+    sudo_password = _configured_password if has_configured_password else _get_cached_sudo_password()
 
     # sudoers NOPASSWD hosts must not be forced through the prompt or the
     # -S password pipe (local backend only; re-probed every call).
     if not has_configured_password and not sudo_password and _sudo_nopasswd_works():
         return command, None
 
-    has_sudo_prompt_callback = _get_sudo_password_callback() is not None
-    # delegate_task children inherit HERMES_INTERACTIVE=1 (and possibly a
-    # stale thread-local callback on a recycled worker) but have no user on
-    # the other side — they always behave as headless; configured password,
-    # session cache and the NOPASSWD probe still apply.
+    # delegate_task children inherit HERMES_INTERACTIVE=1 (and possibly a stale
+    # thread-local callback on a recycled worker) but have no user on the other side —
+    # they always behave as headless; configured password, session cache and the
+    # NOPASSWD probe still apply.
     should_prompt_for_sudo = (
-        env_var_enabled("HERMES_INTERACTIVE") or has_sudo_prompt_callback
+        env_var_enabled("HERMES_INTERACTIVE") or _get_sudo_password_callback() is not None
     ) and not _in_delegated_child_context()
     if not has_configured_password and not sudo_password and should_prompt_for_sudo:
         sudo_password = _prompt_for_sudo_password(timeout_seconds=45)
@@ -632,7 +507,6 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     if has_configured_password or sudo_password:
         # Trailing newline is required: sudo -S reads one line per invocation.
         # Compound commands (`sudo a && sudo b`) need one password line each.
-        password_line = sudo_password + "\n"
-        return transformed, password_line * sudo_count
+        return transformed, (sudo_password + "\n") * sudo_count
 
     return command, None
