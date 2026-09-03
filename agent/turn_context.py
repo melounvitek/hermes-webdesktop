@@ -396,7 +396,8 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
         # Import-cost gate: MCP tools are only registered by code that already imported
         # ``tools.mcp_tool`` (~0.4s); not in sys.modules => nothing to do.
         if not getattr(agent, "_skip_mcp_refresh", False) and "tools.mcp_tool" in sys.modules:
-            from tools.mcp_tool import has_registered_mcp_tools, refresh_agent_mcp_tools
+            from tools.mcp_tool_discovery import has_registered_mcp_tools
+            from tools.mcp_tool_agent import refresh_agent_mcp_tools
             if has_registered_mcp_tools():
                 refresh_agent_mcp_tools(agent, quiet_mode=True, preserve_prefix=True)
     except Exception:
