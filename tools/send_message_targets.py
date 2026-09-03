@@ -6,10 +6,11 @@ import re
 logger = logging.getLogger("tools.send_message_tool")
 
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
+_NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE  # Discord snowflakes: numeric, same "<id>[:<thread>]" shape
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
-# Slack conversation IDs: C (public), G (private/group), D (DM); uppercase alnum, 9+ chars.
-# User IDs (U...) become ``user:U...`` and are opened as D... conversations first (posting
-# straight to a U/W id fails); ``@handle`` -> ``user_name:...`` resolves via users.list.
+# Slack conversation IDs: C (public), G (private/group), D (DM); uppercase alnum, 9+ chars. User IDs
+# (U...) become ``user:U...`` and are opened as D... conversations first (posting straight to a U/W
+# id fails); ``@handle`` -> ``user_name:...`` resolves via users.list.
 _SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
 _SLACK_USER_ID_RE = re.compile(r"^\s*(U[A-Z0-9]{8,})\s*$")
 _SLACK_USER_NAME_RE = re.compile(r"^\s*@([A-Za-z0-9._-]{1,80})\s*$")
@@ -18,24 +19,17 @@ _SLACK_MENTION_RE = re.compile(r"^\s*<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>\s*$")
 _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
-# Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
-_NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
-# Platforms addressing recipients by E.164 phone number ("+1555..."): the '+' fails the
-# isdigit() rule and channel-name resolution cannot resolve a raw number; keep the '+'.
+# E.164 phone recipients ("+1555..."): the '+' fails the isdigit() rule and the channel directory
+# cannot resolve a raw number, so keep the '+' and treat it as explicit.
 _PHONE_PLATFORMS = frozenset({"photon", "signal", "sms", "whatsapp"})
 _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
-# Photon DM chat GUID (mirrors _DM_CHAT_GUID_RE in the photon adapter).
-_PHOTON_DM_GUID_RE = re.compile(r"^any;-;\+\d{6,}$")
-# WhatsApp JIDs (@g.us groups, @s.whatsapp.net users, @lid, broadcast/newsletter): native
-# targets the bridge accepts verbatim — never home-channel.
-_WHATSAPP_JID_RE = re.compile(
-    r"^\s*[\w-]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$", re.IGNORECASE)
-# Buzz channels/DMs are native UUIDs: explicit targets, never the home channel.
-_BUZZ_UUID_RE = re.compile(
-    r"^\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*$", re.IGNORECASE)
-# A valid address is an explicit email target, not a channel name to resolve.
+_PHOTON_DM_GUID_RE = re.compile(r"^any;-;\+\d{6,}$")  # mirrors _DM_CHAT_GUID_RE in the photon adapter
+# WhatsApp JIDs (@g.us, @s.whatsapp.net, @lid, broadcast/newsletter) and Buzz UUIDs are native targets
+# the adapter accepts verbatim — explicit, never home-channel. A valid email address likewise.
+_WHATSAPP_JID_RE = re.compile(r"^\s*[\w-]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$", re.IGNORECASE)
+_BUZZ_UUID_RE = re.compile(r"^\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*$", re.IGNORECASE)
 _EMAIL_TARGET_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*$")
-# Exceptions to "<PLATFORM>_HOME_CHANNEL" (email reads EMAIL_HOME_ADDRESS) for error hints.
+# Exceptions to "<PLATFORM>_HOME_CHANNEL" for error hints (email reads EMAIL_HOME_ADDRESS).
 _HOME_CHANNEL_ENV_OVERRIDES = {"email": "EMAIL_HOME_ADDRESS"}
 
 _UNRESOLVED = object()  # sentinel: stop parsing, target is NOT explicit (skip generic rules)
@@ -45,17 +39,19 @@ _UNRESOLVED = object()  # sentinel: stop parsing, target is NOT explicit (skip g
 # through to the generic rules in _parse_target_ref, or _UNRESOLVED.
 def _parse_regex_groups(regex, *, thread_group=True):
     """Explicit when ``regex`` fully matches: chat_id = group 1, thread = group 2 (or None)."""
-    def parse(ref):
-        match = regex.fullmatch(ref)
-        return (match.group(1), match.group(2) if thread_group else None) if match else None
-    return parse
+    return lambda ref: ((m.group(1), m.group(2) if thread_group else None)
+                        if (m := regex.fullmatch(ref)) else None)
 
 
 def _parse_regex_stripped(regex):
     """Explicit when ``regex`` fully matches; returns the stripped ref verbatim."""
-    def parse(ref):
-        return (ref.strip(), None) if regex.fullmatch(ref) else None
-    return parse
+    return lambda ref: (ref.strip(), None) if regex.fullmatch(ref) else None
+
+
+def _parse_nonempty(ref):
+    # ntfy topics and WeCom ids (the adapter picks the send command) are explicit when non-empty.
+    stripped = ref.strip()
+    return (stripped, None) if stripped else None
 
 
 def _parse_telegram(ref):
@@ -68,20 +64,14 @@ def _parse_telegram(ref):
 
 
 # (regex, chat_id template, thread comes from group 2) — thread form before bare id.
-_SLACK_FORMS = (
-    (_SLACK_THREAD_TARGET_RE, "{}", True),
-    (_SLACK_TARGET_RE, "{}", False),
-    (_SLACK_USER_ID_RE, "user:{}", False),
-    (_SLACK_MENTION_RE, "user:{}", False),
-    (_SLACK_USER_NAME_RE, "user_name:{}", False))
+_SLACK_FORMS = ((_SLACK_THREAD_TARGET_RE, "{}", True), (_SLACK_TARGET_RE, "{}", False),
+                (_SLACK_USER_ID_RE, "user:{}", False), (_SLACK_MENTION_RE, "user:{}", False),
+                (_SLACK_USER_NAME_RE, "user_name:{}", False))
 
 
 def _parse_slack(ref):
-    for regex, template, has_thread in _SLACK_FORMS:
-        match = regex.fullmatch(ref)
-        if match:
-            return template.format(match.group(1)), (match.group(2) if has_thread else None)
-    return None
+    return next(((template.format(m.group(1)), m.group(2) if has_thread else None)
+                 for regex, template, has_thread in _SLACK_FORMS if (m := regex.fullmatch(ref))), None)
 
 
 def _parse_matrix(ref):
@@ -89,9 +79,7 @@ def _parse_matrix(ref):
     # "@user" go via the generic rule so the numeric check keeps precedence.
     trimmed = ref.strip()
     split_idx = trimmed.rfind(":$")
-    if split_idx > 0:
-        return trimmed[:split_idx], trimmed[split_idx + 1 :]
-    return None
+    return (trimmed[:split_idx], trimmed[split_idx + 1:]) if split_idx > 0 else None
 
 
 def _parse_yuanbao(ref):
@@ -99,24 +87,16 @@ def _parse_yuanbao(ref):
     match = _YUANBAO_TARGET_RE.fullmatch(ref)
     if match:
         return match.group(1), None
-    if ref.strip().isdigit():
-        return f"group:{ref.strip()}", None
-    return _UNRESOLVED
-
-
-def _parse_nonempty(ref):
-    # ntfy topics and WeCom ids (the adapter picks the send command) are explicit when non-empty.
-    stripped = ref.strip()
-    return (stripped, None) if stripped else None
+    return (f"group:{ref.strip()}", None) if ref.strip().isdigit() else _UNRESOLVED
 
 
 def _parse_signal(ref):
     # "group:<id>" is a native group target; an empty id is not explicit.
     stripped = ref.strip()
-    if stripped.startswith("group:"):
-        group_id = stripped[len("group:"):].strip()
-        return (f"group:{group_id}", None) if group_id else _UNRESOLVED
-    return None
+    if not stripped.startswith("group:"):
+        return None
+    group_id = stripped[len("group:"):].strip()
+    return (f"group:{group_id}", None) if group_id else _UNRESOLVED
 
 
 _PLATFORM_PARSERS = {
@@ -161,36 +141,28 @@ def resolve_send_target(
     platform_name: str, target_ref: str, *, pass_unresolved_references: bool = False
 ) -> tuple[str | None, str | None, str | None]:
     """Resolve one send target the same way for every caller (model tool, CLI, cron).
-
-    Channel-directory IDs are trusted; plugin parsers are the authority on native syntax.
-    By default an unresolvable target is an error the model can read and pick a listed
-    target instead. ``pass_unresolved_references=True`` (no model in the loop: cron,
-    react/unreact on native message ids) hands an unresolvable target on a built-in
-    platform, or a plugin platform declaring no parser, to the adapter exactly as written;
-    a plugin platform WITH a parser stays strict for every caller. The optional validator
-    has the final say over parser-normalized, directory-resolved and passed-through IDs.
-    """
+    Channel-directory IDs are trusted; plugin parsers are the authority on native syntax. By
+    default an unresolvable target is an error the model can act on. ``pass_unresolved_references``
+    (no model in the loop: cron, react/unreact on native ids) hands an unresolvable target on a
+    built-in platform, or a plugin platform without a parser, to the adapter as written; a plugin
+    WITH a parser stays strict. The optional validator has the final say over every returned id."""
     from gateway.config import Platform
     from gateway.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
 
-    def _validate(candidate: str) -> str | None:
+    def _validated(chat_id, thread_id):
+        """``(chat_id, thread_id, None)`` when the plugin validator (if any) accepts, else an error."""
         if entry is None or entry.validate_target_ref_fn is None:
-            return None
+            return chat_id, thread_id, None
         try:
-            verdict = entry.validate_target_ref_fn(candidate)
+            verdict = entry.validate_target_ref_fn(chat_id)
         except Exception:
             logger.debug("Plugin target validator failed for %s", platform_name, exc_info=True)
-            return f"Target validator failed for platform '{platform_name}'"
+            return None, None, f"Target validator failed for platform '{platform_name}'"
         if verdict is True:
-            return None
+            return chat_id, thread_id, None
         detail = f": {verdict}" if isinstance(verdict, str) and verdict else ""
-        return f"Invalid target '{target_ref}' on {platform_name}{detail}"
-
-    def _validated(chat_id, thread_id):
-        error = _validate(chat_id)
-        return (None, None, error) if error else (chat_id, thread_id, None)
-
+        return None, None, f"Invalid target '{target_ref}' on {platform_name}{detail}"
     if entry is not None and entry.parse_target_ref_fn is not None:
         try:
             parsed = entry.parse_target_ref_fn(target_ref)
@@ -202,11 +174,9 @@ def resolve_send_target(
                     or not parsed[0] or (parsed[1] is not None and not isinstance(parsed[1], str))):
                 return None, None, f"Target parser for platform '{platform_name}' returned an invalid result"
             return _validated(*parsed)
-
     parsed_chat_id, parsed_thread_id, explicit = _parse_target_ref(platform_name, target_ref)
     if explicit and parsed_chat_id is not None:
         return _validated(parsed_chat_id, parsed_thread_id)
-
     resolution_failed = False
     try:
         from gateway.channel_directory import resolve_channel_name
@@ -217,27 +187,21 @@ def resolve_send_target(
     if resolved:
         parsed_chat_id, parsed_thread_id, _ = _parse_target_ref(platform_name, resolved)
         return _validated(parsed_chat_id or resolved, parsed_thread_id)
-
     is_builtin = platform_name in {member.value for member in Platform}
     if entry is None and not is_builtin:
         return None, None, f"Unknown or unregistered plugin platform: {platform_name}"
-
-    def _pass_through_unresolved():
-        """Hand the raw target to the adapter unchanged (it validates)."""
-        error = _validate(target_ref)
-        if error:
-            return None, None, error
-        logger.debug("Handing unresolved target '%s' to the %s adapter unchanged "
-                     "(the adapter validates it)", target_ref, platform_name)
-        return target_ref, None, None
-
-    if entry is not None and entry.source == "plugin" and not is_builtin:
-        if pass_unresolved_references and entry.parse_target_ref_fn is None:
-            return _pass_through_unresolved()
-        return (None, None, f"Could not resolve '{target_ref}' on {platform_name}. "
-                "The plugin parser did not recognize it and no channel-directory entry matched.")
-    if pass_unresolved_references:
-        return _pass_through_unresolved()
-    hint = ("Try using a numeric channel ID instead." if resolution_failed
-            else "Use send_message(action='list') to see available targets.")
+    is_plugin = entry is not None and entry.source == "plugin" and not is_builtin
+    if pass_unresolved_references and (not is_plugin or entry.parse_target_ref_fn is None):
+        # Hand the raw target to the adapter unchanged (it validates).
+        chat_id, thread_id, error = _validated(target_ref, None)
+        if not error:
+            logger.debug("Handing unresolved target '%s' to the %s adapter unchanged "
+                         "(the adapter validates it)", target_ref, platform_name)
+        return chat_id, thread_id, error
+    if is_plugin:
+        hint = "The plugin parser did not recognize it and no channel-directory entry matched."
+    elif resolution_failed:
+        hint = "Try using a numeric channel ID instead."
+    else:
+        hint = "Use send_message(action='list') to see available targets."
     return None, None, f"Could not resolve '{target_ref}' on {platform_name}. {hint}"
