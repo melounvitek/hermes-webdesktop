@@ -732,10 +732,8 @@ try:
 except Exception:
     pass
 
-from rich import box as rich_box
 from rich.console import Console
 from rich.markup import escape as _escape
-from rich.panel import Panel
 from rich.text import Text as _RichText
 
 # Agent and tool systems are imported lazily: bare interactive startup only needs
