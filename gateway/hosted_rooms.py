@@ -328,10 +328,8 @@ def _migrate_remote_run_schema(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS hosted_room_remote_runs_migrating")
     conn.execute(f"CREATE TABLE hosted_room_remote_runs_migrating ({_REMOTE_RUNS_BODY})")
     if columns:
-        home, gateway, epoch = (
-            column if column in columns else default
-            for column, default in (
-                ("home_install_id", "'legacy'"), ("authority_gateway_id", "'legacy'"), ("authority_epoch", "1")))
+        fallbacks = (("home_install_id", "'legacy'"), ("authority_gateway_id", "'legacy'"), ("authority_epoch", "1"))
+        home, gateway, epoch = (column if column in columns else default for column, default in fallbacks)
         conn.execute(
             f"""INSERT OR IGNORE INTO hosted_room_remote_runs_migrating(
                     room_id, home_install_id, authority_gateway_id,
@@ -410,8 +408,7 @@ def _schema_is_current(conn: sqlite3.Connection) -> bool:
     return all(
         required.issubset(columns)
         and (table != "hosted_room_remote_runs" or _remote_run_schema_current(conn, columns))
-        for (table, required), columns in zip(_REQUIRED_COLUMNS, actual, strict=True)
-    ) and conn.execute(
+        for (table, required), columns in zip(_REQUIRED_COLUMNS, actual, strict=True)) and conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hosted_room_events_cursor'"
     ).fetchone() is not None
 
@@ -583,12 +580,10 @@ def _prune_disbanded_rooms_locked(
     candidates: set[str] = set()
     if now is not None:
         candidates.update(_room_ids(
-            conn,
-            """SELECT room_id FROM hosted_rooms
+            conn, """SELECT room_id FROM hosted_rooms
                      WHERE disbanded_at IS NOT NULL AND disbanded_at<=?""", (now - DISBANDED_ROOM_RETENTION_SECONDS,)))
     candidates.update(_room_ids(
-        conn,
-        """SELECT room_id FROM hosted_rooms WHERE disbanded_at IS NOT NULL
+        conn, """SELECT room_id FROM hosted_rooms WHERE disbanded_at IS NOT NULL
                 ORDER BY disbanded_at DESC, room_id ASC LIMIT -1 OFFSET ?""", (MAX_DISBANDED_ROOM_TOMBSTONES,)))
     if max_gateway_event_bytes is not None:
         retained_bytes = _gateway_event_bytes(conn)
@@ -786,8 +781,7 @@ def peer_room_grant_is_current(db_path: DbPath, *, claims: Mapping[str, Any], no
     """Require a grant to match the target's current live reservation."""
     timestamp = _now(now)
     return _read_one(
-        db_path,
-        """SELECT 1 FROM hosted_room_peer_reservations WHERE room_id=? AND member_id=?
+        db_path, """SELECT 1 FROM hosted_room_peer_reservations WHERE room_id=? AND member_id=?
             AND target_profile=? AND authority_gateway_id=? AND authority_epoch=?
             AND expires_at>? AND revoked_at IS NULL LIMIT 1""", (*_reservation_claims(claims), timestamp)) is not None
 
@@ -798,8 +792,7 @@ def room_grant_is_revoked(db_path: DbPath, *, claims: Mapping[str, Any], now: fl
     scope_key = _room_grant_scope_key(claims)
     issued_at = float(claims.get("issued_at") or 0)
     row = _read_one(
-        db_path,
-        """SELECT revoked_before FROM hosted_room_revoked_grants
+        db_path, """SELECT revoked_before FROM hosted_room_revoked_grants
             WHERE scope_key=? AND expires_at>?""", (scope_key, timestamp))
     return row is not None and issued_at <= float(row["revoked_before"])
 
@@ -917,8 +910,7 @@ def create_room(
                 VALUES (?, ?, ?, ?, 1, 1, 0, 1, ?, ?, NULL)""",
             (room_id, name, members_json, authority_gateway_id, now, now))
         row = _reload(
-            conn,
-            """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, revision,
+            conn, """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, revision,
                 created_at, updated_at FROM hosted_rooms WHERE room_id=?""", (room_id,),
             "created room could not be reloaded")
     result = _room_from_row(row)
@@ -1001,8 +993,7 @@ def append_event(
                 raise EventConflictError("event_id already exists with different content")
             return _event_from_row(existing, idempotent=True)
         room = _room_row(
-            conn,
-            """SELECT next_seq, event_bytes, authority_gateway_id, authority_epoch
+            conn, """SELECT next_seq, event_bytes, authority_gateway_id, authority_epoch
                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,), room_id)
         _require_authority(room, authority_gateway_id, authority_epoch, "stale hosted room authority")
         seq = int(room["next_seq"])
@@ -1077,9 +1068,8 @@ def request_room_stop(
     cancel_id = _validate_identifier(cancel_id, label="cancel_id", max_chars=MAX_EVENT_ID_CHARS)
     return append_event(
         db_path, room_id=room_id, event_id=f"room-stop:{hashlib.sha256(cancel_id.encode()).hexdigest()[:32]}",
-        kind="room.stop_requested",
-        actor={"kind": "gateway", "id": expected_gateway_id}, payload={"cancel_id": cancel_id},
-        authority_gateway_id=expected_gateway_id, authority_epoch=expected_epoch)
+        kind="room.stop_requested", actor={"kind": "gateway", "id": expected_gateway_id},
+        payload={"cancel_id": cancel_id}, authority_gateway_id=expected_gateway_id, authority_epoch=expected_epoch)
 
 
 def claim_authority(
@@ -1101,8 +1091,7 @@ def claim_authority(
     claim_payload_json = _claim_payload_json(expected_gateway_id, new_gateway_id, target_epoch)
     with _transaction(db_path, immediate=True) as conn:
         row = _room_row(
-            conn,
-            """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes
+            conn, """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes
                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,), room_id)
         existing_event = _load_event(conn, room_id, event_id)
         idempotent = existing_event is not None
@@ -1116,8 +1105,8 @@ def claim_authority(
             _require_authority(row, expected_gateway_id, expected_epoch, "hosted room authority changed")
             # Insert the claim event, then CAS the room's authority behind the epoch fence.
             claim_bytes = _insert_event(
-                conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", claim_actor_json,
-                target_epoch, claim_payload_json, now, allow_control=True)
+                conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", claim_actor_json, target_epoch,
+                claim_payload_json, now, allow_control=True)
             _fenced_update(conn, """UPDATE hosted_rooms SET authority_gateway_id=?,
             authority_epoch=authority_epoch+1, next_seq=next_seq+1,
             event_bytes=event_bytes+?, revision=revision+1, updated_at=? WHERE room_id=?
@@ -1126,8 +1115,7 @@ def claim_authority(
                 AuthorityConflictError("hosted room authority changed"))
             existing_event = _load_event(conn, room_id, event_id)
         state_row = _reload(
-            conn,
-            """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq,
+            conn, """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq,
                 revision, created_at, updated_at FROM hosted_rooms WHERE room_id=?""", (room_id,),
             "claimed room could not be reloaded")
     state = _room_from_row(state_row, idempotent=idempotent)
@@ -1198,8 +1186,7 @@ def read_events(
     limit = _bounded_limit(limit, MAX_LOG_LIMIT)
     with _transaction(db_path) as conn:
         room = _room_row(
-            conn,
-            """SELECT next_seq, authority_gateway_id, authority_epoch FROM hosted_rooms
+            conn, """SELECT next_seq, authority_gateway_id, authority_epoch FROM hosted_rooms
                 WHERE room_id=? AND (disbanded_at IS NULL OR ?)""", (room_id, int(include_disbanded)), room_id)
         latest_seq = int(room["next_seq"]) - 1
         authority = {"gateway_id": str(room["authority_gateway_id"]), "epoch": int(room["authority_epoch"])}
