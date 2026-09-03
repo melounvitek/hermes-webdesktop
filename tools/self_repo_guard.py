@@ -163,40 +163,27 @@ def _scope_keys(command: str, starts: list[int]) -> dict[int, tuple[int, ...]]:
             context = contexts[-1]
             quote = context.quote
             char = command[cursor]
+            nested = len(contexts) > 1
 
             if quote == "'":
                 if char == "'":
                     context.quote = None
+            elif char == "\\" and cursor + 1 < start:
                 cursor += 1
-                continue
-            # Unquoted or inside double quotes: substitutions still open scopes.
-            if char == "\\" and cursor + 1 < start:
-                cursor += 2
-                continue
-            if quote == '"':
-                if char == '"':
-                    context.quote = None
-                    cursor += 1
-                    continue
-            elif char in {"'", '"'}:
+            elif quote == '"' and char == '"':
+                context.quote = None
+            elif quote is None and char in {"'", '"'}:
                 context.quote = char
-                cursor += 1
-                continue
-            if command.startswith("$(", cursor):
+            # Unquoted or inside double quotes: substitutions still open scopes.
+            elif command.startswith("$(", cursor):
                 contexts.append(_ShellContext("$(", cursor))
-                cursor += 2
-                continue
-            if quote is None:
-                if char == "(":
-                    contexts.append(_ShellContext("(", cursor))
-                    cursor += 1
-                    continue
-                if char == ")" and len(contexts) > 1 and contexts[-1].kind in {"(", "$("}:
-                    contexts.pop()
-                    cursor += 1
-                    continue
-            if char == "`":
-                if quote is None and len(contexts) > 1 and contexts[-1].kind == "`":
+                cursor += 1
+            elif quote is None and char == "(":
+                contexts.append(_ShellContext("(", cursor))
+            elif quote is None and char == ")" and nested and contexts[-1].kind in {"(", "$("}:
+                contexts.pop()
+            elif char == "`":
+                if quote is None and nested and contexts[-1].kind == "`":
                     contexts.pop()
                 else:
                     contexts.append(_ShellContext("`", cursor))

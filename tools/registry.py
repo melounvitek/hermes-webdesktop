@@ -997,42 +997,50 @@ class ToolRegistry:
         """True when a toolset has at least one exposable tool (never raises)."""
         return self._toolset_has_exposable_tools(toolset, self._snapshot_entries())
 
+    @staticmethod
+    def _grouped(entries: List[ToolEntry]) -> Dict[str, List[ToolEntry]]:
+        """``{toolset: entries}`` in first-appearance order."""
+        groups: Dict[str, List[ToolEntry]] = {}
+        for entry in entries:
+            groups.setdefault(entry.toolset, []).append(entry)
+        return groups
+
     def check_toolset_requirements(self) -> Dict[str, bool]:
         """Return ``{toolset: available_bool}`` for every toolset."""
         entries = self._snapshot_entries()
         return {
             toolset: self._toolset_has_exposable_tools(toolset, entries)
-            for toolset in sorted({entry.toolset for entry in entries})}
+            for toolset in sorted(self._grouped(entries))}
 
     def get_available_toolsets(self) -> Dict[str, dict]:
         """Return toolset metadata for UI display."""
-        toolsets: Dict[str, dict] = {}
         entries = self._snapshot_entries()
-        for entry in entries:
-            info = toolsets.get(entry.toolset)
-            if info is None:
-                info = toolsets[entry.toolset] = {
-                    "available": self._toolset_has_exposable_tools(entry.toolset, entries),
-                    "tools": [],
-                    "description": "",
-                    "requirements": []}
-            info["tools"].append(entry.name)
-            _extend_unique(info["requirements"], entry.requires_env or [])
+        toolsets: Dict[str, dict] = {}
+        for toolset, members in self._grouped(entries).items():
+            requirements: list = []
+            for entry in members:
+                _extend_unique(requirements, entry.requires_env or [])
+            toolsets[toolset] = {
+                "available": self._toolset_has_exposable_tools(toolset, entries),
+                "tools": [entry.name for entry in members],
+                "description": "",
+                "requirements": requirements}
         return toolsets
 
     def get_toolset_requirements(self) -> Dict[str, dict]:
         """Build a TOOLSET_REQUIREMENTS-compatible dict for backward compat."""
-        result: Dict[str, dict] = {}
         entries, toolset_checks = self._snapshot_state()
-        for entry in entries:
-            info = result.setdefault(entry.toolset, {
-                "name": entry.toolset,
-                "env_vars": [],
-                "check_fn": toolset_checks.get(entry.toolset),
+        result: Dict[str, dict] = {}
+        for toolset, members in self._grouped(entries).items():
+            env_vars: list = []
+            for entry in members:
+                _extend_unique(env_vars, entry.requires_env)
+            result[toolset] = {
+                "name": toolset,
+                "env_vars": env_vars,
+                "check_fn": toolset_checks.get(toolset),
                 "setup_url": None,
-                "tools": []})
-            _extend_unique(info["tools"], [entry.name])
-            _extend_unique(info["env_vars"], entry.requires_env)
+                "tools": [entry.name for entry in members]}
         return result
 
     def check_tool_availability(self, quiet: bool = False):
@@ -1040,15 +1048,15 @@ class ToolRegistry:
         available = []
         unavailable = []
         entries = self._snapshot_entries()
-        for ts in sorted({entry.toolset for entry in entries}):
-            ts_entries = [entry for entry in entries if entry.toolset == ts]
+        groups = self._grouped(entries)
+        for ts in sorted(groups):
             if self._toolset_has_exposable_tools(ts, entries):
                 available.append(ts)
             else:
                 unavailable.append({
                     "name": ts,
-                    "env_vars": ts_entries[0].requires_env if ts_entries else [],
-                    "tools": [entry.name for entry in ts_entries]})
+                    "env_vars": groups[ts][0].requires_env,
+                    "tools": [entry.name for entry in groups[ts]]})
         return available, unavailable
 
 
