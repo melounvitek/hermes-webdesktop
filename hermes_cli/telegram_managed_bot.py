@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import re
-import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -16,14 +15,10 @@ import httpx
 # Nous-hosted pairing API; override for PoC/staging with TELEGRAM_ONBOARDING_URL.
 DEFAULT_API_URL = "https://setup.hermes-agent.nousresearch.com"
 TELEGRAM_ONBOARDING_URL_ENV = "TELEGRAM_ONBOARDING_URL"
-# Manager bot username (without @); the backend returns the real deep link, so this is only
-# used by local helpers/tests.
-DEFAULT_MANAGER_BOT = "HermesSetupBot"
 DEFAULT_BOT_NAME = "Hermes Agent"
 DEFAULT_POLL_TIMEOUT = 180
 POLL_INTERVAL = 2
 
-_USERNAME_SLUG_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
 
 
@@ -84,18 +79,6 @@ def print_qr_code(url: str, *, include_link: bool = True) -> None:
     print(render_qr_terminal(url) or "  (Install 'qrcode' for a scannable QR code: pip install qrcode)")
     if include_link:
         print(f"  Link: {url}")
-
-
-def generate_username_slug(length: int = 16) -> str:
-    """Generate a base32-ish slug for Telegram username correlation."""
-    return "".join(secrets.choice(_USERNAME_SLUG_ALPHABET) for _ in range(length))
-
-
-def generate_bot_username(profile_name: Optional[str] = None) -> str:
-    """Suggested bot username ``hermes_<slug>_bot``; ``profile_name`` is accepted for backward
-    compatibility but not embedded (the slug must carry the entropy for backend correlation)."""
-    _ = profile_name
-    return f"hermes_{generate_username_slug()}_bot"
 
 
 def create_pairing(
@@ -164,7 +147,7 @@ def poll_for_setup_result(
 
 
 def auto_setup_telegram_bot_result(
-    api_url: str | None = None, manager_bot: str = DEFAULT_MANAGER_BOT,
+    api_url: str | None = None, manager_bot: str = "HermesSetupBot",
     profile_name: Optional[str] = None, poll_timeout: float = DEFAULT_POLL_TIMEOUT,
 ) -> Optional[TelegramBotSetupResult]:
     """Run the full automatic Telegram bot creation flow."""

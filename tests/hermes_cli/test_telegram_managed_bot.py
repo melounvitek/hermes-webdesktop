@@ -9,7 +9,6 @@ from hermes_cli.telegram_managed_bot import (
     TELEGRAM_ONBOARDING_URL_ENV,
     TelegramPairing,
     create_pairing,
-    generate_bot_username,
     poll_for_setup_result,
     print_qr_code,
     render_qr_terminal,
@@ -18,20 +17,6 @@ from hermes_cli.telegram_managed_bot import (
 
 VALID_TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
 SECOND_VALID_TOKEN = "987654321:abcdefghijklmnopqrstuvwxyzABCDEF"
-
-
-class TestGenerateBotUsername:
-    def test_secure_default_format(self):
-        name = generate_bot_username()
-        assert name.startswith("hermes_")
-        assert name.endswith("_bot")
-        assert len(name) == len("hermes_") + 16 + len("_bot")
-        assert len(name) <= 32
-
-
-    def test_uniqueness(self):
-        names = {generate_bot_username() for _ in range(20)}
-        assert len(names) == 20
 
 
 class TestQRCode:

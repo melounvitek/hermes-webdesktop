@@ -86,7 +86,6 @@ _validate_access_token = _rules_validator("Access token", (
     (lambda s: not s.startswith("EAA"), _not_meta_token_reason),
     (lambda s: len(s) < 100, lambda s: f"Access token looks too short ({len(s)} chars, expected 100+)")))
 
-
 # --- Prompt helpers
 
 def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -> str:

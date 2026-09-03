@@ -78,7 +78,6 @@ _APIKEY_PROVIDERS = {
     "StepFun Step Plan": ("STEPFUN_API_KEY",), "MiniMax": ("MINIMAX_API_KEY",),
     "MiniMax (China)": ("MINIMAX_CN_API_KEY",), "DeepInfra": ("DEEPINFRA_API_KEY",)}
 
-
 # Nous Tool Gateway per-feature state: first matching (predicate(feature, nous_auth), text(feature)).
 _FEATURE_STATES = (
     (lambda f, _: f.managed_by_nous, lambda f: "active via Nous subscription"),
