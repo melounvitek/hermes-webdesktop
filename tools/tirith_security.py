@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from contextlib import suppress
 
 from hermes_constants import get_hermes_home
 
@@ -93,10 +94,8 @@ def _record_tirith_crash() -> None:
     _crash_count += 1
     if _crash_count >= _CRASH_LIMIT:
         _circuit_open = True
-        logger.warning(
-            "tirith circuit breaker opened after %d consecutive failures; "
-            "disabling for the rest of the process",
-            _crash_count)
+        logger.warning("tirith circuit breaker opened after %d consecutive failures; "
+                       "disabling for the rest of the process", _crash_count)
 
 
 def _warn_once(key: str, message: str, *args) -> None:
@@ -115,10 +114,8 @@ def _reset_spawn_warning_state() -> None:
 
 
 def _cached_path() -> str | None:
-    """The path resolved on a previous call, or None if unresolved/failed."""
-    if _resolved_path is None or _resolved_path is _INSTALL_FAILED:
-        return None
-    return _resolved_path
+    """The path resolved on a previous call, or None if unresolved (None) / failed (_INSTALL_FAILED)."""
+    return _resolved_path or None
 
 
 def _set_resolved(path: str) -> None:
@@ -153,32 +150,26 @@ def _is_install_failed_on_disk() -> bool:
     """True if a recent install failure was persisted and is still non-retryable.
     A 'cosign_missing' marker is auto-cleared once cosign appears on PATH."""
     reason = _read_failure_reason()
-    if reason is None:
-        return False
     if reason == "cosign_missing" and shutil.which("cosign"):
         _clear_install_failed()
         return False
-    return True
+    return reason is not None
 
 
 def _mark_install_failed(reason: str = ""):
     """Persist install failure to disk; ``reason`` is a short retryability tag."""
-    try:
+    with suppress(OSError):
         p = _failure_marker_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(reason)
-    except OSError:
-        pass
 
 
 def _clear_install_failed():
     """Remove the failure marker and reset warn-once state after a successful install."""
     _reset_spawn_warning_state()
-    try:
+    with suppress(OSError):
         os.unlink(_failure_marker_path())
-    except OSError:
-        pass
 
 
 def _disk_marker_blocks_install() -> bool:
@@ -291,8 +282,7 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
     actual = sha.hexdigest()
     if actual != expected:
         logger.warning("Checksum mismatch: expected %s, got %s", expected, actual)
-        return False
-    return True
+    return actual == expected
 
 
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
@@ -360,10 +350,8 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             try:
                 shutil.copy(src, dest)
             except OSError:
-                try:
+                with suppress(OSError):
                     os.unlink(dest)
-                except OSError:
-                    pass
                 return None, "cross_device_copy_failed"
         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         logger.info("tirith installed to %s (%s)", dest, "cosign + SHA-256" if cosign_verified else "SHA-256 only")
@@ -487,8 +475,8 @@ def ensure_installed(*, log_failures: bool = True):
     if found or not may_install or _disk_marker_blocks_install():
         return found
     if _install_thread is None or not _install_thread.is_alive():
-        _install_thread = threading.Thread(
-            target=_background_install, kwargs={"log_failures": log_failures}, daemon=True)
+        _install_thread = threading.Thread(target=_background_install, daemon=True,
+                                           kwargs={"log_failures": log_failures})
         _install_thread.start()
     return None  # not available yet; commands fail-open until ready
 
@@ -538,7 +526,8 @@ def check_command_security(command: str) -> dict:
     except OSError as exc:
         # FileNotFoundError / PermissionError / exec format error: dedupe by (class, errno)
         # so each failure mode surfaces once, not per command.
-        _warn_once(f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}", "tirith spawn failed: %s", exc)
+        spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
+        _warn_once(spawn_key, "tirith spawn failed: %s", exc)
         _record_tirith_crash()
         return _fail(fail_open, f"tirith unavailable: {exc}", f"tirith spawn failed (fail-closed): {exc}")
     except subprocess.TimeoutExpired:
@@ -552,7 +541,8 @@ def check_command_security(command: str) -> dict:
         # Unknown exit code (includes signal-killed, e.g. -11): respect fail_open.
         logger.warning("tirith returned unexpected exit code %d", exit_code)
         _record_tirith_crash()
-        return _fail(fail_open, f"tirith exit code {exit_code} (fail-open)", f"tirith exit code {exit_code} (fail-closed)")
+        return _fail(fail_open, f"tirith exit code {exit_code} (fail-open)",
+                     f"tirith exit code {exit_code} (fail-closed)")
     if action == "allow":
         _crash_count = 0  # successful execution resets the circuit breaker
     # JSON enriches findings/summary; a parse failure never changes the verdict.
