@@ -15,7 +15,7 @@ import re
 import sys
 import threading
 import uuid
-from dataclasses import dataclass
+from collections import namedtuple
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -79,8 +79,8 @@ def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
 
 # ── Backend selection — env-swappable for tests ─────────────────────────────
 
-# Per-Hermes-session cached backends; each owns its own cua-driver session, native target, refs, and
-# grant namespace. `_backend` is the backward-compatible empty-session injection hook (older tests).
+# Per-Hermes-session cached backends (own cua-driver session, native target, refs, grant namespace).
+# `_backend` is the backward-compatible empty-session injection hook (older tests).
 _backend_lock = threading.Lock()
 _backend: Optional[ComputerUseBackend] = None
 _backends: Dict[str, ComputerUseBackend] = {}
@@ -95,19 +95,18 @@ _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_
 _escalation_warned: set = set()               # sids already warned that a bypass widened the driver mode
 
 def _configured_permission_mode() -> str:
-    """Configured cua mode (standard | bounded); "standard" if unresolvable. bounded needs a
-    computer_use.capability_manifest; the backend fails loudly without it."""
+    """Configured cua mode (standard | bounded; "standard" if unresolvable). bounded needs a
+    computer_use.capability_manifest — the backend fails loudly without it."""
     with contextlib.suppress(Exception):
         from tools.computer_use.cua_backend import _cua_configured_permission_mode
         return _cua_configured_permission_mode()
     return "standard"
 
 def _cua_permission_mode(session_id: str) -> str:
-    """Map Hermes's approval bypass onto Cua's immutable mode. Both identity namespaces are consulted — DB
-    ``session_id`` and gateway ``session_key`` contextvar — or a gateway ``/yolo`` would be invisible here.
-    Fails closed. Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted``
-    daemon, dropping the configured ceiling: deliberate (``unrestricted`` is intentionally not a config value)
-    but easy to trigger by accident."""
+    """Map Hermes's approval bypass onto Cua's immutable mode; fails closed. Both identity namespaces are consulted
+    (DB ``session_id`` and gateway ``session_key`` contextvar) or a gateway ``/yolo`` would be invisible here.
+    Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted`` daemon, dropping
+    the configured ceiling: deliberate (``unrestricted`` is not a config value) but easy to trigger by accident."""
     with contextlib.suppress(Exception):
         from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
         if is_approval_bypass_active_for_session(session_id) or (
@@ -140,8 +139,8 @@ def _install_backend(sid: str, backend: ComputerUseBackend, permission_mode: str
     _backend_call_locks[sid] = threading.RLock()
 
 def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[threading.RLock]]:
-    """Remove one session's cache entries, and the ``_backend`` injection hook when it aliases the empty
-    session (older callers/tests may populate only the hook). Caller holds ``_backend_lock``."""
+    """Remove one session's cache entries, plus the ``_backend`` injection hook when it aliases the empty session
+    (older callers/tests may populate only the hook). Caller holds ``_backend_lock``."""
     global _backend
     _backend_permission_modes.pop(sid, None)
     backend, call_lock = _backends.pop(sid, None), _backend_call_locks.pop(sid, None)
@@ -181,9 +180,9 @@ def _get_backend(session_id: str = "") -> ComputerUseBackend:
             _stop_backend(cached, stale_lock)
 
 def release_computer_use_session(session_id: str) -> bool:
-    """Release one session-owned backend (lifecycle seam for hosts/plugins). Cache entries are removed BEFORE
-    stopping so new lookups cannot retain the stale target/ref namespace; approval state is cleared even without
-    a backend. True when a backend was released, False if already absent; idempotent."""
+    """Release one session-owned backend (lifecycle seam for hosts/plugins); idempotent, True iff one was released.
+    Cache entries are removed BEFORE stopping so new lookups cannot retain the stale target/ref namespace; approval
+    state is cleared even without a backend."""
     sid = str(session_id or "")
     with _backend_lock:
         backend, call_lock = _detach_locked(sid)
@@ -199,8 +198,8 @@ def release_computer_use_session(session_id: str) -> bool:
 
 def _shutdown_backend_atexit() -> None:
     """Stop all cached backends so cua-driver subprocesses don't outlive us. atexit only, no signal handlers: a
-    ``SystemExit`` from a prompt_toolkit key binding corrupts its coroutine state and makes the process
-    unkillable. Never raises. Drops the global lock before stop(): teardown budgets 5s and must not block spawns."""
+    ``SystemExit`` from a prompt_toolkit key binding corrupts its coroutine state and makes the process unkillable.
+    Never raises. Drops the global lock before stop(): teardown budgets 5s and must not block spawns."""
     global _backend
     with _backend_lock:
         unique = {id(b): (b, _backend_call_locks.get(sid)) for sid, b in _backends.items()}
@@ -234,8 +233,9 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
 
-    start = stop = lambda self: None
-    is_available = lambda self: True
+    def start(self) -> None: pass
+    def stop(self) -> None: pass
+    def is_available(self) -> bool: return True
 
     def _record(self, name: str, kw: Dict[str, Any], result: Any = None) -> Any:
         self.calls.append((name, kw))
@@ -256,9 +256,9 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
-    """Main entry point (tools.registry). Returns a JSON string (text-only) or a dict marked `_multimodal`.
-    Order: hard blocks (_reject_unsafe) -> approval scopes (destructive action, then 'bring_to_front': persistent
-    focus is a separate visible side effect with its own scope) -> backend -> dispatch under the session call lock."""
+    """Main entry point (tools.registry): a JSON string (text-only) or a dict marked `_multimodal`. Order: hard
+    blocks (_reject_unsafe) -> approval scopes (destructive action, then 'bring_to_front' — persistent focus is a
+    separate visible side effect with its own scope) -> backend -> dispatch under the session call lock."""
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing `action`"})
@@ -318,8 +318,8 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
     spec = _ACTIONS.get(action)
     return spec.summarize(action, args, fg) if spec is not None else action + fg
 
-# --- action handlers: (backend, action, args, **delivery) -> ActionResult (follow-up capture applied by
-#     _dispatch) or a final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
+# --- handlers: (backend, action, args, **delivery) -> ActionResult (_dispatch applies the follow-up capture) or a
+#     final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
 
 def _xy(args: Dict[str, Any]) -> Tuple[Any, Any]:
     coord = args.get("coordinate")
@@ -373,18 +373,14 @@ def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
              else f" at {tuple(args['coordinate'])}" if args.get("coordinate") else "")
     return f"{action}{where}{fg}"
 
-@dataclass(frozen=True)
-class _ActionSpec:
-    """One `action`. ``input``: native input delivered to the backend's sticky target (gets the delivery kwargs and
-    the `app=` mismatch guard). ``destructive``: mutates user-visible state -> approval prompt (the rest only read).
-    ``summarize(action, args, fg_suffix)`` renders the one-line approval prompt."""
-    handler: Callable[..., Any]
-    input: bool = False
-    destructive: bool = False
-    summarize: Callable[[str, Dict[str, Any], str], str] = lambda a, args, fg: a + fg
+# One `action`. ``input``: native input to the backend's sticky target (gets delivery kwargs + the `app=` mismatch
+# guard). ``destructive``: mutates user-visible state -> approval prompt (the rest only read).
+# ``summarize(action, args, fg_suffix)`` renders the one-line approval prompt.
+_ActionSpec = namedtuple("_ActionSpec", "handler input destructive summarize",
+                         defaults=(False, False, lambda a, args, fg: a + fg))
 
 def _input(handler, summarize=None) -> _ActionSpec:
-    return _ActionSpec(handler, input=True, destructive=True, **({"summarize": summarize} if summarize else {}))
+    return _ActionSpec(handler, True, True, **({"summarize": summarize} if summarize else {}))
 
 _ACTIONS: Dict[str, _ActionSpec] = {
     "click": _input(_do_click, _summarize_click),
@@ -488,15 +484,15 @@ _MAX_ELEMENT_LABEL_CHARS = 120
 _MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
 
 def _capture_mime(cap: CaptureResult) -> str:
-    """cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/, PNG with iVBOR)."""
+    # cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/, PNG with iVBOR).
     return cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
 
 def _capture_image_ext(cap: CaptureResult) -> str:
     return ".jpg" if _capture_mime(cap).lower() == "image/jpeg" else ".png"  # matches on-disk bytes for MIME sniffing
 
 def _bounds_unknown(bounds) -> bool:
-    """True when the AX tree reported no real geometry. KDE/Qt apps report ``[0, 0, 0, 0]`` for elements clickable
-    by index; serializing that as a rect invites ``coordinate=[0, 0]`` clicks."""
+    # No real geometry: KDE/Qt apps report [0, 0, 0, 0] for elements clickable by index; serializing that as a
+    # rect invites coordinate=[0, 0] clicks.
     try:
         return all(int(v) == 0 for v in bounds)
     except (TypeError, ValueError):
@@ -520,10 +516,10 @@ def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str
 
 def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
                   ) -> Tuple[Optional[float], Optional[str]]:
-    """(scale, note) when element bounds live in a different coordinate space than the screenshot, else
-    (None, None). On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate=
-    clicks read off the screenshot miss by the scale factor. 5% slack: window chrome can hang a few px past the
-    captured frame without implying a different coordinate space. Scale heuristic: larger axis ratio wins."""
+    """(scale, note) when element bounds live in a different coordinate space than the screenshot, else (None, None).
+    On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate= clicks read off the
+    screenshot miss by the scale factor. 5% slack: window chrome can hang a few px past the captured frame without
+    implying a different space. Scale heuristic: larger axis ratio wins."""
     if not elements or image_width <= 0 or image_height <= 0:
         return None, None
     max_x = max_y = 0
@@ -569,8 +565,8 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
                  dims_omitted=dims if too_small else None, has_image=has_image)
 
 def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
-    """Human-readable capture summary; line ORDER is contract. Indexes only what is surfaced in `elements`,
-    otherwise the summary names indices the model can't find."""
+    """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
+    summary names indices the model can't find."""
     cap, bounds_note = v.cap, v.bounds_note
     if bounds_note and v.bounds_scale:
         bounds_note += (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
@@ -673,8 +669,8 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
 
 def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int = 0):
-    """Path for a new file under ``$HERMES_HOME/<subdir>`` (dir created). With ``pattern``/``cap``, first unlinks
-    the oldest matching files so at most ``cap - 1`` remain (best-effort)."""
+    """Path for a new file under ``$HERMES_HOME/<subdir>`` (dir created). With ``pattern``/``cap``, first unlinks the
+    oldest matching files so at most ``cap - 1`` remain (best-effort)."""
     from hermes_constants import get_hermes_dir  # lazy so tests can patch get_hermes_dir
     cache_dir = get_hermes_dir(subdir, legacy)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -686,27 +682,24 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
 
 def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int,
                       write: Callable[[Any], None]) -> Optional[str]:
-    """Bounded cache write via ``write(path)``; the path, or None on any failure. Best-effort: an unwritable cache
-    must never break control (a capture keeps working without its spill/screenshot copy)."""
+    """Bounded cache write via ``write(path)``; the path, or None on any failure — an unwritable cache must never
+    break control (a capture keeps working without its spill/screenshot copy)."""
     try:
-        path = _cache_file(subdir, legacy, name, pattern, cap)
-        write(path)
+        write(path := _cache_file(subdir, legacy, name, pattern, cap))
         return str(path)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: %s failed: %s", what, exc)
         return None
 
 def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
-    """Copy of the capture in Hermes' media cache so attachment surfaces can deliver it."""
-    if not cap.png_b64:
-        return None
-    return _write_cache_file("screenshot persistence", "cache/images", "image_cache",
-                             f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}", "computer_use_*.*",
-                             _MAX_CAPTURE_FILES, lambda p: p.write_bytes(base64.b64decode(cap.png_b64, validate=False)))
+    """Copy of the capture in Hermes' media cache so attachment surfaces can deliver it (None without an image)."""
+    return _write_cache_file(
+        "screenshot persistence", "cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}",
+        "computer_use_*.*", _MAX_CAPTURE_FILES, lambda p: p.write_bytes(base64.b64decode(cap.png_b64, validate=False)),
+    ) if cap.png_b64 else None
 
 def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
-    """Write the FULL element tree (untruncated labels) to a cache file — the read_file/search_files escape
-    hatch for capped text."""
+    """FULL element tree (untruncated labels) in a cache file — the read_file/search_files escape hatch for capped text."""
     def write(path) -> None:
         payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
                    "elements": [{"index": e.index, "role": e.role, "label": e.label,
@@ -723,9 +716,9 @@ def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
 _MAX_VISION_DIM = 1456
 
 def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_DIM) -> tuple[bytes, Optional[str]]:
-    """Downscale encoded image bytes so the longest side is <= max_dim. Returns ``(bytes, scale_note)``; note is
-    None when unchanged (fits, or Pillow unavailable/failed), else it tells the vision model the factor so
-    reported coordinates map back to the real screen instead of being silently wrong."""
+    """Downscale encoded image bytes so the longest side is <= max_dim -> ``(bytes, scale_note)``. note is None when
+    unchanged (fits, or Pillow unavailable/failed), else it tells the vision model the factor so reported
+    coordinates map back to the real screen instead of being silently wrong."""
     try:
         from io import BytesIO
         from PIL import Image
@@ -748,8 +741,8 @@ def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_
         return raw, None
 
 def _should_route_through_aux_vision() -> bool:
-    """True when ``_capture_response`` should hand the PNG to aux vision. Any failure returns False (fail
-    open) so a broken config never silently drops the screenshot for vision-capable main models."""
+    """True when ``_capture_response`` should hand the PNG to aux vision. Any failure returns False (fail open) so a
+    broken config never silently drops the screenshot for vision-capable main models."""
     stage = "import"
     try:
         from agent.auxiliary_client import _read_main_model, _read_main_provider
@@ -786,8 +779,8 @@ def _route_capture_through_aux_vision(
     cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
     truncated_elements: int = 0, elements_file: Optional[str] = None, screenshot_path: Optional[str] = None,
 ) -> Optional[str]:
-    """Pre-analyse the capture via ``vision_analyze_tool`` (temp file under ``$HERMES_HOME/cache/vision/``) and
-    merge the description with the AX/SOM summary into one text payload. JSON, or None on any failure."""
+    """Pre-analyse the capture via ``vision_analyze_tool`` (temp file under ``$HERMES_HOME/cache/vision/``) and merge
+    the description with the AX/SOM summary into one text payload. JSON, or None on any failure."""
     if not cap.png_b64:
         return None
     problem, temp_image_path = "aux-vision import failed", None
@@ -815,13 +808,10 @@ def _route_capture_through_aux_vision(
             with contextlib.suppress(Exception):
                 os.unlink(str(temp_image_path))
     # The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON; empty -> no merge.
-    analysis_text = ""
-    if isinstance(result_json, str):
-        try:
-            parsed = json.loads(result_json)
-            analysis_text = str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
-        except (TypeError, json.JSONDecodeError):
-            analysis_text = result_json.strip()
+    analysis_text = result_json.strip() if isinstance(result_json, str) else ""
+    with contextlib.suppress(TypeError, json.JSONDecodeError):
+        parsed = json.loads(analysis_text)
+        analysis_text = str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
     if not analysis_text:
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
