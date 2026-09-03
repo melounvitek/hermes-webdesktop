@@ -54,20 +54,6 @@ def _report_live_models(model_list, source: str) -> None:
         print(f"  Found {len(model_list)} model(s) from {source}")
 
 
-def _aggregator_flow(provider_id: str, label: str, base_url: str, current_model: str, existing_key: str,
-                     resolved_key: str, fetch_ids, *, clear_creds: bool = True, **pick_kw) -> None:
-    """Shared tail of the OpenRouter / AI Gateway flows: live catalog + pricing, picker, persist."""
-    from hermes_cli.auth import _prompt_model_selection
-    from hermes_cli.models import get_pricing_for_provider
-
-    models_list = fetch_ids(force_refresh=True)
-    # Live pricing is non-blocking — empty dict on failure.
-    pricing = get_pricing_for_provider(provider_id, force_refresh=True)
-    selected = _prompt_model_selection(models_list, current_model=current_model, pricing=pricing, **pick_kw)
-    _finish_model(selected, provider_id, f"Default model set to: {selected} (via {label})",
-                  base_url=base_url, api_mode="chat_completions", clear_creds=clear_creds)
-
-
 def _model_flow_openrouter(config, current_model=""):
     """OpenRouter provider: ensure API key, then pick model."""
     from hermes_constants import OPENROUTER_BASE_URL
