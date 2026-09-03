@@ -5,6 +5,7 @@ summarises why a turn ended without a final answer. Every method resolves throug
 """
 import os
 import re
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
 from agent.tool_dispatch_helpers import (
@@ -189,19 +190,17 @@ class TurnExplainersMixin:
             changed = getattr(self, "_turn_file_mutation_paths", None)
             if changed is not None:
                 changed.update(landed_paths)
-            # Feed the checkpoint agent-write ledger so /rollback's safe mode
-            # can tell Hermes-authored content from later user hand-edits.
+            # Feed the checkpoint agent-write ledger so /rollback's safe mode can tell
+            # Hermes-authored content from later user hand-edits.
             mgr = getattr(self, "_checkpoint_mgr", None)
             if mgr is not None and getattr(mgr, "enabled", False):
                 for _p in landed_paths:
-                    try:
+                    with suppress(Exception):
                         mgr.record_agent_write(_p)
-                    except Exception:
-                        pass
         if is_error and not landed:
+            # Keep the FIRST error per path unless a later success replaces it.
             preview = _extract_error_preview(result)
             for path in targets:
-                # Keep the FIRST error per path unless a later success replaces it.
                 state.setdefault(path, {"tool": tool_name, "error_preview": preview})
         else:
             for path in targets:

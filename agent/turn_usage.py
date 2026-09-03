@@ -11,6 +11,7 @@ model/provider. Logger name stays ``agent.conversation_loop`` for caplog parity.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -155,15 +156,13 @@ def record_response_usage(
     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
     # Rolling history for status-bar averages (last 10).
-    try:
+    with suppress(Exception):
         hist = getattr(agent, "_api_latency_history", None)
         if hist is not None:
             hist.append(float(api_duration))
         ohist = getattr(agent, "_api_output_history", None)
         if ohist is not None:
             ohist.append(int(canonical_usage.output_tokens or 0))
-    except Exception:
-        pass
 
     _cache_pct = ""
     if canonical_usage.cache_read_tokens and prompt_tokens:
