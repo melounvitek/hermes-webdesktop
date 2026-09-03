@@ -131,15 +131,14 @@ def test_handle_enter_never_gates_on_command_running():
     cli_path = Path(__file__).resolve().parents[2] / "hermes_cli" / "cli_tui_mixin.py"
     tree = ast.parse(cli_path.read_text(encoding="utf-8"))
 
-    target = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_tui_handle_enter":
-            target = node
-            break
-    assert target is not None, "_tui_handle_enter not found in cli_tui_mixin.py"
+    handlers = ("_tui_handle_enter", "_tui_enter_inline_command", "_tui_enter_overlay",
+                "_tui_enter_clarify_freetext", "_tui_enter_clarify_choice", "_tui_enter_while_busy")
+    targets = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in handlers]
+    assert {n.name for n in targets} == set(handlers), "Enter handlers not found in cli_tui_mixin.py"
 
     offenders = [
         node.attr
+        for target in targets
         for node in ast.walk(target)
         if isinstance(node, ast.Attribute)
         and node.attr in {"_command_running", "_command_blocks_input"}
