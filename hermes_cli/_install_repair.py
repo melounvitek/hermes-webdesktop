@@ -2,7 +2,7 @@
 
 Callers: ``_early_recovery.recover_if_needed`` (stdlib-only, runs BEFORE ``hermes_cli.main``'s
 third-party imports so a pending update completes while no native extension is mapped yet) and
-``hermes_cli.main._recover_core_update_marker_locked`` (the post-import recovery path).
+``hermes_cli.main_install_repair._recover_core_update_marker_locked`` (the post-import recovery path).
 Deliberately **stdlib-only** so importing it can never fail in the corrupted-venv state it exists
 to repair; ``managed_uv`` and friends belong to the late path only.
 """

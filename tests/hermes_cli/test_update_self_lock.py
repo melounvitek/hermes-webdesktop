@@ -319,7 +319,7 @@ class TestUpdateEntrypointImportHygiene:
                 from unittest.mock import patch
                 sys.argv = ["hermes", "update", "--check"]
                 import hermes_cli.main as m
-                with patch("hermes_cli.main._cmd_update_check", lambda *a, **k: 0):
+                with patch("hermes_cli.update_cmd._cmd_update_check", lambda *a, **k: 0):
                     try:
                         m.main()
                     except SystemExit:

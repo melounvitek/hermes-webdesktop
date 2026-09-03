@@ -1,10 +1,7 @@
 """Dashboard/serve support: managed-service restart (systemd/respawn), status/listening probes, SSH session token file, named-profile routing, web-dist resolution, update stdio hangup protection.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching) as before.
-Names that stay in main are imported lazily inside the functions that use them
-(call-time resolution keeps ``hermes_cli.main.<name>`` patches effective and
-avoids an import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import contextlib
@@ -23,8 +20,8 @@ _PRE_BUILD_HINT = "  Pre-build first:  npm install --workspace web && npm run bu
 
 def _find_stale_dashboard_pids(*, exclude_pids: set[int] | None = None) -> list[int]:
     """Return PIDs of stale ``dashboard``/``serve`` processes for update cleanup."""
-    from hermes_cli.main import _self
-    return [pid for pid, _cmd in _self()._scan_dashboard_processes(exclude_pids=exclude_pids)]
+    from hermes_cli.dashboard_procs import _scan_dashboard_processes
+    return [pid for pid, _cmd in _scan_dashboard_processes(exclude_pids=exclude_pids)]
 
 
 def _parse_dashboard_runtime(command: str) -> tuple[str, str, int] | None:
@@ -390,10 +387,10 @@ def _report_dashboard_status() -> int:
     Ledger-registered serves (profiled launches the argv scan can't match) surface via the spawn-ledger
     augmentation in _scan_dashboard_processes. See #81564.
     """
-    from hermes_cli.main import _dashboard_listening, _self
+    from hermes_cli.dashboard_procs import _scan_dashboard_processes
     from gateway.status import _pid_exists
     live: list[tuple[int, str, str]] = []
-    for pid, command in _self()._scan_dashboard_processes():
+    for pid, command in _scan_dashboard_processes():
         runtime = _parse_dashboard_runtime(command)
         if runtime is None:
             continue
@@ -647,7 +644,6 @@ def _route_named_profile_dashboard(
     active_profile file). ``--isolated`` opts out; Desktop pool backends
     (HERMES_DESKTOP=1) stay per-profile. Returns normally when no routing applies.
     """
-    from hermes_cli.main import _dashboard_listening
     try:
         from hermes_cli.profiles import get_active_profile_name
         _launch_profile = get_active_profile_name()
@@ -724,7 +720,8 @@ def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
     (else the server serves 404s). --skip-build on the default location gets ONE
     recovery build; a caller-managed HERMES_WEB_DIST can't be populated.
     """
-    from hermes_cli.main import PROJECT_ROOT, _build_web_ui
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_web_build import _build_web_ui
     skip_build = getattr(args, "skip_build", False)
     if _headless_backend:
         os.environ["HERMES_SERVE_HEADLESS"] = "1"  # set before web_server import

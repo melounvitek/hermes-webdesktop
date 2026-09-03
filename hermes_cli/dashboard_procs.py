@@ -1,7 +1,7 @@
 """Dashboard process-hygiene helpers — extracted from ``hermes_cli/main.py``.
 
-Helpers that STAY in ``hermes_cli.main`` are reached through the lazy ``_m()`` reference so
-monkeypatches on ``hermes_cli.main.<name>`` keep working and imports stay one-way.
+Helpers defined in ``hermes_cli.main_dashboard`` / ``hermes_cli.main_install_repair`` are imported at
+call time so imports stay one-way (both of those modules import this one lazily).
 """
 
 import contextlib
@@ -17,12 +17,6 @@ _DASHBOARD_PATTERNS = tuple(
     for cmd in ("dashboard", "serve")
     for launcher in ("hermes", "hermes_cli.main", "hermes_cli/main.py"))
 _PS_RUN_KWARGS = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
-
-
-def _m():
-    """Lazy ``hermes_cli.main`` reference (call-time; keeps patches working)."""
-    from hermes_cli import main
-    return main
 
 
 def _empty_result() -> dict[str, list]:
@@ -332,10 +326,12 @@ def _kill_stale_dashboard_processes(
     function runs. Without excluding them, a Serve-only install's freshly restarted process is found again
     here and restarted a second time for no benefit (review on #83595).
     """
-    if restart_managed and _m()._restart_managed_dashboard_service(reason):
+    from hermes_cli import main_dashboard as _dash
+
+    if restart_managed and _dash._restart_managed_dashboard_service(reason):
         # The dashboard unit is handled but other backends (e.g. hermes-serve.service) are not:
         # mark the unit handled so the filter below drops its PIDs, and keep going.
-        _dash_unit = getattr(_m(), "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
+        _dash_unit = getattr(_dash, "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
         already_restarted_units = set(already_restarted_units or ()) | {
             str(_dash_unit).removesuffix(".service")}
     exclude = _exclude_pids_from_env()
@@ -343,7 +339,7 @@ def _kill_stale_dashboard_processes(
         # An SSH-owned backend belongs to an attached Desktop client; killing it strands that
         # client's fixed SSH port-forward. Same ownership records as the reaper.
         exclude |= _lock_owned_serve_pids()
-    pids = _m()._find_stale_dashboard_pids(exclude_pids=exclude or None)
+    pids = _dash._find_stale_dashboard_pids(exclude_pids=exclude or None)
     if not pids:
         return _empty_result()
     # Snapshot systemd unit/cgroup and argv BEFORE killing (the cgroup dies with the process).
@@ -353,9 +349,9 @@ def _kill_stale_dashboard_processes(
     pid_home: dict[int, str | None] = {}
     if restart_managed and sys.platform != "win32":
         for pid in pids:
-            pid_cgroup[pid] = _m()._get_pid_cgroup_path(pid)
-            pid_service[pid] = _m()._get_systemd_service_for_pid(pid)
-            if not pid_service[pid] and (cmdline := _m()._dashboard_cmdline_for_pid(pid)):
+            pid_cgroup[pid] = _dash._get_pid_cgroup_path(pid)
+            pid_service[pid] = _dash._get_systemd_service_for_pid(pid)
+            if not pid_service[pid] and (cmdline := _dash._dashboard_cmdline_for_pid(pid)):
                 # Manual process: exact argv + HERMES_HOME for the respawn and its profile cap.
                 # Manually-started process: preserve its exact argv so we can respawn it after the update
                 # (#40449, #68934). Snapshot HERMES_HOME before the kill so per-profile caps still work
@@ -394,6 +390,7 @@ def _restart_killed_backends(
     # back after our clean SIGTERM, and the Desktop can't reconnect (#68934). Filtered so Desktop
     # ``serve|dashboard --port 0`` backends are not resurrected and duplicates collapse to one per profile
     # (#78821).
+    from hermes_cli import main_dashboard as _dash
     unrecovered: list[int] = []
     failed_restarts: list[tuple[str, str]] = []
     seen_services: set[str] = set()
@@ -404,7 +401,7 @@ def _restart_killed_backends(
             if svc_name in seen_services:
                 continue
             seen_services.add(svc_name)
-            if _m()._try_restart_systemd_service(svc_name, pid_cgroup.get(pid)):
+            if _dash._try_restart_systemd_service(svc_name, pid_cgroup.get(pid)):
                 print(f"    ✓ restarted systemd service {svc_name}")
             else:
                 failed_restarts.append((svc_name, "systemctl restart returned non-zero"))
@@ -416,7 +413,7 @@ def _restart_killed_backends(
     for svc, err in failed_restarts:
         print(f"    ⚠ {svc}: {err}")
     respawn_cmds = _filter_dashboard_respawn_candidates(respawn_candidates)
-    failed_cmds = _m()._respawn_dashboard_processes(respawn_cmds) if respawn_cmds else None
+    failed_cmds = _dash._respawn_dashboard_processes(respawn_cmds) if respawn_cmds else None
     if failed_cmds:
         unrecovered.extend(p for p in killed if pid_cmdline.get(p) in failed_cmds)
     if failed_restarts or unrecovered:
@@ -442,13 +439,15 @@ def _detect_concurrent_hermes_instances(
     ``python.exe``); ``proc.parents()`` at once because a per-hop loop bailed on the first
     AccessDenied. Empty off-Windows / without psutil. Never raises.
     """
-    if not _m()._is_windows():
+    from hermes_cli.main_install_repair import _hermes_exe_shims, _is_windows
+
+    if not _is_windows():
         return []
     try:
         import psutil
     except Exception:
         return []
-    shim_paths = {_norm_exe(shim) for shim in _m()._hermes_exe_shims(scripts_dir)}
+    shim_paths = {_norm_exe(shim) for shim in _hermes_exe_shims(scripts_dir)}
     if not shim_paths:
         return []
     seed = int(exclude_pid) if exclude_pid is not None else os.getpid()

@@ -255,7 +255,7 @@ def main() -> None:
     except Exception as exc:
         _emit_probe_fail(f"psutil is not available: {exc}")
     try:
-        from hermes_cli.main import _detect_venv_python_processes  # noqa: PLC0415
+        from hermes_cli.update_cmd import _detect_venv_python_processes
 
         matches = _detect_venv_python_processes()
     except Exception as exc:

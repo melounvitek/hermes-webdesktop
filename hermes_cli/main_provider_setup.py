@@ -1,8 +1,7 @@
 """Provider setup wizard helpers: provider picker, custom-provider save/remove, auxiliary-model
 routing menu, API-key/reasoning prompts, Anthropic OAuth.
 
-Split out of ``hermes_cli/main.py``, which re-imports every name (``hermes_cli.main.<name>`` keeps
-resolving and monkeypatching). Names that stay in main are imported lazily at call time.
+Split out of ``hermes_cli/main.py``. Names that still live in main are imported lazily at call time.
 """
 
 import contextlib
@@ -79,7 +78,6 @@ _DELEGATION_TASK_DESC = "subagent model (delegate_task)"
 def _all_aux_tasks() -> list[tuple[str, str, str]]:
     """Built-in aux tasks (in order) followed by plugin-registered ones
     (:meth:`hermes_cli.plugins.PluginContext.register_auxiliary_task`)."""
-    from hermes_cli.main import _AUX_TASKS
     tasks = list(_AUX_TASKS)
     # Plugin discovery failure must not break the aux config UI.
     with contextlib.suppress(Exception):
@@ -176,7 +174,6 @@ def _reset_aux_to_auto() -> int:
 
 def _aux_config_menu() -> None:
     """Top-level auxiliary-model picker; loops until the user picks "Back"."""
-    from hermes_cli.main import _aux_select_for_task, _prompt_provider_choice
     from hermes_cli.config import load_config
     while True:
         cfg = load_config()
@@ -214,7 +211,6 @@ def _aux_config_menu() -> None:
 def _aux_select_for_task(task: str) -> None:
     """Pick a provider + model for one aux task and persist it. Rows come from
     ``build_aux_picker_rows()`` (shared substrate): only already-configured providers appear."""
-    from hermes_cli.main import _prompt_provider_choice
     from hermes_cli.config import load_config
     from hermes_cli.inventory import build_aux_picker_rows, format_aux_picker_entries
     task_cfg = _aux_task_cfg(load_config(), task)

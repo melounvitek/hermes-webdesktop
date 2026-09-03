@@ -1,10 +1,7 @@
 """Agent-facing subcommand handlers: memory, acp, tools, insights, monitoring, skills (+trust).
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching) as before.
-Names that stay in main are imported lazily inside the functions that use them
-(call-time resolution keeps ``hermes_cli.main.<name>`` patches effective and
-avoids an import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import sys

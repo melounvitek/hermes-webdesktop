@@ -1,10 +1,7 @@
 """Desktop (Electron) app: build/stamp, stage-and-swap pack, exe integrity gate, macOS signing/TCC, Linux sandbox, launch (hermes gui/desktop).
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching) as before.
-Names that stay in main are imported lazily inside the functions that use them
-(call-time resolution keeps ``hermes_cli.main.<name>`` patches effective and
-avoids an import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import logging
@@ -51,7 +48,6 @@ def _desktop_stamp_path() -> Path:
 def _renderer_bundle_dir(desktop_dir: Path, *, source_mode: bool) -> Optional[Path]:
     """The renderer ``dist`` a launch loads: ``apps/desktop/dist`` in source mode, else the
     ``app.asar.unpacked/dist`` copy (the only real directory, and the one an interrupted replace tears)."""
-    from hermes_cli.main import _desktop_packaged_executable
     if source_mode:
         return desktop_dir / "dist"
 
@@ -100,7 +96,6 @@ def _renderer_bundle_torn(dist_dir: Path) -> bool:
 
 def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode: bool) -> bool:
     """True when the desktop build output is stale, missing, torn, or built in the other mode."""
-    from hermes_cli.main import _desktop_dist_exists, _desktop_packaged_executable, _desktop_stamp_path
     if source_mode:
         if not _desktop_dist_exists(desktop_dir):
             return True
@@ -121,7 +116,6 @@ def _desktop_build_needed(desktop_dir: Path, project_root: Path, *, source_mode:
 
 def _write_desktop_build_stamp(project_root: Path, *, source_mode: bool) -> None:
     """Write the desktop build stamp after a successful build."""
-    from hermes_cli.main import _desktop_stamp_path
     _write_build_stamp(
         _desktop_stamp_path(), "desktop",
         lambda: _compute_desktop_content_hash(project_root), sourceMode=source_mode)
@@ -342,7 +336,6 @@ def _windows_native_machine() -> str:
 def _expected_windows_pe_machines() -> set:
     """PE machines this Windows host can load: ``GetMachineTypeAttributes``, else by name (AMD64 → x64+x86,
     ARM64 → ARM64+x64, x86 → x86). Unknown hosts get the full set so the gate can never brick launch."""
-    from hermes_cli.main import _windows_native_machine
     if sys.platform == "win32":
         try:
             runnable = _windows_user_runnable_pe_machines()
@@ -409,7 +402,6 @@ def _pe_machine_or_none(path: Path) -> Optional[int]:
 
 def _desktop_exe_integrity_error(path: Path) -> Optional[str]:
     """Why ``path`` cannot run on this Windows host, or None when it parses as a loadable PE."""
-    from hermes_cli.main import _windows_native_machine
     try:
         machine = _parse_pe_machine(path)
     except ValueError as exc:
@@ -461,7 +453,6 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
 
     See #69179.
     """
-    from hermes_cli.main import _desktop_stamp_path, _purge_electron_build_cache
     if packaged_executable is None or sys.platform != "win32":
         return packaged_executable, False
 
@@ -523,7 +514,6 @@ def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] =
     ``release_dir`` points a stage-and-swap caller at its STAGING output so the
     live app is never touched. Never raises; empty result ⇒ nothing to retry.
     """
-    from hermes_cli.main import _electron_download_cache_dirs
     removed: list[Path] = []
 
     for cache_dir in _electron_download_cache_dirs():
@@ -591,7 +581,6 @@ def _electron_dist_ok(project_root: Path) -> bool:
 
 def _electron_pkg_staged_missing_dist(project_root: Path) -> bool:
     """electron staged (package.json + install.js) but dist missing — blocked postinstall."""
-    from hermes_cli.main import _electron_dist_ok
     electron_dir = _electron_dir(project_root)
     return (
         (electron_dir / "package.json").is_file()
@@ -601,7 +590,6 @@ def _electron_pkg_staged_missing_dist(project_root: Path) -> bool:
 
 def _redownload_electron_dist(project_root: Path, env: dict, *, mirror: Optional[str] = None) -> bool:
     """Best-effort: run electron's install.js to populate dist/ (optional mirror)."""
-    from hermes_cli.main import _electron_dist_ok
     if _electron_dist_ok(project_root):
         return True
 
@@ -630,7 +618,6 @@ def _redownload_electron_dist(project_root: Path, env: dict, *, mirror: Optional
 
 def _try_redownload_electron_dist(project_root: Path, env: dict) -> bool:
     """Canonical download, then fallback mirror unless the user pinned one."""
-    from hermes_cli.main import _redownload_electron_dist
     if _redownload_electron_dist(project_root, env):
         return True
     if env.get("ELECTRON_MIRROR"):
@@ -859,7 +846,6 @@ def _desktop_macos_relaunchable_fixup(
     dotenv load can't reverse it) or an intact Developer ID signature.
     ``release_dir`` signs the STAGED bundle before promotion. Never raises.
     """
-    from hermes_cli.main import _desktop_macos_has_valid_real_signature, _desktop_macos_local_codesign, _desktop_macos_local_signing_identity
     if sys.platform != "darwin":
         return True
     if publisher_signing_configured is None:
@@ -992,7 +978,7 @@ def _desktop_macos_setup_tcc_identity(identity: str = "Hermes Local Signing") ->
     ``desktop.macos_signing_identity`` at it and re-sign the packaged app. TCC grants follow the
     signing identity, so a certificate-anchored one is stable across rebuilds (the yabai/skhd
     mechanism). Idempotent; never raises."""
-    from hermes_cli.main import PROJECT_ROOT, _desktop_macos_relaunchable_fixup, _desktop_packaged_executable
+    from hermes_cli.main import PROJECT_ROOT
     if sys.platform != "darwin":
         print("  (--setup-tcc-identity is macOS-only; skipping)")
         return False
@@ -1125,7 +1111,6 @@ def _desktop_linux_sandbox_helper_is_regular_file(packaged_executable: Path) -> 
 
 def _desktop_linux_sandbox_fixup(packaged_executable: Path) -> bool:
     """Configure Electron's Linux SUID sandbox helper when required."""
-    from hermes_cli.main import _desktop_linux_userns_sandbox_available
     if sys.platform != "linux":
         return True
 
@@ -1254,7 +1239,8 @@ def _register_linux_desktop_entry() -> None:
 
 def _install_desktop_workspace_deps(npm: str, env: dict) -> None:
     """npm-install the desktop workspace; exits on a failure that isn't a repairable missing Electron dist."""
-    from hermes_cli.main import PROJECT_ROOT, _run_npm_install_deterministic
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_web_build import _run_npm_install_deterministic
     from hermes_constants import with_hermes_node_path
     print("→ Installing desktop workspace dependencies...")
     # Managed Node on PATH so npm's child scripts that shell out to bare `node`
@@ -1286,7 +1272,7 @@ def _run_desktop_pack_with_recovery(
     (e.g. macOS signing) leaves it in place and a redownload retry would only
     repeat the same slow failure.
     """
-    from hermes_cli.main import PROJECT_ROOT, _electron_dist_ok, _purge_electron_build_cache, _redownload_electron_dist, _stop_desktop_processes_locking_build
+    from hermes_cli.main import PROJECT_ROOT
     def _staged_exe() -> Optional[Path]:
         return _desktop_packaged_executable_in(staging_dir) if staging_dir else None
 
@@ -1332,7 +1318,6 @@ def _run_desktop_pack_with_recovery(
 
 def _promote_staged_desktop_app(desktop_dir: Path, staging_dir: Path) -> Path:
     """Sign + integrity-gate the STAGED pack, then swap it over the live app. Exits (live app kept) on failure."""
-    from hermes_cli.main import _desktop_macos_relaunchable_fixup
     staged_executable = _desktop_packaged_executable_in(staging_dir)
     # Locally-built apps are ad-hoc signed; make them relaunchable after an
     # in-place self-update. Signs the STAGED bundle so the live app is never
@@ -1360,7 +1345,7 @@ def _promote_staged_desktop_app(desktop_dir: Path, staging_dir: Path) -> Path:
 def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: dict) -> Optional[Path]:
     """npm-install + build the desktop app, stage-and-swapping the packaged tree. Returns the new
     packaged exe (None in source mode). Exits on unrecoverable failure with the previous app kept."""
-    from hermes_cli.main import PROJECT_ROOT, _desktop_packaged_executable, _stop_desktop_processes_locking_build, _write_desktop_build_stamp
+    from hermes_cli.main import PROJECT_ROOT
     _install_desktop_workspace_deps(npm, env)
 
     build_label = "source build" if source_mode else "packaged app"
@@ -1413,7 +1398,6 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
 def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """Electron child env + config-supplied extra flags. ``desktop.*`` config is bridged to env vars
     Electron already reads; an explicit env var wins over config (and over keychain detection)."""
-    from hermes_cli.main import _desktop_launch_options, _detect_linux_password_store
     from hermes_constants import with_hermes_node_path
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
@@ -1448,7 +1432,6 @@ def _check_desktop_skip_build(
     desktop_dir: Path, project_root: Path, *, source_mode: bool, packaged_executable: Optional[Path]
 ) -> None:
     """Validate the pre-built artifact ``--skip-build`` promised; exit with a hint when it's missing."""
-    from hermes_cli.main import _desktop_dist_exists
     if source_mode:
         if not _desktop_dist_exists(desktop_dir):
             print(f"✗ --skip-build --source was passed but no desktop dist found at: {desktop_dir / 'dist'}")
@@ -1472,7 +1455,6 @@ def _check_desktop_skip_build(
 
 def _packaged_desktop_launch_command(packaged_executable: Path) -> list[str]:
     """``[exe, *sandbox flags]`` after the Linux sandbox fixup; exits when the sandbox can't be configured."""
-    from hermes_cli.main import _desktop_linux_sandbox_fixup
     launch_command = [str(packaged_executable)]
     if not _desktop_linux_sandbox_fixup(packaged_executable):
         if _desktop_linux_needs_no_sandbox() and _desktop_linux_sandbox_helper_is_regular_file(packaged_executable):
@@ -1487,7 +1469,8 @@ def _packaged_desktop_launch_command(packaged_executable: Path) -> list[str]:
 
 def cmd_gui(args: argparse.Namespace):
     """Build and launch the native Electron desktop GUI."""
-    from hermes_cli.main import PROJECT_ROOT, _desktop_build_needed, _desktop_dist_exists, _desktop_macos_setup_tcc_identity, _desktop_packaged_executable, _register_linux_desktop_entry, _resolve_node_runtime_npm
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_install_repair import _resolve_node_runtime_npm
     desktop_dir = PROJECT_ROOT / "apps" / "desktop"
     if not (desktop_dir / "package.json").exists():
         print(f"Desktop GUI source not found at: {desktop_dir}")

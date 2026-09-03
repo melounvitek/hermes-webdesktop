@@ -1,8 +1,7 @@
 """``hermes profile`` command — one handler per action, dispatched by ``PROFILE_ACTIONS``.
 
-``hermes_cli.main`` re-exports ``cmd_profile`` so existing callers and monkeypatches on
-``hermes_cli.main.cmd_profile`` keep working. Imports from ``hermes_cli.profiles`` stay
-lazy (inside each handler) so tests can monkeypatch the module attributes.
+Imports from ``hermes_cli.profiles`` stay lazy (inside each handler) so tests can monkeypatch
+the module attributes.
 """
 
 from __future__ import annotations

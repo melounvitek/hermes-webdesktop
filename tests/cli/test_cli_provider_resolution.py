@@ -448,7 +448,7 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: saved_env.__setitem__(key, value))
     monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: saved_env.__setitem__("MODEL", model))
     monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
-    monkeypatch.setattr("hermes_cli.main._save_custom_provider", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hermes_cli.main_provider_setup._save_custom_provider", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "hermes_cli.models.probe_api_models",
         lambda api_key, base_url: {
@@ -510,7 +510,7 @@ def test_model_flow_custom_persists_selected_api_mode(monkeypatch):
         lambda key, value: saved_env.__setitem__(key, value),
     )
     monkeypatch.setattr(
-        "hermes_cli.main._save_custom_provider",
+        "hermes_cli.main_provider_setup._save_custom_provider",
         lambda base_url, api_key="", model="", context_length=None, name=None, api_mode=None, key_env="": captured_provider.update(
             {
                 "base_url": base_url,
@@ -606,7 +606,7 @@ def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_auto_provider_name_localhost():
-    from hermes_cli.main import _auto_provider_name
+    from hermes_cli.main_provider_setup import _auto_provider_name
     assert _auto_provider_name("http://localhost:11434/v1") == "Local (localhost:11434)"
     assert _auto_provider_name("http://127.0.0.1:1234/v1") == "Local (127.0.0.1:1234)"
 
@@ -618,7 +618,7 @@ def test_auto_provider_name_localhost():
 def test_save_custom_provider_uses_provided_name(monkeypatch, tmp_path):
     """When a display name is passed, it should appear in the saved entry."""
     import yaml
-    from hermes_cli.main import _save_custom_provider
+    from hermes_cli.main_provider_setup import _save_custom_provider
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.dump({}))
@@ -640,7 +640,7 @@ def test_save_custom_provider_uses_provided_name(monkeypatch, tmp_path):
 def test_save_custom_provider_references_the_key_instead_of_inlining_it(monkeypatch, tmp_path):
     """With key_env set the entry must not carry the secret (#69449)."""
     import yaml
-    from hermes_cli.main import _save_custom_provider
+    from hermes_cli.main_provider_setup import _save_custom_provider
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.dump({}))

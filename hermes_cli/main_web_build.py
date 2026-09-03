@@ -1,10 +1,7 @@
 """Web UI (dashboard frontend) build: content-hash stamps, npm install/build with idle timeout, bytecode sweep.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching) as before.
-Names that stay in main are imported lazily inside the functions that use them
-(call-time resolution keeps ``hermes_cli.main.<name>`` patches effective and
-avoids an import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import logging
@@ -60,7 +57,7 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
     ``__pycache__`` retains bytecode from the previous revision, and a later process trusts the stale
     ``.pyc`` instead of the fresh source.
     """
-    from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint, _record_bytecode_fingerprint
+    from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint
     try:
         fingerprint = _read_git_revision_fingerprint(PROJECT_ROOT)
         if not fingerprint:
@@ -479,7 +476,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     soft warning (used by ``hermes web``). Returns True when the build succeeded
     or was skipped (no package.json / up to date / stale dist served as fallback).
     """
-    from hermes_cli.main import _resolve_node_runtime_npm, _run_npm_install_deterministic, _run_with_idle_timeout, _web_ui_build_needed, _write_web_ui_build_stamp
+    from hermes_cli.main_install_repair import _resolve_node_runtime_npm
     if not (web_dir / "package.json").exists() or not _web_ui_build_needed(web_dir):
         return True
 

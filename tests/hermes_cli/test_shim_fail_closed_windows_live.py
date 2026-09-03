@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from hermes_cli import main_install_repair
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="live Windows shim-lock E2E"
@@ -83,8 +84,8 @@ def test_strict_quarantine_refuses_against_real_lock(held_shim, monkeypatch):
         lambda cmd, env=None: install_ran.append(cmd),
     )
 
-    with pytest.raises(cli_main.ShimQuarantineError) as exc_info:
-        cli_main._run_quarantined_install(
+    with pytest.raises(main_install_repair.ShimQuarantineError) as exc_info:
+        main_install_repair._run_quarantined_install(
             ["would-be", "uv", "pip", "install"],
             scripts_dir=scripts,
             strict_quarantine=True,
@@ -134,7 +135,7 @@ def test_release_then_strict_quarantine_succeeds(tmp_path, monkeypatch):
         "_run_install_with_heartbeat",
         lambda cmd, env=None: install_ran.append(cmd),
     )
-    cli_main._run_quarantined_install(
+    main_install_repair._run_quarantined_install(
         ["fake"], scripts_dir=scripts, strict_quarantine=True
     )
     assert install_ran == [["fake"]]

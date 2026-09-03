@@ -646,13 +646,10 @@ if _FORCE_IPV4_EARLY:
 
 import logging
 import threading
-import time as _time  # noqa: F401  (tests patch hermes_cli.main._time.sleep)
 from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
 
-# Re-imported so select_provider_and_model and test monkeypatches on
-# hermes_cli.main._model_flow_* keep resolving unchanged.
 from hermes_cli.model_setup_flows import (
     _model_flow_openrouter,
     _model_flow_nous,
@@ -675,8 +672,7 @@ from hermes_cli.model_setup_flows import (
     _model_flow_ai_gateway,
 )
 logger = logging.getLogger(__name__)
-from hermes_cli.main_agent_cmds import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _cmd_skills_trust,
+from hermes_cli.main_agent_cmds import (
     cmd_acp,
     cmd_insights,
     cmd_memory,
@@ -684,230 +680,87 @@ from hermes_cli.main_agent_cmds import (  # noqa: E402,F401  (re-exported; tests
     cmd_skills,
     cmd_tools,
 )
-from hermes_cli.main_platform_setup import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
+from hermes_cli.main_platform_setup import (
     cmd_slack,
     cmd_sync,
     cmd_whatsapp,
     cmd_whatsapp_cloud,
 )
-from hermes_cli.main_dashboard import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _DASHBOARD_SYSTEMD_UNIT,
-    _UpdateOutputStream,
-    _dashboard_cmdline_for_pid,
-    _dashboard_listening,
-    _dashboard_probe_host,
-    _extract_scope_from_cgroup,
+from hermes_cli.main_dashboard import (
     _finalize_update_output,
     _find_stale_dashboard_pids,
-    _get_pid_cgroup_path,
-    _get_systemd_service_for_pid,
     _install_hangup_protection,
     _is_electron_packaged_web_dist,
     _maybe_setup_dashboard_auth_interactively,
-    _parse_dashboard_runtime,
     _read_ssh_session_token_file,
     _report_dashboard_status,
     _resolve_dashboard_web_dist,
-    _respawn_dashboard_processes,
-    _restart_managed_dashboard_service,
     _route_named_profile_dashboard,
-    _try_restart_systemd_service,
 )
-from hermes_cli.main_provider_setup import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _AUX_TASKS,
-    _build_provider_picker_rows,
-    _named_custom_provider_map,
-    _DEFAULT_QWEN_PORTAL_MODELS,
-    _DELEGATION_TASK_DESC,
-    _DELEGATION_TASK_KEY,
-    _DELEGATION_TASK_NAME,
+from hermes_cli.main_dashboard import (  # frozen updater surface: update_cmd*.py resolve these via _m()
+    _respawn_dashboard_processes,
+)
+from hermes_cli.main_provider_setup import (
     _GENERIC_API_KEY_PROVIDERS,
-    _all_aux_tasks,
-    _auto_provider_name,
     _aux_config_menu,
-    _aux_flow_custom_endpoint,
-    _aux_flow_provider_model,
-    _aux_select_for_task,
-    _aux_task_display_name,
+    _build_provider_picker_rows,
     _clear_stale_openai_base_url,
-    _custom_provider_api_key_config_value,
-    _custom_provider_base_url_config_value,
-    _delegation_cfg_as_task,
-    _format_aux_current,
-    _infer_stepfun_region,
     _is_profile_api_key_provider,
-    _prompt_api_key,
-    _prompt_custom_api_mode_selection,
+    _named_custom_provider_map,
     _prompt_provider_choice,
-    _prompt_reasoning_effort_selection,
     _remove_custom_provider,
-    _reset_aux_to_auto,
-    _run_anthropic_oauth_flow,
-    _save_aux_choice,
-    _save_custom_provider,
-    _stepfun_base_url_for_region,
 )
-from hermes_cli.main_install_repair import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    ShimQuarantineError,
-    _LAZY_REFRESH_IMPORT_PROBES,
-    _LAZY_REFRESH_REPAIR_PACKAGES,
-    _PENDING_RENAME_KEY,
-    _PENDING_RENAME_VALUE,
-    _QUARANTINE_GRACE_SECONDS,
-    _UPDATE_REEXEC_ENV,
-    _cleanup_pending_shim_renames,
+from hermes_cli.main_install_repair import (
     _cleanup_quarantined_exes,
+    _recover_from_interrupted_install,
+)
+from hermes_cli.main_install_repair import (  # frozen updater surface: update_cmd*.py resolve these via _m()
+    ShimQuarantineError,
+    _UPDATE_REEXEC_ENV,
     _clear_lazy_refresh_incomplete_marker,
     _clear_marker_file,
     _clear_update_incomplete_marker,
-    _default_venv_install_target,
-    _detect_broken_lazy_refresh_imports,
-    _filter_pending_shim_renames,
-    _hermes_exe_shims,
-    _insert_python_pin,
     _install_python_dependencies_with_optional_fallback,
-    _interpreter_scripts_dir,
     _is_termux_env,
-    _is_uv_command,
     _is_windows,
     _is_windows_npm_path,
     _lazy_refresh_marker_path,
-    _lazy_refresh_repair_specs,
-    _load_console_script_names,
-    _load_installable_optional_extras,
-    _norm_exe_path,
     _pytest_owns_live_checkout,
-    _quarantine_running_hermes_exe,
-    _quarantine_stamp_ms,
-    _recover_core_update_marker_locked,
-    _recover_from_interrupted_install,
-    _recover_lazy_refresh_marker_locked,
     _reexec_dependency_sync_off_windows_shim,
-    _repair_broken_lazy_refresh_imports,
     _repair_venv_via_import_probes,
     _resolve_install_target_python,
     _resolve_node_runtime_npm,
     _resolve_update_branch,
-    _restore_quarantined_exes,
     _run_install_with_heartbeat,
     _run_package_only_install,
-    _run_quarantined_install,
     _update_marker_path,
     _venv_scripts_dir,
     _verify_console_scripts_installed,
     _verify_core_dependencies_installed,
-    _windows_running_hermes_launcher_locked,
-    _windows_shim_in_process_chain,
 )
-from hermes_cli.main_desktop import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _DESKTOP_PREVIOUS_SUFFIX,
-    _DESKTOP_STAGING_PREFIX,
-    _ELECTRON_FALLBACK_MIRROR,
-    _HTML_TAG_WITH_URL,
-    _LINUX_PASSWORD_STORES,
-    _MACHINE_ATTRIBUTE_USER_ENABLED,
-    _MODULE_TAG,
-    _PE_MACHINE_AMD64,
-    _PE_MACHINE_ARM64,
-    _PE_MACHINE_I386,
-    _PE_MACHINE_NAMES,
-    _PE_MACHINE_TO_NAME,
-    _build_desktop_app,
-    _compute_desktop_content_hash,
-    _desktop_backup_unpacked_dir,
-    _desktop_build_needed,
-    _desktop_dist_exists,
-    _desktop_exe_integrity_error,
-    _desktop_launch_options,
-    _desktop_linux_needs_disable_setuid_sandbox,
-    _desktop_linux_needs_no_sandbox,
-    _desktop_linux_sandbox_fixup,
-    _desktop_linux_sandbox_helper_is_regular_file,
-    _desktop_linux_userns_sandbox_available,
-    _desktop_macos_bundle_id,
-    _desktop_macos_has_valid_real_signature,
-    _desktop_macos_local_codesign,
-    _desktop_macos_local_signing_identity,
-    _desktop_macos_relaunchable_fixup,
-    _desktop_macos_setup_tcc_identity,
-    _desktop_packaged_executable,
-    _desktop_packaged_executable_in,
-    _desktop_staging_dir,
-    _desktop_stamp_path,
-    _desktop_unpacked_root,
-    _detect_linux_password_store,
-    _discard_desktop_staging,
-    _electron_dir,
-    _electron_dist_binary,
-    _electron_dist_ok,
-    _electron_download_cache_dirs,
-    _electron_pkg_staged_missing_dist,
-    _ensure_desktop_exe_launchable,
-    _expected_windows_pe_machines,
-    _force_adhoc_macos_signing,
-    _macos_codesigning_identity_valid,
-    _parse_pe_machine,
-    _pe_machine_or_none,
-    _purge_electron_build_cache,
-    _redownload_electron_dist,
-    _register_linux_desktop_entry,
-    _renderer_bundle_dir,
-    _renderer_bundle_torn,
-    _rollback_desktop_from_backup,
-    _stop_desktop_processes_locking_build,
-    _swap_staged_desktop_app,
-    _try_redownload_electron_dist,
-    _windows_native_machine,
-    _windows_native_machine_from_iswow64,
-    _windows_user_runnable_pe_machines,
-    _write_desktop_build_stamp,
+from hermes_cli.main_desktop import (
     cmd_gui,
 )
-from hermes_cli.main_web_build import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _BYTECODE_FINGERPRINT_FILE,
+from hermes_cli.main_desktop import (  # frozen updater surface: update_cmd*.py resolve these via _m()
+    _desktop_build_needed,
+    _desktop_dist_exists,
+    _desktop_macos_relaunchable_fixup,
+    _desktop_packaged_executable,
+)
+from hermes_cli.main_web_build import (
+    _sweep_stale_bytecode_if_checkout_changed,
+)
+from hermes_cli.main_web_build import (  # frozen updater surface: update_cmd*.py resolve these via _m()
     _build_web_ui,
-    _compute_web_ui_content_hash,
-    _do_build_web_ui,
-    _missing_web_build_tool,
     _nixos_build_env,
     _record_bytecode_fingerprint,
     _run_npm_install_deterministic,
-    _run_npm_watching_for_engine_failure,
-    _run_with_idle_timeout,
-    _sweep_stale_bytecode_if_checkout_changed,
-    _web_ui_build_needed,
-    _web_ui_stamp_path,
-    _write_web_ui_build_stamp,
 )
-from hermes_cli.main_tui_launch import (  # noqa: E402,F401  (re-exported; tests patch hermes_cli.main.<name>)
-    _NPM_LOCK_RUNTIME_KEYS,
-    _TUI_BUILD_INPUT_DIRS,
-    _TUI_BUILD_INPUT_FILES,
-    _TUI_BUILD_INPUT_SUFFIXES,
-    _apply_tui_python_env,
-    _ensure_tui_node,
-    _ensure_tui_workspace,
-    _find_bundled_tui,
-    _iter_tui_build_inputs,
+from hermes_cli.main_tui_launch import (
     _launch_tui,
-    _make_tui_argv,
-    _normalize_tui_toolsets,
-    _npm_lifecycle_env,
-    _npm_lock_workspace_closure,
     _pin_kanban_board_env,
-    _print_tui_exit_summary,
-    _read_cgroup_memory_limit,
-    _read_tui_active_session_file,
-    _resolve_tui_heap_mb,
     _resolve_use_tui,
-    _restore_tui_workspace,
-    _safe_tui_cwd,
     _sync_bundled_skills_quietly,
-    _termux_workspace_install_context,
-    _tui_need_npm_install,
-    _tui_need_rebuild,
-    _tui_selected_workspace_keys,
-    _workspace_root,
 )
 
 
@@ -2155,97 +2008,51 @@ def select_provider_and_model(args=None):
         _clear_stale_openai_base_url()
 
 
-# Lazy re-exports (PEP 562 ``__getattr__`` below): tests and callers read
-# ``hermes_cli.main.<name>`` for the sessions/update/dashboard surfaces split
-# out of this file. Importing them eagerly costs ~50-100ms per invocation.
-# patch.object sets a real module attribute, which shadows __getattr__.
-_LAZY_COMMAND_EXPORTS = {
-    "hermes_cli.sessions_cmd": (
-        "_annotate_session_statuses",
-        "_relative_time",
-        "_session_browse_picker",
-        "_session_status_tag",
-        "_size_delta_label",
-        "cmd_sessions",
-    ),
-    "hermes_cli.dashboard_procs": (
-        "_detect_concurrent_hermes_instances",
-        "_kill_stale_dashboard_processes",
-        "_scan_dashboard_processes",
-    ),
+# Frozen updater surface (PEP 562 ``__getattr__`` below): the frozen
+# ``hermes_cli/update_cmd*.py`` files resolve these names via ``_m().<name>``
+# on hermes_cli.main; importing update_cmd eagerly would cost every ``hermes``
+# invocation ~50-100ms, so they resolve on first read. Nothing else may be
+# added here — internal import paths are not a stable API.
+_FROZEN_UPDATER_SURFACE: dict[str, tuple[str, ...]] = {
     "hermes_cli.update_cmd": (
-        "_web_toolchain_roots", "_web_build_toolchain_ready",
-        "_warn_incomplete_gateway_fleet_restart", "_warn_gateway_restart_phase_aborted",
-        "_surviving_gateway_pids_after_failed_restart",
-        "_service_unit_supports_graceful_sigusr1_restart", "_restart_phase_failure_is_incomplete",
-        "_print_update_completion", "_log_only_write", "_for_each_systemd_gateway_unit",
-        "_print_curator_recent_run_notice", "_ORPHAN_RESCUE_REFS_TO_KEEP",
-        "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS", "_UPDATE_CRITICAL_FILES",
         "_abort_dependency_sync_if_self_locked", "_assess_parked_branch_switch",
-        "_atomic_replace_dir", "_capture_active_lazy_features", "_capture_active_tool_dependencies",
-        "_capture_head_sha", "_classify_concurrent_instance", "_cmd_update_check",
-        "_cmd_update_impl", "_cold_start_windows_gateway_after_update",
-        "_defer_update_for_self_lock", "_dependency_sync_would_rewrite",
-        "_detect_self_loaded_native_modules", "_detect_venv_python_processes",
-        "_discard_lockfile_churn", "_discard_stashed_changes", "_ensure_acp_launcher",
-        "_ensure_uv_for_termux", "_filter_non_gateway_concurrent_instances",
-        "_finish_dashboard_update_cleanup", "_fleet_probe_expected_runtimes", "_format_time_ago",
-        "_gateway_prompt", "_get_origin_url", "_handoff_reapable_backend_pids",
-        "_install_psutil_android_compat", "_is_fork", "_ledger_manual_serve_holders",
+        "_capture_active_lazy_features", "_capture_active_tool_dependencies",
+        "_cold_start_windows_gateway_after_update", "_defer_update_for_self_lock",
+        "_dependency_sync_would_rewrite", "_detect_self_loaded_native_modules",
+        "_detect_venv_python_processes", "_discard_stashed_changes",
+        "_filter_non_gateway_concurrent_instances", "_fleet_probe_expected_runtimes",
+        "_get_origin_url", "_handoff_reapable_backend_pids", "_ledger_manual_serve_holders",
         "_ledger_reapable_backend_pids", "_leftover_pausable_gateway_pids", "_npm_lockfile_changed",
-        "_npm_manifests_digest", "_orphaned_desktop_backend_pids", "_park_stashed_changes",
+        "_orphaned_desktop_backend_pids", "_park_stashed_changes",
         "_pause_windows_gateways_for_update", "_print_parked_branch_kept_notice",
-        "_print_parked_branch_skip_warning", "_prune_orphan_rescue_refs",
-        "_purge_stale_hermes_modules", "_record_npm_lockfile_hash", "_refresh_active_lazy_features",
-        "_refresh_active_memory_provider_dependencies", "_refresh_bootstrap_cache_scripts",
-        "_refresh_windows_gateway_launchers", "_relaunch_stopped_serves",
-        "_reload_updated_runtime_modules", "_restore_active_tool_dependencies",
-        "_restore_stashed_changes", "_resume_windows_gateways_after_update",
-        "_run_logged_subprocess", "_run_pre_update_backup", "_stash_local_changes_if_needed",
-        "_stop_process_trees", "_sync_with_upstream_if_needed", "_update_node_dependencies",
-        "_update_via_zip", "_upgrade_pip_before_lazy_refresh", "_validate_critical_files_syntax",
-        "_validate_critical_modules_import", "_venv_launcher_ancestors",
+        "_print_parked_branch_skip_warning", "_purge_stale_hermes_modules",
+        "_refresh_active_lazy_features", "_refresh_active_memory_provider_dependencies",
+        "_refresh_bootstrap_cache_scripts", "_refresh_windows_gateway_launchers",
+        "_relaunch_stopped_serves", "_reload_updated_runtime_modules",
+        "_restore_active_tool_dependencies", "_restore_stashed_changes",
+        "_resume_windows_gateways_after_update", "_run_logged_subprocess", "_run_pre_update_backup",
+        "_stash_local_changes_if_needed", "_stop_process_trees", "_sync_with_upstream_if_needed",
+        "_upgrade_pip_before_lazy_refresh", "_venv_launcher_ancestors",
         "_wait_for_windows_update_gateway_exit", "_warn_orphaned_update_autostashes",
-        "_warn_pending_fleet_restart_on_startup", "_write_marker_file",
         "_write_update_incomplete_marker",
     ),
-}
-
-# name -> (module, attr), plus the model catalog and one back-compat alias
-# (warn-only ``_warn_stale_dashboard_processes`` → the kill helper).
-_LAZY_ATTR_SOURCES: dict[str, tuple[str, str]] = {
-    attr: (module, attr) for module, attrs in _LAZY_COMMAND_EXPORTS.items() for attr in attrs
-}
-_LAZY_ATTR_SOURCES.update({
-    "_PROVIDER_MODELS": ("hermes_cli.models", "_PROVIDER_MODELS"),
-    "_warn_stale_dashboard_processes": (
-        "hermes_cli.dashboard_procs",
-        "_kill_stale_dashboard_processes",
+    "hermes_cli.dashboard_procs": (
+        "_detect_concurrent_hermes_instances", "_kill_stale_dashboard_processes",
     ),
-})
-
-
-def _self():
-    """This module, for attribute access at call time.
-
-    Bare-name globals don't go through PEP 562 __getattr__, so internal callers
-    of lazily re-exported names use _self().<name>; monkeypatches on
-    hermes_cli.main.<name> keep working. ``sys`` is imported locally because
-    some tests patch this module's ``sys`` attribute.
-    """
-    import sys as _sys
-
-    return _sys.modules[__name__]
+}
+_FROZEN_ATTR_SOURCES: dict[str, str] = {
+    attr: module for module, attrs in _FROZEN_UPDATER_SURFACE.items() for attr in attrs
+}
 
 
 def __getattr__(name):
-    """Defer the model-catalog and command-module imports until first read."""
-    source = _LAZY_ATTR_SOURCES.get(name)
-    if source is None:
+    """Resolve the frozen updater surface on first read (see _FROZEN_UPDATER_SURFACE)."""
+    module = _FROZEN_ATTR_SOURCES.get(name)
+    if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
 
-    value = getattr(importlib.import_module(source[0]), source[1])
+    value = getattr(importlib.import_module(module), name)
     globals()[name] = value  # cache: later accesses skip __getattr__
     return value
 
@@ -2419,7 +2226,9 @@ def _update_preflight_handled(args) -> bool:
     if getattr(args, "check", False):
         # --check honors --branch so its answer matches what update would pull.
         branch = _resolve_update_branch(args)
-        _self()._cmd_update_check(
+        from hermes_cli.update_cmd import _cmd_update_check
+
+        _cmd_update_check(
             branch=branch,
             branch_explicit=bool(getattr(args, "branch", None)),
         )
@@ -2452,8 +2261,10 @@ def cmd_update(args):
     # Exit code for the Windows hand-off child's hard exit (see finally); None
     # = not SystemExit-shaped, so real exceptions keep their traceback.
     _update_handoff_exit_code: int | None = None
+    from hermes_cli.update_cmd import _cmd_update_impl
+
     try:
-        _self()._cmd_update_impl(args, gateway_mode=gateway_mode)
+        _cmd_update_impl(args, gateway_mode=gateway_mode)
     except SystemExit as _update_exit:
         # Receipt boundary: the impl has many early sys.exit paths that never
         # reach an inner finalize. Persist any still-open receipt with the real
@@ -2530,7 +2341,7 @@ def _coalesce_session_name_args(argv: list) -> list:
     return result
 
 
-from hermes_cli.profile_cmd import cmd_profile, _render_distribution_plan  # noqa: E402,F401  (re-export)
+from hermes_cli.profile_cmd import cmd_profile
 
 
 def _dashboard_lifecycle_flags(args, token_file) -> None:
@@ -2546,7 +2357,9 @@ def _dashboard_lifecycle_flags(args, token_file) -> None:
             sys.exit(0)
         # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`;
         # it prints outcomes itself. Exit 1 only if every pid was unkillable.
-        _self()._kill_stale_dashboard_processes(reason="requested via --stop")
+        from hermes_cli.dashboard_procs import _kill_stale_dashboard_processes
+
+        _kill_stale_dashboard_processes(reason="requested via --stop")
         sys.exit(1 if _find_stale_dashboard_pids() else 0)
 
 
@@ -3328,6 +3141,13 @@ def _register_plugin_cli_commands(subparsers) -> None:
         logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
 
 
+def _cmd_sessions_lazy(args, **kwargs):
+    """``hermes sessions`` handler; sessions_cmd imports only when the subcommand runs."""
+    from hermes_cli.sessions_cmd import cmd_sessions
+
+    return cmd_sessions(args, **kwargs)
+
+
 def _build_cli_parser():
     """Build the full ``hermes`` argparse tree -> ``(parser, subparsers)``.
 
@@ -3417,8 +3237,7 @@ def _build_cli_parser():
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
     build_computer_use_parser(subparsers)
     build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)
-    # Lazy: sessions_cmd imports only when run; main.cmd_sessions patches keep working.
-    build_sessions_parser(subparsers, cmd_sessions=lambda a, **kw: _self().cmd_sessions(a, **kw))
+    build_sessions_parser(subparsers, cmd_sessions=_cmd_sessions_lazy)
     build_insights_parser(subparsers, cmd_insights=cmd_insights)
     build_monitoring_parser(subparsers, cmd_monitoring=cmd_monitoring)
     build_claw_parser(subparsers, cmd_claw=cmd_claw)
@@ -3522,6 +3341,8 @@ def main():
         except Exception:
             pass
         try:
+            from hermes_cli.update_cmd_fleet import _warn_pending_fleet_restart_on_startup
+
             _warn_pending_fleet_restart_on_startup()
         except Exception:
             pass

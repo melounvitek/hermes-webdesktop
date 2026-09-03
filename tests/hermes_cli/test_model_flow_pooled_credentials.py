@@ -46,7 +46,7 @@ def test_generic_api_key_flow_passes_pool_key_to_existing_key_prompt(monkeypatch
     with (
         patch("hermes_cli.config.get_env_value", return_value=""),
         patch("agent.credential_pool.load_pool", return_value=_AvailablePool()),
-        patch("hermes_cli.main._prompt_api_key", side_effect=capture_prompt),
+        patch("hermes_cli.main_provider_setup._prompt_api_key", side_effect=capture_prompt),
     ):
         _model_flow_api_key_provider({}, "deepseek")
 

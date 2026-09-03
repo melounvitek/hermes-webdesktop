@@ -2,7 +2,7 @@
 persist, confirmation — one copy of each step. Prompt strings and the config keys written (and
 their insertion order = config.yaml key order) are behavior; keep them byte-identical.
 
-hermes_cli.main / auth / config imports are lazy on purpose: main.py re-imports the flows (import
+main_provider_setup / auth / config imports are lazy on purpose: main.py imports the flows (import
 cycle) and tests patch ``hermes_cli.config.load_config`` etc. at call time.
 """
 
@@ -51,7 +51,7 @@ def _ensure_flow_api_key(provider_id: str, pconfig, *, missing_hint=()) -> tuple
 
     Returns ``(existing_key, resolved_key, abort)``.
     """
-    from hermes_cli.main import _prompt_api_key
+    from hermes_cli.main_provider_setup import _prompt_api_key
     existing_key, existing_source = _existing_api_key_for_model_flow(provider_id, pconfig)
     if not existing_key:
         for line in missing_hint:

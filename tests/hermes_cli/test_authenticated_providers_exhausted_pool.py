@@ -8,6 +8,7 @@ the session provider (the "sticky provider fallback pollution" bug).
 """
 
 import pytest
+from hermes_cli import main_provider_setup
 
 
 class _FakePool:
@@ -140,7 +141,7 @@ def test_aux_task_picker_requests_exhausted_pool_visibility(monkeypatch):
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
 
     with pytest.raises(_StopPicker):
-        main._aux_select_for_task("compression")
+        main_provider_setup._aux_select_for_task("compression")
 
     assert recorded.get("for_picker") is True, (
         "aux-task picker must pass for_picker=True so exhausted-pool providers "

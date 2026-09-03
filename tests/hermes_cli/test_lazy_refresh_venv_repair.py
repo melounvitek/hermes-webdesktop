@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import hermes_cli.main as m
+from hermes_cli import main_install_repair
+from hermes_cli import update_cmd
 import pytest
 
 
@@ -26,7 +28,7 @@ def test_detect_returns_none_when_probe_subprocess_fails(tmp_path, monkeypatch):
         "run",
         MagicMock(side_effect=OSError("exec failed")),
     )
-    assert m._detect_broken_lazy_refresh_imports(["uv", "pip"]) is None
+    assert main_install_repair._detect_broken_lazy_refresh_imports(["uv", "pip"]) is None
 
 
 
@@ -61,10 +63,10 @@ def test_repair_runs_force_reinstall_with_pyproject_pins(
         detect_calls["count"] += 1
         return []
 
-    monkeypatch.setattr(m, "_run_package_only_install", fake_install)
-    monkeypatch.setattr(m, "_detect_broken_lazy_refresh_imports", fake_detect)
+    monkeypatch.setattr(main_install_repair, "_run_package_only_install", fake_install)
+    monkeypatch.setattr(main_install_repair, "_detect_broken_lazy_refresh_imports", fake_detect)
 
-    ok = m._repair_broken_lazy_refresh_imports(
+    ok = main_install_repair._repair_broken_lazy_refresh_imports(
         ["uv", "pip"],
         ["PyYAML", "click"],
         env={"VIRTUAL_ENV": str(tmp_path)},
@@ -99,8 +101,8 @@ def test_refresh_repairs_venv_after_lazy_failure(tmp_path, monkeypatch, capsys):
         repair_calls.append(packages)
         return True
 
-    monkeypatch.setattr(m, "_detect_broken_lazy_refresh_imports", lambda *a, **k: ["PyYAML"])
-    monkeypatch.setattr(m, "_repair_broken_lazy_refresh_imports", fake_repair)
+    monkeypatch.setattr(main_install_repair, "_detect_broken_lazy_refresh_imports", lambda *a, **k: ["PyYAML"])
+    monkeypatch.setattr(main_install_repair, "_repair_broken_lazy_refresh_imports", fake_repair)
 
     ok = m._refresh_active_lazy_features(["uv", "pip"], env={"VIRTUAL_ENV": str(tmp_path)})
     out = capsys.readouterr().out
@@ -230,7 +232,7 @@ def test_cmd_update_captures_and_propagates_pre_rebuild_snapshot(
         branch=None,
     )
     with pytest.raises(RestoreReached):
-        m._cmd_update_impl(args, gateway_mode=False)
+        update_cmd._cmd_update_impl(args, gateway_mode=False)
 
     # The repair env is now built via managed_python_env (#83914): third-party
     # UV vars are stripped, managed pins set, then VIRTUAL_ENV re-pointed at

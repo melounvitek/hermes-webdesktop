@@ -1756,7 +1756,7 @@ class TestRunPreUpdateBackup:
         """pre_update_backup: off — an explicit opt-out disables the quick
         snapshot too (it previously ran unconditionally), with no output."""
         self._set_mode(hermes_home, "off")
-        from hermes_cli.main import _run_pre_update_backup
+        from hermes_cli.update_cmd import _run_pre_update_backup
         snap_id = _run_pre_update_backup(Namespace(no_backup=False, backup=False))
         out = capsys.readouterr().out
         assert snap_id is None
@@ -1768,7 +1768,7 @@ class TestRunPreUpdateBackup:
 
     def test_config_full_mode(self, hermes_home, capsys):
         self._set_mode(hermes_home, "full")
-        from hermes_cli.main import _run_pre_update_backup
+        from hermes_cli.update_cmd import _run_pre_update_backup
         snap_id = _run_pre_update_backup(Namespace(no_backup=False, backup=False))
         out = capsys.readouterr().out
         assert snap_id is not None

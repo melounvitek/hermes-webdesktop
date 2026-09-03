@@ -7,6 +7,7 @@ import pytest
 
 from hermes_cli import config as hermes_config
 from hermes_cli import main as hermes_main
+from hermes_cli import update_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +311,7 @@ def test_cmd_update_orphan_history_backs_up_before_reset(monkeypatch, tmp_path, 
     assert "orphan divergence" in out
     assert ref_name in out
     # The user is told the backup is temporary and when it expires.
-    assert f"expires after {hermes_main._ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days" in out
+    assert f"expires after {update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days" in out
 
 
 def test_cmd_update_orphan_rescue_ref_write_failure_message_is_honest(monkeypatch, tmp_path, capsys):
@@ -341,7 +342,7 @@ def test_cmd_update_orphan_rescue_refs_pruned_beyond_keep_limit(monkeypatch, tmp
     # All refs are recent (within the age window) so only the count cap
     # applies — the age-expiry path is exercised separately below.
     now = datetime.now(timezone.utc)
-    total = hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP + 2
+    total = update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP + 2
     stale_refs = [
         "refs/hermes-update-backups/orphan-main-"
         f"{(now - timedelta(hours=total - i)).strftime('%Y%m%d-%H%M%S')}-abc"
@@ -358,9 +359,9 @@ def test_cmd_update_orphan_rescue_refs_pruned_beyond_keep_limit(monkeypatch, tmp
         c for c in recorded
         if "update-ref" in " ".join(str(x) for x in c) and "-d" in c
     ]
-    assert len(delete_calls) == total - hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP
+    assert len(delete_calls) == total - update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP
     deleted_refs = {c[c.index("-d") + 1] for c in delete_calls}
-    assert deleted_refs == set(stale_refs[: total - hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP])
+    assert deleted_refs == set(stale_refs[: total - update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP])
 
 
 def test_cmd_update_orphan_rescue_refs_expired_by_age(monkeypatch, tmp_path, capsys):
@@ -373,7 +374,7 @@ def test_cmd_update_orphan_rescue_refs_expired_by_age(monkeypatch, tmp_path, cap
     _setup_update_mocks(monkeypatch, tmp_path)
 
     now = datetime.now(timezone.utc)
-    old = now - timedelta(days=hermes_main._ORPHAN_RESCUE_REF_MAX_AGE_DAYS + 5)
+    old = now - timedelta(days=update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS + 5)
     fresh = now - timedelta(days=1)
     expired_ref = (
         "refs/hermes-update-backups/orphan-main-"
@@ -415,7 +416,7 @@ def test_prune_orphan_rescue_refs_leaves_unparseable_names_alone():
         return NS(stdout="", stderr="", returncode=0)
 
     with mock_patch.object(hermes_main.subprocess, "run", side_effect=fake_run):
-        hermes_main._prune_orphan_rescue_refs(["git"], ".", "main")
+        update_cmd._prune_orphan_rescue_refs(["git"], ".", "main")
 
     delete_calls = [c for c in calls if "update-ref" in c and "-d" in c]
     assert delete_calls == []
@@ -1225,7 +1226,7 @@ def test_prune_orphan_rescue_refs_with_real_git_unpins_objects(tmp_path):
     assert git("cat-file", "-e", snap_sha, check=False).returncode == 0
 
     # Prune (the ref's 2020 timestamp is way past the age window) → ref gone.
-    hermes_main._prune_orphan_rescue_refs(["git"], tmp_path, "main")
+    update_cmd._prune_orphan_rescue_refs(["git"], tmp_path, "main")
     remaining = git("for-each-ref", "refs/hermes-update-backups/").stdout
     assert old_ref not in remaining
 

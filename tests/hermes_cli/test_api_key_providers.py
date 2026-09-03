@@ -842,14 +842,14 @@ class TestKimiMoonshotModelListIsolation:
     """Moonshot (legacy) users must not see Coding Plan-only models."""
 
     def test_moonshot_list_excludes_coding_plan_only_models(self):
-        from hermes_cli.main import _PROVIDER_MODELS
+        from hermes_cli.models import _PROVIDER_MODELS
         moonshot_models = _PROVIDER_MODELS["moonshot"]
         coding_plan_only = {"kimi-for-coding", "kimi-k2-thinking-turbo"}
         leaked = set(moonshot_models) & coding_plan_only
         assert not leaked, f"Moonshot list contains Coding Plan-only models: {leaked}"
 
     def test_moonshot_list_non_empty(self):
-        from hermes_cli.main import _PROVIDER_MODELS
+        from hermes_cli.models import _PROVIDER_MODELS
         assert len(_PROVIDER_MODELS["moonshot"]) >= 1
 
 
@@ -863,7 +863,7 @@ class TestHuggingFaceModels:
 
     def test_model_lists_match(self):
         """Model lists in main.py and models.py should be identical."""
-        from hermes_cli.main import _PROVIDER_MODELS as main_models
+        from hermes_cli.models import _PROVIDER_MODELS as main_models
         from hermes_cli.models import _PROVIDER_MODELS as models_models
         assert main_models["huggingface"] == models_models["huggingface"]
 

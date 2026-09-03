@@ -22,7 +22,7 @@ def test_run_anthropic_oauth_flow_prefers_claude_code_credentials(tmp_path, monk
         lambda creds: True,
     )
 
-    from hermes_cli.main import _run_anthropic_oauth_flow
+    from hermes_cli.main_provider_setup import _run_anthropic_oauth_flow
 
     save_env_value("ANTHROPIC_TOKEN", "stale-env-token")
     assert _run_anthropic_oauth_flow(save_env_value) is True
@@ -45,7 +45,7 @@ def test_run_anthropic_oauth_flow_manual_token_still_persists(tmp_path, monkeypa
         lambda _prompt="": "sk-ant-oat01-manual-token",
     )
 
-    from hermes_cli.main import _run_anthropic_oauth_flow
+    from hermes_cli.main_provider_setup import _run_anthropic_oauth_flow
 
     assert _run_anthropic_oauth_flow(save_env_value) is True
 

@@ -41,7 +41,7 @@ def _run_nous_flow(config: dict, *, context: str, cancel_exc: tuple, cancel_line
     message is already printed)."""
     from hermes_cli.setup import _info
     try:
-        from hermes_cli.main import _model_flow_nous
+        from hermes_cli.model_setup_flows import _model_flow_nous
         _model_flow_nous(config)
         return True
     except cancel_exc:

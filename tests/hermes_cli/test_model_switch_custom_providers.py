@@ -1560,7 +1560,7 @@ def test_model_flow_named_custom_persists_discovered_models(monkeypatch):
         "hermes_cli.curses_ui.curses_radiolist", lambda *a, **k: 0
     )
     # No-op downstream writes so the test never touches a real config.
-    monkeypatch.setattr("hermes_cli.main._save_custom_provider", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.main_provider_setup._save_custom_provider", lambda *a, **k: None)
     monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda *a, **k: None)
     monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda *a, **k: None)
     monkeypatch.setattr(

@@ -944,7 +944,7 @@ class TestLocalOllamaModelDiscovery:
 
     def test_named_custom_model_flow_discovers_ollama_api_tags(self):
         """Interactive named-custom setup should use tags for a local Ollama root."""
-        from hermes_cli.main import _model_flow_named_custom
+        from hermes_cli.model_setup_flows import _model_flow_named_custom
 
         server, port = _start_fake_ollama_server()
         base_url = f"http://127.0.0.1:{port}/v1"
@@ -960,7 +960,7 @@ class TestLocalOllamaModelDiscovery:
                 "hermes_cli.config.save_config"
             ), patch("hermes_cli.auth._save_model_choice"), patch(
                 "hermes_cli.auth.deactivate_provider"
-            ), patch("hermes_cli.main._save_custom_provider"), patch(
+            ), patch("hermes_cli.main_provider_setup._save_custom_provider"), patch(
                 "hermes_cli.curses_ui.curses_radiolist",
                 side_effect=cancel_after_capturing_models,
             ), patch("builtins.input", return_value="manual-fallback"), patch(
@@ -979,7 +979,7 @@ class TestLocalOllamaModelDiscovery:
 
     def test_named_custom_model_flow_preserves_explicit_ollama_models(self):
         """An explicit named-custom models list should skip live native tags."""
-        from hermes_cli.main import _model_flow_named_custom
+        from hermes_cli.model_setup_flows import _model_flow_named_custom
 
         server, port = _start_fake_ollama_server()
         base_url = f"http://127.0.0.1:{port}/v1"

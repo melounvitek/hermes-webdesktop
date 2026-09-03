@@ -179,7 +179,7 @@ def test_update_via_zip_aborts_before_download_when_dirty(
 
     with patch("urllib.request.urlretrieve") as download:
         with pytest.raises(SystemExit) as exc_info:
-            hermes_main._update_via_zip(SimpleNamespace(branch=None))
+            update_cmd._update_via_zip(SimpleNamespace(branch=None))
 
     assert exc_info.value.code == 1
     download.assert_not_called()

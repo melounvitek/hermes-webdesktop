@@ -1,10 +1,7 @@
 """TUI (ui-tui) launcher: node/npm bootstrap, workspace/rebuild checks, argv/env assembly.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching) as before.
-Names that stay in main are imported lazily inside the functions that use them
-(call-time resolution keeps ``hermes_cli.main.<name>`` patches effective and
-avoids an import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import logging
@@ -520,7 +517,7 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
 
 def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     """TUI: --dev → tsx src; else node dist (HERMES_TUI_DIR prebuilt or esbuild)."""
-    from hermes_cli.main import _ensure_tui_node, _find_bundled_tui, _is_termux_startup_environment, _tui_need_npm_install, _tui_need_rebuild
+    from hermes_cli.main import _is_termux_startup_environment
     _ensure_tui_node()
 
     # Footgun: --dev against a prebuilt bundle that has no source/node_modules.
@@ -643,7 +640,6 @@ def _resolve_tui_heap_mb(default_mb: int = 8192) -> int:
     """V8 ``--max-old-space-size`` (MB) that fits the container: ``default_mb`` when unconstrained,
     else 75% of the cgroup limit (headroom for non-heap RSS + the gateway child), floored at
     1536MB when the container is > 2GB (below that V8 GC-thrashes)."""
-    from hermes_cli.main import _read_cgroup_memory_limit
     limit = _read_cgroup_memory_limit()
     if not limit:
         return default_mb
@@ -720,7 +716,7 @@ def _launch_tui(
     image: Optional[str] = None, worktree: bool = False, checkpoints: bool = False,
     pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False):
     """Replace current process with the TUI."""
-    from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv, _resolve_tui_heap_mb
+    from hermes_cli.main import PROJECT_ROOT
     tui_dir = PROJECT_ROOT / "ui-tui"
 
     import tempfile

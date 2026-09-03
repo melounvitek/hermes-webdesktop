@@ -1,8 +1,7 @@
 """Install/update recovery: interrupted-install markers, lazy-refresh repair, Windows shim quarantine, dependency verification.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching). Names that stay in main
-are imported lazily inside the functions that use them (patch-effective, no import cycle).
+Split out of ``hermes_cli/main.py``. Names that still live in main (``PROJECT_ROOT``, ...)
+are imported lazily inside the functions that use them (avoids an import cycle).
 """
 
 import contextlib
@@ -120,7 +119,6 @@ def _clear_marker_file(path: Path, *, label: str) -> None:
 
 def _clear_update_incomplete_marker() -> None:
     """Remove the interrupted core-install breadcrumb. Never raises."""
-    from hermes_cli.main import _update_marker_path
     _clear_marker_file(_update_marker_path(), label="update-incomplete")
 
 
@@ -184,7 +182,7 @@ def _recover_from_interrupted_install() -> None:
     Concurrent launches race on the shared venv, so an ``O_EXCL`` lockfile lets one process
     recover while the others skip.
     """
-    from hermes_cli.main import PROJECT_ROOT, _clear_update_incomplete_marker, _pytest_owns_live_checkout, _recover_core_update_marker_locked, _update_marker_path
+    from hermes_cli.main import PROJECT_ROOT
     if _pytest_owns_live_checkout(PROJECT_ROOT):
         return
     lazy_marker = _lazy_refresh_marker_path().exists()
@@ -214,7 +212,6 @@ def _recover_from_interrupted_install() -> None:
 
 def _recover_lazy_refresh_marker_locked() -> None:
     """Heal ``.lazy-refresh-incomplete`` via confirmed import-probe repair."""
-    from hermes_cli.main import _default_venv_install_target, _repair_venv_via_import_probes
     print(
         "⚠ A previous lazy-backend refresh may have left the venv unhealthy — "
         "running import-based package repair...")
@@ -245,7 +242,7 @@ def _recover_core_update_marker_locked() -> None:
     install finished — a missing dep outside that probe set would look healthy and
     clear the breadcrumb too early.
     """
-    from hermes_cli.main import PROJECT_ROOT, _clear_update_incomplete_marker, _default_venv_install_target, _repair_venv_via_import_probes
+    from hermes_cli.main import PROJECT_ROOT
     print(
         "⚠ A previous `hermes update` was interrupted mid-install — "
         "finishing dependency installation now...")
@@ -313,7 +310,6 @@ def _windows_shim_in_process_chain() -> Path | None:
 
     See #88838, #89599.
     """
-    from hermes_cli.main import _hermes_exe_shims, _is_windows, _venv_scripts_dir
     if not _is_windows():
         return None
     scripts_dir = _venv_scripts_dir()
@@ -353,7 +349,6 @@ def _windows_shim_in_process_chain() -> Path | None:
 
 def _windows_running_hermes_launcher_locked() -> bool:
     """True when a venv ``hermes*.exe`` shim is this process or an ancestor (best-effort)."""
-    from hermes_cli.main import _windows_shim_in_process_chain
     return _windows_shim_in_process_chain() is not None
 
 
@@ -388,7 +383,6 @@ def _reexec_dependency_sync_off_windows_shim() -> bool:
     holds it open without ``FILE_SHARE_DELETE`` for the whole command, so the quarantine rename is refused
     and uv fails to replace it with os error 32 (#88838, #89599).
     """
-    from hermes_cli.main import _UPDATE_REEXEC_ENV, _windows_shim_in_process_chain
     if os.environ.get(_UPDATE_REEXEC_ENV) == "1":
         return False
     shim = _windows_shim_in_process_chain()
@@ -418,7 +412,7 @@ def _reexec_dependency_sync_off_windows_shim() -> bool:
 
 def _default_venv_install_target() -> tuple[list[str], dict[str, str] | None]:
     """Return ``(install_cmd_prefix, env)`` for the project venv when possible."""
-    from hermes_cli.main import PROJECT_ROOT, _is_termux_env
+    from hermes_cli.main import PROJECT_ROOT
     try:
         from hermes_cli.managed_uv import ensure_uv
         uv_bin = ensure_uv()
@@ -489,7 +483,7 @@ def _is_windows() -> bool:
 
 def _venv_scripts_dir() -> Path | None:
     """Return the venv Scripts directory if we're running inside the project venv."""
-    from hermes_cli.main import PROJECT_ROOT, _is_windows
+    from hermes_cli.main import PROJECT_ROOT
     from hermes_constants import project_venv_dir, venv_bin_dir
     venv_dir = project_venv_dir(PROJECT_ROOT)
     if venv_dir is None:
@@ -501,7 +495,6 @@ def _venv_scripts_dir() -> Path | None:
 def _hermes_exe_shims(scripts_dir: Path) -> list[Path]:
     """Entry-point shims uv may rewrite during ``pip install -e .`` — Windows .exe launchers
     only; POSIX shims are plain scripts replaced atomically."""
-    from hermes_cli.main import _is_windows
     if not _is_windows():
         return []
     names = set(_load_console_script_names()) or {"hermes", "hermes-agent", "hermes-acp"}
@@ -543,7 +536,6 @@ def _quarantine_running_hermes_exe(
 
     See #87331.
     """
-    from hermes_cli.main import _hermes_exe_shims, _is_windows
     moved: list[tuple[Path, Path]] = []
     if not _is_windows():
         return moved
@@ -608,7 +600,6 @@ def _cleanup_pending_shim_renames(scripts_dir: Path) -> int:
     """Drop reboot renames older Hermes versions queued for our shims: ``MOVEFILE_DELAY_UNTIL_REBOOT``
     fallbacks outlive the update that queued them and move away whatever sits at the shim path
     at next boot — even a shim a later repair just wrote. Needs elevation; a no-op otherwise."""
-    from hermes_cli.main import _filter_pending_shim_renames, _hermes_exe_shims, _is_windows
     if not _is_windows():
         return 0
     try:
@@ -671,7 +662,6 @@ def _run_quarantined_install(
 
     See #87331.
     """
-    from hermes_cli.main import ShimQuarantineError, _quarantine_running_hermes_exe, _restore_quarantined_exes, _run_install_with_heartbeat
     moved: list[tuple[Path, Path]] = []
     failed: list[str] = []
     if scripts_dir is not None:
@@ -721,7 +711,6 @@ def _cleanup_quarantined_exes(scripts_dir: Path | None = None) -> None:
 
     Deleting it converts a one-rename recovery into a full reinstall. See #75584.
     """
-    from hermes_cli.main import _QUARANTINE_GRACE_SECONDS, _cleanup_pending_shim_renames, _is_windows, _quarantine_stamp_ms, _venv_scripts_dir
     if not _is_windows():
         return
     scripts_dir = scripts_dir if scripts_dir is not None else _venv_scripts_dir()
@@ -766,7 +755,6 @@ def _run_package_only_install(cmd: list[str], *, env: dict[str, str] | None = No
 
     See #57828.
     """
-    from hermes_cli.main import _run_install_with_heartbeat
     _run_install_with_heartbeat(cmd, env=env)
 
 
@@ -800,7 +788,6 @@ def _detect_broken_lazy_refresh_imports(
     """Probe lazy-refresh packages via real imports: ``[]`` all clean, ``[dist, ...]`` failures,
     ``None`` when the probe could not run (no venv Python, subprocess failure, non-zero exit)
     — *indeterminate*, not healthy."""
-    from hermes_cli.main import _resolve_install_target_python
     venv_python = _resolve_install_target_python(install_cmd_prefix, env)
     if venv_python is None:
         return None
@@ -849,7 +836,6 @@ def _repair_broken_lazy_refresh_imports(
     install_cmd_prefix: list[str], packages: list[str], *, env: dict[str, str] | None = None
 ) -> bool:
     """Force-reinstall ``packages`` and re-probe imports. Never raises."""
-    from hermes_cli.main import _detect_broken_lazy_refresh_imports, _run_package_only_install
     if not packages:
         return True
     specs = _lazy_refresh_repair_specs(packages)
@@ -872,7 +858,6 @@ def _repair_venv_via_import_probes(
 
     See #57828.
     """
-    from hermes_cli.main import _detect_broken_lazy_refresh_imports, _repair_broken_lazy_refresh_imports
     broken = _detect_broken_lazy_refresh_imports(install_cmd_prefix, env=env)
     if broken is None:
         print("  ⚠ Import probes unavailable — cannot confirm venv package health.")
@@ -919,7 +904,6 @@ def _interpreter_scripts_dir() -> Path | None:
 
     See #76105.
     """
-    from hermes_cli.main import _is_windows
     from hermes_constants import venv_bin_dir
     exe = Path(sys.executable)
     # sys.executable lives IN the bin/Scripts dir; parent.parent is the env root.
@@ -944,7 +928,6 @@ def _install_python_dependencies_with_optional_fallback(
     installs (#71510 fixed the ZIP path, #83335 fixed lazy-deps; this closes the shared helper for the
     remaining callers).
     """
-    from hermes_cli.main import _insert_python_pin, _interpreter_scripts_dir, _is_windows, _load_installable_optional_extras, _run_quarantined_install, _venv_scripts_dir, _verify_console_scripts_installed, _verify_core_dependencies_installed
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
 
     # Only uv needs the explicit pin; pip resolves the target from sys.executable itself.
@@ -1015,7 +998,6 @@ def _verify_console_scripts_installed(
     The symptom is ``hermes-agent.exe`` and ``hermes-acp.exe`` present but ``hermes.exe`` missing, so
     ``hermes`` drops off PATH even though the install reported success (issue #52931).
     """
-    from hermes_cli.main import _is_windows, _run_quarantined_install, _venv_scripts_dir
     if not _is_windows():
         return
     scripts_dir = _venv_scripts_dir()
@@ -1079,7 +1061,6 @@ def _verify_core_dependencies_installed(
     install. The final state is a warning, not a hard failure, so one broken-on-PyPI dep can't
     block an otherwise-successful update — but the partial install is visible where it happened.
     """
-    from hermes_cli.main import _is_windows, _resolve_install_target_python, _run_install_with_heartbeat, _run_quarantined_install, _venv_scripts_dir
     project = _pyproject_project("dep verification: failed to read pyproject.toml: %s")
     if project is None:
         return
@@ -1143,7 +1124,6 @@ def _resolve_install_target_python(
     install_cmd_prefix: list[str], env: dict[str, str] | None) -> Path | None:
     """Python interpreter the install targeted: ``VIRTUAL_ENV`` from ``env`` for the
     ``[uv, pip]`` shape, else ``install_cmd_prefix[0]`` for ``[sys.executable, -m, pip]``."""
-    from hermes_cli.main import _is_windows
     if env and "VIRTUAL_ENV" in env:
         from hermes_constants import venv_python_path
         candidate = venv_python_path(Path(env["VIRTUAL_ENV"]), windows=_is_windows())
@@ -1179,7 +1159,6 @@ def _resolve_node_runtime_npm() -> str | None:
 
     On WSL/Linux ``shutil.which("npm")`` may resolve a Windows npm exposed through PATH interop. See #30271.
     """
-    from hermes_cli.main import _is_windows
     from hermes_constants import find_node_executable
     npm = find_node_executable("npm")
     if _is_windows():

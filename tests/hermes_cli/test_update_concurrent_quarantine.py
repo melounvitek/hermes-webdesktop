@@ -18,6 +18,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hermes_cli import main as cli_main
+from hermes_cli import dashboard_procs
+from hermes_cli import main_install_repair
+from hermes_cli import update_cmd
 
 
 # Tests in this module either exercise the REAL _detect_concurrent_hermes_instances
@@ -94,7 +97,7 @@ def _fake_psutil_with_parent_chain(
     )
 
 
-@patch.object(cli_main, "_is_windows", return_value=True)
+@patch.object(main_install_repair, "_is_windows", return_value=True)
 def test_detect_concurrent_parents_call_robust_to_one_bad_hop(_winp, tmp_path):
     """The launcher shim is still excluded even when an ancestor exe is unreadable.
 
@@ -143,13 +146,13 @@ def test_detect_concurrent_parents_call_robust_to_one_bad_hop(_winp, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@patch.object(cli_main, "_is_windows", return_value=True)
+@patch.object(main_install_repair, "_is_windows", return_value=True)
 def test_quarantine_succeeds_first_attempt(_winp, tmp_path):
     """When the rename works immediately, no warning, single rename pair returned."""
     shim = tmp_path / "hermes.exe"
     shim.write_bytes(b"old")
 
-    pairs = cli_main._quarantine_running_hermes_exe(tmp_path)
+    pairs = main_install_repair._quarantine_running_hermes_exe(tmp_path)
 
     assert len(pairs) == 1
     orig, quarantine = pairs[0]
@@ -159,7 +162,7 @@ def test_quarantine_succeeds_first_attempt(_winp, tmp_path):
     assert not shim.exists()
 
 
-@patch.object(cli_main, "_is_windows", return_value=True)
+@patch.object(main_install_repair, "_is_windows", return_value=True)
 def test_quarantine_reports_a_lock_it_cannot_break(_winp, tmp_path, capsys, monkeypatch):
     """Every retry failed: name the likely culprits, queue nothing for reboot."""
     shim = tmp_path / "hermes.exe"
@@ -168,11 +171,11 @@ def test_quarantine_reports_a_lock_it_cannot_break(_winp, tmp_path, capsys, monk
     def always_fails(self, target):
         raise OSError(32, "The process cannot access the file (simulated lock)")
 
-    monkeypatch.setattr(cli_main, "_hermes_exe_shims", lambda d: [shim])
+    monkeypatch.setattr(main_install_repair, "_hermes_exe_shims", lambda d: [shim])
     with patch.object(Path, "rename", always_fails), patch(
         "time.sleep", lambda *_a, **_k: None
     ):
-        pairs = cli_main._quarantine_running_hermes_exe(tmp_path)
+        pairs = main_install_repair._quarantine_running_hermes_exe(tmp_path)
 
     captured = capsys.readouterr().out.lower()
 
@@ -898,7 +901,7 @@ def test_classify_concurrent_instance_recognises_gateway_runtimes(monkeypatch):
     ]
     for argv in cases:
         monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({77: argv}))
-        result = cli_main._classify_concurrent_instance(77)
+        result = update_cmd._classify_concurrent_instance(77)
         assert result == "gateway", f"expected gateway for {argv!r}, got {result!r}"
 
 
@@ -917,7 +920,7 @@ def test_classify_concurrent_instance_recognises_non_gateways(monkeypatch):
     ]
     for argv in cases:
         monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({77: argv}))
-        result = cli_main._classify_concurrent_instance(77)
+        result = update_cmd._classify_concurrent_instance(77)
         assert result == "non-gateway", (
             f"expected non-gateway for {argv!r}, got {result!r}"
         )
@@ -927,13 +930,13 @@ def test_classify_concurrent_instance_unknown_on_psutil_error(monkeypatch):
     """Unreadable cmdline (process gone / AccessDenied) → ``unknown`` —
     treated as non-gateway by the filter, so the gate still aborts."""
     monkeypatch.setitem(sys.modules, "psutil", _fake_psutil_classify({}))
-    assert cli_main._classify_concurrent_instance(4242) == "unknown"
+    assert update_cmd._classify_concurrent_instance(4242) == "unknown"
 
 
 def test_classify_concurrent_instance_unknown_without_psutil(monkeypatch):
     """Missing psutil entirely → ``unknown``, never a crash."""
     monkeypatch.setitem(sys.modules, "psutil", None)
-    assert cli_main._classify_concurrent_instance(4242) == "unknown"
+    assert update_cmd._classify_concurrent_instance(4242) == "unknown"
 
 
 def test_filter_non_gateway_concurrent_instances_splits(monkeypatch):
@@ -1016,7 +1019,7 @@ def test_update_gate_skips_abort_when_only_concurrent_is_gateway(
     ) as mock_backup:
         mock_backup.side_effect = RuntimeError("reached post-gate body")
         with pytest.raises(RuntimeError, match="reached post-gate body"):
-            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
+            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
 
     mock_filter.assert_called_once()
     mock_backup.assert_called_once()
@@ -1048,7 +1051,7 @@ def test_update_gate_still_aborts_on_non_gateway_concurrent(
         cli_main, "_run_pre_update_backup"
     ) as mock_backup:
         with pytest.raises(SystemExit) as excinfo:
-            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
+            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
 
     assert excinfo.value.code == 2
     mock_backup.assert_not_called()
@@ -1093,7 +1096,7 @@ def test_update_impl_refuses_before_terminating_gateway_ancestor(
         status_mod, "terminate_pid"
     ) as terminate:
         with pytest.raises(SystemExit) as excinfo:
-            cli_main._cmd_update_impl(_update_args(), gateway_mode=False)
+            update_cmd._cmd_update_impl(_update_args(), gateway_mode=False)
 
     assert excinfo.value.code == 2
     terminate.assert_not_called()

@@ -261,7 +261,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     # cmd_sessions lives in hermes_cli/sessions_cmd.py; the parser is threaded
     # in because the fallthrough branch calls sessions_parser.print_help().
     # main() injects a lazy indirection so sessions_cmd is only imported when
-    # the subcommand runs and monkeypatches on hermes_cli.main.cmd_sessions work.
+    # the subcommand runs.
     def _dispatch_sessions(_args, *, sessions_parser=sessions_parser):
         return cmd_sessions(_args, sessions_parser=sessions_parser)
 

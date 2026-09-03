@@ -112,7 +112,7 @@ class TestPreUpdateBackupIntegrityGuard:
     def test_healthy_db_stays_quiet(self, hermes_home, capsys):
         from argparse import Namespace
 
-        from hermes_cli.main import _run_pre_update_backup
+        from hermes_cli.update_cmd import _run_pre_update_backup
 
         snap_id = _run_pre_update_backup(Namespace(no_backup=False, backup=False))
         out = capsys.readouterr().out
@@ -126,7 +126,7 @@ class TestPreUpdateBackupIntegrityGuard:
         from argparse import Namespace
 
         import hermes_cli.backup as backup_mod
-        from hermes_cli.main import _run_pre_update_backup
+        from hermes_cli.update_cmd import _run_pre_update_backup
 
         real_create = backup_mod.create_quick_snapshot
 

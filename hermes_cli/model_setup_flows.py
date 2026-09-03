@@ -77,7 +77,7 @@ def _model_flow_openrouter(config, current_model=""):
 def _model_flow_ai_gateway(config, current_model=""):
     """Vercel AI Gateway provider: ensure API key, then pick model with pricing."""
     from hermes_constants import AI_GATEWAY_BASE_URL
-    from hermes_cli.main import _prompt_api_key
+    from hermes_cli.main_provider_setup import _prompt_api_key
     from hermes_cli.auth import PROVIDER_REGISTRY, _prompt_model_selection
     from hermes_cli.config import get_env_value
     pconfig = PROVIDER_REGISTRY["ai-gateway"]
@@ -396,7 +396,7 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
 
 def _model_flow_qwen_oauth(_config, current_model=""):
     """Qwen OAuth provider: reuse local Qwen CLI login, then pick model."""
-    from hermes_cli.main import _DEFAULT_QWEN_PORTAL_MODELS
+    from hermes_cli.main_provider_setup import _DEFAULT_QWEN_PORTAL_MODELS
     from hermes_cli.auth import (
         get_qwen_auth_status, resolve_qwen_runtime_credentials, _prompt_model_selection, DEFAULT_QWEN_BASE_URL)
     from hermes_cli.models import fetch_api_models
@@ -522,7 +522,7 @@ def _copilot_obtain_token() -> bool:
 
 def _model_flow_copilot(config, current_model=""):
     """GitHub Copilot flow using env vars, gh CLI, or OAuth device code."""
-    from hermes_cli.main import _prompt_reasoning_effort_selection
+    from hermes_cli.main_provider_setup import _prompt_reasoning_effort_selection
     from hermes_cli.setup import _current_reasoning_effort, _set_reasoning_effort
     from hermes_cli.auth import PROVIDER_REGISTRY, resolve_api_key_provider_credentials
     from hermes_cli.config import load_config
@@ -651,7 +651,7 @@ def _model_flow_kimi(config, current_model=""):
 
 def _model_flow_stepfun(config, current_model=""):
     """StepFun Step Plan flow with region-specific endpoints."""
-    from hermes_cli.main import _infer_stepfun_region, _prompt_provider_choice, _stepfun_base_url_for_region
+    from hermes_cli.main_provider_setup import _infer_stepfun_region, _prompt_provider_choice, _stepfun_base_url_for_region
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.config import save_env_value
     from hermes_cli.models import _PROVIDER_MODELS, fetch_api_models
@@ -762,7 +762,7 @@ def _select_zai_endpoint(current_base: str) -> str:
     """Picker for the official Z.AI endpoints (``ZAI_ENDPOINTS`` in ``hermes_cli.auth``, kept in
     sync with the probe list) plus a custom-proxy option. Returns the selected base URL;
     *current_base* on cancel/error."""
-    from hermes_cli.main import _prompt_provider_choice
+    from hermes_cli.main_provider_setup import _prompt_provider_choice
     from hermes_cli.auth import ZAI_ENDPOINTS
     options = [(label, url) for _, url, _, label in ZAI_ENDPOINTS]
     normalized_current = (current_base or "").strip().rstrip("/")
@@ -970,7 +970,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
 
 def _anthropic_authenticate() -> bool:
     """Interactive Anthropic auth (OAuth subscription or API key). False = flow must stop."""
-    from hermes_cli.main import _run_anthropic_oauth_flow
+    from hermes_cli.main_provider_setup import _run_anthropic_oauth_flow
     from hermes_cli.config import save_env_value, save_anthropic_api_key
     _say("", "  Choose authentication method:", "", "    1. Claude Pro/Max subscription (OAuth login)",
          "    2. Anthropic API key (pay-per-token)", "    3. Cancel", "")
