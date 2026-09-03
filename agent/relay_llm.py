@@ -651,12 +651,11 @@ def _logical_parent(
             handle = turn.logical_llm_calls.get(request_id)
             if handle is None:
                 call_role = str((metadata or {}).get("call_role") or "primary")
-                handle = runtime.run_in_session(
+                handle = turn.logical_llm_calls[request_id] = runtime.run_in_session(
                     session, runtime.relay.scope.push, relay_runtime.LOGICAL_LLM_SCOPE,
                     runtime.relay.ScopeType.Function, handle=parent, input={},
                     metadata=relay_runtime.runtime_metadata(runtime.runtime_id, **{"hermes.call_role": call_role}),
                 )
-                turn.logical_llm_calls[request_id] = handle
     return turn, handle, request_id
 
 
@@ -670,6 +669,11 @@ def _complete_logical(
     lease = turn.lease
     if not isinstance(lease.host, relay_runtime.RelayRuntime):
         return
+    output = {"outcome": outcome}
+    if model_name is not None and provider_name is not None:
+        output.update({"model": model_name, "provider": provider_name})
+        if response_model_name is not None:
+            output["response_model"] = response_model_name
     with turn.finalize_lock:
         with turn.logical_llm_lock:
             if turn.logical_llm_calls.get(request_id) is not handle:
@@ -677,24 +681,17 @@ def _complete_logical(
         if lease.session is None:
             return
         try:
-            output = {"outcome": outcome}
-            if model_name is not None and provider_name is not None:
-                output.update({"model": model_name, "provider": provider_name})
-                if response_model_name is not None:
-                    output["response_model"] = response_model_name
-            callback = (operation_lease or lease.host).run_in_session
-            callback(
+            (operation_lease or lease.host).run_in_session(
                 lease.session, relay_runtime.pop_relay_scope, lease.host.relay, handle,
                 output=output, metadata=relay_runtime.runtime_metadata(lease.host.runtime_id),
             )
         except Exception:
-            # Provider result is authoritative; retain the handle so turn finalization
-            # can retry cleanup.
+            # Provider result is authoritative; retain the handle so turn finalization can retry.
             logger.warning("Hermes Relay logical LLM finalization failed", exc_info=True)
             return
         with turn.logical_llm_lock:
             if turn.logical_llm_calls.get(request_id) is handle:
-                turn.logical_llm_calls.pop(request_id, None)
+                del turn.logical_llm_calls[request_id]
 
 
 def _is_cancellation(error: BaseException) -> bool:
