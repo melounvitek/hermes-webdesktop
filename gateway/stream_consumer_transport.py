@@ -25,33 +25,25 @@ class StreamTransportMixin:
     async def _edit_message(self, *, message_id: str, content: str, finalize: bool = False):
         """Edit via the adapter, passing routing metadata when supported."""
         # Contract: adapters must accept finalize= even when False (test-guarded).
-        kwargs = {
-            "chat_id": self.chat_id,
-            "message_id": message_id,
-            "content": content,
-            "finalize": finalize,
-        }
+        kwargs = dict(chat_id=self.chat_id, message_id=message_id, content=content,
+                      finalize=finalize)
         if self.metadata:
             try:
                 params = inspect.signature(self.adapter.edit_message).parameters
                 if "metadata" in params or any(
-                    param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
-                ):
+                    param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
                     kwargs["metadata"] = self.metadata
             except (TypeError, ValueError):
                 pass
         return await self.adapter.edit_message(**kwargs)
 
-    async def _send_seed_frame(self):
-        """Open a native stream with an empty seed frame (typing indicator before any token)."""
-        return await self.adapter.send_stream_frame(
-            "", chat_id=self.chat_id, reply_to=self._initial_reply_to_id, turn_id=self._turn_id,
-        )
-
     async def _try_seed_frame(self, fail_log: str, *, exc_info: bool = False) -> bool:
-        """_send_seed_frame() as a bool; a raise logs ``fail_log`` at DEBUG (with the error
-        formatted in, or the traceback when ``exc_info``) and reads as False."""
-        return await self._try_frame(self._send_seed_frame(), fail_log, exc_info=exc_info)
+        """Open a native stream with an empty seed frame (typing indicator before any token) as a
+        bool; a raise logs ``fail_log`` at DEBUG (error formatted in, or the traceback when
+        ``exc_info``) and reads as False."""
+        seed = self.adapter.send_stream_frame(
+            "", chat_id=self.chat_id, reply_to=self._initial_reply_to_id, turn_id=self._turn_id)
+        return await self._try_frame(seed, fail_log, exc_info=exc_info)
 
     @staticmethod
     async def _try_frame(coro, fail_log: str, *, exc_info: bool = False) -> bool:
@@ -68,12 +60,8 @@ class StreamTransportMixin:
     async def _send_frame(self, text: str, *, finalize: bool):
         """One native-stream frame; every frame carries the same chat/reply/turn routing."""
         return await self.adapter.send_stream_frame(
-            text,
-            finalize=finalize,
-            chat_id=self.chat_id,
-            reply_to=self._initial_reply_to_id,
-            turn_id=self._turn_id,
-        )
+            text, finalize=finalize, chat_id=self.chat_id, reply_to=self._initial_reply_to_id,
+            turn_id=self._turn_id)
 
     def _close_native_state(self) -> None:
         """Mark the native stream closed (next content re-seeds or falls back)."""
@@ -103,17 +91,14 @@ class StreamTransportMixin:
 
     def _stale_preview_ids(self, *, segment_only: bool = False) -> set:
         """Preview ids a fresh final replaces; ``segment_only`` spares finalized preambles."""
-        stale_ids = set(
-            self._segment_preview_message_ids if segment_only else self._preview_message_ids
-        )
+        stale_ids = set(self._segment_preview_message_ids if segment_only
+                        else self._preview_message_ids)
         if self._message_id and self._message_id != "__no_edit__":
             stale_ids.add(str(self._message_id) if segment_only else self._message_id)
         return stale_ids
 
-    async def _delete_previews(
-        self, stale_ids, *, skip=None, label: str, retry_on_false: bool = False,
-        skip_sentinel: bool = True,
-    ) -> None:
+    async def _delete_previews(self, stale_ids, *, skip=None, label: str,
+                               retry_on_false: bool = False, skip_sentinel: bool = True) -> None:
         """Best-effort delete of stale previews; never the message just sent (``skip``)."""
         delete_fn = getattr(self.adapter, "delete_message", None)
         if delete_fn is None:
@@ -133,39 +118,31 @@ class StreamTransportMixin:
         """cfg.transport "draft"/"auto" → the adapter's supports_draft_streaming probe
         ("draft" logs the downgrade); "edit"/"off" → False."""
         transport = (self.cfg.transport or "edit").lower()
-        if transport in ("edit", "off"):
-            return False
         # MagicMock test adapters default to edit.
-        if not isinstance(self.adapter, _BasePlatformAdapter):
+        if transport in ("edit", "off") or not isinstance(self.adapter, _BasePlatformAdapter):
             return False
         probe_kwargs = dict(chat_type=self.cfg.chat_type or None, metadata=self.metadata)
         try:
             try:
                 # Per-chat probe (relay adapters resolve through the CHAT's
                 # descriptor); older adapters without the kwarg keep the legacy probe.
-                supported = self.adapter.supports_draft_streaming(
-                    chat_id=self.chat_id, **probe_kwargs,
-                )
+                supported = self.adapter.supports_draft_streaming(chat_id=self.chat_id,
+                                                                  **probe_kwargs)
             except TypeError:
                 supported = self.adapter.supports_draft_streaming(**probe_kwargs)
         except Exception:
             logger.debug("supports_draft_streaming probe raised", exc_info=True)
             supported = False
         if not supported and transport == "draft":
-            logger.debug(
-                "Draft streaming requested but unsupported (chat=%s, type=%r) — "
-                "falling back to edit",
-                self.chat_id, self.cfg.chat_type,
-            )
+            logger.debug("Draft streaming requested but unsupported (chat=%s, type=%r) — "
+                         "falling back to edit", self.chat_id, self.cfg.chat_type)
         return bool(supported)
 
     def _resolve_native_streaming(self) -> bool:
         """Native streaming (send_stream_frame for ALL frames): a BasePlatformAdapter with
         class-level SUPPORTS_NATIVE_STREAMING and a truthy supports_native_streaming probe."""
-        if not (
-            isinstance(self.adapter, _BasePlatformAdapter)
-            and getattr(type(self.adapter), "SUPPORTS_NATIVE_STREAMING", False)
-        ):
+        if not (isinstance(self.adapter, _BasePlatformAdapter)
+                and getattr(type(self.adapter), "SUPPORTS_NATIVE_STREAMING", False)):
             return False
         probe = getattr(self.adapter, "supports_native_streaming", None)
         if probe is None:
@@ -185,21 +162,16 @@ class StreamTransportMixin:
             return False
         try:
             result = await self.adapter.send_draft(
-                chat_id=self.chat_id,
-                draft_id=self._draft_id,
-                content=text,
-                metadata=self._draft_metadata(),
-            )
+                chat_id=self.chat_id, draft_id=self._draft_id, content=text,
+                metadata=self._draft_metadata())
         except Exception as e:
             logger.debug("send_draft raised, disabling draft transport for this run: %s", e)
         else:
             if getattr(result, "success", False):
                 self._last_sent_text = text  # parity with the edit-based no-op skip
                 return True
-            logger.debug(
-                "send_draft returned success=False, disabling draft transport: %s",
-                getattr(result, "error", "unknown"),
-            )
+            logger.debug("send_draft returned success=False, disabling draft transport: %s",
+                         getattr(result, "error", "unknown"))
         self._draft_failures += 1
         self._use_draft_streaming = False
         return False
@@ -214,10 +186,8 @@ class StreamTransportMixin:
             return
         try:
             await self.adapter.abandon_open_draft(
-                self.chat_id,
-                self._last_sent_text or self._clean_for_display(self._accumulated),
-                metadata=self._draft_metadata(),
-            )
+                self.chat_id, self._last_sent_text or self._clean_for_display(self._accumulated),
+                metadata=self._draft_metadata())
         except Exception as e:
             logger.debug("abandon_open_draft failed (best-effort): %s", e)
 
@@ -243,11 +213,8 @@ class StreamTransportMixin:
         """Record the primary id plus any continuation ids from an oversized split."""
         raw = getattr(result, "raw_response", None) or {}
         raw_ids = raw.get("message_ids") if isinstance(raw, dict) else None
-        for mid in (
-            getattr(result, "message_id", None),
-            *(getattr(result, "continuation_message_ids", None) or ()),
-            *(raw_ids or ()),
-        ):
+        for mid in (getattr(result, "message_id", None),
+                    *(getattr(result, "continuation_message_ids", None) or ()), *(raw_ids or ())):
             self._track_preview_id(mid)
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
@@ -283,8 +250,7 @@ class StreamTransportMixin:
         stale_ids = self._stale_preview_ids()
         try:
             result = await self.adapter.send(
-                chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True),
-            )
+                chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True))
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
             return False
@@ -312,8 +278,7 @@ class StreamTransportMixin:
             self._message_created_ts = None
 
     async def _send_or_edit(
-        self, text: str, *, finalize: bool = False, is_turn_final: bool = True,
-    ) -> bool:
+        self, text: str, *, finalize: bool = False, is_turn_final: bool = True) -> bool:
         """Send or edit the streaming message; True if delivered.  ``finalize`` marks the
         last edit.  Transport order: native frame → draft frame → edit existing → first
         send; a transport returns None to fall through to the next."""
@@ -328,22 +293,15 @@ class StreamTransportMixin:
         if not visible_stripped:
             # Native streams MUST still get a finalize frame (placeholder) to close
             # the thinking bubble, e.g. for a MEDIA-only response.
-            if (
-                finalize and self._use_native_streaming and self._native_stream_opened
-                and await self._try_frame(
-                    self._send_frame("✅", finalize=True), "Finalize empty stream failed: %s",
-                )
-            ):
+            if (finalize and self._use_native_streaming and self._native_stream_opened
+                    and await self._try_frame(self._send_frame("✅", finalize=True),
+                                              "Finalize empty stream failed: %s")):
                 self._mark_final_delivered()
             return True  # cursor-only / whitespace-only update
         # Don't open a new message for 1-2 tokens + cursor (rapid tool-calling): if
         # the cursor-strip edit is then rate-limited, "X ▉" stays forever.
-        if (
-            self._message_id is None
-            and self.cfg.cursor
-            and self.cfg.cursor in text
-            and len(visible_stripped) < self._MIN_NEW_MSG_CHARS
-        ):
+        if (self._message_id is None and self.cfg.cursor and self.cfg.cursor in text
+                and len(visible_stripped) < self._MIN_NEW_MSG_CHARS):
             return True  # too short for a standalone message — accumulate more
 
         # A failed native/draft transport disables itself and falls through so the
@@ -353,9 +311,8 @@ class StreamTransportMixin:
             if ok is not None:
                 return ok
         if self._use_draft_streaming and self._message_id is None:
-            ok = await self._draft_push(
-                text, pre_fence_text, finalize=finalize, is_turn_final=is_turn_final,
-            )
+            ok = await self._draft_push(text, pre_fence_text, finalize=finalize,
+                                        is_turn_final=is_turn_final)
             if ok is not None:
                 return ok
         self._last_edit_overflowed = False
@@ -369,9 +326,8 @@ class StreamTransportMixin:
             logger.error("Stream send/edit error: %s", e)
             return False
 
-    async def _native_push(
-        self, text: str, *, finalize: bool, is_turn_final: bool,
-    ) -> Optional[bool]:
+    async def _native_push(self, text: str, *, finalize: bool, is_turn_final: bool,
+                           ) -> Optional[bool]:
         """Native streaming: every frame goes through send_stream_frame(); lazy re-seed after
         a boundary.  None when native was disabled (seed/frame failure) → caller falls through."""
         if not self._native_stream_opened and text:
@@ -381,11 +337,8 @@ class StreamTransportMixin:
             self._native_stream_opened = True
             self._awaiting_reopen_after_boundary = False
             # Paired with the boundary-finalize INFO: typing-reappear latency.
-            logger.info(
-                "[latency] Re-opened native stream after boundary "
-                "(turn=%s, waited for first delta)",
-                self._turn_id,
-            )
+            logger.info("[latency] Re-opened native stream after boundary "
+                        "(turn=%s, waited for first delta)", self._turn_id)
 
         # WeCom renders each finalize as a separate bubble: only the turn-final and
         # boundaries close the stream, not segment breaks.
@@ -399,10 +352,8 @@ class StreamTransportMixin:
         # stream-final-ack-timeout-duplicate.md).  A definitive failure rolls it back.
         if finalize:
             self._mark_final_delivered(record=text)  # recorded: stale frame can't suppress
-        if await self._try_frame(
-            self._send_frame(text, finalize=finalize),
-            "send_stream_frame raised, disabling native streaming: %s",
-        ):
+        if await self._try_frame(self._send_frame(text, finalize=finalize),
+                                 "send_stream_frame raised, disabling native streaming: %s"):
             self._already_sent = True
             self._last_sent_text = text
             self._native_last_pushed_len = len(text)
@@ -430,9 +381,8 @@ class StreamTransportMixin:
                 logger.debug("Native fallback: failed to finalize stream: %s", e)
         return None
 
-    async def _draft_push(
-        self, text: str, pre_fence_text: str, *, finalize: bool, is_turn_final: bool,
-    ) -> Optional[bool]:
+    async def _draft_push(self, text: str, pre_fence_text: str, *, finalize: bool,
+                          is_turn_final: bool) -> Optional[bool]:
         """Draft frame while no message_id exists; None = not applicable / drafts just failed.
         Skipped when finalizing (the real send clears the draft), EXCEPT stream-is-the-message
         adapters keep ONE stream per turn: a segment-break finalize must not become a real
@@ -455,11 +405,8 @@ class StreamTransportMixin:
     async def _first_send(self, text: str, *, finalize: bool) -> bool:
         """First send, threaded to the user's message (correct topic/thread)."""
         result = await self.adapter.send(
-            chat_id=self.chat_id,
-            content=text,
-            reply_to=self._initial_reply_to_id,
-            metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize),
-        )
+            chat_id=self.chat_id, content=text, reply_to=self._initial_reply_to_id,
+            metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize))
         if not result.success:
             self._edit_supported = False
             return False
@@ -488,29 +435,24 @@ class StreamTransportMixin:
         # CLASS (MagicMock auto-creates attrs) plus instance __dict__ (test doubles).
         has_prefers_hook = (
             hasattr(type(self.adapter), "prefers_fresh_final_streaming")
-            or "prefers_fresh_final_streaming" in getattr(self.adapter, "__dict__", {})
-        )
+            or "prefers_fresh_final_streaming" in getattr(self.adapter, "__dict__", {}))
         prefers_fresh = self._adapter_prefers_fresh_final(text)  # probed every edit (hook contract)
         if finalize and (
             prefers_fresh or (not has_prefers_hook and self._should_send_fresh_final())
         ) and await self._try_fresh_final(text, is_turn_final=is_turn_final):
             return True
-        result = await self._edit_message(
-            message_id=self._message_id, content=text, finalize=finalize,
-        )
+        result = await self._edit_message(message_id=self._message_id, content=text,
+                                          finalize=finalize)
         if not result.success:
-            return await self._on_edit_failure(
-                result, text, finalize=finalize, is_turn_final=is_turn_final,
-            )
+            return await self._on_edit_failure(result, text, finalize=finalize,
+                                               is_turn_final=is_turn_final)
         self._already_sent = True
         self._track_preview_ids_from_result(result)
         # Oversized edit split across continuations: message_id is now the LAST
         # continuation, which holds only the final chunk — retarget edits and reset
         # skip-if-same.  getattr keeps SimpleNamespace test mocks working.
-        if (
-            (getattr(result, "continuation_message_ids", ()) or ())
-            and result.message_id and result.message_id != self._message_id
-        ):
+        if ((getattr(result, "continuation_message_ids", ()) or ())
+                and result.message_id and result.message_id != self._message_id):
             self._last_edit_overflowed = True
             self._turn_split_delivery = True
             self._adopt_message_id(str(result.message_id))
@@ -528,18 +470,13 @@ class StreamTransportMixin:
         self._edit_supported = False
         self._already_sent = True
 
-    async def _on_edit_failure(
-        self, result, text: str, *, finalize: bool, is_turn_final: bool,
-    ) -> bool:
+    async def _on_edit_failure(self, result, text: str, *, finalize: bool, is_turn_final: bool,
+                               ) -> bool:
         """Classify a failed edit: partial overflow, flood backoff, or fallback mode.  Always
         False; the caller's finalize path may still deliver the tail."""
         turn_final = finalize and is_turn_final
-        if (
-            turn_final
-            and self.cfg.cursor
-            and self._last_sent_text.endswith(self.cfg.cursor)
-            and self._visible_prefix() == text
-        ):
+        if (turn_final and self.cfg.cursor and self._last_sent_text.endswith(self.cfg.cursor)
+                and self._visible_prefix() == text):
             # Cosmetic final edit was rate-limited but the full answer is already on
             # screen (cursor stuck): mark delivered so the gateway doesn't send it
             # twice, and record the on-screen payload.
@@ -549,9 +486,8 @@ class StreamTransportMixin:
         if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
             # Some overflow chunks landed but not the whole response: preserve the
             # visible prefix so got_done sends the missing tail.
-            self._message_id = str(
-                raw_response.get("last_message_id") or result.message_id or self._message_id
-            )
+            self._message_id = str(raw_response.get("last_message_id") or result.message_id
+                                   or self._message_id)
             delivered_prefix = raw_response.get("delivered_prefix")
             if isinstance(delivered_prefix, str) and delivered_prefix:
                 self._last_sent_text = delivered_prefix
@@ -570,13 +506,10 @@ class StreamTransportMixin:
         if self._is_flood_error(result):
             self._flood_strikes += 1
             self._current_edit_interval = min(self._current_edit_interval * 2, 10.0)
-            logger.debug(
-                "Flood control on edit (strike %d/%d), backoff interval → %.1fs",
-                self._flood_strikes, self._MAX_FLOOD_STRIKES, self._current_edit_interval,
-            )
+            logger.debug("Flood control on edit (strike %d/%d), backoff interval → %.1fs",
+                         self._flood_strikes, self._MAX_FLOOD_STRIKES, self._current_edit_interval)
             immediate_final_fallback = (
-                turn_final and getattr(self.adapter, "FALLBACK_ON_FINAL_EDIT_FLOOD", False) is True
-            )
+                turn_final and getattr(self.adapter, "FALLBACK_ON_FINAL_EDIT_FLOOD", False) is True)
             if self._flood_strikes < self._MAX_FLOOD_STRIKES and not immediate_final_fallback:
                 self._last_edit_time = time.monotonic()  # honor the new interval
                 return False
