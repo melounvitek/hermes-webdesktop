@@ -1,6 +1,6 @@
-"""``hermes kanban boards …`` — board directories, the ``current`` pointer and
-``board.json``. Filesystem-only, so every action works before ``kanban init``
-and must ignore the shared ``--board`` task-routing override.
+"""``hermes kanban boards …`` — board directories, the ``current`` pointer and ``board.json``.
+Filesystem-only, so every action works before ``kanban init`` and must ignore the shared
+``--board`` task-routing override.
 """
 
 from __future__ import annotations
@@ -12,10 +12,8 @@ from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_output import _err, _fmt_counts, _json_out
 
 
-
 def _dispatch_boards(args: argparse.Namespace) -> int:
-    """``hermes kanban boards <action>`` — filesystem-only (board dirs, the
-    ``current`` pointer, ``board.json``), so it works before ``kanban init``."""
+    """``hermes kanban boards <action>`` — filesystem-only, so it works before ``kanban init``."""
     sub = getattr(args, "boards_action", None) or "list"
     handler = _BOARD_HANDLERS.get(sub)
     if handler is None:
@@ -24,15 +22,12 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
 
 
 def _board_task_counts(slug: str) -> dict[str, int]:
-    """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
+    """``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
-        path = kb.kanban_db_path(board=slug)
-        if not path.exists():
+        if not kb.kanban_db_path(board=slug).exists():
             return {}
         with kb.connect_closing(board=slug) as conn:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
+            rows = conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").fetchall()
         return {r["status"]: int(r["n"]) for r in rows}
     except Exception:
         return {}
@@ -67,12 +62,9 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
     print(f"{'':2s}  {'SLUG':24s}  {'NAME':28s}  COUNTS")
     for b in boards:
         marker = "●" if b["is_current"] else " "
-        name = b.get("name") or ""
-        if b.get("archived"):
-            name += " [archived]"
+        name = (b.get("name") or "") + (" [archived]" if b.get("archived") else "")
         print(f"{marker:2s}  {b['slug']:24s}  {name:28s}  {_fmt_counts(b['counts'] or {}, '(empty)')}")
-    print()
-    print(f"Current board: {current}")
+    print(f"\nCurrent board: {current}")
     if len(boards) > 1:
         print("Switch boards with `hermes kanban boards switch <slug>`.")
     return 0
@@ -84,17 +76,12 @@ def _cmd_boards_create(args: argparse.Namespace) -> int:
         return rc
     already = kb.board_exists(normed) and normed != kb.DEFAULT_BOARD
     meta = kb.create_board(
-        normed,
-        name=args.name,
-        description=args.description,
-        icon=args.icon,
-        color=args.color,
+        normed, name=args.name, description=args.description, icon=args.icon, color=args.color,
         default_workdir=args.default_workdir,
     )
-    verb = "already exists" if already else "created"
-    print(f"Board {meta['slug']!r} {verb}.")
-    print(f"  Display name: {meta.get('name', '')}")
-    print(f"  DB path:      {meta['db_path']}")
+    print(f"Board {meta['slug']!r} {'already exists' if already else 'created'}.\n"
+          f"  Display name: {meta.get('name', '')}\n"
+          f"  DB path:      {meta['db_path']}")
     if getattr(args, "switch", False):
         kb.set_current_board(meta["slug"])
         print(f"  Switched to {meta['slug']!r}.")
@@ -104,17 +91,16 @@ def _cmd_boards_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_boards_rm(args: argparse.Namespace) -> int:
-    # `boards delete <slug>` (alias) never sets args.delete because --delete
-    # belongs to the 'rm' subparser only; treat the alias as `rm --delete`.
+    # `boards delete <slug>` (alias) never sets args.delete because --delete belongs to the 'rm'
+    # subparser only; treat the alias as `rm --delete`.
     force_delete = getattr(args, "delete", False) or getattr(args, "boards_action", "") == "delete"
     try:
         res = kb.remove_board(args.slug, archive=not force_delete)
     except ValueError as exc:
         return _err(f"kanban boards rm: {exc}")
     if res["action"] == "archived":
-        print(f"Board {res['slug']!r} archived → {res['new_path']}")
-        print("Recover by moving the directory back to "
-              "<root>/kanban/boards/<slug>/.")
+        print(f"Board {res['slug']!r} archived → {res['new_path']}\n"
+              "Recover by moving the directory back to <root>/kanban/boards/<slug>/.")
     else:
         print(f"Board {res['slug']!r} deleted.")
     return 0
@@ -138,13 +124,11 @@ def _cmd_boards_show(args: argparse.Namespace) -> int:
     current = kb.get_current_board()
     meta = kb.read_board_metadata(current)
     counts = _board_task_counts(current)
-    print(f"Current board: {current}")
-    print(f"  Display name: {meta.get('name', '')}")
+    print(f"Current board: {current}\n  Display name: {meta.get('name', '')}")
     if meta.get("description"):
         print(f"  Description:  {meta['description']}")
-    print(f"  DB path:      {meta['db_path']}")
-    print(f"  Tasks:        {sum(counts.values())} total"
-          + (f" ({_fmt_counts(counts)})" if counts else ""))
+    print(f"  DB path:      {meta['db_path']}\n"
+          f"  Tasks:        {sum(counts.values())} total" + (f" ({_fmt_counts(counts)})" if counts else ""))
     return 0
 
 
@@ -161,8 +145,7 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
     normed, rc = _board_slug_arg(args, "set-default-workdir", must_exist=True)
     if rc:
         return rc
-    meta = kb.write_board_metadata(normed, default_workdir=args.path)
-    new_val = meta.get("default_workdir")
+    new_val = kb.write_board_metadata(normed, default_workdir=args.path).get("default_workdir")
     if new_val:
         print(f"Board {normed!r} default workdir set to {new_val!r}.")
     else:
@@ -178,23 +161,19 @@ def _cmd_boards_export(args: argparse.Namespace) -> int:
     output = args.output or f"{slug}.tar.gz"
     try:
         res = kanban_transfer.export_board(
-            slug,
-            output,
-            include_attachments=not args.no_attachments,
-            include_logs=args.include_logs,
+            slug, output, include_attachments=not args.no_attachments, include_logs=args.include_logs,
         )
     except (OSError, ValueError) as exc:
         return _err(f"kanban boards export: {exc}")
-
     if _json_out(args, res):
         return 0
     counts = res["counts"]
-    print(f"Exported board {res['board']!r} → {res['archive']}")
-    print(f"  Size:        {format_bytes(res['size'])}")
-    print(f"  Tasks:       {counts['tasks']}")
-    print(f"  Comments:    {counts['task_comments']}")
-    print(f"  Attachments: {counts['attachment_files']}")
-    print("Import it with `hermes kanban boards import <archive>`.")
+    print(f"Exported board {res['board']!r} → {res['archive']}\n"
+          f"  Size:        {format_bytes(res['size'])}\n"
+          f"  Tasks:       {counts['tasks']}\n"
+          f"  Comments:    {counts['task_comments']}\n"
+          f"  Attachments: {counts['attachment_files']}\n"
+          "Import it with `hermes kanban boards import <archive>`.")
     return 0
 
 
@@ -202,19 +181,15 @@ def _cmd_boards_import(args: argparse.Namespace) -> int:
     from hermes_cli import kanban_transfer
 
     try:
-        res = kanban_transfer.import_board(
-            args.archive, args.as_slug, activate=args.switch
-        )
+        res = kanban_transfer.import_board(args.archive, args.as_slug, activate=args.switch)
     except (OSError, ValueError) as exc:
         return _err(f"kanban boards import: {exc}")
-
     if _json_out(args, res):
         return 0
     print(f"Imported board {res['board']!r} ({res['name']}).")
     if res["renamed"]:
         print(f"  Renamed from {res['requested_board']!r} — that slug was taken.")
-    print(f"  Path:  {res['path']}")
-    print(f"  Tasks: {res['counts']['tasks']}")
+    print(f"  Path:  {res['path']}\n  Tasks: {res['counts']['tasks']}")
     for warning in res["warnings"]:
         print(f"  Note:  {warning}")
     if res["activated"]:

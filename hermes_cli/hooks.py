@@ -10,12 +10,10 @@ from typing import Any, Dict, List
 def hooks_command(args) -> None:
     """Entry point for ``hermes hooks`` — dispatches to the requested action."""
     sub = getattr(args, "hooks_action", None)
-
     if not sub:
         print("Usage: hermes hooks {list|test|revoke|doctor}")
         print("Run 'hermes hooks --help' for details.")
         return
-
     handler = _ACTIONS.get(sub)
     if handler is None:
         print(f"Unknown hooks subcommand: {sub}")
@@ -48,22 +46,18 @@ def _cmd_list(_args) -> None:
         by_event: Dict[str, List] = {}
         for spec in specs:
             by_event.setdefault(spec.event, []).append(spec)
-
         approved = {
             (e.get("event"), e.get("command"))
             for e in shell_hooks.load_allowlist().get("approvals", [])
             if isinstance(e, dict)
         }
-
         print(f"Configured shell hooks ({len(specs)} total):\n")
-
         for event in sorted(by_event):
             print(f"  [{event}]")
             for spec in by_event[event]:
                 is_approved = (spec.event, spec.command) in approved
                 status = "✓ allowed" if is_approved else "✗ not allowlisted"
                 print(f"    - {spec.command}{_matcher_part(spec)} (timeout={spec.timeout}s, {status})")
-
                 entry = shell_hooks.allowlist_entry_for(spec.event, spec.command) if is_approved else None
                 if entry and entry.get("approved_at"):
                     print(f"      approved_at: {entry['approved_at']}")
@@ -91,8 +85,8 @@ def _matcher_part(obj) -> str:
 
 
 def _mtime_drift(shell_hooks, spec, entry) -> tuple[bool | None, str, str]:
-    """Return ``(drift, mtime_at, mtime_now)``: drift is True if the script changed since approval,
-    False if unchanged, None when either mtime is unknown."""
+    """``(drift, mtime_at, mtime_now)``: True if the script changed since approval, False if
+    unchanged, None when either mtime is unknown."""
     mtime_now = shell_hooks.script_mtime_iso(spec.command)
     mtime_at = entry.get("script_mtime_at_approval")
     if not (mtime_now and mtime_at):
@@ -106,120 +100,65 @@ def _mtime_drift(shell_hooks, spec, entry) -> tuple[bool | None, str, str]:
 # test
 # ---------------------------------------------------------------------------
 
-# Synthetic kwargs matching the real invoke_hook() call sites — these are
-# passed verbatim to agent.shell_hooks.run_once(), which routes them through
-# the same _serialize_payload() that production firings use.  That way the
-# stdin a script sees under `hermes hooks test` and `hermes hooks doctor`
-# is identical in shape to what it will see at runtime.
+# Synthetic kwargs matching the real invoke_hook() call sites. They go verbatim to
+# agent.shell_hooks.run_once() -> the same _serialize_payload() production uses, so the
+# stdin a script sees under `hooks test` / `hooks doctor` has the runtime shape.
 _DEFAULT_PAYLOADS = {
     "pre_tool_call": {
-        "tool_name": "terminal",
-        "args": {"command": "echo hello"},
-        "session_id": "test-session",
-        "task_id": "test-task",
-        "tool_call_id": "test-call",
+        "tool_name": "terminal", "args": {"command": "echo hello"},
+        "session_id": "test-session", "task_id": "test-task", "tool_call_id": "test-call",
     },
     "post_tool_call": {
-        "tool_name": "terminal",
-        "args": {"command": "echo hello"},
-        "session_id": "test-session",
-        "task_id": "test-task",
-        "tool_call_id": "test-call",
-        "result": '{"output": "hello"}',
-        "duration_ms": 42,
+        "tool_name": "terminal", "args": {"command": "echo hello"},
+        "session_id": "test-session", "task_id": "test-task", "tool_call_id": "test-call",
+        "result": '{"output": "hello"}', "duration_ms": 42,
     },
     "pre_llm_call": {
-        "session_id": "test-session",
-        "user_message": "What is the weather?",
-        "conversation_history": [],
-        "is_first_turn": True,
-        "model": "gpt-4",
-        "platform": "cli",
+        "session_id": "test-session", "user_message": "What is the weather?",
+        "conversation_history": [], "is_first_turn": True, "model": "gpt-4", "platform": "cli",
     },
-    "post_llm_call": {
-        "session_id": "test-session",
-        "model": "gpt-4",
-        "platform": "cli",
-    },
+    "post_llm_call": {"session_id": "test-session", "model": "gpt-4", "platform": "cli"},
     "pre_verify": {
-        "session_id": "test-session",
-        "platform": "cli",
-        "model": "gpt-4",
-        "coding": True,
-        "attempt": 0,
-        "final_response": "All done — the change is applied.",
+        "session_id": "test-session", "platform": "cli", "model": "gpt-4", "coding": True,
+        "attempt": 0, "final_response": "All done — the change is applied.",
         "changed_paths": ["src/app.tsx"],
     },
     "on_session_start": {"session_id": "test-session"},
     "on_session_end": {
-        "session_id": "test-session",
-        "task_id": "test-task",
-        "turn_id": "test-turn",
-        "completed": True,
-        "failed": False,
-        "interrupted": False,
-        "turn_exit_reason": "text_response(stop)",
-        "model": "gpt-4",
-        "platform": "cli",
+        "session_id": "test-session", "task_id": "test-task", "turn_id": "test-turn",
+        "completed": True, "failed": False, "interrupted": False,
+        "turn_exit_reason": "text_response(stop)", "model": "gpt-4", "platform": "cli",
     },
     "on_session_finalize": {"session_id": "test-session"},
     "on_session_reset": {"session_id": "test-session"},
     "pre_api_request": {
-        "session_id": "test-session",
-        "task_id": "test-task",
-        "platform": "cli",
-        "model": "claude-sonnet-4-6",
-        "provider": "anthropic",
-        "base_url": "https://api.anthropic.com",
-        "api_mode": "anthropic_messages",
-        "api_call_count": 1,
-        "message_count": 4,
-        "tool_count": 12,
-        "approx_input_tokens": 2048,
-        "request_char_count": 8192,
-        "max_tokens": 4096,
+        "session_id": "test-session", "task_id": "test-task", "platform": "cli",
+        "model": "claude-sonnet-4-6", "provider": "anthropic",
+        "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages",
+        "api_call_count": 1, "message_count": 4, "tool_count": 12,
+        "approx_input_tokens": 2048, "request_char_count": 8192, "max_tokens": 4096,
     },
     "post_api_request": {
-        "session_id": "test-session",
-        "task_id": "test-task",
-        "platform": "cli",
-        "model": "claude-sonnet-4-6",
-        "provider": "anthropic",
-        "base_url": "https://api.anthropic.com",
-        "api_mode": "anthropic_messages",
-        "api_call_count": 1,
-        "api_duration": 1.234,
-        "started_at": 1756000000.0,
-        "ended_at": 1756000001.234,
-        "first_chunk_at": 1756000000.512,
-        "finish_reason": "stop",
-        "message_count": 4,
-        "response_model": "claude-sonnet-4-6",
+        "session_id": "test-session", "task_id": "test-task", "platform": "cli",
+        "model": "claude-sonnet-4-6", "provider": "anthropic",
+        "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages",
+        "api_call_count": 1, "api_duration": 1.234,
+        "started_at": 1756000000.0, "ended_at": 1756000001.234, "first_chunk_at": 1756000000.512,
+        "finish_reason": "stop", "message_count": 4, "response_model": "claude-sonnet-4-6",
         "usage": {"input_tokens": 2048, "output_tokens": 512},
-        "assistant_content_chars": 1200,
-        "assistant_tool_call_count": 0,
-        # Per-advisor metrics on a MoA turn, None otherwise. MoA returns only
-        # the aggregator's response, so without this an observer cannot see the
-        # fan-out or price it at each advisor's own model.
+        "assistant_content_chars": 1200, "assistant_tool_call_count": 0,
+        # Per-advisor metrics on a MoA turn, None otherwise: MoA returns only the aggregator's
+        # response, so without this an observer cannot see or price the fan-out.
         "moa_references": None,
     },
     "subagent_stop": {
-        "parent_session_id": "parent-sess",
-        "child_role": None,
-        "child_summary": "Synthetic summary for hooks test",
-        "child_status": "completed",
-        "tool_call_history": [
-            {
-                "tool_name": "write_file",
-                "tool_input": {
-                    "argument_keys": ["content", "path"],
-                    "targets": {"path": "/tmp/report.txt"},
-                },
-                "input_bytes": 128,
-                "output_bytes": 32,
-                "status": "ok",
-            }
-        ],
+        "parent_session_id": "parent-sess", "child_role": None,
+        "child_summary": "Synthetic summary for hooks test", "child_status": "completed",
+        "tool_call_history": [{
+            "tool_name": "write_file",
+            "tool_input": {"argument_keys": ["content", "path"], "targets": {"path": "/tmp/report.txt"}},
+            "input_bytes": 128, "output_bytes": 32, "status": "ok",
+        }],
         "duration_ms": 1234,
     },
 }
@@ -236,14 +175,11 @@ def _cmd_test(args) -> None:
         print(f"Valid events: {', '.join(sorted(VALID_HOOKS))}")
         return
 
-    # Synthetic kwargs in the same shape invoke_hook() would pass.  Merged
-    # with --for-tool (overrides tool_name) and --payload-file (extra kwargs).
+    # Synthetic kwargs merged with --for-tool (overrides tool_name) and --payload-file (extra kwargs).
     payload = dict(_DEFAULT_PAYLOADS.get(event, {"session_id": "test-session"}))
     for_tool = getattr(args, "for_tool", None)
-
     if for_tool:
         payload["tool_name"] = for_tool
-
     if getattr(args, "payload_file", None):
         try:
             custom = json.loads(Path(args.payload_file).read_text(encoding="utf-8"))
@@ -256,10 +192,8 @@ def _cmd_test(args) -> None:
             return
 
     specs = [s for s in shell_hooks.iter_configured_hooks(load_config()) if s.event == event]
-
     if for_tool:
         specs = [s for s in specs if s.event not in {"pre_tool_call", "post_tool_call"} or s.matches_tool(for_tool)]
-
     if not specs:
         print(f"No shell hooks configured for event: {event}")
         if for_tool:
@@ -269,8 +203,7 @@ def _cmd_test(args) -> None:
     print(f"Firing {len(specs)} hook(s) for event '{event}':\n")
     for spec in specs:
         print(f"  → {spec.command}")
-        result = shell_hooks.run_once(spec, payload)
-        _print_run_result(result)
+        _print_run_result(shell_hooks.run_once(spec, payload))
         print()
 
 
@@ -281,14 +214,11 @@ def _print_run_result(result: Dict[str, Any]) -> None:
     if result.get("timed_out"):
         print(f"      ✗ timed out after {result['elapsed_seconds']}s")
         return
-
     print(f"      exit={result.get('returncode')}  elapsed={result.get('elapsed_seconds', 0)}s")
-
     for stream in ("stdout", "stderr"):
         text = (result.get(stream) or "").strip()
         if text:
             print(f"      {stream}: {_truncate(text, 400)}")
-
     parsed = result.get("parsed")
     if parsed:
         print(f"      parsed (Hermes wire shape): {json.dumps(parsed)}")
@@ -301,7 +231,7 @@ def _truncate(s: str, n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# revoke
+# revoke / doctor
 # ---------------------------------------------------------------------------
 
 def _cmd_revoke(args) -> None:
@@ -318,34 +248,25 @@ def _cmd_revoke(args) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# doctor
-# ---------------------------------------------------------------------------
-
 def _cmd_doctor(_args) -> None:
     from hermes_cli.config import load_config
     from agent import shell_hooks
 
     specs = shell_hooks.iter_configured_hooks(load_config())
-
     if not specs:
         print("No shell hooks configured — nothing to check.")
         return
-
     print(f"Checking {len(specs)} configured shell hook(s)...\n")
-
     problems = 0
     for spec in specs:
         print(f"  [{spec.event}] {spec.command}")
         problems += _doctor_one(spec, shell_hooks)
         print()
-
     print(f"{problems} issue(s) found.  Fix before relying on these hooks." if problems else "All shell hooks look healthy.")
 
 
 def _doctor_one(spec, shell_hooks) -> int:
     problems = 0
-
     # 1. Script exists and is executable
     if shell_hooks.script_is_executable(spec.command):
         print("      ✓ script exists and is executable")
@@ -353,7 +274,6 @@ def _doctor_one(spec, shell_hooks) -> int:
         problems += 1
         print("      ✗ script missing or not executable "
               "(chmod +x the file, or fix the path)")
-
     # 2. Allowlist status
     entry = shell_hooks.allowlist_entry_for(spec.event, spec.command)
     if entry:
@@ -362,7 +282,6 @@ def _doctor_one(spec, shell_hooks) -> int:
         problems += 1
         print("      ✗ not allowlisted — hook will NOT fire at runtime "
               "(run with --accept-hooks once, or confirm at the TTY prompt)")
-
     # 3. Mtime drift
     if entry and entry.get("script_mtime_at_approval"):
         drift, mtime_at, mtime_now = _mtime_drift(shell_hooks, spec, entry)
@@ -373,19 +292,15 @@ def _doctor_one(spec, shell_hooks) -> int:
                   f"then `hermes hooks revoke` + re-approve to refresh")
         elif drift is False:
             print("      ✓ script unchanged since approval")
-
-    # 4. Produces valid JSON for a synthetic payload — only when the entry
-    # is already allowlisted.  Otherwise `hermes hooks doctor` would execute
-    # every script listed in a freshly-pulled config before the user has
-    # reviewed them, which directly contradicts the documented workflow
-    # ("spot newly-added hooks *before they register*").
+    # 4. JSON smoke test on a synthetic payload — ONLY when already allowlisted. Otherwise doctor
+    # would execute every script in a freshly-pulled config before the user reviewed it, which
+    # contradicts the documented workflow ("spot newly-added hooks *before they register*").
     if not entry:
         print("      ℹ skipped JSON smoke test — not allowlisted yet. "
               "Approve the hook first (via TTY prompt or --accept-hooks), "
               "then re-run `hermes hooks doctor`.")
     elif shell_hooks.script_is_executable(spec.command):
-        payload = _DEFAULT_PAYLOADS.get(spec.event, {"extra": {}})
-        result = shell_hooks.run_once(spec, payload)
+        result = shell_hooks.run_once(spec, _DEFAULT_PAYLOADS.get(spec.event, {"extra": {}}))
         if result.get("timed_out"):
             problems += 1
             print(f"      ✗ timed out after {result['elapsed_seconds']}s "
@@ -397,7 +312,10 @@ def _doctor_one(spec, shell_hooks) -> int:
             rc = result.get("returncode")
             elapsed = result.get("elapsed_seconds", 0)
             stdout = (result.get("stdout") or "").strip()
-            if stdout:
+            if not stdout:
+                print(f"      ✓ ran clean with empty stdout "
+                      f"(exit={rc}, {elapsed}s) — hook is observer-only")
+            else:
                 try:
                     json.loads(stdout)
                     print(f"      ✓ produced valid JSON on synthetic payload "
@@ -406,10 +324,6 @@ def _doctor_one(spec, shell_hooks) -> int:
                     problems += 1
                     print(f"      ✗ stdout was not valid JSON (exit={rc}, "
                           f"{elapsed}s): {_truncate(stdout, 120)}")
-            else:
-                print(f"      ✓ ran clean with empty stdout "
-                      f"(exit={rc}, {elapsed}s) — hook is observer-only")
-
     return problems
 
 
