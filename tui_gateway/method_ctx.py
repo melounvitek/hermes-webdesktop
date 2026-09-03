@@ -124,7 +124,7 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
             if obj.__module__ == mod_name:
                 obj = rebind(obj, g, seen)
             elif name == obj.__name__:
-                continue  # plain import; server has its own (an ``_alias = other.fn`` publishes as-is)
+                continue  # plain import; server has its own (``_alias = other.fn`` publishes as-is)
         elif isinstance(obj, (dict, tuple, list)) and _has_own_fn(obj):
             obj = module_globals[name] = _rebind_in(obj)  # keep the split module's own view in sync
         elif isinstance(obj, type):

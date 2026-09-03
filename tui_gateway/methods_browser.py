@@ -16,11 +16,10 @@ _CDP_SCHEMES = {"http", "https", "ws", "wss"}
 def _resolve_browser_cdp_url() -> str:
     """Configured browser CDP override without network I/O.
 
-    ``/browser status`` must be fast: ``tools.browser_tool._get_cdp_override`` runs an
-    HTTP probe with a multi-second timeout for discovery-style URLs. Mirrors its
-    precedence (env var, then ``browser.cdp_url``) minus the WS-resolution step, so the
-    answer reflects user intent even when the host is unreachable; ``browser_navigate``
-    normalizes on the next tool call.
+    ``/browser status`` must be fast: ``tools.browser_tool._get_cdp_override`` runs an HTTP
+    probe with a multi-second timeout for discovery-style URLs. Mirrors its precedence (env var,
+    then ``browser.cdp_url``) minus the WS-resolution step, so the answer reflects user intent
+    even when the host is unreachable; ``browser_navigate`` normalizes on the next tool call.
     """
     env_url = os.environ.get("BROWSER_CDP_URL", "").strip()
     if env_url:
@@ -39,17 +38,14 @@ def _resolve_browser_cdp_url() -> str:
 
 def _is_default_local_cdp(parsed) -> bool:
     """Match the discovery-style local default; never the concrete WS form — a
-    ``ws://127.0.0.1:9222/devtools/browser/<id>`` is connectable as-is and collapsing
-    it to bare ``http://...:9222`` would break the connect."""
+    ``ws://127.0.0.1:9222/devtools/browser/<id>`` is connectable as-is and collapsing it to bare
+    ``http://...:9222`` would break the connect."""
     try:
         port = parsed.port or 80
     except ValueError:
         return False
-    return (
-        parsed.scheme in {"http", "ws"}
-        and parsed.hostname in {"127.0.0.1", "localhost"}
-        and port == 9222
-        and parsed.path in {"", "/", "/json", "/json/version"})
+    return (parsed.scheme in {"http", "ws"} and parsed.hostname in {"127.0.0.1", "localhost"}
+            and port == 9222 and parsed.path in {"", "/", "/json", "/json/version"})
 
 
 def _cdp_http_reachable(parsed, timeout: float = 2.0) -> bool:
@@ -94,13 +90,13 @@ def _launch_failure_hints(port: int, system: str) -> list[str]:
 
 
 def _connect_local_default(port: int, system: str, announce) -> str | None:
-    """Discover (or launch) the default local debug browser → its CDP URL, or None after announcing failure."""
+    """Discover (or launch) the default local debug browser → CDP URL, or None after announcing."""
     from hermes_cli.browser_connect import (
         discover_local_cdp_url, find_free_debug_port, launch_chrome_debug, local_port_in_use)
 
-    # Dual-stack discovery: when another app squats the IPv4 loopback on the debug
-    # port, a browser bound there comes up on [::1] only. An IPv4-only probe misses
-    # it AND hangs against squatters that accept TCP but never answer HTTP.
+    # Dual-stack discovery: when another app squats the IPv4 loopback on the debug port, a
+    # browser bound there comes up on [::1] only; an IPv4-only probe misses it AND hangs
+    # against squatters that accept TCP but never answer HTTP.
     discovered = discover_local_cdp_url(port, timeout=2.0)
     if discovered is not None:
         announce(f"Chromium-family browser is already listening at {discovered}")
@@ -169,8 +165,8 @@ def _browser_connect(rid, params: dict) -> dict:
         parsed = urlparse(url)
         port = parsed.port or 9222
     try:
-        # Hosted ws[s]://.../devtools/browser/<id> endpoints don't serve the HTTP discovery
-        # path: check TCP reachability only and let browser_navigate handshake.
+        # Hosted ws[s]://.../devtools/browser/<id> endpoints don't serve the HTTP discovery path:
+        # check TCP reachability only and let browser_navigate handshake.
         if parsed.scheme in {"ws", "wss"} and parsed.path.startswith("/devtools/browser/"):
             import socket
 
@@ -189,8 +185,8 @@ def _browser_connect(rid, params: dict) -> dict:
         elif not _cdp_http_reachable(parsed):
             return _err(rid, 5031, f"could not reach browser CDP at {url}")
         normalized = _normalize_cdp_url(parsed)
-        # Reap BEFORE publishing the new env (an in-flight tool call sees the old supervisor
-        # closed) and AFTER (the default task's cached supervisor drains against the new URL).
+        # Reap BEFORE publishing the new env (an in-flight tool call sees the old supervisor closed)
+        # and AFTER (the default task's cached supervisor drains against the new URL).
         cleanup_all_browsers()
         os.environ["BROWSER_CDP_URL"] = normalized
         cleanup_all_browsers()

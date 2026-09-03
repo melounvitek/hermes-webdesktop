@@ -1,12 +1,11 @@
 """Suppress benign event-loop teardown noise on the gateway serving loop.
 
-When the Desktop client forcibly closes its WebSocket while the gateway still has
-pending socket operations, asyncio logs a full traceback for every pending
-``_call_connection_lost`` callback — ``ConnectionResetError`` (WinError 10054),
-``ConnectionAbortedError`` (10053), or ``BrokenPipeError`` on POSIX; one disconnect can
-emit 50+ identical tracebacks. They are the expected side effect of the peer hanging up
-before our writes drained, so the loop exception handler installed here collapses exactly
-that class to one debug line and forwards everything else to the previous handler.
+When the Desktop client forcibly closes its WebSocket while the gateway still has pending socket
+operations, asyncio logs a traceback per pending ``_call_connection_lost`` callback —
+``ConnectionResetError`` (WinError 10054), ``ConnectionAbortedError`` (10053) or ``BrokenPipeError``
+(POSIX); one disconnect can emit 50+. They are the expected side effect of the peer hanging up
+before our writes drained, so the handler here collapses exactly that class to one debug line and
+forwards everything else to the previous handler unchanged.
 """
 
 from __future__ import annotations

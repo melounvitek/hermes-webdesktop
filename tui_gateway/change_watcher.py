@@ -18,22 +18,18 @@ def resolve_skin() -> dict:
         init_skin_from_config(_load_cfg())
         skin = get_active_skin()
         return {
-            "name": skin.name,
-            "colors": skin.colors,
+            "name": skin.name, "colors": skin.colors,
             # Paired palettes: the TUI prefers the block matching terminal polarity.
-            "light_colors": skin.light_colors,
-            "dark_colors": skin.dark_colors,
-            "branding": skin.branding,
-            "banner_logo": skin.banner_logo,
-            "banner_hero": skin.banner_hero,
-            "tool_prefix": skin.tool_prefix,
+            "light_colors": skin.light_colors, "dark_colors": skin.dark_colors,
+            "branding": skin.branding, "banner_logo": skin.banner_logo,
+            "banner_hero": skin.banner_hero, "tool_prefix": skin.tool_prefix,
             "help_header": (skin.branding or {}).get("help_header", "")}
     except Exception:
         return {}
 
 
-# (name, user-file mtime) of the last skin broadcast: ``skin.changed`` fires on a
-# name switch OR a live color edit of the active skin, and nothing else.
+# (name, user-file mtime) of the last skin broadcast: ``skin.changed`` fires on a name
+# switch OR a live color edit of the active skin, and nothing else.
 _last_skin_sig: tuple[str, float | None] | None = None
 
 
@@ -52,7 +48,7 @@ def _watcher_mtime_ns(path: Path):
 
 
 def _newest_mtime_ns(paths) -> int | None:
-    """Max ``st_mtime_ns`` across ``paths`` (unstat-able ones ignored); None when none could be stat'ed."""
+    """Max ``st_mtime_ns`` across ``paths`` (unstat-able ignored); None when none stat'ed."""
     mtimes = (_watcher_mtime_ns(p) for p in paths)
     return max((m for m in mtimes if m is not None), default=None)
 
@@ -90,6 +86,12 @@ def _broadcast_skin_if_changed() -> None:
         _broadcast_global_event("skin.changed", resolve_skin())
 
 
+def _active_pet():
+    """(pet, scale) when an enabled pet with an existing sheet is selected, else None."""
+    enabled, pet, scale = _pet_active_selection()
+    return (pet, scale) if enabled and pet is not None and pet.exists else None
+
+
 def _pet_sig() -> tuple:
     """(slug, spritesheet revision, scale) of the active pet — ("off",) when none."""
     display = _load_cfg().get("display") or {}
@@ -97,9 +99,10 @@ def _pet_sig() -> tuple:
     if not pet_cfg or not is_truthy_value(pet_cfg.get("enabled"), default=False):
         return ("off",)
     try:
-        enabled, pet, scale = _pet_active_selection()
-        if not enabled or pet is None or not pet.exists:
+        active = _active_pet()
+        if not active:
             return ("off",)
+        pet, scale = active
         return (pet.slug, _pet_sheet_revision(pet.spritesheet), scale)
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
         return ("off",)
@@ -108,14 +111,12 @@ def _pet_sig() -> tuple:
 def _pet_changed_payload() -> dict:
     """``pet.info.meta``-shaped payload so the renderer can decide whether to refetch sprites."""
     try:
-        enabled, pet, scale = _pet_active_selection()
-        if not enabled or pet is None or not pet.exists:
+        active = _active_pet()
+        if not active:
             return {"enabled": False}
+        pet, scale = active
         return {
-            "enabled": True,
-            "slug": pet.slug,
-            "displayName": pet.display_name,
-            "scale": scale,
+            "enabled": True, "slug": pet.slug, "displayName": pet.display_name, "scale": scale,
             "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)}
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
         return {"enabled": False}
@@ -131,7 +132,9 @@ def _sessions_sig():
     cron runs (which never touch this gateway's transports) all move. Served sibling
     profile homes are probed too, else a routed profile's Bot Chat never refreshes."""
     return _newest_mtime_ns(
-        root / name for root in (_watcher_home(), *_served_profile_homes) for name in ("state.db", "state.db-wal")
+        root / name
+        for root in (_watcher_home(), *_served_profile_homes)
+        for name in ("state.db", "state.db-wal")
     )
 
 
