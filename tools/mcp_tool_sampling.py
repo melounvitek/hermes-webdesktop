@@ -133,9 +133,9 @@ class SamplingHandler:
     @staticmethod
     def _error(message: str, code: int = -1):
         """Return ErrorData (MCP spec) or raise as fallback."""
-        if _core._MCP_SAMPLING_TYPES:
-            return _core.ErrorData(code=code, message=message)
-        raise Exception(message)
+        if not _core._MCP_SAMPLING_TYPES:
+            raise Exception(message)
+        return _core.ErrorData(code=code, message=message)
 
     def _fail(self, message: str):
         """Count an error and return the ErrorData for it."""
@@ -149,14 +149,12 @@ class SamplingHandler:
     def _build_tool_use_result(self, choice, response):
         """CreateMessageResultWithTools from a tool_calls response, under ``max_tool_rounds`` (0 disables)."""
         self.metrics["tool_use_count"] += 1
-        if self.max_tool_rounds == 0:
-            self._tool_loop_count = 0
-            return self._error(f"Tool loops disabled for server '{self.server_name}' (max_tool_rounds=0)")
         self._tool_loop_count += 1
-        if self._tool_loop_count > self.max_tool_rounds:
+        if self.max_tool_rounds == 0 or self._tool_loop_count > self.max_tool_rounds:
             self._tool_loop_count = 0
             return self._error(
-                f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)")
+                f"Tool loops disabled for server '{self.server_name}' (max_tool_rounds=0)" if self.max_tool_rounds == 0
+                else f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)")
         content_blocks = [_core.ToolUseContent(type="tool_use", id=tc.id, name=tc.function.name,
                                                input=_parse_tool_call_arguments(self.server_name, tc.function.arguments))
                           for tc in choice.message.tool_calls]
@@ -202,7 +200,6 @@ class SamplingHandler:
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
         max_tokens = min(mcp_field(params, "max_tokens", "maxTokens", self.max_tokens_cap), self.max_tokens_cap)
-        temperature = getattr(params, "temperature", None)
         server_tools = getattr(params, "tools", None)
         tools = [{"type": "function", "function": {
             "name": getattr(t, "name", ""), "description": getattr(t, "description", "") or "",
@@ -210,8 +207,8 @@ class SamplingHandler:
             for t in server_tools] if server_tools else None
         logger.log(self.audit_level, "MCP server '%s' sampling request: model=%s, max_tokens=%d, messages=%d",
                    self.server_name, resolved_model, max_tokens, len(messages))
-        return lambda: call_llm(task="mcp", model=resolved_model or None, messages=messages, temperature=temperature,
-                                max_tokens=max_tokens, tools=tools, timeout=self.timeout)
+        return lambda: call_llm(task="mcp", model=resolved_model or None, messages=messages, max_tokens=max_tokens,
+                                temperature=getattr(params, "temperature", None), tools=tools, timeout=self.timeout)
 
     async def __call__(self, context, params):
         """SDK ``SamplingFnT``: CreateMessageResult, CreateMessageResultWithTools, or ErrorData."""
@@ -303,11 +300,10 @@ class ElicitationHandler:
         # ``requestedSchema`` on mcp 1.x, ``requested_schema`` on 2.0 (aliases don't apply to attribute
         # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
-        description = _format_elicitation_schema_summary(schema, self.server_name)
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
         # Lazy import avoids import-order coupling with early-bootstrap tools.approval.
         try:
-            invoke_consent = self._consent_thunk(message, description)
+            invoke_consent = self._consent_thunk(message, _format_elicitation_schema_summary(schema, self.server_name))
         except Exception as exc:  # pragma: no cover -- defensive
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")

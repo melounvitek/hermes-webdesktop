@@ -89,9 +89,8 @@ def _mcp_loop_exception_handler(loop, context):
     """Suppress the benign 'Event loop is closed' RuntimeError httpx finalizers raise against the
     dead loop during shutdown; forward the rest."""
     exc = context.get("exception")
-    if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
-        return
-    loop.default_exception_handler(context)
+    if not (isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc)):
+        loop.default_exception_handler(context)
 
 
 def _wrap_with_home_override(coro: "Coroutine") -> "Coroutine":

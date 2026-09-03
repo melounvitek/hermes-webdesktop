@@ -29,18 +29,6 @@ def _is_2xx(resp) -> bool:
     return 200 <= resp.status_code < 300
 
 
-def _capture_pgids(pids: Set[int]) -> Dict[int, int]:
-    """pgid per live pid, captured while alive (getpgid fails once it exits; the sweep needs it
-    to reach reparented descendants)."""
-    pgids: Dict[int, int] = {}
-    for pid in pids:
-        try:
-            pgids[pid] = os.getpgid(pid)
-        except (AttributeError, ProcessLookupError, OSError):  # Windows / already exited
-            pass
-    return pgids
-
-
 def _pgroup_alive(pgid: Optional[int]) -> bool:
     """Signal 0 to the group succeeds iff any member is alive (POSIX only)."""
     _killpg = getattr(os, "killpg", None)
@@ -159,8 +147,14 @@ class MCPServerTransportMixin:
     # ------------------------------------------------------------------ stdio
 
     def _track_spawned_children(self, new_pids: Set[int]) -> None:
-        """Ledger the freshly spawned stdio children (pids, pgids, machine spawn ledger)."""
-        new_pgids = _capture_pgids(new_pids)
+        """Ledger the freshly spawned stdio children (pids, pgids, machine spawn ledger). pgids are
+        captured while alive (getpgid fails once it exits; the sweep needs it for reparented descendants)."""
+        new_pgids: Dict[int, int] = {}
+        for pid in new_pids:
+            try:
+                new_pgids[pid] = os.getpgid(pid)
+            except (AttributeError, ProcessLookupError, OSError):  # Windows / already exited
+                pass
         with _core._lock:
             _stdio_pids.update(dict.fromkeys(new_pids, self.name))
             _stdio_pgids.update(new_pgids)
@@ -256,11 +250,10 @@ class MCPServerTransportMixin:
         except ImportError:
             return  # No httpx → skip probe; SDK import would have failed first.
 
-        client_kwargs: dict = {"verify": ssl_verify, "follow_redirects": True, "timeout": _httpx.Timeout(timeout),
-                               **({"cert": client_cert} if client_cert is not None else {})}
         probe_headers = dict(headers) if headers else {}
         try:
-            async with _httpx.AsyncClient(**client_kwargs) as client:
+            async with _httpx.AsyncClient(verify=ssl_verify, follow_redirects=True, timeout=_httpx.Timeout(timeout),
+                                          **({"cert": client_cert} if client_cert is not None else {})) as client:
                 # HEAD is cheapest; fall back to GET on 405/501.
                 resp = await client.head(url, headers=probe_headers)
                 if resp.status_code in (405, 501):
