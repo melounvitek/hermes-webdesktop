@@ -157,13 +157,13 @@ def _select_nous(config: Dict[str, object], key: str) -> None:
     section.pop("use_gateway", None)
 
 
-def _provider_is_nous(config: Dict[str, object]) -> bool:
-    model_cfg = config.get("model")
-    return isinstance(model_cfg, dict) and str(model_cfg.get("provider") or "").strip().lower() == "nous"
-
-
 def _norm(value: object, default: str = "") -> str:
     return str(value or default).strip().lower()
+
+
+def _provider_is_nous(config: Dict[str, object]) -> bool:
+    model_cfg = config.get("model")
+    return isinstance(model_cfg, dict) and _norm(model_cfg.get("provider")) == "nous"
 
 
 def _toolset_enabled(config: Dict[str, object], toolset_key: str) -> bool:

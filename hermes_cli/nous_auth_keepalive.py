@@ -67,7 +67,6 @@ def _interval_seconds(value: Optional[int]) -> int:
             return int(value)
         except (TypeError, ValueError):
             return NOUS_AUTH_KEEPALIVE_INTERVAL_SECONDS
-
     raw = _nous_config().get(NOUS_AUTH_KEEPALIVE_INTERVAL_CONFIG_KEY)
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return NOUS_AUTH_KEEPALIVE_INTERVAL_SECONDS
