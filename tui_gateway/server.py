@@ -1405,7 +1405,9 @@ def _tour_request(sid: str, payload: dict) -> str:
     session's first action gets the short probe deadline; an unanswered probe marks the bridge
     unavailable for that session; once a client has answered, actions get the full deadline. The
     verdict lives on the session record, so a new session re-probes."""
-    session = _sessions.get(sid) or {}  # detached caller: throwaway record, plain bridge, unprobed
+    session = _sessions.get(sid)
+    if session is None:  # detached caller: throwaway record, plain bridge, unprobed (empty record != detached)
+        session = {}
     state = session.get("tour_bridge")
     if state == "unanswered":
         return _TOUR_BRIDGE_UNAVAILABLE
