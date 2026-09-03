@@ -100,9 +100,7 @@ def _gh_cli_candidates() -> list[str]:
     """Candidate ``gh`` binary paths, including common Homebrew installs."""
     candidates: list[str] = [c for c in (shutil.which("gh"),) if c]
     for candidate in (
-        "/opt/homebrew/bin/gh",
-        "/usr/local/bin/gh",
-        str(Path.home() / ".local" / "bin" / "gh"),
+        "/opt/homebrew/bin/gh", "/usr/local/bin/gh", str(Path.home() / ".local" / "bin" / "gh")
     ):
         if (candidate not in candidates and os.path.isfile(candidate)
                 and os.access(candidate, os.X_OK)):

@@ -63,18 +63,13 @@ def _slot_action(
     profile: str, profile_dir: Path, prior_state: str | None, start: bool,
 ) -> ReconcileAction:
     return ReconcileAction(
-        profile=profile,
-        prior_state=prior_state,
-        action="started" if start else "registered",
+        profile=profile, prior_state=prior_state, action="started" if start else "registered",
         prior_exit=_read_prior_exit_label(profile_dir),
     )
 
 
 def reconcile_profile_gateways(
-    *,
-    hermes_home: Path,
-    scandir: Path,
-    dry_run: bool = False,
+    *, hermes_home: Path, scandir: Path, dry_run: bool = False,
     container_argv: Sequence[str] | None = None,
 ) -> list[ReconcileAction]:
     """Recreate s6 service registrations for every persistent profile.
@@ -150,10 +145,7 @@ def reconcile_profile_gateways(
 
 
 def _maybe_migrate_legacy_gateway_run_state(
-    hermes_home: Path,
-    *,
-    container_argv: Sequence[str] | None,
-    dry_run: bool,
+    hermes_home: Path, *, container_argv: Sequence[str] | None, dry_run: bool
 ) -> str | None:
     """Seed root gateway_state for pre-s6 `gateway run` containers.
 
@@ -405,20 +397,14 @@ def main() -> int:
     # logs/gateways/<profile>/lock → "Resource busy" restart storm. The role is detected from
     # PID 1 argv, not an operator flag — a flag can be forgotten in a hand-written manifest.
     if _is_dashboard_container(_read_container_argv()):
-        print(
-            "reconcile: skipping (dashboard container — does not need "
-            "per-profile gateways)"
-        )
+        print("reconcile: skipping (dashboard container — does not need per-profile gateways)")
         return 0
 
     hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
     scandir = Path(os.environ.get("S6_PROFILE_GATEWAY_SCANDIR", "/run/service"))
     actions = reconcile_profile_gateways(hermes_home=hermes_home, scandir=scandir)
     for a in actions:
-        print(
-            f"reconcile: profile={a.profile} "
-            f"prior_state={a.prior_state} action={a.action}"
-        )
+        print(f"reconcile: profile={a.profile} prior_state={a.prior_state} action={a.action}")
     return 0
 
 

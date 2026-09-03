@@ -56,8 +56,7 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
             from hermes_cli._subprocess_compat import bounded_probe_run
 
             result = bounded_probe_run(
-                ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
-                timeout=10,
+                ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"], timeout=10,
                 errors="ignore",
             )
             if result is None or result.returncode != 0 or result.stdout is None:
@@ -219,9 +218,7 @@ def _profile_key_for_respawn(argv: list[str], hermes_home: str | None = None) ->
 
 
 def _filter_dashboard_respawn_candidates(
-    candidates: list[tuple[int, list[str], str | None]],
-    *,
-    own_home: str | None = None,
+    candidates: list[tuple[int, list[str], str | None]], *, own_home: str | None = None
 ) -> list[list[str]]:
     """Select which killed manual backends to respawn after ``hermes update``.
 
@@ -346,10 +343,8 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
 
 
 def _kill_stale_dashboard_processes(
-    reason: str = "the running backend no longer matches the updated frontend",
-    *,
-    restart_managed: bool = False,
-    already_restarted_units: "set[str] | None" = None,
+    reason: str = "the running backend no longer matches the updated frontend", *,
+    restart_managed: bool = False, already_restarted_units: "set[str] | None" = None,
 ) -> dict[str, list]:
     """Kill running ``hermes dashboard`` / ``hermes serve`` processes.
 

@@ -400,9 +400,7 @@ def _print_ticker_health(pids: list) -> None:
     the liveness heartbeat and the last-successful-tick marker before saying "will fire".
     """
     from cron.jobs import (
-        get_ticker_heartbeat_age,
-        get_ticker_last_error,
-        get_ticker_success_age,
+        get_ticker_heartbeat_age, get_ticker_last_error, get_ticker_success_age,
         TICKER_INTERVAL_SECONDS,
     )
     from cron.scheduler import _is_fd_exhaustion_text as _cron_is_fd_exhaustion_text
@@ -706,13 +704,10 @@ def cron_create(args):
     # job-creation path (CLI AND the agent's `cronjob` tool); a block surfaces as
     # result["error"] and is printed in red below.
     result = _cron_api(
-        action="create",
-        schedule=args.schedule,
-        prompt=args.prompt,
+        action="create", schedule=args.schedule, prompt=args.prompt,
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
-        no_agent=getattr(args, "no_agent", False) or None,
-        **_job_api_kwargs(args),
+        no_agent=getattr(args, "no_agent", False) or None, **_job_api_kwargs(args),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -759,13 +754,9 @@ def cron_edit(args):
                 final_skills.append(skill)
 
     result = _cron_api(
-        action="update",
-        job_id=args.job_id,
-        schedule=getattr(args, "schedule", None),
-        prompt=getattr(args, "prompt", None),
-        skills=final_skills,
-        no_agent=getattr(args, "no_agent", None),
-        **_job_api_kwargs(args),
+        action="update", job_id=args.job_id, schedule=getattr(args, "schedule", None),
+        prompt=getattr(args, "prompt", None), skills=final_skills,
+        no_agent=getattr(args, "no_agent", None), **_job_api_kwargs(args),
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))

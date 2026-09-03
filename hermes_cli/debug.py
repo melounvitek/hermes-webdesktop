@@ -646,10 +646,7 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
     if not _confirm_upload(args):
         return
     if not redact:
-        print(
-            "⚠️  --no-redact is set: secrets in your logs will NOT be redacted "
-            "before upload.\n"
-        )
+        print("⚠️  --no-redact is set: secrets in your logs will NOT be redacted before upload.\n")
     print("Collecting debug report...")
     _best_effort_sweep_expired_pastes()
 
