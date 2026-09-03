@@ -1411,13 +1411,8 @@ class _NonStreamRequest:
             f"Reconnecting." + (f" {silent_hint}" if silent_hint else "")
         )
         self._abort_request("codex_ttfb_kill")
-        agent._emit_wait_notice(
-            f"⚠ no response from provider in {int(elapsed)}s — "
-            f"reconnecting..."
-        )
-        agent._touch_activity(
-            f"codex stream killed after {int(elapsed)}s with no first byte"
-        )
+        agent._emit_wait_notice(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
+        agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first byte")
         self._await_worker_after_kill(
             f"Codex stream produced no bytes within {int(elapsed)}s "
             f"(TTFB threshold: {int(wd.ttfb_timeout)}s)"
@@ -2352,8 +2347,7 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     if needs_sanitize and agent.provider == "moa":
         # MoA: agent.model is the virtual preset; use the real aggregator so Gemini keeps thought_signature.
         agg_slot = getattr(getattr(agent, "client", None), "last_aggregator_slot", None)
-        if agg_slot and agg_slot.get("model"):
-            sanitize_model = agg_slot["model"]
+        sanitize_model = (agg_slot or {}).get("model") or sanitize_model
     api_messages = []
     for msg in messages:
         api_msg = msg.copy()
@@ -2383,7 +2377,7 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     for api_msg in api_messages:  # underscore scaffolding: the transport's sweeper is bypassed here
         if isinstance(api_msg, dict):
             for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
-                api_msg.pop(internal_key, None)
+                del api_msg[internal_key]
     return api_messages
 
 
@@ -2927,8 +2921,8 @@ class _ToolCallAccumulator:
 
     def feed(self, tc_delta) -> Optional[str]:
         """Merge one delta; return the tool name the first time it is complete."""
-        raw_index = getattr(tc_delta, "index", None)
-        raw_idx = raw_index if raw_index is not None else 0
+        raw_idx = getattr(tc_delta, "index", None)
+        raw_idx = raw_idx if raw_idx is not None else 0
         tc_id = getattr(tc_delta, "id", None)
         delta_id = tc_id or ""
         if isinstance(tc_id, int):  # Poolside sends integer ids
@@ -2948,15 +2942,13 @@ class _ToolCallAccumulator:
             entry["id"] = tc_id
         tc_function = getattr(tc_delta, "function", None)
         if tc_function:
-            function_name = getattr(tc_function, "name", None)
-            if function_name:
+            if getattr(tc_function, "name", None):
                 # Assignment, not +=: names arrive complete (OpenAI spec) and
                 # some providers (MiniMax M2.7 via NVIDIA NIM) resend the full
                 # name in every chunk — concatenation gives "read_fileread_file".
-                entry["function"]["name"] = function_name
-            function_arguments = getattr(tc_function, "arguments", None)
-            if function_arguments:
-                entry["function"]["arguments"] += function_arguments
+                entry["function"]["name"] = tc_function.name
+            if getattr(tc_function, "arguments", None):
+                entry["function"]["arguments"] += tc_function.arguments
         extra = getattr(tc_delta, "extra_content", None)
         if extra is None and hasattr(tc_delta, "model_extra"):
             extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
@@ -3147,10 +3139,8 @@ class _StreamingCall:
         # Nous Portal usage frames (choices=[] + lastOne=true, no [DONE]) are a
         # clean terminal, not a drop; relabelled upstreams send 1 / "true".
         last_one = getattr(chunk, "lastOne", None)
-        if last_one is None:
-            extra = getattr(chunk, "model_extra", None)
-            if isinstance(extra, dict):
-                last_one = extra.get("lastOne")
+        if last_one is None and isinstance(getattr(chunk, "model_extra", None), dict):
+            last_one = chunk.model_extra.get("lastOne")
         if last_one in (True, 1, "true") and finish_reason is None:
             finish_reason = "stop"
         return usage, finish_reason
@@ -3160,18 +3150,16 @@ class _StreamingCall:
         import httpx as _httpx
         base_timeout, read_timeout, conn_cap = self._stream_timeouts()
         content_parts: list = []
+        reasoning_parts: list = []
+        pending_text_parts: list[str] = []
         tool_calls = _ToolCallAccumulator()
         tool_calls_acc = tool_calls.acc
-        finish_reason = None
-        model_name = None
+        finish_reason = model_name = usage_obj = None
         role = "assistant"
-        reasoning_parts: list = []
-        usage_obj = None
         _diag = self._new_diag()
         _writer_token = {"value": None}
         attempt_request_client = {"value": None}
         attempt_stream_response = {"value": None}
-        pending_text_parts: list[str] = []
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
             timeout = _httpx.Timeout(connect=conn_cap, read=read_timeout, write=base_timeout, pool=conn_cap)
@@ -3179,17 +3167,15 @@ class _StreamingCall:
             # Native Gemini rejects OpenAI's usage-streaming extension.
             if not is_native_gemini_base_url(self.agent.base_url):
                 stream_kwargs["stream_options"] = {"include_usage": True}
-            request_client = self.clients.set_client(self.agent._create_request_openai_client(
-                reason="chat_completion_stream_request", api_kwargs=stream_kwargs,
-            ))
-            attempt_request_client["value"] = request_client
+            request_client = attempt_request_client["value"] = self.clients.set_client(
+                self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs)
+            )
             self.last_chunk_time["t"] = time.time()
             self.agent._touch_activity("waiting for provider response (streaming)")
             return request_client.chat.completions.create(**stream_kwargs)
 
         def _stream_created(raw_stream: Any) -> None:
-            response = getattr(raw_stream, "response", None)
-            attempt_stream_response["value"] = response
+            response = attempt_stream_response["value"] = getattr(raw_stream, "response", None)
             self.agent._capture_rate_limits(response)
             self.agent._capture_credits(response)
             self.agent._stream_diag_capture_response(_diag, response)
@@ -3209,11 +3195,8 @@ class _StreamingCall:
                 # Marker-only finish chunk (no writable delta) always passes: the
                 # fence only stops MORE text; fending the completion signal would
                 # make the drop-guard mislabel a clean end as a drop.
-                if getattr(choice, "finish_reason", None) and not (
-                    getattr(delta, "content", None)
-                    or getattr(delta, "tool_calls", None)
-                    or getattr(delta, "reasoning_content", None)
-                    or getattr(delta, "reasoning", None)
+                if getattr(choice, "finish_reason", None) and not any(
+                    getattr(delta, attr, None) for attr in ("content", "tool_calls", "reasoning_content", "reasoning")
                 ):
                     return True
             except Exception:
@@ -3238,17 +3221,16 @@ class _StreamingCall:
                 "reasoning_content": "".join(reasoning_parts) or None,
                 "tool_calls": [tool_calls_acc[i] for i in sorted(tool_calls_acc)] or None,
             }
-            choices = [{"message": message, "finish_reason": finish_reason or "stop"}]
-            return {"model": model_name, "choices": choices, "usage": usage_obj}
+            return {
+                "model": model_name, "usage": usage_obj,
+                "choices": [{"message": message, "finish_reason": finish_reason or "stop"}],
+            }
 
         def _flush_pending_stream_text():
             pending_parts = list(pending_text_parts)
             pending_text_parts.clear()
             for text in pending_parts:
-                if tool_calls_acc:
-                    self._route_suppressed_text(text)
-                else:
-                    self._emit_text(text)
+                (self._route_suppressed_text if tool_calls_acc else self._emit_text)(text)
 
         from agent import relay_llm
 
@@ -3312,9 +3294,8 @@ class _StreamingCall:
                     self._route_suppressed_text(delta_content)
                 elif pending_text_parts or _provider_stream_text_may_be_sse(delta_content):
                     pending_text_parts.append(delta_content)
-                    if _provider_stream_text_may_be_sse("".join(pending_text_parts)):
-                        continue
-                    _flush_pending_stream_text()
+                    if not _provider_stream_text_may_be_sse("".join(pending_text_parts)):
+                        _flush_pending_stream_text()
                     continue
                 else:
                     self._emit_text(delta_content)
@@ -3358,7 +3339,7 @@ class _StreamingCall:
             content = getattr(message, "content", None)
             if isinstance(content, str) and content:
                 self._fire_first_delta()
-                self.agent._fire_stream_delta(content)
+                self.agent._fire_stream_delta(content)  # not _emit_text: deltas_were_sent stays False here
         return final_response
 
     @staticmethod
@@ -3385,8 +3366,7 @@ class _StreamingCall:
                 has_truncated_tool_args = True
             mock_tool_calls.append(SimpleNamespace(
                 id=tc["id"], type=tc["type"], extra_content=tc.get("extra_content"),
-                function=SimpleNamespace(name=tc["function"]["name"], arguments=arguments),
-            ))
+                function=SimpleNamespace(name=tc["function"]["name"], arguments=arguments)))
         return mock_tool_calls or None, has_truncated_tool_args
 
     def _finish_chat_stream(
@@ -3403,8 +3383,7 @@ class _StreamingCall:
         # Zero-chunk guard: nothing usable = upstream error / malformed SSE.
         if finish_reason is None and not content_parts and not reasoning_parts and not tool_calls_acc:
             raise EmptyStreamError(
-                "Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response)."
-            )
+                "Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response).")
         if has_truncated_tool_args and finish_reason is None:
             # Partial args WITH finish_reason="length" is a real output cap; with
             # NONE the upstream dropped mid tool-call, and stamping "length"
@@ -3416,31 +3395,24 @@ class _StreamingCall:
                 _dropped_names,
             )
             return _build_partial_stream_stub(
-                role, full_content, full_reasoning, model_name, usage_obj, dropped_tool_names=_dropped_names or None,
-            )
+                role, full_content, full_reasoning, model_name, usage_obj, dropped_tool_names=_dropped_names or None)
         if finish_reason is None and content_parts and not tool_calls_acc and usage_obj is None:
             # Text-only drop: otherwise the partial text is stamped "stop" and the
             # next step is lost. A usage object proves the provider finished
             # (include_usage's final chunk has empty choices, no finish_reason).
             logger.warning(
-                "Stream ended with no finish_reason after delivering text with no tool calls; treating as a mid-stream drop."
-            )
+                "Stream ended with no finish_reason after delivering text with no tool calls; treating as a mid-stream drop.")
             return _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj)
         effective_finish_reason = "length" if has_truncated_tool_args else (finish_reason or "stop")
         provider_stream_error = _provider_stream_error_from_text(
-            full_content or "", effective_finish_reason, response=getattr(stream, "response", None),
-        )
+            full_content or "", effective_finish_reason, response=getattr(stream, "response", None))
         if provider_stream_error is not None:
             raise provider_stream_error
         flush_pending()
-        message = SimpleNamespace(
-            role=role, content=full_content, tool_calls=mock_tool_calls, reasoning_content=full_reasoning,
-        )
+        message = SimpleNamespace(role=role, content=full_content, tool_calls=mock_tool_calls, reasoning_content=full_reasoning)
         return SimpleNamespace(
-            id="stream-" + str(uuid.uuid4()),
-            model=model_name,
+            id="stream-" + str(uuid.uuid4()), model=model_name, usage=usage_obj,
             choices=[SimpleNamespace(index=0, message=message, finish_reason=effective_finish_reason)],
-            usage=usage_obj,
         )
 
     # ── anthropic_messages wire ─────────────────────────────────────────
@@ -3529,9 +3501,8 @@ class _StreamingCall:
                     block = getattr(event, "content_block", None)
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
-                        tool_name = getattr(block, "name", None)
-                        if tool_name:
-                            self._emit_tool_started(tool_name)
+                        if getattr(block, "name", None):
+                            self._emit_tool_started(block.name)
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)
                     delta_type = getattr(delta, "type", None) if delta else None
@@ -3539,10 +3510,8 @@ class _StreamingCall:
                         text = getattr(delta, "text", "")
                         if text and not has_tool_use:
                             self._emit_text(text)
-                    elif delta_type == "thinking_delta":
-                        thinking_text = getattr(delta, "thinking", "")
-                        if thinking_text:
-                            self._emit_reasoning(thinking_text)
+                    elif delta_type == "thinking_delta" and getattr(delta, "thinking", ""):
+                        self._emit_reasoning(delta.thinking)
             raw_stream = _stream_context["stream"]
             if not self.agent._interrupt_requested and raw_stream is not None:
                 try:
@@ -3576,8 +3545,7 @@ class _StreamingCall:
         clients are never closed from inside a request (FD-recycle hazard); the
         OpenAI primary is replaced lazily."""
         self.agent._emit_stream_drop(
-            error=e, attempt=attempt + 2, max_attempts=max_retries + 1, mid_tool_call=mid_tool_call, diag=self.clients.diag,
-        )
+            error=e, attempt=attempt + 2, max_attempts=max_retries + 1, mid_tool_call=mid_tool_call, diag=self.clients.diag)
         self._cancel_current_stream_attempt(reason)
         self.clients.close_once(reason)
 
@@ -3609,9 +3577,7 @@ class _StreamingCall:
         # Our own interrupt force-close: no retry/fallback/"reconnecting" (the
         # poll loop raises InterruptedError).
         if self._request_cancelled["value"]:
-            logger.debug(
-                "Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__,
-            )
+            logger.debug("Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__)
             return False
         _is_timeout = isinstance(e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout))
         _is_conn_err = isinstance(e, (_httpx.ConnectError, _httpx.RemoteProtocolError, ConnectionError))
@@ -3649,8 +3615,7 @@ class _StreamingCall:
             # Exhausted: log full diagnostics (chain, headers, bytes/elapsed).
             self.agent._log_stream_retry(
                 kind="exhausted", error=e, attempt=max_retries + 1, max_attempts=max_retries + 1, mid_tool_call=False,
-                diag=self.clients.diag,
-            )
+                diag=self.clients.diag)
             if _is_stream_parse_err:
                 _what = "Provider returned malformed streaming data after"
             elif _is_empty_stream:
@@ -3659,8 +3624,7 @@ class _StreamingCall:
             else:
                 _what = "Connection to provider failed after"
             self.agent._buffer_status(
-                f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment."
-            )
+                f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment.")
         else:
             self._maybe_disable_streaming(e)
             logger.exception("Streaming failed before delivery: %s", e)
@@ -3684,8 +3648,7 @@ class _StreamingCall:
                         # Per-request client so the watchdog aborts its socket, not the shared one.
                         request_client = self.clients.set_client(
                             self.agent._create_request_anthropic_client(reason="anthropic_stream_request"),
-                            kind="anthropic_messages",
-                        )
+                            kind="anthropic_messages")
                         self.result["response"] = self._call_anthropic(request_client)
                     else:
                         self.result["response"] = self._call_chat_completions(stream_attempt_id)
@@ -3854,8 +3817,7 @@ class _StreamingCall:
             self._stream_stale_timeout = env_float("HERMES_LOCAL_STREAM_STALE_TIMEOUT", _local_default)
             logger.debug(
                 "Local provider detected (%s) — stale stream timeout set to %.0fs",
-                self.agent.base_url, self._stream_stale_timeout,
-            )
+                self.agent.base_url, self._stream_stale_timeout)
             return
         base = _scale_stale_timeout_for_context(base, estimate_request_context_tokens(self.api_kwargs))
         from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
@@ -3897,10 +3859,9 @@ class _StreamingCall:
         # Anthropic refusal) before the raw error is swallowed into the stub:
         # the loop reads the tag and falls back instead of re-hitting the filter.
         try:
-            from agent.error_classifier import classify_api_error, FailoverReason
+            from agent.error_classifier import classify_api_error
             _cls = classify_api_error(
-                error, provider=str(getattr(self.agent, "provider", "") or ""), model=str(getattr(self.agent, "model", "") or ""),
-            )
+                error, provider=str(getattr(self.agent, "provider", "") or ""), model=str(getattr(self.agent, "model", "") or ""))
             _content_filter_terminated = _cls.reason == FailoverReason.content_policy_blocked
         except Exception:
             _content_filter_terminated = False
@@ -3927,8 +3888,8 @@ class _StreamingCall:
         self._monitor_interrupted = {"yes": False}
         if self._inline:
             self.worker = None
-            monitor_target = _context_thread_target(self._monitor_loop)
-            monitor = threading.Thread(target=monitor_target, name="stream-inline-monitor", daemon=True)
+            monitor = threading.Thread(
+                target=_context_thread_target(self._monitor_loop), name="stream-inline-monitor", daemon=True)
             monitor.start()
             try:
                 self._run_call()
