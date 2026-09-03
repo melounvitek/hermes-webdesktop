@@ -1,10 +1,8 @@
 """Structured streaming events — the agent→gateway delivery contract.
 
-A small typed vocabulary naming *what happened* without prescribing *how it is
-delivered*: the agent emits these from its worker thread, ``GatewayStreamConsumer``
-is the single sink and the platform adapter decides rendering.  Plain frozen
-dataclasses: no behavior, no I/O, safe across the thread/async boundary.  Events
-describe *transport*, never *context* — whatever the gateway "eats" must never
+Typed *what happened* events (frozen dataclasses, no I/O) emitted from the agent's
+worker thread; ``GatewayStreamConsumer`` is the sink and the adapter decides rendering.
+Events describe *transport*, never *context*: whatever the gateway "eats" must never
 diverge from the agent-owned message history.
 """
 
@@ -22,12 +20,8 @@ class MessageChunk:
 
 @dataclass(frozen=True)
 class MessageStop:
-    """The current assistant text segment is complete.
-
-    ``final`` is True only for the terminal stop of the turn; an intermediate stop
-    (text → tool call → more text) makes the consumer start a fresh segment below
-    tool chrome.
-    """
+    """Assistant text segment complete.  ``final`` only for the turn's terminal stop; an
+    intermediate stop (text → tool → text) starts a fresh segment below tool chrome."""
     final: bool = False
 
 
@@ -43,16 +37,13 @@ class ToolCallChunk:
     tool_name: str
     preview: Optional[str] = None
     args: Optional[Dict[str, Any]] = None
-    # Monotonic per-turn index: correlates a finish with its start.
-    index: int = 0
+    index: int = 0  # monotonic per-turn index: correlates a finish with its start
 
 
 @dataclass(frozen=True)
 class ToolCallFinished:
-    """A tool invocation completed. Tool *output* never travels here (it is history).
-
-    Drives progress-bubble settling and one-time onboarding hints (LongToolHint).
-    """
+    """A tool invocation completed (drives bubble settling + LongToolHint).  Tool *output*
+    never travels here — it is history."""
     tool_name: str
     duration: float = 0.0  # wall-clock seconds
     ok: bool = True        # returned without raising
@@ -61,21 +52,16 @@ class ToolCallFinished:
 
 @dataclass(frozen=True)
 class LongToolHint:
-    """One-shot onboarding nudge when a tool runs longer than the threshold.
-
-    The gateway gates it on platform capability (/verbose usable) and first-time use.
-    """
+    """One-shot onboarding nudge for a long tool run; the gateway gates it on platform
+    capability (/verbose usable) and first-time use."""
     tool_name: str = ""
     duration: float = 0.0
 
 
 @dataclass(frozen=True)
 class GatewayNotice:
-    """A gateway-originated control message.
-
-    ``kind`` is a stable string adapters switch on (``"restart"`` / ``"online"`` /
-    ``"long_run"`` / …); ``text`` is the default rendering.
-    """
+    """Gateway-originated control message; ``kind`` is a stable string adapters switch on
+    (``"restart"`` / ``"online"`` / ``"long_run"`` / …), ``text`` the default rendering."""
     kind: str
     text: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)

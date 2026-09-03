@@ -49,10 +49,8 @@ class StreamTransportMixin:
         )
 
     async def _try_seed_frame(self, fail_log: str, *, exc_info: bool = False) -> bool:
-        """_send_seed_frame() as a bool; a raise logs ``fail_log`` at DEBUG and reads as False.
-
-        ``exc_info`` logs the traceback instead of formatting the error into ``fail_log``.
-        """
+        """_send_seed_frame() as a bool; a raise logs ``fail_log`` at DEBUG (with the error
+        formatted in, or the traceback when ``exc_info``) and reads as False."""
         try:
             return bool(await self._send_seed_frame())
         except Exception as e:
@@ -87,11 +85,8 @@ class StreamTransportMixin:
         self._reopen_seeded_eagerly = False
 
     def _degrade_native_to_buffered_send(self) -> None:
-        """Leave native mode; post-boundary output goes out as ONE send() at got_done.
-
-        buffer_only avoids mid-stream flushes that create multiple messages on
-        non-editable platforms.
-        """
+        """Leave native mode; buffer_only so post-boundary output is ONE send() at got_done
+        (mid-stream flushes would create multiple messages on non-editable platforms)."""
         self._use_native_streaming = False
         self._close_native_state()
         self.cfg.buffer_only = True
@@ -105,10 +100,7 @@ class StreamTransportMixin:
         return md or None
 
     def _stale_preview_ids(self, *, segment_only: bool = False) -> set:
-        """Preview message ids a fresh final replaces.
-
-        ``segment_only``: never delete an earlier finalized preamble.
-        """
+        """Preview ids a fresh final replaces; ``segment_only`` spares finalized preambles."""
         stale_ids = set(
             self._segment_preview_message_ids if segment_only else self._preview_message_ids
         )
@@ -136,11 +128,8 @@ class StreamTransportMixin:
                 logger.debug("%s preview cleanup failed (%s): %s", label, stale_id, e)
 
     def _resolve_draft_streaming(self) -> bool:
-        """Whether this run should use draft streaming per ``cfg.transport``.
-
-        "edit"/"off" → False.  "draft"/"auto" → the adapter's supports_draft_streaming
-        probe (chat type, platform-version gates); "draft" logs the downgrade.
-        """
+        """cfg.transport "draft"/"auto" → the adapter's supports_draft_streaming probe
+        ("draft" logs the downgrade); "edit"/"off" → False."""
         transport = (self.cfg.transport or "edit").lower()
         if transport in ("edit", "off"):
             return False
@@ -169,11 +158,8 @@ class StreamTransportMixin:
         return bool(supported)
 
     def _resolve_native_streaming(self) -> bool:
-        """Whether to use native streaming (adapter.send_stream_frame for ALL frames).
-
-        Requires a BasePlatformAdapter subclass with class-level
-        SUPPORTS_NATIVE_STREAMING and a truthy supports_native_streaming probe.
-        """
+        """Native streaming (send_stream_frame for ALL frames): a BasePlatformAdapter with
+        class-level SUPPORTS_NATIVE_STREAMING and a truthy supports_native_streaming probe."""
         if not (
             isinstance(self.adapter, _BasePlatformAdapter)
             and getattr(type(self.adapter), "SUPPORTS_NATIVE_STREAMING", False)
@@ -190,9 +176,7 @@ class StreamTransportMixin:
 
     async def _send_draft_frame(self, text: str) -> bool:
         """Emit one draft frame; any failure permanently disables drafts for this run.
-
-        Drafts have no message_id and clear on the client when the final sendMessage lands.
-        """
+        Drafts have no message_id and clear on the client when the final send lands."""
         if self._draft_id is None:
             # Should never happen (set in tandem with _use_draft_streaming in run()).
             self._use_draft_streaming = False
@@ -219,11 +203,9 @@ class StreamTransportMixin:
         return False
 
     async def _abandon_native_stream(self) -> None:
-        """Seal an orphaned draft stream in place on turn death (stale exit / cancel).
-
-        Else the live indicator stays forever and the adapter's armed interception
-        state leaks into the next turn.  Never sets delivery flags.
-        """
+        """Seal an orphaned draft stream on turn death (stale exit / cancel): else the live
+        indicator stays forever and armed interception state leaks into the next turn.
+        Never sets delivery flags."""
         if not self._use_draft_streaming:
             return
         if getattr(type(self.adapter), "abandon_open_draft", None) is None:
@@ -267,10 +249,8 @@ class StreamTransportMixin:
             self._track_preview_id(mid)
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
-        """Adapter's prefers_fresh_final_streaming hook (e.g. Telegram's richer send path).
-
-        False when there's no real preview, no hook, or on any error.
-        """
+        """Adapter's prefers_fresh_final_streaming hook (Telegram's richer send path);
+        False without a real preview / hook, or on any error."""
         fn = getattr(self.adapter, "prefers_fresh_final_streaming", None)
         if fn is None or not self._has_real_preview():
             return False
@@ -292,11 +272,8 @@ class StreamTransportMixin:
         return result is True
 
     async def _try_fresh_final(self, text: str, *, is_turn_final: bool = True) -> bool:
-        """Send ``text`` as a fresh message and best-effort delete the preview(s).
-
-        False on any failure so the caller falls back to edit.  ``is_turn_final=False``
-        (interim segment) leaves the final-delivery flag unset.
-        """
+        """Send ``text`` fresh and best-effort delete the preview(s); False on any failure so
+        the caller falls back to edit.  ``is_turn_final=False`` leaves the delivery flag unset."""
         # Replacing every preview is only sound while ``text`` holds the whole answer;
         # after a split, deleting sealed heads would erase delivered text.
         if self._turn_split_delivery:
@@ -335,12 +312,9 @@ class StreamTransportMixin:
     async def _send_or_edit(
         self, text: str, *, finalize: bool = False, is_turn_final: bool = True,
     ) -> bool:
-        """Send or edit the streaming message; True if delivered.
-
-        ``finalize`` marks the last edit of a streaming sequence.  Transport order:
-        native frame → draft frame → edit existing → first send; a transport returns
-        None to fall through to the next.
-        """
+        """Send or edit the streaming message; True if delivered.  ``finalize`` marks the
+        last edit.  Transport order: native frame → draft frame → edit existing → first
+        send; a transport returns None to fall through to the next."""
         text = self._clean_for_display(text)
         # Stream-is-the-message draft frames must stay prefix-stable: a closing ```
         # on a mid-code-block frame makes frame N not a prefix of N+1 and the
@@ -395,11 +369,8 @@ class StreamTransportMixin:
     async def _native_push(
         self, text: str, *, finalize: bool, is_turn_final: bool,
     ) -> Optional[bool]:
-        """Native streaming: every frame goes through send_stream_frame().
-
-        Lazy re-seed here after a boundary closed the stream.  Returns None when
-        native was disabled (seed/frame failure) so the caller falls through.
-        """
+        """Native streaming: every frame goes through send_stream_frame(); lazy re-seed after
+        a boundary.  None when native was disabled (seed/frame failure) → caller falls through."""
         if not self._native_stream_opened and text:
             if not await self._try_seed_frame("Re-seed failed, disabling native streaming: %s"):
                 self._use_native_streaming = False
@@ -462,11 +433,9 @@ class StreamTransportMixin:
         self, text: str, pre_fence_text: str, *, finalize: bool, is_turn_final: bool,
     ) -> Optional[bool]:
         """Draft frame while no message_id exists; None = not applicable / drafts just failed.
-
-        Drafts are skipped when finalizing (the real send clears the draft), EXCEPT
-        stream-is-the-message adapters keep ONE stream per turn: a segment-break
-        finalize must not become a real send (it would seal at every tool boundary).
-        """
+        Skipped when finalizing (the real send clears the draft), EXCEPT stream-is-the-message
+        adapters keep ONE stream per turn: a segment-break finalize must not become a real
+        send (it would seal at every tool boundary)."""
         stream_is_msg = self._stream_is_message()
         if finalize and not (stream_is_msg and not is_turn_final):
             return None
@@ -561,10 +530,8 @@ class StreamTransportMixin:
     async def _on_edit_failure(
         self, result, text: str, *, finalize: bool, is_turn_final: bool,
     ) -> bool:
-        """Classify a failed edit: partial overflow, flood backoff, or fallback mode.
-
-        Always False; the caller's finalize path may still deliver the tail.
-        """
+        """Classify a failed edit: partial overflow, flood backoff, or fallback mode.  Always
+        False; the caller's finalize path may still deliver the tail."""
         turn_final = finalize and is_turn_final
         if (
             turn_final

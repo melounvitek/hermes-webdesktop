@@ -76,10 +76,8 @@ class StreamFallbackMixin:
     def _truncate_for_stream(
         self, text: str, limit: int, len_fn: "Callable[[str], int]",
     ) -> list[str]:
-        """Split via the adapter's canonical truncate_message (platform-specific rules).
-
-        Non-base test doubles / legacy adapters keep the two-argument call shape.
-        """
+        """Split via the adapter's canonical truncate_message (platform-specific rules);
+        non-base test doubles / legacy adapters keep the two-argument call shape."""
         truncate = getattr(self.adapter, "truncate_message", None)
         if not callable(truncate):
             return self._split_text_chunks(text, limit, len_fn)
@@ -92,10 +90,8 @@ class StreamFallbackMixin:
         return list(chunks)
 
     async def _send_fallback_final(self, text: str) -> None:
-        """Send the final continuation after streaming edits stop working.
-
-        Retries each chunk once on flood-control failures with a short delay.
-        """
+        """Send the final continuation after streaming edits stop working (one flood retry
+        per chunk)."""
         # Balance fences BEFORE computing the continuation so the closing fence
         # reaches the user even when only the tail is delivered.
         final_text = ensure_closed_code_fences(self._clean_for_display(text))
@@ -154,11 +150,9 @@ class StreamFallbackMixin:
         self._fallback_preserve_partial_messages = False
 
     async def _fallback_when_nothing_unseen(self, final_text: str) -> Optional[str]:
-        """Fallback entered but the visible prefix already covers ``final_text``.
-
-        Returns the continuation to send (the whole final when the prefix is from a
-        *previous* segment) or None when the turn is settled here.
-        """
+        """Fallback entered but the visible prefix already covers ``final_text``: returns the
+        continuation to send (the whole final when the prefix is from a *previous* segment)
+        or None when the turn is settled here."""
         visible = self._visible_prefix()
         # Telegram clients can lose (part of) a streamed preview after a failed
         # final edit, so opt-in adapters commit a fresh final send.
@@ -219,11 +213,8 @@ class StreamFallbackMixin:
         return _len_fn, raw_limit
 
     async def _send_with_flood_retry(self, *, content: str, retry_log: str, reply_to=None):
-        """adapter.send(final metadata) with ONE bounded retry on flood control.
-
-        Exceptions propagate (callers decide whether a raise means "ambiguous").
-        Returns the last SendResult (success or not).
-        """
+        """adapter.send(final metadata) with ONE bounded flood retry; returns the last
+        SendResult.  Exceptions propagate (callers decide whether a raise is "ambiguous")."""
         kwargs = dict(
             chat_id=self.chat_id, content=content, metadata=self._metadata_for_send(final=True),
         )
@@ -242,11 +233,9 @@ class StreamFallbackMixin:
         return result
 
     async def _send_empty_fallback_final(self, final_text: str) -> str:
-        """Commit a completed answer after Telegram finalization fails.
-
-        Returns "delivered", "failed" (gateway may retry), "ambiguous" (a timeout may
-        have landed) or "preview" (flood control; the complete preview is authoritative).
-        """
+        """Commit a completed answer after Telegram finalization fails: "delivered", "failed"
+        (gateway may retry), "ambiguous" (a timeout may have landed) or "preview" (flood
+        control; the complete preview is authoritative)."""
         # Segment-scoped only: never delete an earlier finalized preamble.
         stale_ids = self._stale_preview_ids(segment_only=True)
         try:
@@ -314,10 +303,8 @@ class StreamFallbackMixin:
         return "flood" in err_lower or "retry after" in err_lower or "rate" in err_lower
 
     async def _flush_segment_tail_on_edit_failure(self) -> None:
-        """Send the unseen tail after the delivered prefix as a new message before a segment reset.
-
-        Also best-effort strips the stuck cursor from the partial message.
-        """
+        """Before a segment reset, send the unseen tail as a new message (and best-effort
+        strip the stuck cursor from the partial)."""
         if not self._fallback_final_send:
             await self._try_strip_cursor()
         visible = self._fallback_prefix or self._visible_prefix()
@@ -381,11 +368,9 @@ class StreamFallbackMixin:
             return False
 
     def _raw_message_limit(self) -> int:
-        """Per-chat length budget (adapter ``message_len_fn`` units) before overflow splits.
-
-        Rich-capable adapters may raise it via ``streaming_overflow_limit`` so a
-        reply that fits one rich message isn't fragmented at the edit limit.
-        """
+        """Per-chat length budget (``message_len_fn`` units) before overflow splits; rich
+        adapters may raise it via ``streaming_overflow_limit`` so a reply that fits one rich
+        message isn't fragmented at the edit limit."""
         base = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
         # isinstance gate keeps MagicMock adapters (mock attrs, not ints) on base.
         if isinstance(self.adapter, _BasePlatformAdapter):
@@ -403,11 +388,9 @@ class StreamFallbackMixin:
         return base
 
     async def _suppress_silence_marker(self) -> None:
-        """Retract any streamed preview when the final reply is a bare silence marker.
-
-        Flags stay False: nothing was delivered, and the gateway's whole-response
-        filter turns the marker into "" so no fallback send happens either.
-        """
+        """Retract any streamed preview when the final reply is a bare silence marker.  Flags
+        stay False: the gateway's whole-response filter turns the marker into "" so no
+        fallback send happens either."""
         # A native-stream bubble isn't a deletable message — close an open one
         # (e.g. from an eager re-seed) with an empty finalize so it doesn't hang.
         if self._native_stream_opened:

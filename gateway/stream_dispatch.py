@@ -1,11 +1,9 @@
-"""Adapter-driven dispatch of structured stream events to a delivery sink.
+"""Adapter-driven dispatch of structured stream events (gateway/stream_events.py).
 
-``GatewayEventDispatcher`` routes each typed event (gateway/stream_events.py)
-through the adapter's render hooks: message events flow into the consumer; tool
-events are formatted by the adapter — which may return None to *eat* them on
-platforms without tool chrome — and enqueued onto the same tool-progress queue the
-gateway drains, so the two paths never race.  Synchronous, no asyncio: callable
-from the agent's worker thread.
+Message events flow into the consumer; tool events are formatted by the adapter (None
+= eat it on platforms without tool chrome) and enqueued onto the same tool-progress
+queue the gateway drains, so the two paths never race.  Synchronous: callable from
+the agent's worker thread.
 """
 
 from __future__ import annotations
@@ -23,15 +21,11 @@ logger = logging.getLogger("gateway.stream_events")
 class GatewayEventDispatcher:
     """Route typed stream events through an adapter onto a delivery sink.
 
-    adapter: provides ``render_message_event`` / ``format_tool_event``.
-    sink: the GatewayStreamConsumer; None when streaming is disabled (message
-        events are dropped — the final response still goes out normally).
-    enqueue_tool_line: puts a rendered tool-progress line on the gateway's
-        progress queue; None when tool progress is disabled for the channel.
-    tool_mode: "all" / "new" / "verbose" / "off".  preview_max_len: resolved
-        ``tool_preview_length`` (0 = no cap in verbose).
-    on_long_tool / on_notice: optional hooks so the gateway owns the
-        "should I surface this here?" decision.
+    sink: the GatewayStreamConsumer, or None when streaming is disabled (message
+    events dropped; the final still goes out normally).  enqueue_tool_line: None
+    when tool progress is disabled.  tool_mode: "all"/"new"/"verbose"/"off";
+    preview_max_len: ``tool_preview_length`` (0 = no cap in verbose).
+    on_long_tool / on_notice: the gateway owns the "surface this here?" decision.
     """
 
     def __init__(
