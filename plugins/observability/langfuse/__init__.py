@@ -233,13 +233,10 @@ def _build_client() -> Optional[Langfuse]:
         )
         return None
 
-    kwargs: Dict[str, Any] = {
-        "public_key": public_key,
-        "secret_key": secret_key,
-        "base_url": _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
-    }
-    for key, name in (("environment", "ENV"), ("release", "RELEASE")):
-        value = _env(f"HERMES_LANGFUSE_{name}") or _env(f"LANGFUSE_{name}")
+    kwargs: Dict[str, Any] = {"public_key": public_key, "secret_key": secret_key}
+    for key, name, default in (("base_url", "BASE_URL", "https://cloud.langfuse.com"), ("environment", "ENV", ""),
+                               ("release", "RELEASE", "")):
+        value = _env(f"HERMES_LANGFUSE_{name}") or _env(f"LANGFUSE_{name}") or default
         if value:
             kwargs[key] = value
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
@@ -389,14 +386,10 @@ def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
     if isinstance(system_prompt, str):
         text = system_prompt.strip()
     elif isinstance(system_prompt, list):
-        parts: list[str] = []
-        for block in system_prompt:
-            if isinstance(block, dict):
-                # Anthropic: {"type": "text", "text": ...}; Bedrock Converse: {"text": ...}.
-                block = block.get("text", "") if block.get("type") in ("text", None) and "text" in block else None
-            if isinstance(block, str) and block:
-                parts.append(block)
-        text = "\n\n".join(parts)
+        # Anthropic: {"type": "text", "text": ...}; Bedrock Converse: {"text": ...}; or bare strings.
+        blocks = ((b.get("text", "") if b.get("type") in ("text", None) and "text" in b else None)
+                  if isinstance(b, dict) else b for b in system_prompt)
+        text = "\n\n".join(b for b in blocks if isinstance(b, str) and b)
     else:
         return None
     return {"role": "system", "content": _capture_content(text)} if text else None
@@ -420,16 +413,14 @@ def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
     for message in messages[-12:]:
         if not isinstance(message, dict):
             continue
-        role = message.get("role")
-        item = {"role": role, "content": _capture_content(message.get("content"), parse_json_strings=(role == "tool"))}
-        if role == "tool":
-            if message.get("tool_call_id"):
-                item["tool_call_id"] = message["tool_call_id"]
-            if message.get("name"):
-                item["name"] = _safe_value(message["name"])
-        if message.get("tool_calls"):
-            item["tool_calls"] = _capture_content(message.get("tool_calls"), parse_json_strings=True)
-        serialized.append(item)
+        role, is_tool = message.get("role"), message.get("role") == "tool"
+        serialized.append({
+            "role": role, "content": _capture_content(message.get("content"), parse_json_strings=is_tool),
+            **({"tool_call_id": message["tool_call_id"]} if is_tool and message.get("tool_call_id") else {}),
+            **({"name": _safe_value(message["name"])} if is_tool and message.get("name") else {}),
+            **({"tool_calls": _capture_content(message["tool_calls"], parse_json_strings=True)}
+               if message.get("tool_calls") else {}),
+        })
     return serialized
 
 
@@ -671,9 +662,8 @@ def _client_and_key(task_id: str, session_id: str, turn_id: str, api_request_id:
     return client, _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
 
 
-def _add_duration(metadata: Dict[str, Any], api_duration: Any) -> None:
-    if api_duration and api_duration > 0:
-        metadata["api_duration_s"] = round(api_duration, 3)
+def _duration_meta(api_duration: Any) -> Dict[str, Any]:
+    return {"api_duration_s": round(api_duration, 3)} if api_duration and api_duration > 0 else {}
 
 
 def _pop_generation(task_key: str, api_call_count: Any) -> tuple[Optional[TraceState], Any]:
@@ -742,8 +732,8 @@ def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, refe
         cost_details = {"total": float(cost_usd)} if isinstance(cost_usd, (int, float)) else {}
 
         label = ref.get("label") or "advisor"
-        metadata = {"moa_role": "reference", "label": label}
-        metadata.update({k: ref[k] for k in ("provider", "cost_status", "cost_source", "temperature") if ref.get(k) is not None})
+        metadata = {"moa_role": "reference", "label": label,
+                    **{k: ref[k] for k in ("provider", "cost_status", "cost_source", "temperature") if ref.get(k) is not None}}
 
         observation = _start_child_observation(
             state, name=f"MoA advisor: {label}", as_type="generation",
@@ -845,10 +835,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     else:
         usage_details, cost_details = {}, {}
 
-    gen_metadata: Dict[str, Any] = {"tool_call_count": len(output.get("tool_calls", [])) or assistant_tool_call_count}
-    _add_duration(gen_metadata, api_duration)
-    if finish_reason:
-        gen_metadata["finish_reason"] = finish_reason
+    gen_metadata = {"tool_call_count": len(output.get("tool_calls", [])) or assistant_tool_call_count,
+                    **_duration_meta(api_duration), **({"finish_reason": finish_reason} if finish_reason else {})}
     _end_observation(generation, output=output, usage_details=usage_details, cost_details=cost_details, metadata=gen_metadata)
 
     has_tools = bool(getattr(assistant_message, "tool_calls", None)) if assistant_message else assistant_tool_call_count > 0
@@ -931,11 +919,12 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     error_type, error_message = str(error.get("type") or ""), str(error.get("message") or "")
 
     # Error messages can embed request fragments (URLs w/ keys, prompt echoes) — capture-pipeline them.
-    error_metadata: Dict[str, Any] = {"error": True, "error_type": error_type, "error_message": _capture_content(error_message)}
-    error_metadata.update({k: v for k, v in (("status_code", status_code), ("retry_count", retry_count),
-                                             ("max_retries", max_retries), ("retryable", retryable),
-                                             ("reason", str(reason) if reason else None)) if v is not None})
-    _add_duration(error_metadata, api_duration)
+    error_metadata: Dict[str, Any] = {
+        "error": True, "error_type": error_type, "error_message": _capture_content(error_message),
+        **{k: v for k, v in (("status_code", status_code), ("retry_count", retry_count), ("max_retries", max_retries),
+                             ("retryable", retryable), ("reason", str(reason) if reason else None)) if v is not None},
+        **_duration_meta(api_duration),
+    }
 
     if generation is not None:
         with _failsafe("error-level update"):
@@ -961,12 +950,9 @@ def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> 
 
     # This session's traces (all, when no session_id). Keys carry the session as
     # "session:<id>" or "task:<id>" (gateway: task_id == session_id) or bare legacy id.
+    fragments = (f"session:{session_id}", f"task:{session_id}")
     with _STATE_LOCK:
-        if session_id:
-            fragments = (f"session:{session_id}", f"task:{session_id}")
-            keys = [k for k in _TRACE_STATE if k == session_id or any(f in k for f in fragments)]
-        else:
-            keys = list(_TRACE_STATE)
+        keys = [k for k in _TRACE_STATE if not session_id or k == session_id or any(f in k for f in fragments)]
     for key in keys:
         _finish_trace(key)
     _flush(client)
@@ -1012,11 +998,9 @@ def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, 
     if observation is None:
         return
 
-    metadata: Dict[str, Any] = {"child_role": child_role}
-    metadata.update({k: v for k, v in (("status", child_status), ("duration_ms", duration_ms)) if v})
-    if isinstance(tool_call_history, list):
-        metadata["tool_call_count"] = len(tool_call_history)
-        metadata["tool_calls"] = _capture_content(tool_call_history)
+    metadata = {"child_role": child_role, **{k: v for k, v in (("status", child_status), ("duration_ms", duration_ms)) if v},
+                **({"tool_call_count": len(tool_call_history), "tool_calls": _capture_content(tool_call_history)}
+                   if isinstance(tool_call_history, list) else {})}
     _end_observation(observation, output=_capture_content(child_summary), metadata=metadata)
 
 
