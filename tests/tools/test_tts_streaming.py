@@ -940,7 +940,7 @@ def test_sync_pipeline_stop_skips_queued_playback(monkeypatch):
 
 
 def test_sync_pipeline_cleans_temp_files(monkeypatch):
-    from tools import tts_tool
+    from tools import tts_tool_speaker
 
     created = []
     real_mkstemp = tempfile.mkstemp
@@ -950,7 +950,7 @@ def test_sync_pipeline_cleans_temp_files(monkeypatch):
         created.append(path)
         return fd, path
 
-    monkeypatch.setattr(tts_tool.tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(tts_tool_speaker.tempfile, "mkstemp", tracking_mkstemp)
     events, _stop, done = _timed_sync_run(monkeypatch,
                                           ["First full sentence here. ",
                                            "Second full sentence here. "])

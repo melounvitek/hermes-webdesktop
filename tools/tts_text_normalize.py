@@ -276,3 +276,42 @@ def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     if max_chars is not None and max_chars > 0 and len(spoken) > max_chars:
         spoken = spoken[:max_chars].rstrip()
     return spoken
+
+
+# ===========================================================================
+# Speech text cleanup (shared by voice-mode streaming and gateway auto-TTS)
+# ===========================================================================
+# Legacy regex fallback, only used if the shared normalizer raises.
+_LEGACY_TTS_STRIP_STEPS = (
+    (re.compile(r'<think[\s>].*?</think>', flags=re.DOTALL), ' '),
+    (re.compile(r'```[\s\S]*?```'), ' '),
+    (re.compile(r'\[([^\]]+)\]\([^)]+\)'), r'\1'),
+    (re.compile(r'https?://\S+'), ''),
+    (re.compile(r'\*\*(.+?)\*\*'), r'\1'),
+    (re.compile(r'\*(.+?)\*'), r'\1'),
+    (re.compile(r'`(.+?)`'), r'\1'),
+    (re.compile(r'^#+\s*', flags=re.MULTILINE), ''),
+    (re.compile(r'^\s*[-*]\s+', flags=re.MULTILINE), ''),
+    (re.compile(r'---+'), ''),
+    # Emoji + variation selectors/ZWJ: providers speak them as awkward labels.
+    (re.compile('[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\U000E0020-\U000E007F]+'), ' '),
+    (re.compile(r'\n{3,}'), '\n\n'),
+)
+
+
+def _strip_markdown_for_tts(text: str) -> str:
+    """Prepare text for speech via the shared cleaner in tts_text_normalize.
+
+    One cleaner for every TTS path (tool, gateway auto-TTS, voice-mode
+    streaming, web dashboard): strips <think> blocks, the verifier footer,
+    markdown and emoji; expands units; flattens newlines so newline-sensitive
+    providers (Kokoro) speak the whole script. Falls back to the legacy regex
+    pipeline if the normalizer ever fails.
+    """
+    try:
+        return prepare_spoken_text(text, max_chars=None)
+    except Exception:
+        pass
+    for pattern, repl in _LEGACY_TTS_STRIP_STEPS:
+        text = pattern.sub(repl, text)
+    return text.strip()
