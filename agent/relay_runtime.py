@@ -814,12 +814,9 @@ class RelayHostRegistry:
 
     def for_profile(self, profile_key: str | None = None, *, create: bool = True) -> RelayHost | None:
         key = profile_key or current_profile_key()
-        host = self._hosts.get(key)
-        if host is not None or not create:
-            return host
         with self._lock:
             host = self._hosts.get(key)
-            if host is not None:
+            if host is not None or not create:
                 return host
             try:
                 host = RelayRuntime(profile_key=key)

@@ -56,7 +56,7 @@ class _ManagedAttempt:
         *, name: str, model_name: str,
     ) -> "_ManagedAttempt | None":
         """Return the managed attempt for ``session_id``, or None to run unmanaged."""
-        if session_id is None:
+        if not session_id:
             return None
         runtime, session, parent = relay_runtime.resolve_execution_context(session_id)
         if runtime is None or session is None or not runtime.managed_execution_enabled():
@@ -164,11 +164,20 @@ class _ManagedAttempt:
             _complete_logical(self.logical, outcome="success")
 
 
+def _current_session_id() -> str | None:
+    """Return the inherited Hermes turn's session id, or None outside a live turn."""
+    turn = relay_runtime.active_turn()
+    return None if turn is None else turn.lease.session_id
+
+
 def execute(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str, name: str,
-    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
+    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, name: str, model_name: str,
+    session_id: str | None = None, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
-    """Run one non-streaming physical provider attempt through Relay."""
+    """Run one non-streaming physical provider attempt through Relay.
+    ``session_id`` defaults to the inherited Hermes turn's session (unmanaged when there is none)."""
+    if session_id is None:
+        session_id = _current_session_id()
     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
         return callback(request)
@@ -182,10 +191,12 @@ def execute(
 
 
 async def execute_async(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str, name: str,
-    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
+    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, name: str, model_name: str,
+    session_id: str | None = None, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
-    """Run one asynchronous physical provider attempt through Relay."""
+    """Async ``execute``."""
+    if session_id is None:
+        session_id = _current_session_id()
     attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
         return await callback(request)
@@ -196,32 +207,9 @@ async def execute_async(
     return attempt.result(managed, defer_logical_completion)
 
 
-def _current_session_id() -> str | None:
-    """Return the inherited Hermes turn's session id, or None outside a live turn."""
-    turn = relay_runtime.active_turn()
-    return None if turn is None else turn.lease.session_id
-
-
-def execute_current(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, name: str,
-    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
-) -> Any:
-    """Run a provider attempt under the inherited Hermes turn when present."""
-    return execute(
-        request, callback, session_id=_current_session_id(), name=name, model_name=model_name,
-        metadata=metadata, defer_logical_completion=defer_logical_completion,
-    )
-
-
-async def execute_current_async(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, name: str,
-    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
-) -> Any:
-    """Run an async provider attempt under the inherited turn when present."""
-    return await execute_async(
-        request, callback, session_id=_current_session_id(), name=name, model_name=model_name,
-        metadata=metadata, defer_logical_completion=defer_logical_completion,
-    )
+# Run under the inherited Hermes turn when present (callers that do not know a session id).
+execute_current = execute
+execute_current_async = execute_async
 
 
 def _has_running_event_loop() -> bool:
