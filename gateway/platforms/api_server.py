@@ -188,11 +188,9 @@ def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
 def _hermes_version() -> str:
     """Canonical Hermes version: ``hermes_cli.__version__`` (dist-info can be stale on
     source checkouts), then distribution metadata, then "dev". Never raises."""
-    try:
+    with suppress(Exception):
         from hermes_cli import __version__
         return __version__
-    except Exception:
-        pass
     try:
         from importlib.metadata import version
         return version("hermes-agent")
@@ -255,12 +253,8 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
         normalized = value.strip().lower()
         if normalized in _TRUE_REQUEST_BOOL_STRINGS:
             return True
-        if normalized in _FALSE_REQUEST_BOOL_STRINGS:
-            return False
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return default
+        return False if normalized in _FALSE_REQUEST_BOOL_STRINGS else default
+    return bool(value) if isinstance(value, (int, float)) else default
 
 
 _REQUEST_OPTION_MISSING = object()
@@ -303,11 +297,7 @@ def _request_service_tier(model_options: Any) -> Any:
         return _REQUEST_OPTION_MISSING
     if "service_tier" in model_options:
         raw_tier = model_options.get("service_tier")
-        if raw_tier is None:
-            return None
-        if isinstance(raw_tier, str):
-            return raw_tier.strip() or None
-        return raw_tier
+        return _clean_request_string(raw_tier) if isinstance(raw_tier, str) else raw_tier
     if "fast" in model_options:
         return "priority" if _coerce_request_bool(model_options.get("fast"), default=False) else None
     return _REQUEST_OPTION_MISSING
@@ -319,8 +309,6 @@ def _apply_runtime_agent_overrides(
     if not isinstance(overrides, dict):
         return runtime_kwargs
     for key in _RUNTIME_AGENT_OVERRIDE_KEYS:
-        if key not in overrides:
-            continue
         value = overrides.get(key)
         if value is None:
             continue
@@ -340,10 +328,8 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
     max_tokens = None
     env_max_tokens = os.environ.get("HERMES_MAX_TOKENS")
     if env_max_tokens:
-        try:
+        with suppress(ValueError, TypeError):
             max_tokens = int(env_max_tokens)
-        except (ValueError, TypeError):
-            max_tokens = None
     elif isinstance(model_cfg, dict):
         cfg_max_tokens = model_cfg.get("max_tokens")
         if isinstance(cfg_max_tokens, int):
@@ -353,14 +339,9 @@ def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[
         if isinstance(runtime_max_tokens, int) and runtime_max_tokens > 0:
             max_tokens = runtime_max_tokens
     return {
-        "api_key": runtime.get("api_key"),
-        "base_url": runtime.get("base_url"),
-        "provider": runtime.get("provider"),
-        "api_mode": runtime.get("api_mode"),
-        "command": runtime.get("command"),
+        **{k: runtime.get(k) for k in ("api_key", "base_url", "provider", "api_mode", "command")},
         "args": list(runtime.get("args") or []),
-        "credential_pool": runtime.get("credential_pool"),
-        "max_tokens": max_tokens}
+        "credential_pool": runtime.get("credential_pool"), "max_tokens": max_tokens}
 
 
 def _request_agent_overrides(
@@ -468,10 +449,8 @@ def _normalize_chat_content(
                 if str(item.get("type") or "").strip().lower() in _TEXT_PART_TYPES:
                     text = item.get("text", "")
                     if text:
-                        try:
+                        with suppress(Exception):
                             part = str(text)
-                        except Exception:
-                            pass
             elif isinstance(item, list):
                 part = _normalize_chat_content(item, _max_depth=_max_depth, _depth=_depth + 1)
             if part:
@@ -583,9 +562,8 @@ def _content_has_visible_payload(content: Any) -> bool:
         for part in content:
             if isinstance(part, dict):
                 ptype = str(part.get("type") or "").strip().lower()
-                if ptype in _TEXT_PART_TYPES and str(part.get("text") or "").strip():
-                    return True
-                if ptype in _IMAGE_PART_TYPES:
+                if ptype in _IMAGE_PART_TYPES or (
+                        ptype in _TEXT_PART_TYPES and str(part.get("text") or "").strip()):
                     return True
     return False
 
@@ -694,18 +672,14 @@ async def _abandon_agent_task(
     ``await_cancel=False`` on the CancelledError path, which must not await in the handler."""
     agent = agent_ref[0] if agent_ref else None
     if agent is not None:
-        try:
+        with suppress(Exception):
             request_hard_interrupt(agent, reason)
-        except Exception:
-            pass
         _reap_disconnected_agent_processes(agent, source=reap_source)
     if not agent_task.done():
         agent_task.cancel()
         if await_cancel:
-            try:
+            with suppress(asyncio.CancelledError, Exception):
                 await agent_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
 
 def check_api_server_requirements() -> bool:
@@ -810,10 +784,8 @@ class ResponseStore:
 
     def close(self) -> None:
         """Close the database connection."""
-        try:
+        with suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
     def __len__(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
@@ -889,19 +861,13 @@ def _resolve_media_to_data_urls(text: str) -> str:
 def _redact_api_error_text(value: Any, *, limit: int | None = None) -> str:
     """Redact API-bound error text before it crosses the HTTP boundary."""
     redacted = redact_sensitive_text(str(value), force=True)
-    if limit is not None:
-        return redacted[:limit]
-    return redacted
+    return redacted[:limit] if limit is not None else redacted
 
 
 def _openai_error(message: str, err_type: str = "invalid_request_error", param: str = None, code: str = None) -> Dict[str, Any]:
     """OpenAI-style error envelope."""
-    return {
-        "error": {
-            "message": _redact_api_error_text(message),
-            "type": err_type,
-            "param": param,
-            "code": code}}
+    return {"error": {
+        "message": _redact_api_error_text(message), "type": err_type, "param": param, "code": code}}
 
 
 def _error_response(
@@ -1050,8 +1016,7 @@ class _IdempotencyCache:
         if task is None:
             async def _compute_and_store():
                 resp = await compute_coro()
-                import time as _t
-                self._store[key] = {"resp": resp, "fp": fingerprint, "ts": _t.time()}
+                self._store[key] = {"resp": resp, "fp": fingerprint, "ts": time.time()}
                 self._purge()
                 return resp
             task = asyncio.create_task(_compute_and_store())
@@ -1068,9 +1033,8 @@ _idem_cache = _IdempotencyCache()
 
 
 def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
-    from hashlib import sha256
     subset = {k: body.get(k) for k in keys}
-    return sha256(repr(subset).encode("utf-8")).hexdigest()
+    return hashlib.sha256(repr(subset).encode("utf-8")).hexdigest()
 
 
 def _derive_chat_session_id(
@@ -1085,12 +1049,8 @@ def _derive_chat_session_id(
 _CRON_AVAILABLE = False
 try:
     from cron.jobs import (
-        list_jobs as _cron_list,
-        get_job as _cron_get,
-        update_job as _cron_update,
-        remove_job as _cron_remove,
-        pause_job as _cron_pause,
-        resume_job as _cron_resume,
+        list_jobs as _cron_list, get_job as _cron_get, update_job as _cron_update,
+        remove_job as _cron_remove, pause_job as _cron_pause, resume_job as _cron_resume,
         trigger_job as _cron_trigger)
     from cron.scheduler import (
         CronSchedulerRegistrationError as _CronSchedulerRegistrationError,
@@ -1106,11 +1066,9 @@ except ImportError:
 
 def _notify_cron_provider_jobs_changed() -> None:
     """Best-effort notify of the active cron provider after a REST mutation (built-in: no-op)."""
-    try:
+    with suppress(Exception):
         from cron.scheduler import _notify_provider_jobs_changed
         _notify_provider_jobs_changed()
-    except Exception:
-        pass
 
 
 # Defense-in-depth parity with the cronjob tool's prompt injection scan (the REST
@@ -1156,13 +1114,11 @@ class _SessionEventQueue:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
-        try:
+        with suppress(RuntimeError):
             if running_loop is self.loop:
                 self.queue.put_nowait(event)
             else:
                 self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
-        except RuntimeError:
-            pass
 
 
 class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
@@ -1260,11 +1216,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         try:
             from gateway.run import _gateway_runner_ref
             runner = _gateway_runner_ref()
-            return bool(
-                runner
-                and (
-                    getattr(runner, "_draining", False)
-                    or getattr(runner, "_external_drain_active", False)))
+            return bool(runner and (getattr(runner, "_draining", False)
+                                    or getattr(runner, "_external_drain_active", False)))
         except Exception:
             return False
 
@@ -1290,16 +1243,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if status.get("status") in {"queued", "running", "waiting_for_approval", "stopping"})
         process_depth = 0
         active_delegations = 0
-        try:
+        with suppress(Exception):
             from tools.process_registry import process_registry
             process_depth = process_registry.completion_queue.qsize()
-        except Exception:
-            pass
-        try:
+        with suppress(Exception):
             from tools.async_delegation import active_count
             active_delegations = active_count()
-        except Exception:
-            pass
         return active_api_runs, process_depth, active_delegations
 
     @staticmethod
@@ -1334,13 +1283,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         (precedence owned by ``hermes_cli.model_switch.resolve_effective_model``)."""
         from hermes_cli.model_switch import resolve_effective_model
         profile_name = ""
-        try:
+        with suppress(Exception):
             from hermes_cli.profiles import get_active_profile_name
             profile = get_active_profile_name()
             if profile and profile not in {"default", "custom"}:
                 profile_name = profile
-        except Exception:
-            pass
         return resolve_effective_model(explicit, profile_name, "hermes-agent")
 
     def _cors_headers_for_origin(self, origin: str) -> Optional[Dict[str, str]]:
@@ -1409,9 +1356,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             from agent.secret_scope import get_secret
             from hermes_cli.auth import has_usable_secret
             key = get_secret("API_SERVER_KEY", "") or ""
-            if not has_usable_secret(key, min_length=16):
-                return ""
-            return key
+            return key if has_usable_secret(key, min_length=16) else ""
         except Exception as exc:
             # Fail closed; never log the key or exception text.
             logger.warning(
@@ -1456,18 +1401,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @staticmethod
     def _normalize_callback_platform(value: str) -> str:
         normalized = (value or "").strip().lower().replace("-", "_")
-        if not re.fullmatch(r"[a-z0-9_]+", normalized):
-            return ""
-        return normalized
+        return normalized if re.fullmatch(r"[a-z0-9_]+", normalized) else ""
 
     def _get_platform_callback_adapter(
         self, request: "web.Request", platform_name: str) -> Optional[Any]:
         injected = request.app.get("platform_event_adapters")
-        if isinstance(injected, dict):
-            adapter = injected.get(platform_name)
-            if adapter is not None:
-                return adapter
-        adapter = request.app.get(f"{platform_name}_adapter")
+        adapter = injected.get(platform_name) if isinstance(injected, dict) else None
+        if adapter is None:
+            adapter = request.app.get(f"{platform_name}_adapter")
         if adapter is not None:
             return adapter
         runner = self.gateway_runner or request.app.get("gateway_runner")
@@ -1558,14 +1499,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         on its first credential read. Single-profile gateways keep the no-op.
         """
         if not profile:
-            try:
+            with suppress(Exception):
                 from agent.secret_scope import is_multiplex_active
                 if is_multiplex_active():
                     from gateway.run import _profile_runtime_scope
                     from hermes_constants import get_hermes_home
                     return _profile_runtime_scope(get_hermes_home())
-            except Exception:
-                pass
             return nullcontext()
         from gateway.run import _profile_runtime_scope
         from hermes_cli.profiles import get_profile_dir
@@ -1844,12 +1783,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _clean_runtime_id(value: Any, *, max_len: int = 200) -> str:
-        if value is None:
-            return ""
-        text = str(value).strip()
-        if not text or len(text) > max_len or re.search(r"[\r\n\x00]", text):
-            return ""
-        return text
+        text = "" if value is None else str(value).strip()
+        return "" if len(text) > max_len or re.search(r"[\r\n\x00]", text) else text
 
     @classmethod
     def _split_provider_prefixed_model(cls, model: str) -> tuple[str, str]:
@@ -1954,12 +1889,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if isinstance(raw, dict):
             return dict(raw)
         if isinstance(raw, str) and raw.strip():
-            try:
+            with suppress(Exception):
                 parsed = json.loads(raw)
-            except Exception:
-                return {}
-            if isinstance(parsed, dict):
-                return parsed
+                return parsed if isinstance(parsed, dict) else {}
         return {}
 
     def _runtime_request_from_persisted_session_lock(
@@ -1998,8 +1930,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested = runtime_request.get("requested") or {}
         if requested.get("model") or requested.get("provider"):
             return runtime_request
-        persisted = self._runtime_request_from_persisted_session_lock(session, body)
-        return persisted or runtime_request
+        return self._runtime_request_from_persisted_session_lock(session, body) or runtime_request
 
     @classmethod
     def _sanitize_runtime_metadata(
@@ -2010,11 +1941,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             payload.get("provider") or payload.get("provider_id") or payload.get("effective_provider"),
             max_len=80)
         model = cls._clean_runtime_id(payload.get("model") or payload.get("model_id") or payload.get("effective_model"))
-        result: Dict[str, Any] = {
-            "provider": provider,
-            "model": model,
-            "route_source": cls._clean_runtime_id(payload.get("route_source") or route_source, max_len=64) or "global",
-        }
+        route_source = cls._clean_runtime_id(payload.get("route_source") or route_source, max_len=64)
+        result: Dict[str, Any] = {"provider": provider, "model": model, "route_source": route_source or "global"}
         if requested_runtime or payload.get("requested"):
             req = requested_runtime or payload.get("requested") or {}
             result["requested"] = {
@@ -2028,9 +1956,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _normalize_session_source(value: Any) -> str:
         text = str(value or "").strip().lower()
         allowed = {"api_server", "hermes_browser", "browser", "cli", "telegram", "discord", "slack", "desktop", "dashboard"}
-        if text in allowed:
-            return "hermes_browser" if text == "browser" else text
-        return "api_server"
+        if text not in allowed:
+            return "api_server"
+        return "hermes_browser" if text == "browser" else text
 
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[Dict[str, Any]]:
         """The gateway's per-session ``/model`` override for *session_key*, if any — a
@@ -2092,11 +2020,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         try:
             return _resolve_request_runtime_agent_kwargs(provider_name, target_model=target_model or None)
         except Exception as exc:
-            try:
+            with suppress(Exception):
                 from gateway.run import _resolve_runtime_agent_kwargs_for_provider
                 return _resolve_runtime_agent_kwargs_for_provider(provider_name)
-            except Exception:
-                pass
             if required:
                 raise _ProviderAuthResolutionError(str(exc)) from exc
             logger.debug(
@@ -2109,15 +2035,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model for this key / process-wide. Non-empty non-virtual models are recorded instead."""
         # No model.default but a provider resolved (e.g. `hermes auth add` without `hermes model`).
         if not model and runtime_kwargs.get("provider"):
-            try:
+            with suppress(Exception):
                 from hermes_cli.models import get_default_model_for_provider
                 model = get_default_model_for_provider(runtime_kwargs["provider"])
                 if model:
                     logger.info(
                         "No model configured — defaulting to %s for provider %s",
                         model, runtime_kwargs["provider"])
-            except Exception:
-                pass
         # Keyed by gateway_session_key only (session_id is per-request -> unbounded growth).
         _resolved_key = gateway_session_key or ""
         if not model:
@@ -2285,12 +2209,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
-        if confirmed_runtime_lock:
-            route_source = "session_model_lock"
-        elif session_override:
-            route_source = "session_model_override"
-        else:
-            route_source = "raw_request" if route or request_model or request_provider else "global"
+        route_source = (
+            "session_model_lock" if confirmed_runtime_lock
+            else "session_model_override" if session_override
+            else "raw_request" if route or request_model or request_provider else "global")
         agent._hermes_api_runtime = {
             "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
             "model": getattr(agent, "model", None) or model,
@@ -2496,12 +2418,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "ticket_expires_in_seconds": ticket_ttl,
                 "ws_path": "/v1/browser-control/ws",
                 "scope": {
-                    "principal_id": scope.principal_id,
-                    "profile_id": scope.profile_id,
-                    "session_id": scope.session_id,
-                    "controller_id": scope.controller_id,
-                    "browser_profile_id": scope.browser_profile_id,
-                    "transport_family": scope.transport_family,
+                    **{key: getattr(scope, key) for key in (
+                        "principal_id", "profile_id", "session_id", "controller_id",
+                        "browser_profile_id", "transport_family")},
                     "capabilities": sorted(scope.capabilities)}},
             status=201)
 
@@ -2609,16 +2528,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """``local-api`` for a loopback peer, else ``remote-api``; the broker treats the family as
         part of exact identity, so a remote controller never satisfies a local-only dispatch."""
         host = None
-        try:
+        with suppress(Exception):
             transport = request.transport
-            if transport is not None:
-                peer = transport.get_extra_info("peername")
-                if isinstance(peer, tuple) and peer:
-                    host = peer[0]
-                elif isinstance(peer, str):
-                    host = peer
-        except Exception:
-            host = None
+            peer = transport.get_extra_info("peername") if transport is not None else None
+            if isinstance(peer, tuple) and peer:
+                host = peer[0]
+            elif isinstance(peer, str):
+                host = peer
         return "local-api" if host in ("127.0.0.1", "::1", "localhost") else "remote-api"
 
     def _browser_control_developer_mode(self) -> bool:
@@ -2808,12 +2724,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 except Exception:
                     tools = []
                 data.append({
-                    "name": name,
-                    "label": label,
-                    "description": desc,
+                    "name": name, "label": label, "description": desc,
                     "enabled": name in enabled_toolsets,
-                    "configured": _toolset_has_keys(name, config, features=features),
-                    "tools": tools})
+                    "configured": _toolset_has_keys(name, config, features=features), "tools": tools})
         except Exception:
             logger.exception("GET /v1/toolsets failed")
             return _error_response("Failed to enumerate toolsets", 500, err_type="server_error")
@@ -2971,14 +2884,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_name = self._clean_runtime_id(requested.get("model")) or None
         model_config = None
         if requested.get("model") or requested.get("provider"):
-            model_config = {
-                "browser_model_lock": {
-                    "provider": requested.get("provider") or "",
-                    "model": requested.get("model") or "",
-                    "model_options": runtime_request.get("model_options") or {},
-                    "route_source": runtime_request.get("route_source") or "",
-                    "confirmed": bool(runtime_request.get("require_model_lock")),
-                    "updated_at": time.time()}}
+            model_config = {"browser_model_lock": {
+                "provider": requested.get("provider") or "", "model": requested.get("model") or "",
+                "model_options": runtime_request.get("model_options") or {},
+                "route_source": runtime_request.get("route_source") or "",
+                "confirmed": bool(runtime_request.get("require_model_lock")),
+                "updated_at": time.time()}}
         title = body.get("title")
 
         def _atomic(conn):
@@ -3099,8 +3010,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "session_id": resolved_id,
             "data": [self._message_response(m) for m in messages],
             "pagination": {
-                "limit": limit,
-                "offset": offset,
+                "limit": limit, "offset": offset,
                 "order": order or ("latest" if default_page else "oldest"),
                 "returned": len(messages)}})
 
@@ -3315,23 +3225,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if is_dict else []
                 effective_runtime = self._effective_turn_runtime(runtime_request, result, usage)
                 await queue.put(_event_payload("assistant.completed", {
-                    "session_id": effective_session_id,
-                    "message_id": message_id,
-                    "content": final_response,
-                    "completed": True,
+                    "session_id": effective_session_id, "message_id": message_id,
+                    "content": final_response, "completed": True,
                     "partial": bool(result.get("partial")) if is_dict else False,
-                    "interrupted": False,
-                    "runtime": effective_runtime}))
+                    "interrupted": False, "runtime": effective_runtime}))
                 # A steer accepted after the final reply lands in result["pending_steer"]; surface
                 # it so clients can replay it rather than lose it.
                 pending_steer = result.get("pending_steer") if is_dict else None
                 completed_payload = {
-                    "session_id": effective_session_id,
-                    "message_id": message_id,
-                    "completed": True,
-                    "messages": turn_messages,
-                    "usage": usage,
-                    "runtime": effective_runtime}
+                    "session_id": effective_session_id, "message_id": message_id, "completed": True,
+                    "messages": turn_messages, "usage": usage, "runtime": effective_runtime}
                 if pending_steer:
                     completed_payload["pending_steer"] = pending_steer
                 await queue.put(_event_payload("run.completed", completed_payload))
@@ -3357,10 +3260,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         task = asyncio.create_task(_run_and_signal())
         self._track_background_task(task)
         headers = {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "X-Hermes-Session-Id": session_id}
+            "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no", "X-Hermes-Session-Id": session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
         response = web.StreamResponse(status=200, headers=headers)
@@ -3423,9 +3324,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return lock_error
         if not self._persist_session_runtime_lock(session_id, runtime_request):
             return _error_response(
-                "Could not persist the requested session model lock",
-                500,
-                code="model_lock_persistence_failed")
+                "Could not persist the requested session model lock", 500, code="model_lock_persistence_failed")
         requested = runtime_request.get("requested") or {}
         route = runtime_request.get("route") or {}
         runtime = self._sanitize_runtime_metadata(
@@ -3436,10 +3335,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             requested_runtime=requested,
             route_source=runtime_request.get("route_source") or "raw_request",
             model_lock="accepted")
-        return web.json_response({
-            "object": "hermes.session.model_lock",
-            "session_id": session_id,
-            "runtime": runtime})
+        return web.json_response(
+            {"object": "hermes.session.model_lock", "session_id": session_id, "runtime": runtime})
 
     # -- Cron jobs API ----------------------------------------------------------------
 
@@ -3497,11 +3394,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return web.json_response({"error": scan_error}, status=400)
         return None
 
-    async def _job_lookup_or_mutate(self, request: "web.Request", fn, *, notify: bool) -> "web.Response":
-        """Run ``fn(job_id)``; 404 when it returns falsy, else ``{"job": ...}``."""
-        job_id, err = self._cron_request_guard(request, need_job_id=True)
-        if err:
-            return err
+    def _job_response(self, fn, job_id: str, *, notify: bool) -> "web.Response":
+        """Run ``fn(job_id)``: 404 when falsy, else ``{"job": ...}``; exceptions -> 500."""
         try:
             job = fn(job_id)
             if not job:
@@ -3511,6 +3405,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return web.json_response({"job": job})
         except Exception as e:
             return self._cron_error_response(e)
+
+    async def _job_lookup_or_mutate(self, request: "web.Request", fn, *, notify: bool) -> "web.Response":
+        job_id, err = self._cron_request_guard(request, need_job_id=True)
+        return err if err else self._job_response(fn, job_id, notify=notify)
 
     async def _handle_list_jobs(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs — list all cron jobs."""
@@ -3547,11 +3445,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if repeat is not None and (not isinstance(repeat, int) or repeat < 1):
                 return web.json_response({"error": "Repeat must be a positive integer"}, status=400)
             kwargs = {
-                "prompt": prompt,
-                "schedule": schedule,
-                "name": name,
-                "deliver": body.get("deliver", "local"),
-                "origin": self._cron_origin_from_request(request)}
+                "prompt": prompt, "schedule": schedule, "name": name,
+                "deliver": body.get("deliver", "local"), "origin": self._cron_origin_from_request(request)}
             if skills:
                 kwargs["skills"] = skills
             if repeat is not None:
@@ -3583,13 +3478,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 prompt_err = self._validate_cron_prompt(sanitized["prompt"])
                 if prompt_err:
                     return prompt_err
-            job = _cron_update(job_id, sanitized)
-            if not job:
-                return web.json_response({"error": "Job not found"}, status=404)
-            _notify_cron_provider_jobs_changed()
-            return web.json_response({"job": job})
         except Exception as e:
             return self._cron_error_response(e)
+        return self._job_response(lambda jid: _cron_update(jid, sanitized), job_id, notify=True)
 
     async def _handle_delete_job(self, request: "web.Request") -> "web.Response":
         """DELETE /api/jobs/{job_id} — delete a cron job."""
@@ -3632,13 +3523,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 if prompt_err:
                     return prompt_err
                 extra_prompt = extra_prompt or None
-        try:
-            job = _cron_trigger(job_id, extra_prompt=extra_prompt)
-            if not job:
-                return web.json_response({"error": "Job not found"}, status=404)
-            return web.json_response({"job": job})
-        except Exception as e:
-            return self._cron_error_response(e)
+        return self._job_response(
+            lambda jid: _cron_trigger(jid, extra_prompt=extra_prompt), job_id, notify=False)
 
     async def _handle_cron_fire(self, request: "web.Request") -> "web.Response":
         """POST /api/cron/fire — Chronos managed-cron fire webhook (NAS -> agent).
@@ -3690,11 +3576,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # have no native credential, so without them delivery fails.
             runner = self.gateway_runner or request.app.get("gateway_runner")
             if runner is None:
-                try:
+                with suppress(Exception):
                     from gateway.run import _gateway_runner_ref
                     runner = _gateway_runner_ref()
-                except Exception:
-                    runner = None
             adapters = getattr(runner, "adapters", None) or None
 
             def _detach_fire(fire_fn, *fire_args) -> "web.Response":
@@ -3724,10 +3608,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _track_background_task(self, task) -> None:
         """Register a task in ``_background_tasks`` (tolerates test doubles) with auto-discard."""
-        try:
+        with suppress(TypeError, AttributeError):
             self._background_tasks.add(task)
-        except (TypeError, AttributeError):
-            pass
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
 
@@ -4061,11 +3943,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 retryable=False)
             return False
         try:
-            mws = [
-                mw for mw in (
-                    self._make_profile_prefix_middleware(), cors_middleware, body_limit_middleware,
-                    security_headers_middleware)
-                if mw is not None]
+            mws = [mw for mw in (
+                self._make_profile_prefix_middleware(), cors_middleware, body_limit_middleware,
+                security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
             # Native routes + multiplex /p/<profile>/ mirrors (same handlers; the prefix
