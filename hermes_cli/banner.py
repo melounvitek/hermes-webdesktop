@@ -43,7 +43,7 @@ def cprint(text: str):
 
 
 def _active_skin():
-    """The active skin object, or None when the skin engine is unavailable."""
+    """The active skin object (raises when the skin engine is unavailable)."""
     from hermes_cli.skin_engine import get_active_skin
     return get_active_skin()
 
@@ -120,7 +120,6 @@ def get_available_skills() -> Dict[str, List[str]]:
         for skill in all_skills:
             skills_by_category.setdefault(skill.get("category") or "general", []).append(skill["name"])
         return skills_by_category
-
     result = _memo("_available_skills_cache", _compute)
     return {} if result is _UNCACHED else result
 
@@ -162,8 +161,7 @@ _GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 
 def _git_run(
-    args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True, network: bool = False
-):
+    args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True, network: bool = False):
     """Run ``git <args>`` with the shared subprocess boilerplate; None on any exception.
 
     git output is UTF-8; on Windows ``text=True`` defaults to the ANSI code page and a byte like the
@@ -190,17 +188,20 @@ def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5) -> Optional[str
     return (result.stdout or "").strip()
 
 
+def _git_ok(args: list[str], **kw) -> bool:
+    """True when ``git <args>`` ran and exited 0 (output discarded)."""
+    result = _git_run(args, text=False, **kw)
+    return result is not None and result.returncode == 0
+
+
 def _git_count(args: list[str], *, cwd: Path) -> Optional[int]:
     """``int`` of a successful ``git rev-list --count``-style command, else None.
 
     Deliberately bypasses ``_git_stdout`` so tests can stub the two layers independently.
     """
     result = _git_run(args, cwd=cwd)
-    try:
-        if result is not None and result.returncode == 0:
-            return int(result.stdout.strip())
-    except Exception:
-        pass
+    if result is not None and result.returncode == 0:
+        return _quiet(lambda: int(result.stdout.strip()))
     return None
 
 
@@ -225,12 +226,9 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
             url, headers={"Accept": "application/vnd.github+json", "User-Agent": "hermes-cli-update-check"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
-
     payload = _quiet(_fetch)
     ahead = payload.get("ahead_by") if isinstance(payload, dict) else None
-    if isinstance(ahead, int) and not isinstance(ahead, bool) and ahead >= 0:
-        return ahead
-    return None
+    return ahead if isinstance(ahead, int) and not isinstance(ahead, bool) and ahead >= 0 else None
 
 
 def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: Optional[Path] = None) -> Optional[int]:
@@ -243,12 +241,9 @@ def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: O
     """
     if not head_rev or not target_rev:
         return None
-    if head_rev == target_rev:
+    if head_rev == target_rev or (
+            repo_dir is not None and _git_ok(["merge-base", "--is-ancestor", target_rev, "HEAD"], cwd=repo_dir)):
         return 0
-    if repo_dir is not None:
-        ancestor = _git_run(["merge-base", "--is-ancestor", target_rev, "HEAD"], cwd=repo_dir, text=False)
-        if ancestor is not None and ancestor.returncode == 0:
-            return 0
     counted = _github_compare_behind(head_rev, target_rev)
     return counted if counted is not None else UPDATE_AVAILABLE_NO_COUNT
 
@@ -300,11 +295,9 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # A scoped fetch still updates ``origin/main`` and FETCH_HEAD; ``--depth 1`` preserves
         # the shallow boundary.
         fetch_args = ["fetch", "origin", "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
-        fetch_proc = _git_run(fetch_args, cwd=repo_dir, timeout=10, text=False, network=True)
-        return fetch_proc is not None and fetch_proc.returncode == 0
+        return _git_ok(fetch_args, cwd=repo_dir, timeout=10, network=True)
 
     fetch_ok = _quiet(_fetch, False)  # Offline or timeout — don't use stale refs
-
     # When the fetch fails the local origin/main ref is stale: it cannot prove *currentness*, but
     # if it already shows HEAD behind, that is sound evidence an update exists. Return the positive
     # stale count; None (inconclusive) otherwise so the caller doesn't cache a false "up to date".
@@ -318,11 +311,8 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
             _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
             or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir))
         return _tips_behind(head_rev, target_rev)
-
     behind = _git_count(["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir)
-    if fetch_ok or (behind is not None and behind > 0):
-        return behind
-    return None
+    return behind if fetch_ok or (behind is not None and behind > 0) else None
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -337,10 +327,8 @@ def check_for_updates() -> Optional[int]:
     If ``HERMES_REVISION`` is set (nix builds embed it), compare it to upstream main via
     ``git ls-remote``; otherwise count commits behind ``origin/main`` in the local checkout.
     """
-    hermes_home = get_hermes_home()
-    cache_file = hermes_home / ".update_check"
+    cache_file = get_hermes_home() / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
-
     # Docker images have no working tree (the image excludes `.git`) and set no HERMES_REVISION.
     # None makes both the Rich banner and the Ink badge show nothing, mirroring the dashboard's
     # `/api/hermes/update/check` short-circuit so the surfaces agree.
@@ -350,30 +338,23 @@ def check_for_updates() -> Optional[int]:
 
     if _quiet(_install_method) in {"docker", "apt"}:
         return None
-
     # Cache is invalidated when the embedded rev OR installed version changed since the last check.
     now = time.time()
     cached = _read_json(cache_file)
-    if (
-        cached is not None
-        and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-        and cached.get("rev") == embedded_rev
-        and cached.get("ver") == VERSION):
+    if (cached is not None and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
+            and cached.get("rev") == embedded_rev and cached.get("ver") == VERSION):
         return cached.get("behind")
-
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
         # No checkout and no embedded revision — status can't be determined.
         repo_dir = _resolve_repo_dir()
         behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
-
     # Don't cache inconclusive results: None means the check could not run (typically a failed
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
         _quiet(lambda: cache_file.write_text(
             json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8"))
-
     return behind
 
 
@@ -405,7 +386,6 @@ def _baked_banner_state() -> Optional[dict]:
     def _baked():
         from hermes_cli.build_info import get_build_sha
         return get_build_sha(short=8)
-
     baked = _quiet(_baked)
     return {"upstream": baked, "local": baked, "ahead": 0} if baked else None
 
@@ -414,12 +394,10 @@ def _compute_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]
     repo_dir = repo_dir or _resolve_repo_dir()
     if repo_dir is None:
         return _baked_banner_state()
-
     upstream, local = (_git_stdout(["rev-parse", "--short=8", rev], cwd=repo_dir) for rev in ("origin/main", "HEAD"))
     if not upstream or not local:
         # Live-git lookup failed (e.g. shallow clone without origin/main).
         return _baked_banner_state()
-
     ahead = _git_count(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_dir) or 0
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
@@ -436,7 +414,6 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
         rd = repo_dir or _resolve_repo_dir()
         tag = _git_stdout(["describe", "--tags", "--abbrev=0"], cwd=rd, timeout=3) if rd else None
         return (tag, f"{_RELEASE_URL_BASE}/{tag}") if tag else None
-
     return _memo("_latest_release_cache", _compute)
 
 
@@ -446,7 +423,6 @@ def format_banner_version_label() -> str:
     state = get_git_banner_state()
     if not state:
         return base
-
     upstream, local = state["upstream"], state["local"]
     ahead = int(state.get("ahead") or 0)
     if ahead <= 0 or upstream == local:
@@ -492,7 +468,6 @@ def prefetch_banner_data():
     def _run() -> None:
         for warm in (get_git_banner_state, get_latest_release_tag, get_available_skills):
             _quiet(warm)
-
     _daemon("banner-data-prefetch", _run)
 
 
@@ -533,7 +508,6 @@ def _defer_update_notice(console: "Console", max_wait: float = 30.0) -> None:
     def _wait_and_print() -> None:
         if _update_check_done.wait(timeout=max_wait) and _update_result:
             console.print(_format_update_notice(_update_result))
-
     _daemon("update-notice", _wait_and_print)  # never break the session over an update notice
 
 
@@ -555,9 +529,7 @@ def _format_context_length(tokens: int) -> str:
 
 def _display_toolset_name(toolset_name: str) -> str:
     """Normalize internal/legacy toolset identifiers for banner display."""
-    if not toolset_name:
-        return "unknown"
-    return toolset_name[:-6] if toolset_name.endswith("_tools") else toolset_name
+    return toolset_name.removesuffix("_tools") if toolset_name else "unknown"
 
 
 def _short_label(name: str) -> str:
@@ -585,7 +557,6 @@ def banner_snapshot_fingerprint() -> Optional[str]:
     def _inputs():
         from hermes_cli.config import get_config_path
         return (get_config_path(), get_hermes_home() / ".env")
-
     paths = _quiet(_inputs)
     if paths is None:
         return None
@@ -607,19 +578,15 @@ def load_banner_snapshot(enabled_toolsets: List[str] = None) -> Optional[Dict[st
     if blob is None:
         return None
     fp = banner_snapshot_fingerprint()
-    if not fp or blob.get("fingerprint") != fp:
-        return None
-    if blob.get("enabled_toolsets") != sorted(enabled_toolsets or []):
-        return None
-    if not isinstance(blob.get("tools"), list) or not all(
-        isinstance(blob.get(k), dict) for k in ("toolset_map", "availability", "skills_by_category")):
+    if (not fp or blob.get("fingerprint") != fp or blob.get("enabled_toolsets") != sorted(enabled_toolsets or [])
+            or not isinstance(blob.get("tools"), list)
+            or not all(isinstance(blob.get(k), dict) for k in ("toolset_map", "availability", "skills_by_category"))):
         return None
     return blob
 
 
 def save_banner_snapshot(
-    tools: List[dict], enabled_toolsets: List[str], availability: Dict[str, Any], toolset_map: Dict[str, str]
-) -> None:
+    tools: List[dict], enabled_toolsets: List[str], availability: Dict[str, Any], toolset_map: Dict[str, str]) -> None:
     """Persist the banner tool panel inputs for next launch (best-effort)."""
     fp = banner_snapshot_fingerprint()
     if not fp:
@@ -627,15 +594,12 @@ def save_banner_snapshot(
     payload = {
         "fingerprint": fp,
         "enabled_toolsets": sorted(enabled_toolsets or []),
-        "tools": [
-            {"function": {"name": t["function"]["name"]}}
-            for t in tools
-            if isinstance(t, dict) and t.get("function", {}).get("name")],
+        "tools": [{"function": {"name": t["function"]["name"]}}
+                  for t in tools if isinstance(t, dict) and t.get("function", {}).get("name")],
         "toolset_map": toolset_map,
         "availability": {
             "unavailable_toolsets": availability.get("unavailable_toolsets", []),
-            **{k: list(availability.get(k, [])) for k in ("lazy_tools", "disabled_tools")},
-        },
+            **{k: list(availability.get(k, [])) for k in ("lazy_tools", "disabled_tools")}},
         "skills_by_category": get_available_skills(),
     }
 
@@ -647,7 +611,6 @@ def save_banner_snapshot(
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
         os.replace(tmp, path)
-
     _quiet(_write)
 
 
@@ -673,11 +636,8 @@ def compute_toolset_availability(enabled_toolsets: List[str] = None) -> Dict[str
     for item in unavailable_toolsets:
         is_lazy = TOOLSET_REQUIREMENTS.get(item.get("name", ""), {}).get("check_fn")
         (lazy_tools if is_lazy else disabled_tools).update(item.get("tools", []))
-    return {
-        "unavailable_toolsets": unavailable_toolsets,
-        "lazy_tools": sorted(lazy_tools),
-        "disabled_tools": sorted(disabled_tools),
-    }
+    return {"unavailable_toolsets": unavailable_toolsets, "lazy_tools": sorted(lazy_tools),
+            "disabled_tools": sorted(disabled_tools)}
 
 
 def _mcp_server_line(srv: dict, *, dim: str, text: str) -> str:
@@ -686,11 +646,8 @@ def _mcp_server_line(srv: dict, *, dim: str, text: str) -> str:
     if srv["connected"]:
         return f"[dim {dim}]{name}[/] [{text}]({transport})[/] [dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
     status = "disabled" if srv.get("disabled") else srv.get("status")
-    suffix = {
-        "disabled": f"[dim {dim}]— disabled[/]",
-        "connecting": "[yellow]— connecting[/]",
-        "configured": f"[dim {dim}]— configured[/]",
-    }.get(status)
+    suffix = {"disabled": f"[dim {dim}]— disabled[/]", "connecting": "[yellow]— connecting[/]",
+              "configured": f"[dim {dim}]— configured[/]"}.get(status)
     if suffix is not None:
         return f"[dim {dim}]{name}[/] [dim]({transport})[/] {suffix}"
     return f"[red]{name}[/] [dim]({transport})[/] [red]— failed[/]"
@@ -717,8 +674,7 @@ def _pack_skill_names(skill_names: List[str], avail: int) -> str:
     length = 0
     for i, name in enumerate(skill_names):
         needed = (2 if parts else 0) + len(name)
-        # Indicator size IF we were to add this skill then stop.
-        after = len(skill_names) - (i + 1)
+        after = len(skill_names) - (i + 1)  # indicator size IF we add this skill then stop
         ind_len = len(f", +{after} more") if after > 0 else 0
         if parts and length + needed + ind_len > avail:
             parts.append(f"+{len(skill_names) - len(parts)} more")
@@ -751,7 +707,6 @@ def _mcp_configured() -> bool:
     def _portable():
         from hermes_cli.plugins import get_portable_mcp_server_names_nowait
         return bool(get_portable_mcp_server_names_nowait())
-
     return _quiet(_native, True) or _quiet(_portable, True)
 
 
@@ -776,7 +731,6 @@ def _banner_left_lines(model: str, cwd: str, session_id, context_length, provide
     """Model / cwd / session lines under the hero art."""
     def _dim_sep(label: str) -> str:
         return f" [dim {dim}]·[/] [dim {dim}]{label}[/]"
-
     lines = []
     ctx_str = _dim_sep(f"{_format_context_length(context_length)} context") if context_length else ""
     nous_str = _dim_sep("Nous Research")
@@ -791,7 +745,6 @@ def _banner_left_lines(model: str, cwd: str, session_id, context_length, provide
     else:
         model_short = model.split("/")[-1].removesuffix(".gguf")
         lines.append(f"[{accent}]{_short_label(model_short)}[/]{ctx_str}{nous_str}")
-
     if os.getenv("HERMES_YOLO_MODE"):
         lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
     lines.append(f"[dim {dim}]{cwd}[/]")
@@ -819,12 +772,8 @@ def _banner_tool_lines(
     def _color_tool(name: Optional[str]) -> str:
         if name is None:  # truncation marker
             return "[dim]...[/]"
-        if name in disabled_tools:
-            return f"[red]{name}[/]"
-        if name in lazy_tools:
-            return f"[yellow]{name}[/]"
-        return f"[{text}]{name}[/]"
-
+        color = "red" if name in disabled_tools else "yellow" if name in lazy_tools else text
+        return f"[{color}]{name}[/]"
     sorted_toolsets = sorted(toolsets_dict.keys())
     for toolset in sorted_toolsets[:8]:
         tool_names = _truncate_tool_names(sorted(toolsets_dict[toolset]))
@@ -866,32 +815,26 @@ def build_welcome_banner(
         from model_tools import get_toolset_for_tool
     tools = tools or []
     enabled_toolsets = enabled_toolsets or []
-
     if availability is None:
         availability = compute_toolset_availability(enabled_toolsets)
     _enabled_ts = {str(t) for t in enabled_toolsets}
-
     # Resolve skin colors once for the entire banner
     accent = _skin_color("banner_accent", "#FFBF00")
     dim = _skin_color("banner_dim", "#B8860B")
     text = _skin_color("banner_text", "#FFF8DC")
-
     # Use skin's custom caduceus art if provided
     _bskin = _quiet(_active_skin)
     left_lines = ["", getattr(_bskin, "banner_hero", None) or HERMES_CADUCEUS, ""]
     left_lines += _banner_left_lines(model, cwd, session_id, context_length, provider, accent=accent, dim=dim)
-
     right_lines = _banner_tool_lines(
         tools, availability.get("unavailable_toolsets", []), get_toolset_for_tool,
         lazy_tools=set(availability.get("lazy_tools", [])), disabled_tools=set(availability.get("disabled_tools", [])),
         accent=accent, dim=dim, text=text)
-
     # MCP Servers section (only if configured) — see ``_mcp_configured`` for why the cheap probe.
     mcp_status = _quiet(_probe_mcp_status, []) if _mcp_configured() else []
     if mcp_status:
         right_lines += ["", f"[bold {accent}]MCP Servers[/]"]
         right_lines.extend(_mcp_server_line(srv, dim=dim, text=text) for srv in mcp_status)
-
     right_lines += ["", f"[bold {accent}]Available Skills[/]"]
     # The skills catalog is only reachable when the `skills` toolset is enabled (skill_view /
     # skill_manage). When disabled (Blank Slate) the agent cannot load any skill, so advertising
@@ -903,7 +846,6 @@ def build_welcome_banner(
         skills_by_category = get_available_skills()
     total_skills = sum(len(s) for s in skills_by_category.values())
     right_lines += _banner_skill_lines(skills_by_category, _skills_enabled, dim=dim, text=text)
-
     right_lines.append("")
     mcp_connected = sum(1 for s in mcp_status if s["connected"])
     summary_parts = [f"{len(tools)} tools", f"{total_skills} skills"]
@@ -913,16 +855,13 @@ def build_welcome_banner(
     # Flag the codex_app_server runtime so users understand why tool counts may not match what's
     # reachable (codex builds its own tool list inside the spawned subprocess).
     if _quiet(_codex_runtime_active, False):
-        right_lines.append(
-            f"[bold {accent}]Runtime:[/] [{text}]codex app-server[/] "
-            f"[dim {dim}](terminal/file ops/MCP run inside codex)[/]")
+        right_lines.append(f"[bold {accent}]Runtime:[/] [{text}]codex app-server[/] "
+                           f"[dim {dim}](terminal/file ops/MCP run inside codex)[/]")
     # Show active profile name when not 'default'. Never break the banner over a profiles.py bug.
     _profile_name = _quiet(_active_profile_name)
     if _profile_name and _profile_name != "default":
         right_lines.append(f"[bold {accent}]Profile:[/] [{text}]{_profile_name}[/]")
-
     right_lines.append(f"[dim {dim}]{' · '.join(summary_parts)}[/]")
-
     # Update check — NEVER block the banner on it: the prefetch does git/network work that rarely
     # finishes before render, so a blocking wait adds its full timeout to every startup. If not
     # ready, a daemon thread prints the same notice above the prompt when it lands
@@ -933,14 +872,11 @@ def build_welcome_banner(
             _defer_update_notice(console)
         elif behind is not None and behind != 0:
             right_lines.append(_format_update_notice(behind))
-
     _quiet(_update_line)  # Never break the banner over an update check
-
     layout_table = Table.grid(padding=(0, 2))
     layout_table.add_column("left", justify="center")
     layout_table.add_column("right", justify="left")
     layout_table.add_row("\n".join(left_lines), "\n".join(right_lines))
-
     version_label = format_banner_version_label()
     release_info = get_latest_release_tag()
     if release_info:
@@ -948,7 +884,6 @@ def build_welcome_banner(
     outer_panel = Panel(
         layout_table, title=f"[bold {_skin_color('banner_title', '#FFD700')}]{version_label}[/]",
         border_style=_skin_color("banner_border", "#CD7F32"), padding=(0, 2))
-
     console.print()
     if shutil.get_terminal_size().columns >= 95:
         console.print(getattr(_bskin, "banner_logo", None) or HERMES_AGENT_LOGO)
