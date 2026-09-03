@@ -14,6 +14,9 @@ method = _registry.method
 
 # ext -> mime; iteration order is the on-disk lookup order for assets.
 _ASSET_EXTS = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+# ext -> [(start, end, magic bytes)]; format is sniffed, the declared mime is never trusted.
+_ASSET_MAGIC = {"png": [(0, 8, b"\x89PNG\r\n\x1a\n")], "jpg": [(0, 3, b"\xff\xd8\xff")],
+                "webp": [(0, 4, b"RIFF"), (8, 12, b"WEBP")]}
 
 
 def _profile_handler(name: str, code: int):
@@ -37,6 +40,10 @@ def _lazy(module, name):
 
 def _pin_profile_model(profile_dir, provider, model) -> None:
     _lazy("hermes_cli.web_routers.profiles", "_write_profile_model")(profile_dir, provider, model)
+
+
+def _model_provider_params(params) -> tuple:
+    return str(params.get("model") or "").strip(), str(params.get("provider") or "").strip()
 
 
 def _try(fn, default):
@@ -75,10 +82,12 @@ def _resolve_profile(rid, params):
 
 
 def _read_profile_yaml(profile_dir) -> dict:
-    """profile.yaml as a mapping; ``{}`` when missing, unparseable, or not a mapping."""
-    import yaml
-    meta_path = profile_dir / "profile.yaml"
-    loaded = (yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}) if meta_path.is_file() else {}
+    """profile.yaml as a mapping; ``{}`` when missing, unreadable, unparseable, or not a mapping."""
+    def load():
+        import yaml
+        meta_path = profile_dir / "profile.yaml"
+        return (yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}) if meta_path.is_file() else {}
+    loaded = _try(load, {})
     return loaded if isinstance(loaded, dict) else {}
 
 
@@ -181,15 +190,15 @@ def _latest_profile_session_rows(db):
 def _profile_session_fields(row, profile_path):
     """Attach last_session / worker_session / canonical_session to a roster row. The DB is a
     read-only attach (a writable ``SessionDB()`` waits up to 20s for the write lock + runs DDL
-    and stalled the 5s roster poll); no DB -> every field None."""
+    and stalled the 5s roster poll); no/unreadable DB -> every field None (the readers swallow)."""
     db_path = Path(profile_path) / "state.db"
     db = None
     if _try(db_path.exists, False):
         db = _try(lambda: _lazy("hermes_state", "SessionDB")(db_path=db_path, read_only=True), None)
     try:
-        row["last_session"], row["worker_session"] = _latest_profile_session_rows(db) if db else (None, None)
+        row["last_session"], row["worker_session"] = _latest_profile_session_rows(db)
         # Resolved server-side on every listing so no client carries a session pointer.
-        row["canonical_session"] = _canonical_session_row(db, profile_path) if db else None
+        row["canonical_session"] = _canonical_session_row(db, profile_path)
     finally:
         if db is not None:
             _best_effort(db.close)
@@ -200,7 +209,7 @@ def _profile_ui_meta_fields(row: dict, profile_dir) -> None:
     ``ui_meta_revisions`` is always present: it feature-detects gateway-owned CAS even for a
     brand-new profile."""
     row["ui_meta_revisions"] = {}
-    raw_meta = _try(lambda: _read_profile_yaml(profile_dir), {})
+    raw_meta = _read_profile_yaml(profile_dir)
     ui_meta = raw_meta.get("ui_meta")
     if isinstance(ui_meta, dict) and ui_meta:
         row["ui_meta"] = ui_meta
@@ -295,10 +304,9 @@ def _inherit_launch_model(path) -> bool:
     if dst_model.get("provider") and dst_model.get("default"):
         return False
     model_cfg = (load_config_readonly() or {}).get("model") or {}
-    provider, model = str(model_cfg.get("provider") or ""), str(model_cfg.get("default") or "")
-    if not (provider and model):
+    if not (model_cfg.get("provider") and model_cfg.get("default")):
         return False
-    _pin_profile_model(path, provider, model)
+    _pin_profile_model(path, str(model_cfg["provider"]), str(model_cfg["default"]))
     return True
 
 
@@ -348,12 +356,10 @@ def _(rid, params: dict) -> dict:
         _best_effort(lambda: profiles_mod.seed_profile_skills(path, quiet=True))
     _best_effort(lambda: profiles_mod.check_alias_collision(name) or profiles_mod.create_wrapper_script(name))
     soul = params.get("soul")
-    soul_written = False
-    if isinstance(soul, str) and soul.strip():
-        soul_written = _best_effort(lambda: (path / "SOUL.md").write_text(soul, encoding="utf-8"))
+    soul_written = isinstance(soul, str) and bool(soul.strip()) and _best_effort(
+        lambda: (path / "SOUL.md").write_text(soul, encoding="utf-8"))
     mirrored = _mirror_launch_credentials(path, params)
-    model = str(params.get("model") or "").strip()
-    provider = str(params.get("provider") or "").strip()
+    model, provider = _model_provider_params(params)
     model_set = False
     if model and provider:
         model_set = _best_effort(lambda: _pin_profile_model(path, provider, model))
@@ -436,7 +442,7 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
         if expected is not None and not isinstance(expected, dict):
             raise ValueError("ui_meta_expected_revisions must be an object")
         with _profile_ui_meta_lock:
-            existing = _try(lambda: _read_profile_yaml(profile_dir), {})
+            existing = _read_profile_yaml(profile_dir)
             raw_revisions = existing.get("_ui_meta_revisions")
             revisions = _clean_revisions(raw_revisions if isinstance(raw_revisions, dict) else {})
             conflicts = {}
@@ -473,8 +479,7 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
 def _configure_model(profile_dir, params, applied):
     """Apply a ``model`` + ``provider`` pin, or return a confirm message and write NOTHING (client
     resends with ``confirm_expensive_model``). A failing guard = "no warning" (as _apply_model_switch)."""
-    model = str(params.get("model") or "").strip()
-    provider = str(params.get("provider") or "").strip()
+    model, provider = _model_provider_params(params)
     confirm_message = None
     if not (model and provider):
         return None
@@ -611,13 +616,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4068, "data is not valid base64")
     if len(blob) > 2_000_000:
         return _err(rid, 4069, f"asset too large ({len(blob)} bytes; max 2MB)")
-    if blob[:8] == b"\x89PNG\r\n\x1a\n":
-        ext = "png"
-    elif blob[:3] == b"\xff\xd8\xff":
-        ext = "jpg"
-    elif blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
-        ext = "webp"
-    else:
+    ext = next((e for e, magic in _ASSET_MAGIC.items() if all(blob[a:b] == m for a, b, m in magic)), None)
+    if ext is None:
         return _err(rid, 4070, "unsupported image format (PNG/JPEG/WebP only)")
     assets_dir.mkdir(parents=True, exist_ok=True)
     _unlink_asset_files(assets_dir, asset)  # one canonical file per asset

@@ -1,22 +1,13 @@
 """Image-generation JSON-RPC handler (ws twin of the image_generate tool) for UI surfaces
 (avatar pickers, artifact panes). The result is a data URL: a remote desktop can't read a
-gateway file path and hosted URLs are often CORS-opaque to a renderer canvas.
-
-Bodies are rebound onto server.py's globals (method_ctx.bind_module) and reference them bare.
+gateway file path and hosted URLs are often CORS-opaque to a renderer canvas. Bodies are
+rebound onto server.py's globals (method_ctx.bind_module) and reference them bare.
 """
 
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
 method = _registry.method
-
-
-def _image_gen_available() -> bool:
-    try:
-        from tools.image_generation_tool import check_image_generation_requirements
-        return bool(check_image_generation_requirements())
-    except Exception:
-        return False
 
 
 def _image_to_data_url(ref: str, cap: int):
@@ -43,8 +34,7 @@ def _image_to_data_url(ref: str, cap: int):
             return None
         if len(data) > cap:
             return None
-        if not mime.startswith("image/"):
-            mime = "image/png"
+        mime = mime if mime.startswith("image/") else "image/png"
         return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     except Exception:
         return None
@@ -57,14 +47,16 @@ def _(rid, params: dict) -> dict:
     on the data URL, default 8MB, max 16MB). Result: ``{available, success, image,
     image_data, error}`` — ``image_data`` is omitted when the download fails, so
     callers fall back to ``image`` (the backend's URL/path)."""
-    available = _image_gen_available()
+    try:
+        from tools.image_generation_tool import check_image_generation_requirements
+        available = bool(check_image_generation_requirements())
+    except Exception:
+        available = False
     if is_truthy_value(params.get("probe", False)):
         return _ok(rid, {"available": available})
     if not available:
-        return _ok(rid, {
-            "available": False, "success": False,
-            "error": "No image generation backend configured (run `hermes tools` to enable one).",
-        })
+        return _ok(rid, {"available": False, "success": False,
+                         "error": "No image generation backend configured (run `hermes tools` to enable one)."})
     prompt = str(params.get("prompt") or "").strip()
     if not prompt:
         return _err(rid, 4071, "prompt required")
@@ -74,9 +66,9 @@ def _(rid, params: dict) -> dict:
     except (TypeError, ValueError):
         cap = 8_000_000
     try:
-        from tools.image_generation_tool import _handle_image_generate
         # Full provider dispatcher — same path as the model tool (source-image confinement,
         # plugin providers, managed routing, FAL fallback); the FAL leaf bypassed providers.
+        from tools.image_generation_tool import _handle_image_generate
         result = json.loads(_handle_image_generate({"prompt": prompt, "aspect_ratio": aspect}))
     except Exception as e:
         return _err(rid, 5071, str(e))
@@ -84,11 +76,9 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"available": True, "success": False,
                          "error": str(result.get("error") or "generation failed")})
     image_ref = str(result.get("image") or "")
-    payload = {"available": True, "success": True, "image": image_ref}
     data_url = _image_to_data_url(image_ref, cap) if image_ref else None
-    if data_url:
-        payload["image_data"] = data_url
-    return _ok(rid, payload)
+    return _ok(rid, {"available": True, "success": True, "image": image_ref,
+                     **({"image_data": data_url} if data_url else {})})
 
 
 def register(server) -> None:

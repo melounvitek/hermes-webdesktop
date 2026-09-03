@@ -258,10 +258,10 @@ def _(rid, params: dict) -> dict:
 # ── setup readiness
 
 def _readiness_profile_scope(params: dict):
-    """``(profile, scope)`` for the readiness RPCs' optional ``profile`` param: ``scope`` binds
-    that profile's HERMES_HOME + ``.env`` secret scope (ContextVars, so concurrent checks stay
-    isolated); no param yields ``("", nullcontext())``. An unknown profile raises
-    ``FileNotFoundError`` — never quietly answer for the launch profile instead."""
+    """``(profile, scope)`` for the readiness RPCs' optional ``profile``: ``scope`` binds that
+    profile's HERMES_HOME + ``.env`` secret scope (ContextVars: concurrent checks stay isolated);
+    no param -> ``("", nullcontext())``. Unknown profile raises ``FileNotFoundError`` — never
+    quietly answer for the launch profile instead."""
     import contextlib
     profile = str(params.get("profile") or "").strip() if isinstance(params, dict) else ""
     if not profile:
@@ -303,10 +303,9 @@ def _(rid, params: dict) -> dict:
 
 @method("setup.runtime_check")
 def _(rid, params: dict) -> dict:
-    """Strict provider check: does the configured/default model resolve to a usable runtime?
-    Unlike setup.status (True if ANY provider auth state is discoverable), this runs the same
-    resolve_runtime_provider() the agent uses on session creation and returns ok=False with the
-    auth error when the model can't be served, so UIs surface onboarding before a doomed prompt.
+    """Strict provider check via the same resolve_runtime_provider() the agent uses on session
+    creation (setup.status is True if ANY provider auth state is discoverable): ok=False + the auth
+    error when the model can't be served, so UIs surface onboarding before a doomed prompt.
     ``profile`` answers for THAT profile's pin and ``.env``; unknown -> ``ok=False``."""
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -329,10 +328,8 @@ def _(rid, params: dict) -> dict:
                 return fail("No Hermes provider is configured.", source)
             api_key = runtime.get("api_key")
             api_key_text = "" if callable(api_key) else str(api_key or "").strip()
-            credential_ok = (
-                callable(api_key) or api_key_text in {"aws-sdk", "no-key-required"}
-                or has_usable_secret(api_key_text) or bool(runtime.get("command")))
-            if not credential_ok:
+            if not (callable(api_key) or api_key_text in {"aws-sdk", "no-key-required"}
+                    or has_usable_secret(api_key_text) or bool(runtime.get("command"))):
                 return fail(f"No usable credentials found for {provider}.", runtime.get("source"))
             return {"ok": True, "provider": runtime.get("provider"), "model": runtime.get("model"),
                     "source": runtime.get("source"), **scoped}
@@ -352,11 +349,10 @@ def _safe_client_label(label: str) -> str:
 @method("diagnostics.share_nous")
 def _(rid, params: dict) -> dict:
     """Upload a redacted debug bundle to Nous-internal diagnostics storage — same collection +
-    force-redaction pipeline as ``hermes debug share --nous``; redaction is NOT
-    client-controllable and consent lives with the CALLER (privacy notice first). Structured
-    ``ok``/``error`` envelope so the client renders upload failures inline. Optional params:
-    ``error_context`` (redacted, attached as ``error-context.txt``), ``extra_files`` ({label ->
-    text}, force-redacted, labels sanitized and size-capped), ``log_lines`` (default 200)."""
+    force-redaction pipeline as ``hermes debug share --nous``; redaction is NOT client-controllable
+    and consent lives with the CALLER (privacy notice first). Structured ``ok``/``error`` envelope so
+    upload failures render inline. Optional: ``error_context`` (-> ``error-context.txt``),
+    ``extra_files`` ({label -> text}), ``log_lines`` (default 200); all force-redacted."""
     try:
         from hermes_cli.debug import _redact_log_text, build_nous_bundle, collect_share_bundle
         from hermes_cli.diagnostics_upload import share_to_nous
@@ -371,18 +367,14 @@ def _(rid, params: dict) -> dict:
             bundle["error-context.txt"] = _redact_log_text(error_context.strip()[:8_000])
         # Bounded: at most 4 files, 512KB each, sanitized labels — not an arbitrary upload surface.
         extra_files = params.get("extra_files")
-        if isinstance(extra_files, dict):
-            for label, text in list(extra_files.items())[:4]:
-                if not isinstance(label, str) or not isinstance(text, str):
-                    continue
-                safe_label = _safe_client_label(label)
-                if safe_label and text.strip():
-                    bundle[f"client/{safe_label}"] = _redact_log_text(text[:524_288])
+        for label, text in list(extra_files.items())[:4] if isinstance(extra_files, dict) else ():
+            safe_label = _safe_client_label(label) if isinstance(label, str) else ""
+            if safe_label and isinstance(text, str) and text.strip():
+                bundle[f"client/{safe_label}"] = _redact_log_text(text[:524_288])
         res = share_to_nous(build_nous_bundle(bundle, redact=True))
         view_url = res.get("viewUrl") or res.get("view_url")
         upload_id = res.get("id")
-        if not view_url and not upload_id:
-            # An upload the user can't reference is useless to support.
+        if not view_url and not upload_id:  # an upload the user can't reference is useless to support
             return _ok(rid, {"ok": False, "error": "upload succeeded but returned no view URL or id"})
         return _ok(rid, {"ok": True, "view_url": view_url, "upload_id": upload_id,
                          "expires_at": res.get("expiresAt") or res.get("expires_at")})

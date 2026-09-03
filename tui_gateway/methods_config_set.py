@@ -20,10 +20,8 @@ _profile_scoped = _registry.profile_scoped
 def _write_display_sections(*, sections=None, drop_sections=(), **display_fields) -> None:
     """Persist ``display.<field>`` + ``display.sections`` edits via the raw (uncached) write-back."""
     cfg = _load_cfg_raw()
-    display = cfg.get("display")
-    display = display if isinstance(display, dict) else {}
-    cur = display.get("sections")
-    cur = cur if isinstance(cur, dict) else {}
+    display = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
+    cur = display.get("sections") if isinstance(display.get("sections"), dict) else {}
     display.update(display_fields)
     cur.update(sections or {})
     for name in drop_sections:
@@ -157,8 +155,7 @@ def _set_fast(rid, params, key, value, session):
     if agent is not None:
         current_tier = getattr(agent, "service_tier", None)
     elif session is not None and session.get("create_service_tier_override") is not None:
-        # Pre-build session with a pinned tier: report/toggle from the pin, not the global.
-        current_tier = session["create_service_tier_override"] or None
+        current_tier = session["create_service_tier_override"] or None  # pre-build pin beats global
     else:
         current_tier = _load_service_tier()
     if raw == "status":
@@ -172,8 +169,7 @@ def _set_fast(rid, params, key, value, session):
         from hermes_cli.models import resolve_fast_mode_overrides
         if agent is not None:
             target_model = getattr(agent, "model", None)
-        else:
-            # A pre-build session may carry a picked model (desktop draft) — validate against THAT.
+        else:  # a pre-build session may carry a picked model (desktop draft): validate against THAT
             session_override = (session or {}).get("model_override") or {}
             target_model = (isinstance(session_override, dict) and session_override.get("model")) or _resolve_model()
         if not target_model:
@@ -191,12 +187,9 @@ def _set_fast(rid, params, key, value, session):
         _write_config_key("agent.service_tier", nv)
     if agent is not None:
         agent.service_tier = {"fast": "priority", "normal": None}.get(nv, nv)
-        current_overrides = dict(getattr(agent, "request_overrides", {}) or {})
-        current_overrides.pop("service_tier", None)
-        current_overrides.pop("speed", None)
-        if nv == "fast":
-            current_overrides.update(overrides)
-        agent.request_overrides = current_overrides
+        current_overrides = {k: v for k, v in (getattr(agent, "request_overrides", {}) or {}).items()
+                             if k not in ("service_tier", "speed")}
+        agent.request_overrides = {**current_overrides, **(overrides or {})}
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, nv)
@@ -214,14 +207,13 @@ def _set_busy(rid, params, key, value, session):
 
 def _set_verbose(rid, params, key, value, session):
     cycle = ["off", "new", "all", "verbose"]
-    cur = session.get("tool_progress_mode", _load_tool_progress_mode()) if session else _load_tool_progress_mode()
     if value and value != "cycle":
         nv = str(value).strip().lower()
         if nv not in cycle:
             return _err(rid, 4002, f"unknown verbose mode: {value}")
     else:
-        idx = cycle.index(cur) if cur in cycle else 2
-        nv = cycle[(idx + 1) % len(cycle)]
+        cur = session.get("tool_progress_mode", _load_tool_progress_mode()) if session else _load_tool_progress_mode()
+        nv = cycle[((cycle.index(cur) if cur in cycle else 2) + 1) % len(cycle)]
     _write_config_key("display.tool_progress", nv)
     if session:
         session["tool_progress_mode"] = nv
@@ -285,8 +277,7 @@ def _set_yolo(rid, params, key, value, session):
         # Binary affordance: no restore of a prior "smart"/custom mode (those live in config.yaml).
         _write_config_key("approvals.mode", "off" if enable else "manual")
         _emit_all_session_info()  # reflect the flip in every live indicator
-        return _kv(rid, key, "1" if enable else "0", scope="global")
-    if session:
+    elif session:
         skey = session["session_key"]
         enable = _resolve_toggle(is_session_yolo_enabled(skey))
         (enable_session_yolo if enable else disable_session_yolo)(skey)
@@ -297,7 +288,7 @@ def _set_yolo(rid, params, key, value, session):
             os.environ["HERMES_YOLO_MODE"] = "1"
         else:
             os.environ.pop("HERMES_YOLO_MODE", None)
-    return _kv(rid, key, "1" if enable else "0", scope="session")
+    return _kv(rid, key, "1" if enable else "0", scope=scope if scope == "global" else "session")
 
 
 # /reasoning display words: (accepted inputs, reported value, display field, sections.thinking,
@@ -353,12 +344,9 @@ def _set_details_section(rid, params, key, value, session):
     if section not in _DETAIL_SECTION_NAMES:
         return _err(rid, 4002, f"unknown section: {section}")
     nv = _word(value)
-    if not nv:
-        _write_display_sections(drop_sections=(section,))
-    elif nv not in _DETAIL_MODES:
+    if nv and nv not in _DETAIL_MODES:
         return _err(rid, 4002, f"unknown details_mode: {value}")
-    else:
-        _write_display_sections(sections={section: nv})
+    _write_display_sections(sections={section: nv} if nv else None, drop_sections=() if nv else (section,))
     return _kv(rid, key, nv)
 
 
