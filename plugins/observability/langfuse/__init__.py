@@ -122,23 +122,22 @@ def _redact_secrets(value: str) -> str:
         return value
 
 
+# (types, shape builder) for _describe_content; first match wins (bool handled before).
+_CONTENT_SHAPES = (
+    ((int, float), lambda v: {"type": "number"}),
+    (bytes, lambda v: {"type": "bytes", "length": len(v)}),
+    (str, lambda v: {"type": "text", "chars": len(v)}),
+    (dict, lambda v: {"type": "object", "keys": [str(k) for k in list(v.keys())[:20]]}),
+    ((list, tuple, set), lambda v: {"type": "array", "items": len(v)}),
+)
+
+
 def _describe_content(value: Any) -> Any:
     """Metadata-mode stand-in for content: shape and size, never payload."""
     if value is None or isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
-        shape = {"type": "number"}
-    elif isinstance(value, bytes):
-        shape = {"type": "bytes", "length": len(value)}
-    elif isinstance(value, str):
-        shape = {"type": "text", "chars": len(value)}
-    elif isinstance(value, dict):
-        shape = {"type": "object", "keys": [str(k) for k in list(value.keys())[:20]]}
-    elif isinstance(value, (list, tuple, set)):
-        shape = {"type": "array", "items": len(value)}
-    else:
-        shape = {"type": type(value).__name__}
-    return {"omitted": True, **shape}
+    shape = next((build(value) for types, build in _CONTENT_SHAPES if isinstance(value, types)), None)
+    return {"omitted": True, **(shape or {"type": type(value).__name__})}
 
 
 def _capture_content(value: Any, *, parse_json_strings: bool = False) -> Any:
@@ -181,22 +180,19 @@ def _get_langfuse() -> Optional[Langfuse]:
     The first build is serialized so racing callers can't each construct a client
     and leak the loser's HTTP connection + flush thread."""
     global _LANGFUSE_CLIENT
-    # Fast path — already settled (success or _INIT_FAILED); no lock needed.
-    if _LANGFUSE_CLIENT is not None:
-        return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
-
-    with _LANGFUSE_CLIENT_LOCK:
-        # Re-check: a racing thread may have finished init while we waited.
-        if _LANGFUSE_CLIENT is not None:
-            return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
-        client = _build_client()
-        _LANGFUSE_CLIENT = _INIT_FAILED if client is None else client
-        if client is not None:
-            # atexit is LIFO: registering AFTER the SDK's constructor means our
-            # finalizer runs first, so root spans ended there still get flushed
-            # by the SDK (short-lived processes: kanban workers, chat -q, cron).
-            atexit.register(_finalize_all_traces)
-        return client
+    # Fast path — already settled (success or _INIT_FAILED) needs no lock;
+    # re-check under it since a racing thread may have finished init.
+    if _LANGFUSE_CLIENT is None:
+        with _LANGFUSE_CLIENT_LOCK:
+            if _LANGFUSE_CLIENT is None:
+                client = _build_client()
+                _LANGFUSE_CLIENT = _INIT_FAILED if client is None else client
+                if client is not None:
+                    # atexit is LIFO: registering AFTER the SDK's constructor means our
+                    # finalizer runs first, so root spans ended there still get flushed
+                    # by the SDK (short-lived processes: kanban workers, chat -q, cron).
+                    atexit.register(_finalize_all_traces)
+    return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
 
 
 def _build_client() -> Optional[Langfuse]:
@@ -253,26 +249,17 @@ def _build_client() -> Optional[Langfuse]:
         return None
 
 
-def _scope_prefix(task_id: str, session_id: str) -> str:
-    if task_id:
-        return f"task:{task_id}"
-    if session_id:
-        return f"session:{session_id}"
-    return f"thread:{threading.get_ident()}"
-
-
 def _trace_key(task_id: str, session_id: str, *, turn_id: str = "", api_request_id: str = "") -> str:
     """In-process trace scope key for one agent turn. ``turn_id`` wins over
     ``api_request_id`` so the turn-level post_llm_call hook (no api_request_id)
     resolves to the same key as request-level hooks; a bare ``task_id`` is the
     legacy shape from before turn/request scoping."""
+    scope = f"task:{task_id}" if task_id else f"session:{session_id}" if session_id else f"thread:{threading.get_ident()}"
     if turn_id:
-        return f"{_scope_prefix(task_id, session_id)}:turn:{turn_id}"
+        return f"{scope}:turn:{turn_id}"
     if api_request_id:
-        return f"{_scope_prefix(task_id, session_id)}:api:{api_request_id}"
-    if task_id:
-        return task_id
-    return _scope_prefix(task_id, session_id)
+        return f"{scope}:api:{api_request_id}"
+    return task_id or scope
 
 
 def _state_for_turn(turn_id: str) -> Optional[TraceState]:
@@ -285,18 +272,14 @@ def _state_for_turn(turn_id: str) -> Optional[TraceState]:
     return next((state for key, state in _TRACE_STATE.items() if key.endswith(suffix)), None)
 
 
-def _redact_data_uri(value: str) -> dict[str, Any]:
-    header = value.split(",", 1)[0] if "," in value else "data:"
-    media_type = header[5:].split(";", 1)[0] if header.startswith("data:") else ""
-    return {"type": "data_uri", "media_type": media_type or None, "omitted": True, "length": len(value)}
-
-
 def _truncate_text(value: str, max_chars: int) -> Any:
     # The SDK decodes data:*;base64 strings as media; a truncated one is
     # invalid base64 and logs noisily, so redact the whole URI instead.
     prefix = value[:200].lower()
     if prefix.startswith("data:") and ";base64," in prefix:
-        return _redact_data_uri(value)
+        header = value.split(",", 1)[0] if "," in value else "data:"
+        media_type = header[5:].split(";", 1)[0] if header.startswith("data:") else ""
+        return {"type": "data_uri", "media_type": media_type or None, "omitted": True, "length": len(value)}
     # Redact BEFORE truncating so a secret straddling the cut cannot leak.
     if _capture_mode() == "sanitized":
         value = _redact_secrets(value)
@@ -325,15 +308,6 @@ def _maybe_parse_json_string(value: str) -> Any:
     return {"data": parsed, hint_key: trailing}
 
 
-def _parse_read_file_lines(content: str) -> list[dict[str, Any]]:
-    if not isinstance(content, str) or not content:
-        return []
-    matches = [_READ_FILE_LINE_RE.match(raw_line) for raw_line in content.splitlines()]
-    if not all(matches):
-        return []
-    return [{"line": int(m.group(1)), "text": m.group(2)} for m in matches]
-
-
 def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     if isinstance(args, dict):
@@ -341,7 +315,9 @@ def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> 
             normalized["path"] = args["path"]
         normalized.update({key: args[key] for key in ("offset", "limit") if isinstance(args.get(key), int)})
 
-    lines = _parse_read_file_lines(value.get("content", ""))
+    content = value.get("content", "")
+    matches = [_READ_FILE_LINE_RE.match(raw) for raw in content.splitlines()] if isinstance(content, str) and content else []
+    lines = [{"line": int(m.group(1)), "text": m.group(2)} for m in matches] if matches and all(matches) else []
     if lines:
         normalized["returned_lines"] = {"start": lines[0]["line"], "end": lines[-1]["line"], "count": len(lines)}
         head, tail = _READ_FILE_HEAD_LINES, _READ_FILE_TAIL_LINES
@@ -395,13 +371,6 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
     if hasattr(value, "__dict__"):
         return recurse(vars(value), depth + 1)
     return _truncate_text(repr(value), max_chars)
-
-
-def _extract_last_user_message(messages: Any) -> Any:
-    if not isinstance(messages, list):
-        return None
-    last = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None)
-    return None if last is None else {"role": "user", "content": _capture_content(last.get("content"))}
 
 
 def _coerce_request_messages(*, request_messages: Any = None, messages: Any = None,
@@ -573,7 +542,9 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
-    trace_input = _extract_last_user_message(messages)
+    last_user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None) \
+        if isinstance(messages, list) else None
+    trace_input = None if last_user is None else {"role": "user", "content": _capture_content(last_user.get("content"))}
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
@@ -637,32 +608,17 @@ def _end_children(state: TraceState, *, include_subagents: bool = False) -> None
         _end_observation(observation)
 
 
-def _exit_root_ctx(state: TraceState) -> None:
-    # Unwind the root context manager now, while opentelemetry.trace.Span is
-    # still a real type; GC-driven close at interpreter teardown raises
-    # TypeError inside use_span's isinstance check.
-    if state.root_ctx is not None:
-        try:
-            state.root_ctx.__exit__(None, None, None)
-        except Exception:  # pragma: no cover - fail-open
-            pass
-
-
 def _end_root(state: TraceState, label: str) -> None:
     """End the root span then unwind its context; never raises."""
     try:
         state.root_span.end()
-        _exit_root_ctx(state)
+        # Unwind the root context manager now, while opentelemetry.trace.Span is
+        # still a real type; GC-driven close at interpreter teardown raises
+        # TypeError inside use_span's isinstance check.
+        if state.root_ctx is not None:
+            state.root_ctx.__exit__(None, None, None)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"{label} failed: {exc}")
-
-
-def _merge_trace_output(output: Any, state: TraceState) -> Any:
-    if not state.turn_tool_calls:
-        return output
-    merged = dict(output) if isinstance(output, dict) else {"content": output}
-    merged["tool_calls"] = list(state.turn_tool_calls)
-    return merged
 
 
 def _evict_stale_locked() -> None:
@@ -717,7 +673,10 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
 
     try:
         _end_children(state)
-        final_output = _merge_trace_output(output, state)
+        final_output = output
+        if state.turn_tool_calls:
+            final_output = dict(output) if isinstance(output, dict) else {"content": output}
+            final_output["tool_calls"] = list(state.turn_tool_calls)
         if final_output is not None:
             # update_trace sets TRACE-level I/O (SDK v3); root I/O via update().
             # Neither may prevent end(), else children export without a root.
