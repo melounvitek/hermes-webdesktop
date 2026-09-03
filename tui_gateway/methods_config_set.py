@@ -326,12 +326,31 @@ def _set_reasoning(rid, params, key, value, session):
     return _kv(rid, key, arg)
 
 
-def _set_details_mode(rid, params, key, value, session):
-    nv = _word(value)
-    if nv not in _DETAIL_MODES:
-        return _err(rid, 4002, f"unknown details_mode: {value}")
-    _write_display_sections(sections={section: nv for section in _DETAIL_SECTION_NAMES}, details_mode=nv)
-    return _kv(rid, key, nv)
+def _word_setters() -> dict:
+    """key -> (normaliser, accepted words, error template, apply(word)); the reported value is the
+    accepted word. Built per call: the specs reference server.py globals (rebound at install)."""
+    return {
+        "details_mode": (_word, _DETAIL_MODES, "unknown details_mode: {value}", lambda w: _write_display_sections(
+            sections={section: w for section in _DETAIL_SECTION_NAMES}, details_mode=w)),
+        # thinking_mode also keeps details_mode aligned (compat bridge).
+        "thinking_mode": (_word, {"collapsed", "truncated", "full"}, "unknown thinking_mode: {value}", lambda w: (
+            _write_config_key("display.thinking_mode", w),
+            _write_config_key("display.details_mode", "expanded" if w == "full" else "collapsed"))),
+        # 'light'/'dark' pin beats background auto-detection (xterm.js hosts misreport OSC 11).
+        "theme": (_word, {"auto", "light", "dark"}, "unknown theme value: {value} (use auto|light|dark)",
+                  lambda w: _write_config_key("display.tui_theme", w)),
+        # _raw_word: 0/False/[] keep their text so the error names what was sent.
+        "indicator": (_raw_word, INDICATOR_STYLES, "unknown indicator: {raw!r}; pick one of " + "|".join(INDICATOR_STYLES),
+                      lambda w: _write_config_key("display.tui_status_indicator", w))}
+
+
+def _set_word(rid, params, key, value, session):
+    norm, allowed, err, apply = _word_setters()[key]
+    raw = norm(value)
+    if raw not in allowed:
+        return _err(rid, 4002, err.format(value=value, raw=raw))
+    apply(raw)
+    return _kv(rid, key, raw)
 
 
 def _set_details_section(rid, params, key, value, session):
@@ -344,15 +363,6 @@ def _set_details_section(rid, params, key, value, session):
     if nv and nv not in _DETAIL_MODES:
         return _err(rid, 4002, f"unknown details_mode: {value}")
     _write_display_sections(sections={section: nv} if nv else None, drop_sections=() if nv else (section,))
-    return _kv(rid, key, nv)
-
-
-def _set_thinking_mode(rid, params, key, value, session):
-    nv = _word(value)
-    if nv not in {"collapsed", "truncated", "full"}:
-        return _err(rid, 4002, f"unknown thinking_mode: {value}")
-    _write_config_key("display.thinking_mode", nv)
-    _write_config_key("display.details_mode", "expanded" if nv == "full" else "collapsed")  # compat bridge
     return _kv(rid, key, nv)
 
 
@@ -379,15 +389,6 @@ def _set_display_bool(rid, params, key, value, session):
                           lambda v: "on" if v else "off")
 
 
-def _set_theme(rid, params, key, value, session):
-    # 'light'/'dark' pin beats background auto-detection (xterm.js hosts misreport OSC 11).
-    raw = _word(value)
-    if raw not in {"auto", "light", "dark"}:
-        return _err(rid, 4002, f"unknown theme value: {value} (use auto|light|dark)")
-    _write_config_key("display.tui_theme", raw)
-    return _kv(rid, key, raw)
-
-
 def _set_statusbar(rid, params, key, value, session):
     current = _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))
     return _toggle_setter(rid, key, value, _word(value), {"on": "top", **{m: m for m in _STATUSBAR_MODES}},
@@ -399,14 +400,6 @@ def _set_mouse(rid, params, key, value, session):
     current = _display_mouse_tracking(_display_cfg())
     return _toggle_setter(rid, key, value, _raw_word(value), _MOUSE_TRACKING_ALIASES,
                           "all" if current == "off" else "off", "display.mouse_tracking")
-
-
-def _set_indicator(rid, params, key, value, session):
-    raw = _raw_word(value)  # 0/False/[] surface in the error message
-    if raw not in INDICATOR_STYLES:
-        return _err(rid, 4002, f"unknown indicator: {raw!r}; pick one of {'|'.join(INDICATOR_STYLES)}")
-    _write_config_key("display.tui_status_indicator", raw)
-    return _kv(rid, key, raw)
 
 
 def _set_cwd(rid, params, key, value, session):
@@ -465,9 +458,9 @@ def _set_display_toggle(rid, params, key, value, session):
 _CONFIG_SETTERS = {
     "model": _set_model, "fast": _set_fast, "busy": _set_busy, "verbose": _set_verbose, "focus": _set_focus,
     "approval_mode": _set_approval_mode, "approvals.mode": _set_approval_mode, "yolo": _set_yolo,
-    "reasoning": _set_reasoning, "details_mode": _set_details_mode, "thinking_mode": _set_thinking_mode,
-    "density": _set_display_bool, "battery": _set_display_bool, "theme": _set_theme,
-    "statusbar": _set_statusbar, "mouse": _set_mouse, "indicator": _set_indicator,
+    "reasoning": _set_reasoning, "details_mode": _set_word, "thinking_mode": _set_word,
+    "density": _set_display_bool, "battery": _set_display_bool, "theme": _set_word,
+    "statusbar": _set_statusbar, "mouse": _set_mouse, "indicator": _set_word,
     "cwd": _set_cwd, "terminal.cwd": _set_cwd, "workdir": _set_cwd,
     "prompt": _set_prompt, "personality": _set_personality, "skin": _set_skin}
 
