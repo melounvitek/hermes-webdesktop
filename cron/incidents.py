@@ -137,11 +137,7 @@ def _classify_failure_type(error: str) -> str:
 
 
 def upsert_incident(
-    job_id: str,
-    error: str,
-    *,
-    job_name: Optional[str] = None,
-    failure_type: Optional[str] = None,
+    job_id: str, error: str, *, job_name: Optional[str] = None, failure_type: Optional[str] = None,
     output_file: Optional[str] = None,
 ) -> tuple[str, bool]:
     """Record (or refresh) the incident for ``job_id`` + ``error``; returns ``(incident_id, is_new)``.

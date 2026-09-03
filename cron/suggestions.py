@@ -111,12 +111,7 @@ def list_pending() -> List[Dict[str, Any]]:
 
 
 def add_suggestion(
-    *,
-    title: str,
-    description: str,
-    source: str,
-    job_spec: Dict[str, Any],
-    dedup_key: str,
+    *, title: str, description: str, source: str, job_spec: Dict[str, Any], dedup_key: str,
 ) -> Optional[Dict[str, Any]]:
     """Register a pending suggestion. Returns the record, or None when skipped: the same ``dedup_key``
     was already decided on or is still pending (never re-offer, never duplicate), or the pending list
@@ -197,8 +192,7 @@ def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> O
         return None
 
     from cron.scheduler import (
-        CronSchedulerRegistrationError,
-        create_job_with_scheduler_registration,
+        CronSchedulerRegistrationError, create_job_with_scheduler_registration,
     )
 
     spec = dict(s.get("job_spec") or {})

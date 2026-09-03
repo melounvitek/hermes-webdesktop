@@ -130,9 +130,7 @@ def main() -> int:
     prompt = _build_prompt(items, args.criteria)
     try:
         resp = call_llm(
-            task="monitor",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024,
+            task="monitor", messages=[{"role": "user", "content": prompt}], max_tokens=1024,
             temperature=0,
         )
         content = resp.choices[0].message.content

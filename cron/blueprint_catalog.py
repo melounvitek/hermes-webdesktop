@@ -719,9 +719,7 @@ def _resolve_schedule(blueprint: AutomationBlueprint, values: Dict[str, Any]) ->
 
 
 def fill_blueprint(
-    blueprint: AutomationBlueprint,
-    values: Dict[str, Any],
-    *,
+    blueprint: AutomationBlueprint, values: Dict[str, Any], *,
     origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Validate ``values`` and return ``cron.jobs.create_job`` kwargs.

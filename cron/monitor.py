@@ -49,11 +49,7 @@ def build_monitor_diff(old: str, new: str) -> str:
     """Unified diff of old vs new monitor output, capped at MAX_DIFF_CHARS."""
     diff = "\n".join(
         difflib.unified_diff(
-            old.splitlines(),
-            new.splitlines(),
-            fromfile="previous",
-            tofile="current",
-            lineterm="",
+            old.splitlines(), new.splitlines(), fromfile="previous", tofile="current", lineterm="",
         )
     )
     if len(diff) > MAX_DIFF_CHARS:

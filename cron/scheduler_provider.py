@@ -78,11 +78,7 @@ class CronScheduler(ABC):
 
     @abstractmethod
     def start(
-        self,
-        stop_event: threading.Event,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
+        self, stop_event: threading.Event, *, adapters: Any = None, loop: Any = None,
         interval: int = 60,
     ) -> None:
         """Begin firing due jobs. Built-in BLOCKS until stop_event is set (run in a daemon thread);
@@ -115,12 +111,7 @@ class CronScheduler(ABC):
         return provider_supports_force_fire(self)
 
     def fire_due(
-        self,
-        job_id: str,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
-        force: bool = False,
+        self, job_id: str, *, adapters: Any = None, loop: Any = None, force: bool = False,
     ) -> bool:
         """Run one job NOW (inbound fire webhook entry). Store CAS claim (multi-machine
         at-most-once) then shared ``run_one_job``. True if THIS caller claimed and processed the
@@ -144,8 +135,7 @@ class CronScheduler(ABC):
             claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
         except BaseException as exc:
             finish_execution(
-                execution["id"],
-                success=False,
+                execution["id"], success=False,
                 error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
             )
             raise
@@ -156,11 +146,7 @@ class CronScheduler(ABC):
         return claimed_job
 
     def fire_claimed(
-        self,
-        claimed_job: dict,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
+        self, claimed_job: dict, *, adapters: Any = None, loop: Any = None,
         cancel_event: Any = None,
     ) -> bool:
         """Run an exact ``claim_fire`` snapshot; ``cancel_event`` lets the transport stop it
@@ -220,11 +206,7 @@ def _misfire_grace_minutes() -> float:
 
 
 def fire_overdue_jobs(
-    provider: "CronScheduler",
-    *,
-    adapters: Any = None,
-    loop: Any = None,
-    now: Any = None,
+    provider: "CronScheduler", *, adapters: Any = None, loop: Any = None, now: Any = None,
 ) -> int:
     """Misfire backstop (gateway housekeeping loop): fire jobs whose external HTTP fire never
     arrived, else ``next_run_at`` stays parked in the past forever. No-op for the built-in (its tick
@@ -289,10 +271,8 @@ def fire_overdue_jobs(
             if claimed is None:
                 continue
             threading.Thread(
-                target=provider.fire_claimed,
-                args=(claimed,),
-                kwargs={"adapters": adapters, "loop": loop},
-                daemon=True,
+                target=provider.fire_claimed, args=(claimed,),
+                kwargs={"adapters": adapters, "loop": loop}, daemon=True,
                 name=f"cron-misfire-{job_id[:12]}",
             ).start()
             fired += 1
@@ -356,17 +336,8 @@ class InProcessCronScheduler(CronScheduler):
         return "builtin"
 
     def start(
-        self,
-        stop_event,
-        *,
-        adapters=None,
-        loop=None,
-        interval=60,
-        can_dispatch=None,
-        profile_homes=None,
-        profile_adapters=None,
-        default_profile=None,
-        profile_gate=None,
+        self, stop_event, *, adapters=None, loop=None, interval=60, can_dispatch=None,
+        profile_homes=None, profile_adapters=None, default_profile=None, profile_gate=None,
     ):
         from cron.scheduler import CronTickYielded
         from cron.scheduler import tick as cron_tick
@@ -377,15 +348,9 @@ class InProcessCronScheduler(CronScheduler):
         # Multiplex: tick EACH profile's store every cycle, heartbeats/recovery scoped per profile.
         if profile_homes:
             self._start_multiplex(
-                stop_event,
-                profile_homes=profile_homes,
-                adapters=adapters,
-                loop=loop,
-                interval=interval,
-                can_dispatch=can_dispatch,
-                profile_adapters=profile_adapters,
-                default_profile=default_profile,
-                profile_gate=profile_gate,
+                stop_event, profile_homes=profile_homes, adapters=adapters, loop=loop,
+                interval=interval, can_dispatch=can_dispatch, profile_adapters=profile_adapters,
+                default_profile=default_profile, profile_gate=profile_gate,
             )
             return
 
@@ -423,26 +388,15 @@ class InProcessCronScheduler(CronScheduler):
             stop_event.wait(_backoff_wait_seconds(interval, consecutive_failures))
 
     def _start_multiplex(
-        self,
-        stop_event,
-        *,
-        profile_homes,
-        adapters=None,
-        loop=None,
-        interval=60,
-        can_dispatch=None,
-        profile_adapters=None,
-        default_profile=None,
-        profile_gate=None,
+        self, stop_event, *, profile_homes, adapters=None, loop=None, interval=60,
+        can_dispatch=None, profile_adapters=None, default_profile=None, profile_gate=None,
     ):
         """Tick every profile's store, each scoped via ``_profile_cron_scope``. ``profile_gate(name,
         home)``, when given, is consulted every cycle; a rejected profile is neither ticked nor
         heartbeated."""
         from cron.scheduler import tick as cron_tick
         from cron.scheduler import (
-            CronTickYielded,
-            SharedRouteAdapters,
-            _is_fd_exhaustion,
+            CronTickYielded, SharedRouteAdapters, _is_fd_exhaustion,
             _primary_profile_routes_for_current_home,
         )
         from cron.jobs import clear_ticker_error, record_ticker_error, record_ticker_heartbeat
@@ -496,11 +450,8 @@ class InProcessCronScheduler(CronScheduler):
                         try:
                             with _profile_cron_scope(home):
                                 cron_tick(
-                                    verbose=False,
-                                    adapters=tick_adapters_for(_pname),
-                                    loop=loop,
-                                    sync=False,
-                                    can_dispatch=can_dispatch,
+                                    verbose=False, adapters=tick_adapters_for(_pname), loop=loop,
+                                    sync=False, can_dispatch=can_dispatch,
                                 )
                         except CronTickYielded as e:
                             # Yield for THIS profile only; one fresh gateway must not stop others.

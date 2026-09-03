@@ -688,11 +688,7 @@ def _read_script_for_scanning(script_path: str) -> str:
 # --- recursive walk ---------------------------------------------------------------------------
 
 def _contains_unsafe_gateway_action(
-    command: str,
-    *,
-    cwd: Optional[str],
-    depth: int,
-    visited: set[Path],
+    command: str, *, cwd: Optional[str], depth: int, visited: set[Path],
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
 ) -> bool:
     if _direct_lifecycle_scan(command):
@@ -735,9 +731,7 @@ def _contains_unsafe_gateway_action(
 
 
 def contains_gateway_lifecycle_command_or_referenced_script(
-    command: str,
-    *,
-    cwd: Optional[str] = None,
+    command: str, *, cwd: Optional[str] = None,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
 ) -> bool:
     """Detect lifecycle/submit commands, including bounded nested scripts.

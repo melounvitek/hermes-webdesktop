@@ -116,8 +116,7 @@ CATALOG: List[CatalogEntry] = [
 
 
 def seed_catalog_suggestions(
-    *,
-    add_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    *, add_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     keys: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Register catalog entries as pending suggestions.

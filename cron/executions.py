@@ -50,8 +50,7 @@ def prepare_ledger(conn: sqlite3.Connection, *, db_label: str, synchronous_full:
 
 @contextmanager
 def ledger_transaction(
-    lock: threading.RLock,
-    connect: Callable[[], sqlite3.Connection],
+    lock: threading.RLock, connect: Callable[[], sqlite3.Connection],
     initialize_schema: Callable[[sqlite3.Connection], None],
 ) -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, always close. ``sqlite3.Connection``'s own context
@@ -249,8 +248,7 @@ def recover_interrupted_executions() -> int:
 
 
 def list_executions(
-    *, job_id: Optional[str] = None, limit: int = 50,
-    before_claimed_at: Optional[str] = None,
+    *, job_id: Optional[str] = None, limit: int = 50, before_claimed_at: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return indexed, newest-first execution history with cursor pagination."""
     clauses: List[str] = []
