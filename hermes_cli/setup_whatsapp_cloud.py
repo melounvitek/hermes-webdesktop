@@ -20,47 +20,49 @@ from typing import Optional
 # --- Field-shape validators: each returns (ok, reason_if_not_ok) so obviously-malformed input is
 # rejected before saving, sparing a round trip with Meta's 401 / 400 errors.
 
-def _validate_phone_number_id(value: str) -> tuple[bool, Optional[str]]:
-    """Phone Number ID is a 15-17 digit numeric ID assigned by Meta — NOT a phone number.
-
-    The #1 setup mistake is pasting the actual phone number (10-11 digits), which Graph rejects
-    with "Object with ID does not exist."
-    """
-    if not value:
-        return False, "Phone Number ID is required"
-    s = value.strip()
-    if not s.isdigit():
-        return False, "Phone Number ID must be numeric (no '+', spaces, or dashes)"
-    if 10 <= len(s) <= 12:  # phone-number-sized: almost certainly the number itself
-        return False, (
-            "That looks like a phone number — but this field needs the "
-            "Phone Number ID (Meta's internal ID, 15-17 digits, e.g. "
-            "'7794189252778687'). Look just BELOW the 'From' dropdown in "
-            "API Setup → it's labelled 'Phone number ID'.")
-    if len(s) < 13:
-        return False, "Phone Number ID looks too short (expected 13-18 digits)"
-    if len(s) > 20:
-        return False, "Phone Number ID looks too long (expected 13-18 digits)"
-    return True, None
-
-
-def _numeric_id_validator(label: str, lo: int, hi: int, expected: str):
-    """Validator for a numeric Meta ID whose digit count must fall in [lo, hi]."""
+def _rules_validator(label: str, rules):
+    """Validator from ``(fails(stripped), reason)`` rules, checked in order after the required check.
+    ``reason`` may be a str or a ``fn(stripped) -> str``."""
     def validate(value: str) -> tuple[bool, Optional[str]]:
         if not value:
             return False, f"{label} is required"
         s = value.strip()
-        if not s.isdigit():
-            return False, f"{label} must be numeric"
-        if len(s) < lo or len(s) > hi:
-            return False, f"{label} looks wrong (expected {expected})"
+        for fails, reason in rules:
+            if fails(s):
+                return False, reason(s) if callable(reason) else reason
         return True, None
     return validate
 
 
+def _numeric_id_validator(label: str, lo: int, hi: int, expected: str):
+    """Validator for a numeric Meta ID whose digit count must fall in [lo, hi]."""
+    return _rules_validator(label, (
+        (lambda s: not s.isdigit(), f"{label} must be numeric"),
+        (lambda s: len(s) < lo or len(s) > hi, f"{label} looks wrong (expected {expected})")))
+
+
+# Phone Number ID is a 15-17 digit numeric ID assigned by Meta — NOT a phone number. The #1 setup
+# mistake is pasting the actual phone number (10-11 digits), which Graph rejects with "Object with
+# ID does not exist."
+_validate_phone_number_id = _rules_validator("Phone Number ID", (
+    (lambda s: not s.isdigit(), "Phone Number ID must be numeric (no '+', spaces, or dashes)"),
+    (lambda s: 10 <= len(s) <= 12,  # phone-number-sized: almost certainly the number itself
+     "That looks like a phone number — but this field needs the "
+     "Phone Number ID (Meta's internal ID, 15-17 digits, e.g. "
+     "'7794189252778687'). Look just BELOW the 'From' dropdown in "
+     "API Setup → it's labelled 'Phone number ID'."),
+    (lambda s: len(s) < 13, "Phone Number ID looks too short (expected 13-18 digits)"),
+    (lambda s: len(s) > 20, "Phone Number ID looks too long (expected 13-18 digits)")))
 # WABA ID: similar length range as Phone Number ID. App ID: typically 15-16 digits.
 _validate_waba_id = _numeric_id_validator("WABA ID", 10, 25, "10-25 digits")
 _validate_app_id = _numeric_id_validator("App ID", 13, 20, "15-16 digits")
+# App Secret is a 32-character lowercase hex string.
+_validate_app_secret = _rules_validator("App Secret", (
+    (lambda s: not re.fullmatch(r"[0-9a-f]+", s.lower()),
+     "App Secret should be a hex string (only digits 0-9 and "
+     "letters a-f). Make sure you copied the 'App secret' from "
+     "Settings → Basic, not some other token."),
+    (lambda s: len(s) != 32, lambda s: f"App Secret should be exactly 32 hex characters (got {len(s)})")))
 
 # Common paste mistakes for the access-token field: (prefixes, what it actually is).
 _FOREIGN_TOKEN_PREFIXES = (
@@ -72,38 +74,20 @@ _FOREIGN_TOKEN_PREFIXES = (
                        "token. Meta tokens start with 'EAA'."))
 
 
-def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
-    """App Secret is a 32-character lowercase hex string."""
-    if not value:
-        return False, "App Secret is required"
-    s = value.strip()
-    if not re.fullmatch(r"[0-9a-f]+", s.lower()):
-        return False, (
-            "App Secret should be a hex string (only digits 0-9 and "
-            "letters a-f). Make sure you copied the 'App secret' from "
-            "Settings → Basic, not some other token.")
-    if len(s) != 32:
-        return False, f"App Secret should be exactly 32 hex characters (got {len(s)})"
-    return True, None
-
-
-def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
-    """Meta access tokens (temp and System User alike) start with ``EAA``, 100-300+ chars."""
-    if not value:
-        return False, "Access token is required"
-    s = value.strip()
-    if not s.startswith("EAA"):
-        for prefixes, reason in _FOREIGN_TOKEN_PREFIXES:
-            if s.startswith(prefixes):
-                return False, reason
-        return False, (
-            "Meta WhatsApp access tokens start with 'EAA'. Check that "
+def _not_meta_token_reason(s: str) -> str:
+    for prefixes, reason in _FOREIGN_TOKEN_PREFIXES:
+        if s.startswith(prefixes):
+            return reason
+    return ("Meta WhatsApp access tokens start with 'EAA'. Check that "
             "you're copying from the right place (API Setup → 'Generate "
             "access token', or Business Settings → System Users → "
             "'Generate token' for a permanent one).")
-    if len(s) < 100:
-        return False, f"Access token looks too short ({len(s)} chars, expected 100+)"
-    return True, None
+
+
+# Meta access tokens (temp and System User alike) start with ``EAA``, 100-300+ chars.
+_validate_access_token = _rules_validator("Access token", (
+    (lambda s: not s.startswith("EAA"), _not_meta_token_reason),
+    (lambda s: len(s) < 100, lambda s: f"Access token looks too short ({len(s)} chars, expected 100+)")))
 
 
 # --- Prompt helpers
@@ -165,18 +149,23 @@ def _lines(*lines: str) -> None:
         print(line)
 
 
-def _save_optional(key: str, value: Optional[str], current: Optional[str]) -> None:
+def _persist(env_var: str, value: Optional[str], current: Optional[str],
+             saved: str = "  ✓ Saved: {v}", kept: str = "  ✓ Keeping existing: {v}") -> Optional[str]:
+    """Save ``value`` to .env, else keep ``current``; prints the matching line. Returns the effective
+    value (None when neither exists). ``{v}`` in ``saved``/``kept`` is the value."""
     from hermes_cli.config import save_env_value
     if value:
-        save_env_value(key, value)
-        print(f"  ✓ Saved: {value}")
-    elif current:
-        print(f"  ✓ Keeping existing: {current}")
+        save_env_value(env_var, value)
+        print(saved.format(v=value))
+        return value
+    if current:
+        print(kept.format(v=current))
+    return current or None
 
 
 # Credential steps 1-3: (step title, env var, prompt label, validator, secret, preview chars of
 # the existing value shown as default (0 = full), "saved" line, "kept" line, lines printed when
-# nothing is configured, abort-when-missing). ``{v}`` in the saved/kept lines is the value.
+# nothing is configured, abort-when-missing, help text).
 _CREDENTIAL_STEPS = (
     ("STEP 1 — Phone Number ID", "WHATSAPP_CLOUD_PHONE_NUMBER_ID", "Phone Number ID",
      _validate_phone_number_id, False, 0, "  ✓ Saved: {v}", "  ✓ Keeping existing: {v}",
@@ -230,31 +219,87 @@ _OPTIONAL_ID_STEPS = (
      "Not required for messaging — useful for analytics."))
 
 
-def _credential_step(step) -> tuple[Optional[str], bool]:
-    """Run one _CREDENTIAL_STEPS entry. Returns (effective value, abort)."""
-    from hermes_cli.config import get_env_value, save_env_value
+def _credential_step(step) -> bool:
+    """Run one _CREDENTIAL_STEPS entry. Returns True when the wizard must abort."""
+    from hermes_cli.config import get_env_value
     title, env_var, label, validator, secret, preview, saved, kept, missing, required, help_text = step
     _header(title)
     current = get_env_value(env_var) or None
     shown = (current[:preview] + "...") if (preview and current) else current
     value = _prompt_validated(label, validator, current=shown, secret=secret, help_text=help_text)
-    if value:
-        save_env_value(env_var, value)
-        print(saved.format(v=value))
-    elif current:
-        value = current
-        print(kept.format(v=value))
-    else:
+    if _persist(env_var, value, current, saved, kept) is None:
         _lines(*missing)
         if required:
-            return None, True
+            return True
     print()
-    return value, False
+    return False
+
+
+def _step_optional_ids() -> dict:
+    """STEP 4: optional App ID / WABA ID. Returns {env var: effective value or None}."""
+    from hermes_cli.config import get_env_value
+    _header("STEP 4 — App ID & WABA ID (optional, for analytics)")
+    ids = {}
+    for label, env_var, validator, help_text in _OPTIONAL_ID_STEPS:
+        current = get_env_value(env_var) or None
+        value = _prompt_validated(label, validator, current=current, help_text=help_text)
+        ids[env_var] = _persist(env_var, value, current)
+    print()
+    return ids
+
+
+def _step_verify_token() -> str:
+    """STEP 5: generate (or keep) the webhook verify token; returns the effective token."""
+    from hermes_cli.config import get_env_value, save_env_value
+    _header("STEP 5 — Verify Token (auto-generated)")
+    verify_token = get_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN") or None
+    regen = "y"
+    if verify_token:
+        print(f"  An existing verify token is already set ({verify_token[:8]}...).")
+        try:
+            regen = input("  Generate a new one? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            regen = "n"
+    if regen in {"y", "yes"}:
+        label = "New verify token" if verify_token else "Generated"
+        verify_token = secrets.token_urlsafe(32)
+        save_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN", verify_token)
+        print(f"  ✓ {label}: {verify_token}")
+    else:
+        print("  ✓ Keeping existing verify token")
+    _lines("", "  → COPY THIS TOKEN NOW. You'll paste it into Meta's webhook",
+           "    configuration dialog (next step).", "")
+    return verify_token
+
+
+def _step_allowlist() -> None:
+    """STEP 6: recipient allowlist (spaces/dashes/'+' stripped from each entry)."""
+    from hermes_cli.config import get_env_value, save_env_value
+    _header("STEP 6 — Recipient Allowlist")
+    _lines(
+        "", "  Who is allowed to message the bot? (Comma-separated phone",
+        "  numbers with country code, no '+' / spaces / dashes. Use '*'",
+        "  to allow anyone — only safe if you've also configured Meta's",
+        "  recipient whitelist for app-development mode.)", "")
+    allow_default = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
+    try:
+        allowed = line_input(
+            f"  → Allowed users{' [' + allow_default + ']' if allow_default else ''}: "
+        ).strip() or (allow_default or "")
+    except (EOFError, KeyboardInterrupt):
+        allowed = ""
+    if allowed:
+        allowed = ",".join(re.sub(r"[\s\-+]", "", part) for part in allowed.split(",") if part.strip())
+        save_env_value("WHATSAPP_CLOUD_ALLOWED_USERS", allowed)
+        print(f"  ✓ Saved: {allowed}")
+    else:
+        _lines("  ⚠ No allowlist — every inbound message will be denied.",
+               "    Re-run this wizard or set WHATSAPP_CLOUD_ALLOWED_USERS manually.")
+    print()
 
 
 def run_whatsapp_cloud_setup() -> int:
     """Interactive wizard for the WhatsApp Cloud API adapter. Returns 0 on success, 1 on abort."""
-    from hermes_cli.config import get_env_value, save_env_value
     _lines(
         "", "⚕ WhatsApp Business Cloud API Setup", "=" * 50, "",
         "This wizard configures Hermes to talk to WhatsApp via Meta's",
@@ -278,63 +323,12 @@ def run_whatsapp_cloud_setup() -> int:
         return 1
 
     print()
-    for step in _CREDENTIAL_STEPS:
-        _, abort = _credential_step(step)
-        if abort:
-            return 1
+    if any(_credential_step(step) for step in _CREDENTIAL_STEPS):
+        return 1
 
-    _header("STEP 4 — App ID & WABA ID (optional, for analytics)")
-    ids = {}
-    for label, env_var, validator, help_text in _OPTIONAL_ID_STEPS:
-        current = get_env_value(env_var) or None
-        value = _prompt_validated(
-            label, lambda v, _val=validator: (True, None) if not v else _val(v),
-            current=current, help_text=help_text)
-        _save_optional(env_var, value, current)
-        ids[env_var] = value or current
-    print()
-
-    _header("STEP 5 — Verify Token (auto-generated)")
-    verify_token = get_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN") or None
-    regen = "y"
-    if verify_token:
-        print(f"  An existing verify token is already set ({verify_token[:8]}...).")
-        try:
-            regen = input("  Generate a new one? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            regen = "n"
-    if regen in {"y", "yes"}:
-        label = "New verify token" if verify_token else "Generated"
-        verify_token = secrets.token_urlsafe(32)
-        save_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN", verify_token)
-        print(f"  ✓ {label}: {verify_token}")
-    else:
-        print("  ✓ Keeping existing verify token")
-    _lines("", "  → COPY THIS TOKEN NOW. You'll paste it into Meta's webhook",
-           "    configuration dialog (next step).", "")
-
-    _header("STEP 6 — Recipient Allowlist")
-    _lines(
-        "", "  Who is allowed to message the bot? (Comma-separated phone",
-        "  numbers with country code, no '+' / spaces / dashes. Use '*'",
-        "  to allow anyone — only safe if you've also configured Meta's",
-        "  recipient whitelist for app-development mode.)", "")
-    allow_default = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
-    try:
-        allowed = line_input(
-            f"  → Allowed users{' [' + allow_default + ']' if allow_default else ''}: "
-        ).strip() or (allow_default or "")
-    except (EOFError, KeyboardInterrupt):
-        allowed = ""
-    if allowed:
-        # Light normalization — strip spaces and dashes from each entry.
-        allowed = ",".join(re.sub(r"[\s\-+]", "", part) for part in allowed.split(",") if part.strip())
-        save_env_value("WHATSAPP_CLOUD_ALLOWED_USERS", allowed)
-        print(f"  ✓ Saved: {allowed}")
-    else:
-        _lines("  ⚠ No allowlist — every inbound message will be denied.",
-               "    Re-run this wizard or set WHATSAPP_CLOUD_ALLOWED_USERS manually.")
-    print()
+    effective_waba = _step_optional_ids()["WHATSAPP_CLOUD_WABA_ID"]
+    verify_token = _step_verify_token()
+    _step_allowlist()
 
     _header("SETUP COMPLETE — Next steps")
     _lines(
@@ -371,7 +365,6 @@ def run_whatsapp_cloud_setup() -> int:
         "         'Manage phone number list'", "",
         "    7. DM the bot's test number from your phone.", "")
     _header("Optional: polish your bot's WhatsApp profile")
-    effective_waba = ids["WHATSAPP_CLOUD_WABA_ID"]
     _lines(
         "", "  WhatsApp shows a display name and profile picture for your bot",
         "  in every chat header and contact list. These are set in Meta's",
