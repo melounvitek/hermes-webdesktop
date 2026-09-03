@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import time
@@ -99,20 +100,12 @@ class SessionTelegramTopicsMixin:
     tables (nobody ran ``/topic``) by returning their empty value; only
     ``enable``/``bind`` run the migration."""
 
-    def _topic_read_one(self, sql: str, params, default=None):
-        """``fetchone`` that treats an unmigrated table as *default*."""
-        return self._topic_read(self._read_one, sql, params, default)
-
-    def _topic_read_all(self, sql: str, params) -> list:
-        """``fetchall`` that treats an unmigrated table as no rows."""
-        return self._topic_read(self._read_all, sql, params, [])
-
-    @staticmethod
-    def _topic_read(reader, sql: str, params, default):
+    def _topic_read_one(self, sql: str, params):
+        """``fetchone`` that treats an unmigrated table as None."""
         try:
-            return reader(sql, params)
+            return self._read_one(sql, params)
         except sqlite3.OperationalError:
-            return default
+            return None
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in. Deliberately NOT
@@ -129,25 +122,21 @@ class SessionTelegramTopicsMixin:
                 # v1/v2 → v3. SQLite can't ALTER a PK or FK, so rebuild (also supplies v2's
                 # ON DELETE CASCADE). Legacy rows land in "default" only.
                 legacy_columns = columns.replace("profile_name, ", "", 1)
-                conn.executescript(
-                    f"""
+                conn.executescript(f"""
                     CREATE TABLE {table}_new ({ddl});
                     INSERT INTO {table}_new ({columns})
                         SELECT 'default', {legacy_columns} FROM {table};
                     DROP TABLE {table};
                     ALTER TABLE {table}_new RENAME TO {table};
-                    """
-                )
+                    """)
             # Indexes after any rebuild: the user index needs profile_name.
-            conn.executescript(
-                """
+            conn.executescript("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
                 ON telegram_dm_topic_bindings(session_id);
 
                 CREATE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_user
                 ON telegram_dm_topic_bindings(profile_name, user_id, chat_id);
-                """
-            )
+                """)
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -168,8 +157,7 @@ class SessionTelegramTopicsMixin:
         def _to_int(value: Optional[bool]) -> Optional[int]:
             return None if value is None else (1 if value else 0)
 
-        self._write_sql(
-            """
+        self._write_sql("""
             INSERT INTO telegram_dm_topic_mode (
                 profile_name, chat_id, user_id, enabled, activated_at, updated_at,
                 has_topics_enabled, allows_users_to_create_topics,
@@ -182,10 +170,8 @@ class SessionTelegramTopicsMixin:
                 has_topics_enabled = excluded.has_topics_enabled,
                 allows_users_to_create_topics = excluded.allows_users_to_create_topics,
                 capability_checked_at = excluded.capability_checked_at
-            """,
-            (profile_name, str(chat_id), str(user_id), now, now,
-             _to_int(has_topics_enabled), _to_int(allows_users_to_create_topics), now),
-        )
+            """, (profile_name, str(chat_id), str(user_id), now, now,
+                  _to_int(has_topics_enabled), _to_int(allows_users_to_create_topics), now))
 
     def disable_telegram_topic_mode(
         self, *, chat_id: str, profile_name: str = "default", clear_bindings: bool = True
@@ -196,7 +182,7 @@ class SessionTelegramTopicsMixin:
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
 
         def _do(conn):
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(
                     "UPDATE telegram_dm_topic_mode SET enabled = 0, updated_at = ? "
                     "WHERE profile_name = ? AND chat_id = ?",
@@ -207,20 +193,15 @@ class SessionTelegramTopicsMixin:
                         "DELETE FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ?",
                         (profile_name, str(chat_id)),
                     )
-            except sqlite3.OperationalError:
-                return
         self._execute_write(_do)
 
     def is_telegram_topic_mode_enabled(self, *, chat_id: str, user_id: str, profile_name: str = "default") -> bool:
         """Return whether Telegram DM topic mode is enabled for this chat/user."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
-        row = self._topic_read_one(
-            """
+        row = self._topic_read_one("""
                     SELECT enabled FROM telegram_dm_topic_mode
                     WHERE profile_name = ? AND chat_id = ? AND user_id = ?
-                    """,
-            (profile_name, str(chat_id), str(user_id)),
-        )
+                    """, (profile_name, str(chat_id), str(user_id)))
         return bool(row[0]) if row is not None else False
 
     def get_telegram_topic_binding(
@@ -228,13 +209,10 @@ class SessionTelegramTopicsMixin:
     ) -> Optional[Dict[str, Any]]:
         """Return the session binding for a Telegram DM topic, if present."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
-        row = self._topic_read_one(
-            """
+        row = self._topic_read_one("""
                     SELECT * FROM telegram_dm_topic_bindings
                     WHERE profile_name = ? AND chat_id = ? AND thread_id = ?
-                    """,
-            (profile_name, str(chat_id), str(thread_id)),
-        )
+                    """, (profile_name, str(chat_id), str(thread_id)))
         return dict(row) if row else None
 
     def list_telegram_topic_bindings_for_chat(
@@ -242,21 +220,21 @@ class SessionTelegramTopicsMixin:
     ) -> List[Dict[str, Any]]:
         """All bindings for one chat, newest first ([] when the table is absent)."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
-        rows = self._topic_read_all(
-            "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? ORDER BY updated_at DESC",
-            (profile_name, str(chat_id)),
-        )
+        try:
+            rows = self._read_all(
+                "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? ORDER BY updated_at DESC",
+                (profile_name, str(chat_id)),
+            )
+        except sqlite3.OperationalError:
+            return []
         return [dict(row) for row in rows]
 
     def get_telegram_topic_binding_by_session(self, *, session_id: str) -> Optional[Dict[str, Any]]:
         """Reverse lookup via the UNIQUE INDEX on session_id; None when unbound."""
-        row = self._topic_read_one(
-            """
+        row = self._topic_read_one("""
                     SELECT * FROM telegram_dm_topic_bindings
                     WHERE session_id = ?
-                    """,
-            (str(session_id),),
-        )
+                    """, (str(session_id),))
         return dict(row) if row else None
 
     def delete_telegram_topic_binding(self, *, chat_id: str, thread_id: str, profile_name: str = "default") -> int:
@@ -268,41 +246,32 @@ class SessionTelegramTopicsMixin:
         transaction, or a user who disabled topics in the Telegram client (not via
         ``/topic off``) stays stuck. Returns the number of rows deleted; absent binding or
         unmigrated tables are silent no-ops (never raise from a cleanup hot path)."""
-        chat_id = str(chat_id)
-        thread_id = str(thread_id)
+        chat_id, thread_id = str(chat_id), str(thread_id)
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
 
         def _do(conn) -> int:
             try:
-                deleted = conn.execute(
-                    """
+                deleted = conn.execute("""
                     DELETE FROM telegram_dm_topic_bindings
                     WHERE profile_name = ? AND chat_id = ? AND thread_id = ?
-                    """,
-                    (profile_name, chat_id, thread_id),
-                ).rowcount or 0
+                    """, (profile_name, chat_id, thread_id)).rowcount or 0
             except sqlite3.OperationalError:
                 return 0
             if not deleted:
                 return 0
             # Last binding gone → disable topic mode in the same transaction (no
-            # read-after-prune race).
-            try:
-                remaining = conn.execute(
-                    """
+            # read-after-prune race). telegram_dm_topic_mode absent — binding prune still stands.
+            with contextlib.suppress(sqlite3.OperationalError):
+                remaining = conn.execute("""
                     SELECT 1 FROM telegram_dm_topic_bindings
                     WHERE profile_name = ? AND chat_id = ? LIMIT 1
-                    """,
-                    (profile_name, chat_id),
-                ).fetchone()
+                    """, (profile_name, chat_id)).fetchone()
                 if remaining is None:
                     conn.execute(
                         "UPDATE telegram_dm_topic_mode SET enabled = 0, updated_at = ? "
                         "WHERE profile_name = ? AND chat_id = ?",
                         (time.time(), profile_name, chat_id),
                     )
-            except sqlite3.OperationalError:
-                pass  # telegram_dm_topic_mode absent — binding prune still stands.
             return deleted
 
         return self._execute_write(_do)
@@ -321,24 +290,16 @@ class SessionTelegramTopicsMixin:
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
 
         def _do(conn):
-            existing_session = conn.execute(
-                """
+            existing_session = conn.execute("""
                 SELECT profile_name, chat_id, thread_id
                 FROM telegram_dm_topic_bindings
                 WHERE session_id = ?
-                """,
-                (session_id,),
-            ).fetchone()
+                """, (session_id,)).fetchone()
             if existing_session is not None:
                 linked_profile, linked_chat, linked_thread = existing_session
-                if (
-                    str(linked_profile) != profile_name
-                    or str(linked_chat) != chat_id
-                    or str(linked_thread) != thread_id
-                ):
+                if (str(linked_profile), str(linked_chat), str(linked_thread)) != (profile_name, chat_id, thread_id):
                     raise ValueError("session is already linked to another Telegram topic")
-            conn.execute(
-                """
+            conn.execute("""
                 INSERT INTO telegram_dm_topic_bindings (
                     profile_name, chat_id, thread_id, user_id, session_key, session_id,
                     managed_mode, linked_at, updated_at
@@ -349,22 +310,16 @@ class SessionTelegramTopicsMixin:
                     session_id = excluded.session_id,
                     managed_mode = excluded.managed_mode,
                     updated_at = excluded.updated_at
-                """,
-                (profile_name, chat_id, thread_id, user_id, session_key, session_id,
-                 managed_mode, now, now),
-            )
+                """, (profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, now, now))
         self._execute_write(_do)
 
     def is_telegram_session_linked_to_topic(self, *, session_id: str) -> bool:
         """True if the session is bound to any Telegram DM topic (absent tables → False)."""
-        row = self._topic_read_one(
-            """
+        row = self._topic_read_one("""
                     SELECT 1 FROM telegram_dm_topic_bindings
                     WHERE session_id = ?
                     LIMIT 1
-                    """,
-            (str(session_id),),
-        )
+                    """, (str(session_id),))
         return row is not None
 
     def list_unlinked_telegram_sessions_for_user(
