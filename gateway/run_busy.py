@@ -269,6 +269,12 @@ class GatewayBusySessionMixin:
             entry = session_store._entries.get(session_key)  # noqa: SLF001
         return getattr(entry, "session_id", None) if entry is not None else None
 
+    # Metadata that must match for two pending events to merge into one slot.
+    _SECURITY_METADATA_KEYS = (
+        "hermes_plugin_id", "hermes_plugin_injection", "gateway_session_key",
+        "gateway_session_id", "gateway_session_strict",
+    )
+
     def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
         from gateway.run import merge_pending_message_event
         adapter = self._adapter_for_source(event.source)
@@ -278,13 +284,6 @@ class GatewayBusySessionMixin:
         # be silently OVERWRITTEN). Photo bursts still merge into the head slot (album semantics).
         pending_slot = getattr(adapter, "_pending_messages", None)
         existing = pending_slot.get(session_key) if isinstance(pending_slot, dict) else None
-        security_metadata_keys = (
-            "hermes_plugin_id",
-            "hermes_plugin_injection",
-            "gateway_session_key",
-            "gateway_session_id",
-            "gateway_session_strict",
-        )
         same_security_context = existing is not None and (
             getattr(existing, "internal", False) == getattr(event, "internal", False)
             and getattr(existing, "allow_gateway_control", True)
@@ -292,7 +291,7 @@ class GatewayBusySessionMixin:
             and all(
                 (getattr(existing, "metadata", None) or {}).get(key)
                 == (getattr(event, "metadata", None) or {}).get(key)
-                for key in security_metadata_keys
+                for key in self._SECURITY_METADATA_KEYS
             )
         )
         if same_security_context and (
@@ -515,14 +514,14 @@ class GatewayBusySessionMixin:
         # Some mobile chat setups want silent steering — keep the behavior, drop the bubble.
         from gateway.run import _load_gateway_config, _platform_config_key
         from gateway.display_config import resolve_display_setting
-        platform_key = _platform_config_key(event.source.platform)
         steer_ack_env = os.environ.get("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED")
         if steer_ack_env is not None:
             steer_ack_enabled = steer_ack_env.strip().lower() in {"1", "true", "yes", "on"}
         else:
             steer_ack_enabled = bool(
                 resolve_display_setting(
-                    _load_gateway_config(), platform_key, "busy_steer_ack_enabled", True
+                    _load_gateway_config(), _platform_config_key(event.source.platform),
+                    "busy_steer_ack_enabled", True,
                 )
             )
         if not steer_ack_enabled:
@@ -551,25 +550,22 @@ class GatewayBusySessionMixin:
                 "busy_ack_detail", True,
             )
         )
-
         if busy_ack_detail_enabled and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 summary = running_agent.get_activity_summary()
-                iteration = summary.get("api_call_count", 0)
-                max_iter = summary.get("max_iterations", 0)
-                current_tool = summary.get("current_tool")
-                start_ts = _busy_state.turn.started_ts if _busy_state else 0
-                if start_ts:
-                    elapsed_min = int((now - start_ts) / 60)
-                    if elapsed_min > 0:
-                        status_parts.append(f"{elapsed_min} min elapsed")
-                if max_iter:
-                    status_parts.append(f"iteration {iteration}/{max_iter}")
-                if current_tool:
-                    status_parts.append(f"running: {current_tool}")
+                elapsed_min = 0
+                if _busy_state and _busy_state.turn.started_ts:
+                    elapsed_min = int((now - _busy_state.turn.started_ts) / 60)
+                if elapsed_min > 0:
+                    status_parts.append(f"{elapsed_min} min elapsed")
+                if summary.get("max_iterations", 0):
+                    status_parts.append(
+                        f"iteration {summary.get('api_call_count', 0)}/{summary.get('max_iterations', 0)}"
+                    )
+                if summary.get("current_tool"):
+                    status_parts.append(f"running: {summary.get('current_tool')}")
             except Exception:
                 pass
-
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
         if is_steer_mode:
             head, tail = "⏩ Steered into current run", ". Your message arrives after the next tool call."
@@ -680,16 +676,13 @@ class GatewayBusySessionMixin:
 
         # Disabled ack: still process input. Checked before debounce so an undelivered ack never
         # stamps the "last ack" timestamp.
-        busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
-        if not busy_ack_enabled:
+        if os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() != "true":
             logger.debug("Busy ack suppressed for session %s", session_key)
             return True  # input still processed, just no ack sent
 
-        # Debounce before the config-heavy display lookup.
-        _BUSY_ACK_COOLDOWN = 30
+        # Debounce (30s) before the config-heavy display lookup.
         now = time.time()
-        last_ack = _busy_state.turn.busy_ack_ts if _busy_state else 0
-        if now - last_ack < _BUSY_ACK_COOLDOWN:
+        if now - (_busy_state.turn.busy_ack_ts if _busy_state else 0) < 30:
             return True  # interrupt sent (if not queue), ack already delivered recently
 
         if is_steer_mode and not self._busy_steer_ack_enabled(event, session_key):
@@ -809,8 +802,7 @@ class GatewayBusySessionMixin:
             return "Hermes wasn't paused."
         state = estop.get_state()
         if state is not None and not args:
-            reason = state.get("reason")
-            suffix = f" (reason: {reason})" if reason else ""
+            suffix = f" (reason: {state.get('reason')})" if state.get("reason") else ""
             return f"⏸️ Hermes is already paused{suffix}. Use `/pause off` to resume."
         estop.engage(reason=args or None)
         suffix = f" (reason: {args})" if args else ""
@@ -953,16 +945,13 @@ class GatewayBusySessionMixin:
         allowed_preview = sorted(policy.user_allowed_commands)
         if allowed_preview:
             suffix = (
-                "You can run: "
-                + ", ".join(f"/{c}" for c in allowed_preview[:12])
-                + ("…" if len(allowed_preview) > 12 else "")
-                + ". Use /whoami for the full list."
+                "You can run: " + ", ".join(f"/{c}" for c in allowed_preview[:12])
+                + ("…" if len(allowed_preview) > 12 else "") + ". Use /whoami for the full list."
             )
         else:
             suffix = (
-                "No slash commands are enabled for non-admins on this "
-                "platform. Ask an admin to add you to allow_admin_from "
-                "or to set user_allowed_commands."
+                "No slash commands are enabled for non-admins on this platform. Ask an admin to "
+                "add you to allow_admin_from or to set user_allowed_commands."
             )
         return f"⛔ /{canonical_cmd} is admin-only here. {suffix}"
 
