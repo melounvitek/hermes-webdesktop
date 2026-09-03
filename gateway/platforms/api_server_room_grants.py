@@ -28,8 +28,7 @@ def _require_unchanged_execution_policy(claims: dict[str, Any], execution_policy
 def _invalid_room_grant(_openai_error) -> "web.Response":
     return _json_error(
         _openai_error, "Room authorization is invalid or expired.",
-        err_type="gateway_auth_error", code="invalid_room_grant", status=401,
-    )
+        err_type="gateway_auth_error", code="invalid_room_grant", status=401)
 
 
 def _room_grant_error_response(exc: Exception, *, _openai_error) -> "web.Response":
@@ -37,8 +36,7 @@ def _room_grant_error_response(exc: Exception, *, _openai_error) -> "web.Respons
         return _invalid_room_grant(_openai_error)
     return _json_error(
         _openai_error, "Room authorization needs to be renewed.",
-        err_type="gateway_auth_error", code="room_reauthorization_required", status=403,
-    )
+        err_type="gateway_auth_error", code="room_reauthorization_required", status=403)
 
 
 def _hard_expiry(claims: dict[str, Any]) -> float:
@@ -52,8 +50,7 @@ def _local_target(claims: dict[str, Any] | None, _api_request_profile) -> tuple[
     profile = _api_request_profile.get() or "default"
     installation_id = hosted_rooms.local_authority_gateway_id()
     if claims is not None and (
-        claims["target_profile"] != profile or claims["target_install_id"] != installation_id
-    ):
+        claims["target_profile"] != profile or claims["target_install_id"] != installation_id):
         raise ValueError("room grant target does not match this profile")
     return profile, installation_id
 
@@ -68,8 +65,7 @@ def _local_room_catalog(self, profile: str, installation_id: str) -> tuple[dict,
     catalog = catalog_mapping(
         installation_id=installation_id, protocol_versions=(PROTOCOL_VERSION,), link_modes=("direct",),
         persistent_process=True, text=True, attachments=False, target_profile=profile,
-        execution_policy=execution_policy,
-    )
+        execution_policy=execution_policy)
     return execution_policy, catalog
 
 
@@ -78,8 +74,7 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/room-members/invitations", self._handle_room_member_invitation),
         ("GET", "/v1/room-members/capabilities", self._handle_room_member_capabilities),
         ("POST", "/v1/room-members/grants/refresh", self._handle_room_member_grant_refresh),
-        ("POST", "/v1/room-members/grants/revoke", self._handle_room_member_grant_revoke),
-    ]
+        ("POST", "/v1/room-members/grants/revoke", self._handle_room_member_grant_revoke)]
 
 
 def _room_grant_token(request: "web.Request") -> str:
@@ -119,8 +114,7 @@ def _room_grant_claims(self, request: "web.Request", *, permission: str) -> dict
 
 
 async def _handle_room_member_invitation(
-    self, request: "web.Request", *, _openai_error, _api_request_profile
-) -> "web.Response":
+    self, request: "web.Request", *, _openai_error, _api_request_profile) -> "web.Response":
     """Mint a short-lived room/profile grant for a trusted home gateway."""
     auth_err = self._check_auth(request)
     if auth_err:
@@ -133,8 +127,7 @@ async def _handle_room_member_invitation(
     if set(body) - allowed or not required <= set(body):
         return _json_error(
             _openai_error, "Invitation is missing required room authority fields.",
-            code="invalid_room_invitation", status=400,
-        )
+            code="invalid_room_invitation", status=400)
     try:
         from gateway import hosted_rooms
         from gateway.hosted_room_peer import decode_room_grant, issue_room_grant
@@ -150,22 +143,15 @@ async def _handle_room_member_invitation(
         token = issue_room_grant(
             self._room_grant_secret(),
             grant_id=str(body.get("grant_id") or f"grant-{uuid.uuid4().hex}"),
-            room_id=str(body["room_id"]),
-            home_install_id=str(body["home_install_id"]),
+            room_id=str(body["room_id"]), home_install_id=str(body["home_install_id"]),
             authority_gateway_id=str(body["authority_gateway_id"]),
-            authority_epoch=int(body["authority_epoch"]),
-            member_id=str(body["member_id"]),
-            target_install_id=target_install_id,
-            target_profile=profile,
-            execution_policy_digest=execution_policy["policy_digest"],
-            issued_at=time.time(),
-            ttl_seconds=ttl,
-            status_ttl_seconds=status_ttl,
-        )
+            authority_epoch=int(body["authority_epoch"]), member_id=str(body["member_id"]),
+            target_install_id=target_install_id, target_profile=profile,
+            execution_policy_digest=execution_policy["policy_digest"], issued_at=time.time(),
+            ttl_seconds=ttl, status_ttl_seconds=status_ttl)
         claims = decode_room_grant(self._room_grant_secret(), token, permission="status")
         hosted_rooms.reserve_peer_room(
-            hosted_rooms.default_db_path(), claims=claims, expires_at=_hard_expiry(claims)
-        )
+            hosted_rooms.default_db_path(), claims=claims, expires_at=_hard_expiry(claims))
     except Exception as exc:
         return _json_error(_openai_error, str(exc), code="invalid_room_invitation", status=400)
     return web.json_response({
@@ -179,8 +165,7 @@ async def _handle_room_member_invitation(
 
 
 async def _handle_room_member_capabilities(
-    self, request: "web.Request", *, _openai_error, _api_request_profile
-) -> "web.Response":
+    self, request: "web.Request", *, _openai_error, _api_request_profile) -> "web.Response":
     """Verify a scoped grant and return this target's live room catalog."""
     try:
         claims = self._room_grant_claims(request, permission="status")
@@ -196,13 +181,11 @@ async def _handle_room_member_capabilities(
         "authority_epoch": claims["authority_epoch"],
         "member_id": claims["member_id"],
         "target_profile": profile,
-        "catalog": catalog,
-    })
+        "catalog": catalog})
 
 
 async def _handle_room_member_grant_refresh(
-    self, request: "web.Request", *, _openai_error, _api_request_profile
-) -> "web.Response":
+    self, request: "web.Request", *, _openai_error, _api_request_profile) -> "web.Response":
     """Refresh dispatch access without a Desktop or broad gateway key."""
     body, error = await self._read_json_body(request)
     if error:
@@ -210,8 +193,7 @@ async def _handle_room_member_grant_refresh(
     if set(body) - {"ttl_seconds"}:
         return _json_error(
             _openai_error, "Grant refresh accepts only ttl_seconds.",
-            code="invalid_room_grant_refresh", status=400,
-        )
+            code="invalid_room_grant_refresh", status=400)
     try:
         from gateway.hosted_room_peer import MAX_DISPATCH_GRANT_TTL_SECONDS, issue_room_grant
         from gateway.hosted_room_execution_policy import execution_policy_mapping
@@ -231,21 +213,14 @@ async def _handle_room_member_grant_refresh(
             execution_policy = execution_policy_mapping(target_profile=profile)
         _require_unchanged_execution_policy(claims, execution_policy)
         token = issue_room_grant(
-            self._room_grant_secret(),
-            grant_id=f"grant-refresh-{uuid.uuid4().hex}",
-            room_id=claims["room_id"],
-            home_install_id=claims["home_install_id"],
+            self._room_grant_secret(), grant_id=f"grant-refresh-{uuid.uuid4().hex}",
+            room_id=claims["room_id"], home_install_id=claims["home_install_id"],
             authority_gateway_id=claims["authority_gateway_id"],
-            authority_epoch=int(claims["authority_epoch"]),
-            member_id=claims["member_id"],
-            target_install_id=installation_id,
-            target_profile=profile,
+            authority_epoch=int(claims["authority_epoch"]), member_id=claims["member_id"],
+            target_install_id=installation_id, target_profile=profile,
             execution_policy_digest=execution_policy["policy_digest"],
-            permissions=claims["permissions"],
-            issued_at=now,
-            ttl_seconds=dispatch_ttl,
-            status_expires_at=hard_expiry,
-        )
+            permissions=claims["permissions"], issued_at=now, ttl_seconds=dispatch_ttl,
+            status_expires_at=hard_expiry)
     except Exception as exc:
         return _room_grant_error_response(exc, _openai_error=_openai_error)
     return web.json_response({
@@ -253,13 +228,11 @@ async def _handle_room_member_grant_refresh(
         "grant": token,
         "expires_at": now + dispatch_ttl,
         "status_expires_at": hard_expiry,
-        "execution_policy": execution_policy,
-    })
+        "execution_policy": execution_policy})
 
 
 async def _handle_room_member_grant_revoke(
-    self, request: "web.Request", *, _openai_error, _api_request_profile
-) -> "web.Response":
+    self, request: "web.Request", *, _openai_error, _api_request_profile) -> "web.Response":
     """Revoke exactly the scoped grant authenticating this request."""
     body, error = await self._read_json_body(request)
     if error:
@@ -267,8 +240,7 @@ async def _handle_room_member_grant_revoke(
     if body:
         return _json_error(
             _openai_error, "Grant revoke accepts no fields.",
-            code="invalid_room_grant_revoke", status=400,
-        )
+            code="invalid_room_grant_revoke", status=400)
     try:
         from gateway import hosted_rooms
 
@@ -278,8 +250,7 @@ async def _handle_room_member_grant_revoke(
         claims = _decode_request_grant(self, request, permission="status")
         _local_target(claims, _api_request_profile)
         hosted_rooms.revoke_room_grant_scope(
-            hosted_rooms.default_db_path(), claims=claims, expires_at=_hard_expiry(claims)
-        )
+            hosted_rooms.default_db_path(), claims=claims, expires_at=_hard_expiry(claims))
     except Exception:
         return _invalid_room_grant(_openai_error)
     return web.json_response({"object": "hermes.room_member.grant.revocation", "revoked": True})

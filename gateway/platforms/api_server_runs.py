@@ -26,24 +26,21 @@ logger = logging.getLogger("gateway.platforms.api_server")
 _ROOM_RETENTION_REQUEST_KEY = (
     RequestKey("hermes.room_run_retention_until", float)
     if RequestKey is not None
-    else "hermes.room_run_retention_until"
-)
+    else "hermes.room_run_retention_until")
 # Forwarded subagent lifecycle fields; free-text ones are secret-redacted.
 _SUBAGENT_EVENT_KEYS = (
     "goal", "task_count", "task_index", "subagent_id", "child_session_id",
     "delegation_id", "parent_id", "depth", "model", "tool_count", "status",
     "summary", "duration_seconds", "input_tokens", "output_tokens",
     "reasoning_tokens", "api_calls", "cost_usd", "files_read", "files_written",
-    "output_tail",
-)
+    "output_tail")
 _SUBAGENT_TEXT_KEYS = ("goal", "summary", "output_tail")
 # Tool-progress event -> SSE payload fields (tool_name, preview, kwargs); key order is wire format.
 _FIXED_EVENT_FIELDS = {
     "tool.started": lambda tool, preview, kw: {"tool": tool, "preview": preview},
     "tool.completed": lambda tool, preview, kw: {
         "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False)},
-    "reasoning.available": lambda tool, preview, kw: {"text": preview or ""},
-}
+    "reasoning.available": lambda tool, preview, kw: {"text": preview or ""}}
 
 
 def _remember_room_retention(request: "web.Request", claims: dict[str, Any]) -> None:
@@ -69,13 +66,6 @@ def _run_event(run_id: str, name: str, **fields: Any) -> Dict[str, Any]:
 
 def _run_not_found(_openai_error, run_id: str) -> "web.Response":
     return _json_error(_openai_error, f"Run not found: {run_id}", code="run_not_found", status=404)
-
-
-def _idempotency_conflict(_openai_error) -> "web.Response":
-    return _json_error(
-        _openai_error, "Idempotency-Key was already used with a different request payload",
-        code="idempotency_key_conflict", status=409,
-    )
 
 
 def _uses_room_run_auth(self, request: "web.Request") -> bool:
@@ -109,21 +99,18 @@ def _initialize_run_state(self, *, store_factory) -> None:
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
     return [
-        ("POST", "/v1/runs", self._handle_runs),
-        ("GET", "/v1/runs/{run_id}", self._handle_get_run),
+        ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
         ("POST", "/v1/runs/{run_id}/steer", self._handle_steer_run),
-        ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run),
-    ]
+        ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run)]
 
 
 def _idempotency_capabilities(self, *, store_type) -> dict[str, Any]:
     return {
         "supported": True,
         "durable": self._run_idempotency_store.durable,
-        "retention_seconds": store_type.RETENTION_SECONDS,
-    }
+        "retention_seconds": store_type.RETENTION_SECONDS}
 
 
 def _close_run_state(self) -> None:
@@ -151,8 +138,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
-        or bool(field_names & {"output", "error", "usage", "pending_steer", "session_id"})
-    )
+        or bool(field_names & {"output", "error", "usage", "pending_steer", "session_id"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -213,16 +199,13 @@ def _run_idempotency_scope(self, request: "web.Request", *, _api_server) -> str:
     if self._room_grant_token(request):
         claims = self._room_grant_claims(request, permission=_room_permission_for(request))
         _remember_room_retention(request, claims)
-        identity = (
-            f"{claims['room_id']}\0{claims['home_install_id']}\0"
-            f"{claims['authority_gateway_id']}\0{claims['authority_epoch']}\0"
-            f"{claims['member_id']}\0{claims['target_install_id']}\0"
-            f"{claims['target_profile']}"
-        )
-        return hashlib.sha256(identity.encode()).hexdigest()
-    profile = _api_server._api_request_profile.get() or "default"
-    identity = self._expected_api_key() or "unauthenticated-test-listener"
-    return hashlib.sha256(f"{profile}\0{identity}".encode()).hexdigest()
+        parts = (claims[k] for k in (
+            "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
+            "member_id", "target_install_id", "target_profile"))
+    else:
+        parts = (_api_server._api_request_profile.get() or "default",
+                 self._expected_api_key() or "unauthenticated-test-listener")
+    return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
 
 
 def _check_run_auth(self, request: "web.Request", *, permission: str, _api_server) -> "web.Response | None":
@@ -261,21 +244,16 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
 
     scope = self._run_idempotency_scope(request)
     record = self._run_idempotency_store.status_for_run(
-        scope, run_id, retention_until=_room_retention_until(request)
-    )
+        scope, run_id, retention_until=_room_retention_until(request))
     if record is None:
         return None
 
     status = dict(record["status"])
     if status.get("status") not in TERMINAL_STATUSES and not _owner_alive(
-        int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0)
-    ):
-        status.update({
-            "status": "interrupted",
-            "error": "The gateway restarted before this run settled.",
-            "last_event": "run.interrupted",
-            "updated_at": time.time(),
-        })
+        int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0)):
+        status.update(
+            status="interrupted", error="The gateway restarted before this run settled.",
+            last_event="run.interrupted", updated_at=time.time())
         self._run_idempotency_store.update_status(run_id, status)
 
     self._run_statuses[run_id] = status
@@ -305,8 +283,7 @@ def _resolve_conversation_history(
             if not isinstance(entry, dict) or "role" not in entry or "content" not in entry:
                 return [], instructions, None, _json_error(
                     _openai_error, f"conversation_history[{i}] must have 'role' and 'content' fields",
-                    status=400,
-                )
+                    status=400)
             conversation_history.append({"role": str(entry["role"]), "content": str(entry["content"])})
         if previous_response_id:
             logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
@@ -327,23 +304,29 @@ def _resolve_conversation_history(
                 if isinstance(content, list):  # flatten multi-part content blocks to text
                     content = " ".join(
                         part.get("text", "") for part in content
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    )
+                        if isinstance(part, dict) and part.get("type") == "text")
                 conversation_history.append({"role": msg["role"], "content": str(content)})
     return conversation_history, instructions, stored_session_id, None
 
 
-def _replay_response(self, request: "web.Request", record: dict, gateway_session_key) -> "web.Response":
-    """202 replay of an already-admitted idempotent run."""
-    original_id = str(record["run_id"])
-    status = self._durable_run_status(request, original_id) or record["status"]
-    headers = {"Idempotency-Replayed": "true"}
+def _accepted_response(run_id: str, status: str, gateway_session_key, *, replayed: bool) -> "web.Response":
+    """202 admission response; replays are flagged via ``Idempotency-Replayed``."""
+    headers = {"Idempotency-Replayed": "true"} if replayed else {}
     if gateway_session_key:
         headers["X-Hermes-Session-Key"] = gateway_session_key
     return web.json_response(
-        {"run_id": original_id, "status": status.get("status", "queued"), "replayed": True},
-        status=202, headers=headers,
-    )
+        {"run_id": run_id, "status": status, "replayed": replayed}, status=202, headers=headers)
+
+
+def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error) -> "web.Response":
+    """409 for a fingerprint conflict, else a 202 replay of the already-admitted run."""
+    if outcome == "conflict":
+        return _json_error(
+            _openai_error, "Idempotency-Key was already used with a different request payload",
+            code="idempotency_key_conflict", status=409)
+    original_id = str(record["run_id"])
+    status = self._durable_run_status(request, original_id) or record["status"]
+    return _accepted_response(original_id, status.get("status", "queued"), gateway_session_key, replayed=True)
 
 
 @dataclass(slots=True)
@@ -384,8 +367,7 @@ def _idempotency_key_from(request: "web.Request", _openai_error) -> "tuple[str, 
     if key and (len(key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in key)):
         return "", _json_error(
             _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
-            code="invalid_idempotency_key", status=400,
-        )
+            code="invalid_idempotency_key", status=400)
     return key, None
 
 
@@ -408,8 +390,7 @@ def _retire_live_run(self, run_id: str) -> None:
     """Retire agent/task/approval control state once the executor-backed task is done."""
     _forget_run(
         self, run_id, self._active_run_agents, self._active_run_tasks,
-        self._run_approval_sessions, self._stopping_run_ids,
-    )
+        self._run_approval_sessions, self._stopping_run_ids)
 
 
 def _drop_run_transport(self, run_id: str) -> None:
@@ -458,8 +439,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return _json_error(_openai_error, "No user message found in input", status=400)
 
     conversation_history, instructions, stored_session_id, history_err = (
-        _resolve_conversation_history(self, body, raw_input, _openai_error=_openai_error)
-    )
+        _resolve_conversation_history(self, body, raw_input, _openai_error=_openai_error))
     if history_err is not None:
         return history_err
     previous_response_id = body.get("previous_response_id")
@@ -470,8 +450,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     selection_error = self._request_route_conflict_error(
         session_id=session_id, gateway_session_key=gateway_session_key,
         requested_model=agent_overrides.get("requested_model"),
-        requested_provider=agent_overrides.get("requested_provider"), route=route,
-    )
+        requested_provider=agent_overrides.get("requested_provider"), route=route)
     if selection_error:
         return _json_error(_openai_error, selection_error, status=400)
 
@@ -481,12 +460,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if idempotency_key:
         outcome, record = self._run_idempotency_store.lookup(
             idempotency_scope, idempotency_key, idempotency_fingerprint,
-            retention_until=_room_retention_until(request),
-        )
-        if outcome == "conflict":
-            return _idempotency_conflict(_openai_error)
-        if outcome == "reused" and record is not None:
-            return _replay_response(self, request, record, gateway_session_key)
+            retention_until=_room_retention_until(request))
+        if outcome == "conflict" or (outcome == "reused" and record is not None):
+            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
 
     # Enforce concurrency only for a genuinely new run.
     limited = self._concurrency_limited_response()
@@ -521,16 +497,12 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
-            retention_until=_room_retention_until(request),
-        )
+            retention_until=_room_retention_until(request))
         if outcome != "created":
             _forget_run(
                 self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
-                self._run_statuses, self._run_owners,
-            )
-            if outcome == "conflict":
-                return _idempotency_conflict(_openai_error)
-            return _replay_response(self, request, record, gateway_session_key)
+                self._run_statuses, self._run_owners)
+            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
 
     launch = _RunLaunch(
@@ -545,10 +517,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
     )
     _start_run_task(self, launch, _api_server=_api_server)
-    response_headers = {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
-    return web.json_response(
-        {"run_id": run_id, "status": "started", "replayed": False}, status=202, headers=response_headers
-    )
+    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
 def _start_run_task(self, launch: _RunLaunch, *, _api_server) -> None:
@@ -568,14 +537,10 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     """Executor-thread body of one run; returns ``(result, usage)``."""
     from gateway.session_context import clear_session_vars
     from gateway.hosted_room_execution_policy import (
-        RoomExecutionPolicy, bind_room_execution_policy, reset_room_execution_policy,
-    )
+        RoomExecutionPolicy, bind_room_execution_policy, reset_room_execution_policy)
     from tools.approval import (
-        register_gateway_notify,
-        reset_current_session_key,
-        set_current_session_key,
-        unregister_gateway_notify,
-    )
+        register_gateway_notify, reset_current_session_key, set_current_session_key,
+        unregister_gateway_notify)
 
     session_id = run.session_id
     effective_task_id = session_id or run.run_id
@@ -593,8 +558,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             session_tokens = self._bind_api_server_session(
                 chat_id=session_id or "", session_key=run.approval_session_key, session_id=session_id or "",
                 browser_control_principal=run.browser_control_principal,
-                browser_control_transport_family=run.browser_control_transport_family,
-            )
+                browser_control_transport_family=run.browser_control_transport_family)
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
             if run.room_dispatch is not None:
@@ -607,8 +571,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             r = agent.run_conversation(
                 user_message=run.user_message, conversation_history=run.conversation_history,
-                task_id=effective_task_id,
-            )
+                task_id=effective_task_id)
         finally:
             # Clear ownership immediately so a later stop/cancel can't reap
             # background work this run deliberately left running.
@@ -617,8 +580,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             # bind_declared_conversation), with the same precedence gate.
             if run.declared_selected:
                 self._bind_declared_conversation(
-                    getattr(agent, "session_id", None) or session_id, run.gateway_session_key
-                )
+                    getattr(agent, "session_id", None) or session_id, run.gateway_session_key)
             try:
                 unregister_gateway_notify(run.approval_session_key)
             finally:
@@ -628,8 +590,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
         return r, {
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
             "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-            "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-        }
+            "total_tokens": getattr(agent, "session_total_tokens", 0) or 0}
 
 
 def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Dict[str, Any]], None]:
@@ -651,9 +612,7 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
             "choices": _api_server._approval_event_choices(
                 smart_denied=bool(event.get("smart_denied")),
                 allow_session=event.get("allow_session") is not False,
-                allow_permanent=event.get("allow_permanent") is not False,
-            ),
-        })
+                allow_permanent=event.get("allow_permanent") is not False)})
         self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request", approval=event)
         with suppress(Exception):
             loop.call_soon_threadsafe(q.put_nowait, event)
@@ -696,8 +655,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 requested_model=run.agent_overrides.get("requested_model"),
                 requested_provider=run.agent_overrides.get("requested_provider"),
                 model_options=run.agent_overrides.get("model_options"), route=run.route,
-                room_dispatch=run.room_dispatch, room_execution_policy=run.room_execution_policy,
-            )
+                room_dispatch=run.room_dispatch, room_execution_policy=run.room_execution_policy)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage = await loop.run_in_executor(
@@ -758,9 +716,7 @@ def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         run_id in table
         for table in (
             self._run_statuses, self._active_run_agents, self._active_run_tasks,
-            self._run_streams, self._run_approval_sessions,
-        )
-    ):
+            self._run_streams, self._run_approval_sessions)):
         return
     self._run_owners.pop(run_id, None)
 
@@ -804,8 +760,7 @@ def _load_owned_run(self, request: "web.Request", *, _api_server, permission: Op
 async def _handle_get_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """GET /v1/runs/{run_id} — return pollable run status for external UIs."""
     _, status, _, _, err = _load_owned_run(
-        self, request, _api_server=_api_server, permission="status", active_fallback=True
-    )
+        self, request, _api_server=_api_server, permission="status", active_fallback=True)
     return err or web.json_response(status)
 
 
@@ -872,8 +827,7 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
     _coerce_request_bool = _api_server._coerce_request_bool
     _openai_error = _api_server._openai_error
     run_id, _, _, _, err = _load_owned_run(
-        self, request, _api_server=_api_server, permission="approve", active_fallback=False
-    )
+        self, request, _api_server=_api_server, permission="approve", active_fallback=False)
     if err is not None:
         return err
 
@@ -891,8 +845,7 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
     allowed = {"once", "deny"} if room_scoped else {"once", "session", "always", "deny"}
     resolve_all = (
         _coerce_request_bool(body.get("all"), default=False)
-        or _coerce_request_bool(body.get("resolve_all"), default=False)
-    )
+        or _coerce_request_bool(body.get("resolve_all"), default=False))
     approval_session_key = self._run_approval_sessions.get(run_id)
     for failed, message, code, status in (
         (raw_request_id is not None and (not request_id or len(request_id) > 256),
@@ -905,16 +858,14 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
         (room_scoped and not request_id,
          "Room approvals require the exact request_id.", "approval_request_required", 400),
         (not approval_session_key,
-         f"Run has no active approval session: {run_id}", "approval_not_active", 409),
-    ):
+         f"Run has no active approval session: {run_id}", "approval_not_active", 409)):
         if failed:
             return _json_error(_openai_error, message, code=code, status=status)
     try:
         from tools.approval import resolve_gateway_approval
 
         resolved = resolve_gateway_approval(
-            approval_session_key, choice, resolve_all=resolve_all, request_id=request_id or None
-        )
+            approval_session_key, choice, resolve_all=resolve_all, request_id=request_id or None)
     except Exception as exc:
         logger.exception("[api_server] approval resolution failed for run %s", run_id)
         return _json_error(_openai_error, str(exc), status=500)
@@ -929,18 +880,15 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
     return web.json_response({
         "object": "hermes.run.approval_response",
         "run_id": run_id,
-        "choice": choice,
-        **request_id_field,
-        "resolved": resolved,
-    })
+        "choice": choice, **request_id_field,
+        "resolved": resolved})
 
 
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/steer — inject guidance into a running agent."""
     _openai_error = _api_server._openai_error
     run_id, status, agent, _, err = _load_owned_run(
-        self, request, _api_server=_api_server, permission=None, active_fallback=False
-    )
+        self, request, _api_server=_api_server, permission=None, active_fallback=False)
     if err is not None:
         return err
     # Only genuinely running runs are steerable. /stop retains agent/task refs
@@ -949,8 +897,7 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
     if status.get("status") != "running" or not hasattr(agent, "steer"):
         return _json_error(
             _openai_error, f"Run is not currently accepting steer input: {run_id}",
-            code="run_not_accepting_steer", status=409,
-        )
+            code="run_not_accepting_steer", status=409)
 
     body, err = await self._read_json_body(request)
     if err:
@@ -960,8 +907,7 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
     if not steer_text:
         return _json_error(
             _openai_error, "Missing non-empty steer text; expected 'input', 'message', or 'text'.",
-            code="invalid_steer_input", status=400,
-        )
+            code="invalid_steer_input", status=400)
 
     try:
         accepted = bool(agent.steer(steer_text))
@@ -980,8 +926,7 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
     """POST /v1/runs/{run_id}/stop — interrupt a running agent."""
     _openai_error = _api_server._openai_error
     run_id, status, agent, task, err = _load_owned_run(
-        self, request, _api_server=_api_server, permission="stop", active_fallback=True
-    )
+        self, request, _api_server=_api_server, permission="stop", active_fallback=True)
     if err is not None:
         return err
     if status.get("status") in TERMINAL_STATUSES:
@@ -990,8 +935,7 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
     if agent is None and task is None:
         return _json_error(
             _openai_error, f"Run is not active in this gateway process: {run_id}",
-            code="run_not_active", status=409,
-        )
+            code="run_not_active", status=409)
 
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
@@ -1021,8 +965,7 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     stale = [
         run_id
         for run_id, created_at in list(self._run_streams_created.items())
-        if now - created_at > self._RUN_STREAM_TTL and run_id not in self._run_stream_subscribers
-    ]
+        if now - created_at > self._RUN_STREAM_TTL and run_id not in self._run_stream_subscribers]
     for run_id in stale:
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)
@@ -1037,7 +980,6 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         run_id
         for run_id, status in list(self._run_statuses.items())
         if status.get("status") in {"completed", "failed", "cancelled"}
-        and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
-    ]
+        and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL]
     for run_id in stale_statuses:
         _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)

@@ -28,8 +28,7 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
     title = f"Group: {dispatch.room_id}"
     seed = (
         f"{dispatch.home_install_id}\0{dispatch.room_id}\0"
-        f"{dispatch.member_id}\0{dispatch.target_profile}"
-    )
+        f"{dispatch.member_id}\0{dispatch.target_profile}")
     session_id = f"room_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
     def atomic(conn):
@@ -40,18 +39,14 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
             return session_id
         clean_title = db.sanitize_title(title)
         conflict = conn.execute(
-            "SELECT id FROM sessions WHERE title=? AND id!=?", (clean_title, session_id)
-        ).fetchone()
+            "SELECT id FROM sessions WHERE title=? AND id!=?", (clean_title, session_id)).fetchone()
         if conflict:
             raise RuntimeError(
                 "Another group already uses this room title on the target gateway. "
-                "Rename or migrate that group before retrying."
-            )
+                "Rename or migrate that group before retrying.")
         conn.execute(
             "INSERT INTO sessions(id, source, title, hidden, started_at) "
-            "VALUES(?, 'bot_room', ?, 1, ?)",
-            (session_id, clean_title, time.time()),
-        )
+            "VALUES(?, 'bot_room', ?, 1, ?)", (session_id, clean_title, time.time()))
         return session_id
 
     return await asyncio.to_thread(db._execute_write, atomic)
@@ -70,8 +65,7 @@ def _room_dispatch_error(exc: Exception, *, _openai_error) -> "web.Response":
 
 
 async def _normalize_room_dispatch(
-    self, request: "web.Request", body: Any, *, _api_server
-) -> tuple[Any, "web.Response | None"]:
+    self, request: "web.Request", body: Any, *, _api_server) -> tuple[Any, "web.Response | None"]:
     """Validate and normalize a scoped RoomLink dispatch request."""
     _openai_error = _api_server._openai_error
     room_token = self._room_grant_token(request)
@@ -80,8 +74,7 @@ async def _normalize_room_dispatch(
     if not isinstance(body, dict) or set(body) - {"input", "hosted_room_dispatch"}:
         return body, _json_error(
             _openai_error, "Room dispatch accepts only input and hosted_room_dispatch.",
-            code="invalid_room_dispatch", status=400,
-        )
+            code="invalid_room_dispatch", status=400)
     try:
         from gateway import hosted_rooms
         from gateway.hosted_room_peer import GatewayRoomCatalog, HostedMemberDispatch, verify_room_grant
