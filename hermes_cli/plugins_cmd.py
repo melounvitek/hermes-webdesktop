@@ -1914,6 +1914,29 @@ def _reapply_stash(git_exe: str, target: Path) -> bool:
     return True
 
 
+def _autostash_dirty_tree(git_exe: str, target: Path) -> tuple[bool, str]:
+    """Stash local edits before a pull. Returns ``(stash_created, error)``; a non-empty error means
+    the tree is dirty but nothing was saved, so the pull must not run."""
+    status = _run_plugin_git(git_exe, target, "status", "--porcelain")
+    if status.returncode != 0 or not status.stdout.strip():
+        return False, ""
+    pre_stash = _stash_ref(git_exe, target)
+    push = _run_plugin_git(
+        git_exe, target, "stash", "push", "--include-untracked", "-m", "hermes-plugin-update-autostash")
+    post_stash = _stash_ref(git_exe, target)
+    if not post_stash or post_stash == pre_stash:
+        err = _safe_git_error(push)
+        return False, (
+            "Local changes in the plugin checkout could not be "
+            "stashed; update aborted before touching the checkout."
+            + (f"\n{err}" if err else ""))
+    if push.returncode != 0:
+        # Saved-but-couldn't-clean (undeletable untracked files): the stash entry is complete;
+        # reset tracked mods so the pull isn't blocked by a still-dirty tree.
+        _run_plugin_git(git_exe, target, "reset", "--hard", "HEAD")
+    return True, ""
+
+
 def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     """``git pull --ff-only`` a plugin checkout, autostashing local edits (users patch installed
     plugins in place, and a plain ff-only pull would then refuse forever)."""
@@ -1921,30 +1944,10 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     if not git_exe:
         return False, "git is not installed or not in PATH."
     try:
-        status = _run_plugin_git(git_exe, target, "status", "--porcelain")
-        stash_created = False
-        if status.returncode == 0 and status.stdout.strip():
-            pre_stash = _stash_ref(git_exe, target)
-            push = _run_plugin_git(
-                git_exe, target, "stash", "push", "--include-untracked", "-m",
-                "hermes-plugin-update-autostash")
-            post_stash = _stash_ref(git_exe, target)
-            stash_created = bool(post_stash) and post_stash != pre_stash
-            if not stash_created:
-                # Nothing was saved — do not risk the pull clobbering edits.
-                err = _safe_git_error(push)
-                return False, (
-                    "Local changes in the plugin checkout could not be "
-                    "stashed; update aborted before touching the checkout."
-                    + (f"\n{err}" if err else ""))
-            if push.returncode != 0:
-                # Saved-but-couldn't-clean (undeletable untracked files):
-                # the stash entry is complete; reset tracked mods so the
-                # pull isn't blocked by a still-dirty tree.
-                _run_plugin_git(git_exe, target, "reset", "--hard", "HEAD")
-
+        stash_created, err = _autostash_dirty_tree(git_exe, target)
+        if err:
+            return False, err
         result = _run_plugin_git(git_exe, target, "pull", "--ff-only")
-
         if result.returncode != 0:
             err = _safe_git_error(result) or "git pull failed."
             if not stash_created:
