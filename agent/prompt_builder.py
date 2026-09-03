@@ -169,11 +169,20 @@ def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = T
             "memory tool (target='user') — the built-in notes store is disabled, so never target='memory'. "
         )
     return frame + (
-        "Save proactively — storage has a hard character budget, and when it fills, replace or consolidate stale "
-        "entries in the same batch rather than skipping the save. Write entries as declarative facts, not instructions "
-        "to yourself: 'User prefers concise responses' ✓ — 'Always respond concisely' ✗ (imperative phrasing gets "
-        "re-read as a directive in later sessions and can override the user's current request). Route by longevity: a "
-        "fact stale within a week belongs in session history; procedures and workflows belong in skills."
+        "Skills come first: when you learn something while doing a task — a "
+        "procedure, a pitfall, and the user's preferences and corrections "
+        "for that kind of work — record it in the skill you used or built "
+        "for the task (skill_manage), where it loads only when relevant. "
+        "Memory is the narrow exception for facts that apply to EVERY "
+        "session regardless of task (who the user is, environment facts, "
+        "standing conventions with no task home); it has a hard character "
+        "budget, so when it fills, replace or consolidate stale entries "
+        "rather than skipping the save. Write entries as declarative facts, "
+        "not instructions to yourself: 'User prefers concise responses' ✓ — "
+        "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
+        "a directive in later sessions and can override the user's current "
+        "request). A fact stale within a week belongs in session history; "
+        "procedures and workflows belong in skills."
     )
 
 

@@ -15,8 +15,31 @@ Two independent guards, both failing OPEN to legacy behaviour:
    (default $0.25), the retry budget drops from 3 to 1. Unknown pricing / missing usage /
    included routes leave it untouched.
 
-Config ``agent.empty_response_guard.{enabled, cost_threshold_usd}`` is resolved once by
-``agent_init`` and stashed on the agent so the hot loop never re-reads config (no env vars).
+1. **Deterministic-empty detection** — two consecutive empty attempts from
+   the same (model, provider, finish_reason) are treated as deterministic
+   when usage proves zero output, or when usage is absent and the assembled
+   responses contain neither content nor reasoning. Remaining retries are
+   skipped and the loop proceeds straight to the fallback chain (a different
+   model may behave differently). Mixed evidence or any generated tokens keep
+   the full retry budget.
+
+2. **Cost-aware retry budget** — when the estimated input cost of a
+   single empty attempt exceeds the configured threshold (default
+   $0.25), the empty-retry budget for this streak drops from 3 to 1.
+   Unknown pricing, missing usage, or included/subscription routes
+   leave the budget untouched.
+
+Configured via the additive ``agent.empty_response_guard`` section in
+``config.yaml`` (resolved once at agent init by ``agent_init``)::
+
+    agent:
+      empty_response_guard:
+        enabled: true            # false = legacy fixed 3-retry behaviour
+        cost_threshold_usd: 0.25 # per-attempt cost that halves the budget
+
+Per project policy, no ``HERMES_*`` environment variables are involved —
+``.env`` is reserved for credentials; behavioural settings live in
+``config.yaml``.
 """
 
 from __future__ import annotations
@@ -51,6 +74,7 @@ class EmptyAttempt:
     finish_reason: str
     usage_present: bool
     zero_output: bool
+    observed_generation: bool
 
     @property
     def signature(self) -> tuple:
@@ -146,7 +170,13 @@ def _zero_output(agent: Any, response: Any) -> tuple:
     return (True, (output + reasoning) == 0)
 
 
-def record_empty_attempt(agent: Any, *, finish_reason: str, response: Any) -> None:
+def record_empty_attempt(
+    agent: Any,
+    *,
+    finish_reason: str,
+    response: Any,
+    observed_generation: bool = True,
+) -> None:
     """Record one empty completion in the current streak.
 
     Call BEFORE ``_empty_content_retries`` is incremented: a counter of 0 marks a new
@@ -157,10 +187,16 @@ def record_empty_attempt(agent: Any, *, finish_reason: str, response: Any) -> No
         setattr(agent, _STREAK_COST_ATTR, Decimal("0"))
 
     usage_present, zero_output = _zero_output(agent, response)
-    attempts.append(EmptyAttempt(
-        model=str(getattr(agent, "model", "") or ""), provider=str(getattr(agent, "provider", "") or ""),
-        finish_reason=str(finish_reason or ""), usage_present=usage_present, zero_output=zero_output,
-    ))
+    attempts.append(
+        EmptyAttempt(
+            model=str(getattr(agent, "model", "") or ""),
+            provider=str(getattr(agent, "provider", "") or ""),
+            finish_reason=str(finish_reason or ""),
+            usage_present=usage_present,
+            zero_output=zero_output,
+            observed_generation=bool(observed_generation),
+        )
+    )
 
     cost = _estimate_attempt_cost(agent, response)
     if cost is not None and cost > 0:
@@ -169,14 +205,25 @@ def record_empty_attempt(agent: Any, *, finish_reason: str, response: Any) -> No
 
 
 def deterministic_empty(agent: Any) -> bool:
-    """True when >= 2 consecutive attempts ALL have usage present, zero output and an
-    identical signature. Any missing-usage / non-zero attempt → False (fail open)."""
+    """True when the current streak looks deterministic.
+
+    Requires >= 2 consecutive attempts with an identical (model, provider,
+    finish_reason) signature. Usage-backed attempts must all prove zero output.
+    Usage-absent attempts must all have no observed content or reasoning. Mixed
+    evidence fails open so ambiguous transients keep their retries.
+    """
     if not guard_enabled(agent):
         return False
     attempts = getattr(agent, _ATTEMPTS_ATTR, None) or []
-    return len(attempts) >= 2 and all(
-        a.usage_present and a.zero_output and a.signature == attempts[0].signature for a in attempts
+    if len(attempts) < 2:
+        return False
+    first = attempts[0]
+    same_signature = all(a.signature == first.signature for a in attempts)
+    usage_proves_empty = all(a.usage_present and a.zero_output for a in attempts)
+    response_proves_empty = all(
+        not a.usage_present and not a.observed_generation for a in attempts
     )
+    return same_signature and (usage_proves_empty or response_proves_empty)
 
 
 def empty_retry_budget(agent: Any, response: Any) -> int:

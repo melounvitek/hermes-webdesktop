@@ -43,7 +43,7 @@ class EmptyResponseVerdict:
 
 def _retry_empty(
     agent: Any, response: Any, finish_reason: str, empty_candidate: bool, *, messages: Any,
-    conversation_history: Any, api_call_count: int,
+    conversation_history: Any, api_call_count: int, observed_generation: bool = False,
 ) -> tuple:
     """Budgeted empty-response retry. Each empty attempt re-bills the full input, so the
     signature is recorded and deterministic empties stop burning paid retries (fails
@@ -52,7 +52,9 @@ def _retry_empty(
     from agent.conversation_loop import jittered_backoff
 
     if empty_candidate:
-        _empty_guard.record_empty_attempt(agent, finish_reason=finish_reason, response=response)
+        _empty_guard.record_empty_attempt(
+            agent, finish_reason=finish_reason, response=response, observed_generation=observed_generation,
+        )
     budget = (
         _empty_guard.empty_retry_budget(agent, response)
         if empty_candidate else _empty_guard.DEFAULT_EMPTY_RETRY_BUDGET
@@ -246,18 +248,19 @@ def recover_empty_response(
     action, interrupt_result, _deterministic_empty = _retry_empty(
         agent, response, finish_reason, _empty_candidate, messages=messages,
         conversation_history=conversation_history, api_call_count=api_call_count,
+        observed_generation=_has_structured,
     )
     if action is not None:
         return _verdict(action, interrupt_result)
 
     if _truly_empty and _deterministic_empty:
         logger.warning(
-            "Deterministic empty response detected (consecutive zero-output completions, "
-            "model=%s provider=%s finish_reason=%s) — skipping remaining retries",
+            "Repeated empty response detected (model=%s provider=%s finish_reason=%s) — "
+            "skipping remaining retries",
             agent.model, agent.provider, finish_reason,
         )
         agent._buffer_status(
-            "⚠️ Model is deterministically returning empty (zero output tokens) — skipping further retries "
+            "⚠️ Model is repeatedly returning empty content — skipping further retries "
             "to avoid repeat charges"
         )
 

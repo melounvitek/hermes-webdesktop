@@ -205,6 +205,15 @@ def _strip_reasoning_tags(text: str) -> str:
         r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*', '', cleaned,
         flags=re.IGNORECASE,
     )
+    # Unterminated opener / stray <arg_key>/<arg_value> markup = stream cut
+    # mid tool-call serialization (#101899); strip to end of text.
+    cleaned = re.sub(
+        r'(?:^|\n)[ \t]*<(?:tool_call|tool_calls|tool_result|function_call|function_calls)\b[^>]*>.*$'
+        r'|(?:^|\n)[^\n<]*</?arg_(?:key|value)\b.*$',
+        '',
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
     return cleaned.strip()
 
 

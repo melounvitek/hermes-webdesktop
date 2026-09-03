@@ -58,6 +58,17 @@ _STRAY_TOOL_CALL_CLOSER_PATTERN = re.compile(
     rf'</(?:{"|".join(_TOOL_CALL_TAG_NAMES)}|function)>\s*', re.IGNORECASE
 )
 
+# A tool-call opener with no closer, or GLM-style argument markup
+# (<arg_key>/<arg_value>) outside any closed block, means the stream was
+# cut mid-serialization of a text-channel tool call (#101899). The call
+# can't be recovered; strip from the block-boundary opener (or the line
+# holding the first stray argument tag) to the end of the text.
+_UNTERMINATED_TOOL_CALL_PATTERN = re.compile(
+    rf'(?:^|\n)[ \t]*<(?:{"|".join(_TOOL_CALL_TAG_NAMES)})\b[^>]*>.*$'
+    r'|(?:^|\n)[^\n<]*</?arg_(?:key|value)\b.*$',
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def _ra():
     """Lazy ``run_agent`` reference for test-patch routing."""
@@ -570,7 +581,7 @@ def _flatten_content_text(content: Any) -> str:
 _THINK_STRIP_PATTERNS = (
     *_REASONING_BLOCK_PATTERNS, *_TOOL_CALL_BLOCK_PATTERNS, _NAMED_FUNCTION_BLOCK_PATTERN,
     _UNTERMINATED_REASONING_BLOCK_PATTERN, _ORPHAN_REASONING_TAG_PATTERN,
-    _STRAY_TOOL_CALL_CLOSER_PATTERN,
+    _STRAY_TOOL_CALL_CLOSER_PATTERN, _UNTERMINATED_TOOL_CALL_PATTERN,
 )
 
 

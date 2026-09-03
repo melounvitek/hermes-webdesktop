@@ -72,12 +72,20 @@ def record_response_usage(
     consume a pending compaction verdict. Returns the loop-visible outcome."""
     rearmed = False
     compressor = agent.context_compressor
+    # Count every completed provider attempt, including providers that omit usage.
+    # Token/cost accounting below stays gated on real usage, but the request itself
+    # must remain observable.
+    agent.session_api_calls += 1
     if not (hasattr(response, 'usage') and response.usage):
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the
             # pending verdict so later readings aren't charged to it and
             # preflight deferral isn't latched indefinitely.
             compressor.update_from_response({})
+        logger.info(
+            "API call #%d: model=%s provider=%s in=? out=? total=? latency=%.1fs usage=unavailable",
+            agent.session_api_calls, agent.model, agent.provider or "unknown", api_duration,
+        )
         return ResponseUsageOutcome(compression_attempts=compression_attempts, rearmed=rearmed)
 
     canonical_usage = normalize_usage(response.usage, provider=agent.provider, api_mode=agent.api_mode)
@@ -149,7 +157,6 @@ def record_response_usage(
     agent.session_prompt_tokens += prompt_tokens
     agent.session_completion_tokens += completion_tokens
     agent.session_total_tokens += total_tokens
-    agent.session_api_calls += 1
     agent.session_input_tokens += canonical_usage.input_tokens
     agent.session_output_tokens += canonical_usage.output_tokens
     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
