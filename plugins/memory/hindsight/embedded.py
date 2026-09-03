@@ -3,6 +3,7 @@ file the standalone ``hindsight-embed`` daemon consumes, and the health-grace ex
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
@@ -156,9 +157,7 @@ def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: st
         _secure_write_profile_env(profile_env, content)
         _validate_profile_env_permissions(profile_env)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             profile_env.unlink()
-        except OSError:
-            pass
         raise
     return profile_env

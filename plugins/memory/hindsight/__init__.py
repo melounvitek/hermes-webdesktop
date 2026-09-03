@@ -373,10 +373,9 @@ class HindsightMemoryProvider(MemoryProvider):
         """Install hint for an unavailable local_embedded runtime (is_available() gates
         initialize() out, so the hint it would log never fires; agent_init shows this)."""
         try:
-            mode = _load_config().get("mode", "cloud")
+            if _load_config().get("mode", "cloud") not in _LOCAL_MODES:
+                return ""
         except Exception:
-            return ""
-        if mode not in _LOCAL_MODES:
             return ""
         available, reason = _check_local_runtime()
         return "" if available else _local_runtime_hint(reason).strip()
@@ -567,12 +566,10 @@ class HindsightMemoryProvider(MemoryProvider):
         (pending until recall-visible). No id (older API / sync completion) leaves
         only the local queue drain as a signal."""
         raw_ids = [getattr(retain_response, "operation_id", None), *(getattr(retain_response, "operation_ids", None) or [])]
-        ids = [str(op) for op in raw_ids if op]
-        if not ids:
-            return
-        self._retain_ops_bank_id = bank_id
-        with self._pending_retain_ops_lock:
-            self._pending_retain_ops.update(ids)
+        if ids := [str(op) for op in raw_ids if op]:
+            self._retain_ops_bank_id = bank_id
+            with self._pending_retain_ops_lock:
+                self._pending_retain_ops.update(ids)
 
     def _is_retain_op_complete(self, bank_id: str, op_id: str) -> bool:
         """True when a server-side retain op is done or gone (completed ops are evicted,
@@ -598,25 +595,23 @@ class HindsightMemoryProvider(MemoryProvider):
         server-side async ops complete (async retain returns on acceptance, not
         durability). False on timeout/shutdown."""
         deadline = None if timeout <= 0 else time.monotonic() + timeout
+        expired = lambda: deadline is not None and time.monotonic() >= deadline  # noqa: E731
         while self._retain_queue.unfinished_tasks > 0:
             if self._shutting_down.is_set():
                 return False
-            if deadline is not None and time.monotonic() >= deadline:
+            if expired():
                 logger.debug("Prefetch: retain drain timed out after %.1fs (%d pending)",
                              timeout, self._retain_queue.unfinished_tasks)
                 return False
             time.sleep(0.05)
-        return self._wait_for_server_retain_ops(deadline, timeout)
+        return self._wait_for_server_retain_ops(expired, timeout)
 
-    def _wait_for_server_retain_ops(self, deadline: float | None, timeout: float) -> bool:
-        """Poll tracked async retain ops until complete or *deadline* (monotonic; None
-        = unbounded). Ops still pending at the deadline are DROPPED: keeping them
+    def _wait_for_server_retain_ops(self, _expired: Callable[[], bool], timeout: float) -> bool:
+        """Poll tracked async retain ops until complete or *_expired()* (deadline
+        predicate). Ops still pending at the deadline are DROPPED: keeping them
         would let a permanently failing status endpoint burn the full timeout on
         EVERY later prefetch (a per-turn latency penalty via prefetch()'s bounded
         join). Trades a possibly-stale recall for liveness; WARNING once per prefetch."""
-        def _expired() -> bool:
-            return deadline is not None and time.monotonic() >= deadline
-
         while True:
             with self._pending_retain_ops_lock:
                 bank_id = self._retain_ops_bank_id or self._bank_id
