@@ -169,15 +169,14 @@ def _cmd_recover(args):
     except (SessionRecoveryError, OSError, sqlite3.DatabaseError) as exc:
         print(f"Error: session recovery failed: {exc}\nThe supplied source database was not replaced or deleted.")
         return 1
-    if report_path is not None:
+    if report_path is None:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
         try:
-            written_report = write_recovery_report(report_path, report)
+            print(f"Recovery report: {write_recovery_report(report_path, report)}")
         except (FileExistsError, OSError) as exc:
             print(f"Error: could not write recovery report: {exc}")
             return 1
-        print(f"Recovery report: {written_report}")
-    else:
-        print(json.dumps(report, indent=2, sort_keys=True))
     if inspect_only:
         return 0 if report.get("recoverable") else 1
     return _print_recovery_verdict(report, output, allow_partial)
@@ -533,8 +532,7 @@ def _cmd_delete(db, args):
     if not resolved_session_id:
         return _not_found(args.session_id)
     # The delete is honored (explicit id), but a pin is a "keep" flag: say so instead of silently destroying it.
-    _meta = db.get_session(resolved_session_id) or {}
-    _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
+    _pinned_note = " (this session is PINNED)" if (db.get_session(resolved_session_id) or {}).get("pinned") else ""
     if not args.yes:
         if not _confirm_prompt(f"Delete session '{resolved_session_id}'{_pinned_note} and all its messages? [y/N] "):
             print("Cancelled.")
