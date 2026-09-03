@@ -1,6 +1,5 @@
-"""Small pure helpers shared by the tools.mcp_tool_* modules: SDK 1.x/2.x field
-access, error-text sanitising, numeric/bool coercion, timeouts and jitter. No
-origin state."""
+"""Small pure helpers shared by the tools.mcp_tool_* modules: SDK 1.x/2.x field access,
+error-text sanitising, numeric/bool coercion, timeouts and jitter. No origin state."""
 
 import logging
 import math
@@ -13,17 +12,15 @@ logger = logging.getLogger("tools.mcp_tool")
 
 
 class _OriginProxy:
-    """Attribute proxy for ``tools.mcp_tool`` resolved at access time. The split
-    modules read origin state (``_servers``, ``_lock``, SDK symbols, patchable
-    helpers) through this so ``mock.patch("tools.mcp_tool.X")`` and origin-side
-    rebinds stay effective, and so no split module needs the origin imported
-    first (the origin imports them while it is still initialising)."""
+    """Attribute proxy for ``tools.mcp_tool`` resolved at access time. The split modules read
+    origin state (``_servers``, ``_lock``, SDK symbols, patchable helpers) through this so
+    ``mock.patch("tools.mcp_tool.X")`` and origin-side rebinds stay effective, and so no split
+    module needs the origin imported first (the origin imports them while initialising)."""
 
     __slots__ = ()
 
     def __getattr__(self, name: str):
         from tools import mcp_tool
-
         return getattr(mcp_tool, name)
 
 
@@ -32,11 +29,9 @@ _MISSING = object()
 
 
 def mcp_field(obj, snake: str, camel: str, default=None):
-    """Read an MCP model field across the 1.x -> 2.x rename to snake_case.
-    Pydantic aliases don't apply to attribute access, so ``getattr(result,
-    "isError", False)`` silently returns the default on 2.x — failed calls read
-    as successful, schemas as empty. Trying both spellings stays correct on
-    either SDK generation (``mcp`` is an optional extra at the user's version)."""
+    """Read an MCP model field across the 1.x -> 2.x rename to snake_case. Pydantic aliases
+    don't apply to attribute access, so ``getattr(result, "isError", False)`` silently returns
+    the default on 2.x — failed calls read as successful, schemas as empty."""
     value = getattr(obj, snake, _MISSING)
     if value is _MISSING:
         value = getattr(obj, camel, _MISSING)
@@ -47,15 +42,14 @@ _DEFAULT_TOOL_TIMEOUT = 300      # seconds for tool calls
 
 
 def _resolve_tool_timeout(config: dict) -> float:
-    """Per-server tool-call timeout. Precedence: ``mcp_servers.<name>.timeout``
-    > ``timeouts.mcp.tool_call`` > the 300s default; values are platform-clamped
-    by ``resolve_timeout``."""
+    """Per-server tool-call timeout. Precedence: ``mcp_servers.<name>.timeout`` >
+    ``timeouts.mcp.tool_call`` > the 300s default; values are platform-clamped by
+    ``resolve_timeout``."""
     per_server = config.get("timeout")
     if per_server is not None:
         return per_server
     try:
         from agent.deadline import resolve_timeout
-
         resolved = resolve_timeout("mcp.tool_call", default=_DEFAULT_TOOL_TIMEOUT)
         if resolved is not None:
             return resolved
@@ -64,8 +58,7 @@ def _resolve_tool_timeout(config: dict) -> float:
     return _DEFAULT_TOOL_TIMEOUT
 
 
-# Jitter on reconnect backoff so servers that lost the same backend don't
-# retry in lockstep (thundering herd, synchronized log bursts).
+# Jitter on reconnect backoff so servers that lost the same backend don't retry in lockstep.
 _BACKOFF_JITTER = 0.2            # +/-20%
 
 
@@ -74,20 +67,11 @@ def _jittered(seconds: float) -> float:
     return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER, 1.0 + _BACKOFF_JITTER))
 
 
-# Credential patterns to strip from error messages.
+# Credential patterns to strip from error messages: GitHub PAT, OpenAI-style key, Bearer token,
+# and ``token= / key= / API_KEY= / password= / secret=`` assignments.
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?:"
-    r"ghp_[A-Za-z0-9_]{1,255}"           # GitHub PAT
-    r"|sk-[A-Za-z0-9_]{1,255}"           # OpenAI-style key
-    r"|Bearer\s+\S+"                      # Bearer token
-    r"|token=[^\s&,;\"']{1,255}"         # token=...
-    r"|key=[^\s&,;\"']{1,255}"           # key=...
-    r"|API_KEY=[^\s&,;\"']{1,255}"       # API_KEY=...
-    r"|password=[^\s&,;\"']{1,255}"      # password=...
-    r"|secret=[^\s&,;\"']{1,255}"        # secret=...
-    r")",
-    re.IGNORECASE,
-)
+    r"(?:ghp_[A-Za-z0-9_]{1,255}|sk-[A-Za-z0-9_]{1,255}|Bearer\s+\S+"
+    r"|(?:token|key|API_KEY|password|secret)=[^\s&,;\"']{1,255})", re.IGNORECASE)
 
 
 def _env_ref_name(ref: str) -> str:
@@ -104,8 +88,8 @@ def _sanitize_error(text: str) -> str:
 
 
 def _exc_str(exc: BaseException) -> str:
-    """Non-empty string for *exc*: some exceptions (``anyio.ClosedResourceError``)
-    carry no message, so fall back to ``repr`` to keep diagnostics."""
+    """Non-empty string for *exc*: some exceptions (``anyio.ClosedResourceError``) carry no
+    message, so fall back to ``repr`` to keep diagnostics."""
     text = str(exc).strip()
     return text or repr(exc)
 
@@ -113,20 +97,17 @@ def _exc_str(exc: BaseException) -> str:
 def _prepend_path(env: dict, directory: str) -> dict:
     """Prepend *directory* to env PATH if it is not already present."""
     updated = dict(env or {})
-    if not directory:
-        return updated
-
-    existing = updated.get("PATH", "")
-    parts = [part for part in existing.split(os.pathsep) if part]
-    if directory not in parts:
-        parts = [directory, *parts]
-    updated["PATH"] = os.pathsep.join(parts) if parts else directory
+    if directory:
+        parts = [part for part in updated.get("PATH", "").split(os.pathsep) if part]
+        if directory not in parts:
+            parts = [directory, *parts]
+        updated["PATH"] = os.pathsep.join(parts) if parts else directory
     return updated
 
 
 def _safe_numeric(value, default, coerce=int, minimum=1):
-    """Coerce a config value (YAML strings included) to a number, clamped to
-    *minimum*; *default* on failure or non-finite floats."""
+    """Coerce a config value (YAML strings included) to a number, clamped to *minimum*;
+    *default* on failure or non-finite floats."""
     try:
         result = coerce(value)
         if isinstance(result, float) and not math.isfinite(result):
@@ -157,12 +138,11 @@ def _parse_boolish(value: Any, default: bool = True) -> bool:
 
 
 def _get_lifecycle_seconds(config: dict, key: str) -> Optional[float]:
-    """Return an optional positive lifecycle timeout from top-level/nested config
-    (``0`` disables; negatives and non-numbers are warned about and ignored)."""
+    """Optional positive lifecycle timeout from top-level/nested ``lifecycle`` config (``0``
+    disables; negatives and non-numbers are warned about and ignored)."""
     raw = config.get(key)
-    lifecycle = config.get("lifecycle")
-    if raw is None and isinstance(lifecycle, dict):
-        raw = lifecycle.get(key)
+    if raw is None and isinstance(config.get("lifecycle"), dict):
+        raw = config["lifecycle"].get(key)
     if raw is None:
         return None
     try:

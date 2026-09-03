@@ -1,10 +1,7 @@
-"""Persistent MCP tool-schema cache for lazy server startup.
-
-Stores per-server tool manifests on disk so Hermes can register MCP tools
-into the agent snapshot without spawning the stdio child process at idle
-dashboard startup. Cache entries are keyed by server name + a fingerprint
-of the connection config (command/args/url/tools filters).
-"""
+"""Persistent MCP tool-schema cache for lazy server startup: per-server tool manifests on
+disk so Hermes can register MCP tools into the agent snapshot without spawning the stdio
+child at idle dashboard startup. Entries are keyed by server name + a fingerprint of the
+connection config (command/args/url/tools filters)."""
 
 from __future__ import annotations
 
@@ -24,7 +21,6 @@ _cache_lock = threading.Lock()
 
 def _cache_path() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "cache" / _CACHE_FILENAME
 
 
@@ -37,8 +33,7 @@ def config_fingerprint(config: dict) -> str:
         "url": config.get("url"),
         "transport": config.get("transport"),
         "tools_include": sorted(tools_filter.get("include") or []),
-        "tools_exclude": sorted(tools_filter.get("exclude") or []),
-    }
+        "tools_exclude": sorted(tools_filter.get("exclude") or [])}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -57,44 +52,31 @@ def _load_all() -> Dict[str, Any]:
 
 def _save_all(data: Dict[str, Any]) -> None:
     from utils import atomic_json_write
-
-    # 0o600 (as tools/registry.py _save_discovery_cache): the cache file is
-    # trusted input on the lazy registration path, so keep it user-only.
+    # 0o600: the cache file is trusted input on the lazy registration path, keep it user-only.
     atomic_json_write(_cache_path(), data, mode=0o600)
 
 
 def get_cached_entry(server_name: str, fingerprint: str) -> Optional[dict]:
-    """Return cached entry when fingerprint matches (and TTL holds), else None.
-    ``tools/list`` results may carry ``ttlMs`` (SEP-2549); an entry older than a
-    recorded TTL is a miss so the next startup re-probes instead of serving a
-    stale manifest forever. Entries without a TTL never expire. ``cacheScope``
-    is irrelevant: this cache is per-user local disk, satisfying even ``private``."""
+    """Return cached entry when fingerprint matches (and TTL holds), else None. ``tools/list``
+    results may carry ``ttlMs`` (SEP-2549); an entry older than a recorded TTL is a miss so the
+    next startup re-probes instead of serving a stale manifest forever. Entries without a TTL
+    never expire. ``cacheScope`` is irrelevant: this cache is per-user local disk."""
     with _cache_lock:
         entry = _load_all().get(server_name)
     if not isinstance(entry, dict) or entry.get("fingerprint") != fingerprint:
         return None
     ttl_ms = entry.get("ttl_ms")
     written_at = entry.get("written_at")
-    expired = (
-        isinstance(ttl_ms, (int, float))
-        and isinstance(written_at, (int, float))
-        and (time.time() - written_at) * 1000.0 >= float(ttl_ms)
-    )
+    expired = (isinstance(ttl_ms, (int, float)) and isinstance(written_at, (int, float))
+               and (time.time() - written_at) * 1000.0 >= float(ttl_ms))
     return None if expired else entry
 
 
-def write_cache_entry(
-    server_name: str,
-    fingerprint: str,
-    *,
-    tools: List[dict],
-    utility_tools: Optional[List[dict]] = None,
-    ttl_ms: Optional[float] = None,
-    cache_scope: Optional[str] = None,
-) -> None:
-    """Persist tool schemas after a successful live connect. ``ttl_ms`` /
-    ``cache_scope`` are the server's ``tools/list`` SEP-2549 hints;
-    ``written_at`` anchors TTL expiry in :func:`get_cached_entry`."""
+def write_cache_entry(server_name: str, fingerprint: str, *, tools: List[dict],
+                      utility_tools: Optional[List[dict]] = None, ttl_ms: Optional[float] = None,
+                      cache_scope: Optional[str] = None) -> None:
+    """Persist tool schemas after a successful live connect. ``ttl_ms`` / ``cache_scope`` are
+    the server's ``tools/list`` SEP-2549 hints; ``written_at`` anchors TTL expiry."""
     entry = {"fingerprint": fingerprint, "tools": tools, "utility_tools": utility_tools or []}
     if isinstance(ttl_ms, (int, float)):
         entry["ttl_ms"] = ttl_ms
@@ -103,10 +85,9 @@ def write_cache_entry(
         entry["cache_scope"] = cache_scope
     with _cache_lock:
         data = _load_all()
-        # Write-through fires on every registration (reconnects, list_changed);
-        # skip the load-all+rewrite churn when the entry is byte-identical on
-        # disk. TTL'd entries always rewrite: written_at must advance or the
-        # entry would expire at its ORIGINAL write time regardless of reconnects.
+        # Write-through fires on every registration (reconnects, list_changed); skip the
+        # rewrite when the entry is byte-identical on disk. TTL'd entries always rewrite:
+        # written_at must advance or the entry would expire at its ORIGINAL write time.
         if "written_at" not in entry and data.get(server_name) == entry:
             return
         data[server_name] = entry
