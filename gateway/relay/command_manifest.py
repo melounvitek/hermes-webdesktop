@@ -1,20 +1,13 @@
-"""Gateway-declared slash-command manifest for the relay lane (Phase 4).
+"""Gateway-declared Discord slash-command manifest for the relay lane (Phase 4).
 
-Over the relay the CONNECTOR holds the Discord token, so the gateway DECLARES
-its command set on the ``hello`` frame (``command_manifest``) and the connector
-reconciles Discord's global registration against it (GET → diff → bulk PUT,
-idempotent, best-effort). This module is the single source of truth for that
-declaration and MIRRORS the native tree (`_register_slash_commands`,
-plugins/platforms/discord/adapter.py) — same names, same descriptions.
-Interactions come back over the passthrough plane and are normalized by
-RelayAdapter._discord_interaction_to_event into the same "/name args" COMMAND
-events the dispatcher already routes, so declaring a command here needs NO new
-handler.
-
-Wire shape per entry: {name, description, options?}; options rows are Discord
-option objects passed through verbatim. Names must satisfy Discord's CHAT_INPUT
-rules ([a-z0-9_-]{1,32}); the connector drops invalid entries (fail-open per
-entry, never the whole manifest).
+The CONNECTOR holds the Discord token, so the gateway declares its command set on
+the ``hello`` frame and the connector reconciles Discord's registration (idempotent,
+best-effort). MIRRORS the native tree (plugins/platforms/discord/adapter.py
+``_register_slash_commands``) — same names, same descriptions; interactions return
+via the passthrough plane as ordinary "/name args" COMMAND events, so a new entry
+needs NO new handler. Wire shape per entry: {name, description, options?} with
+Discord option objects verbatim; names must match ``[a-z0-9_-]{1,32}`` (the
+connector drops invalid entries, never the whole manifest).
 """
 
 from __future__ import annotations
