@@ -29,6 +29,7 @@ from utils import atomic_json_write
 logger = logging.getLogger(__name__)
 
 # Extra leash beyond ``agent.restart_drain_timeout`` so a slow-but-progressing drain survives.
+# Matches the issue #66892 suggested hardening.
 DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S = 60.0
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S = 5.0
@@ -36,6 +37,9 @@ DEFAULT_LOOP_WATCHDOG_INTERVAL_S = 30.0
 DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
 # 3 sustained misses (~90-120s of loop block) escalate; stays tight because the heartbeat write is
 # off-loop. Slow loops tune gateway.loop_watchdog_* in config.yaml.
+# The false-positive class that motivated raising this (the watchdog's own on-loop heartbeat fsync stalling
+# the loop it monitors) is fixed at the root by the off-loop heartbeat write + two-witness probe (#90502),
+# so the default stays tight for genuine wedges.
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
@@ -165,7 +169,12 @@ def get_loop_heartbeat_path(home: Optional[Path] = None) -> Path:
 def get_loop_tick_socket_path(home: Optional[Path] = None, pid: Optional[int] = None) -> Path:
     """``<HERMES_HOME>/state/gateway.loop-tick.<pid>.sock`` — PID-suffixed so a stale node from a
     dead process is never mistaken for this gateway's witness. Served by the loop itself
-    (``_tick_socket_handler``), so an answer proves the loop dispatches; the heartbeat cannot."""
+    (``_tick_socket_handler``), so an answer proves the loop dispatches; the heartbeat cannot.
+
+    Served by the gateway loop itself (see ``_tick_socket_handler``): an answer is direct proof that the
+    loop is dispatching, which is exactly the property the heartbeat file lost when its write moved off-loop
+    (#90502).
+    """
     pid = int(pid if pid is not None else os.getpid())
     return _home(home) / "state" / f"gateway.loop-tick.{pid}.sock"
 
@@ -264,6 +273,9 @@ def arm_shutdown_watchdog(
         # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock BEFORE the log drain
         # (never strand locks), then drain the log queue so logger.critical lands before os._exit.
         with contextlib.suppress(Exception):
+            # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock BEFORE the log drain
+            # (locks must never be stranded), then drain the async log queue so the logger.critical above
+            # actually reaches the file before os._exit bypasses atexit. (#66892)
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()

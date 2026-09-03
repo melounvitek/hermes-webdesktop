@@ -51,8 +51,15 @@ def _codex_request_failure_details(error: BaseException) -> tuple[int | None, st
 
 
 def _coerce_usage_int(value: Any) -> int:
-    with suppress(ValueError):
-        if not isinstance(value, bool) and isinstance(value, (int, float, str)):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    if isinstance(value, str):
+        # Only the str->int parse is guarded; a float NaN still raises like it always has.
+        with suppress(ValueError):
             return max(int(value), 0)
     return 0
 

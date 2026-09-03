@@ -158,16 +158,20 @@ class RelaySession:
 
 def _load_segments_config() -> dict[str, Any]:
     """gateway.telemetry.session_segments; both defaults OFF => rotation never fires."""
-    segments: dict[str, Any] = {}
-    with contextlib.suppress(Exception):  # config absence must not crash
+    on_compaction = False
+    max_turns = 0
+    try:
         from gateway.run import _load_gateway_config  # late import
         telemetry = (_load_gateway_config().get("gateway") or {}).get("telemetry") or {}
         segments = telemetry.get("session_segments") or {}
-    try:
-        max_turns = max(0, int(segments.get("max_turns", 0) or 0))
-    except (TypeError, ValueError):
-        max_turns = 0
-    return {"on_compaction": bool(segments.get("on_compaction", False)), "max_turns": max_turns}
+        on_compaction = bool(segments.get("on_compaction", False))
+        try:
+            max_turns = max(0, int(segments.get("max_turns", 0) or 0))
+        except (TypeError, ValueError):
+            max_turns = 0
+    except Exception:  # noqa: BLE001 - config absence (or a malformed section) must not crash
+        pass
+    return {"on_compaction": on_compaction, "max_turns": max_turns}
 
 
 _SEGMENTS_CONFIG = _Lazy(_load_segments_config)  # cached at first read
@@ -1217,10 +1221,13 @@ def _resolve_plugin_awaitable(value: Any) -> Any:
     """Resolve Relay's async plugin API from synchronous host construction."""
     if not inspect.isawaitable(value):
         return value
-    with contextlib.suppress(RuntimeError):
+    # Only the "no running loop" probe is guarded: a RuntimeError raised by the awaitable itself
+    # (re-raised from the daemon thread) must propagate, not fall through to a second asyncio.run.
+    try:
         asyncio.get_running_loop()
-        return _run_on_daemon_thread(lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle")
-    return asyncio.run(value)
+    except RuntimeError:
+        return asyncio.run(value)
+    return _run_on_daemon_thread(lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle")
 
 
 def _session_id(event: dict[str, Any]) -> str:
