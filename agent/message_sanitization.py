@@ -360,8 +360,10 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
         raw = raw.strip() if isinstance(raw, str) else ""
         # Composite Responses ids ("call_x|fc_y") collide on the call half — the pairing key.
         cid = raw.split("|", 1)[0]
-        if not cid or cid not in seen:
-            seen.update((cid,) if cid else ())
+        if not cid:
+            continue
+        if cid not in seen:
+            seen.add(cid)
             continue
         # range is bounded: at most len(seen) suffixes can already be taken.
         new_id = next(f"{cid}_d{n}" for n in range(2, len(seen) + 3) if f"{cid}_d{n}" not in seen)
