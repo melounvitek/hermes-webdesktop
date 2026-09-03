@@ -153,14 +153,10 @@ def build_oss_config(flags: dict[str, str]) -> tuple[dict, dict[str, str]]:
         "embedder": {"provider": embedder_id, "config": embedder_config},
         "vector_store": {"provider": vector_id, "config": vector_config},
     }
-    env_writes: dict[str, str] = {}
-    if llm_def.get("needs_key") and flags.get("oss_llm_key"):
-        env_writes[llm_def["env_var"]] = flags["oss_llm_key"]
-    if embedder_def.get("needs_key"):
-        # An embedder sharing the LLM's provider reuses the LLM key when no embedder key was given.
-        key = flags.get("oss_embedder_key") or (flags.get("oss_llm_key") if embedder_id == llm_id else "")
-        if key:
-            env_writes[embedder_def["env_var"]] = key
+    # An embedder sharing the LLM's provider reuses the LLM key when no embedder key was given.
+    llm_key = flags.get("oss_llm_key") if llm_def.get("needs_key") else ""
+    emb_key = (flags.get("oss_embedder_key") or (flags.get("oss_llm_key") if embedder_id == llm_id else "")) if embedder_def.get("needs_key") else ""
+    env_writes = {d["env_var"]: k for d, k in ((llm_def, llm_key), (embedder_def, emb_key)) if k}
     return oss_config, env_writes
 
 
@@ -178,13 +174,6 @@ def _write_env(env_path: Path, env_writes: dict[str, str]) -> None:
         new_lines.append(line)
     new_lines += [f"{k}={v}" for k, v in env_writes.items() if k not in updated_keys]
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-
-
-def _save_mem0_json(hermes_home: str, data: dict) -> None:
-    config_path = Path(hermes_home) / "mem0.json"
-    existing = _read_mem0_json(config_path)
-    existing.update(data)
-    config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
 
 
 def _activate_provider(config: dict) -> None:
@@ -287,7 +276,8 @@ def _finish_oss(hermes_home: str, config: dict, oss_config: dict, env_writes: di
     """Shared OSS tail: write secrets + mem0.json, install deps, activate, check, summarize."""
     if env_writes:
         _write_env(Path(hermes_home) / ".env", env_writes)
-    _save_mem0_json(hermes_home, {"mode": "oss", "user_id": user_id, "agent_id": agent_id, "oss": oss_config})
+    config_path = Path(hermes_home) / "mem0.json"  # merge-write, plain text (platform path uses save_config's 0600 atomic write)
+    config_path.write_text(json.dumps({**_read_mem0_json(config_path), "mode": "oss", "user_id": user_id, "agent_id": agent_id, "oss": oss_config}, indent=2) + "\n", encoding="utf-8")
     _install_provider_deps(oss_config["llm"]["provider"], oss_config["embedder"]["provider"], oss_config["vector_store"]["provider"])
     if pgvector_config:
         _ensure_pgvector_extension(pgvector_config)
@@ -387,7 +377,7 @@ def _ensure_ollama(models: list[str]) -> bool:
         print("  Warning: Ollama not reachable. Models cannot be pulled.")
         return False
     for model in models:
-        if _ollama_has_model(_OLLAMA_URL, model):
+        if any(model in n or model.split(":")[0] in n for n in _ollama_models(_OLLAMA_URL)):
             print(f"  ✓ Model '{model}' available")
             continue
         print(f"  Pulling '{model}'... (this may take a few minutes)")
@@ -399,13 +389,11 @@ def _ensure_ollama(models: list[str]) -> bool:
     return True
 
 
-def _ollama_has_model(url: str, model: str) -> bool:
+def _ollama_models(url: str) -> list[str]:
     try:
-        names = [m.get("name", "") for m in json.loads(_http_get(url, "/api/tags", 5).read()).get("models", [])]
-        base_model = model.split(":")[0]
-        return any(model in n or base_model in n for n in names)
+        return [m.get("name", "") for m in json.loads(_http_get(url, "/api/tags", 5).read()).get("models", [])]
     except Exception:
-        return False
+        return []
 
 
 def _ensure_pgvector_extension(pg_config: dict) -> None:
@@ -414,9 +402,8 @@ def _ensure_pgvector_extension(pg_config: dict) -> None:
     except ImportError:
         return
     defaults = {"host": "localhost", "port": 5432, "user": "postgres", "dbname": "postgres"}
-    conn_params = defaults | {k: v for k, v in pg_config.items() if k in defaults or (k == "password" and v)}
     try:
-        conn = psycopg2.connect(**conn_params)
+        conn = psycopg2.connect(**(defaults | {k: v for k, v in pg_config.items() if k in defaults or (k == "password" and v)}))
         conn.autocommit = True
         conn.cursor().execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.close()
@@ -435,20 +422,13 @@ def _wait_for_port(host: str, port: int, timeout: int = 15) -> None:
             time.sleep(0.5)
 
 
+# Picker descriptions: LLM/embedder show model (+ URL); vector stores by provider id (default: the id itself).
 def _provider_description(v: dict) -> str:
     model, url = v.get("default_model", ""), v.get("default_url")
     return f"{model} ({url})" if url else model
 
 
-# Vector-store picker description by provider id (default: the id itself).
-_VECTOR_DESCRIPTIONS = {
-    "qdrant": lambda cfg: cfg.get("path", "local storage"),
-    "pgvector": lambda cfg: f"{cfg.get('host', 'localhost')}:{cfg.get('port', 5432)}",
-}
-
-
-def _vector_description(pid: str, v: dict) -> str:
-    return _VECTOR_DESCRIPTIONS.get(pid, lambda cfg: pid)(v.get("default_config", {}))
+_VECTOR_DESCRIPTIONS = {"qdrant": lambda cfg: cfg.get("path", "local storage"), "pgvector": lambda cfg: f"{cfg.get('host', 'localhost')}:{cfg.get('port', 5432)}"}
 
 
 def _configure_model_provider(kind: str, registry: dict, hermes_home: str, env_writes: dict[str, str], llm: tuple[str, dict] | None = None) -> tuple[str, dict, str, str | None]:
@@ -482,7 +462,7 @@ def _setup_oss_interactive(hermes_home: str, config: dict) -> None:
     env_writes: dict[str, str] = {}
     llm_id, llm_def, llm_model, llm_url = _configure_model_provider("LLM", LLM_PROVIDERS, hermes_home, env_writes)
     embedder_id, _, embedder_model, embedder_url = _configure_model_provider("Embedder", EMBEDDER_PROVIDERS, hermes_home, env_writes, llm=(llm_id, llm_def))
-    vector_items = [(v["label"], _vector_description(pid, v)) for pid, v in VECTOR_PROVIDERS.items()]
+    vector_items = [(v["label"], _VECTOR_DESCRIPTIONS.get(pid, lambda cfg: pid)(v.get("default_config", {}))) for pid, v in VECTOR_PROVIDERS.items()]
     vector_id = list(VECTOR_PROVIDERS)[_curses_select("Vector Store", vector_items, 0)]
 
     # Auto-setup: ensure Ollama is running and models are pulled; ensure pgvector is reachable (offer Docker if not).
@@ -572,17 +552,6 @@ def _run_connectivity_checks(oss_config: dict) -> None:
         _warn_unless(_check_ollama(llm.get("config", {}).get("ollama_base_url", _OLLAMA_URL)))
 
 
-def _check_min_dep_version() -> None:
-    """Ensure mem0ai meets the minimum version from plugin.yaml."""
-    try:
-        import mem0
-        installed_ver = getattr(mem0, "__version__", None)
-        if installed_ver and tuple(int(x) for x in installed_ver.split(".")[:3]) < (2, 0, 7):
-            print(f"\n  ⚠ mem0ai {installed_ver} installed but >=2.0.7 required.\n  Run: uv pip install --python {sys.executable} 'mem0ai>=2.0.7'")
-    except Exception:
-        pass
-
-
 _MODE_HANDLERS = {"oss": _setup_oss, "selfhosted": _setup_selfhosted, "self-hosted": _setup_selfhosted, "platform": _setup_platform}
 # Interactive picker order: Platform, Self-hosted server, Open Source.
 _MODE_ITEMS = [
@@ -596,7 +565,13 @@ _MODE_PICKER = (_setup_platform, _setup_selfhosted, _setup_oss)
 def post_setup(hermes_home: str, config: dict) -> None:
     """Entry point for `hermes memory setup`: routes on --mode (platform / selfhosted / oss), else shows a picker.
     OSS is non-interactive only when the mode came from the flag."""
-    _check_min_dep_version()
+    try:  # mem0ai must meet the minimum version from plugin.yaml
+        import mem0
+        installed_ver = getattr(mem0, "__version__", None)
+        if installed_ver and tuple(int(x) for x in installed_ver.split(".")[:3]) < (2, 0, 7):
+            print(f"\n  ⚠ mem0ai {installed_ver} installed but >=2.0.7 required.\n  Run: uv pip install --python {sys.executable} 'mem0ai>=2.0.7'")
+    except Exception:
+        pass
     flags = parse_flags(sys.argv[1:])
     handler = _MODE_HANDLERS.get(flags["mode"])
     flags["_mode_from_flag"] = handler is not None

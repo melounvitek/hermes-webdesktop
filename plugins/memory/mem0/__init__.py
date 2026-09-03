@@ -97,12 +97,9 @@ class Mem0MemoryProvider(MemoryProvider):
     """Mem0 memory with server-side extraction and semantic search (platform, self-hosted or OSS)."""
 
     def __init__(self):
-        self._config = self._backend = None
-        self._mode, self._api_key, self._host = "platform", "", ""
-        self._user_id, self._agent_id = _DEFAULT_USER_ID, "hermes"
-        self._rerank_default = False
-        self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
-        self._sync_thread = self._prefetch_thread = None
+        self._config = self._backend = self._sync_thread = self._prefetch_thread = None
+        self._mode, self._api_key, self._host, self._user_id, self._agent_id = "platform", "", "", _DEFAULT_USER_ID, "hermes"
+        self._rerank_default, self._channel = False, "cli"  # channel = gateway name (cli/telegram/discord/...)
         self._prefetch_query = self._prefetch_result = ""
         self._prefetch_done = self._atexit_registered = False
         self._consecutive_failures, self._breaker_open_until = 0, 0.0  # circuit breaker state
@@ -275,8 +272,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall memories for the CURRENT question with a short hot-path wait."""
-        cached = self._consume_prefetch_result(query)
-        if cached is not None:
+        if (cached := self._consume_prefetch_result(query)) is not None:
             return cached
         self._start_prefetch(query)
         with self._prefetch_lock:
@@ -297,11 +293,11 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._try(lambda: self._add(messages, infer=True), logger.warning, "Mem0 sync failed: %s")
 
         with self._sync_lock:
-            if self._sync_thread and self._sync_thread.is_alive():
-                self._sync_thread.join(timeout=5.0)
-            # If still alive after timeout, skip to avoid duplicate ingestion.
-            if self._sync_thread and self._sync_thread.is_alive():
-                return
+            prev = self._sync_thread
+            if prev and prev.is_alive():
+                prev.join(timeout=5.0)
+                if prev.is_alive():  # still busy after the wait: skip to avoid duplicate ingestion
+                    return
             self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
             self._sync_thread.start()
 
