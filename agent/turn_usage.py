@@ -79,18 +79,15 @@ def record_response_usage(
             compressor.update_from_response({})
         return ResponseUsageOutcome(compression_attempts=compression_attempts, rearmed=rearmed)
 
-    canonical_usage = normalize_usage(
-        response.usage, provider=agent.provider, api_mode=agent.api_mode
-    )
-    # Aggregator-only usage kept for pricing: advisor tokens are priced
-    # at each advisor's OWN model rate and added as dollars below.
+    canonical_usage = normalize_usage(response.usage, provider=agent.provider, api_mode=agent.api_mode)
+    # Aggregator-only usage kept for pricing: advisor tokens are priced at each advisor's
+    # OWN model rate and added as dollars below.
     aggregator_usage = canonical_usage
     _moa_client, canonical_usage, _moa_ref_cost = _fold_moa_usage(agent, canonical_usage)
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = canonical_usage.total_tokens
-    # Forward canonical token + cache buckets for context engines;
-    # legacy keys stay for back-compat.
+    # Canonical token + cache buckets for context engines; legacy keys stay for back-compat.
     usage_dict = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -101,24 +98,21 @@ def record_response_usage(
         "cache_write_tokens": canonical_usage.cache_write_tokens,
         "reasoning_tokens": canonical_usage.reasoning_tokens,
     }
-    # Capture the boundary latch before update_from_response() consumes
-    # it: only the real prompt count right after a compaction rearms the
-    # budget.
+    # Capture the boundary latch before update_from_response() consumes it: only the real
+    # prompt count right after a compaction rearms the budget.
     _completed_compaction_pending = bool(
         getattr(compressor, "_verify_compaction_cleared_threshold", False)
     )
     compressor.update_from_response(usage_dict)
-    # Usage-anchored accounting: snapshot exact provider usage against
-    # the durable transcript; main-loop ONLY. MoA uses pre-fold
-    # aggregator usage.
+    # Usage-anchored accounting: snapshot exact provider usage against the durable
+    # transcript (main-loop ONLY; MoA uses pre-fold aggregator usage). The display meter
+    # anchors on the turn's FIRST response: later same-turn responses inflate
+    # prompt_tokens with replayed thinking. Display-only; compression math uses real usage.
     _new_anchor = capture_usage_anchor(
         aggregator_usage.prompt_tokens, aggregator_usage.output_tokens, messages
     )
     if _new_anchor is not None:
         agent._usage_anchor = _new_anchor
-        # Anchor the display meter on the turn's FIRST response:
-        # later same-turn responses inflate prompt_tokens with replayed
-        # thinking. Display-only; compression math uses real usage.
         if api_call_count == 1:
             agent._turn_base_usage_anchor = _new_anchor
     _compression_threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
@@ -135,13 +129,11 @@ def record_response_usage(
             max_compression_attempts,
         )
         compression_attempts = 0
-        # Confirmed recovery also clears the loop's stale insufficient-progress
-        # verdict (``_preflight_compression_blocked``), else it stays armed all
-        # turn and a later pressure spike grows unchecked.
+        # Confirmed recovery also clears the loop's stale insufficient-progress verdict
+        # (``_preflight_compression_blocked``), else a later pressure spike grows unchecked.
         rearmed = True
 
-    # Stash canonical usage for on_turn_complete() (same shape as
-    # update_from_response); keep the latest call's — last request.
+    # Stash canonical usage for on_turn_complete(); keep the latest call's.
     agent._last_turn_usage = dict(usage_dict)
 
     # Persist only provider-confirmed context lengths, not probe tiers.
@@ -183,9 +175,8 @@ def record_response_usage(
         api_duration, _cache_pct,
     )
 
-    # MoA: agent.model/provider are the virtual preset/"moa" with no
-    # pricing entry, silently dropping aggregator spend. Price at the
-    # REAL model/provider from the MoA client's aggregator slot.
+    # MoA: agent.model/provider are the virtual preset/"moa" with no pricing entry, silently
+    # dropping aggregator spend. Price at the REAL model/provider from the aggregator slot.
     _agg_cost_model, _agg_cost_provider, _agg_cost_base_url = agent.model, agent.provider, agent.base_url
     _agg_slot = getattr(_moa_client, "last_aggregator_slot", None) if _moa_client is not None else None
     if _agg_slot and _agg_slot.get("model"):
@@ -214,18 +205,16 @@ def record_response_usage(
     agent.session_cost_status = cost_result.status
     agent.session_cost_source = cost_result.source
 
-    # Persist per-call token deltas for any session_id so non-CLI runs
-    # can't lose accounting; gateway/session-store writes use absolute
-    # totals and safely overwrite these deltas.
+    # Persist per-call token deltas for any session_id so non-CLI runs can't lose
+    # accounting; gateway/session-store writes use absolute totals and safely overwrite
+    # these deltas. Enqueued, not written (a cold state.db UPDATE here stalled the tool
+    # loop); drained at finalize via _persist_session.
     if agent._session_db and agent.session_id:
         try:
-            # Ensure the row exists: under concurrent SQLite load the
-            # initial _ensure_db_session() may fail, and UPDATE on a
-            # missing row silently affects 0 rows.
+            # Ensure the row exists: under concurrent SQLite load the initial
+            # _ensure_db_session() may fail, and UPDATE on a missing row affects 0 rows.
             if not agent._session_db_created:
                 agent._ensure_db_session()
-            # Enqueued, not written: a cold state.db UPDATE here stalled
-            # the tool loop. Drained at finalize via _persist_session.
             agent._session_db.queue_token_counts(
                 agent.session_id,
                 input_tokens=canonical_usage.input_tokens,
@@ -243,8 +232,7 @@ def record_response_usage(
                 model=agent.model,
                 api_call_count=1,
             )
-        except Exception as e:
-            # Log failures — silent loss here undercounts analytics.
+        except Exception as e:  # silent loss here undercounts analytics
             logger.debug(
                 "Token persistence failed (session=%s, tokens=%d): %s",
                 agent.session_id, total_tokens, e,
@@ -253,9 +241,8 @@ def record_response_usage(
     if agent.verbose_logging:
         logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
 
-    # Report cache stats for any provider that returns
-    # ``prompt_tokens_details.cached_tokens``, not only when we inject
-    # cache_control markers. ``canonical_usage`` is already normalised.
+    # Report cache stats for any provider that returns ``prompt_tokens_details.cached_tokens``,
+    # not only when we inject cache_control markers.
     cached = canonical_usage.cache_read_tokens
     written = canonical_usage.cache_write_tokens
     prompt = usage_dict["prompt_tokens"]

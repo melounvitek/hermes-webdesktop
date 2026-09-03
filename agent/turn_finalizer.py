@@ -20,9 +20,7 @@ from agent.message_sanitization import _sanitize_surrogates
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
 # real content and is not flagged. (#65919)
-_VERIFICATION_CONTINUATION_FLAGS = (
-    "_verification_stop_synthetic", "_pre_verify_synthetic"
-)
+_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic")
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
 
@@ -50,17 +48,13 @@ def _record_kanban_budget_exhausted(
                 _conn,
                 kanban_task,
                 error=(
-                    f"Iteration budget exhausted "
-                    f"({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed "
-                    "iterations"
+                    f"Iteration budget exhausted ({api_call_count}/{max_iterations}) — "
+                    "task could not complete within the allowed iterations"
                 ),
                 outcome="timed_out",
                 release_claim=True,
                 end_run=True,
-                event_payload_extra={
-                    "budget_used": api_call_count, "budget_max": max_iterations
-                },
+                event_payload_extra={"budget_used": api_call_count, "budget_max": max_iterations},
             )
         finally:
             with suppress(Exception):
@@ -191,9 +185,8 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
             final_response = _streamed
             _recovered_from_stream = True
 
-    # An interrupt can leave a tool result as the tail (no scaffolding flag rewinds
-    # it); close the sequence so strict providers don't see ``tool → user``. An
-    # explicit placeholder is used since final_response is usually empty (#48879).
+    # An interrupt can leave a tool result as the tail; close the sequence so strict
+    # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
         from agent.message_sanitization import close_interrupted_tool_sequence
         close_interrupted_tool_sequence(messages, final_response)
@@ -204,7 +197,6 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
     if final_response and not interrupted:
         _tail = messages[-1] if messages else None
         if not isinstance(_tail, dict) or _tail.get("role") != "assistant":
-            # Append so the durable turn closes with the answer (#43849/#44100).
             append_message(messages, {"role": "assistant", "content": final_response})
         elif (
             _tail.get("content") != final_response
@@ -219,8 +211,7 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
             agent._db_flush_scan_prefix = None
 
     # Request is complete, so replace API-local voice/model/skill guidance with the
-    # clean user input before the durable snapshot; earlier flushes used the DB-only
-    # override as their messages were still needed (#48677 / #63766).
+    # clean user input before the durable snapshot (earlier flushes still needed them).
     _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
     if callable(_apply_override):
         _apply_override(messages)
@@ -460,12 +451,11 @@ def finalize_turn(
             turn_id=turn_id, original_user_message=original_user_message, messages=messages,
         )
 
-    # Context engine observation hook (complements per-request select_context()):
-    # notify the engine the turn finished with the finalized transcript. Fail-open.
+    # Context engine observation hook: the turn finished with the finalized transcript.
+    # Fail-open. ``_last_turn_usage`` is the last response's canonical usage dict, or
+    # ``None`` on turns that never reached a provider response — by contract.
     try:
         from agent.conversation_loop import _notify_context_engine_turn_complete
-        # ``_last_turn_usage`` holds the last API response's canonical usage dict, or
-        # ``None`` on turns that never reached a provider response — by contract.
         _notify_context_engine_turn_complete(
             agent, messages, usage=getattr(agent, "_last_turn_usage", None), logger=logger,
             turn_id=turn_id, task_id=effective_task_id, api_call_count=api_call_count,
@@ -474,9 +464,8 @@ def finalize_turn(
     except Exception as exc:
         logger.warning("on_turn_complete notification failed: %s", exc)
 
-    # Surrogate chokepoint: ``final_response`` may be RAW SDK content, and a lone UTF-16
-    # surrogate crashes downstream consumers (stdout, Telegram ``utf16_len``, JSON).
-    # Scrub once where model text leaves the loop (#80366).
+    # Surrogate chokepoint: RAW SDK text with a lone UTF-16 surrogate crashes downstream
+    # consumers (stdout, Telegram ``utf16_len``, JSON); scrub once where it leaves the loop.
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
@@ -508,8 +497,7 @@ def finalize_turn(
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
-        # Requested service tier (from request_overrides.extra_body), for billing
-        # audits by callers like `hermes -z --usage-file`.
+        # Requested service tier, for billing audits (`hermes -z --usage-file`).
         "service_tier": (
             (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}
         ).get("service_tier"),
@@ -518,9 +506,8 @@ def finalize_turn(
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # Persistence failures already set failed=True; also stamp `error` so the gateway
-    # surfaces status="error" (and desktop can toast) instead of a quiet complete frame,
-    # plus the machine-readable cause, exactly
-    # 'session_persistence_failed:<locked|compression|turn_lease|corrupt|...>'.
+    # surfaces status="error" (desktop can toast) instead of a quiet complete frame, plus
+    # the machine-readable cause 'session_persistence_failed:<locked|compression|...>'.
     if failed and str(_turn_exit_reason) == "session_persistence_failed":
         result["error"] = final_response or (
             "session storage could not be written — check the state database "
@@ -528,8 +515,7 @@ def finalize_turn(
         )
         _cause = getattr(agent, "_last_persistence_error_cause", None)
         result["failure_reason"] = "session_persistence_failed:" + (_cause or "unknown")
-    # Surface post-loop cleanup failures so the caller can tell a clean turn from one
-    # whose teardown raised; the response is returned either way (#8049).
+    # Cleanup failures are surfaced, but the response is returned either way (#8049).
     if _cleanup_errors:
         result["cleanup_errors"] = _cleanup_errors
     # A /steer landing after the final assistant turn has no tool batch to drain into;
@@ -541,8 +527,7 @@ def finalize_turn(
     if interrupted and agent._interrupt_message:
         result["interrupt_message"] = agent._interrupt_message
     agent.clear_interrupt()
-    # Clear stream callback so it doesn't leak into future calls.
-    agent._stream_callback = None
+    agent._stream_callback = None  # don't leak into future calls
 
     # Skill trigger is checked NOW — based on how many tool iterations THIS turn used.
     _should_review_skills = (
@@ -561,7 +546,8 @@ def finalize_turn(
 
     # Background memory/skill review runs AFTER delivery so it never competes with the
     # user's task. Suppressed by skip_background_review (e.g. cron): the fork costs
-    # ~30K tokens / event with no human-in-the-loop benefit. Best-effort.
+    # ~30K tokens / event with no human-in-the-loop benefit. Best-effort; the review
+    # clones the snapshot structurally so its sanitizers can't reach the live transcript.
     if (
         final_response
         and not interrupted
@@ -569,8 +555,6 @@ def finalize_turn(
         and (_should_review_memory or _should_review_skills)
     ):
         with suppress(Exception):
-            # _spawn_background_review clones the snapshot structurally so the fork's
-            # in-place sanitizers can't reach the live transcript.
             agent._spawn_background_review(
                 messages_snapshot=list(messages), review_memory=_should_review_memory,
                 review_skills=_should_review_skills,

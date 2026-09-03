@@ -113,12 +113,10 @@ def run_tool_round(
             tc for tc in assistant_message.tool_calls if tc.function.name in agent.valid_tool_names
         ]
 
+    # Persist the tool-call turn before any tool side effects so resume sees the executed
+    # block if a destructive tool restarts Hermes.
     try:
-        # Persist the tool-call turn before any tool side effects so resume
-        # sees the executed block if a destructive tool restarts Hermes.
-        _tool_turn_persisted = agent._flush_messages_to_session_db(
-            messages, conversation_history
-        )
+        _tool_turn_persisted = agent._flush_messages_to_session_db(messages, conversation_history)
     except Exception as exc:
         _tool_turn_persisted = False
         from hermes_state import classify_persistence_error
@@ -131,9 +129,8 @@ def run_tool_round(
         )
 
     if _tool_turn_persisted is False:
-        # Canonical append failed: never project the row or run tools from
-        # process-only state; break rather than retry the unpersisted turn.
-        # If the flush recorded no cause, the cause is genuinely unknown.
+        # Canonical append failed: never project the row or run tools from process-only
+        # state; break rather than retry. No recorded cause means genuinely unknown.
         if getattr(agent, "_last_persistence_error_cause", None) is None:
             agent._last_persistence_error_cause = "unknown"
         _turn_exit_reason = "session_persistence_failed"
@@ -141,14 +138,13 @@ def run_tool_round(
         failed = True
         return _verdict("break")
 
-    # A UI must never observe an assistant/tool-call row that is only an
-    # in-memory projection: emit interim commentary after the DB append.
+    # A UI must never observe an assistant/tool-call row that is only an in-memory
+    # projection: emit interim commentary after the DB append.
     if not duplicate_previous_interim:
         agent._emit_interim_assistant_message(assistant_msg)
 
-    # Flush open streaming boxes before tools so early content doesn't wrap
-    # tool feed lines. Display callback only — TTS (_stream_callback) must
-    # NOT receive None (its end-of-stream marker).
+    # Flush open streaming boxes before tools so early content doesn't wrap tool feed
+    # lines. Display callback only — TTS (_stream_callback) must NOT receive None (EOS).
     if agent.stream_delta_callback:
         with suppress(Exception):
             agent.stream_delta_callback(None)
@@ -156,8 +152,8 @@ def run_tool_round(
     agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
     if getattr(agent, "_incremental_persistence_failed", False):
-        # Tool result could not be made canonical: never send the in-memory
-        # result to the model or project later events from this turn.
+        # Tool result could not be made canonical: never send the in-memory result to
+        # the model or project later events from this turn.
         _turn_exit_reason = "session_persistence_failed"
         final_response = ""
         failed = True
@@ -167,12 +163,10 @@ def run_tool_round(
         decision = agent._tool_guardrail_halt_decision
         _turn_exit_reason = "guardrail_halt"
         final_response = agent._toolguard_controlled_halt_response(decision)
-        agent._emit_status(
-            f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
-        )
+        agent._emit_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
         append_message(messages, {"role": "assistant", "content": final_response})
-        # Emit the halt message so it isn't mistaken for a crash; the stream
-        # callback is still alive, so SSE/TUI clients see the explanation.
+        # Emit the halt so it isn't mistaken for a crash; the stream callback is still
+        # alive, so SSE/TUI clients see the explanation.
         if final_response:
             agent._safe_print(f"\n{final_response}\n")
             if agent.stream_delta_callback:
@@ -183,13 +177,11 @@ def run_tool_round(
 
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
-
-    # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n"
-    # when real text arrives, so tool iterations don't stack blank lines.
+    # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real
+    # text arrives, so tool iterations don't stack blank lines.
     agent._stream_needs_break = True
-
-    # Refund the iteration when the ONLY tool was execute_code (programmatic
-    # tool calling) — cheap RPC-style calls shouldn't eat the budget.
+    # Refund the iteration when the ONLY tool was execute_code (programmatic tool
+    # calling) — cheap RPC-style calls shouldn't eat the budget.
     if {tc.function.name for tc in assistant_message.tool_calls} == {"execute_code"}:
         agent.iteration_budget.refund()
 
@@ -211,9 +203,8 @@ def run_tool_round(
 
     # Save session log incrementally (so progress is visible even if interrupted)
     agent._session_messages = messages
-
-    # Touch activity so slow post-tool work plus a slow follow-up API call
-    # can't exceed the gateway inactivity timeout (HERMES_AGENT_TIMEOUT).
+    # Touch activity so slow post-tool work plus a slow follow-up API call can't exceed
+    # the gateway inactivity timeout (HERMES_AGENT_TIMEOUT).
     agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
     return _verdict("continue")
 
@@ -235,40 +226,32 @@ def stage_tool_call_message(
 
     turn_content = assistant_message.content or ""
 
-    # A bare bracketed token (e.g. ``[memory]``) beside a function call is
-    # protocol scaffolding; persisting it lets the post-tool fallback replay
-    # it forever (#78148).
-    if (
-        assistant_message.tool_calls and _STALE_MARKER_RE.fullmatch(turn_content.strip())
-    ):
+    # A bare bracketed token (e.g. ``[memory]``) beside a function call is protocol
+    # scaffolding; persisting it lets the post-tool fallback replay it forever (#78148).
+    if assistant_message.tool_calls and _STALE_MARKER_RE.fullmatch(turn_content.strip()):
         logger.warning(
             "Discarding bare tool-call marker from assistant content: %s", turn_content
         )
         turn_content = ""
         assistant_msg["content"] = ""
 
-    # Classify tools regardless of visible content: a substantive tool-only
-    # turn must invalidate any older housekeeping fallback.
+    # Classify tools regardless of visible content: a substantive tool-only turn must
+    # invalidate any older housekeeping fallback (so a two-turn-old housekeeping
+    # narration isn't attributed to the preceding tool turn), and clear the mute flag a
+    # prior housekeeping turn set, else _vprint suppresses this turn's tool progress.
     _all_housekeeping = all(
         tc.function.name in _HOUSEKEEPING_TOOLS for tc in assistant_message.tool_calls
     )
-
-    # Substantive tools clear any older fallback so a two-turn-old
-    # housekeeping narration isn't attributed to the preceding tool turn.
     if assistant_message.tool_calls and not _all_housekeeping:
         agent._last_content_with_tools = None
         agent._last_content_tools_all_housekeeping = False
-        # Also clear the mute flag a prior housekeeping turn may have set,
-        # else _vprint suppresses this turn's tool progress until the
-        # no-tool-call branch clears it.
         agent._mute_post_response = False
 
-    # Content + tool_calls in one turn: keep the content as a fallback final
-    # response in case the follow-up turn after tools is empty.
+    # Content + tool_calls in one turn: keep the content as a fallback final response in
+    # case the follow-up turn after tools is empty. Mute only when EVERY tool call is
+    # post-response housekeeping; substantive tools keep output on.
     if turn_content and agent._has_content_after_think_block(turn_content):
         agent._last_content_with_tools = turn_content
-        # Mute only when EVERY tool call is post-response housekeeping
-        # (memory, todo, skill_manage); substantive tools keep output on.
         agent._last_content_tools_all_housekeeping = _all_housekeeping
         if _all_housekeeping and agent._has_stream_consumers():
             agent._mute_post_response = True
@@ -281,18 +264,15 @@ def stage_tool_call_message(
     # final-response path). Tool calls after a prefill recovery reset the prefill
     # counter, so each tool-call success is a fresh start, not a cumulative burn.
     _had_prefill = False
-    while (
-        messages and isinstance(messages[-1], dict) and messages[-1].get("_thinking_prefill")
-    ):
+    while messages and isinstance(messages[-1], dict) and messages[-1].get("_thinking_prefill"):
         messages.pop()
         _had_prefill = True
     if _had_prefill:
         agent._thinking_prefill_retries = 0
         agent._empty_content_retries = 0
-    # Re-arm the post-tool nudge so it can fire on a LATER tool round.
+    # Re-arm the post-tool nudge so it can fire on a LATER tool round; a landed tool call
+    # recovers any dropped-tool-call stall, so refresh that budget per stall.
     agent._post_tool_empty_retried = False
-    # A landed tool call recovers any dropped-tool-call stall; refresh that
-    # budget so it guards each stall independently, not the whole run.
     agent._dropped_toolcall_retries = 0
 
     previous_msg = messages[-1] if messages else None

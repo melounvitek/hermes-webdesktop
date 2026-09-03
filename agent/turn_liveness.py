@@ -109,8 +109,8 @@ class TurnLivenessWatchdog:
         self._deactivate_turn = deactivate_turn
 
     def make_thread(self) -> threading.Thread:
-        """Build the (not yet started) watcher thread; run_agent starts it at
-        turn entry, after the turn-active flag and activity clock are stamped."""
+        """Build the (not yet started) watcher thread; started at turn entry, after the
+        turn-active flag and activity clock are stamped."""
         return threading.Thread(target=self._watch, name="turn-liveness-watchdog", daemon=True)
 
     def _watch(self) -> None:
@@ -120,15 +120,13 @@ class TurnLivenessWatchdog:
                 return  # turn no longer active
             if snapshot.idle_seconds < self._timeout_s:
                 continue
-            # Observational only: the commit below can still veto the abort
-            # if progress resumed; the definitive settlement is published
-            # by _surface_committed_abort after commit + deactivate.
+            # Observational only: the commit below can still veto the abort if progress
+            # resumed; the definitive settlement is _surface_committed_abort.
             self._surface_stall(snapshot)
             message = f"Turn made no progress for {int(snapshot.idle_seconds)}s; aborting to release the session."
             if not self._commit_abort(snapshot, message):
                 continue
-            # Stop renewing the lease so a wedge the interrupt cannot unwind
-            # expires via TTL instead of masking forever.
+            # Stop renewing the lease so a wedge the interrupt cannot unwind expires via TTL.
             self._deactivate_turn()
             self._surface_committed_abort(snapshot)
             return
@@ -152,11 +150,8 @@ class TurnLivenessWatchdog:
             logger.debug(debug_msg, exc_info=True)
 
     def _surface_stall(self, snapshot: ActivitySnapshot) -> None:
-        """Log + UI-warn that recovery is beginning (not that it committed).
-
-        Rate-limited per activity generation so repeatedly declined aborts
-        do not re-log every poll; a new generation re-arms the surface.
-        """
+        """Log + UI-warn that recovery is beginning (not that it committed). Rate-limited per
+        activity generation so repeatedly declined aborts do not re-log every poll."""
         generation = snapshot.generation
         if getattr(self, "_last_surfaced_generation", None) == generation:
             return

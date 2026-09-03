@@ -44,11 +44,8 @@ class DurableTurnLease:
         return getattr(self.agent, "session_id", None) or self.session_id
 
     def build_threads(self) -> None:
-        """Create (not start) the refresher thread and, when configured, the liveness watchdog.
-
-        Lease renewal is NOT evidence of progress; a silently stalled turn would renew forever, so the
-        watchdog (policy in ``agent/turn_liveness.py``) is wired with the commit/deactivate callbacks.
-        """
+        """Create (not start) the refresher thread and, when configured, the liveness watchdog:
+        lease renewal is NOT evidence of progress; a silently stalled turn would renew forever."""
         self.refresh_thread = threading.Thread(
             target=self.refresh_loop, name="session-turn-lease-refresh", daemon=True
         )
@@ -73,8 +70,8 @@ class DurableTurnLease:
     def start(self) -> None:
         with self._lock:
             self.turn_active = True
-        # Stamp the activity clock at turn entry: `_last_activity_ts` persists across turns, so without
-        # this the watchdog would measure idle from the PREVIOUS turn and abort a fresh one.
+        # Stamp the activity clock at turn entry: `_last_activity_ts` persists across turns, so
+        # without this the watchdog would measure idle from the PREVIOUS turn and abort a fresh one.
         self.agent._touch_activity("starting new turn")
         self.refresh_thread.start()
         if self.liveness_thread is not None:
@@ -111,28 +108,26 @@ class DurableTurnLease:
             return self.turn_active
 
     def _interrupt_turn(self, message: str) -> None:
-        # Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means this
-        # process no longer owns the session. Only the watchdog's stalls can be spuriously stale.
-        agent = self.agent
+        """Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means
+        this process no longer owns the session. Only the watchdog's stalls can be spuriously stale."""
         with self._lock:
             if self.stop.is_set() or not self.turn_active:
                 return
             self.interrupt_message = message
             try:
-                agent.interrupt(message, hard_cancel=True)
+                self.agent.interrupt(message, hard_cancel=True)
             except Exception:
-                agent._interrupt_requested = True
-                agent._interrupt_message = message
+                self.agent._interrupt_requested = True
+                self.agent._interrupt_message = message
 
     def commit_liveness_abort(self, snapshot, message: str) -> bool:
         """Commit point for the watchdog's stall observation.
 
         Revalidates the observed ``(generation, timestamp)`` under the SAME lock ``_touch_activity``
-        uses, so a turn that resumed while the stall was logged is never hard-cancelled. The
-        revalidated generation is carried into ``interrupt`` as ``require_generation``, which consumes
-        it with the first publication in ONE critical section. If ``interrupt`` raises, the abort
-        declines FAIL-CLOSED. Returns False when stale or already winding down.
-        """
+        uses, so a turn that resumed while the stall was logged is never hard-cancelled; the
+        revalidated generation is consumed by ``interrupt(require_generation=...)`` with the first
+        publication in ONE critical section. If ``interrupt`` raises, the abort declines FAIL-CLOSED.
+        Returns False when stale or already winding down."""
         agent = self.agent
         with agent._liveness_activity_lock():
             current_generation = getattr(agent, "_turn_liveness_activity_generation", 0)
@@ -148,10 +143,7 @@ class DurableTurnLease:
                 message, hard_cancel=True, require_generation=current_generation
             )
         except Exception:
-            # Fail closed: an exceptional path must not turn an unvalidated claim into abort authority.
-            logger.debug(
-                "Turn liveness abort interrupt raised; declining the abort", exc_info=True
-            )
+            logger.debug("Turn liveness abort interrupt raised; declining the abort", exc_info=True)
             published = False
         if published is False:
             # Claim went stale between revalidation and the hammer: real progress landed.
@@ -182,10 +174,9 @@ class DurableTurnLease:
     def refresh_loop(self) -> None:
         """Renew the lease every ``refresh_interval``; a miss or error interrupts the turn.
 
-        Long turns outlive the fixed TTL; the holder-qualified UPDATE fences a late refresher from a
-        successor lease. The façade's finally sets ``stop`` before releasing, so a holder-fenced miss
-        observed after stop is not a loss.
-        """
+        The holder-qualified UPDATE fences a late refresher from a successor lease. The façade's
+        finally sets ``stop`` before releasing, so a holder-fenced miss observed after stop is not
+        a loss."""
         while not self.stop.wait(self.refresh_interval):
             try:
                 if self.db.refresh_session_turn_lease(
@@ -197,16 +188,12 @@ class DurableTurnLease:
                 logger.error(
                     "Lost session turn lease while turn is active: %s", self._current_session_id()
                 )
-                self._interrupt_turn(
-                    "Session turn lease lost; stopping to protect the transcript."
-                )
+                self._interrupt_turn("Session turn lease lost; stopping to protect the transcript.")
             except Exception:
                 if self.stop.is_set():
                     return
                 logger.warning(
-                    "Failed to refresh session turn lease: %s",
-                    self._current_session_id(),
-                    exc_info=True,
+                    "Failed to refresh session turn lease: %s", self._current_session_id(), exc_info=True,
                 )
                 self._interrupt_turn(
                     "Session turn lease could not be refreshed; stopping to protect the transcript."
@@ -245,15 +232,14 @@ def admit_durable_turn_lease(
 
     Mutates ``task_context["session_id"]`` and ``agent.session_id`` when the wait forced a resume-id
     reload. Returns an ``early_result`` (interrupted / timed out) instead of a lease when admission
-    fails; the caller returns it verbatim.
-    """
+    fails; the caller returns it verbatim."""
     db = getattr(agent, "_session_db", None)
     admission = TurnLeaseAdmission(conversation_history=conversation_history)
     if db is None or not session_id:
         return admission
-    # A fresh session id has no durable transcript to race over, and callers may supply an in-memory
-    # seed before the row exists — reloading would erase it. Check the concrete type: MagicMock-style
-    # shims accept any attribute without the protocol.
+    # A fresh session id has no durable transcript to race over, and callers may supply an
+    # in-memory seed before the row exists — reloading would erase it. Check the concrete type:
+    # MagicMock-style shims accept any attribute without the protocol.
     if (
         getattr(agent, "_persist_disabled", False)
         or not _durable_session_exists(db, session_id)
@@ -270,16 +256,12 @@ def admit_durable_turn_lease(
     def _on_wait(elapsed: float) -> None:
         nonlocal waited
         waited = True
-        if elapsed < 1.0:
-            agent._emit_status(
-                "⏳ Another Hermes process is using this session; "
-                "waiting for it to finish before starting your turn..."
-            )
-        else:
-            agent._emit_status(
-                "⏳ Still waiting for the other Hermes process on "
-                f"this session ({int(elapsed)}s)..."
-            )
+        agent._emit_status(
+            "⏳ Another Hermes process is using this session; "
+            "waiting for it to finish before starting your turn..."
+            if elapsed < 1.0 else
+            f"⏳ Still waiting for the other Hermes process on this session ({int(elapsed)}s)..."
+        )
 
     if not db.acquire_session_turn_lease(
         session_id, holder, ttl_seconds=LEASE_TTL_SECONDS, wait_seconds=LEASE_WAIT_SECONDS,
@@ -288,16 +270,16 @@ def admit_durable_turn_lease(
         admission.early_result = _lease_not_acquired_result(agent, session_id, conversation_history)
         return admission
 
-    # Assign only after admission so the finally cannot release a holder that never owned the row;
-    # persist paths read the agent attr so a late flush is fenced in the same SQLite transaction.
+    # Assign only after admission so the finally cannot release a holder that never owned the
+    # row; persist paths read the agent attr so a late flush is fenced in the same transaction.
     lease = DurableTurnLease(agent, db, session_id, holder)
     agent._active_session_turn_lease_holder = holder
     agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
     try:
         if waited:
             agent._emit_status("Session is free; loading the latest transcript...")
-            # The holder may have compressed/rotated the session while we waited: reload only AFTER
-            # admission, and skip when acquisition was immediate (avoids a needless prompt-cache miss).
+            # The holder may have compressed/rotated the session while we waited: reload only
+            # AFTER admission; an immediate acquisition skips this (needless prompt-cache miss).
             latest_session_id = db.resolve_resume_session_id(session_id)
             if latest_session_id:
                 agent.session_id = latest_session_id
@@ -326,11 +308,10 @@ def _lease_not_acquired_result(agent, session_id: str, conversation_history) -> 
             **base,
             "interrupted": True,
         }
-        interrupt_message = getattr(agent, "_interrupt_message", None)
-        if interrupt_message:
-            result["interrupt_message"] = interrupt_message
-        # The finalizer never runs on this early return; clear so a cached agent doesn't fail-close
-        # the next turn.
+        if getattr(agent, "_interrupt_message", None):
+            result["interrupt_message"] = agent._interrupt_message
+        # The finalizer never runs on this early return; clear so a cached agent doesn't
+        # fail-close the next turn.
         try:
             agent.clear_interrupt()
         except Exception:
