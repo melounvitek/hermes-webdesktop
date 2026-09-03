@@ -12,6 +12,7 @@ import re
 import fnmatch
 import hashlib
 import json
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,21 +21,15 @@ from typing import List, Tuple
 
 SCANNER_VERSION = "skills-guard-v2"
 
-TRUSTED_REPOS = {
-    "openai/skills",
-    "anthropics/skills",
-    "huggingface/skills",
-    # NVIDIA-verified: each entry ships a signed `skill.oms.sig` + governance `skill-card.md`.
-    "NVIDIA/skills",
-}
+# NVIDIA-verified skills each ship a signed `skill.oms.sig` + governance `skill-card.md`.
+TRUSTED_REPOS = {"openai/skills", "anthropics/skills", "huggingface/skills", "NVIDIA/skills"}
 
 INSTALL_POLICY = {
     #                  safe      caution    dangerous
     "builtin":       ("allow",  "allow",   "allow"),
     "trusted":       ("allow",  "allow",   "block"),
     "community":     ("allow",  "block",   "block"),
-    # "ask" surfaces as an error to the agent, which can retry without the flagged content. Only
-    # consulted when skills.guard_agent_created is on (skill_manager_tool._guard_agent_created_enabled).
+    # "ask" = error to the agent (retry without the flagged content); only when skills.guard_agent_created is on.
     "agent-created": ("allow",  "allow",   "ask"),
 }
 
@@ -83,11 +78,10 @@ _OTHER_AGENT_CONFIG_FILES = r'\.(?:claude/settings|codex/config)[\w.]*'
 
 
 def _shell_write_re(file_alt: str) -> str:
-    """Mechanical shell write into *file_alt*: ``>``/``>>`` redirection, ``sed -i``, ``tee`` (target as
-    immediate argument, so ``| tee output | AGENTS.md |`` table cells miss), ``cp``/``mv`` with the file in
-    destination position (a source arg is required, so ``cp AGENTS.md backup/`` — a read — misses;
-    ``AGENTS.md.bak`` is not the file). A single ``>`` needs a preceding word/quote/paren char so
-    blockquotes (``> text``) and arrows (``-> file``) miss."""
+    """Mechanical shell write into *file_alt*: ``>``/``>>``, ``sed -i``, ``tee`` (target as immediate argument, so
+    ``| tee output | AGENTS.md |`` cells miss), ``cp``/``mv`` with the file as destination (a source arg is required,
+    so ``cp AGENTS.md backup/`` misses; ``AGENTS.md.bak`` is not the file). A single ``>`` needs a preceding
+    word/quote/paren char so blockquotes (``> text``) and arrows (``-> file``) miss."""
     return (
         rf'(?:>>|[\w"\'`)\]]\s*>)\s*[~\w./-]*{file_alt}(?!\.?\w)'
         rf'|\bsed\b[^\n]*\s(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b[^\n]*{file_alt}(?!\.?\w)'
@@ -97,10 +91,9 @@ def _shell_write_re(file_alt: str) -> str:
 
 
 def _prose_modify_re(file_alt: str) -> str:
-    """Prose instructing modification of *file_alt*: an imperative-position verb (line start / bullet), or
-    a mid-line verb strengthened by a directive marker ("you must", "please", "make sure to").
-    Descriptive prose ("skills that edit AGENTS.md") matches neither; the verb→file gap forbids commas so
-    enumerations ("Write or refactor skills, AGENTS.md, CLAUDE.md") miss."""
+    """Prose instructing modification of *file_alt*: an imperative-position verb (line start / bullet), or a mid-line
+    verb with a directive marker ("you must", "please", "make sure to"). Descriptive prose ("skills that edit
+    AGENTS.md") misses; the verb→file gap forbids commas so enumerations ("Write skills, AGENTS.md, CLAUDE.md") miss."""
     return (
         rf'^\s*(?:[-*+]\s+|\d+[.)]\s+)?{MODIFY_VERB_RE}[^\n,]{{0,80}}?{file_alt}\b'
         rf'|(?:\byou\s+(?:must|should|need\s+to)\s+|\bplease\s+'
@@ -397,11 +390,9 @@ def _unicode_char_name(char: str) -> str:
 
 
 def _compute_docstring_lines(lines: list) -> set:
-    """1-indexed line numbers inside (or on the boundary of) triple-quoted strings.
-
-    ``in_docstring`` toggles on each line with an odd count of a marker; opening, interior, closing and
-    self-contained single-line docstrings are all included so ``os.environ`` in prose is not scored.
-    Heuristic (ignores a triple quote inside a string literal) but covers the common false-positive shapes."""
+    """1-indexed line numbers inside (or on the boundary of) triple-quoted strings: opening, interior, closing and
+    self-contained one-line docstrings all count, so ``os.environ`` in prose is not scored. Heuristic (ignores a
+    triple quote inside a string literal) but covers the common false-positive shapes."""
     doc_lines: set = set()
     in_docstring = False
     for i, line in enumerate(lines):
@@ -412,8 +403,6 @@ def _compute_docstring_lines(lines: list) -> set:
             doc_lines.add(i + 1)
     return doc_lines
 
-
-# --- Scanning functions -----------------------------------------------------
 
 def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     """Scan one file for threat patterns and invisible unicode. *rel_path* is the display path (defaults
@@ -431,10 +420,9 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
             if i not in docstring_lines and pattern.search(line):
-                matched_text = line.strip()
-                if len(matched_text) > 120:
-                    matched_text = matched_text[:117] + "..."
-                findings.append(Finding(pid, severity, category, rel_path, i, matched_text, description))
+                text = line.strip()
+                findings.append(Finding(pid, severity, category, rel_path, i,
+                                        text if len(text) <= 120 else text[:117] + "...", description))
     for i, line in enumerate(lines, start=1):
         char = next((c for c in INVISIBLE_CHARS if c in line), None)
         if char is not None:
@@ -446,11 +434,9 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
 
 
 def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
-    """Structural checks + pattern scan of every text file in a skill dir (or a single file).
-
-    A `.skillignore` / `.clawhubignore` (gitignore-style) excludes dev/docs artifacts from BOTH the
-    structural checks and the pattern scan; the ignore file itself is always excluded and `SKILL.md` can
-    never be un-ignored. *source* (e.g. "openai/skills") resolves the trust level."""
+    """Structural checks + pattern scan of every text file in a skill dir (or a single file). A `.skillignore` /
+    `.clawhubignore` (gitignore-style) excludes dev/docs artifacts from BOTH passes; the ignore file itself is
+    always excluded and `SKILL.md` can never be un-ignored. *source* (e.g. "openai/skills") sets the trust level."""
     skill_name = skill_path.name
     trust_level = _resolve_trust_level(source)
     all_findings: List[Finding] = []
@@ -472,11 +458,9 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
 
 
 def _content_digest(skill_path: Path) -> str:
-    """Canonical SHA-256 over (POSIX relative path, file bytes), ORDERED by the rel-path string.
-
-    Sorting Paths diverged on Windows (case-insensitive normcase) from ``tools.skills_hub.bundle_content_hash``,
-    which sorts plain strings — every installed skill then reported ``update_available`` forever. Sorting the
-    posix strings keeps the digest OS-independent and byte-symmetric with the bundle side."""
+    """Canonical SHA-256 over (POSIX relative path, file bytes), ORDERED by the rel-path STRING: sorting Paths is
+    case-insensitive on Windows and diverged from ``tools.skills_hub.bundle_content_hash`` (plain-string sort), so
+    every installed skill reported ``update_available`` forever. String order keeps both sides byte-symmetric."""
     h = hashlib.sha256()
     if not skill_path.is_dir():
         h.update(skill_path.read_bytes())
@@ -511,28 +495,23 @@ def scan_skill_cached(
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         cached = None
-    if (isinstance(cached, dict) and cached.get("bundle_hash") == bundle_hash
-            and cached.get("scanner_version") == SCANNER_VERSION
-            and cached.get("source") == source and cached.get("source_url") == source_url):
+    expected = {"bundle_hash": bundle_hash, "scanner_version": SCANNER_VERSION, "source": source, "source_url": source_url}
+    if isinstance(cached, dict) and all(cached.get(k) == v for k, v in expected.items()):
         result = ScanResult(
             skill_name=skill_path.name, source=source, trust_level=cached["trust_level"], verdict=cached["verdict"],
             findings=[Finding(**item) for item in cached.get("findings", [])],
             scanned_at=cached["scanned_at"], summary=cached.get("summary", ""))
-        result.scan_provenance = provenance = {**cached, "fresh": False}
-        return result, provenance
-
-    result = scan_skill(skill_path, source=source)
-    findings = [asdict(item) for item in result.findings]
-    provenance = {
-        "source": source, "source_url": source_url, "bundle_hash": bundle_hash, "scanner_version": SCANNER_VERSION,
-        "verdict": result.verdict, "trust_level": result.trust_level, "findings": findings,
-        "rules": sorted({item["pattern_id"] for item in findings}),
-        "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True}
-    try:
-        cache_root.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+        provenance = {**cached, "fresh": False}
+    else:
+        result = scan_skill(skill_path, source=source)
+        findings = [asdict(item) for item in result.findings]
+        provenance = {
+            **expected, "verdict": result.verdict, "trust_level": result.trust_level, "findings": findings,
+            "rules": sorted({item["pattern_id"] for item in findings}),
+            "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True}
+        with suppress(OSError):
+            cache_root.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     result.scan_provenance = provenance
     return result, provenance
 
@@ -572,8 +551,6 @@ def format_scan_report(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
-# --- Structural checks ------------------------------------------------------
-
 def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
     """Structural anomalies: file count, total size, binary/executable files, symlinks escaping the skill
     dir, oversized files. *ignore(rel_path) -> bool* excludes paths from every count and finding."""
@@ -583,14 +560,10 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
 
     def add(pid: str, severity: str, category: str, rel: str, match: str, description: str) -> None:
         findings.append(Finding(pid, severity, category, rel, 0, match, description))
-
-    file_count = 0
-    total_size = 0
+    file_count = total_size = 0
     for f in skill_dir.rglob("*"):
-        if not f.is_file() and not f.is_symlink():
-            continue
         rel = str(f.relative_to(skill_dir))
-        if ignore(rel):
+        if not (f.is_file() or f.is_symlink()) or ignore(rel):
             continue
         file_count += 1
         if f.is_symlink():
@@ -626,8 +599,6 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
     return findings
 
 
-# --- Internal helpers -------------------------------------------------------
-
 # `.skillignore` is Hermes-native; `.clawhubignore` is honored for skills published through ClawHub.
 _SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
 _ALWAYS_IGNORED_NAMES = set(_SKILL_IGNORE_FILENAMES)
@@ -635,11 +606,10 @@ _NEVER_IGNORABLE = {"SKILL.md"}
 
 
 def _load_skill_ignore(skill_dir: Path):
-    """Build ``ignore(rel_posix_path) -> bool`` from a skill's `.skillignore` / `.clawhubignore`.
-
-    gitignore basics: blank lines and ``#`` comments skipped; trailing ``/`` marks a directory (matches it
-    and everything under it); ``*``/``?`` globs via fnmatch on the full relative path and each segment;
-    leading ``/`` anchors to the skill root. Ignore files are always excluded; ``SKILL.md`` never is."""
+    """Build ``ignore(rel_posix_path) -> bool`` from `.skillignore` / `.clawhubignore`. gitignore basics: blank
+    lines and ``#`` comments skipped; trailing ``/`` = directory (it and everything under it); ``*``/``?`` globs via
+    fnmatch on the full path and each segment; leading ``/`` anchors to the root. Ignore files always excluded;
+    ``SKILL.md`` never."""
     patterns: List[str] = []
     for ig in (skill_dir / name for name in _SKILL_IGNORE_FILENAMES):
         try:
