@@ -133,7 +133,7 @@ class TestRecommendedDefaultEndpoint:
 
     def _call(self, monkeypatch):
         import hermes_cli.auth as auth_mod
-        from hermes_cli.web_server import get_recommended_default_model
+        from hermes_cli.web_routers.models import get_recommended_default_model
 
         # Blocked first, so an unfiltered list would make it the silent
         # default — otherwise this passes whether or not the filter runs.
@@ -209,7 +209,7 @@ class TestNousPrefetch:
             auth_mod, "_load_auth_store",
             lambda *a, **k: {"providers": {"nous": {"access_token": "tok"}}},
         )
-        slugs = model_switch_providers._collect_authed_provider_slugs({}, {"nous": list(CURATED)}, [])
+        slugs = ms._collect_authed_provider_slugs({}, {"nous": list(CURATED)}, [])
         assert "nous" not in slugs
 
 

@@ -1099,7 +1099,7 @@ class TestNousDeviceAuthTimeoutMessage:
 
 def test_poll_for_token_timeout_raises_actionable_message():
     """The poll deadline must raise the CAPTCHA-aware guidance at the SOURCE,
-    so both the CLI login and the dashboard poller (web_server._nous_poller,
+    so both the CLI login and the dashboard poller (web_server_oauth._nous_poller,
     which surfaces str(e) to the UI) inherit it."""
     import httpx
     import pytest

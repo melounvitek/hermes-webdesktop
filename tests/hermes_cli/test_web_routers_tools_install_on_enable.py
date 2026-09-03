@@ -10,6 +10,7 @@ the binary.
 """
 
 import pytest
+import hermes_cli.web_server_gateway as _web_server_gateway
 
 
 class TestToggleToolsetInstallOnEnable:
@@ -42,7 +43,7 @@ class TestToggleToolsetInstallOnEnable:
             calls.append((tuple(subcommand), name))
             return _FakeProc()
 
-        monkeypatch.setattr(web_server, "_spawn_hermes_action", _fake_spawn)
+        monkeypatch.setattr(_web_server_gateway, "_spawn_hermes_action", _fake_spawn)
         return calls
 
     def test_enable_computer_use_spawns_cua_install_when_binary_missing(
@@ -127,7 +128,7 @@ class TestToggleToolsetInstallOnEnable:
         def _boom(subcommand, name, **kwargs):
             raise RuntimeError("spawn exploded")
 
-        monkeypatch.setattr(web_server, "_spawn_hermes_action", _boom)
+        monkeypatch.setattr(_web_server_gateway, "_spawn_hermes_action", _boom)
 
         resp = self.client.put(
             "/api/tools/toolsets/computer_use", json={"enabled": True}
