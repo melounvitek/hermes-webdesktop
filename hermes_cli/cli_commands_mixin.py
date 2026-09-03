@@ -2114,7 +2114,7 @@ class CLICommandsMixin:
             prompt = arg[len(tokens[0]):].strip() if interval and interval > 0 else ""
         if interval is None:
             return _cp(
-                       "  Usage: /heartbeat every <interval> <prompt>   (e.g. /heartbeat every 10m Check CI)",
+                "  Usage: /heartbeat every <interval> <prompt>   (e.g. /heartbeat every 10m Check CI)",
                        _dim_line('Also: /heartbeat status | pause | resume | clear'))
         if interval < 0:
             from hermes_cli.heartbeat import MIN_INTERVAL_SECONDS
@@ -2727,12 +2727,9 @@ class CLICommandsMixin:
 
     def _handle_voice_command(self, command: str):
         """Handle /voice [on|off|tts|status] command."""
-        subcommand = _command_arg(command, lower=True)
-        if subcommand == "":  # bare /voice toggles
-            subcommand = "off" if self._voice_mode else "on"
-        actions = {
-            "on": self._enable_voice_mode, "off": self._disable_voice_mode,
-            "tts": self._toggle_voice_tts, "status": self._show_voice_status}
+        subcommand = _command_arg(command, lower=True) or ("off" if self._voice_mode else "on")
+        actions = {"on": self._enable_voice_mode, "off": self._disable_voice_mode,
+                   "tts": self._toggle_voice_tts, "status": self._show_voice_status}
         if subcommand in actions:
             actions[subcommand]()
         else:
@@ -2742,9 +2739,8 @@ class CLICommandsMixin:
         """Handle /wake [on|off|status] — the 'Hey Hermes' hotword listener. The toggle IS the
         config: on/off also writes ``wake_word.enabled`` so the choice persists; startup
         auto-arm only reads it."""
-        subcommand = _command_arg(command, lower=True)
-        if subcommand == "":  # bare /wake toggles
-            subcommand = "off" if getattr(self, "_wake_word_active", False) else "on"
+        subcommand = _command_arg(command, lower=True) or (
+            "off" if getattr(self, "_wake_word_active", False) else "on")  # bare /wake toggles
         if subcommand == "on":
             if self._start_wake_word_listener(announce=True):
                 self._persist_wake_word_enabled(True)
