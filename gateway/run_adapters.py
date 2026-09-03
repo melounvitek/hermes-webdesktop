@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 import asyncio
 import contextlib
+import functools
 import os
 import time
 import weakref as _weakref
@@ -59,10 +60,10 @@ class GatewayAdapterLifecycleMixin:
             await awaitable
             return True
         task = asyncio.ensure_future(awaitable)
-        if await self._wait_or_detach(task, timeout):
-            await task
-            return True
-        return False
+        if not await self._wait_or_detach(task, timeout):
+            return False
+        await task
+        return True
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
         """Call adapter.disconnect() defensively (bounded, never raises).
@@ -1258,10 +1259,7 @@ class GatewayAdapterLifecycleMixin:
         self, profile_name: str, platform: Platform
     ) -> Callable[[BasePlatformAdapter], Awaitable[None]]:
         """Route a secondary-profile fatal error to that profile's reconnect slot."""
-        async def _handler(adapter: BasePlatformAdapter) -> None:
-            await self._handle_profile_adapter_fatal_error(profile_name, platform, adapter)
-
-        return _handler
+        return functools.partial(self._handle_profile_adapter_fatal_error, profile_name, platform)
 
     async def _handle_profile_adapter_fatal_error(
         self, profile_name: str, platform: Platform, adapter: BasePlatformAdapter
@@ -1472,14 +1470,12 @@ class GatewayAdapterLifecycleMixin:
             from gateway.platform_registry import platform_registry
             if platform_registry.is_registered(platform.value):
                 adapter = platform_registry.create_adapter(platform.value, config)
-                if adapter is not None:
-                    return adapter
-                # Registered but failed — never fall through to built-ins.
-                logger.error(
-                    "Platform '%s' is registered but adapter creation failed "
-                    "(check dependencies and config)", platform.value,
-                )
-                return None
+                if adapter is None:  # registered but failed — never fall through to built-ins
+                    logger.error(
+                        "Platform '%s' is registered but adapter creation failed "
+                        "(check dependencies and config)", platform.value,
+                    )
+                return adapter
         except Exception as e:
             logger.debug("Platform registry lookup for '%s' failed: %s", platform.value, e)
         return _instantiate_builtin_adapter(platform, config)

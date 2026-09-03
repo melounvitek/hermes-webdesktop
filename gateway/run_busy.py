@@ -218,6 +218,13 @@ class GatewayBusySessionMixin:
         session_store = getattr(self, "session_store", None)
         if not session_key or session_store is None:
             return False
+        def _assume_active(what: str, ident) -> bool:
+            logger.warning(
+                "Compression in-flight check failed while reading %s %s; treating compression as "
+                "active to avoid interrupting a possible parent-session rotation", what, ident, exc_info=True,
+            )
+            return True
+
         try:
             session_id = await asyncio.to_thread(
                 self._lookup_session_id_under_store_lock, session_store, session_key
@@ -225,12 +232,7 @@ class GatewayBusySessionMixin:
         except (AttributeError, TypeError):
             return False
         except Exception:
-            logger.warning(
-                "Compression in-flight check failed while reading session %s; "
-                "treating compression as active to avoid interrupting a possible "
-                "parent-session rotation", session_key, exc_info=True,
-            )
-            return True
+            return _assume_active("session", session_key)
         session_db = getattr(self, "_session_db", None)
         if not session_id or session_db is None:
             return False
@@ -243,12 +245,7 @@ class GatewayBusySessionMixin:
         except (AttributeError, TypeError):
             return False
         except Exception:
-            logger.warning(
-                "Compression in-flight check failed while reading lock holder "
-                "for session %s; treating compression as active to avoid "
-                "interrupting a possible parent-session rotation", session_id, exc_info=True,
-            )
-            return True
+            return _assume_active("lock holder for session", session_id)
 
     @staticmethod
     def _lookup_session_id_under_store_lock(session_store, session_key: str):
@@ -316,14 +313,10 @@ class GatewayBusySessionMixin:
         text = (event.text or "").strip()
         if not self._pending_event_audio_paths(event):
             return text
-
-        adapter = self._adapter_for_source(event.source)
         enriched_text, successful_transcripts = await self._transcribe_and_echo_pending_voice(
-            event, adapter, event.source, text, log_context="Busy-steer"
+            event, self._adapter_for_source(event.source), event.source, text, log_context="Busy-steer"
         )
-        if not successful_transcripts:
-            return text
-        return (enriched_text or text).strip()
+        return (enriched_text or text).strip() if successful_transcripts else text
 
     @staticmethod
     def _busy_reply_to(event: MessageEvent, reply_anchor):
