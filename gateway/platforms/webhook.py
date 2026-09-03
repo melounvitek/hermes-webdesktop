@@ -93,6 +93,19 @@ def _json_error(message: str, status: int) -> "web.Response":
     return web.json_response({"error": message}, status=status)
 
 
+def _peek_session_id(store, session_key: str):
+    """Prefer the store's lock-held accessor; fall back to the private path only for
+    older stores / test doubles that predate it."""
+    peek = getattr(store, "peek_session_id", None)
+    if callable(peek):
+        return peek(session_key)
+    if hasattr(store, "_ensure_loaded"):
+        with suppress(Exception):
+            store._ensure_loaded()
+    entry = (getattr(store, "_entries", {}) or {}).get(session_key)
+    return getattr(entry, "session_id", None) if entry else None
+
+
 def check_webhook_requirements() -> bool:
     """Check if webhook adapter dependencies are available."""
     return AIOHTTP_AVAILABLE
@@ -632,28 +645,14 @@ class WebhookAdapter(BasePlatformAdapter):
         """Mark the per-delivery session ended via ``SessionDB.end_session`` (never a hand-written UPDATE),
         resolving session_id from the SAME source the run was keyed on."""
         runner = self.gateway_runner
-        if runner is None:
-            return
         session_db = getattr(runner, "_session_db", None)
         store = getattr(runner, "session_store", None)
-        if session_db is None or store is None:
+        key_fn = getattr(runner, "_session_key_for_source", None)
+        if runner is None or session_db is None or store is None or key_fn is None:
             return
         try:
-            key_fn = getattr(runner, "_session_key_for_source", None)
-            if key_fn is None:
-                return
             session_key = key_fn(event.source)
-            # Prefer the store's lock-held accessor; fall back to the private path
-            # only for older stores / test doubles that predate it.
-            peek = getattr(store, "peek_session_id", None)
-            if callable(peek):
-                session_id = peek(session_key)
-            else:
-                if hasattr(store, "_ensure_loaded"):
-                    with suppress(Exception):
-                        store._ensure_loaded()
-                entry = (getattr(store, "_entries", {}) or {}).get(session_key)
-                session_id = getattr(entry, "session_id", None) if entry else None
+            session_id = _peek_session_id(store, session_key)
             if not session_id:
                 logger.debug("[webhook] No session_id to close for %s (key=%s)", session_chat_id, session_key)
                 return
