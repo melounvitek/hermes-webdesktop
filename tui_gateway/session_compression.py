@@ -148,23 +148,17 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
             pct = float(compression["threshold"])
     if pct is None:
         pct = _derived_default_threshold_percent(agent, compression)
-    with contextlib.suppress(TypeError, ValueError):
-        cc._config_threshold_percent = pct
-        cc._configured_threshold_percent = pct
-        base = pct
-        model_thresholds = getattr(cc, "model_thresholds", None) or {}
-        if model_thresholds:
-            from agent.context_compressor import resolve_model_threshold
+    cc._config_threshold_percent = cc._configured_threshold_percent = pct
+    base = pct
+    if cc.model_thresholds:
+        from agent.context_compressor import resolve_model_threshold
 
-            base = resolve_model_threshold(getattr(agent, "model", "") or "", model_thresholds, pct)
-        cc._base_threshold_percent = base
-        if hasattr(cc, "_effective_threshold_percent"):
-            try:
-                cc.threshold_percent = cc._effective_threshold_percent(cc.context_length, base)
-            except Exception:
-                cc.threshold_percent = pct
-        else:
-            cc.threshold_percent = pct
+        base = resolve_model_threshold(getattr(agent, "model", "") or "", cc.model_thresholds, pct)
+    cc._base_threshold_percent = base
+    try:
+        cc.threshold_percent = cc._effective_threshold_percent(cc.context_length, base)
+    except Exception:
+        cc.threshold_percent = pct
 
     raw_ctx = model_cfg.get("context_length")
     if raw_ctx is not None:
@@ -182,35 +176,10 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
         cc._config_context_length = None
         cc._resolved_context_length = None
 
-    coerce_cap = getattr(cc, "_coerce_threshold_tokens_cap", None)
-    if callable(coerce_cap):
-        cc.threshold_tokens_cap = coerce_cap(compression.get("threshold_tokens"))
-    elif "threshold_tokens" in compression:
-        try:
-            cap = int(compression.get("threshold_tokens"))
-            cc.threshold_tokens_cap = cap if cap > 0 else None
-        except (TypeError, ValueError):
-            cc.threshold_tokens_cap = None
-    else:
-        cc.threshold_tokens_cap = None
-
+    cc.threshold_tokens_cap = cc._coerce_threshold_tokens_cap(compression.get("threshold_tokens"))
     # Invalidate the cached trigger so the next preflight re-derives from percent/window, then the cap.
-    if hasattr(cc, "_threshold_tokens"):
-        cc._threshold_tokens = None
-        if hasattr(cc, "_tail_token_budget"):
-            cc._tail_token_budget = None
-    elif hasattr(cc, "_apply_threshold_tokens_cap"):
-        compute = getattr(cc, "_compute_threshold_tokens", None)
-        if callable(compute):
-            cc.threshold_tokens = compute(
-                getattr(cc, "context_length", 0) or 0, getattr(cc, "threshold_percent", 0.5), getattr(cc, "max_tokens", None)
-            )
-        cc._apply_threshold_tokens_cap()
-    else:
-        cap = getattr(cc, "threshold_tokens_cap", None)
-        current = getattr(cc, "threshold_tokens", None)
-        if cap and current:
-            cc.threshold_tokens = min(int(current), int(cap))
+    cc._threshold_tokens = None
+    cc._tail_token_budget = None
 
 
 def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
