@@ -771,13 +771,12 @@ def _kanban_attachment_roots() -> List[Path]:
 
 def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
-    roots = [*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_profile_cache_roots(),
-             *_kanban_attachment_roots()]
-    roots.extend(
+    operator_roots = (
         root for chunk in os.environ.get(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "").split(os.pathsep)
         for raw_root in chunk.split(",")
         if (root := Path(os.path.expanduser(raw_root.strip()))).is_absolute())
-    return roots
+    return [*map(Path, MEDIA_DELIVERY_SAFE_ROOTS), *_profile_cache_roots(),
+            *_kanban_attachment_roots(), *operator_roots]
 
 
 def _media_delivery_recency_seconds() -> float:
@@ -995,16 +994,14 @@ def _translate_docker_container_media_path(candidate: Path, session_key: str = "
         return None
     # Longest container-prefix match; equal-length prefixes are tried in insertion order.
     candidate_posix = candidate.as_posix()
-    matched: List[Tuple[Path, Path, int]] = [
-        (host_root, container_root, len(container_posix))
-        for host_root, container_root in mounts
-        for container_posix in (container_root.as_posix().rstrip("/") or "/",)
-        if candidate_posix == container_posix or candidate_posix.startswith(container_posix + "/")]
+    matched = [
+        (host_root, container_root, len(prefix)) for host_root, container_root in mounts
+        for prefix in (container_root.as_posix().rstrip("/") or "/",)
+        if candidate_posix == prefix or candidate_posix.startswith(prefix + "/")]
     if not matched:
         _warn_unresolved_docker_media(candidate, session_key, "no mounted prefix matches")
         return None
-    matched.sort(key=lambda m: -m[2])
-    for host_root, container_root, _score in matched:
+    for host_root, container_root, _score in sorted(matched, key=lambda m: -m[2]):
         translated = _resolve_path(host_root / candidate.relative_to(container_root), strict=True)
         if translated is not None and (
                 translated == host_root or _path_is_within(translated, host_root)):
@@ -1920,9 +1917,8 @@ class BasePlatformAdapter(ABC):
             write_runtime_status(platform=platform_key, **kwargs)
         except Exception as exc:
             logged = _lazy_attr(self, "_status_write_logged", set)  # object.__new__ in tests
-            key = (self.platform.value, context)
-            first = key not in logged
-            logged.add(key)
+            first = (self.platform.value, context) not in logged
+            logged.add((self.platform.value, context))
             (logger.warning if first else logger.debug)(
                 "Failed to write runtime status (%s) for %s: %s" + (" (further failures at debug level)" if first else ""),
                 context, self.platform.value, exc)
@@ -2372,10 +2368,10 @@ class BasePlatformAdapter(ABC):
                     _is_multi = bool(getattr(_cg._entries.get(clarify_id), "multi_select", False))
             except Exception:
                 _is_multi = False
-            hint = (
-                "Multiple selections allowed — reply with the numbers separated by commas or "
-                "spaces (e.g. \"1, 3\"), the option text, or your own answer."
-                if _is_multi else "Reply with the number, the option text, or your own answer.")
+            hint = "Reply with the number, the option text, or your own answer."
+            if _is_multi:
+                hint = ("Multiple selections allowed — reply with the numbers separated by commas "
+                        "or spaces (e.g. \"1, 3\"), the option text, or your own answer.")
             numbered = [f"  {i}. {choice}" for i, choice in enumerate(choices, start=1)]
             text = "\n".join([f"❓ {question}", "", *numbered, "", hint])
             # Text fallback: let the gateway intercept capture the typed reply.
@@ -2468,26 +2464,28 @@ class BasePlatformAdapter(ABC):
     def extract_images(content: str) -> Tuple[List[Tuple[str, str]], str]:
         """Extract ``![alt](url)`` and ``<img src=...>`` image URLs from a response;
         returns ``([(url, alt_text), ...], content with those tags removed)``."""
-        cleaned = content
         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
-        # Only extract URLs that look like actual images
-        images = [
-            (m.group(2), m.group(1)) for m in re.finditer(md_pattern, content)
-            if any(m.group(2).lower().endswith(ext) or ext in m.group(2).lower() for ext in
-                   ['.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn', 'replicate.delivery'])]
         # <img src="url"> / <img src="url"></img> / <img src="url"/>
         html_pattern = r'<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?'
+        # Only extract URLs that look like actual images.
+        markers = ('.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn',
+                   'replicate.delivery')
+        images = [(m.group(2), m.group(1)) for m in re.finditer(md_pattern, content)
+                  if any(m.group(2).lower().endswith(ext) or ext in m.group(2).lower()
+                         for ext in markers)]
         images.extend((match.group(1), "") for match in re.finditer(html_pattern, content))
+        if not images:
+            return images, content
         # Remove only the tags we extracted, not every markdown image.
-        if images:
-            extracted_urls = {url for url, _ in images}
-            def _remove_if_extracted(match):
-                url = match.group(2) if match.lastindex >= 2 else match.group(1)
-                return '' if url in extracted_urls else match.group(0)
-            for pattern in (md_pattern, html_pattern):
-                cleaned = re.sub(pattern, _remove_if_extracted, cleaned)
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()  # leftover blank lines
-        return images, cleaned
+        extracted_urls = {url for url, _ in images}
+
+        def _remove_if_extracted(match):
+            url = match.group(2) if match.lastindex >= 2 else match.group(1)
+            return '' if url in extracted_urls else match.group(0)
+        cleaned = content
+        for pattern in (md_pattern, html_pattern):
+            cleaned = re.sub(pattern, _remove_if_extracted, cleaned)
+        return images, re.sub(r'\n{3,}', '\n\n', cleaned).strip()  # leftover blank lines
 
     async def send_voice(
         self, chat_id: str, audio_path: str, caption: Optional[str] = None,
@@ -2581,10 +2579,12 @@ class BasePlatformAdapter(ABC):
         """User-visible notice when a MEDIA attachment upload failed: the tag was
         already stripped from the text, so silence would be a silent drop."""
         ext = Path(media_path).suffix.lower()
-        text = (_media_failure_text("audio")
-                if is_voice or should_send_media_as_audio(self.platform, ext, is_voice=is_voice)
-                else _media_failure_text("video") if ext in _VIDEO_EXTS
-                else _media_failure_text("file", os.path.basename(media_path)))
+        if is_voice or should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
+            text = _media_failure_text("audio")
+        elif ext in _VIDEO_EXTS:
+            text = _media_failure_text("video")
+        else:
+            text = _media_failure_text("file", os.path.basename(media_path))
         try:
             notice = await self.send(chat_id=chat_id, content=text, metadata=metadata)
             problem = None if notice.success else notice.error
@@ -3364,13 +3364,11 @@ class BasePlatformAdapter(ABC):
                         text_content: str, media_files: list) -> bool:
         """Auto-TTS on voice input (voice-first), gated by /voice or voice.auto_tts;
         skipped when streaming TTS already delivered audio this turn."""
+        generation = getattr(interrupt_event, "_hermes_run_generation", None)
         return bool(
             self._should_auto_tts_for_chat(event.source.chat_id)
-            and event.message_type == MessageType.VOICE
-            and text_content
-            and not media_files
-            and not self._streaming_tts_turn_completed(
-                session_key, getattr(interrupt_event, "_hermes_run_generation", None), event=event))
+            and event.message_type == MessageType.VOICE and text_content and not media_files
+            and not self._streaming_tts_turn_completed(session_key, generation, event=event))
 
     async def _play_tts_file(
         self, event: MessageEvent, text_content: str, tts_path: str, first: bool,
@@ -3399,12 +3397,13 @@ class BasePlatformAdapter(ABC):
                 compute_obligation_id, ledger_enabled, mark_attempting, record_obligation)
             if not await asyncio.to_thread(ledger_enabled):
                 return None
+            source = event.source
             obligation_id = compute_obligation_id(
                 session_key, str(getattr(event, "message_id", "") or ""), text_content)
             await asyncio.to_thread(
                 record_obligation, obligation_id=obligation_id, session_key=session_key,
-                platform=str(getattr(event.source.platform, "value", event.source.platform)),
-                chat_id=event.source.chat_id, thread_id=getattr(event.source, "thread_id", None),
+                platform=str(getattr(source.platform, "value", source.platform)),
+                chat_id=source.chat_id, thread_id=getattr(source, "thread_id", None),
                 content=text_content,
                 adapter_profile=getattr(delivery_adapter, "_owner_profile", None))
             await asyncio.to_thread(mark_attempting, obligation_id)
@@ -3708,10 +3707,10 @@ class BasePlatformAdapter(ABC):
                 self._spawn_drain_task(pending_event, session_key)
                 return  # Drain task owns the session now.
         except asyncio.CancelledError:
-            outcome = (
-                ProcessingOutcome.CANCELLED if asyncio.current_task() in self._expected_cancelled_tasks
-                else ProcessingOutcome.FAILURE)
-            await self._run_processing_hook("on_processing_complete", event, outcome)
+            expected = asyncio.current_task() in self._expected_cancelled_tasks
+            await self._run_processing_hook(
+                "on_processing_complete", event,
+                ProcessingOutcome.CANCELLED if expected else ProcessingOutcome.FAILURE)
             raise
         except BaseException as e:
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
@@ -3774,7 +3773,7 @@ class BasePlatformAdapter(ABC):
             except asyncio.TimeoutError:
                 logger.warning("[%s] %d background task(s) did not exit within 5s; "
                                "releasing tracking and letting them unwind in the background",
-                               self.name, len([t for t in tasks if not t.done()]))
+                               self.name, sum(not t.done() for t in tasks))
                 break
         with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
@@ -3806,14 +3805,13 @@ class BasePlatformAdapter(ABC):
         profile is stamped on ``source.profile`` for per-profile HERMES_HOME isolation."""
         def _opt(value) -> Optional[str]:
             return str(value) if value else None
-        fields = dict(platform=self.platform, chat_id=str(chat_id), chat_name=chat_name,
-                      chat_type=chat_type, user_id=_opt(user_id), user_name=user_name,
-                      thread_id=_opt(thread_id), chat_topic=(chat_topic or "").strip() or None,
-                      user_id_alt=user_id_alt, chat_id_alt=chat_id_alt, is_bot=is_bot,
-                      scope_id=_opt(scope_id), guild_id=_opt(guild_id),
-                      parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
-        profile = None  # from configured routes; None when no match / no routes
-        profile_route_rejected = False
+        fields = dict(
+            platform=self.platform, chat_id=str(chat_id), chat_name=chat_name, chat_type=chat_type,
+            user_id=_opt(user_id), user_name=user_name, thread_id=_opt(thread_id),
+            chat_topic=(chat_topic or "").strip() or None, user_id_alt=user_id_alt,
+            chat_id_alt=chat_id_alt, is_bot=is_bot, scope_id=_opt(scope_id),
+            guild_id=_opt(guild_id), parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
+        profile, profile_route_rejected = None, False  # profile from configured routes, if any
         if self.gateway_runner is not None:
             from gateway.profile_routing import ProfileRouteRejected
             try:
@@ -3823,9 +3821,10 @@ class BasePlatformAdapter(ABC):
             except Exception:
                 logger.warning("Profile resolution failed for %s/%s, defaulting to active profile",
                                self.platform, chat_id, exc_info=True)
-        source = SessionSource(**fields, profile=profile, role_authorized=role_authorized,
-                               auto_thread_created=auto_thread_created,
-                               auto_thread_initial_name=auto_thread_initial_name)
+        source = SessionSource(
+            **fields, profile=profile, role_authorized=role_authorized,
+            auto_thread_created=auto_thread_created,
+            auto_thread_initial_name=auto_thread_initial_name)
         # Transport-only, kept out of to_dict(): the receiving adapter is authoritative this turn
         # even if profile_routes picks another runtime; the reject flag is consumed before auth.
         source._transport_adapter_ref = weakref.ref(self)
