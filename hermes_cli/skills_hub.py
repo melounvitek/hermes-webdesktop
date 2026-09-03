@@ -186,10 +186,8 @@ def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
 # --- Identifier / source resolution ---
 
 def _resolve_short_name(name: str, sources, console: Console) -> str:
-    """Short name (e.g. 'pptx') -> full identifier via search; "" when ambiguous/missing.
-
-    One exact match wins; several -> the single official one, else they are listed.
-    """
+    """Short name -> full identifier via search; "" when ambiguous/missing (one exact match wins,
+    several -> the single official one, else they are listed)."""
     from tools.skills_hub import unified_search
     c = console or _console
     c.print(f"[dim]Resolving '{name}'...[/]")
@@ -263,10 +261,9 @@ def _existing_categories() -> List[str]:
     """Sorted category buckets under ``~/.hermes/skills/`` (children without their own SKILL.md)."""
     from tools.skills_hub import SKILLS_DIR, _category_skill_dirs
     try:
-        return sorted(
-            name for name in set(_category_skill_dirs(SKILLS_DIR))
-            if not (SKILLS_DIR / name / "SKILL.md").exists())
-    except (FileNotFoundError, OSError):
+        return sorted(name for name in set(_category_skill_dirs(SKILLS_DIR))
+                      if not (SKILLS_DIR / name / "SKILL.md").exists())
+    except OSError:  # FileNotFoundError is an OSError
         return []
 
 
@@ -646,11 +643,9 @@ def do_install(identifier: str, category: str = "", force: bool = False,
                console: Optional[Console] = None, skip_confirm: bool = False,
                invalidate_cache: bool = True, name_override: str = "",
                source_id: Optional[str] = None) -> None:
-    """Fetch, quarantine, scan, confirm, and install a skill.
-
-    ``source_id`` pins resolution to one adapter; callers that know the provenance (``do_update``)
-    must pass it so a bare identifier cannot resolve to a same-named skill elsewhere.
-    """
+    """Fetch, quarantine, scan, confirm, and install a skill. ``source_id`` pins resolution to one
+    adapter; callers that know the provenance (``do_update``) must pass it so a bare identifier
+    cannot resolve to a same-named skill elsewhere."""
     from tools.skills_hub import (ensure_hub_dirs, quarantine_bundle, install_from_quarantine,
                                   HubLockFile)
     from tools.skills_guard import should_allow_install
@@ -1077,8 +1072,8 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
             return
         table = _table(("Repo", {"style": "bold cyan"}), "Path", title="Configured Taps")
         for t in taps:
-            label = t.get("repo") or t.get("name") or t.get("path", "unknown")
-            table.add_row(label, t.get("path", "skills/"))
+            table.add_row(t.get("repo") or t.get("name") or t.get("path", "unknown"),
+                          t.get("path", "skills/"))
         c.print(table)
         c.print()
     elif action in _TAP_OPS:
@@ -1229,9 +1224,8 @@ def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> N
     if output_path == "-":
         sys.stdout.write(payload)
         return
-    out = Path(output_path)
-    out.write_text(payload, encoding="utf-8")
-    c.print(f"[bold green]Snapshot exported:[/] {out}")
+    Path(output_path).write_text(payload, encoding="utf-8")
+    c.print(f"[bold green]Snapshot exported:[/] {Path(output_path)}")
     c.print(f"[dim]{len(installed)} skill(s), {len(tap_list)} tap(s)[/]\n")
 
 
@@ -1320,8 +1314,7 @@ _CLI_ACTIONS = {
                                                     skip_confirm=getattr(a, "yes", False)),
     "publish": lambda a: do_publish(a.skill_path, target=getattr(a, "to", "github"),
                                     repo=getattr(a, "repo", "")),
-    "snapshot": lambda a: _snapshot_cli(a),
-    "tap": lambda a: _tap_cli(a)}
+    "snapshot": _snapshot_cli, "tap": _tap_cli}
 
 
 def skills_command(args) -> None:
@@ -1339,13 +1332,8 @@ def skills_command(args) -> None:
 def _opt_value(args: List[str], flag: str, default: str, last: bool = False) -> str:
     """Value following `flag` (default if absent/trailing); `last` makes a repeated flag's final
     occurrence win (historical install/publish/browse behaviour), else the first."""
-    found = default
-    for i, a in enumerate(args):
-        if a == flag and i + 1 < len(args):
-            found = args[i + 1]
-            if not last:
-                break
-    return found
+    hits = [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
+    return (hits[-1] if last else hits[0]) if hits else default
 
 
 def _int_or(text: str, default: int) -> int:

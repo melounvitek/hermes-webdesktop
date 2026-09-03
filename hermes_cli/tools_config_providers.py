@@ -277,7 +277,7 @@ def _configure_tool_category(ts_key: str, cat: dict, config: dict, *, force_fres
         try:
             _nous_logged_in = bool(get_nous_subscription_features(config, force_fresh=force_fresh).nous_auth_present)
         except Exception:
-            _nous_logged_in = False
+            pass
 
     provider_choices = []  # plain text labels only (no ANSI codes in menu items)
     for p in providers:
@@ -349,8 +349,7 @@ def _managed_provider_active(provider: dict, config: dict, managed_feature: str,
     provider must be the row's vendor or ``nous``."""
     from hermes_cli.tools_config import get_nous_subscription_features
 
-    features = get_nous_subscription_features(config, force_fresh=force_fresh)
-    feature = features.features.get(managed_feature)
+    feature = get_nous_subscription_features(config, force_fresh=force_fresh).features.get(managed_feature)
     if feature is None:
         return False
     if managed_feature in ("image_gen", "video_gen"):
@@ -644,8 +643,7 @@ def _configure_stt_model(stt_provider: str, config: dict) -> None:
     model_key = _STT_MODEL_CONFIG_KEY.get(stt_provider, "model")
     current = str(prov_cfg.get(model_key) or "").strip()
     ordered = list(catalog)
-    default_idx = ordered.index(current) if current in ordered else 0
-    chosen = ordered[_prompt_choice("  Select STT model:", ordered, default_idx)]
+    chosen = ordered[_prompt_choice("  Select STT model:", ordered, ordered.index(current) if current in ordered else 0)]
     prov_cfg[model_key] = chosen
     _print_success(f"  STT model set to: {chosen}")
 
@@ -846,9 +844,9 @@ def _prompt_secret(
     if url:
         _print_info(f"  {url_label}: {url}")
     if reconfigure:
-        value = _prompt(f"    {label} (Enter to keep current)", password=not default_val)
-        if value and value.strip():
-            save_env_value(key, value.strip())
+        value = (_prompt(f"    {label} (Enter to keep current)", password=not default_val) or "").strip()
+        if value:
+            save_env_value(key, value)
             _print_success("    Updated")
         else:
             _print_info("    Kept current")
@@ -1002,15 +1000,12 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
         providers = []
 
     if not providers:
-        _print_warning(
-            "  No authenticated providers found. Configure a provider first "
-            "with `hermes model`, then re-run this.")
+        _print_warning("  No authenticated providers found. Configure a provider first "
+                       "with `hermes model`, then re-run this.")
         return
 
     provider_labels = [label for _slug, label, _models in format_aux_picker_entries(
-        providers, current_provider=current_provider, current_base_url=current_base_url)]
-    provider_labels.append("Cancel")
-
+        providers, current_provider=current_provider, current_base_url=current_base_url)] + ["Cancel"]
     pidx = _prompt_choice("  Choose vision provider:", provider_labels, 0)
     if pidx >= len(providers):
         _print_info("  Cancelled")
@@ -1019,8 +1014,7 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
     chosen = providers[pidx]
     slug = chosen.get("slug")
     models = list(chosen.get("models", []))
-    model_choices = list(models) + ["Type a custom model id…"]
-    midx = _prompt_choice(f"  Choose vision model for {chosen.get('name') or slug}:", model_choices, 0)
+    midx = _prompt_choice(f"  Choose vision model for {chosen.get('name') or slug}:", models + ["Type a custom model id…"], 0)
     if midx < len(models):
         model = models[midx]
     else:
