@@ -44,8 +44,7 @@ def _task_data(task_id: str) -> dict:
     code paths (or injected by tests) may lack the newer containers.
     """
     task_data = _read_tracker.setdefault(task_id, {
-        "last_key": None, "consecutive": 0, "read_history": set(),
-    })
+        "last_key": None, "consecutive": 0, "read_history": set()})
     for key in ("dedup", "dedup_hits", "read_timestamps"):
         task_data.setdefault(key, {})
     return task_data
@@ -80,8 +79,7 @@ def _cap_read_tracker_data(task_data: dict) -> None:
         ("dedup", _DEDUP_CAP),
         ("dedup_hits", _DEDUP_CAP),
         ("read_timestamps", _READ_TIMESTAMPS_CAP),
-        ("not_found", _NOT_FOUND_CAP),
-    ):
+        ("not_found", _NOT_FOUND_CAP)):
         container = task_data.get(key)
         if container is not None and len(container) > cap:
             _evict_oldest(container, cap)
@@ -237,8 +235,7 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
         return (
             f"Warning: {filepath} was modified since you last read it "
             "(external edit or concurrent agent). The content you read may be "
-            "stale. Consider re-reading the file to verify before writing."
-        )
+            "stale. Consider re-reading the file to verify before writing.")
     return None
 
 

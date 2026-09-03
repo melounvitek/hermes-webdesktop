@@ -24,10 +24,7 @@ from pathlib import Path
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
 from tools.file_operations import (
-    ShellFileOperations,
-    normalize_read_pagination,
-    normalize_search_pagination,
-)
+    ShellFileOperations, normalize_read_pagination, normalize_search_pagination)
 from tools import file_state
 from agent.redact import redact_sensitive_text
 from tools.file_tools_paths import (  # noqa: F401  (re-exported)
@@ -44,8 +41,7 @@ from tools.file_tools_paths import (  # noqa: F401  (re-exported)
     _resolve_path_for_task,
     _sentinel_free_abs_cwd,
     _terminal_env_type_for_task,
-    _uses_container_paths,
-)
+    _uses_container_paths)
 from tools.file_tools_write_guards import (  # noqa: F401  (re-exported)
     _PROTECTED_INSTRUCTION_BASENAMES,
     _READ_DEDUP_STATUS_MESSAGE,
@@ -64,8 +60,7 @@ from tools.file_tools_write_guards import (  # noqa: F401  (re-exported)
     _looks_like_read_file_line_numbered_content,
     _protected_instruction_config,
     _protected_instruction_reason,
-    _request_protected_instruction_approval,
-)
+    _request_protected_instruction_approval)
 from tools.file_tools_read_tracking import (  # noqa: F401  (re-exported)
     _DEDUP_CAP,
     _NOT_FOUND_CAP,
@@ -88,8 +83,7 @@ from tools.file_tools_read_tracking import (  # noqa: F401  (re-exported)
     _task_data,
     _update_read_timestamp,
     notify_other_tool_call,
-    reset_file_dedup,
-)
+    reset_file_dedup)
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +149,12 @@ def _apply_char_budget(result_dict: dict, content: str, offset: int, total_lines
     result_dict["hint"] = (
         f"Output truncated at the {max_chars:,}-char read budget after "
         f"{lines_kept} line(s) (showing lines {offset}-{next_offset - 1} of "
-        f"{total_lines}). Use offset={next_offset} to continue."
-    )
+        f"{total_lines}). Use offset={next_offset} to continue.")
     if len(trimmed.split("\n", 1)[0]) >= max_chars:
         result_dict["hint"] += (
             " Note: the first line alone exceeded the budget and was "
             "clamped mid-line; its remainder is not retrievable via "
-            "offset."
-        )
+            "offset.")
     return trimmed
 
 
@@ -182,8 +174,7 @@ _BLOCKED_DEVICE_PATHS = frozenset({
 _BLOCKED_PROC_SUFFIXES = (
     "/fd/0", "/fd/1", "/fd/2",  # stdio aliases
     "/environ", "/cmdline", "/maps", "/smaps", "/smaps_rollup", "/numa_maps",
-    "/mem", "/auxv", "/pagemap",
-)
+    "/mem", "/auxv", "/pagemap")
 
 
 def _file_ops_uses_host_paths(file_ops) -> bool:
@@ -330,8 +321,7 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
         _resolve_task_host_cwd,
         _select_image,
         get_session_cwd,
-        resolve_task_overrides,
-    )
+        resolve_task_overrides)
 
     config = _get_env_config()
     env_type = config["env_type"]
@@ -351,8 +341,7 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
             logger.info(
                 "Ignoring host/relative cwd override %r for %s backend "
                 "(won't exist in sandbox). Using %r instead.",
-                cwd, env_type, config["cwd"],
-            )
+                cwd, env_type, config["cwd"])
         cwd = config["cwd"]
     logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
     terminal_env = _create_configured_env(
@@ -376,8 +365,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     from tools.terminal_tool import (
         _active_environments, _env_lock, _last_activity, _start_cleanup_thread,
         _creation_locks, _creation_locks_lock, _resolve_container_task_id,
-        get_session_cwd, record_session_cwd,
-    )
+        get_session_cwd, record_session_cwd)
 
     raw_task_id = task_id or "default"
     task_id = _resolve_container_task_id(raw_task_id)
@@ -441,8 +429,7 @@ _SPECIAL_FILE_KINDS = (
     (stat.S_ISFIFO, "a FIFO (named pipe)"),
     (stat.S_ISSOCK, "a socket"),
     (stat.S_ISCHR, "a character device"),
-    (stat.S_ISBLK, "a block device"),
-)
+    (stat.S_ISBLK, "a block device"))
 
 
 def _special_file_kind(path) -> str | None:
@@ -478,8 +465,7 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         MAX_DOCUMENT_BYTES,
         ExtractionError,
         extract_document_bytes,
-        is_extractable_document,
-    )
+        is_extractable_document)
 
     if not is_extractable_document(str(_resolved)):
         return None
@@ -504,8 +490,7 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
             return tool_error(
                 f"Cannot read '{path}' ({_doc_ext}): document "
                 f"extraction failed — {exc}. Use terminal utilities "
-                "to inspect or convert the file."
-            )
+                "to inspect or convert the file.")
         return None
 
     lines = extracted_text.splitlines()
@@ -517,13 +502,11 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         "total_lines": total_lines,
         "file_size": binary.file_size,
         "truncated": total_lines > end_line,
-        "extracted_document": True,
-    }
+        "extracted_document": True}
     if result_dict["truncated"]:
         result_dict["hint"] = (
             f"Use offset={end_line + 1} to continue reading "
-            f"(showing {offset}-{min(end_line, total_lines)} of {total_lines} lines)"
-        )
+            f"(showing {offset}-{min(end_line, total_lines)} of {total_lines} lines)")
     max_chars = _get_max_read_chars()
     if len(result_dict["content"]) > max_chars:
         _apply_char_budget(result_dict, result_dict["content"], offset, total_lines, max_chars)
@@ -550,8 +533,7 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
             "still current. Proceed with your task using "
             "the information you already have.",
             path=path,
-            already_read=hits + 1,
-        )
+            already_read=hits + 1)
 
     return json.dumps({
         "status": "unchanged",
@@ -614,8 +596,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         if _is_blocked_device(path, base_dir=device_base):
             return tool_error(
                 f"Cannot read '{path}': this is a device file that would "
-                "block or produce infinite output."
-            )
+                "block or produce infinite output.")
 
         _resolved = _resolve_path_for_task(path, task_id)
 
@@ -629,9 +610,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                         f"'{path}' is {kind}, not a regular file — reading "
                         "it would block indefinitely, so no read was "
                         "attempted. Use terminal utilities if you need to "
-                        "interact with it."
-                    ),
-                })
+                        "interact with it.")})
 
         extracted = _read_extracted_document(path, _resolved, offset, limit, task_id)
         if extracted is not None:
@@ -642,8 +621,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         if has_binary_extension(str(_resolved)):
             return tool_error(
                 f"Cannot read binary file '{path}' ({_resolved.suffix.lower()}). "
-                "Use vision_analyze for images, or terminal to inspect binary files."
-            )
+                "Use vision_analyze for images, or terminal to inspect binary files.")
 
         # Hermes internal denylist: blocks prompt injection via catalog/hub
         # metadata and credential stores under HERMES_HOME. Pass the resolved
@@ -692,8 +670,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
         if len(result.content or "") > max_chars:
             result.content = _apply_char_budget(
                 result_dict, result.content or "", offset,
-                result_dict.get("total_lines", "unknown"), max_chars,
-            )
+                result_dict.get("total_lines", "unknown"), max_chars)
         if result.content:
             result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
@@ -703,8 +680,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             result_dict.setdefault("_hint", (
                 f"This file is large ({file_size:,} bytes). "
                 "Consider reading only the section you need with offset and limit "
-                "to keep context usage efficient."
-            ))
+                "to keep context usage efficient."))
 
         count = _record_successful_read(task_data, task_id, path, resolved_str, offset, limit,
                                         dedup_key, partial=(offset > 1) or bool(result_dict.get("truncated")))
@@ -714,14 +690,12 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
                 "The content has NOT changed. You already have this information. "
                 "STOP re-reading and proceed with your task.",
                 path=path,
-                already_read=count,
-            )
+                already_read=count)
         if count >= 3:
             result_dict["_warning"] = (
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
-                "If you are stuck in a loop, stop reading and proceed with writing or responding."
-            )
+                "If you are stuck in a loop, stop reading and proceed with writing or responding.")
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -764,8 +738,7 @@ def _write_precheck_error(paths: list[str], content_paths: list[str], task_id: s
     return _first_error(
         *(lambda p=p: _check_binary_document_write(p, task_id) for p in content_paths),
         lambda: _check_protected_instruction_write(paths, task_id),
-        lambda: _check_approval_required_write(paths, task_id),
-    )
+        lambda: _check_approval_required_write(paths, task_id))
 
 
 def _edit_warnings(paths: list[str], path_to_resolved: dict, task_id: str) -> list[str]:
@@ -813,8 +786,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             "Refusing to write internal read_file display text as file content. "
             "Strip read_file line-number prefixes or reconstruct the intended "
             "file contents before writing."
-        ) if _is_internal_file_tool_content(content) else None,
-    )
+        ) if _is_internal_file_tool_content(content) else None)
     if err:
         return tool_error(err)
     try:
@@ -873,8 +845,7 @@ def _collect_v4a_header_paths(patch: str) -> tuple[list[str], list[str]] | str:
                 f"V4A patch header contains '..' traversal: {v4a_path!r}. "
                 "Use the agent's cwd-relative path (no '..') or an absolute "
                 "path in '*** Update File:' / '*** Add File:' / "
-                "'*** Delete File:' / '*** Move File:' headers."
-            )
+                "'*** Delete File:' / '*** Move File:' headers.")
         paths.append(v4a_path)
         if writes_text:
             content_paths.append(v4a_path)
@@ -958,13 +929,11 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                     "content, (2) use a longer / more unique old_string with "
                     "surrounding context lines, or (3) use write_file to "
                     "replace the entire file if the targeted region is hard "
-                    "to anchor."
-                )
+                    "to anchor.")
             elif "Did you mean one of these sections?" not in str(result_dict["error"]):
                 result_dict["_hint"] = (
                     "old_string not found. Use read_file to verify the current "
-                    "content, or search_files to locate the text."
-                )
+                    "content, or search_files to locate the text.")
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -983,8 +952,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         search_key = ("search", pattern, target, str(path), file_glob or "", limit, offset)
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
-                "last_key": None, "consecutive": 0, "read_history": set(),
-            })
+                "last_key": None, "consecutive": 0, "read_history": set()})
             count = _bump_consecutive(task_data, search_key)
 
         if count >= 4:
@@ -993,8 +961,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 "The results have NOT changed. You already have this information. "
                 "STOP re-searching and proceed with your task.",
                 pattern=pattern,
-                already_searched=count,
-            )
+                already_searched=count)
 
         try:
             resolved_search_path = str(_resolve_path_for_task(path, task_id))
@@ -1016,8 +983,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
 
         result = _get_file_ops(task_id).search(
             pattern=pattern, path=path, target=target, file_glob=file_glob,
-            limit=limit, offset=offset, output_mode=output_mode, context=context
-        )
+            limit=limit, offset=offset, output_mode=output_mode, context=context)
         omitted = _filter_read_blocked_search_results(result, task_id)
         for m in getattr(result, "matches", None) or ():
             if getattr(m, "content", None):
@@ -1027,8 +993,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if omitted:
             result_dict["_omitted"] = (
                 f"{omitted} result(s) omitted because they target credential, "
-                "token, cache, or secret-bearing environment files."
-            )
+                "token, cache, or secret-bearing environment files.")
 
         # No early return on a cached miss — same rationale as the read path.
         _search_err = result_dict.get("error") or ""
@@ -1038,8 +1003,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if count >= 3:
             result_dict["_warning"] = (
                 f"You have run this exact search {count} times consecutively. "
-                "The results have not changed. Use the information you already have."
-            )
+                "The results have not changed. Use the information you already have.")
 
         result_json = json.dumps(result_dict, ensure_ascii=False)
         if result_dict.get("truncated"):

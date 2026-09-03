@@ -139,16 +139,14 @@ class FileStateRegistry:
                         f"{resolved} was modified by sibling subagent "
                         f"{writer_tid!r} but this agent never read it. "
                         "Read the file before writing to avoid overwriting "
-                        "the sibling's changes."
-                    )
+                        "the sibling's changes.")
                 read_ts = stamp[1]
                 if writer_ts > read_ts:
                     return (
                         f"{resolved} was modified by sibling subagent "
                         f"{writer_tid!r} at {_fmt_ts(writer_ts)} — after "
                         f"this agent's last read at {_fmt_ts(read_ts)}. "
-                        "Re-read the file before writing."
-                    )
+                        "Re-read the file before writing.")
 
         if stamp is not None:
             read_mtime, _read_ts, partial = stamp
@@ -156,20 +154,17 @@ class FileStateRegistry:
                 return (
                     f"{resolved} was modified since you last read it "
                     "on disk (external edit or unrecorded writer). "
-                    "Re-read the file before writing."
-                )
+                    "Re-read the file before writing.")
             if partial:
                 return (
                     f"{resolved} was last read with offset/limit pagination "
                     "(partial view). Re-read the whole file before "
-                    "overwriting it."
-                )
+                    "overwriting it.")
             return None
 
         return (
             f"{resolved} was not read by this agent. "
-            "Read the file first so you can write an informed edit."
-        )
+            "Read the file first so you can write an informed edit.")
 
     def writes_since(self, exclude_task_id: str, since_ts: float,
                      paths: Iterable[str]) -> Dict[str, List[str]]:
@@ -242,5 +237,4 @@ __all__ = [
     "check_stale",
     "lock_path",
     "writes_since",
-    "known_reads",
-]
+    "known_reads"]

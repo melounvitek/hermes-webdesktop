@@ -21,8 +21,7 @@ from tools.file_tools_paths import _expand_tilde, _resolve_path_for_task
 _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
     "/private/etc/",
-    "/private/var/db/", "/private/var/root/",
-)
+    "/private/var/db/", "/private/var/root/")
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 _hermes_config_resolved: str | None = None
@@ -77,8 +76,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     if any(c.startswith(_SENSITIVE_PATH_PREFIXES) or c in _SENSITIVE_EXACT_PATHS for c in candidates):
         return (
             f"Refusing to write to sensitive system path: {filepath}\n"
-            "Use the terminal tool with sudo if you need to modify system files."
-        )
+            "Use the terminal tool with sudo if you need to modify system files.")
     # approvals.mode and other security settings live in config.yaml; a
     # prompt-injected agent could silently disable exec approval by editing it.
     hermes_config = _get_hermes_config_resolved()
@@ -86,8 +84,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         return (
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
-            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
-        )
+            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead.")
     return None
 
 
@@ -100,8 +97,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 # human approval — even under --yolo — and fail closed without a human channel.
 # Basenames match in ANY directory and case-insensitively (loaders probe variants).
 _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
-    "agents.md", "claude.md", "soul.md", ".cursorrules",
-})
+    "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
 
 def _protected_instruction_config() -> tuple[bool, list[str]]:
@@ -182,15 +178,13 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
     description = (
         f"Write to protected agent-instruction file(s): {targets}. "
         "These files steer future agent behavior; approval is always "
-        "required (not bypassed by auto-approve)."
-    )
+        "required (not bypassed by auto-approve).")
     display = f"<write to {targets}>"
     blocked = (
         f"BLOCKED: write to protected agent-instruction file(s) ({targets}) "
         "{why} The user has NOT consented to this write. Do NOT retry it or "
         "attempt the same edit via another path (terminal, execute_code, "
-        "etc.)."
-    )
+        "etc.).")
     timed_out = blocked.format(why="approval prompt timed out without a user response. Silence is not consent.")
     denied = blocked.format(why="was denied by the user.")
 
@@ -215,8 +209,7 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
             "pattern_keys": ["protected_instruction_file"],
             "description": description,
             "allow_permanent": False,
-            "allow_session": False,
-        }
+            "allow_session": False}
         decision = _approval._await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
         if decision.get("notify_failed"):
             return blocked.format(why="requires approval but the approval request could not be delivered.")
@@ -282,13 +275,11 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default") -
     description = (
         f"Write to SSH client config file(s): {display_targets}. "
         "The SSH config can carry ProxyCommand / Match exec directives that "
-        "run commands, so writes require your approval."
-    )
+        "run commands, so writes require your approval.")
     blocked = (
         f"BLOCKED: write to SSH config file(s) ({display_targets}) "
         "{why} Do NOT retry it via another path (terminal, execute_code) "
-        "without the user's explicit consent."
-    )
+        "without the user's explicit consent.")
 
     try:
         import tools.approval as _approval
@@ -307,8 +298,7 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default") -
                 "approve in config.yaml."),
         autoapprove_log_prefix="ssh_config_write",
         fail_closed_when_no_human=True,
-        no_human_block_message=blocked.format(why=_NO_HUMAN),
-    )
+        no_human_block_message=blocked.format(why=_NO_HUMAN))
     if result.get("approved"):
         return None
     return result.get("message") or blocked.format(why="was denied.")
@@ -318,8 +308,7 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
     """Return the container-side Hermes mirror prefix for persistent Docker file tools."""
     try:
         from tools.terminal_tool import (
-            _active_environments, _env_lock, _get_env_config, _resolve_container_task_id,
-        )
+            _active_environments, _env_lock, _get_env_config, _resolve_container_task_id)
         container_key = _resolve_container_task_id(task_id)
         with _env_lock:
             env = _active_environments.get(container_key) or _active_environments.get(task_id)
@@ -372,8 +361,7 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
             "corrupt the file (read_file showed you EXTRACTED text, not the real "
             "bytes). Use the docx/xlsx/powerpoint skills or a library like "
             "python-docx/openpyxl/python-pptx via the terminal to create or edit "
-            "this document."
-        )
+            "this document.")
     if is_pdf_path(filepath):
         try:
             resolved = Path(_resolve_path_for_task(filepath, task_id))
@@ -386,8 +374,7 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
                     "read_file showed you EXTRACTED text, not the real bytes — writing "
                     "text back would destroy the document. Use the pdf skill or a PDF "
                     "library via the terminal to modify it. (Creating a NEW .pdf file "
-                    "is allowed.)"
-                )
+                    "is allowed.)")
         except OSError:
             pass
     return None
@@ -399,8 +386,7 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
 _READ_DEDUP_STATUS_MESSAGE = (
     "File unchanged since last read. The content from "
     "the earlier read_file result in this conversation is "
-    "still current — refer to that instead of re-reading."
-)
+    "still current — refer to that instead of re-reading.")
 
 
 def _is_internal_file_status_text(content: str) -> bool:

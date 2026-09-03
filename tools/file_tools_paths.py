@@ -47,8 +47,7 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
     """Best-effort terminal backend type for path-resolution decisions."""
     try:
         from tools.terminal_tool import (
-            _active_environments, _env_lock, _get_env_config, _resolve_container_task_id,
-        )
+            _active_environments, _env_lock, _get_env_config, _resolve_container_task_id)
 
         try:
             container_key = _resolve_container_task_id(task_id)
@@ -147,10 +146,7 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
 
 
 def _resolve_base_dir(
-    task_id: str = "default",
-    *,
-    container_paths: bool | None = None,
-) -> Path | PurePosixPath:
+    task_id: str = "default", *, container_paths: bool | None = None) -> Path | PurePosixPath:
     """Return the ABSOLUTE base directory for resolving relative paths.
 
     Uses ``_authoritative_workspace_root`` (live cwd → registered override →
@@ -249,7 +245,6 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
             f"OUTSIDE the active workspace ({str(root)!r}). The edit will land in "
             f"a different directory than the terminal's cwd. If this is not "
             f"intended (e.g. a git-worktree session writing into the main "
-            f"checkout), pass an absolute path under the workspace instead."
-        )
+            f"checkout), pass an absolute path under the workspace instead.")
     except Exception:
         return None
