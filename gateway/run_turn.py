@@ -47,15 +47,6 @@ logger = logging.getLogger("gateway.run")
 class GatewayTurnMixin:
     """Agent-turn execution (_handle_message_with_agent, _run_agent*, proxy path, background tasks, MCP reload) for GatewayRunner."""
 
-    _SESSION_OVERRIDE_RUNTIME_KEYS = (
-        "provider", "requested_provider", "api_key", "base_url", "api_mode",
-        "max_tokens", "credential_pool", "request_overrides",
-    )
-    _TURN_RUNTIME_KEYS = (
-        "api_key", "base_url", "provider", "requested_provider", "api_mode", "command",
-        "credential_pool", "max_tokens",
-    )
-
     def _resolve_session_agent_runtime(
         self,
         *,
@@ -84,8 +75,13 @@ class GatewayTurnMixin:
         override = _override_state.conversation.model_override if _override_state else None
         if override:
             override_model = override.get("model", model)
-            override_runtime = {k: override.get(k) for k in self._SESSION_OVERRIDE_RUNTIME_KEYS}
-            override_runtime["capabilities"] = dict(override.get("capabilities") or {})
+            override_runtime = {
+                k: override.get(k) for k in (
+                    "provider", "requested_provider", "api_key", "base_url", "api_mode",
+                    "max_tokens", "credential_pool", "request_overrides", "capabilities",
+                )
+            }
+            override_runtime["capabilities"] = dict(override_runtime["capabilities"] or {})
             if override_runtime.get("api_key"):
                 if override_runtime.get("credential_pool") is None:
                     override_runtime["credential_pool"] = _credential_pool_for_provider(
@@ -190,9 +186,15 @@ class GatewayTurnMixin:
         from gateway.run import _deep_merge_request_overrides
         from hermes_cli.models import resolve_fast_mode_overrides
 
-        runtime = {k: runtime_kwargs.get(k) for k in self._TURN_RUNTIME_KEYS}
-        runtime["args"] = list(runtime_kwargs.get("args") or [])
-        runtime["capabilities"] = dict(runtime_kwargs.get("capabilities") or {})
+        # Tests bind this method onto bare namespaces, so no class-level tables here.
+        runtime = {
+            k: runtime_kwargs.get(k) for k in (
+                "api_key", "base_url", "provider", "requested_provider", "api_mode", "command", "args",
+                "credential_pool", "max_tokens", "capabilities",
+            )
+        }
+        runtime["args"] = list(runtime["args"] or [])
+        runtime["capabilities"] = dict(runtime["capabilities"] or {})
         base_request_overrides = dict(runtime_kwargs.get("request_overrides") or {})
         route = {
             "model": model,
@@ -1221,15 +1223,15 @@ class GatewayTurnMixin:
         return _hyg_agent, _hyg_session_db
 
     async def _hmwa_hygiene_detached_attempt(
-        self, hs, plan, history, _hyg_msgs, _hyg_model, _hyg_runtime, _hyg_meta,
+        self, attempt, hs, plan, history, _hyg_msgs, _hyg_model, _hyg_runtime,
         source, session_entry, session_key, _quick_key, run_generation,
     ):
-        """Run one detached hygiene compression attempt end to end. Returns the transcript to
-        continue with (compressed or original)."""
+        """Run one detached hygiene compression attempt end to end; publishes the transcript to
+        continue with (compressed or original) on ``attempt.history``."""
         from gateway.run import HygieneTurnHoldExceeded
         from agent.conversation_compression import CompressionCommitFence
         _hyg_agent, _hyg_session_db = await self._hmwa_hygiene_build_agent(_hyg_model, _hyg_runtime, session_entry)
-        attempt = self._HygieneAttempt(agent=_hyg_agent, meta=_hyg_meta, history=history)
+        attempt.agent = _hyg_agent
         try:
             # Hygiene runs before the turn and owns the session binding, so prefer in-place
             # compaction: archive old rows under the same session id rather than minting a
@@ -1286,7 +1288,6 @@ class GatewayTurnMixin:
             self._evict_cached_agent(session_key)
             if not attempt.cleanup_deferred:
                 await self._cleanup_agent_resources_off_loop(_hyg_agent, context="session hygiene")
-        return attempt.history
 
     async def _hmwa_run_session_hygiene(
         self, event, source, session_entry, session_key, history, _quick_key, run_generation,
@@ -1305,7 +1306,11 @@ class GatewayTurnMixin:
         if not plan.needs_compress:
             return history
 
-        _hyg_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+        attempt = self._HygieneAttempt(
+            agent=None,
+            meta=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+            history=history,
+        )
         try:
             _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
                 source=source,
@@ -1322,8 +1327,8 @@ class GatewayTurnMixin:
                 # of context and short histories tripped the protect-first/last early-return.
                 _hyg_msgs = [m for m in history if m.get("role") in {"user", "assistant", "tool"}]
                 if len(_hyg_msgs) >= 4:
-                    history = await self._hmwa_hygiene_detached_attempt(
-                        hs, plan, history, _hyg_msgs, _hyg_model, _hyg_runtime, _hyg_meta,
+                    await self._hmwa_hygiene_detached_attempt(
+                        attempt, hs, plan, history, _hyg_msgs, _hyg_model, _hyg_runtime,
                         source, session_entry, session_key, _quick_key, run_generation,
                     )
         except HygieneTurnHoldExceeded:
@@ -1332,7 +1337,7 @@ class GatewayTurnMixin:
             pass
         except Exception as e:
             logger.warning("Session hygiene auto-compress failed: %s", e)
-        return history
+        return attempt.history
 
     async def _hmwa_first_contact_notes(self, source, history, turn_sidecar_notes):
         """First-ever-message onboarding note + one-time 'no home channel' prompt (both only when
