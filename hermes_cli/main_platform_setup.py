@@ -1,10 +1,8 @@
 """Interactive messaging-platform setup wizards: WhatsApp (bridge + Cloud API), Slack manifest,
 Skill Sync.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching). Names that stay in main are
-imported lazily inside the functions that use them (call-time resolution keeps
-``hermes_cli.main.<name>`` patches effective and avoids an import cycle).
+Split out of ``hermes_cli/main.py``, which re-imports every name (``hermes_cli.main.<name>`` keeps
+resolving and monkeypatching). Names that stay in main are imported lazily at call time.
 """
 
 import contextlib
@@ -137,11 +135,10 @@ def cmd_whatsapp(args):
     if wa_mode is None:
         return
 
-    # WHATSAPP_ENABLED=true is deliberately NOT written here. An aborted wizard (Ctrl+C,
-    # failed npm install, missed QR scan) would otherwise leave .env claiming WhatsApp is
-    # ready with no creds.json, and every `hermes gateway` would pay a 30s bridge-bootstrap
-    # timeout and queue WhatsApp for indefinite retries. It is set only after pairing
-    # succeeds; prior successful pairings stay enabled.
+    # WHATSAPP_ENABLED=true is deliberately NOT written here: an aborted wizard (Ctrl+C, failed npm
+    # install, missed QR scan) would leave .env claiming WhatsApp is ready with no creds.json, and
+    # every `hermes gateway` would pay a 30s bridge timeout + indefinite retries. Set only after
+    # pairing succeeds; prior successful pairings stay enabled.
     print()
     if (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true":
         print("✓ WhatsApp is already enabled")
@@ -207,11 +204,8 @@ def cmd_whatsapp(args):
 
 
 def cmd_whatsapp_cloud(args):
-    """Set up WhatsApp Business Cloud API (official Meta integration).
-
-    Distinct from ``hermes whatsapp`` (the Baileys bridge wizard) — the two adapters are
-    complementary. See ``hermes_cli/setup_whatsapp_cloud.py``.
-    """
+    """Set up WhatsApp Business Cloud API (official Meta integration) — complementary to the
+    ``hermes whatsapp`` Baileys bridge wizard. See ``hermes_cli/setup_whatsapp_cloud.py``."""
     from hermes_cli.main import _require_tty
     _require_tty("whatsapp-cloud")
     from hermes_cli.setup_whatsapp_cloud import run_whatsapp_cloud_setup

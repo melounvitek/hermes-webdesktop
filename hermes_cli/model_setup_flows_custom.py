@@ -72,11 +72,8 @@ def _pick_detected_model(detected_models: list) -> str:
 
 
 def _model_flow_custom(config):
-    """Custom endpoint: collect URL, API key, and model name.
-
-    Also saves the endpoint to ``custom_providers`` in config.yaml so it appears
-    in the provider menu on subsequent runs.
-    """
+    """Custom endpoint: collect URL, API key, and model name; also saved to ``custom_providers`` so
+    it appears in the provider menu on subsequent runs."""
     from hermes_cli.main import _auto_provider_name, _prompt_custom_api_mode_selection, _save_custom_provider
     from hermes_cli.auth import _save_model_choice, deactivate_provider
     from hermes_cli.config import custom_endpoint_key_env, get_env_value, save_env_value
@@ -286,12 +283,9 @@ def _pick_named_custom_model(name: str, models: list, saved_model: str):
 
 
 def _model_flow_named_custom(config, provider_info):
-    """Handle a named custom provider from config.yaml custom_providers list.
-
-    Probes the endpoint's model catalog (native ``/api/tags`` for endpoints
-    conservatively identified as Ollama); a previously saved model is pre-selected
-    and used as the fallback when probing fails.
-    """
+    """Named custom provider from ``custom_providers`` / ``providers.<key>``: probes the model
+    catalog (native ``/api/tags`` for endpoints conservatively identified as Ollama); a previously
+    saved model is pre-selected and is the fallback when probing fails."""
     from hermes_cli.main import _custom_provider_api_key_config_value, _custom_provider_base_url_config_value, _save_custom_provider
     from hermes_cli.auth import _save_model_choice
     from hermes_cli.config import load_config, save_config

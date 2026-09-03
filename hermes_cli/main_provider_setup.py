@@ -1,10 +1,8 @@
 """Provider setup wizard helpers: provider picker, custom-provider save/remove, auxiliary-model
 routing menu, API-key/reasoning prompts, Anthropic OAuth.
 
-Split out of ``hermes_cli/main.py``; every moved name is re-imported there, so
-``hermes_cli.main.<name>`` keeps resolving (and monkeypatching). Names that stay in main are
-imported lazily inside the functions that use them (call-time resolution keeps
-``hermes_cli.main.<name>`` patches effective and avoids an import cycle).
+Split out of ``hermes_cli/main.py``, which re-imports every name (``hermes_cli.main.<name>`` keeps
+resolving and monkeypatching). Names that stay in main are imported lazily at call time.
 """
 
 import contextlib
@@ -37,11 +35,8 @@ def _short_url(url: str) -> str:
 
 
 def _clear_stale_openai_base_url():
-    """Remove OPENAI_BASE_URL from ~/.hermes/.env unless the active provider is 'custom'.
-
-    A leftover OPENAI_BASE_URL after a provider switch routes provider:auto auxiliary
-    clients (compression, vision, delegation) to the old custom endpoint.
-    """
+    """Remove OPENAI_BASE_URL from ~/.hermes/.env unless the active provider is 'custom' — a
+    leftover value routes provider:auto auxiliary clients to the old custom endpoint."""
     from hermes_cli.config import get_env_value, save_env_value, load_config
     model_cfg = load_config().get("model", {})
     provider = (model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
@@ -136,9 +131,8 @@ def _aux_task_display_name(task: str) -> str:
 
 def _save_aux_choice(task: str, *, provider: str, model: str = "", base_url: str = "",
                      api_key: str = "") -> None:
-    """Persist an aux task's four routing fields to config.yaml (timeout etc. untouched; the main
-    model config never modified). ``delegation`` writes the top-level section, with "auto"
-    stored as an empty provider."""
+    """Persist an aux task's four routing fields (timeout etc. untouched; main model config never
+    modified). ``delegation`` writes the top-level section, with "auto" stored as an empty provider."""
     from hermes_cli.config import load_config, save_config
     cfg = load_config()
     if task == _DELEGATION_TASK_KEY:
@@ -224,11 +218,8 @@ def _aux_config_menu() -> None:
 
 
 def _aux_select_for_task(task: str) -> None:
-    """Pick a provider + model for one aux task and persist it.
-
-    Rows come from ``build_aux_picker_rows()`` (the shared aux-picker substrate), so only
-    already-configured providers appear; new ones are set up via ``hermes model`` first.
-    """
+    """Pick a provider + model for one aux task and persist it. Rows come from
+    ``build_aux_picker_rows()`` (shared substrate): only already-configured providers appear."""
     from hermes_cli.main import _prompt_provider_choice
     from hermes_cli.config import load_config
     from hermes_cli.inventory import build_aux_picker_rows, format_aux_picker_entries
@@ -445,13 +436,9 @@ def _custom_provider_base_url_config_value(provider_info, resolved_base_url=""):
 
 def _save_custom_provider(base_url, api_key="", model="", context_length=None, name=None, api_mode=None,
                           key_env=""):
-    """Save a custom endpoint to ``custom_providers`` in config.yaml.
-
-    Deduplicates by base_url: an existing entry gets its model / context_length / api_mode
-    updated instead of a duplicate. *name* defaults to ``_auto_provider_name``. When *key_env*
-    is set the caller already wrote the key to ``.env``, so the entry references it instead
-    of inlining the secret.
-    """
+    """Save a custom endpoint to ``custom_providers`` in config.yaml, deduplicated by base_url (an
+    existing entry gets model / context_length / api_mode updated). *key_env* set means the caller
+    already wrote the key to ``.env``; the entry references it instead of inlining the secret."""
     from hermes_cli.config import load_config, save_config
     cfg = load_config()
     providers = cfg.get("custom_providers") or []
@@ -459,33 +446,34 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
         providers = []
 
     for entry in providers:
-        if isinstance(entry, dict) and entry.get("base_url", "").rstrip("/") == base_url.rstrip("/"):
-            changed = False
-            if model and entry.get("model") != model:
-                entry["model"] = model
+        if not (isinstance(entry, dict) and entry.get("base_url", "").rstrip("/") == base_url.rstrip("/")):
+            continue
+        changed = False
+        if model and entry.get("model") != model:
+            entry["model"] = model
+            changed = True
+        if model and context_length:
+            models_cfg = entry.get("models", {})
+            if not isinstance(models_cfg, dict):
+                models_cfg = {}
+            models_cfg[model] = {"context_length": context_length}
+            entry["models"] = models_cfg
+            changed = True
+        if api_mode:
+            if entry.get("api_mode") != api_mode:
+                entry["api_mode"] = api_mode
                 changed = True
-            if model and context_length:
-                models_cfg = entry.get("models", {})
-                if not isinstance(models_cfg, dict):
-                    models_cfg = {}
-                models_cfg[model] = {"context_length": context_length}
-                entry["models"] = models_cfg
-                changed = True
-            if api_mode:
-                if entry.get("api_mode") != api_mode:
-                    entry["api_mode"] = api_mode
-                    changed = True
-            elif "api_mode" in entry:
-                entry.pop("api_mode", None)
-                changed = True
-            if key_env and (entry.get("key_env") != key_env or entry.get("api_key")):
-                entry["key_env"] = key_env
-                entry.pop("api_key", None)
-                changed = True
-            if changed:
-                cfg["custom_providers"] = providers
-                save_config(cfg)
-            return  # already saved, updated if needed
+        elif "api_mode" in entry:
+            entry.pop("api_mode", None)
+            changed = True
+        if key_env and (entry.get("key_env") != key_env or entry.get("api_key")):
+            entry["key_env"] = key_env
+            entry.pop("api_key", None)
+            changed = True
+        if changed:
+            cfg["custom_providers"] = providers
+            save_config(cfg)
+        return  # already saved, updated if needed
 
     if not name:
         name = _auto_provider_name(base_url)
@@ -592,12 +580,9 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
 
 
 def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "", existing_source: str = "") -> tuple:
-    """Shared API-key entry point for ``hermes setup`` / ``hermes model``.
-
-    First-time entry, or [K]eep / [R]eplace / [C]lear when a key is already present (so a
-    malformed paste is recoverable without editing ``~/.hermes/.env``). Returns
-    ``(resolved_key, abort)``; ``abort=True`` means the caller should ``return`` immediately.
-    """
+    """API-key entry for ``hermes setup`` / ``hermes model``: first-time entry, or [K]eep / [R]eplace /
+    [C]lear when a key exists (a malformed paste is recoverable without editing ``.env``).
+    Returns ``(resolved_key, abort)``; ``abort=True`` means the caller must ``return`` at once."""
     from hermes_cli.auth import LMSTUDIO_NOAUTH_PLACEHOLDER
     from hermes_cli.config import save_env_value
     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
@@ -758,17 +743,12 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
         model = str(raw_entry.get("model", "") or raw_entry.get("default_model", "") or "").strip()
         # Index by every identity the loaded (expanded) config might present: (name),
         # (name, model), (provider_key), (provider_key, model); case-insensitive names.
-        identities = []
-        if name:
-            identities.extend(((name.lower(),), (name.lower(), model)))
-        if provider_key:
-            identities.extend(((provider_key.lower(),), (provider_key.lower(), model)))
-        if "${" in template:
-            for identity in identities:
-                raw_api_key_refs.setdefault(identity, template)
-        if "${" in base_template:
-            for identity in identities:
-                raw_base_url_refs.setdefault(identity, base_template)
+        keys = [k.lower() for k in (name, provider_key) if k]
+        identities = [(k,) for k in keys] + [(k, model) for k in keys]
+        for refs, tmpl in ((raw_api_key_refs, template), (raw_base_url_refs, base_template)):
+            if "${" in tmpl:
+                for identity in identities:
+                    refs.setdefault(identity, tmpl)
 
     def _lookup_ref(refs: dict[tuple, str], name: str, provider_key: str, model: str) -> str:
         name_lc = str(name or "").strip().lower()
@@ -808,14 +788,10 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
 
 def _build_provider_picker_rows(config: dict, active: str, provider_labels: dict[str, str],
                                 custom_provider_map: dict[str, dict[str, str]]) -> tuple[list[tuple[str, str, list[str]]], int]:
-    """Rows for the ``hermes model`` provider picker plus the pre-selected index.
-
-    Canonical providers fold into display groups (PROVIDER_GROUPS in hermes_cli/models.py):
-    a multi-member group is one row whose ``members`` drive a sub-picker; leaf rows have
-    ``members == []``. Saved custom providers and the trailing actions stay flat. Honors
-    ``model_catalog.excluded_providers`` (slug or alias, case-insensitive) like the
-    gateway/TUI pickers.
-    """
+    """Rows for the ``hermes model`` provider picker plus the pre-selected index. Canonical providers
+    fold into display groups (PROVIDER_GROUPS): a group row's ``members`` drive a sub-picker, leaf
+    rows have ``members == []``; saved custom providers and trailing actions stay flat. Honors
+    ``model_catalog.excluded_providers`` (slug or alias, case-insensitive) like the gateway/TUI."""
     from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_ALIASES, group_providers, provider_group_for_slug
     canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
     _cli_excluded = {

@@ -146,15 +146,11 @@ def _azure_detect_transport(effective_url: str, effective_key: str, token_provid
 
 
 def _model_flow_azure_foundry(config, current_model=""):
-    """Azure Foundry provider: configure endpoint, auth mode, API mode, and model.
-
-    Two transports (OpenAI-style ``/v1/chat/completions``, Anthropic-style ``/v1/messages``)
-    and two auth modes: **API key** (``AZURE_FOUNDRY_API_KEY``) or **Microsoft Entra ID**
-    (keyless RBAC via ``azure-identity``; the same ``Azure AI User`` role covers both
-    transports). Detection order: ``/anthropic`` URL suffix → Anthropic; ``GET <base>/models``
-    success → OpenAI-style + model picker; Anthropic Messages probe; manual entry. Context
-    length resolves via :func:`agent.model_metadata.get_model_context_length`.
-    """
+    """Azure Foundry: endpoint, auth mode, API mode, model. Two transports (OpenAI-style
+    ``/v1/chat/completions``, Anthropic-style ``/v1/messages``) and two auth modes: API key
+    (``AZURE_FOUNDRY_API_KEY``) or Microsoft Entra ID (keyless RBAC via ``azure-identity``; the
+    ``Azure AI User`` role covers both transports). Detection: ``/anthropic`` URL suffix → Anthropic;
+    ``GET <base>/models`` → OpenAI-style + picker; Anthropic Messages probe; manual entry."""
     from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli import azure_detect
 
@@ -176,8 +172,7 @@ def _model_flow_azure_foundry(config, current_model=""):
 
     # Step 1: endpoint URL
     _placeholder = cur.base_url or (
-        "e.g. https://<resource>.openai.azure.com/openai/v1 or https://<resource>.services.ai.azure.com/anthropic"
-    )
+        "e.g. https://<resource>.openai.azure.com/openai/v1 or https://<resource>.services.ai.azure.com/anthropic")
     base_url = _ask(f"API endpoint URL [{_placeholder}]: ")
     if base_url is None:
         return

@@ -1,12 +1,9 @@
-"""Shared skeleton for the ``_model_flow_*`` wizards in :mod:`hermes_cli.model_setup_flows`.
+"""Shared skeleton for the ``_model_flow_*`` wizards: banner, credentials, model list, picker,
+persist, confirmation — one copy of each step. Prompt strings and the config keys written (and
+their insertion order = config.yaml key order) are behavior; keep them byte-identical.
 
-Every wizard is the same shape — banner, credentials, model list, picker, persist,
-confirmation — and these helpers hold the one copy of each step. Prompt strings and the
-config keys written (and their insertion order, which is the config.yaml key order) are
-behavior; keep them byte-identical when editing.
-
-All hermes_cli.main / auth / config imports are lazy on purpose: main.py re-imports the
-flows (import cycle) and tests patch ``hermes_cli.config.load_config`` etc. at call time.
+hermes_cli.main / auth / config imports are lazy on purpose: main.py re-imports the flows (import
+cycle) and tests patch ``hermes_cli.config.load_config`` etc. at call time.
 """
 
 from __future__ import annotations
@@ -218,12 +215,9 @@ def _show_curated(model_list) -> None:
 
 
 def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_name: str = "") -> None:
-    """Drop stale ``model_config`` credentials from inactive custom pools.
-
-    ``model_config`` means "the credential currently stored under ``model.api_key``".
-    After an explicit custom-endpoint switch, any old custom pool still carrying that
-    source points at the previous endpoint and could be selected before the fresh config.
-    """
+    """Drop stale ``model_config`` ("the credential under ``model.api_key``") entries from inactive
+    custom pools: after an explicit custom-endpoint switch an old pool still carrying that source
+    points at the previous endpoint and could be selected before the fresh config."""
     try:
         from agent.credential_pool import CUSTOM_POOL_PREFIX, custom_provider_pool_key_candidates
         from hermes_cli.auth import read_credential_pool, write_credential_pool

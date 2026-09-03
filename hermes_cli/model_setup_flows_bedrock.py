@@ -28,11 +28,9 @@ def bedrock_region_geo_prefix(region_name: str) -> str:
 
 
 def bedrock_model_routable_from_region(model_id: str, region_name: str) -> bool:
-    """True when *model_id* can be invoked from *region_name*'s endpoint.
-
-    Bare foundation-model ids and ``global.*`` profiles route from anywhere;
-    geo-prefixed profiles only from their own geography. Unknown regions hide nothing.
-    """
+    """True when *model_id* can be invoked from *region_name*'s endpoint: bare foundation-model ids
+    and ``global.*`` profiles route from anywhere, geo-prefixed profiles only from their own
+    geography. Unknown regions hide nothing."""
     mid = (model_id or "").lower()
     matched_geo = next((p for p in BEDROCK_GEO_PREFIXES if mid.startswith(p)), None)
     if matched_geo is None or mid.startswith("global."):
@@ -47,11 +45,8 @@ def bedrock_model_routable_from_region(model_id: str, region_name: str) -> bool:
 
 
 def _model_flow_bedrock_api_key(config, region, current_model=""):
-    """Bedrock API Key mode — uses the OpenAI-compatible bedrock-mantle endpoint.
-
-    For developers without an AWS account who received a Bedrock API Key from
-    their AWS admin. Works like any OpenAI-compatible endpoint.
-    """
+    """Bedrock API Key mode on the OpenAI-compatible bedrock-mantle endpoint — for developers
+    without an AWS account who received a Bedrock API Key from their AWS admin."""
     from hermes_cli.auth import _resolve_api_key_provider_secret, ProviderConfig
     from hermes_cli.config import save_env_value
     from hermes_cli.models import _PROVIDER_MODELS
@@ -151,12 +146,8 @@ def _bedrock_text_model_ids(live_models: list, region: str) -> list[str]:
 
 
 def _model_flow_bedrock(config, current_model=""):
-    """AWS Bedrock provider: verify credentials, pick region, discover models.
-
-    Uses the native Converse API via boto3 — not the OpenAI-compatible endpoint.
-    Auth is the AWS SDK default credential chain (env vars, profile, instance
-    role), so no API key prompt is needed.
-    """
+    """AWS Bedrock (native Converse API via boto3): verify credentials, pick region, discover models.
+    Auth is the AWS SDK default credential chain, so no API key prompt is needed."""
     from hermes_cli.models import _PROVIDER_MODELS
 
     # 1. Check for AWS credentials

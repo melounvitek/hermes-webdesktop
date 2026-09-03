@@ -1,11 +1,9 @@
 """Per-provider model-selection wizard flows for ``hermes setup`` / ``hermes model``.
 
-Contract: ``select_provider_and_model`` in main.py re-imports every ``_model_flow_*`` here, so
-tests patching ``hermes_cli.main._model_flow_*`` keep working. main.py-internal helpers
-(``_prompt_api_key``, ``_save_custom_provider``, ...) and config/auth/models functions are
-imported lazily inside function bodies: that avoids the main.py import cycle and lets tests
-patch ``hermes_cli.config.load_config`` etc. at call time. The shared skeleton lives in
-:mod:`hermes_cli.model_setup_flows_common` and is re-exported here.
+main.py re-imports every ``_model_flow_*`` (tests patch ``hermes_cli.main._model_flow_*``). main /
+config / auth / models helpers are imported lazily inside bodies: avoids the main.py import cycle
+and lets tests patch ``hermes_cli.config.load_config`` etc. at call time. The shared skeleton is
+:mod:`hermes_cli.model_setup_flows_common`, re-exported here.
 """
 
 from __future__ import annotations
@@ -102,11 +100,8 @@ def _model_flow_ai_gateway(config, current_model=""):
 
 
 def _model_flow_moa(config, current_model=""):
-    """Mixture of Agents virtual provider: pick a preset, then persist it.
-
-    No credential step — presets reference already-configured providers. The preset list is
-    always shown (even with one entry), then the full breakdown on selection.
-    """
+    """Mixture of Agents virtual provider: pick a preset (list always shown, even with one entry),
+    persist it, print the breakdown. No credential step — presets reference configured providers."""
     from hermes_cli.auth import _save_model_choice
     from hermes_cli.moa_config import normalize_moa_config
     moa = normalize_moa_config(config.get("moa") if isinstance(config, dict) else {})
@@ -171,22 +166,18 @@ def _nous_login_args(args) -> argparse.Namespace:
 
 
 def _nous_model_catalog(free_tier: bool, portal_url: str, model_ids: list, pricing: dict):
-    """Free/paid-tier catalog for the Nous picker.
-
-    Returns ``(model_ids, pricing, unavailable_models, unavailable_message, policy_narrowed)``
-    or None (message already printed) when nothing is selectable.
-    """
+    """Free/paid-tier catalog for the Nous picker: ``(model_ids, pricing, unavailable_models,
+    unavailable_message, policy_narrowed)`` or None (message already printed) when nothing is selectable."""
     from hermes_cli.models import (
         nous_policy_allowed_ids, partition_nous_models_by_tier, restrict_to_nous_policy,
         union_with_portal_free_recommendations, union_with_portal_paid_recommendations)
 
-    # Free users: augment with the Portal's freeRecommendedModels (so newly launched free
-    # models appear before this build's curated list catches up), then partition into
-    # selectable/unavailable by Portal pricing. Paid users: paidRecommendedModels, no partition.
+    # Free users: union with the Portal's freeRecommendedModels (newly launched free models appear
+    # before the curated list catches up), then partition selectable/unavailable by Portal pricing.
+    # Paid users: paidRecommendedModels, no partition. Org policy narrows BEFORE the tier split so a
+    # rescued id still has to pass the free/paid predicate.
     unavailable_models: list[str] = []
     unavailable_message = ""
-    # Org policy narrows BEFORE the tier split, so a rescued id still has to pass the
-    # free/paid predicate instead of going around it.
     _policy_allowed = nous_policy_allowed_ids()
     if free_tier:
         try:
@@ -406,8 +397,7 @@ def _model_flow_qwen_oauth(_config, current_model=""):
     """Qwen OAuth provider: reuse local Qwen CLI login, then pick model."""
     from hermes_cli.main import _DEFAULT_QWEN_PORTAL_MODELS
     from hermes_cli.auth import (
-        get_qwen_auth_status, resolve_qwen_runtime_credentials, _prompt_model_selection, DEFAULT_QWEN_BASE_URL,
-    )
+        get_qwen_auth_status, resolve_qwen_runtime_credentials, _prompt_model_selection, DEFAULT_QWEN_BASE_URL)
     from hermes_cli.models import fetch_api_models
     status = get_qwen_auth_status()
     if not status.get("logged_in"):
@@ -719,12 +709,9 @@ def _model_flow_stepfun(config, current_model=""):
 
 
 def _model_flow_vertex(config, current_model=""):
-    """Google Vertex AI provider: Gemini via the OpenAI-compatible endpoint.
-
-    Auth is OAuth2 (service-account JSON or ADC), no static key. The credential *path* lives
-    in .env (VERTEX_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS); project ID and region
-    are non-secret and saved to config.yaml under ``vertex:``.
-    """
+    """Google Vertex AI (Gemini via the OpenAI-compatible endpoint). Auth is OAuth2 (service-account
+    JSON or ADC): the credential *path* lives in .env (VERTEX_CREDENTIALS_PATH /
+    GOOGLE_APPLICATION_CREDENTIALS); project ID and region are non-secret, saved under ``vertex:``."""
     from hermes_cli.auth import _prompt_model_selection
     from hermes_cli.config import load_config, get_env_value
     from hermes_cli.models import _PROVIDER_MODELS
@@ -886,12 +873,9 @@ _SPECIAL_MODEL_LISTS = {
 
 
 def _api_key_provider_model_list(provider_id: str, pconfig, existing_key: str, key_env: str, effective_base: str) -> list:
-    """Model list for an API-key provider. Resolution order:
-      1. models.dev registry (cached, filtered for agentic/tool-capable models)
-      2. Curated static fallback list (offline insurance)
-      3. Live /models endpoint probe (small providers without models.dev data)
-    Providers in ``_SPECIAL_MODEL_LISTS`` have their own resolution.
-    """
+    """Model list for an API-key provider: models.dev registry (cached, agentic/tool-capable filter)
+    → curated static list (offline insurance) → live /models probe (small providers without
+    models.dev data). Providers in ``_SPECIAL_MODEL_LISTS`` have their own resolution."""
     from hermes_cli.config import get_env_value
     from hermes_cli.models import _PROVIDER_MODELS, fetch_api_models
     curated = _PROVIDER_MODELS.get(provider_id, [])
