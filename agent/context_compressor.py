@@ -2094,8 +2094,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._fallback_compression_streak = 0
         self._ineffective_compression_count = 0
         self._prellm_skip_count = 0
-        self._anti_thrash_recovery_deadline = 0.0
-        self._structural_no_op_backoff_until = 0.0
+        self._anti_thrash_recovery_deadline = self._structural_no_op_backoff_until = 0.0
         self._proactive_prune_rearm_tokens = 0
         self.get_active_compression_failure_cooldown()
         self._load_fallback_compression_streak()
@@ -2113,18 +2112,18 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         previous_ineffective_count = self._ineffective_compression_count
         if boundary_reason == "compression" and old_session_id:
             # Parent row carries the streak/strike state across the rotation.
-            found, value = self._durable_read(
-                "get_compression_fallback_streak", "compression parent fallback streak", int, 0,
-                session_db=session_db, session_id=old_session_id,
+            def _parent(method: str, label: str, current: int) -> int:
+                found, value = self._durable_read(
+                    method, label, int, 0, session_db=session_db, session_id=old_session_id,
+                )
+                return value if found and value is not None else current
+
+            previous_fallback_streak = _parent(
+                "get_compression_fallback_streak", "compression parent fallback streak", previous_fallback_streak,
             )
-            if found and value is not None:
-                previous_fallback_streak = value
-            found, value = self._durable_read(
-                "get_compression_ineffective_count", "compression parent ineffective count", int, 0,
-                session_db=session_db, session_id=old_session_id,
+            previous_ineffective_count = _parent(
+                "get_compression_ineffective_count", "compression parent ineffective count", previous_ineffective_count,
             )
-            if found and value is not None:
-                previous_ineffective_count = value
         self.bind_session_state(session_db, session_id)
         if boundary_reason == "compression":
             # Rotation creates a fresh child row first; carry the streak until boundary bookkeeping persists it.
