@@ -1197,46 +1197,63 @@ class GatewayAdapterLifecycleMixin:
         # bindings correctly under multiplex.
         adapter._hermes_profile_name = profile_name
 
+    async def _secondary_reconnect_attempt(self, profile_name: str, platform: Platform):
+        """One scoped attempt to rebuild+connect a secondary adapter.
+
+        Returns ``(adapter, success)``; ``(None, None)`` means "give up for good" (platform disabled,
+        credential removed, adapter unavailable). Caller owns teardown of a RETURNED adapter; an
+        adapter whose configure/connect raised is torn down here before the exception propagates.
+        """
+        from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
+        # Lazy + per-attempt: keeps test monkeypatches on these modules live.
+        from hermes_cli.profiles import get_profile_dir
+        from hermes_cli.env_loader import hydrate_profile_secret_sources
+        from gateway.config import load_gateway_config
+
+        profile_home = get_profile_dir(profile_name)
+        # Hydrate external secret sources off-loop so they cannot starve heartbeats.
+        await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
+        with _profile_runtime_scope(profile_home, hydrate_secrets=False):
+            profile_config = load_gateway_config().platforms.get(platform)
+            if profile_config is None or not profile_config.enabled:
+                return None, None
+            # Startup credential gate mirror: a removed credential must not rebuild.
+            if not _platform_has_bot_credential(platform, profile_config):
+                logger.info(
+                    "Secondary %s reconnect skipped: no bot credential (profile: %s)",
+                    platform.value, profile_name,
+                )
+                return None, None
+            adapter = self._create_adapter(platform, profile_config)
+            if adapter is None:
+                logger.warning(
+                    "Secondary %s reconnect skipped: adapter unavailable (profile: %s)",
+                    platform.value, profile_name,
+                )
+                return None, None
+            try:
+                self._configure_profile_adapter(adapter, profile_name, platform)
+                success = await self._connect_adapter_with_timeout(
+                    adapter, platform, is_reconnect=True
+                )
+            except BaseException:
+                # Caller never sees this adapter; release its partial resources here.
+                await self._safe_adapter_disconnect(adapter, platform)
+                raise
+            return adapter, success
+
     async def _run_secondary_profile_reconnect(self, profile_name: str, platform: Platform) -> None:
         """Reconnect a retryable secondary adapter under its own profile scope."""
-        from gateway.run import _platform_has_bot_credential, _profile_runtime_scope, _reconnect_backoff
+        from gateway.run import _reconnect_backoff
         attempts = 0
         current_task = asyncio.current_task()
         try:
             while self._running:
                 adapter = None
                 try:
-                    # Lazy + per-attempt: keeps test monkeypatches on these modules live.
-                    from hermes_cli.profiles import get_profile_dir
-                    from hermes_cli.env_loader import hydrate_profile_secret_sources
-                    from gateway.config import load_gateway_config
-
-                    profile_home = get_profile_dir(profile_name)
-                    # Hydrate external secret sources off-loop so they cannot starve heartbeats.
-                    await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
-                    with _profile_runtime_scope(profile_home, hydrate_secrets=False):
-                        profile_config = load_gateway_config().platforms.get(platform)
-                        if profile_config is None or not profile_config.enabled:
-                            return
-                        # Startup credential gate mirror: a removed credential must not rebuild.
-                        if not _platform_has_bot_credential(platform, profile_config):
-                            logger.info(
-                                "Secondary %s reconnect skipped: no bot credential "
-                                "(profile: %s)", platform.value, profile_name,
-                            )
-                            return
-                        adapter = self._create_adapter(platform, profile_config)
-                        if adapter is None:
-                            logger.warning(
-                                "Secondary %s reconnect skipped: adapter unavailable (profile: %s)",
-                                platform.value, profile_name,
-                            )
-                            return
-                        self._configure_profile_adapter(adapter, profile_name, platform)
-                        success = await self._connect_adapter_with_timeout(
-                            adapter, platform, is_reconnect=True
-                        )
-
+                    adapter, success = await self._secondary_reconnect_attempt(profile_name, platform)
+                    if adapter is None:
+                        return
                     if success and self._running:
                         profile_map = self._profile_adapters.setdefault(profile_name, {})
                         if platform not in profile_map:
