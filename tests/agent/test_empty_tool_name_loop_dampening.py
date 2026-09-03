@@ -161,6 +161,13 @@ def agent_env():
         # land on modules the app no longer imports.
         sys.modules.clear()
         sys.modules.update(saved_modules)
+        for _name, _mod in saved_modules.items():
+            _parent, _, _child = _name.rpartition(".")
+            if _parent and _parent in saved_modules:
+                try:
+                    setattr(saved_modules[_parent], _child, _mod)
+                except Exception:
+                    pass
         if prev_home is None:
             os.environ.pop("HERMES_HOME", None)
         else:

@@ -27,8 +27,21 @@ def _restore_sys_modules():
     the app no longer imports."""
     saved = dict(sys.modules)
     yield
+    _restore_modules(saved)
+
+
+def _restore_modules(saved):
     sys.modules.clear()
     sys.modules.update(saved)
+    # Re-imports rebound ``pkg.<child>`` attributes to the fresh module objects; point them
+    # back so ``from pkg import child`` and ``sys.modules["pkg.child"]`` agree again.
+    for name, mod in saved.items():
+        parent, _, child = name.rpartition(".")
+        if parent and parent in saved:
+            try:
+                setattr(saved[parent], child, mod)
+            except Exception:
+                pass
 
 
 def _fresh_run_agent(hermes_home):
