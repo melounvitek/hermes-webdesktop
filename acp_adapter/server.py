@@ -113,6 +113,62 @@ def _history_tool_call_name_args(tool_call: dict[str, Any]) -> tuple[str, dict[s
     return name, coerce_tool_args(function.get("arguments") or tool_call.get("arguments") or tool_call.get("args") or {})
 
 
+def _history_message_chunk(role: str, message: dict[str, Any]) -> UserMessageChunk | AgentMessageChunk | None:
+    text = _flatten_history_text(message.get("content"))
+    if not text:
+        return None
+    cls, session_update = _HISTORY_CHUNK_TYPES[role]
+    return cls(
+        session_update=session_update, content=TextContentBlock(type="text", text=text),
+        field_meta=_history_summary_meta(message, text),
+    )
+
+
+def _history_replay_updates(history: list[dict[str, Any]]):
+    """Yield ACP session updates that reconstruct a persisted transcript, in order: user/assistant
+    text (with compaction ``_meta``), assistant thoughts, and tool-call start/complete pairs
+    (``todo`` results also re-emit the plan)."""
+    active_tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    for message in history:
+        role = str(message.get("role") or "")
+        if role == "user":
+            if (chunk := _history_message_chunk(role, message)) is not None:
+                yield chunk
+        elif role == "assistant":
+            thought = _history_reasoning_text(message)
+            if thought:
+                yield acp.update_agent_thought_text(thought)
+            if (chunk := _history_message_chunk(role, message)) is not None:
+                yield chunk
+            tool_calls = message.get("tool_calls")
+            for tool_call in tool_calls if isinstance(tool_calls, list) else ():
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_call_id = str(
+                    tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id") or ""
+                ).strip()
+                if not tool_call_id:
+                    continue
+                tool_name, args = _history_tool_call_name_args(tool_call)
+                active_tool_calls[tool_call_id] = (tool_name, args)
+                yield build_tool_start(tool_call_id, tool_name, args)
+        elif role == "tool":
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            tool_name = str(message.get("tool_name") or "").strip()
+            function_args: dict[str, Any] | None = None
+            if tool_call_id in active_tool_calls:
+                tool_name, function_args = active_tool_calls.pop(tool_call_id)
+            if not tool_call_id or not tool_name:
+                continue
+            result = message.get("content")
+            result_text = result if isinstance(result, str) else None
+            yield build_tool_complete(tool_call_id, tool_name, result=result_text, function_args=function_args)
+            if tool_name == "todo":
+                plan_update = _build_plan_update_from_todo_result(result_text)
+                if plan_update is not None:
+                    yield plan_update
+
+
 def _mcp_server_config(server: McpServerStdio | McpServerHttp | McpServerSse) -> dict:
     if isinstance(server, McpServerStdio):
         return {"command": server.command, "args": list(server.args), "env": {i.name: i.value for i in server.env}}
@@ -514,69 +570,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         start/complete events so the editor shows the transcript, not a clean thread."""
         if not self._conn or not state.history:
             return
-
-        active_tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
-
-        async def send(update: Any) -> bool:
-            return await self._send(
-                state.session_id, update, fail_msg="Failed to replay ACP history for session %s"
-            )
-
-        async def send_message(role: str, message: dict[str, Any]) -> bool:
-            text = _flatten_history_text(message.get("content"))
-            if not text:
-                return True
-            cls, session_update = _HISTORY_CHUNK_TYPES[role]
-            return await send(cls(
-                session_update=session_update, content=TextContentBlock(type="text", text=text),
-                field_meta=_history_summary_meta(message, text),
-            ))
-
-        for message in state.history:
-            role = str(message.get("role") or "")
-
-            if role == "user":
-                if not await send_message(role, message):
-                    return
-
-            elif role == "assistant":
-                thought = _history_reasoning_text(message)
-                if thought and not await send(acp.update_agent_thought_text(thought)):
-                    return
-                if not await send_message(role, message):
-                    return
-                tool_calls = message.get("tool_calls")
-                if isinstance(tool_calls, list):
-                    for tool_call in tool_calls:
-                        if not isinstance(tool_call, dict):
-                            continue
-                        tool_call_id = str(
-                            tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id") or ""
-                        ).strip()
-                        if not tool_call_id:
-                            continue
-                        tool_name, args = _history_tool_call_name_args(tool_call)
-                        active_tool_calls[tool_call_id] = (tool_name, args)
-                        if not await send(build_tool_start(tool_call_id, tool_name, args)):
-                            return
-
-            elif role == "tool":
-                tool_call_id = str(message.get("tool_call_id") or "").strip()
-                tool_name = str(message.get("tool_name") or "").strip()
-                function_args: dict[str, Any] | None = None
-                if tool_call_id in active_tool_calls:
-                    tool_name, function_args = active_tool_calls.pop(tool_call_id)
-                if not tool_call_id or not tool_name:
-                    continue
-                result = message.get("content")
-                result_text = result if isinstance(result, str) else None
-                update = build_tool_complete(tool_call_id, tool_name, result=result_text, function_args=function_args)
-                if not await send(update):
-                    return
-                if tool_name == "todo":
-                    plan_update = _build_plan_update_from_todo_result(result_text)
-                    if plan_update is not None and not await send(plan_update):
-                        return
+        for update in _history_replay_updates(state.history):
+            if not await self._send(state.session_id, update, fail_msg="Failed to replay ACP history for session %s"):
+                return
 
     async def _replay_history_guarded(self, state: SessionState, verb: str) -> None:
         """Per ACP spec, load/resume must stream history via ``session/update`` BEFORE
