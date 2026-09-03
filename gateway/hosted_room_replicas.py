@@ -1,11 +1,10 @@
 """Replica store and takeover primitives for hosted Group Chat rooms.
 
-Every non-authority participant gateway keeps a durable local copy of the room log
-(``ingest_page()``: idempotent, gap- and epoch-regression-safe) plus fenced primitives to
-continue the room when the authority host dies: ``promote_replica()`` resumes locally at
-``epoch + 1`` with a lineage-proving ``authority.claimed`` event; ``demote_room()`` records
-``authority.lost`` when a returning stale authority is shown a newer epoch. Storage
-primitives only: the caller decides *when* takeover is safe.
+Non-authority gateways keep a durable local copy of the room log (``ingest_page()``: idempotent,
+gap- and epoch-regression-safe) plus fenced primitives to continue the room when the authority host
+dies: ``promote_replica()`` resumes locally at ``epoch + 1`` with a lineage-proving ``authority.claimed``
+event; ``demote_room()`` records ``authority.lost`` when a returning stale authority is shown a newer
+epoch. Storage primitives only: the caller decides *when* takeover is safe.
 """
 
 from __future__ import annotations

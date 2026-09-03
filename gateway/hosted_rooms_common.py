@@ -1,11 +1,9 @@
 """Shared leaf helpers for the gateway hosted-room modules.
 
-Every hosted-room module validates identifiers, bounded integers, exact field
-sets and canonical JSON with its own error class and its own error strings
-(tests pin those strings). These helpers take the error class and message
-templates as parameters so each caller keeps byte-identical failures while the
-logic lives once. This module must stay a leaf: never import a hosted_room*
-origin module from here (import cycle).
+Each hosted-room module validates identifiers, bounded integers, exact field sets and
+canonical JSON with its own error class and pinned error strings; these helpers take the
+error class and message templates as parameters so failures stay byte-identical while the
+logic lives once. Must stay a leaf: never import a hosted_room* module (import cycle).
 """
 
 from __future__ import annotations
