@@ -142,18 +142,14 @@ def get_skin_tool_prefix() -> str:
 def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     """Display emoji for a tool: skin ``tool_emojis`` override, then registry, then *default*."""
     skin = _get_skin()
-    if skin and skin.tool_emojis:
-        override = skin.tool_emojis.get(tool_name)
-        if override:
-            return override
+    override = skin.tool_emojis.get(tool_name) if skin and skin.tool_emojis else None
+    if override:
+        return override
     try:
         from tools.registry import registry
-        emoji = registry.get_emoji(tool_name, default="")
-        if emoji:
-            return emoji
+        return registry.get_emoji(tool_name, default="") or default
     except Exception:
-        pass
-    return default
+        return default
 
 
 # ── Tool preview (one-line summary of a tool call's primary argument) ─────
@@ -434,9 +430,8 @@ def _preview_process_manage(args: dict, _max_len: int) -> str | None:
 
 def _preview_todo_list(args: dict, _max_len: int) -> str:
     todos_arg = args.get("todos")
-    if todos_arg is None:
-        return "reading task list"
-    return f"{'updating' if args.get('merge', False) else 'planning'} {len(todos_arg)} task(s)"
+    verb = "updating" if args.get("merge", False) else "planning"
+    return "reading task list" if todos_arg is None else f"{verb} {len(todos_arg)} task(s)"
 
 
 def _preview_shell(key: str):
@@ -455,8 +450,7 @@ def _preview_read_file(args: dict, max_len: int) -> str | None:
 
 
 def _preview_memory(args: dict, _max_len: int) -> str:
-    action = args.get("action", "")
-    target = args.get("target", "")
+    action, target = args.get("action", ""), args.get("target", "")
     if action == "add":
         return f"+{target}: \"{_clip(_oneline(args.get('content', '')), 25)}\""
     if action in ("replace", "remove"):
@@ -466,10 +460,7 @@ def _preview_memory(args: dict, _max_len: int) -> str:
 
 
 def _preview_send_message(args: dict, _max_len: int) -> str:
-    msg = _oneline(args.get("message", ""))
-    if len(msg) > 20:
-        msg = msg[:17] + "..."
-    return f"to {args.get('target', '?')}: \"{msg}\""
+    return f"to {args.get('target', '?')}: \"{_tail_trunc(_oneline(args.get('message', '')), 20)}\""
 
 
 def _preview_skill_view(args: dict, max_len: int) -> str | None:
@@ -1073,8 +1064,7 @@ def _cute_todo_list(a: dict, result) -> str:
 
 
 def _cute_memory(a: dict, _r) -> str:
-    action = a.get("action", "?")
-    target = a.get("target", "")
+    action, target = a.get("action", "?"), a.get("target", "")
     if action == "add":
         return f"┊ 🧠 memory    +{target}: \"{_cute_trunc(a.get('content', ''))}\""
     if action in ("replace", "remove"):
@@ -1084,10 +1074,8 @@ def _cute_memory(a: dict, _r) -> str:
 
 
 def _cute_skill_view(a: dict, _r) -> str:
-    label = a.get("name", "")
-    file_path = a.get("file_path")
-    if file_path:
-        label = f"{label} → {file_path}" if label else str(file_path)
+    label, file_path = a.get("name", ""), a.get("file_path")
+    label = (f"{label} → {file_path}" if label else str(file_path)) if file_path else label
     return f"┊ 📚 skill     {_cute_trunc(label)}"
 
 
@@ -1103,17 +1091,14 @@ def _cute_cronjob(a: dict, _r) -> str:
 
 
 def _cute_execute_code(a: dict, _r) -> str:
-    code = a.get("code", "")
-    first_line = code.strip().split("\n")[0] if code.strip() else ""
-    return f"┊ 🐍 exec      {_cute_trunc(first_line)}"
+    code = a.get("code", "").strip()
+    return f"┊ 🐍 exec      {_cute_trunc(code.split(chr(10))[0] if code else '')}"
 
 
 def _cute_browser_exec(a: dict, _r) -> str:
     # Leading `# …` comment becomes the step label; code stays collapsed behind the preview cap.
     label = _browser_exec_step_label(a)
-    if label is not None:
-        return f"┊ 🌐 browser   {label}"
-    return f"┊ 🌐 browser   {_cute_trunc(' '.join(str(a.get('code', '') or '').split()))}"
+    return f"┊ 🌐 browser   {_cute_trunc(_oneline(str(a.get('code', '') or ''))) if label is None else label}"
 
 
 def _cute_delegate(a: dict, _r) -> str:
@@ -1129,8 +1114,7 @@ def _cute_delegate(a: dict, _r) -> str:
 
 
 def _cute_process_manage(a: dict, _r) -> str:
-    action = a.get("action", "?")
-    sid = a.get("session_id", "")[:12]
+    action, sid = a.get("action", "?"), a.get("session_id", "")[:12]
     return f"┊ ⚙️  proc      {'ls processes' if action == 'list' else f'{action} {sid}'}"
 
 
