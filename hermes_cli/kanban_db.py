@@ -578,19 +578,13 @@ def current_board_path() -> Path:
 
 
 def get_current_board() -> str:
-    """Return the active board slug, honouring the resolution chain.
+    """Active board slug: ``HERMES_KANBAN_BOARD`` env (dispatcher injects it
+    on spawn) -> ``<root>/kanban/current`` (``boards switch``, only while that
+    board still exists) -> ``DEFAULT_BOARD``.
 
-    Order (highest precedence first):
-
-    1. ``HERMES_KANBAN_BOARD`` env var (set by the dispatcher on worker
-       spawn, or manually for ad-hoc overrides).
-    2. ``<root>/kanban/current`` on disk (set by ``hermes kanban boards
-       switch``), but only when that board still exists.
-    3. ``DEFAULT_BOARD`` (``"default"``).
-
-    A malformed or stale slug at any step falls through to the next layer
-    with a best-effort warning — the dispatcher must never crash because a
-    user hand-edited a file or removed a board directory.
+    A malformed/stale slug falls through to the next layer with a warning —
+    the dispatcher must never crash because a user hand-edited a file or
+    removed a board directory.
     """
     def _existing(candidate: str) -> Optional[str]:
         if not candidate:
@@ -690,32 +684,19 @@ def _board_path(
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
-    """Return the path to the ``kanban.db`` for ``board``.
-
-    Resolution (highest precedence first):
-
-    1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
-       back-compat and for the dispatcher→worker handoff (defense in
-       depth: dispatcher injects this into worker env so workers are
-       immune to any path-resolution disagreement).
-    2. When ``board`` arg is None, the active board from
-       :func:`get_current_board` is used.
-    3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
-       Other boards → ``<root>/kanban/boards/<slug>/kanban.db``.
+    """``kanban.db`` path for ``board``: ``HERMES_KANBAN_DB`` pins it (the
+    dispatcher injects it into worker env so workers are immune to any
+    path-resolution disagreement); else ``default`` -> ``<root>/kanban.db``
+    (back-compat), other boards -> ``<root>/kanban/boards/<slug>/kanban.db``.
     """
     return _board_path("HERMES_KANBAN_DB", board, ("kanban.db",), "kanban.db")
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
-    """Return the directory under which ``scratch`` workspaces are created.
-
-    Anchored per-board so workspaces don't leak between projects.
-    ``HERMES_KANBAN_WORKSPACES_ROOT`` pins the path directly (highest
-    precedence) — the dispatcher injects this into worker env.
-
-    ``default`` keeps the legacy path ``<root>/kanban/workspaces/`` so
-    that existing scratch workspaces from before the boards feature are
-    preserved. Other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
+    """Per-board ``scratch`` workspace root (``HERMES_KANBAN_WORKSPACES_ROOT``
+    wins — the dispatcher injects it into worker env). ``default`` keeps the
+    legacy ``<root>/kanban/workspaces/`` so pre-boards workspaces survive;
+    other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
     """
     return _board_path("HERMES_KANBAN_WORKSPACES_ROOT", board, ("kanban", "workspaces"), "workspaces")
 
@@ -894,15 +875,10 @@ def create_board(
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
-    """Enumerate all boards that exist on disk.
-
-    Always includes ``default`` (even when the ``boards/default/``
-    metadata dir doesn't exist, because its DB is at the legacy path).
-    Other boards are discovered by scanning ``boards/`` for subdirectories
-    that either contain a ``kanban.db`` or a ``board.json``.
-
-    Returns a list of metadata dicts, sorted with ``default`` first and
-    the rest alphabetically.
+    """Metadata dicts for every board on disk, ``default`` first (always
+    present — its DB lives at the legacy path, so no ``boards/default/`` dir
+    is needed) then alphabetical; a ``boards/<slug>/`` counts when it holds a
+    ``kanban.db`` or ``board.json``.
     """
     entries: list[dict] = []
     seen: set[str] = set()
@@ -938,15 +914,9 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
 
 
 def remove_board(slug: str, *, archive: bool = True) -> dict:
-    """Remove or archive a board.
-
-    ``archive=True`` (default) moves the board's directory to
-    ``<root>/kanban/boards/_archived/<slug>-<timestamp>/`` so the data
-    is recoverable. ``archive=False`` deletes the directory outright.
-
-    The ``default`` board cannot be removed — raises :class:`ValueError`.
-    Returns a summary dict describing what happened (``{"slug", "action",
-    "new_path"}``).
+    """Archive (move to ``boards/_archived/<slug>-<timestamp>/``, recoverable)
+    or, with ``archive=False``, delete a board. ``default`` cannot be removed
+    (ValueError). Returns ``{"slug", "action", "new_path"}``.
     """
     _assert_not_delegated_child_mutation()
     normed = _normalize_board_slug(slug)
@@ -2948,16 +2918,10 @@ def claim_review_task(
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
 ) -> Optional[Task]:
-    """Atomically transition ``review -> running``.
-
-    Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``review`` status).
-
-    Parent dependencies are re-checked because a previously completed parent
-    may have been reopened while this task waited in review.
-
-    Creates a new run entry so the review agent's lifecycle is tracked
-    independently from the original worker run.
+    """Atomically ``review -> running``; the claimed ``Task`` or None when
+    already claimed / not in review. Parents are re-checked (one may have
+    been reopened while the task waited) and a NEW run is opened so the
+    review agent's lifecycle is tracked apart from the implementer's run.
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
@@ -3246,16 +3210,10 @@ def reclaim_task(
     reason: Optional[str] = None,
     signal_fn=None,
 ) -> bool:
-    """Operator-driven reclaim: release the claim and restore its source phase.
-
-    Unlike :func:`release_stale_claims` which only acts on tasks whose
-    ``claim_expires`` has passed, this function reclaims immediately
-    regardless of TTL. Intended for the dashboard/CLI recovery flow
-    when an operator wants to abort a running worker without waiting
-    for the TTL to expire (e.g. after seeing a hallucination warning).
-
-    Returns True if a reclaim happened, False if the task isn't in a
-    reclaimable state (not running, or doesn't exist).
+    """Operator-driven reclaim regardless of TTL (unlike
+    :func:`release_stale_claims`): release the claim and restore the source
+    phase so a running worker can be aborted on demand. False when the task
+    is missing or not running.
     """
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
@@ -3318,16 +3276,10 @@ def reassign_task(
     reclaim_first: bool = False,
     reason: Optional[str] = None,
 ) -> bool:
-    """Reassign a task, optionally reclaiming a stuck running worker first.
-
-    This is the recovery path for "this profile's model is broken, try
-    a different one". If ``reclaim_first`` is True, any active claim is
-    released (via :func:`reclaim_task`) before the reassign happens;
-    otherwise the function refuses to reassign a currently-running task
-    and returns False (caller can retry with ``reclaim_first=True``).
-
-    Returns True if the reassign landed. ``profile`` may be ``None`` to
-    unassign entirely.
+    """Reassign (``profile=None`` unassigns). A running task is refused
+    (False) unless ``reclaim_first`` releases its claim via
+    :func:`reclaim_task` first — the "this profile's model is broken, try
+    another" recovery path.
     """
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
@@ -5519,15 +5471,9 @@ def read_worker_log(
 # ---------------------------------------------------------------------------
 
 def list_profiles_on_disk() -> list[str]:
-    """Return the set of assignee/profile names discovered on disk.
-
-    Includes:
-    - named profiles under ``<default-root>/profiles/<name>/config.yaml``
-    - the implicit ``default`` profile when the default Hermes root exists
-
-    Reads profile paths directly so this module has no import dependency on
-    ``hermes_cli.profiles`` (which pulls in a large chunk of the CLI startup
-    path).
+    """Profile names on disk: ``<default-root>/profiles/<name>/config.yaml``
+    plus the implicit ``default`` when the root exists. Reads paths directly
+    to avoid importing ``hermes_cli.profiles`` (a large chunk of CLI startup).
     """
     try:
         from hermes_constants import get_default_hermes_root
@@ -5554,17 +5500,9 @@ def list_profiles_on_disk() -> list[str]:
 
 
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
-    """Return every assignee name known to the board or on disk.
-
-    Each entry is ``{"name": str, "on_disk": bool, "counts": {status: n}}``.
-    A name is included when it's a configured profile on disk OR when
-    any non-archived task has it as the assignee. Used by:
-
-    - ``hermes kanban assignees`` for the terminal.
-    - The dashboard assignee dropdown (so a fresh profile appears in
-      the picker even before it's been given any task).
-    - Router-profile heuristics ("who's overloaded?") without scanning
-      the whole board.
+    """Every assignee that is a profile on disk OR assigned to a non-archived
+    task, as ``{"name", "on_disk", "counts": {status: n}}`` — so a fresh
+    profile appears in pickers before it has any task.
     """
     on_disk = set(list_profiles_on_disk())
 
@@ -5600,15 +5538,9 @@ def list_runs(
     state_type: Optional[str] = None,
     state_name: Optional[str] = None,
 ) -> list[Run]:
-    """Return all runs for ``task_id`` in start order.
-
-    ``include_active=True`` (default) includes the currently-running
-    attempt if any. Set False to return only closed runs (useful for
-    "how many prior attempts have there been?" checks).
-
-    When ``state_type`` and ``state_name`` are set, restrict to rows
-    where that column equals ``state_name`` (``state_type`` is
-    ``status`` or ``outcome``). Both must be passed together.
+    """All runs for ``task_id`` in start order. ``include_active=False`` returns
+    only closed runs; ``state_type`` (``status``/``outcome``) + ``state_name``
+    filter on that column and must be passed together.
     """
     if (state_type is None) ^ (state_name is None):
         raise ValueError("state_type and state_name must both be set or both omitted")
@@ -5644,17 +5576,10 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
 
 
 def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """Return the latest non-null ``task_runs.summary`` for ``task_id``.
-
-    The worker writes its handoff to ``task_runs.summary``
-    via ``complete_task(summary=...)``; ``tasks.result`` is left empty
-    unless the caller passes ``result=`` explicitly. Dashboards and CLI
-    "show" views need this value to surface what a worker actually did
-    — without it, ``tasks.result`` is NULL and the task looks like a
-    no-op even when the run completed.
-
-    Picks the most recent run by ``ended_at`` (falling back to ``id``
-    for ties or unfinished rows). Returns None if no run has a summary.
+    """Latest non-null ``task_runs.summary`` (newest ``ended_at``, ``id`` for
+    ties), or None. Workers hand off via ``complete_task(summary=...)`` and
+    leave ``tasks.result`` NULL, so show/dashboard views need this or a
+    completed task looks like a no-op.
     """
     row = conn.execute(
         "SELECT summary FROM task_runs "
@@ -5668,16 +5593,10 @@ def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 def latest_summaries(
     conn: sqlite3.Connection, task_ids: Iterable[str]
 ) -> dict[str, str]:
-    """Batch-fetch latest non-null summaries for a list of task ids.
-
-    Used by the dashboard board endpoint to attach ``latest_summary`` to
-    every card in a single SQL query, avoiding the N+1 pattern of
-    calling :func:`latest_summary` per task. Returns a dict mapping
-    ``task_id`` → summary string, omitting tasks with no summary.
-
-    Approach: a window function picks the newest non-null-summary row
-    per ``task_id``; works against SQLite ≥ 3.25 (default on every
-    supported platform).
+    """``{task_id: latest non-null run summary}`` for many tasks in one query
+    (dashboard board endpoint; avoids N+1 :func:`latest_summary` calls).
+    Window function -> needs SQLite >= 3.25 (default on every supported
+    platform). Tasks without a summary are omitted.
     """
     ids = list(task_ids)
     if not ids:
