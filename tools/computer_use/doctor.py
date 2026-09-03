@@ -100,8 +100,7 @@ def _extract_health_report_from_result(result: Report) -> Report:
         return sc  # type: ignore[return-value]
     for text in _text_items(result):  # older builds: JSON text block with schema_version
         with suppress(ValueError, TypeError):
-            parsed = json.loads(text)
-            if _is_valid_health_report(parsed):
+            if _is_valid_health_report(parsed := json.loads(text)):
                 return parsed
     if isinstance(sc, dict):  # present but not a real report — unavailable, not fatal
         raise HealthReportUnavailable(f"health_report structuredContent lacks schema_version/overall/checks (keys={sorted(sc.keys())})")
@@ -176,8 +175,7 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
     out: Report = dict.fromkeys(("init_version", "permissions", "permissions_error", "list_apps_ok", "list_apps_error", "list_apps_count"))
     with _mcp_session(binary, timeout) as proc:
         server_info = (_mcp_rpc(proc, 1, "initialize", {}).get("result") or {}).get("serverInfo") or {}
-        if isinstance(server_info, dict):
-            out["init_version"] = server_info.get("version")
+        out["init_version"] = server_info.get("version") if isinstance(server_info, dict) else None
         perms, out["permissions_error"] = _probe_tool(proc, 2, "check_permissions")  # primary TCC signal on 0.10
         out["permissions"] = _structured(perms) if perms is not None else None
         # list_apps — light AX capability probe; text-only success still counts as AX working
@@ -201,12 +199,10 @@ def _tcc_row(field: str, label: str, platform_bound: bool, ctx: Report) -> _Row:
         return "skip", f"not applicable on {ctx['plat']}" if off_platform else f"{field} field absent from check_permissions", {}
     if not granted:
         return "fail", f"{label} is not granted.", {"hint": _TCC_HINT.format(label), "data": {field: False}}
-    data = {field: True}
-    if field == "screen_recording":  # the granted-but-not-capturable row wins over plain pass
-        data["screen_recording_capturable"] = perms.get("screen_recording_capturable")
-        if data["screen_recording_capturable"] is False:
-            return "fail", "Screen Recording granted but not capturable.", {"hint": (
-                "Screen Recording permission may need a restart of CuaDriver or a re-grant in System Settings."), "data": data}
+    data = {field: True, **({"screen_recording_capturable": perms.get("screen_recording_capturable")} if field == "screen_recording" else {})}
+    if data.get("screen_recording_capturable") is False:  # the granted-but-not-capturable row wins over plain pass
+        return "fail", "Screen Recording granted but not capturable.", {"hint": (
+            "Screen Recording permission may need a restart of CuaDriver or a re-grant in System Settings."), "data": data}
     return "pass", f"{label} is granted.", {"data": data}
 
 def _ax_capability_row(ctx: Report) -> _Row:
@@ -219,10 +215,9 @@ def _ax_capability_row(ctx: Report) -> _Row:
         return "fail", probes.get("list_apps_error") or ("list_apps failed" + (" despite accessibility grant" if ax_granted else "")), {}
     return ("pass", "inferred from accessibility grant (list_apps not probed)", {}) if ax_granted else ("skip", "not probed", {})
 
-def _cli_doctor_row(ctx: Report) -> Optional[_Row]:
-    if not (txt := ctx["doctor_txt"]):
-        return None
-    return ("pass" if "[ok" in txt.lower() or "ok  ]" in txt else "skip"), txt.splitlines()[0].strip(), {"data": {"snippet": txt[:2000]}}
+def _cli_doctor_row(txt: Optional[str]) -> Optional[_Row]:
+    return None if not txt else (("pass" if "[ok" in txt.lower() or "ok  ]" in txt else "skip"), txt.splitlines()[0].strip(),
+                                 {"data": {"snippet": txt[:2000]}})
 
 # Fallback composite probe table, in emitted order: (check name, row builder(ctx) -> _Row | None to omit).
 _FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
@@ -235,7 +230,7 @@ _FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
     ("ax_capability", _ax_capability_row),
     ("health_report_path", lambda c: ("skip", "fallback composite (cua-driver 0.10 unclassified health_report); "
                                               f"cause: {c['reason_short']}", {})),
-    ("cli_doctor", _cli_doctor_row),
+    ("cli_doctor", lambda c: _cli_doctor_row(c["doctor_txt"])),
 )
 
 def _overall_from(checks: List[Report]) -> str:
@@ -243,8 +238,8 @@ def _overall_from(checks: List[Report]) -> str:
     by_name = {c.get("name"): c.get("status") for c in checks}
     if by_name.get("binary_version") != "pass":
         return "failed"
-    ax_ok = by_name.get("tcc_accessibility") in ("pass", "skip", None)
-    return "ok" if ax_ok and not any(c.get("status") == "fail" for c in checks) else "degraded"
+    ok = by_name.get("tcc_accessibility") in ("pass", "skip", None) and not any(c.get("status") == "fail" for c in checks)
+    return "ok" if ok else "degraded"
 
 def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 12.0) -> Report:
     """schema_version=1 report from CLI + MCP probes (``_FALLBACK_PROBES``) when health_report is denied (0.10)."""
@@ -321,8 +316,7 @@ def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (),
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
     binary = resolve_cua_driver_cmd(driver_cmd)
     if not binary:
-        print(f"cua-driver: not installed (looked for {driver_cmd or 'cua-driver (PATH and canonical install paths)'!r}).")
-        print("  Run: hermes computer-use install")
+        print(f"cua-driver: not installed (looked for {driver_cmd or 'cua-driver (PATH and canonical install paths)'!r}).\n  Run: hermes computer-use install")
         return 2
     try:  # prefer real health_report; on denial/non-schema, synthesize via probes
         try:
