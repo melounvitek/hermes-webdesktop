@@ -17,21 +17,22 @@ logger = logging.getLogger(__name__)
 
 def claim_stream_writer(agent: Any) -> int:
     """Claim the delta sink for this stream attempt; ``0`` (never fenced) when the agent lacks the fence or the claim raised."""
-    claim = getattr(agent, "_claim_stream_writer", None)
-    if callable(claim):
-        try:
-            return int(claim())
-        except Exception:
-            logger.debug("stream single-writer: claim failed; proceeding unfenced", exc_info=True)
-    return 0
+    return _fence_call(agent, "_claim_stream_writer", int, 0, "claim failed; proceeding unfenced")
 
 
 def stream_writer_is_current(agent: Any, token: int) -> bool:
     """True when ``token`` is still the active writer; a falsy token or a fence-less agent cannot prove supersession, so True."""
-    is_current = getattr(agent, "_stream_writer_is_current", None) if token else None
-    if callable(is_current):
+    if not token:
+        return True
+    return _fence_call(agent, "_stream_writer_is_current", bool, True, "is_current check failed; treating as current", token)
+
+
+def _fence_call(agent: Any, name: str, cast, fallback, failure_note: str, *args):
+    """Call ``agent.<name>(*args)`` when it exists; ``fallback`` when missing or raising (logged at debug)."""
+    fn = getattr(agent, name, None)
+    if callable(fn):
         try:
-            return bool(is_current(token))
+            return cast(fn(*args))
         except Exception:
-            logger.debug("stream single-writer: is_current check failed; treating as current", exc_info=True)
-    return True
+            logger.debug("stream single-writer: %s", failure_note, exc_info=True)
+    return fallback

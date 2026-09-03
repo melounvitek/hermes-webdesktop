@@ -44,9 +44,7 @@ class _ThreadRoutingStream:
         self._state = state
 
     def _target(self) -> TextIO:
-        if self._state.silenced.get(threading.get_ident(), 0) > 0:
-            return self._state.sink
-        return self._passthrough
+        return self._state.sink if self._state.silenced.get(threading.get_ident(), 0) > 0 else self._passthrough
 
     def silence(self, ident: int) -> None:
         with self._state.lock:
@@ -107,15 +105,12 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
         passthrough = current if current is not None else passthrough
         sink = _sinks.get(attr)
         if sink is None or sink.closed:
-            sink = open(os.devnull, "w", encoding="utf-8")
-            _sinks[attr] = sink
+            sink = _sinks[attr] = open(os.devnull, "w", encoding="utf-8")
         state = _routing_states.get(attr)
         if state is None or state.sink is not sink:
-            state = _RoutingState(sink)
-            _routing_states[attr] = state
-        proxy = _ThreadRoutingStream(passthrough, state)
+            state = _routing_states[attr] = _RoutingState(sink)
+        proxy = _installed[attr] = _ThreadRoutingStream(passthrough, state)
         setattr(sys, attr, proxy)
-        _installed[attr] = proxy
         return proxy
 
 
@@ -123,10 +118,7 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
 def thread_scoped_silence() -> Iterator[None]:
     """Silence ``stdout``/``stderr`` for the *current thread only*."""
     ident = threading.get_ident()
-    proxies = (
-        _ensure_installed("stdout", sys.__stdout__ or sys.stdout),
-        _ensure_installed("stderr", sys.__stderr__ or sys.stderr),
-    )
+    proxies = (_ensure_installed("stdout", sys.__stdout__ or sys.stdout), _ensure_installed("stderr", sys.__stderr__ or sys.stderr))
     for proxy in proxies:
         proxy.silence(ident)
     try:
