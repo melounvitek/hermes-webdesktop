@@ -48,12 +48,8 @@ class CLILoopsMixin:
 
     def _cmd_clear(self, cmd_original: str):
         from cli import (
-            ChatConsole,
-            _build_compact_banner,
-            _clear_output_history,
-            _cprint,
-            build_welcome_banner,
-            get_tool_definitions,
+            ChatConsole, _build_compact_banner, _clear_output_history, _cprint,
+            build_welcome_banner, get_tool_definitions,
         )
         if self._confirm_destructive_slash(
             "clear",
@@ -86,14 +82,9 @@ class CLILoopsMixin:
             if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
                 ctx_len = self.agent.context_compressor.context_length
             build_welcome_banner(
-                console=cc,
-                model=self.model,
-                cwd=os.getenv("TERMINAL_CWD", os.getcwd()),
-                tools=tools,
-                enabled_toolsets=self.enabled_toolsets,
-                session_id=self.session_id,
-                context_length=ctx_len,
-                provider=self.provider,
+                console=cc, model=self.model, cwd=os.getenv("TERMINAL_CWD", os.getcwd()),
+                tools=tools, enabled_toolsets=self.enabled_toolsets, session_id=self.session_id,
+                context_length=ctx_len, provider=self.provider,
             )
         _cprint(_FRESH_START)
         self._print_random_tip()
@@ -236,10 +227,7 @@ class CLILoopsMixin:
             # installed-but-not-enabled plugins show up; the plugin manager only knows
             # *loaded* plugins and made fresh installs look like "nothing installed".
             from hermes_cli.plugins_cmd import (
-                _discover_all_plugins,
-                _get_disabled_set,
-                _get_enabled_set,
-                _plugin_status,
+                _discover_all_plugins, _get_disabled_set, _get_enabled_set, _plugin_status
             )
 
             entries = _discover_all_plugins()

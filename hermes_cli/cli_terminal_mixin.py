@@ -394,14 +394,8 @@ class CLITerminalMixin:
     def _recover_terminal_input_modes(self, *, reason: str) -> None:
         """Best-effort reset when leaked mouse reports indicate mode drift."""
         from cli import (
-            CLI_CONFIG,
-            _DIM,
-            _RST,
-            _TERMINAL_INPUT_MODE_RESET_SEQ,
-            _cli_multiline_shortcuts_enabled,
-            _cprint,
-            _enable_extended_enter_keys,
-            logger,
+            CLI_CONFIG, _DIM, _RST, _TERMINAL_INPUT_MODE_RESET_SEQ,
+            _cli_multiline_shortcuts_enabled, _cprint, _enable_extended_enter_keys, logger,
         )
         now = time.monotonic()
         # Rate-limit to avoid thrashing if a terminal floods reports.
