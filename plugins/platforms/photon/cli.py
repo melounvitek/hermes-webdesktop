@@ -252,7 +252,14 @@ def _autoconfigure_access(phone: str) -> None:
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
-    _refresh_status_numbers()
+    phone, assigned = photon_auth.load_user_numbers()
+    if not (phone and assigned):
+        spectrum_id, project_secret = photon_auth.load_project_credentials()
+        if spectrum_id and project_secret:
+            try:
+                photon_auth.refresh_user_numbers(spectrum_id, project_secret)
+            except Exception as e:
+                print(f"      (could not refresh Photon user numbers: {e})", file=sys.stderr)
     # auth.print_credential_summary's emit callback is the only sink that sees
     # credential-derived strings (keeps cli.py taint-free for CodeQL).
     photon_auth.print_credential_summary(print)
@@ -261,19 +268,6 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     print(f"  sidecar deps        : {'✓ installed' if sidecar_deps_installed() else '✗ run `hermes photon install-sidecar`'}")
     print(f"  telemetry           : {'on' if _telemetry_enabled() else 'off'} (`hermes photon telemetry on|off`)")
     return 0
-
-
-def _refresh_status_numbers() -> None:
-    phone, assigned = photon_auth.load_user_numbers()
-    if phone and assigned:
-        return
-    spectrum_id, project_secret = photon_auth.load_project_credentials()
-    if not spectrum_id or not project_secret:
-        return
-    try:
-        photon_auth.refresh_user_numbers(spectrum_id, project_secret)
-    except Exception as e:
-        print(f"      (could not refresh Photon user numbers: {e})", file=sys.stderr)
 
 
 def _telemetry_enabled() -> bool:

@@ -197,13 +197,6 @@ def sidecar_deps_installed() -> bool:
     return (_sidecar_dir() / "node_modules" / "spectrum-ts").exists()
 
 
-def _coerce(cast: Callable[[Any], Any], value: Any, default: Any) -> Any:
-    try:
-        return cast(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _is_timeout_error(exc: BaseException) -> bool:
     """True when *exc* indicates the request timed out (call hung)."""
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
@@ -435,18 +428,21 @@ def _normalize_group_content(content: Dict[str, Any]) -> _Normalized:
     return text, mtype, media_urls, media_types
 
 
+_CONTENT_NORMALIZERS: Dict[Any, Callable[[Dict[str, Any]], _Normalized]] = {
+    "text": lambda c: (c.get("text") or "", MessageType.TEXT, [], []),
+    "attachment": _normalize_binary_payload, "voice": _normalize_binary_payload,
+    "richlink": lambda c: (_format_richlink_content(c), MessageType.TEXT, [], []),
+    "group": _normalize_group_content,
+}
+
+
 def _normalize_content(content: Dict[str, Any]) -> _Normalized:
     """Turn a sidecar ``content`` payload into (text, type, media_urls, media_types)."""
     ctype = content.get("type")
-    if ctype == "text":
-        return content.get("text") or "", MessageType.TEXT, [], []
-    if ctype in {"attachment", "voice"}:
-        return _normalize_binary_payload(content)
-    if ctype == "richlink":
-        return _format_richlink_content(content), MessageType.TEXT, [], []
-    if ctype == "group":
-        return _normalize_group_content(content)
-    return f"[Photon content type not handled: {ctype}]", MessageType.TEXT, [], []
+    normalize = _CONTENT_NORMALIZERS.get(ctype) if isinstance(ctype, str) else None
+    if normalize is None:
+        return f"[Photon content type not handled: {ctype}]", MessageType.TEXT, [], []
+    return normalize(content)
 
 
 def _attachment_body(space_id: str, safe_path: str, *, kind: str, name: Optional[str] = None,
@@ -513,7 +509,10 @@ class PhotonAdapter(BasePlatformAdapter):
             value = extra.get(key)
             if value is None:
                 value = _get_scoped_secret(env)
-            return _coerce(cast, value, default)
+            try:
+                return cast(value)
+            except (TypeError, ValueError):
+                return default
         self._probe_interval = _setting("probe_interval_seconds", "PHOTON_PROBE_INTERVAL_SECONDS", 600.0, float)
         self._probe_timeout = _setting("probe_timeout_seconds", "PHOTON_PROBE_TIMEOUT_SECONDS", 10.0, float)
         self._probe_max_failures = _setting("probe_max_failures", "PHOTON_PROBE_MAX_FAILURES", 3, int)
@@ -587,8 +586,7 @@ class PhotonAdapter(BasePlatformAdapter):
             return False
         client = httpx.AsyncClient(timeout=30.0, trust_env=False)
         self._http_client = client
-        # The sidecar holds the gRPC stream for BOTH directions, so it is required now.
-        if self._autostart_sidecar:
+        if self._autostart_sidecar:  # the sidecar holds the gRPC stream for BOTH directions: required now
             try:
                 await self._start_sidecar()
             except Exception as e:
@@ -621,8 +619,7 @@ class PhotonAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._inbound_running = False
-        # Stop the watchdog first so it can't respawn while we tear the sidecar down.
-        await self._stop_watchdog()
+        await self._stop_watchdog()  # first, so it can't respawn while we tear the sidecar down
         task, self._sidecar_health_task = self._sidecar_health_task, None
         await _cancel_task(task)
         task, self._inbound_task = self._inbound_task, None
@@ -719,8 +716,7 @@ class PhotonAdapter(BasePlatformAdapter):
             break
 
     async def _on_inbound_line(self, line: str) -> None:
-        # Any inbound line proves the upstream gRPC channel is live.
-        self._note_upstream_activity()
+        self._note_upstream_activity()  # any inbound line proves the upstream gRPC channel is live
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -779,8 +775,7 @@ class PhotonAdapter(BasePlatformAdapter):
                                        user_id=sender_id, user_name=sender_id or None)
             return MessageEvent(text=text, message_type=mtype, source=source, message_id=message_id,
                                 raw_message=event, timestamp=timestamp, **kwargs)
-        if ctype in {"read", "read_receipt"}:
-            # Presence signal, not a user turn (sidecar only forwards receipts for our sends).
+        if ctype in {"read", "read_receipt"}:  # presence signal, not a user turn (receipts for our sends)
             logger.debug("[photon] outbound message read: %s", content.get("targetMessageId") or "unknown")
             return
         if ctype == "reaction":
@@ -966,8 +961,7 @@ class PhotonAdapter(BasePlatformAdapter):
                 code="SIDECAR_NODE_MISSING", retryable=False) from exc
         loop = asyncio.get_event_loop()
         self._sidecar_supervisor_task = loop.create_task(self._supervise_sidecar(self._sidecar_proc))
-        # Wait for /healthz — up to 15s on cold start.
-        deadline = time.time() + 15.0
+        deadline = time.time() + 15.0  # wait for /healthz — up to 15s on cold start
         last_err: Optional[Exception] = None
         async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             while time.time() < deadline:
@@ -977,8 +971,7 @@ class PhotonAdapter(BasePlatformAdapter):
                         f"Photon sidecar exited with code {self._sidecar_proc.returncode} before becoming ready")
                 try:
                     resp = await client.post(self._sidecar_url("/healthz"), headers=self._sidecar_headers())
-                    if resp.status_code == 200:
-                        # Let out-of-process senders (cron, `hermes send`) reach this sidecar.
+                    if resp.status_code == 200:  # let out-of-process senders (cron) reach this sidecar
                         _write_runtime_record(self._sidecar_port, self._sidecar_token, self._sidecar_proc.pid)
                         return
                 except httpx.RequestError as e:
@@ -1014,8 +1007,7 @@ class PhotonAdapter(BasePlatformAdapter):
             _delete_runtime_record()  # never leave a record behind on disconnect
             return
         try:
-            # Closing our stdin end is itself a shutdown signal (sidecar watches EOF).
-            if proc.stdin is not None:
+            if proc.stdin is not None:  # closing our stdin end is itself a shutdown signal (EOF watch)
                 with contextlib.suppress(Exception):
                     proc.stdin.close()
             if self._http_client is not None:  # polite shutdown first
@@ -1097,8 +1089,7 @@ class PhotonAdapter(BasePlatformAdapter):
             except Exception:
                 logger.exception("[photon] failed to respawn sidecar; watchdog will retry")
                 return
-            # Fresh stream: give it a full interval before probing again.
-            self._note_upstream_activity()
+            self._note_upstream_activity()  # fresh stream: give it a full interval before probing again
             logger.info("[photon] presence watchdog: sidecar respawned, gRPC stream renewed")
 
     async def _presence_watchdog(self) -> None:
@@ -1189,11 +1180,6 @@ class PhotonAdapter(BasePlatformAdapter):
         return await self._sidecar_send_attachment(chat_id, file_path, name=file_name, caption=caption)
 
     # send_animation: base falls back to send_image (iMessage renders GIFs inline as images).
-
-    async def send_poll(self, chat_id: str, title: str, options: list[str],
-                        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Send a native iMessage poll (thin wrapper over ``_sidecar_send_poll``)."""
-        return await self._sidecar_send_poll(chat_id, title, list(options or []))
 
     async def _sidecar_try(self, path: str, body: Dict[str, Any], what: str) -> bool:
         """Soft-failing sidecar call: True on success, False (debug-logged) on any error."""
@@ -1394,14 +1380,11 @@ class PhotonAdapter(BasePlatformAdapter):
         self._record_sent_message(data.get("messageId"))
         return SendResult(success=True, message_id=data.get("messageId"))
 
-    async def _sidecar_send_richlink(self, space_id: str, url: str) -> SendResult:
-        return await self._post_send("/send-richlink", {"spaceId": space_id, "url": url})
-
     async def _sidecar_send(self, space_id: str, text: str, *, richlink: bool = True,
                             markdown: bool = True) -> SendResult:
         rich_url = _richlink_candidate(text) if richlink else None
         if rich_url:
-            rich_result = await self._sidecar_send_richlink(space_id, rich_url)
+            rich_result = await self._post_send("/send-richlink", {"spaceId": space_id, "url": rich_url})
             if rich_result.success:
                 return rich_result
             logger.warning("[photon] rich-link send failed, falling back to plain text: %s", rich_result.error)
@@ -1410,8 +1393,7 @@ class PhotonAdapter(BasePlatformAdapter):
             logger.warning("[photon] truncating outbound from %d to %d chars", len(text), self.MAX_MESSAGE_LENGTH)
             text = text[: self.MAX_MESSAGE_LENGTH]
         body: Dict[str, Any] = {"spaceId": space_id, "text": text}
-        # Omit the key when disabled so a pre-`format` sidecar keeps accepting the body.
-        if markdown and _markdown_enabled():
+        if markdown and _markdown_enabled():  # key omitted when disabled: pre-`format` sidecars still accept
             body["format"] = "markdown"
         return await self._post_send("/send", body, structured=True)
 
@@ -1430,8 +1412,7 @@ class PhotonAdapter(BasePlatformAdapter):
                                        kind: str = "attachment") -> SendResult:
         """POST a local file to ``/send-attachment``. ``kind="voice"`` sends audio as a voice
         note (downgrades to a plain audio attachment where unsupported)."""
-        # Defense-in-depth: send_*_file / cron callers may pass arbitrary strings.
-        safe_path = self.validate_media_delivery_path(str(path))
+        safe_path = self.validate_media_delivery_path(str(path))  # send_*_file / cron may pass arbitrary strings
         if not safe_path:
             return SendResult(success=False, error=f"unsafe or missing attachment path: {path}")
         body = _attachment_body(
@@ -1570,8 +1551,7 @@ async def _standalone_send(
                     return resp, None
                 data = resp.json() or {}
                 return resp, (data if data.get("ok") else None)
-            # 1. Text body first (if any), so it leads the conversation.
-            if message:
+            if message:  # 1. text body first, so it leads the conversation
                 rich_url = _richlink_candidate(message)
                 if rich_url:
                     _resp, data = await _post("/send-richlink", {"spaceId": chat_id, "url": rich_url})
