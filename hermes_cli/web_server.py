@@ -1,15 +1,9 @@
-"""
-Hermes Agent — Web UI server.
+"""Hermes Agent — Web UI server: FastAPI app assembly, auth/host middleware, ``start_server``.
 
-FastAPI app construction for the dashboard: lifespan, auth/host middleware,
-router mounting (``hermes_cli.web_routers``) and ``start_server``.  Route
-handlers live in ``web_routers/``; the helpers they call live in the sibling
-``web_server_<concern>`` modules and are re-imported here so
-``web_server.<name>`` stays the single late-binding seam tests monkeypatch.
-
-Usage:
-    python -m hermes_cli.main web          # Start on http://127.0.0.1:9119
-    python -m hermes_cli.main web --port 8080
+Route handlers live in ``web_routers/``; their helpers live in the sibling
+``web_server_<concern>`` modules and are re-imported here so ``web_server.<name>``
+stays the single late-binding seam tests monkeypatch (``web_deps.late``).
+Usage: ``python -m hermes_cli.main web [--port 8080]``.
 """
 
 from contextlib import asynccontextmanager
@@ -103,41 +97,16 @@ from hermes_cli.web_server_lifecycle import (  # noqa: E402,F401 — re-exported
 )
 
 
-# ---------------------------------------------------------------------------
-# Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
-# and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
-# the chat tab generates on mount; entries auto-evict when the last subscriber
-# drops AND the publisher has disconnected.
-#
-# State lives on app.state (not module-level globals) so that asyncio.Lock is
-# created on the running event loop during lifespan startup.  A module-level
-# asyncio.Lock() binds to whatever loop was active at import time, which breaks
-# when the same module is used across TestClient instances or uvicorn reloads.
-# ---------------------------------------------------------------------------
-
 def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60) -> None:
     """Tick the cron scheduler from inside the desktop dashboard backend.
 
-    The scheduler tick loop normally lives in ``hermes gateway run`` — but the
-    desktop app spawns a ``hermes dashboard`` backend, not a gateway, so a cron
-    a user creates in the app would never fire. We run the resolved cron
-    scheduler provider here (no live adapters; delivery falls back to the
-    per-platform send path).
-
-    Every local profile's store is ticked, not just this backend's own
-    (#69377's desktop sibling): the desktop pools per-profile backends and
-    reaps them after ~10 idle minutes, so a secondary profile's ticker dies
-    with its backend and that profile's jobs silently stop firing until the
-    user next opens it ("tasks on the sleeping profile could be idle" —
-    community report, Aug 2026). The primary backend outlives the pool, so it
-    owns every profile's tick, exactly like a multiplex gateway. External
-    providers keep the single-store behavior — their registries are not
-    profile-scoped (see _notify_cron_provider_for_profile).
-
-    Cross-process safe: the built-in provider's ``cron.scheduler.tick`` takes
-    the per-store ``cron/.tick.lock`` file lock, so this never double-fires
-    alongside a real gateway or a live pool backend on the same profile home —
-    whichever process grabs the lock first wins the tick.
+    The desktop spawns a ``hermes dashboard`` backend, not a gateway, so without
+    this a cron created in the app would never fire (no live adapters; delivery
+    falls back to the per-platform send path). The primary backend outlives the
+    per-profile pool (reaped after ~10 idle minutes), so it ticks EVERY local
+    profile's store like a multiplex gateway; external providers keep the
+    single-store behavior (registries are not profile-scoped). Cross-process
+    safe: the built-in tick takes the per-store ``cron/.tick.lock``.
     """
     from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
 
@@ -151,17 +120,12 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
             profile_homes = list(profiles_to_serve(multiplex=True))
             if len(profile_homes) > 1:
                 start_kwargs["profile_homes"] = profile_homes
-                # Stand down, per tick, for any profile whose OWN gateway is
-                # running: that gateway ticks it with live adapters, and the
-                # tick-lock race otherwise lets this adapter-less ticker win
-                # and deliver the job through the standalone path (#100489).
-                # Evaluated every cycle so a gateway starting/stopping later
-                # is picked up without a dashboard restart.
+                # Stand down, per tick, for a profile whose OWN gateway runs:
+                # it ticks with live adapters, and the tick-lock race would
+                # otherwise deliver through the standalone path (#100489).
                 from hermes_cli.profiles import _check_gateway_running
 
-                start_kwargs["profile_gate"] = (
-                    lambda _name, home: not _check_gateway_running(Path(home))
-                )
+                start_kwargs["profile_gate"] = lambda _name, home: not _check_gateway_running(Path(home))
                 from hermes_logging import enable_profile_log_routing
 
                 enable_profile_log_routing(profile_homes)
@@ -171,8 +135,7 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
                     [name for name, _home in profile_homes],
                 )
         except Exception:
-            # Fail open to the single-store ticker — the active profile's
-            # jobs must keep firing even if profile enumeration breaks.
+            # Fail open to the single-store ticker so the active profile keeps firing.
             _log.exception("Desktop cron: profile enumeration failed; ticking active profile only")
 
     _log.info("Desktop cron scheduler started (provider=%s, interval=%ds)", provider.name, interval)
@@ -189,52 +152,37 @@ async def _lifespan(app: "FastAPI"):
     app.state.event_channels = {}  # dict[str, set]
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}  # dict[str, Path]
-    # Serializes chat-argv resolution so concurrent /api/pty connections
-    # don't trigger overlapping ``npm install`` / ``npm run build`` work.
-    # On app.state (not a module global) so the Lock binds to the running
-    # event loop during lifespan startup — see _get_event_state's docstring.
+    # Serializes chat-argv resolution so concurrent /api/pty connections don't
+    # overlap ``npm install`` / ``npm run build``. Locks live on app.state (not
+    # module globals) so they bind to the running loop, not the import-time one.
     app.state.chat_argv_lock = asyncio.Lock()
 
-    # Bring this profile's state.db schema current BEFORE the first
-    # session-list poll (#79531/#80037). Migrations used to run lazily on
-    # the first writable open — typically the user's first new session —
-    # so a store left behind by `hermes update` kept 500ing every
-    # /api/sessions poll (and the read-probe heal, while it retries per
-    # poll, can lose repeatedly to lock contention from orphaned sibling
-    # backends). One writable open here runs _init_schema →
-    # _reconcile_columns with the full open-time lock patience. Runs in a
-    # daemon thread so a locked store never delays the server socket (the
-    # Desktop ready-probe times out at 10s, GH-73083); reads that land
-    # before it finishes are still covered by the read-probe heal.
+    # Bring state.db schema current BEFORE the first session-list poll
+    # (#79531/#80037): a store left behind by `hermes update` otherwise 500s
+    # every poll while the read-probe heal loses to sibling lock contention.
+    # Daemon thread so a locked store never delays the socket (Desktop
+    # ready-probe times out at 10s, GH-73083).
     threading.Thread(
         target=_eager_reconcile_own_session_db,
         daemon=True,
         name="statedb-eager-reconcile",
     ).start()
 
-    # Import hermes_cli.gateway eagerly *before* the lifespan yield so the
-    # GIL-heavy .pyc compilation and Defender scan cost is absorbed during
-    # backend initialisation — before the server socket accepts probes.
-    # On Windows + Python 3.11 the import does not release the GIL, so
-    # run_in_executor still froze the event loop for 15-22 s, causing the
-    # Desktop's 10-second WebSocket ready-probe to time out (GH-73083).
+    # Import hermes_cli.gateway *before* the yield: on Windows + 3.11 the
+    # import holds the GIL, so run_in_executor still froze the loop 15-22s and
+    # the Desktop's 10s ready-probe timed out (GH-73083).
     _warm_gateway_module()
 
-    # Snapshot the checkout revision at boot so risky lazy-import paths (the
-    # model picker) can detect when `hermes update` replaced the code
-    # underneath this long-lived process and refuse with a clear "restart
-    # required" message instead of a stale-module ImportError (#86207).  This
-    # mirrors the gateway's record_boot_fingerprint in gateway/run.py; the
-    # dashboard is a separate process/unit that the update flow does not
-    # reliably restart, so it must detect the drift itself.
+    # Snapshot the checkout revision so lazy-import paths (model picker) can
+    # refuse with "restart required" after `hermes update` replaced the code
+    # (#86207); the update flow does not reliably restart the dashboard.
     from gateway.code_skew import record_boot_fingerprint
 
     record_boot_fingerprint()
 
-    # Hosted Bot rooms belong to the backend process, not to any connected
-    # Desktop socket. Recovery may need a contended state.db migration, so keep
-    # it off the lifespan's pre-yield path: Group Chat startup must degrade on
-    # its own instead of preventing every dashboard/Desktop feature from booting.
+    # Hosted Bot rooms belong to the backend process. Recovery may need a
+    # contended state.db migration, so keep it off the pre-yield path: Group
+    # Chat must degrade on its own rather than block every Desktop feature.
     from tui_gateway import methods_groups as _hosted_groups
     import tui_gateway.server  # noqa: F401
 
@@ -262,25 +210,11 @@ async def _lifespan(app: "FastAPI"):
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
     if os.getenv("HERMES_DESKTOP") == "1":
-        # Before forking a fresh gateway, reap any orphan left by a previous
-        # serve session. Graceful shutdown reaps the managed child, but an
-        # abnormal exit (crash, SIGKILL, power loss, forced update) reparents
-        # the old gateway to launchd (PPID=1). It keeps holding the QQ
-        # WebSocket, and a newly forked gateway then races the same credential,
-        # splitting messages across parallel session trees (#77276).
-        #
-        # The sweep itself still runs unconditionally — a stale-but-present
-        # registration must not veto the #77276 orphan reap. Protection for
-        # a healthy standalone gateway (launched via `hermes gateway run`,
-        # no service supervisor) lives INSIDE the reaper: it probes the
-        # registration with cleanup_stale=False so the recorded PID always
-        # joins the exclusion set, even when liveness validation would have
-        # unlinked the record mid-sweep. That matters most on Windows, where
-        # every layer of the launcher chain (stub -> venv python -> runtime
-        # python) carries "gateway run" in its command line, so
-        # find_gateway_pids() matches processes the pidfile exclusion cannot
-        # see, and os.kill(SIGTERM) is a hard TerminateProcess — the
-        # gateway's planned-stop watcher (0.5s poll) has no time to drain.
+        # Reap an orphaned gateway from an abnormal previous exit (reparented to
+        # launchd, still holding the platform WebSocket) before forking a fresh
+        # one that would race the same credential (#77276). Runs
+        # unconditionally; protection of a healthy standalone gateway lives
+        # INSIDE the reaper (registration probed with cleanup_stale=False).
         try:
             from hermes_cli.gateway import _reap_unsupervised_gateway_orphans
 
@@ -297,38 +231,27 @@ async def _lifespan(app: "FastAPI"):
         )
         cron_thread.start()
 
-    # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
+    # Reap idle/dead keep-alive PTY sessions (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
-
-    # Periodic authenticated self-test (feeds the ``dashboard`` component on
-    # /api/status).  The loop exits immediately when httpx is unavailable.
+    # Periodic authenticated self-test feeding the ``dashboard`` component on /api/status.
     selftest_task = asyncio.create_task(_dashboard_selftest_loop())
-
-    # Live auto-archive timer — keeps a backend that stays up for days
-    # sweeping stale sessions on schedule, independent of list requests.
+    # Live auto-archive timer, independent of list requests.
     auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
 
-    # Managed local runtime: when the user opted in (local_runtime.enabled,
-    # set by the Local Models 'Use' action), bring the llama-server back up
-    # so a restart doesn't strand a llamacpp main model without a backend.
-    # Off-thread and best-effort: binary check + spawn + health poll must
-    # not delay the server socket, and failure falls back to configured
-    # cloud providers exactly like a cold start.
+    # Managed local runtime (local_runtime.enabled): bring llama-server back so a
+    # restart doesn't strand a llamacpp main model. Off-thread and best-effort;
+    # failure falls back to cloud providers like a cold start. Server only —
+    # models load on first inference (an empty router holds no VRAM).
     def _boot_local_runtime():
         try:
             from hermes_cli.config import load_config
             from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
 
-            # Server only — models load on first inference, always (residency
-            # design: downloaded = available; demand loads; idleness
-            # evicts). An empty router holds no VRAM; warming a model at
-            # boot would reload gigabytes nobody asked for yet.
             ensure_local_runtime(load_config())
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning("local runtime boot failed: %s", exc)
 
-    threading.Thread(target=_boot_local_runtime, daemon=True,
-                     name="local-runtime-boot").start()
+    threading.Thread(target=_boot_local_runtime, daemon=True, name="local-runtime-boot").start()
 
     try:
         yield
@@ -342,8 +265,7 @@ async def _lifespan(app: "FastAPI"):
         selftest_task.cancel()
         auto_archive_task.cancel()
         await PTY_REGISTRY.close_all()
-        # Stop the managed llama-server with its parent — a supervisor-less
-        # orphan would keep VRAM pinned after the app closes.
+        # Stop the managed llama-server with its parent (an orphan pins VRAM).
         try:
             from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
 
@@ -384,16 +306,9 @@ from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
 
-# ---------------------------------------------------------------------------
-# Session token for protecting sensitive endpoints (reveal).
-# The desktop shell mints the token and injects it via
-# HERMES_DASHBOARD_SESSION_TOKEN so its main process can authenticate the
-# /api calls it makes on the user's behalf; otherwise we generate one fresh
-# on every server start. Either way it dies when the process exits and is
-# injected into the SPA HTML so only the legitimate web UI can use it.
-# ---------------------------------------------------------------------------
-
-
+# Session token for sensitive endpoints. The desktop shell mints it via
+# HERMES_DASHBOARD_SESSION_TOKEN; otherwise fresh per server start. It dies with
+# the process and is injected into the SPA HTML so only the web UI can use it.
 def _resolve_session_token() -> str:
     return os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
 
@@ -421,14 +336,10 @@ def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
             purelib = sysconfig.get_paths()["purelib"]
         except (KeyError, OSError):
             return
-        # Primary identity: a marker FILE written into site-packages now.
-        # A replaced venv (rm -rf && recreate — same OR different Python
-        # version) loses the marker deterministically, while pip installs
-        # into the live venv leave it untouched (no false stales). A bare
-        # (dev, ino) snapshot of the directory is NOT sufficient on its
-        # own: ext4 reuses directory inodes immediately, so the exact
-        # reported repro (`rm -rf venv && uv venv`) can land on the same
-        # inode and pass undetected (proven live during salvage).
+        # Primary identity: a marker FILE in site-packages. A replaced venv
+        # loses it deterministically; pip installs leave it. A bare (dev, ino)
+        # snapshot alone is NOT enough: ext4 reuses directory inodes at once,
+        # so `rm -rf venv && uv venv` can land on the same inode undetected.
         try:
             marker = os.path.join(purelib, f".hermes-ssh-runtime-{nonce}")
             with open(marker, "w", encoding="utf-8") as fh:
@@ -444,12 +355,10 @@ def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
 
 
 def _ssh_runtime_intact() -> bool:
-    # Marker file is the deterministic signal when we managed to write one.
     if _SSH_RUNTIME_MARKER is not None:
         return os.path.isfile(_SSH_RUNTIME_MARKER)
-    # Fallback (read-only site-packages): directory identity snapshot.
-    # Weaker — inode reuse can mask a same-filesystem recreate — but still
-    # catches cross-device moves and version-bump path changes.
+    # Fallback (read-only site-packages): directory identity snapshot — weaker
+    # (inode reuse) but catches cross-device moves and version-bump paths.
     if _SSH_RUNTIME_PURELIB is None:
         return True
     purelib, device, inode = _SSH_RUNTIME_PURELIB
@@ -460,26 +369,18 @@ def _ssh_runtime_intact() -> bool:
     return (st.st_dev, st.st_ino) == (device, inode)
 
 
-# In-browser Chat tab (/chat, /api/pty, /api/ws, …).  Always enabled: the
-# desktop app and the dashboard's own Chat tab both drive the agent over the
-# `/api/ws` + `/api/pty` WebSockets, so the embedded-chat surface is an
-# unconditional part of the dashboard.  Kept as a module-level constant (rather
-# than inlining ``True`` at every gate) so the WS endpoints and the SPA token
-# injection share a single, testable seam.
+# In-browser Chat tab (/chat, /api/pty, /api/ws): always enabled. A module
+# constant (not an inlined True) so the WS endpoints and SPA token injection
+# share one testable seam.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = True
 
-# Desktop's file.attach compatibility transport sends a complete base64 data
-# URL in one JSON-RPC frame. Uvicorn defaults to 16 MiB, which rejects files at
-# the preview ceiling before the dispatcher sees them. Keep the gateway
-# finite while allowing the 256 MiB raw Desktop attach cap plus base64/JSON
-# overhead.
+# Desktop file.attach sends a whole base64 data URL in one JSON-RPC frame;
+# uvicorn's 16 MiB default rejects files under the 256 MiB raw attach cap.
 _DESKTOP_ATTACHMENT_WS_MAX_BYTES = 384 * 1024 * 1024
 
 
-# CORS: restrict to localhost origins only.  The web UI is intended to run
-# locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
-# read/modify config and secrets.
-
+# CORS: localhost origins only — allow_origins=["*"] on 0.0.0.0 would let any
+# website read/modify config and secrets.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -487,47 +388,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Endpoints that do NOT require the session token.  Everything else under
-# /api/ is gated by the auth middleware below.
-#
-# This list is defined in ``hermes_cli.dashboard_auth.public_paths`` so the
-# OAuth gate middleware can honour the same allowlist — keeping the two
-# gates in lockstep avoids drift like the wildcard-subdomain regression
-# where ``/api/status`` was public under the legacy gate but 401'd under
-# the OAuth gate (breaking the portal's liveness probe).
-#
-# Keep the upstream list minimal — only truly non-sensitive, read-only
-# endpoints belong there.
-# ---------------------------------------------------------------------------
-from hermes_cli.dashboard_auth.public_paths import (
-    PUBLIC_API_PATHS as _PUBLIC_API_PATHS,
-)
+# Endpoints that do NOT require the session token; everything else under /api/
+# is gated below. Shared with the OAuth gate so the two allowlists cannot
+# drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).
+from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS as _PUBLIC_API_PATHS
 
 
 def _has_valid_session_token(request: Request) -> bool:
     """True if the request carries a valid dashboard session token.
 
-    The dedicated session header avoids collisions with reverse proxies that
-    already use ``Authorization`` (for example Caddy ``basic_auth``). We still
-    accept the legacy Bearer path for backward compatibility with older
-    dashboard bundles.
+    The dedicated header avoids collisions with reverse proxies that already use
+    ``Authorization`` (Caddy ``basic_auth``); the legacy Bearer path stays for
+    older dashboard bundles.
     """
     session_header = request.headers.get(_SESSION_HEADER_NAME, "")
-    if session_header and hmac.compare_digest(
-        session_header.encode(),
-        _SESSION_TOKEN.encode(),
-    ):
+    if session_header and hmac.compare_digest(session_header.encode(), _SESSION_TOKEN.encode()):
         return True
-
     auth = request.headers.get("authorization", "")
-    expected = f"Bearer {_SESSION_TOKEN}"
-    return hmac.compare_digest(auth.encode(), expected.encode())
+    return hmac.compare_digest(auth.encode(), f"Bearer {_SESSION_TOKEN}".encode())
 
 
-# Routes that may also authenticate via a ``?token=`` query param, for download
-# links opened by the OS shell or a new browser tab where the session header
-# can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
+# Routes that may also authenticate via ``?token=`` (download links opened by
+# the OS shell / a new tab, where no header can be set). Kept narrow.
 _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
 
 
@@ -541,84 +423,48 @@ def _has_valid_query_token(request: Request, path: str) -> bool:
 def _require_token(request: Request) -> None:
     """Authorize a sensitive endpoint, raising 401 if the caller isn't allowed.
 
-    Two auth schemes protect the dashboard, exactly one active per bind:
-
-    * **Loopback / ``--insecure`` mode** (``auth_required`` False): the
-      ephemeral ``_SESSION_TOKEN`` is injected into the SPA HTML and echoed
-      back via ``X-Hermes-Session-Token`` (or the legacy ``Bearer`` header).
-      Validate it here.
-    * **Gated / OAuth mode** (``auth_required`` True): ``_SESSION_TOKEN`` is
-      NOT injected (the SPA authenticates with a session cookie), so there is
-      no token to check. The ``gated_auth_middleware`` has already verified the
-      cookie before the request reached this handler — any non-public ``/api/``
-      route it lets through carries a verified ``request.state.session``. The
-      legacy ``auth_middleware`` likewise short-circuits in this mode. Requiring
-      the (absent) token here would 401 every cookie-authenticated request,
-      making plugin install/enable/disable and the other ``_require_token``
-      endpoints permanently unreachable behind the gate. Defer to the gate.
+    Loopback mode (``auth_required`` False): validate the SPA-injected
+    ``_SESSION_TOKEN``. Gated mode: the token is NOT injected (cookie auth), and
+    ``gated_auth_middleware`` already 401'd anything without a verified
+    ``request.state.session`` — requiring the absent token here would make every
+    ``_require_token`` endpoint unreachable behind the gate, so defer to it.
     """
     if getattr(request.app.state, "auth_required", False):
-        # Gate is authoritative. It attaches ``request.state.session`` on
-        # success and 401s otherwise, so a request that reached us is already
-        # authenticated. Belt-and-braces: confirm the session is present.
-        if getattr(request.state, "session", None) is not None:
-            return
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if not _has_valid_session_token(request):
+        ok = getattr(request.state, "session", None) is not None
+    else:
+        ok = _has_valid_session_token(request)
+    if not ok:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# Accepted Host header values for loopback binds. DNS rebinding attacks
-# point a victim browser at an attacker-controlled hostname (evil.test)
-# which resolves to 127.0.0.1 after a TTL flip — bypassing same-origin
-# checks because the browser now considers evil.test and our dashboard
-# "same origin". Validating the Host header at the app layer rejects any
-# request whose Host isn't one we bound for. See GHSA-ppp5-vxwm-4cf7.
-_LOOPBACK_HOST_VALUES: frozenset = frozenset({
-    "localhost", "127.0.0.1", "::1",
-})
+# Accepted Host values for loopback binds. DNS rebinding TTL-flips an attacker
+# hostname to 127.0.0.1 so the browser treats it as same-origin; validating Host
+# at the app layer rejects it. See GHSA-ppp5-vxwm-4cf7.
+_LOOPBACK_HOST_VALUES: frozenset = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _dashboard_public_hosts() -> frozenset[str]:
     """Return the exact hostname declared by ``dashboard.public_url``.
 
-    ``public_url`` is already Hermes' canonical browser-facing URL behind a
-    reverse proxy. Reusing its validated hostname here keeps OAuth redirects,
-    HTTP Host validation, and WebSocket Origin validation on one source of
-    truth. Malformed or unset values fail closed as an empty set.
+    One source of truth for OAuth redirects, Host and WS Origin validation.
+    Malformed or unset values fail closed as an empty set.
     """
     from hermes_cli.dashboard_auth.prefix import resolve_public_url
 
     public_url = resolve_public_url()
-    if not public_url:
-        return frozenset()
     try:
-        hostname = urllib.parse.urlparse(public_url).hostname
+        hostname = urllib.parse.urlparse(public_url).hostname if public_url else None
     except ValueError:
-        return frozenset()
-    if not hostname:
-        return frozenset()
-    return frozenset({hostname.lower()})
+        hostname = None
+    return frozenset({hostname.lower()}) if hostname else frozenset()
 
 
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
-    """Return True iff the dashboard auth gate must be active.
+    """True iff the auth gate must be active: any non-loopback bind.
 
-    Truth table:
-      host == loopback        → False (no auth — local-only, trusted operator)
-      host != loopback        → True  (gate engages — OAuth or password required)
-
-    "Loopback" is 127.0.0.1, localhost, ::1. RFC1918 / CGNAT / link-local are
-    deliberately treated as PUBLIC — a hostile device on the same LAN is exactly
-    the threat model the gate is designed for.
-
-    ``allow_public`` (the legacy ``--insecure`` escape hatch) NO LONGER disables
-    the gate. It is accepted for backward-compat with old launch scripts and
-    desktop shells but is ignored: a non-loopback bind ALWAYS requires an auth
-    provider (OAuth or the bundled password provider). This closes the
-    unauthenticated-public-dashboard hole behind the June 2026 ``hermes-0day``
-    MCP-persistence campaign, where ``--insecure --host 0.0.0.0`` left the
-    config/MCP/agent surface open to internet scanners.
+    RFC1918 / CGNAT / link-local are deliberately PUBLIC — a hostile LAN device
+    is the threat model. ``allow_public`` (legacy ``--insecure``) is accepted for
+    old launch scripts but IGNORED since the June 2026 hermes-0day campaign.
     """
     return host not in _LOOPBACK_HOST_VALUES
 
@@ -627,19 +473,14 @@ def should_require_dashboard_auth(
     host: str,
     trusted_public_hosts: Optional[frozenset[str]] = None,
 ) -> bool:
-    """Return whether the dashboard auth gate must be active.
+    """Gate required for a non-loopback bind OR a non-loopback ``dashboard.public_url``.
 
-    The browser-facing URL is part of the exposure boundary: a non-loopback
-    ``dashboard.public_url`` requires authentication even when a reverse proxy
-    reaches a backend bound to loopback. Callers may pass the already-resolved
-    host set so startup and request validation use the same snapshot.
+    Callers may pass the already-resolved host set so startup and request
+    validation share one snapshot.
     """
     if trusted_public_hosts is None:
         trusted_public_hosts = _dashboard_public_hosts()
-    return should_require_auth(host) or any(
-        candidate not in _LOOPBACK_HOST_VALUES
-        for candidate in trusted_public_hosts
-    )
+    return should_require_auth(host) or any(h not in _LOOPBACK_HOST_VALUES for h in trusted_public_hosts)
 
 
 def _desktop_loopback_auth_exempt(
@@ -649,33 +490,18 @@ def _desktop_loopback_auth_exempt(
 ) -> bool:
     """True for a Desktop-owned loopback backend (#96490).
 
-    A non-loopback ``dashboard.public_url`` engages the ticket-only auth gate
-    for EVERY ``hermes serve`` on the machine — including the private loopback
-    backends the Desktop app spawns for itself. Those backends authenticate
-    with the per-spawn session token (injected via
-    ``HERMES_DASHBOARD_SESSION_TOKEN`` for local spawns, ``--ssh-session-token
-    -file``/``--ssh-owner-nonce`` for Desktop SSH), which the gate's WS path
-    refuses outright — Desktop could not boot with a ``public_url`` configured.
-
-    The public_url describes a DIFFERENT deployment: the actual public
-    dashboard is a separate process on a non-loopback bind, whose own startup
-    computes ``should_require_dashboard_auth`` from its host and stays gated.
-    Exempting this process therefore never opens the public surface.
-
-    Exemption requires ALL of: loopback bind, ``HERMES_DESKTOP=1`` (set by
-    every Desktop spawn path — local and SSH), and an operator-minted
-    credential (env token, SSH session token, or owner nonce). A plain
-    ``hermes serve`` with ``HERMES_DESKTOP=1`` exported but no credential is
-    NOT exempt.
+    A non-loopback ``dashboard.public_url`` would otherwise engage the
+    ticket-only gate for the private loopback backends Desktop spawns, whose
+    per-spawn session token the gate's WS path refuses — Desktop could not boot.
+    The public dashboard is a separate non-loopback process that stays gated, so
+    this never opens the public surface. Requires ALL of: loopback bind,
+    ``HERMES_DESKTOP=1``, and an operator-minted credential (env token, SSH
+    session token, or owner nonce).
     """
-    if host not in _LOOPBACK_HOST_VALUES:
-        return False
-    if os.environ.get("HERMES_DESKTOP") != "1":
-        return False
-    return bool(
-        os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN")
-        or ssh_session_token
-        or ssh_owner_nonce
+    return (
+        host in _LOOPBACK_HOST_VALUES
+        and os.environ.get("HERMES_DESKTOP") == "1"
+        and bool(os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or ssh_session_token or ssh_owner_nonce)
     )
 
 
@@ -686,11 +512,7 @@ def _host_header_hostname(host_header: str) -> str:
     malformed IPv6 brackets, and URL syntax so validation always fails closed.
     """
     value = (host_header or "").strip()
-    if not value:
-        return ""
-    if any(char in value for char in ('"', "'", "<", ">", " ", "\n", "\r", "\t")):
-        return ""
-    if "://" in value or any(char in value for char in ("/", "?", "#", "@")):
+    if not value or "://" in value or any(c in value for c in '"\'<> \n\r\t/?#@'):
         return ""
 
     if value.startswith("["):
@@ -734,57 +556,33 @@ def _is_accepted_host(
     host_only = _host_header_hostname(host_header)
     if not host_only:
         return False
-
-    if host_only in trusted_public_hosts:
+    # All-interfaces bind: no Host-layer defence is possible; rely on operator
+    # network controls.
+    if host_only in trusted_public_hosts or bound_host in {"0.0.0.0", "::"}:
         return True
-
-    # 0.0.0.0 bind means operator explicitly opted into all-interfaces
-    # (requires --insecure per web_server.start_server). No Host-layer
-    # defence can protect that mode; rely on operator network controls.
-    if bound_host in {"0.0.0.0", "::"}:
-        return True
-
-    # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
         return host_only in _LOOPBACK_HOST_VALUES
-
-    # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
 
 
 @app.middleware("http")
 async def host_header_middleware(request: Request, call_next):
-    """Reject requests whose Host header doesn't match the bound interface.
-
-    Defends against DNS rebinding: a victim browser on a localhost
-    dashboard is tricked into fetching from an attacker hostname that
-    TTL-flips to 127.0.0.1. CORS and same-origin checks don't help —
-    the browser now treats the attacker origin as same-origin with the
-    dashboard. Host-header validation at the app layer catches it.
-
-    See GHSA-ppp5-vxwm-4cf7.
-    """
-    # Store the bound host on app.state so this middleware can read it —
-    # set by start_server() at listen time.
+    """Reject requests whose Host header doesn't match the bound interface (DNS rebinding, GHSA-ppp5-vxwm-4cf7)."""
+    # app.state.bound_host is set by start_server() at listen time.
     bound_host = getattr(app.state, "bound_host", None)
-    if bound_host:
-        host_header = request.headers.get("host", "")
-        trusted_public_hosts = getattr(
-            app.state, "trusted_public_hosts", frozenset()
+    if bound_host and not _is_accepted_host(
+        request.headers.get("host", ""), bound_host, getattr(app.state, "trusted_public_hosts", frozenset())
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": (
+                    "Invalid Host header. Dashboard requests must use the "
+                    "bound hostname or the configured public hostname."
+                ),
+            },
         )
-        if not _is_accepted_host(
-            host_header, bound_host, trusted_public_hosts
-        ):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "detail": (
-                        "Invalid Host header. Dashboard requests must use the "
-                        "bound hostname or the configured public hostname."
-                    ),
-                },
-            )
     return await call_next(request)
 
 
@@ -792,17 +590,11 @@ async def host_header_middleware(request: Request, call_next):
 async def _plugin_api_runtime_gate(request: Request, call_next):
     """Block requests to disabled plugin API routes at request time.
 
-    :func:`_mount_plugin_api_routes` gates at import time, but if a plugin
-    is disabled *after* the dashboard is already running, its FastAPI router
-    remains mounted until restart.  This middleware enforces the enabled/
-    disabled policy on every request to ``/api/plugins/{name}/...`` so that
-    runtime config changes take effect immediately.
-
-    Registered BEFORE the auth middlewares (so it executes AFTER them): a
-    request that hasn't cleared auth must get auth's 401 first, never this
-    gate's 404 — otherwise an unauthenticated caller could fingerprint which
-    plugins are installed/enabled by reading the status code. We only reach
-    the enabled/disabled check for a request that auth already let through.
+    :func:`_mount_plugin_api_routes` gates at import time; a plugin disabled
+    while running keeps its router mounted until restart, so enforce on every
+    ``/api/plugins/{name}/...`` request. Registered BEFORE the auth middlewares
+    (runs AFTER them): an unauthenticated caller must get auth's 401, never this
+    404, or the status code becomes a plugin-name oracle.
     """
     path = request.url.path
     # parts: ['', 'api', 'plugins', '<name>', ...]
@@ -833,40 +625,31 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# ---------------------------------------------------------------------------
-# Dashboard OAuth auth gate — engaged only when start_server flags the
-# bind as non-loopback-without-insecure.  No-op pass-through in loopback
-# mode so the legacy auth_middleware (below) handles those binds via
-# the injected ``_SESSION_TOKEN``.  Registered between host_header and
-# auth_middleware so the order is: host check → cookie auth → token auth.
-# ---------------------------------------------------------------------------
-
-
 @app.middleware("http")
 async def _dashboard_auth_gate(request: Request, call_next):
+    """OAuth gate — active only when start_server flags ``auth_required``; pass-through on loopback.
+
+    Registered between host_header and auth_middleware: host check → cookie auth → token auth.
+    """
     from hermes_cli.dashboard_auth.middleware import gated_auth_middleware
     return await gated_auth_middleware(request, call_next)
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require the session token on all /api/ routes except the public list."""
-    # A request already authenticated by the token-auth seam (a service caller
-    # presenting a bearer token on a registered token route) carries
-    # ``token_authenticated`` — never bounce it through the cookie/session gate.
-    if getattr(request.state, "token_authenticated", False):
-        return await call_next(request)
-    # When the OAuth gate is active, cookie-based auth (gated_auth_middleware
-    # above) is authoritative.  The legacy _SESSION_TOKEN path is loopback-only
-    # and is skipped here so the gate's session attachment isn't overridden.
-    if getattr(request.app.state, "auth_required", False):
-        return await call_next(request)
+    """Require the session token on all /api/ routes except the public list.
+
+    Skipped for requests the token-auth seam already authenticated
+    (``token_authenticated``) and when the OAuth gate is active — cookie auth is
+    then authoritative and the loopback-only token path must not override it.
+    """
     path = request.url.path
-    is_mcp_oauth_callback = path.startswith("/api/mcp/oauth/callback/")
     if (
-        path.startswith("/api/")
+        not getattr(request.state, "token_authenticated", False)
+        and not getattr(request.app.state, "auth_required", False)
+        and path.startswith("/api/")
         and path not in _PUBLIC_API_PATHS
-        and not is_mcp_oauth_callback
+        and not path.startswith("/api/mcp/oauth/callback/")
         and not _has_valid_session_token(request)
         and not _has_valid_query_token(request, path)
     ):
@@ -876,36 +659,24 @@ async def auth_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def _token_auth_seam(request: Request, call_next):
-    """Outermost auth seam: non-interactive bearer-token auth for opted-in routes.
+    """Outermost auth seam: bearer-token auth for opted-in routes (registered LAST = runs FIRST).
 
-    Registered LAST so it runs FIRST (Starlette middleware is outermost-last).
-    A registered token route is fully owned here — authenticate by token,
-    attach the principal + ``token_authenticated`` flag, and let the downstream
-    cookie/session gates skip enforcement. Non-token routes pass straight
-    through untouched.
+    A registered token route is owned here — authenticate, attach the principal
+    + ``token_authenticated`` so downstream gates skip enforcement. Non-token
+    routes pass through untouched.
     """
     from hermes_cli.dashboard_auth.token_auth import token_auth_middleware
     return await token_auth_middleware(request, call_next)
 
 
-# ---------------------------------------------------------------------------
-# Dashboard component health — in-process error/self-test counters that feed
-# the ``components`` dict on ``/api/status``.  That endpoint is in
-# ``PUBLIC_API_PATHS``, so everything exported from here must be counts and
-# enums only: no exception messages, no request paths, no tokens.
-# ---------------------------------------------------------------------------
-
 _DASHBOARD_HEALTH_WINDOW_SECONDS = 300.0
 
 
 class DashboardHealth:
-    """Module-level holder for dashboard-process health signals.
+    """Dashboard-process health: rolling unhandled-error/5xx window + periodic self-test result.
 
-    Tracks unhandled exceptions / 5xx responses seen by the outermost HTTP
-    middleware (rolling window) and the result of the periodic authenticated
-    self-test.  ``last_error_path`` and ``last_error_type`` are internal
-    diagnostics for logs/debuggers — :meth:`snapshot` deliberately exports
-    neither (public-payload no-secrets contract).
+    Feeds ``components`` on the PUBLIC ``/api/status``, so :meth:`snapshot`
+    exports counts and enums only — never ``last_error_type``/``last_error_path``.
     """
 
     def __init__(self, window_seconds: float = _DASHBOARD_HEALTH_WINDOW_SECONDS) -> None:
@@ -953,13 +724,7 @@ DASHBOARD_HEALTH = DashboardHealth()
 
 @app.middleware("http")
 async def _dashboard_health_middleware(request: Request, call_next):
-    """Outermost middleware: count unhandled exceptions and 5xx responses.
-
-    Registered after ``_token_auth_seam`` so it is the outermost layer
-    (Starlette middleware is outermost-last) — nothing below can raise past
-    it unseen.  Records into :data:`DASHBOARD_HEALTH` and re-raises; never
-    swallows or alters the response.
-    """
+    """Outermost middleware (registered last): count unhandled exceptions and 5xx; re-raises, never alters."""
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -970,13 +735,8 @@ async def _dashboard_health_middleware(request: Request, call_next):
     return response
 
 
-# ---------------------------------------------------------------------------
-# Authenticated-route self-test: every minute, make one in-process request
-# against a cheap DB-touching authenticated route with the real session
-# token.  Catches the class of failure where liveness looks fine but every
-# authenticated request 500s (e.g. wedged state DB).
-# ---------------------------------------------------------------------------
-
+# Authenticated-route self-test: one in-process request per minute against a
+# cheap DB-touching route, catching "liveness fine but every authed request 500s".
 _DASHBOARD_SELFTEST_INTERVAL_SECONDS = 60.0
 _DASHBOARD_SELFTEST_ROUTE = "/api/sessions?limit=1"
 
@@ -986,18 +746,11 @@ async def _dashboard_selftest_once() -> None:
     try:
         import httpx
     except ImportError:
-        return  # optional dependency — skip cleanly, leave status "unknown"
+        return  # optional dependency — leave status "unknown"
     try:
-        transport = httpx.ASGITransport(app=app)
-        # base_url uses a loopback name so the Host-header middleware accepts
-        # the request on loopback binds.
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://127.0.0.1"
-        ) as client:
-            resp = await client.get(
-                _DASHBOARD_SELFTEST_ROUTE,
-                headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
-            )
+        # Loopback base_url so the Host-header middleware accepts the request.
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+            resp = await client.get(_DASHBOARD_SELFTEST_ROUTE, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
         DASHBOARD_HEALTH.record_selftest(resp.status_code == 200, resp.status_code)
     except Exception:
         DASHBOARD_HEALTH.record_selftest(False, None)
@@ -1012,8 +765,7 @@ async def _dashboard_selftest_loop() -> None:
         return
     while True:
         await asyncio.sleep(_DASHBOARD_SELFTEST_INTERVAL_SECONDS)
-        # On OAuth-gated binds the legacy session token is not honoured, so
-        # the probe would false-alarm 401 — skip until the gate is off.
+        # OAuth-gated binds don't honour the session token; the probe would false-alarm 401.
         if getattr(app.state, "auth_required", False):
             continue
         await _dashboard_selftest_once()
