@@ -189,7 +189,8 @@ class _CliSurface:
     """How a CLI subcommand module hangs its argparse tree off a root subparsers action.
     ``extracted``: ``builder(subparsers, <handler>=fn)``, fn from hermes_cli.main.
     ``registered``: ``register(subparsers.add_parser(root))``, optional module ``handler``.
-    ``builder``: ``top = builder(subparsers)``, func from hermes_cli.main. ``adder``: self-wiring."""
+    ``builder``: ``top = builder(subparsers)``, func from hermes_cli.main.
+    ``adder``: self-wiring."""
     kind: Literal["extracted", "registered", "builder", "adder"]
     module: str
     builder: str
