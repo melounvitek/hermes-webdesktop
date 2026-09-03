@@ -454,13 +454,10 @@ class _Runtime:
         session = self._session(event)
         if session is None:
             return
-        with session.lock:
-            if session.closing:
-                return
-            session.closing = True
-            self._abort_tasks(
-                session, {**event, **_ABORTED, "completed": False, "interrupted": False}
-            )
+        if not self._abort_session(
+            session, {**event, **_ABORTED, "completed": False, "interrupted": False}
+        ):
+            return
         try:
             self.relay.subscribers.flush()
         except Exception as exc:
@@ -505,11 +502,7 @@ class _Runtime:
         with self._sessions_lock:
             sessions = list(self._sessions.values())
         for session in sessions:
-            with session.lock:
-                if session.closing:
-                    continue
-                session.closing = True
-                self._abort_tasks(session, {"session_id": session.session_id, **_ABORTED})
+            self._abort_session(session, {"session_id": session.session_id, **_ABORTED})
         with self._sessions_lock:
             self._sessions.clear()
         with self._task_sessions_lock:
@@ -576,11 +569,16 @@ class _Runtime:
         self.relay.subscribers.flush()
         return True
 
-    def _abort_tasks(self, session: _MetricsSession, base_event: dict[str, Any]) -> None:
-        """Close every open task of a closing session as system-aborted (caller holds the lock)."""
-        for task_id in list(session.tasks):
-            self._finish_task(session, task_id, {**base_event, "task_id": task_id})
-        self._end_pending_model_calls(session, base_event)
+    def _abort_session(self, session: _MetricsSession, base_event: dict[str, Any]) -> bool:
+        """Mark the session closing and system-abort its open tasks; False if already closing."""
+        with session.lock:
+            if session.closing:
+                return False
+            session.closing = True
+            for task_id in list(session.tasks):
+                self._finish_task(session, task_id, {**base_event, "task_id": task_id})
+            self._end_pending_model_calls(session, base_event)
+        return True
 
     def _unregister_atexit(self) -> None:
         with contextlib.suppress(Exception):
@@ -699,9 +697,11 @@ class _Runtime:
                 for (owner_id, candidate_turn_id), candidate in self._turn_sessions.items()
                 if candidate_turn_id == turn_id and self._sessions.get(owner_id) is candidate
             )
-        if session is None:
-            return None, None
-        task = _sole(task for task in session.tasks.values() if turn_id in task.turn_ids)
+        task = (
+            _sole(task for task in session.tasks.values() if turn_id in task.turn_ids)
+            if session is not None
+            else None
+        )
         return (None, None) if task is None else (session, task)
 
     def _open_tool_call(self, task: _TaskRun, event: dict[str, Any]) -> _ToolCall:
@@ -709,12 +709,7 @@ class _Runtime:
             task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
             handle=task.handle, metadata=self._event_metadata(),
         )
-        return _ToolCall(
-            handle=handle,
-            task_id=task.task_id,
-            category=tool_category(event),
-            started_ns=monotonic_ns(),
-        )
+        return _ToolCall(handle, task.task_id, tool_category(event), monotonic_ns())
 
     def _finish_tool_call(
         self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
@@ -734,13 +729,10 @@ class _Runtime:
     def _end_pending_tool_calls(
         self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
-        pending_keys = [key for key in session.tool_calls if key[0] == task.task_id]
         task_outcome, _, _ = task_terminal_state(event)
         status = {"cancelled": "cancelled", "timed_out": "timeout"}.get(task_outcome, "error")
-        for key in pending_keys:
-            tool_call = session.tool_calls.pop(key, None)
-            if tool_call is not None:
-                self._finish_tool_call(task, tool_call, {**event, "status": status})
+        for key in [key for key in session.tool_calls if key[0] == task.task_id]:
+            self._finish_tool_call(task, session.tool_calls.pop(key), {**event, "status": status})
 
     def _finish_model_call(self, session: _MetricsSession, model_call_key: tuple[str, str]) -> None:
         model_call = session.model_calls.pop(model_call_key, None)
@@ -755,13 +747,9 @@ class _Runtime:
 
     def _end_pending_model_calls(self, session: _MetricsSession, event: dict[str, Any]) -> None:
         task_id = _text(event, "task_id")
-        pending = [
-            key
-            for key, call in session.model_calls.items()
-            if not task_id or call.task_id == task_id
-        ]
-        for model_call_key in pending:
-            self._finish_model_call(session, model_call_key)
+        pending = [k for k, c in session.model_calls.items() if not task_id or c.task_id == task_id]
+        for key in pending:
+            self._finish_model_call(session, key)
 
     @staticmethod
     def _existing_model_call_key(
