@@ -166,10 +166,9 @@ def _fd_tts_pending() -> bool:
     """True while any TTS (streaming pipeline or fallback speak) is unfinished."""
     with _tts_stream_lock:
         state = _tts_stream_state
-    if state is not None and not state["done"].is_set():
-        return True
     with _fd_listener_lock:
-        return any(not done.is_set() for _stop, done in _fd_speak_pipelines)
+        pending = ([state["done"]] if state is not None else []) + [done for _stop, done in _fd_speak_pipelines]
+    return any(not done.is_set() for done in pending)
 
 
 def _full_duplex_listener() -> None:
@@ -180,11 +179,8 @@ def _full_duplex_listener() -> None:
                                       transcribe_recording)
 
         def _should_stop() -> bool:
-            if not _voice_mode_enabled():
-                return True
-            if _any_session_running() or _fd_tts_pending():
-                return False
-            return not is_audio_output_active()
+            return not _voice_mode_enabled() or not (
+                _any_session_running() or _fd_tts_pending() or is_audio_output_active())
         tripped = threading.Event()
 
         def _on_trigger(phase: str) -> None:
@@ -198,9 +194,8 @@ def _full_duplex_listener() -> None:
             return
         try:
             result = transcribe_recording(wav_path)
-            text = (result.get("transcript") or "").strip() if result.get("success") else ""
-            if text:
-                _deliver_fd_transcript(text)
+            if result.get("success") and (result.get("transcript") or "").strip():
+                _deliver_fd_transcript(result["transcript"].strip())
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(wav_path)
