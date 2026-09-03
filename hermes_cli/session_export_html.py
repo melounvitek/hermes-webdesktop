@@ -642,6 +642,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+
 def _escape_html(text: Any) -> str:
     return (
         str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -715,34 +716,31 @@ def _generate_messages_html(messages: List[Dict[str, Any]]) -> str:
             )
         if content:
             escaped = _escape_html(content)
-            body = f"<pre><code>{escaped}</code></pre>" if role == "tool" else escaped
-            html += f'  <div class="content">{body}</div>'
+            html += f'  <div class="content">{f"<pre><code>{escaped}</code></pre>" if role == "tool" else escaped}</div>'
         if reasoning := msg.get("reasoning") or msg.get("reasoning_content"):
             html += _collapsible(
-                "reasoning", ICON_SPARKLES, "Reasoning",
-                f'<div class="content">{_escape_html(reasoning)}</div>', " " * 12,
+                "reasoning", ICON_SPARKLES, "Reasoning", f'<div class="content">{_escape_html(reasoning)}</div>', " " * 12,
             )
         html_list.append(html + "  </div></div>")
     return "\n".join(html_list)
 
 
-def _sidebar_html(sessions: List[Dict[str, Any]]) -> str:
-    items = []
-    for s in sessions:
-        sid = str(s.get("id", "N/A"))
-        title = s.get("title") or s.get("preview") or "Untitled Session"
-        if len(title) > 50:
-            title = title[:47] + "..."
-        date = _format_timestamp(s.get("started_at", 0)).split(" ")[0]
-        items.append(f"""
+def _sidebar_item_html(s: Dict[str, Any]) -> str:
+    sid = str(s.get("id", "N/A"))
+    title = s.get("title") or s.get("preview") or "Untitled Session"
+    title = title[:47] + "..." if len(title) > 50 else title
+    return f"""
             <a class="session-item" data-id="{_escape_html(sid)}" href="#{quote(sid, safe='')}">
                 <div class="session-item-title">{_escape_html(title)}</div>
                 <div class="session-item-meta">
                     <span>{_escape_html(sid[:8])}</span>
-                    <span>{date}</span>
+                    <span>{_format_timestamp(s.get("started_at", 0)).split(" ")[0]}</span>
                 </div>
             </a>
-            """)
+            """
+
+
+def _sidebar_html(sessions: List[Dict[str, Any]]) -> str:
     return f"""
         <aside class="sidebar">
             <div class="sidebar-header">
@@ -755,7 +753,7 @@ def _sidebar_html(sessions: List[Dict[str, Any]]) -> str:
                 </div>
             </div>
             <div class="session-list">
-                {"".join(items)}
+                {"".join(_sidebar_item_html(s) for s in sessions)}
             </div>
         </aside>
         """
@@ -763,13 +761,11 @@ def _sidebar_html(sessions: List[Dict[str, Any]]) -> str:
 
 def _session_view_html(s: Dict[str, Any], is_multi: bool) -> str:
     escaped_sid = _escape_html(str(s.get("id", "N/A")))
-    system_html = ""
-    if system_prompt := s.get("system_prompt"):
-        system_html = _collapsible(
-            "system-prompt", ICON_SHIELD, "System Prompt (Persona)",
-            f'<div class="content">{_escape_html(system_prompt)}</div>', " " * 12,
-            outer_class="system-prompt-section active",
-        )
+    system_html = _collapsible(
+        "system-prompt", ICON_SHIELD, "System Prompt (Persona)",
+        f'<div class="content">{_escape_html(s["system_prompt"])}</div>', " " * 12,
+        outer_class="system-prompt-section active",
+    ) if s.get("system_prompt") else ""
     return f"""
         <div class="{"session-view" if is_multi else "session-view active"}" id="view-{escaped_sid}">
             <header class="fade-in">
