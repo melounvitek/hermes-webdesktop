@@ -26,13 +26,11 @@ from agent.file_safety import get_write_denied_error, is_write_denied as _is_wri
 from tools.file_operations_common import (  # noqa: F401  (re-exported)
     ExecuteResult, LintResult, PatchResult, ReadResult, SearchMatch, SearchResult, WriteResult,
     _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_line_endings, _strip_bom,
-    _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination,
-)
+    _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination)
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
 from tools.file_operations_search import (  # noqa: F401  (re-exported)
     SearchMixin, _macos_protected_search_exclusions, _parse_search_context_line,
-    _pattern_has_regex_newline, _search_stdout_and_limit, _split_tool_diagnostics,
-)
+    _pattern_has_regex_newline, _search_stdout_and_limit, _split_tool_diagnostics)
 
 # Controller home; SearchMixin reads it (tests monkeypatch it here).
 _HOME = str(Path.home())
@@ -375,8 +373,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             'cat > "$tmp"; '
             'if [ ! -e "$t" ]; then chmod "=rw" "$tmp" 2>/dev/null || true; fi; '
             'mv -f "$tmp" "$t"; '
-            "trap - EXIT"
-        )
+            "trap - EXIT")
         return self._exec(script, stdin_data=content)
 
     def _detect_file_line_ending(self, path: str, pre_content: Optional[str] = None) -> Optional[str]:
@@ -399,8 +396,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         return ''.join(difflib.unified_diff(
             old_content.splitlines(keepends=True), new_content.splitlines(keepends=True),
-            fromfile=f"a/{filename}", tofile=f"b/{filename}",
-        ))
+            fromfile=f"a/{filename}", tofile=f"b/{filename}"))
 
     # =========================================================================
     # READ Implementation
@@ -411,8 +407,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Error for a path that exists but would block if read."""
         return ReadResult(error=(
             f"Cannot read '{path}': not a regular file (directory, FIFO, "
-            "socket, or device). Reading it could block indefinitely."
-        ))
+            "socket, or device). Reading it could block indefinitely."))
 
     def _probe_regular_file(self, path: str) -> tuple[int, str]:
         """Byte size of a REGULAR file: ``(file_size, status)`` with status ``"ok"``,
@@ -427,8 +422,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         stat_result = self._exec(
             f"if [ -f {arg} ]; then wc -c < {arg} 2>/dev/null; "
             f"elif [ -e {arg} ]; then echo {NOT_REGULAR_SENTINEL}; "
-            f"else exit 1; fi"
-        )
+            f"else exit 1; fi")
         if stat_result.exit_code != 0:
             return 0, "missing"
         stat_output = _strip_terminal_fence_leaks(stat_result.stdout).strip()
@@ -504,8 +498,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             "    print('HERMES_UTF16:OK')\n"
             "    print(json.dumps(out, ensure_ascii=True))\n"
             "except Exception:\n"
-            "    print('HERMES_UTF16:NO'); sys.exit(0)\n"
-        )
+            "    print('HERMES_UTF16:NO'); sys.exit(0)\n")
         result = self._run_python_snippet(snippet)
         stdout = _strip_terminal_fence_leaks(result.stdout or "")
         marker = stdout.find("HERMES_UTF16:OK")
@@ -526,12 +519,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         if truncated:
             hint_parts.append(
                 f"Use offset={end_line + 1} to continue reading "
-                f"(showing {offset}-{end_line} of {total_lines} lines)"
-            )
+                f"(showing {offset}-{end_line} of {total_lines} lines)")
         return ReadResult(
             content=self._add_line_numbers(content, offset), total_lines=total_lines,
-            file_size=file_size, truncated=truncated, hint=" ".join(hint_parts),
-        )
+            file_size=file_size, truncated=truncated, hint=" ".join(hint_parts))
 
     def read_file(self, path: str, offset: int = 1, limit: int = 2000) -> ReadResult:
         """Read a file with pagination, binary detection, and line numbers.
@@ -552,8 +543,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                     f"Note: '{path}' not found byte-for-byte; resolved to "
                     f"the unicode-equivalent file '{variant}' (invisible "
                     "encoding difference: NFC/NFD or special space/quote "
-                    "characters)."
-                )
+                    "characters).")
                 result.hint = f"{note} {result.hint}" if result.hint else note
                 return result
             return self._suggest_similar_files(path)
@@ -564,9 +554,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 is_image=True, is_binary=True, file_size=file_size,
                 hint=(
                     "Image file detected. Automatically redirected to vision_analyze tool. "
-                    "Use vision_analyze with this file path to inspect the image contents."
-                ),
-            )
+                    "Use vision_analyze with this file path to inspect the image contents."))
         is_binary, sample_bytes = self._detect_binary(path)
         if is_binary:
             # A UTF-16 text file (Notepad .txt, PowerShell `>`) arrives mangled with
@@ -576,8 +564,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 return utf16_result
             return ReadResult(
                 is_binary=True, file_size=file_size,
-                error=describe_binary_file(sample_bytes, file_size),
-            )
+                error=describe_binary_file(sample_bytes, file_size))
 
         # Clamp each line to a byte budget IN THE SHELL so a pathological single-
         # line file (one 400MB minified line) never crosses the exec transport;
@@ -593,8 +580,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         end_line = offset + limit - 1
         read_result = self._exec(
             f"sed -n '{offset},{end_line}p' {self._escape_shell_arg(path)}"
-            f" | cut -b1-{line_clamp_bytes}"
-        )
+            f" | cut -b1-{line_clamp_bytes}")
         if read_result.exit_code != 0:
             return ReadResult(error=f"Failed to read file: {read_result.stdout}")
         read_output = _strip_terminal_fence_leaks(read_result.stdout)
@@ -631,13 +617,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 hint=(
                     f"Note: offset {offset} is beyond the end of the file "
                     f"({total_lines} lines total). Retry with offset <= "
-                    f"{total_lines}."
-                ),
-            )
+                    f"{total_lines}."))
         return ReadResult(
             content=self._add_line_numbers(read_output, offset), total_lines=total_lines,
-            file_size=file_size, truncated=truncated, hint=hint,
-        )
+            file_size=file_size, truncated=truncated, hint=hint)
 
     # Confusable characters seen in real filenames, collapsed after NFC.
     _CONFUSABLES = (
@@ -669,8 +652,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             return None
         candidates = [
             entry for entry in _strip_terminal_fence_leaks(ls_result.stdout).splitlines()
-            if entry and entry != filename and _canon(entry) == target
-        ]
+            if entry and entry != filename and _canon(entry) == target]
         if len(candidates) == 1:
             return os.path.join(dir_path, candidates[0]) if dir_path != "." or "/" in path else candidates[0]
         return None
@@ -748,8 +730,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         if max_bytes is not None and file_size > max_bytes:
             return ReadResult(
                 file_size=file_size,
-                error=f"File is too large ({file_size:,} bytes, limit is {max_bytes:,})",
-            )
+                error=f"File is too large ({file_size:,} bytes, limit is {max_bytes:,})")
         encoded = self._exec(f"base64 < {self._escape_shell_arg(path)}")
         if encoded.exit_code != 0:
             return ReadResult(error=f"Failed to read binary file: {encoded.stdout}")
@@ -784,8 +765,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             "except FileNotFoundError:\n"
             "    pass\n"
             "except Exception as exc:\n"
-            "    print(str(exc), file=sys.stderr); sys.exit(1)\n"
-        )
+            "    print(str(exc), file=sys.stderr); sys.exit(1)\n")
         result = self._run_python_snippet(snippet)
         if result.exit_code != 0:
             return WriteResult(error=f"Failed to delete {path}: {(result.stdout or '').strip() or 'unknown error'}")
@@ -820,8 +800,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             return WriteResult(error=(
                 f"Refusing to write '{path}': content contains a lone "
                 f"surrogate character ({m.group(0)!r}) that cannot be "
-                "encoded as UTF-8. The file was NOT created or modified."
-            ))
+                "encoded as UTF-8. The file was NOT created or modified."))
         return None
 
     @staticmethod
@@ -842,8 +821,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         return WriteResult(error=(
             f"Refusing to write '{path}': candidate content fails "
             f"{ext} syntax validation ({err}). The file was "
-            "NOT created or modified. Fix the content and retry."
-        ))
+            "NOT created or modified. Fix the content and retry."))
 
     def _capture_pre_content(self, path: str, ext: str, pre_content: Optional[str]) -> Optional[str]:
         """Pre-write content for the lint-delta and LSP line-shift consumers.
@@ -893,8 +871,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                         f"Post-write verification failed for {path}: on-disk "
                         "content hash differs from the intended write. The "
                         "write did not persist correctly — re-read the file "
-                        "and retry."
-                    ))
+                        "and retry."))
                 return True, None
         except Exception:
             pass
@@ -955,8 +932,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             lsp_diagnostics = self._maybe_lsp_diagnostics(path, pre_content=pre_content, post_content=content) or None
         return WriteResult(
             bytes_written=len(content_bytes), dirs_created=dirs_created, verified=content_verified,
-            lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics,
-        )
+            lint=lint_result.to_dict() if lint_result else None, lsp_diagnostics=lsp_diagnostics)
 
     # =========================================================================
     # PATCH Implementation (Replace Mode)
@@ -979,9 +955,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 note=(
                     f"File already contains the target text — the edit "
                     f"appears to be already applied to {path}. No write "
-                    "performed; do not re-send this patch."
-                ),
-            )
+                    "performed; do not re-send this patch."))
         err_msg = error or f"Could not find match for old_string in {path}"
         try:
             err_msg += format_no_match_hint(err_msg, match_count, old_string, content)
@@ -1012,8 +986,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 f"differs from intended write "
                 f"(wrote {len(intended)} chars, read back "
                 f"{len(on_disk)} chars after normalizing line endings). "
-                "The patch did not persist. Re-read the file and try again."
-            ))
+                "The patch did not persist. Re-read the file and try again."))
         return None
 
     def patch_replace(self, path: str, old_string: str, new_string: str,
@@ -1035,8 +1008,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
 
         from tools.fuzzy_match import fuzzy_find_and_replace
         new_content, match_count, _strategy, error = fuzzy_find_and_replace(
-            content, old_string, new_string, replace_all
-        )
+            content, old_string, new_string, replace_all)
         if error or match_count == 0:
             return self._no_match_result(path, content, old_string, new_string, match_count, error)
         # Models send bare-LF old/new strings, so the substituted region is LF
@@ -1058,8 +1030,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             lint=lint_result.to_dict() if lint_result else None,
             # Captured by the internal write_file call against the pre-patch
             # baseline, so the delta is correct for the whole patch.
-            lsp_diagnostics=write_result.lsp_diagnostics,
-        )
+            lsp_diagnostics=write_result.lsp_diagnostics)
 
     def patch_v4a(self, patch_content: str) -> PatchResult:
         """Apply a V4A format patch (``*** Begin Patch`` / ``*** Update File:`` /
@@ -1086,8 +1057,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             # Models frequently pass several paths in one string ("dir1 dir2" or
             # comma-separated): search every part that exists and report the rest.
             multi = self._try_multi_path_search(
-                pattern, path, target, file_glob, limit, offset, output_mode, context
-            )
+                pattern, path, target, file_glob, limit, offset, output_mode, context)
             if multi is not None:
                 return multi
             return self._path_not_found_result(path)
@@ -1099,6 +1069,5 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             result.warning = (
                 "Skipped macOS protected folders during broad search to avoid "
                 f"an unattended privacy prompt: {skipped}. Search a protected "
-                "folder directly when access is intentional."
-            )
+                "folder directly when access is intentional.")
         return result

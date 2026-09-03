@@ -126,8 +126,7 @@ def _maybe_warn_line_oriented_newline_pattern(result: SearchResult, pattern: str
         "0 results found. Note: search_files content search is line-oriented "
         "and does not run ripgrep with -U/--multiline, so `\\n` in the regex "
         "does not match line breaks. Use context=N to inspect neighboring "
-        "lines, or escape as `\\\\n` when searching for a literal backslash+n."
-    )
+        "lines, or escape as `\\\\n` when searching for a literal backslash+n.")
     return result
 
 
@@ -157,8 +156,7 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
     if output_mode == "files_only":
         return SearchResult(
             files=lines[offset:offset + limit], total_count=len(lines),
-            truncated=bool(limit_reason), limit_reason=limit_reason, warning=warning,
-        )
+            truncated=bool(limit_reason), limit_reason=limit_reason, warning=warning)
     if output_mode == "count":
         counts = {}
         for line in lines:
@@ -170,8 +168,7 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
                     pass
         return SearchResult(
             counts=counts, total_count=sum(counts.values()),
-            truncated=bool(limit_reason), limit_reason=limit_reason,
-        )
+            truncated=bool(limit_reason), limit_reason=limit_reason)
     matches = []
     for line in lines:
         if line == "--":
@@ -332,8 +329,7 @@ class SearchMixin:
                 f"rg {flags} --count-matches{glob_expr} "
                 f"{self._escape_shell_arg(pattern)} {self._escape_native_tool_arg(path)} "
                 f"2>/dev/null | head -50",
-                timeout=30,
-            )
+                timeout=30)
             total, per_file = 0, []
             for line in (probe.stdout or "").strip().splitlines():
                 p, _sep, n = line.rpartition(":")
@@ -357,8 +353,7 @@ class SearchMixin:
             return SearchResult(
                 error="File search requires 'rg' (ripgrep) or 'find'. "
                       "Install ripgrep for best results: "
-                      "https://github.com/BurntSushi/ripgrep#installation"
-            )
+                      "https://github.com/BurntSushi/ripgrep#installation")
         # Hidden roots: find's path filter would exclude everything under the root,
         # so gather full output and filter descendants in Python (pagination too).
         search_root = Path(path)
@@ -428,8 +423,7 @@ class SearchMixin:
         else:
             return SearchResult(
                 error="Content search requires ripgrep (rg) or grep. "
-                      "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
-            )
+                      "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation")
         if (not result.error and result.total_count == 0
                 and not result.matches and not result.files and not result.counts):
             try:
@@ -492,8 +486,7 @@ class SearchMixin:
         protected_paths = self._protected_prune_paths(path)
         if protected_paths:
             return self._search_with_grep_pruned(
-                pattern, path, file_glob, limit, offset, output_mode, context, protected_paths,
-            )
+                pattern, path, file_glob, limit, offset, output_mode, context, protected_paths)
         # -H forces filenames; -E matches rg regex behavior; --exclude-dir='.*'
         # mirrors rg's hidden-dir default (.git/, .hub/index-cache/, ...).
         cmd_parts = ["grep", "-rnHE", "--exclude-dir='.*'"]
