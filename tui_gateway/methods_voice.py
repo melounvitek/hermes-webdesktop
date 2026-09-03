@@ -1,6 +1,5 @@
-"""Voice / TTS / wake-word JSON-RPC handlers and their process-global state (one mic, one
-speaker per process). Bodies are rebound onto server.py's globals (method_ctx.bind_module)
-and reference them bare.
+"""Voice / TTS / wake-word JSON-RPC handlers and their process-global state (one mic, one speaker
+per process). Bodies are rebound onto server.py's globals (method_ctx.bind_module), used bare.
 """
 
 from __future__ import annotations
@@ -51,8 +50,7 @@ def _voice_tts_enabled() -> bool:
 
 def _end_voice_chat(*, stop_loop: bool, stop_tts: bool) -> None:
     """Flip voice + TTS off; optionally halt the continuous loop / cut live TTS (best-effort)."""
-    os.environ["HERMES_VOICE"] = "0"
-    os.environ["HERMES_VOICE_TTS"] = "0"
+    os.environ["HERMES_VOICE"] = os.environ["HERMES_VOICE_TTS"] = "0"
     if stop_loop:
         with contextlib.suppress(Exception):
             from hermes_cli.voice import stop_continuous

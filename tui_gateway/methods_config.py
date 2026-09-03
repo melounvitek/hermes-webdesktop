@@ -5,6 +5,7 @@
 from .method_ctx import HandlerRegistry, bind_module
 
 from hermes_constants import DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES
+from hermes_constants import display_hermes_home as _display_hermes_home
 
 _registry = HandlerRegistry()
 method = _registry.method
@@ -134,14 +135,8 @@ def _cfg_get_provider(params):
             "providers": list_available_providers()}
 
 
-def _cfg_get_profile(params):
-    from hermes_constants import display_hermes_home
-    return {"home": str(_hermes_home), "display": display_hermes_home()}
-
-
 def _cfg_get_project(params):
-    cfg_terminal = _load_cfg().get("terminal") or {}
-    raw = str(params.get("cwd", "") or cfg_terminal.get("cwd", "") or "").strip()
+    raw = str(params.get("cwd", "") or (_load_cfg().get("terminal") or {}).get("cwd", "") or "").strip()
     cwd = _completion_cwd({"cwd": raw} if raw else {})
     return {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)}
 
@@ -183,10 +178,9 @@ def _cfg_get_fast(params):
 
 def _cfg_get_thinking_mode(params):
     raw = _display_word("thinking_mode", "", _THINKING_MODES)
-    if raw:
-        return {"value": raw}
-    dm = _display_word("details_mode", "collapsed", _DETAIL_MODES)
-    return {"value": "full" if dm == "expanded" else "collapsed"}
+    if not raw:  # legacy details_mode fallback
+        raw = "full" if _display_word("details_mode", "collapsed", _DETAIL_MODES) == "expanded" else "collapsed"
+    return {"value": raw}
 
 
 def _cfg_get_mtime(params):
@@ -203,7 +197,7 @@ def _cfg_get_mtime(params):
 # key -> getter(params); bind_module rebinds the table's functions onto server.py's globals.
 _CONFIG_GETTERS = {
     "provider": _cfg_get_provider,
-    "profile": _cfg_get_profile,
+    "profile": lambda params: {"home": str(_hermes_home), "display": _display_hermes_home()},
     "project": _cfg_get_project,
     "full": lambda params: {"config": _load_cfg()},
     "prompt": lambda params: {"prompt": _load_cfg().get("custom_prompt", "")},
