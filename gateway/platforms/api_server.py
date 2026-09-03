@@ -1,11 +1,9 @@
 """OpenAI-compatible API server platform adapter (aiohttp).
 
-Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, the
-/api/sessions resource API, /v1/runs, /api/jobs and /health* (full table:
-``APIServerAdapter._http_route_table``). Any OpenAI-compatible frontend can
-connect at http://localhost:8642/v1 with API_SERVER_KEY. Under
-``gateway.multiplex_profiles`` secondary profiles are reached via
-``/p/<profile>/...`` (same contract as the webhook adapter).
+Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, /api/sessions,
+/v1/runs, /api/jobs and /health* (full table: ``APIServerAdapter._http_route_table``); any
+OpenAI-compatible frontend connects at http://localhost:8642/v1 with API_SERVER_KEY. Under
+``gateway.multiplex_profiles`` secondary profiles live at ``/p/<profile>/...``.
 """
 
 import asyncio
@@ -60,9 +58,6 @@ class _ArtifactScopeFacade:
         self.principal_id = principal_id
         self.session_id = session_id
         self.transport_family = transport_family
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"_ArtifactScopeFacade(principal={self.principal_id!r})"
 
 
 # Advertised in capabilities and echoed in registration responses; validated by the broker.
@@ -140,6 +135,7 @@ from gateway.browser_control_broker import (
     ControllerScope, ControllerTicketInvalid, browser_control_developer_mode,
     browser_control_protocol_supported, filter_browser_control_capabilities, get_browser_control_broker)
 
+from gateway.platforms._shared import coerce_port as _coerce_port
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
 
@@ -222,14 +218,6 @@ def _sse_frame(data: Any, *, event: str = None, ensure_ascii: bool = True) -> by
     SSE writer. ``ensure_ascii=False`` keeps raw non-ASCII on the wire."""
     prefix = f"event: {event}\n" if event else ""
     return f"{prefix}data: {json.dumps(data, ensure_ascii=ensure_ascii)}\n\n".encode()
-
-
-def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
-    """Parse a listen port without letting malformed env/config values crash startup."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
@@ -420,8 +408,7 @@ def _cap_list(items: list) -> list:
     return items[:MAX_CONTENT_LIST_SIZE] if len(items) > MAX_CONTENT_LIST_SIZE else items
 
 
-def _normalize_chat_content(
-    content: Any, *, _max_depth: int = 10, _depth: int = 0) -> str:
+def _normalize_chat_content(content: Any, *, _max_depth: int = 10, _depth: int = 0) -> str:
     """Flatten OpenAI chat content (string or typed-part array) into one plain string; non-text
     parts are skipped, recursion depth / list size / output length are bounded."""
     if _depth > _max_depth or content is None:
@@ -637,20 +624,18 @@ def _session_chat_user_message(body: Dict[str, Any], *, param: str = "message") 
         return None, _multimodal_validation_error(exc, param=param)
 
 
+_USAGE_TOKEN_KEYS = ("input_tokens", "output_tokens", "total_tokens")
+
+
 def _chat_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
-    """OpenAI Chat Completions ``usage`` block from the agent's usage dict."""
-    return {
-        "prompt_tokens": usage.get("input_tokens", 0),
-        "completion_tokens": usage.get("output_tokens", 0),
-        "total_tokens": usage.get("total_tokens", 0)}
+    """OpenAI Chat Completions ``usage`` block (prompt/completion/total) from the agent's usage."""
+    values = (usage.get(key, 0) for key in _USAGE_TOKEN_KEYS)
+    return dict(zip(("prompt_tokens", "completion_tokens", "total_tokens"), values))
 
 
 def _responses_usage_payload(usage: Dict[str, Any]) -> Dict[str, int]:
     """OpenAI Responses ``usage`` block from the agent's usage dict."""
-    return {
-        "input_tokens": usage.get("input_tokens", 0),
-        "output_tokens": usage.get("output_tokens", 0),
-        "total_tokens": usage.get("total_tokens", 0)}
+    return {key: usage.get(key, 0) for key in _USAGE_TOKEN_KEYS}
 
 
 async def _abandon_agent_task(
@@ -723,8 +708,8 @@ class ResponseStore:
         if row is None:
             return None
         self._conn.execute(
-            "UPDATE responses SET accessed_at = ? WHERE response_id = ?", (time.time(), response_id)
-        )
+            "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
+            (time.time(), response_id))
         self._conn.commit()
         try:
             return json.loads(row[0])
@@ -1012,8 +997,7 @@ def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
     return hashlib.sha256(repr(subset).encode("utf-8")).hexdigest()
 
 
-def _derive_chat_session_id(
-    system_prompt: Optional[str], first_user_message: str) -> str:
+def _derive_chat_session_id(system_prompt: Optional[str], first_user_message: str) -> str:
     """Stable session id from the system prompt + first user message (constant across all
     turns of an Open WebUI-style conversation), so one Hermes session/sandbox is reused."""
     seed = f"{system_prompt or ''}\n{first_user_message}"
@@ -1563,8 +1547,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # _bind_api_server_session and _create_agent) so peer lookups can filter on it.
     _SESSION_SOURCE = "api_server"
 
-    def _declared_conversation_session(
-        self, gateway_session_key: Optional[str]) -> Optional[str]:
+    def _declared_conversation_session(self, gateway_session_key: Optional[str]) -> Optional[str]:
         """Resolve the live session a client declared with ``X-Hermes-Session-Key`` (the key
         names the conversation, ``session_id`` its current transcript). Same reset-fenced
         recovery as ``SessionStore._recover_session_for_peer``; concurrent first requests
@@ -1799,12 +1782,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "model_options": (
                 body.get("model_options") if isinstance(body.get("model_options"), dict) else {})}
 
+    @classmethod
+    def _requested_ids(cls, requested: Any) -> tuple[str, str]:
+        """``(model, provider)`` cleaned from a ``requested``/lock mapping."""
+        requested = requested or {}
+        return (cls._clean_runtime_id(requested.get("model")),
+                cls._clean_runtime_id(requested.get("provider"), max_len=80))
+
     def _runtime_lock_error(self, runtime_request: Dict[str, Any]) -> Optional["web.Response"]:
         if not runtime_request.get("require_model_lock"):
             return None
-        requested = runtime_request.get("requested") or {}
-        model = self._clean_runtime_id(requested.get("model"))
-        provider = self._clean_runtime_id(requested.get("provider"), max_len=80)
+        model, provider = self._requested_ids(runtime_request.get("requested"))
         route = runtime_request.get("route")
         if not model and not provider:
             return _error_response(
@@ -1820,9 +1808,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # turn, and a one-off request override must not erase a confirmed lock.
         if runtime_request.get("persisted_lock") or not runtime_request.get("require_model_lock"):
             return True
-        requested = runtime_request.get("requested") or {}
-        model = self._clean_runtime_id(requested.get("model"))
-        provider = self._clean_runtime_id(requested.get("provider"), max_len=80)
+        model, provider = self._requested_ids(runtime_request.get("requested"))
         if not model and not provider:
             return False
         db = self._ensure_session_db()
@@ -1857,8 +1843,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         lock = model_config.get("browser_model_lock")
         if not isinstance(lock, dict) or not _coerce_request_bool(lock.get("confirmed"), default=False):
             return None
-        model = self._clean_runtime_id(lock.get("model"))
-        provider = self._clean_runtime_id(lock.get("provider"), max_len=80)
+        model, provider = self._requested_ids(lock)
         if not model and not provider:
             return None
         if self._clean_runtime_id(lock.get("route_source"), max_len=64).lower() == "model_routes":
@@ -1899,10 +1884,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         result: Dict[str, Any] = {
             "provider": provider, "model": model, "route_source": source or "global"}
         if requested_runtime or payload.get("requested"):
-            req = requested_runtime or payload.get("requested") or {}
-            result["requested"] = {
-                "provider": cls._clean_runtime_id(req.get("provider"), max_len=80),
-                "model": cls._clean_runtime_id(req.get("model"))}
+            model, provider = cls._requested_ids(requested_runtime or payload.get("requested"))
+            result["requested"] = {"provider": provider, "model": model}
         if model_lock or payload.get("model_lock"):
             result["model_lock"] = cls._clean_runtime_id(model_lock or payload.get("model_lock"), max_len=32)
         return result
@@ -1982,6 +1965,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 provider_name, target_model or "", exc_info=True)
             return None
 
+    def _apply_provider_runtime(
+        self, runtime_kwargs: Dict[str, Any], provider: Optional[str], *,
+        target_model: Optional[str], required: bool = False) -> bool:
+        """Resolve ``provider``'s runtime and merge it into ``runtime_kwargs``; True if applied."""
+        provider_runtime = self._resolve_provider_runtime(
+            provider, target_model=target_model, required=required)
+        if provider_runtime:
+            _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
+        return bool(provider_runtime)
+
     def _recover_or_record_model(self, model: str, runtime_kwargs: Dict[str, Any], gateway_session_key) -> str:
         """Fill an empty resolved model: provider's default catalog model, then the last-known-good
         model for this key / process-wide. Non-empty non-virtual models are recorded instead."""
@@ -2035,11 +2028,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         from hermes_cli.model_switch import resolve_effective_model
         if session_override:
             model = resolve_effective_model(session_override, None, model)
-            provider_runtime = self._resolve_provider_runtime(
+            self._apply_provider_runtime(
+                runtime_kwargs,
                 _clean_request_string(session_override.get("provider")) or current_provider,
-                target_model=model, required=False)
-            if provider_runtime:
-                _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
+                target_model=model)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
             if route or request_model or request_provider:
                 logger.debug(
@@ -2048,10 +2040,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         elif session_row_model and not confirmed_runtime_lock:
             # A session-persisted raw model (no route alias) is a standing selection that pins
             # this session's turns ahead of per-request body values.
-            provider_runtime = self._resolve_provider_runtime(
-                current_provider, target_model=session_row_model, required=False)
-            if provider_runtime:
-                _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
+            self._apply_provider_runtime(
+                runtime_kwargs, current_provider, target_model=session_row_model)
             model = resolve_effective_model(None, session_row_model, model)
             if request_model or request_provider:
                 logger.debug(
@@ -2062,16 +2052,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # model name; a route with no ``model`` key keeps the global default.
             effective_model = (route_model or model) if route is not None else (request_model or model)
             effective_provider = request_provider or route_provider or current_provider
-            provider_runtime = None
+            applied = False
             if effective_provider and (bool(request_provider or route_provider) or effective_model != model):
                 # A confirmed Browser lock fails closed: never fall through to the previous
                 # global provider's credentials.
-                provider_runtime = self._resolve_provider_runtime(
-                    effective_provider, target_model=effective_model,
+                applied = self._apply_provider_runtime(
+                    runtime_kwargs, effective_provider, target_model=effective_model,
                     required=bool(request_provider) or confirmed_runtime_lock)
-            if provider_runtime:
-                _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
-            elif effective_provider and effective_provider != current_provider:
+            if not applied and effective_provider and effective_provider != current_provider:
                 runtime_kwargs["provider"] = effective_provider
             model = effective_model
             # Per-route explicit transport secrets/base URLs win after provider resolution.
@@ -3237,22 +3225,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
-    @staticmethod
-    def _check_jobs_available() -> Optional["web.Response"]:
-        """Return error response if cron module isn't available."""
-        if not _CRON_AVAILABLE:
-            return web.json_response({"error": "Cron module not available"}, status=501)
-        return None
-
-    def _check_job_id(self, request: "web.Request") -> tuple:
-        """Validate and extract job_id. Returns (job_id, error_response)."""
-        job_id = request.match_info["job_id"]
-        if not self._JOB_ID_RE.fullmatch(job_id):
-            logger.warning(
-                "Cron jobs API rejected invalid job_id %r: %s", job_id, self._request_audit_log_suffix(request))
-            return job_id, web.json_response({"error": "Invalid job ID format"}, status=400)
-        return job_id, None
-
     def _cron_request_guard(
         self, request: "web.Request", *, need_job_id: bool = False, check_draining: bool = False,
     ) -> tuple:
@@ -3264,12 +3236,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             draining = self._draining_response()
             if draining is not None:
                 return None, draining
-        cron_err = self._check_jobs_available()
-        if cron_err:
-            return None, cron_err
-        if need_job_id:
-            return self._check_job_id(request)
-        return None, None
+        if not _CRON_AVAILABLE:
+            return None, web.json_response({"error": "Cron module not available"}, status=501)
+        if not need_job_id:
+            return None, None
+        job_id = request.match_info["job_id"]
+        if not self._JOB_ID_RE.fullmatch(job_id):
+            logger.warning(
+                "Cron jobs API rejected invalid job_id %r: %s", job_id, self._request_audit_log_suffix(request))
+            return job_id, web.json_response({"error": "Invalid job ID format"}, status=400)
+        return job_id, None
 
     @staticmethod
     def _cron_error_response(exc: BaseException) -> "web.Response":
@@ -3563,9 +3539,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     f"actual provider={actual_provider or '<unknown>'} "
                     f"model={actual_model or '<unknown>'}")
         if requested_runtime:
-            runtime["requested"] = {
-                "provider": self._clean_runtime_id(requested_runtime.get("provider"), max_len=80),
-                "model": self._clean_runtime_id(requested_runtime.get("model"))}
+            model, provider = self._requested_ids(requested_runtime)
+            runtime["requested"] = {"provider": provider, "model": model}
         runtime["route_source"] = route_source or runtime.get("route_source") or "global"
         return self._sanitize_runtime_metadata(
             runtime=runtime, requested_runtime=requested_runtime or None, route_source=route_source or "global",
