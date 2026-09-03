@@ -43,15 +43,7 @@ def _build_hermes_repo_root_aliases(
     treating arbitrary HERMES_HOME descendants as Hermes-owned. A repo-level junction
     (possibly cross-drive) is accepted only when a strict resolve proves
     <root>/<repo dirname> is the physical root (fail-closed)."""
-    aliases: list[Path] = []
-
-    def add(candidate: Path) -> None:
-        if not any(_same_path(candidate, existing) for existing in aliases):
-            aliases.append(candidate)
-
-    add(resolved_root)
-    add(lexical_root)
-
+    candidates = [resolved_root, lexical_root]
     # Profile re-home: with --profile the configured home is <root>/profiles/<name>
     # and the repo lives beside the profiles dir (as get_default_hermes_root() does).
     home_candidates = [configured_home]
@@ -63,7 +55,7 @@ def _build_hermes_repo_root_aliases(
             resolved_home = home.resolve()
             home_key = os.path.normcase(str(resolved_home))
             if os.path.commonpath([home_key, os.path.normcase(str(resolved_root))]) == home_key:
-                add(home / os.path.relpath(str(resolved_root), str(resolved_home)))
+                candidates.append(home / os.path.relpath(str(resolved_root), str(resolved_home)))
         except (OSError, ValueError):
             pass
 
@@ -73,10 +65,13 @@ def _build_hermes_repo_root_aliases(
         repo_candidate = home / resolved_root.name
         try:
             if repo_candidate.resolve(strict=True) == resolved_root.resolve(strict=True):
-                add(repo_candidate)
+                candidates.append(repo_candidate)
         except OSError:
             pass
-
+    aliases: list[Path] = []
+    for candidate in candidates:
+        if not any(_same_path(candidate, existing) for existing in aliases):
+            aliases.append(candidate)
     return tuple(aliases)
 
 
@@ -110,11 +105,9 @@ def _get_hermes_site_packages(env: dict) -> list[Path]:
             except Exception:
                 pass
             if not result:
-                if _IS_WINDOWS:
-                    result.append(Path(sys.prefix) / "Lib" / "site-packages")
-                else:
-                    pyver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
-                    result.append(Path(sys.prefix) / "lib" / pyver / "site-packages")
+                pyver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
+                result.append(Path(sys.prefix) / "Lib" / "site-packages" if _IS_WINDOWS
+                              else Path(sys.prefix) / "lib" / pyver / "site-packages")
         local._hermes_site_packages = list(result)
     result = list(local._hermes_site_packages)
 

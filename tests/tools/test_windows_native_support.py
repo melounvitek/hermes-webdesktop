@@ -719,8 +719,8 @@ class TestLocalEnvironmentWindowsTempDir:
         source = (root / "tools" / "environments" / "local.py").read_text(encoding="utf-8")
         assert "if _IS_WINDOWS:" in source
         assert "get_hermes_home" in source
-        assert 'cache_dir = get_hermes_home() / "cache" / "terminal"' in source
-        assert "_default_terminal_temp_dir() or Path(tempfile.gettempdir())" in source
+        assert 'get_hermes_home() / "cache" / "terminal"' in source
+        assert "_default_terminal_temp_dir()" in source
 
 
 class TestLocalEnvironmentPathInjectionGated:

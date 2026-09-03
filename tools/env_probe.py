@@ -21,21 +21,17 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
-# Concurrency model: the probe runs in exactly ONE background worker thread;
-# ``_PROBE_DONE`` signals completion. Callers never execute the probe themselves
-# and block at most ``_PROBE_WAIT_TIMEOUT`` seconds before failing open with "" —
-# a stuck probe (e.g. a Windows pipe wedged open by an orphaned pip descendant)
+# Concurrency model: exactly ONE background worker runs the probe; ``_PROBE_DONE``
+# signals completion. Callers block at most ``_PROBE_WAIT_TIMEOUT`` s then fail open
+# with "" — a stuck probe (e.g. a Windows pipe wedged by an orphaned pip descendant)
 # can degrade only the probe line, never system-prompt construction.
 _CACHE_LOCK = threading.Lock()
 _CACHED_LINE: Optional[str] = None  # None = not probed yet; "" = probed, nothing to say.
 _PROBE_DONE = threading.Event()
 _PROBE_THREAD: Optional[threading.Thread] = None
-# Bumped on every reset so a stale worker can't publish into the fresh generation.
-_PROBE_GEN = 0
-# Upper bound a prompt build will wait for the probe (healthy runtime ~0.5s).
-_PROBE_WAIT_TIMEOUT = 10.0
-# Once one caller has burned the full wait, later callers only peek at the event.
-_WAIT_ALREADY_TIMED_OUT = False
+_PROBE_GEN = 0  # bumped on reset so a stale worker can't publish into the fresh generation
+_PROBE_WAIT_TIMEOUT = 10.0  # healthy runtime ~0.5s
+_WAIT_ALREADY_TIMED_OUT = False  # after one full wait, later callers only peek
 
 # Keep in sync with agent/prompt_builder.py:_REMOTE_TERMINAL_BACKENDS.
 # Duplicated rather than imported to avoid a circular import.
@@ -59,24 +55,19 @@ def _plugin_backend_is_remote(backend: str) -> bool:
 
 def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
     """Run a short subprocess -> (returncode, stdout, stderr); failures (binary
-    missing, timeout, OSError) return (-1, "", "<reason>").
-
-    Output goes through temp files, not pipes, so ``timeout`` bounds the *whole*
-    call even on native Windows: a console-script launcher (``pip.exe``) can spawn a
-    descendant that inherits the captured handles and outlives its parent; with OS
-    pipes ``communicate()``'s reader threads block until that grandchild closes the
-    write end (a warm probe could hang ~28 min holding ``_CACHE_LOCK``). Temp files
-    have no reader threads, so ``wait()`` only waits on the direct child.
-    """
+    missing, timeout, OSError) return (-1, "", "<reason>"). Output goes through temp
+    files, not pipes, so ``timeout`` bounds the *whole* call even on native Windows: a
+    console-script launcher (``pip.exe``) can spawn a descendant that inherits the
+    captured handles and outlives its parent; with OS pipes ``communicate()``'s reader
+    threads block until that grandchild closes the write end (a warm probe could hang
+    ~28 min holding ``_CACHE_LOCK``). Temp files make ``wait()`` cover only the child."""
     try:
         with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
             try:
                 result = subprocess.run(
                     cmd, stdout=out_f, stderr=err_f, timeout=timeout, check=False,
-                    stdin=subprocess.DEVNULL,
-                    # CREATE_NO_WINDOW (0 on POSIX): windowless hosts (pythonw
-                    # gateway / kanban workers) would otherwise flash a console.
-                    creationflags=windows_hide_flags(),
+                    # CREATE_NO_WINDOW (0 on POSIX): pythonw hosts would flash a console
+                    stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
                 )
             except subprocess.TimeoutExpired:
                 return -1, "", "timeout"
@@ -95,7 +86,8 @@ def _python_version_of(binary: str) -> Optional[str]:
     """Return a short version string like ``3.12.4`` for ``binary``, or None."""
     if not shutil.which(binary):
         return None
-    rc, out, err = _run([binary, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
+    code = "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+    rc, out, _err = _run([binary, "-c", code])
     return out if rc == 0 and out else None
 
 
@@ -151,9 +143,9 @@ def _build_probe_line() -> str:
     py3_has_pip = _has_pip_module("python3") if py3_ver else False
     pip_bound_to = _pip_python_version()
     py3_pep668 = _detect_pep668("python3") if py3_ver else False
-    # Bare which() is correct here, unlike Hermes's own uv call sites: this reports
-    # the environment *the model will see* in the terminal tool, whose PATH (via
-    # local.py) includes the Hermes-managed $HERMES_HOME/bin.
+    # Bare which() is correct here (unlike Hermes's own uv call sites): this reports
+    # the environment *the model will see* in the terminal tool, whose PATH includes
+    # the Hermes-managed $HERMES_HOME/bin via local.py.
     has_uv = shutil.which("uv") is not None
 
     mismatch = bool(pip_bound_to and py3_ver and not py3_ver.startswith(pip_bound_to))
@@ -198,10 +190,10 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     if force_refresh:
         _reset_cache_for_tests()
 
-    # Resolve the backend HERE, in the caller's context: under gateway multiplexing
-    # the routed profile's backend lives in the per-turn terminal scope, which the
-    # bare worker thread does not inherit. A remote backend answers "" without
-    # consulting the cache — the cached line describes the HOST toolchain.
+    # Resolve the backend HERE, in the caller's context: under gateway multiplexing the
+    # routed profile's backend lives in the per-turn terminal scope, which the worker
+    # thread does not inherit. Remote backends answer "" without consulting the cache
+    # — the cached line describes the HOST toolchain.
     backend = _resolve_terminal_backend()
     if backend in _REMOTE_BACKENDS or _plugin_backend_is_remote(backend):
         return ""
