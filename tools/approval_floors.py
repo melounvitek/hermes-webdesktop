@@ -7,33 +7,30 @@ allowlist runs after. Session state stays in ``tools.approval`` and is read
 through it at call time so tests that rebind it keep working.
 """
 
+import contextlib
 import fnmatch
 import logging
 import re
 import time
 import uuid
-from typing import Optional
 from tools.approval_detection import _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION
 
 logger = logging.getLogger("tools.approval")
 
 
 def _match_user_deny_rule(command: str) -> str | None:
-    """Return the matching ``approvals.deny`` glob, or None.
-
-    User-defined fnmatch globs that block unconditionally — like the hardline
-    floor, a match fires BEFORE the yolo / mode=off bypass ("never let the
-    agent run this, even under yolo"). Case-insensitive, run over the same
-    normalized/deobfuscated variants the dangerous-pattern detector uses so
-    quoting tricks (``r\\m``, ``git st""atus``) can't sidestep a rule.
-    """
+    """Return the matching ``approvals.deny`` glob, or None. User-defined fnmatch
+    globs that block unconditionally — like the hardline floor, a match fires
+    BEFORE the yolo / mode=off bypass ("never let the agent run this, even under
+    yolo"). Case-insensitive, run over the same normalized/deobfuscated variants
+    the dangerous-pattern detector uses so quoting tricks (``r\\m``,
+    ``git st""atus``) can't sidestep a rule."""
     from tools import approval as _a
     try:
         deny_patterns = _a._get_approval_config().get("deny") or []
     except Exception:
         return None
-    globs = [p.strip() for p in deny_patterns
-             if isinstance(p, str) and p.strip()]
+    globs = [p.strip() for p in deny_patterns if isinstance(p, str) and p.strip()]
     if not globs:
         return None
     for command_variant in _a._command_detection_variants(command):
@@ -46,29 +43,22 @@ def _match_user_deny_rule(command: str) -> str | None:
 
 def _user_deny_block_result(pattern: str) -> dict:
     """Build the standard block result for an ``approvals.deny`` match."""
-    return {
-        "approved": False,
-        "user_deny": True,
-        "message": (
-            f"BLOCKED: this command matches the user-defined deny rule "
-            f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
-            "executed via the agent — not even with --yolo, /yolo, or "
-            "approvals.mode=off. Do NOT retry or rephrase this command; "
-            "the user has explicitly forbidden it."
-        ),
-    }
+    return {"approved": False, "user_deny": True, "message": (
+        f"BLOCKED: this command matches the user-defined deny rule "
+        f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
+        "executed via the agent — not even with --yolo, /yolo, or "
+        "approvals.mode=off. Do NOT retry or rephrase this command; "
+        "the user has explicitly forbidden it.")}
 
 
-def _save_blocked_payload(command: str) -> Optional[str]:
-    """Persist a parser-limit-blocked command as a runnable script.
-
-    The parser-limit block fires on payload SIZE/shape, not the operation —
-    usually a legitimate script the model inlined. Saving it makes recovery one
-    turn (`bash <file>`) instead of two, and is strictly safer than the
-    hint-only path: the file goes through the normal execution pipeline
-    (including the referenced-script content guard) and nothing runs here.
-    Returns the path, or None on any failure (hint falls back to write_file).
-    """
+def _save_blocked_payload(command: str) -> str | None:
+    """Persist a parser-limit-blocked command as a runnable script. That block
+    fires on payload SIZE/shape, not the operation — usually a legitimate script
+    the model inlined. Saving it makes recovery one turn (`bash <file>`) instead
+    of two, and is strictly safer than the hint-only path: the file goes through
+    the normal execution pipeline (including the referenced-script content guard)
+    and nothing runs here. Returns the path, or None on any failure (hint falls
+    back to write_file)."""
     try:
         from hermes_constants import get_hermes_home
         script_dir = get_hermes_home() / "cache" / "blocked-scripts"
@@ -76,25 +66,29 @@ def _save_blocked_payload(command: str) -> Optional[str]:
         # Opportunistic cleanup: blocked payloads older than 7 days.
         cutoff = time.time() - 7 * 86400
         for old in script_dir.glob("blocked-*.sh"):
-            try:
+            with contextlib.suppress(OSError):
                 if old.stat().st_mtime < cutoff:
                     old.unlink()
-            except OSError:
-                pass
         path = script_dir / f"blocked-{int(time.time())}-{uuid.uuid4().hex[:8]}.sh"
         path.write_text(
             "#!/bin/bash\n"
             "# Auto-saved by Hermes: this command exceeded the inline command\n"
             "# parser limit and was blocked from direct execution. Review it,\n"
-            "# then run it via: bash " + str(path) + "\n"
-            + command
-            + ("\n" if not command.endswith("\n") else ""),
+            f"# then run it via: bash {path}\n"
+            + command + ("" if command.endswith("\n") else "\n"),
             encoding="utf-8", errors="replace",
         )
         return str(path)
     except Exception:
         logger.debug("failed to save blocked payload", exc_info=True)
         return None
+
+
+_RECOVERY_PREFIX = (
+    " RECOVERY: this block fires on oversized/unparseable inline "
+    "command payloads (heredocs, giant one-liners), not on the "
+    "operation itself. "
+)
 
 
 def _hardline_block_result(description: str, command: str = "") -> dict:
@@ -109,69 +103,53 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
         "agent."
     )
     # The parser-limit block is almost always a giant inline payload, not a
-    # forbidden operation, and is typically followed by blind rephrase
-    # retries — point at the saved script (or the write_file recipe).
+    # forbidden operation, and is typically followed by blind rephrase retries —
+    # point at the saved script (or the write_file recipe).
     if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
         saved = _a._save_blocked_payload(command) if command else None
         if saved:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                f"operation itself. Your command was saved to {saved} — "
+            message += _RECOVERY_PREFIX + (
+                f"Your command was saved to {saved} — "
                 f"review it, then run: terminal(command=\"bash {saved}\"). "
                 "Do not retry inline."
             )
         else:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                "operation itself. Write the script to a file with write_file, "
+            message += _RECOVERY_PREFIX + (
+                "Write the script to a file with write_file, "
                 "then run it: terminal(command=\"bash /path/script.sh\") or "
                 "\"python3 /path/script.py\". Do not retry inline."
             )
-    return {
-        "approved": False,
-        "hardline": True,
-        "message": message,
-    }
+    return {"approved": False, "hardline": True, "message": message}
 
 
 def _sudo_stdin_block_result(description: str) -> dict:
     """Build the standard block result for sudo stdin guard."""
-    return {
-        "approved": False,
-        "message": (
-            f"BLOCKED: {description}. "
-            "Do not pipe passwords to 'sudo -S' — this is a brute-force "
-            "attack vector. Set SUDO_PASSWORD in your .env file if the "
-            "agent needs passwordless sudo, or run the sudo command "
-            "manually in your own terminal."
-        ),
-    }
+    return {"approved": False, "message": (
+        f"BLOCKED: {description}. "
+        "Do not pipe passwords to 'sudo -S' — this is a brute-force "
+        "attack vector. Set SUDO_PASSWORD in your .env file if the "
+        "agent needs passwordless sudo, or run the sudo command "
+        "manually in your own terminal.")}
 
 
-# Shell control characters that make a command compound when they appear
-# OUTSIDE quotes. Inside quotes they are literal to the outer shell — but they
-# become executable again if an option like `-c`/`-e`/`--eval` (or a git
-# `-c alias.x=!...`) hands the quoted argument to another interpreter, so quoted
-# control chars only disqualify a command when such an option is present.
+# Shell control characters that make a command compound when they appear OUTSIDE
+# quotes. Inside quotes they are literal to the outer shell — but they become
+# executable again if an option like `-c`/`-e`/`--eval` (or a git `-c alias.x=!...`)
+# hands the quoted argument to another interpreter, so quoted control chars only
+# disqualify a command when such an option is present.
 _SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
 
-_REINTERPRETED_ARGUMENT_RE = re.compile(
-    r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)"
-)
+_REINTERPRETED_ARGUMENT_RE = re.compile(r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)")
 
 
 def _has_allowlist_shell_operator(command: str) -> bool:
     """Return True when a command is too compound for the allowlist shortcut.
-
     Quote-aware: metacharacters inside quotes or behind a backslash are literal
     arguments (``cargo bench -- '^a(b|c)$'``), not shell syntax. Still
     disqualifying: ``$`` or backtick inside DOUBLE quotes (expansion stays
     active), and any quoted/escaped control character when the command also
     carries a ``-c``/``-e``/``--command``/``--eval``-style option that would
-    hand the quoted text to another interpreter.
-    """
+    hand the quoted text to another interpreter."""
     command = command or ""
     quote = None  # None | "'" | '"'
     has_reinterpretable = False
@@ -179,40 +157,27 @@ def _has_allowlist_shell_operator(command: str) -> bool:
     n = len(command)
     while i < n:
         ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            elif ch in _SHELL_CONTROL_CHARS:
-                has_reinterpretable = True
-            i += 1
-            continue
-        if ch == "\\":
+        if ch == "\\" and quote != "'":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt in _SHELL_CONTROL_CHARS:
                 has_reinterpretable = True
             i += 2
             continue
-        if quote == '"':
-            if ch == '"':
+        if quote is not None:
+            if ch == quote:
                 quote = None
-            elif ch in ("`", "$"):
+            elif quote == '"' and ch in ("`", "$"):
                 return True  # expansion is active inside double quotes
             elif ch in _SHELL_CONTROL_CHARS:
                 has_reinterpretable = True
-            i += 1
-            continue
-        if ch in ("'", '"'):
+        elif ch in ("'", '"'):
             quote = ch
-            i += 1
-            continue
-        if ch == "$":
-            # Unquoted $ is only compound when it opens a substitution
-            # ("$HOME" stays simple, matching the historical `\$\(` behavior).
+        elif ch == "$":
+            # Unquoted $ is only compound when it opens a substitution ("$HOME"
+            # stays simple, matching the historical `\$\(` behavior).
             if i + 1 < n and command[i + 1] == "(":
                 return True
-            i += 1
-            continue
-        if ch in _SHELL_CONTROL_CHARS and ch not in "()":
+        elif ch in _SHELL_CONTROL_CHARS and ch not in "()":
             return True
         i += 1
     # An unterminated quote means we can't reason about the command shape.
@@ -222,28 +187,19 @@ def _has_allowlist_shell_operator(command: str) -> bool:
 
 
 def _command_matches_permanent_allowlist(command: str) -> bool:
-    """True when command_allowlist holds this exact command text or a matching glob.
-
-    Permanent approvals historically store dangerous-pattern keys such as
+    """True when command_allowlist holds this exact command text or a matching
+    glob. Permanent approvals historically store dangerous-pattern keys such as
     ``recursive delete``; manual entries are command text, possibly with
-    shell-style wildcards like ``podman *``.
-    """
+    shell-style wildcards like ``podman *``."""
     from tools import approval as _a
     command = (command or "").strip()
     if not command or _a._has_allowlist_shell_operator(command):
         return False
-
     with _a._lock:
         patterns = tuple(_a._permanent_approved)
-
     for pattern in patterns:
-        if not isinstance(pattern, str):
-            continue
-        pattern = pattern.strip()
-        if not pattern:
-            continue
-        if command == pattern:
-            return True
-        if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(command, pattern):
+        pattern = pattern.strip() if isinstance(pattern, str) else ""
+        if pattern and (command == pattern or (any(ch in pattern for ch in "*?[")
+                                               and fnmatch.fnmatchcase(command, pattern))):
             return True
     return False
