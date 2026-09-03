@@ -186,9 +186,8 @@ def _recover_from_interrupted_install() -> None:
     from hermes_cli.main import PROJECT_ROOT, _clear_update_incomplete_marker, _pytest_owns_live_checkout, _recover_core_update_marker_locked, _update_marker_path
     if _pytest_owns_live_checkout(PROJECT_ROOT):
         return
-    core_marker = _update_marker_path().exists()
     lazy_marker = _lazy_refresh_marker_path().exists()
-    if not core_marker and not lazy_marker:
+    if not lazy_marker and not _update_marker_path().exists():
         return
     # Managed/Docker installs and git-less PyPI installs never run the source-tree
     # update path, so a stray marker is not ours to act on. Just clear it.
@@ -333,7 +332,7 @@ def _windows_shim_in_process_chain() -> Path | None:
         if matched is not None:
             return matched
 
-    try:
+    with contextlib.suppress(Exception):
         import psutil
         me = psutil.Process()
         for proc in [me] + list(me.parents()):
@@ -343,8 +342,6 @@ def _windows_shim_in_process_chain() -> Path | None:
                 continue
             if matched is not None:
                 return matched
-    except Exception:
-        return None
     return None
 
 
@@ -543,9 +540,8 @@ def _quarantine_running_hermes_exe(
             moved.append((shim, target))
             continue
 
-        # Every rename failed. MOVEFILE_DELAY_UNTIL_REBOOT is no fallback: it needs
-        # elevation, frees nothing for the install running now, and would move a later,
-        # freshly repaired shim aside at next boot. Report and let uv try its luck.
+        # Every rename failed. MOVEFILE_DELAY_UNTIL_REBOOT is no fallback (needs elevation, frees
+        # nothing now, moves a later repaired shim aside at boot). Report; let uv try its luck.
         print(
             f"  ⚠ Could not quarantine {shim.name} ({last_exc.__class__.__name__}: "
             f"another process is holding it open).")
@@ -635,11 +631,9 @@ class ShimQuarantineError(RuntimeError):
 
 
 def _run_quarantined_install(
-    cmd: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    scripts_dir: Path | None = None,
-    strict_quarantine: bool = False) -> None:
+    cmd: list[str], *, env: dict[str, str] | None = None, scripts_dir: Path | None = None,
+    strict_quarantine: bool = False,
+) -> None:
     """Run an editable install, quarantining the running ``hermes.exe`` first.
 
     Every editable install rewrites the entry-point shims; on Windows the live ``hermes.exe``
@@ -660,10 +654,8 @@ def _run_quarantined_install(
     try:
         _run_install_with_heartbeat(cmd, env=env)
     finally:
-        # Restore on FAILURE and on SUCCESS: uv audits an already-satisfied editable
-        # install as a no-op and rewrites no entry points, which would leave the shims
-        # quarantined aside. _restore_quarantined_exes skips any shim the installer
-        # actually replaced. Errors are not swallowed — the finally re-raises.
+        # Restore on FAILURE and SUCCESS: an already-satisfied editable install is a uv no-op
+        # that rewrites no entry points. Skips shims the installer replaced; finally re-raises.
         if scripts_dir is not None:
             _restore_quarantined_exes(moved)
 
@@ -696,8 +688,7 @@ def _cleanup_quarantined_exes(scripts_dir: Path | None = None) -> None:
     from hermes_cli.main import _QUARANTINE_GRACE_SECONDS, _cleanup_pending_shim_renames, _is_windows, _quarantine_stamp_ms, _venv_scripts_dir
     if not _is_windows():
         return
-    if scripts_dir is None:
-        scripts_dir = _venv_scripts_dir()
+    scripts_dir = scripts_dir if scripts_dir is not None else _venv_scripts_dir()
     if scripts_dir is None:
         return
     _cleanup_pending_shim_renames(scripts_dir)
@@ -708,8 +699,7 @@ def _cleanup_quarantined_exes(scripts_dir: Path | None = None) -> None:
             if (stamp := _quarantine_stamp_ms(stale)) is not None]
     except OSError:
         return
-    # Newest first by PARSED stamp: lexicographic filename order only tracks recency while
-    # every stamp shares a digit width (a stray ``.old.999`` would sort above epoch-ms).
+    # Newest first by PARSED stamp: lexicographic order breaks when a stray ``.old.999`` exists.
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     for stamp, stale in candidates:
         try:
@@ -804,10 +794,8 @@ def _detect_broken_lazy_refresh_imports(
         logger.debug("lazy refresh import probe failed: %s", exc)
         return None
     if result.returncode != 0:
-        logger.debug(
-            "lazy refresh import probe exited %s: %s",
-            result.returncode,
-            (result.stderr or "")[:200])
+        logger.debug("lazy refresh import probe exited %s: %s",
+                     result.returncode, (result.stderr or "")[:200])
         return None
     packages: list[str] = []
     for mod in _nonblank_lines(result.stdout):
@@ -910,30 +898,23 @@ def _install_python_dependencies_with_optional_fallback(
     from hermes_cli.main import _insert_python_pin, _interpreter_scripts_dir, _is_windows, _load_installable_optional_extras, _run_quarantined_install, _venv_scripts_dir, _verify_console_scripts_installed, _verify_core_dependencies_installed
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
 
-    # Only uv needs the explicit pin; pip resolves the target from sys.executable
-    # itself and has no --python flag.
-    pin_python = False
-    if (
-        env
-        and env.get("VIRTUAL_ENV")
-        and not Path(env["VIRTUAL_ENV"]).is_dir()
-        and install_cmd_prefix
-        and _is_uv_command(install_cmd_prefix)):
-        pin_python = True
+    # Only uv needs the explicit pin; pip resolves the target from sys.executable itself.
+    pin_python = bool(
+        env and env.get("VIRTUAL_ENV") and not Path(env["VIRTUAL_ENV"]).is_dir()
+        and install_cmd_prefix and _is_uv_command(install_cmd_prefix))
+    if pin_python:
         env = {**env}
         env.pop("VIRTUAL_ENV", None)
-        # Pinned to sys.executable, the shims uv rewrites live in THAT interpreter's
-        # Scripts dir, not PROJECT_ROOT/venv. Quarantining the wrong dir leaves the
-        # running hermes.exe locked on Windows. Only override when the venv dir is missing.
+        # Pinned to sys.executable, the shims uv rewrites live in THAT interpreter's Scripts
+        # dir, not PROJECT_ROOT/venv; quarantining the wrong dir leaves hermes.exe locked.
         if scripts_dir is None and _is_windows():
             scripts_dir = _interpreter_scripts_dir()
 
     def _install(args: list[str]) -> None:
         if pin_python:
             args = _insert_python_pin(args)
-        # strict_quarantine: this is the UPDATE dependency sync. A shim that cannot be
-        # renamed aside proves a hard venv hold; ShimQuarantineError propagates to the
-        # sync boundary, which defers via the update-incomplete marker instead.
+        # strict_quarantine: this is the UPDATE dependency sync; ShimQuarantineError propagates
+        # to the sync boundary, which defers via the update-incomplete marker instead.
         _run_quarantined_install(
             install_cmd_prefix + args, env=env, scripts_dir=scripts_dir, strict_quarantine=True)
 
@@ -959,9 +940,8 @@ def _install_python_dependencies_with_optional_fallback(
         print(f"  ✓ Reinstalled optional extras individually: {', '.join(installed_extras)}")
     if failed_extras:
         print(f"  ⚠ Skipped optional extras that still failed: {', '.join(failed_extras)}")
-    # uv's incremental resolver has produced partial installs where a newly added base
-    # dep silently fails to land on a half-stale venv, surfacing hours later as a
-    # ModuleNotFoundError in a downstream subprocess. Verify here so it surfaces now.
+    # uv's incremental resolver has left newly added base deps silently missing on a half-stale
+    # venv, surfacing hours later as a downstream ModuleNotFoundError. Verify here instead.
     _verify_core_dependencies_installed(install_cmd_prefix, env=env, group=group)
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
 
@@ -1073,9 +1053,8 @@ def _verify_core_dependencies_installed(
         f"  ⚠ Verification: {len(missing)} declared dep(s) missing after install: "
         f"{', '.join(missing[:8])}{'...' if len(missing) > 8 else ''}")
     print("  → Reinstalling base group with --reinstall to repair...")
-    # Base group only, not ``[{group}]``: the missing dep is a *base* dep; the full
-    # all-extras install costs minutes and trips on whatever extra was already broken
-    # upstream. Quarantine first: ``--reinstall -e .`` rewrites the entry-point shims.
+    # Base group only, not ``[{group}]``: the missing dep is a *base* dep and the all-extras
+    # install costs minutes. Quarantine first: ``--reinstall -e .`` rewrites the shims.
     scripts_dir = _venv_scripts_dir() if _is_windows() else None
     if not _run_repair_step(
         _run_quarantined_install, install_cmd_prefix + ["install", "--reinstall", "-e", "."],
