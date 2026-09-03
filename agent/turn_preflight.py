@@ -251,8 +251,9 @@ def compress_after_tool_results(
     list (never rebuild ``conversation_history`` for it)."""
     from agent.conversation_loop import (
         _HANDOFF_SKIP_FINAL_RESPONSE, _midturn_request_pressure_tokens,
-        _should_skip_model_call_for_reference_handoff, estimate_request_tokens_rough,
+        _should_skip_model_call_for_reference_handoff,
     )
+    from agent.model_metadata import estimate_request_tokens_rough
 
     def _verdict(end_turn: bool) -> PostToolCompressionVerdict:
         return PostToolCompressionVerdict(

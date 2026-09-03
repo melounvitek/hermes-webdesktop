@@ -264,7 +264,7 @@ def _print_nous_401_diagnostics(agent: Any, api_error: Exception) -> None:
 
 def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
     """Anthropic 401 that survived a credential refresh: show auth method + fixes."""
-    from agent.anthropic_adapter import _is_oauth_token
+    from agent.anthropic_credentials import _is_oauth_token
     from agent.azure_identity_adapter import is_token_provider
     from hermes_constants import display_hermes_home
     _plines(agent, "🔐 Anthropic 401 — authentication failed.")
@@ -526,7 +526,7 @@ def recover_after_classification(
         _retry.reasoning_mandatory_retry_attempted = True
         agent._reasoning_disable_rejected = True
         try:
-            from hermes_cli.models import refresh_reasoning_caps_async
+            from hermes_cli.models_reasoning_caps import refresh_reasoning_caps_async
             refresh_reasoning_caps_async(agent.provider)
         except Exception:
             pass
@@ -977,10 +977,9 @@ def compute_error_backoff(
     limits (capped at 600s: Anthropic Tier 1 buckets reset in ~171s, so a 120s cap re-tripped
     the limit); otherwise jittered backoff, replaced by the adaptive policy for 429s / Z.AI
     overloads. Normal retries are buffered; long Z.AI Coding waits surface immediately."""
-    # Resolved through the loop module so tests that patch
-    # ``agent.conversation_loop.jittered_backoff`` / ``adaptive_rate_limit_backoff``
-    # (incl. the run_agent conftest fast-backoff fixture) keep intercepting.
-    from agent.conversation_loop import adaptive_rate_limit_backoff, jittered_backoff
+    # Imported lazily so tests that patch ``agent.retry_utils.jittered_backoff`` /
+    # ``adaptive_rate_limit_backoff`` (incl. the run_agent conftest fast-backoff fixture) intercept.
+    from agent.retry_utils import adaptive_rate_limit_backoff, jittered_backoff
 
     _retry_after = None
     _resp_headers = getattr(getattr(api_error, "response", None), "headers", None) if is_rate_limited else None
@@ -1245,10 +1244,9 @@ def route_classified_error(
     (immediately) and transport failures (after 1 retry) unless credential-pool rotation may
     still recover (upstream-aggregator 429s always fall back); persistent 401/403 → fallback
     chain once; genuine Nous 429 → cross-session breaker + re-enter the loop exactly once."""
-    from agent.conversation_loop import (
-        _arm_fallback_restart, _ra, conversation_history_after_compression,
-        estimate_request_tokens_rough,
-    )
+    from agent.conversation_compression import conversation_history_after_compression
+    from agent.conversation_loop import _arm_fallback_restart, _ra
+    from agent.model_metadata import estimate_request_tokens_rough
 
     _provider_overflow_recovery_pending = False
     is_rate_limited = False

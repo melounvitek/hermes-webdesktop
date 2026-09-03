@@ -113,8 +113,9 @@ def assemble_api_request(
     user merge and surrogate stripping, so the same row's bytes never vary across turns."""
     from agent.conversation_loop import (
         _apply_context_engine_selection, _canonicalize_api_tool_calls, _clone_message_for_send,
-        _midturn_request_pressure_tokens, _pressure_with_real_floor, estimate_messages_tokens_rough,
+        _midturn_request_pressure_tokens, _pressure_with_real_floor,
     )
+    from agent.model_metadata import estimate_messages_tokens_rough
 
     api_messages, effective_system = build_api_messages(
         agent, messages, current_turn_user_idx=current_turn_user_idx,

@@ -49,7 +49,7 @@ def _retry_empty(
     signature is recorded and deterministic empties stop burning paid retries (fails
     open: missing usage or any output keeps the budget). Returns
     ``(action_or_None, interrupt_result, deterministic_empty)``."""
-    from agent.conversation_loop import jittered_backoff
+    from agent.retry_utils import jittered_backoff
 
     if empty_candidate:
         _empty_guard.record_empty_attempt(

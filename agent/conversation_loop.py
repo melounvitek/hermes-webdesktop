@@ -50,28 +50,6 @@ from agent.turn_response_check import check_api_response
 from agent.turn_response_intake import normalize_model_response
 from agent.turn_tool_round import run_tool_round
 from hermes_logging import set_session_context
-# Resolved lazily by agent.turn_* via ``from agent.conversation_loop import X`` — tests
-# patch them here, so they must stay bound in this namespace.
-from agent.conversation_compression import conversation_history_after_compression  # noqa: F401
-from agent.model_metadata import (  # noqa: F401
-    # ----------------------------------------------------------------- Session hygiene: auto-compress
-    # pathologically large transcripts Long-lived gateway sessions can accumulate enough history that every
-    # new message rehydrates an oversized transcript, causing repeated truncation/context failures. Detect
-    # this early and compress proactively — before the agent even starts. (#628) Token source priority: 1.
-    # Actual API-reported prompt_tokens from the last turn (stored in session_entry.last_prompt_tokens) 2.
-    # Rough char-based estimate (str(msg)//4). Overestimates by 30-50% on code/JSON-heavy sessions, but that
-    # just means hygiene fires a bit early — safe and harmless.
-    # -----------------------------------------------------------------
-    estimate_messages_tokens_rough,
-    estimate_request_tokens_rough,
-    save_context_length,
-)
-from agent.retry_utils import adaptive_rate_limit_backoff, jittered_backoff  # noqa: F401
-from agent.turn_recovery import (  # noqa: F401
-    describe_invalid_response,
-    interruptible_backoff_sleep,
-    validate_response_shape,
-)
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches
 

@@ -31,8 +31,7 @@ class ResponseUsageOutcome:
 
 
 def _loop_mod():
-    """Lazy ``agent.conversation_loop`` so tests patching
-    ``agent.conversation_loop.save_context_length`` still intercept (and no import cycle)."""
+    """Lazy ``agent.conversation_loop`` import (avoids an import cycle)."""
     import agent.conversation_loop as _cl
 
     return _cl
@@ -149,7 +148,9 @@ def record_response_usage(
     if getattr(compressor, "_context_probed", False):
         ctx = compressor.context_length
         if getattr(compressor, "_context_probe_persistable", False):
-            _loop_mod().save_context_length(agent.model, agent.base_url, ctx)
+            from agent.model_metadata import save_context_length
+
+            save_context_length(agent.model, agent.base_url, ctx)
             agent._safe_print(f"{agent.log_prefix}💾 Cached context length: {ctx:,} tokens for {agent.model}")
         compressor._context_probed = False
         compressor._context_probe_persistable = False

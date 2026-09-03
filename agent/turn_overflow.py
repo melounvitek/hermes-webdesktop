@@ -146,10 +146,8 @@ class _Recovery(OverflowVerdict):
         ``fail_on_timeout`` a host timeout (recovery spent its wait budget with no
         committed summary) ends the turn via the typed contract, since re-sending would
         hit the same overflow."""
-        from agent.conversation_loop import (
-            _COMPRESSION_TIMEOUT_FINAL_RESPONSE, _compression_deferred_result,
-            conversation_history_after_compression,
-        )
+        from agent.conversation_compression import conversation_history_after_compression
+        from agent.conversation_loop import _COMPRESSION_TIMEOUT_FINAL_RESPONSE, _compression_deferred_result
 
         agent = self.agent
         before = self.messages
@@ -185,7 +183,7 @@ class _Recovery(OverflowVerdict):
         token-budget errors). Same-message-count compression (tool-result pruning,
         in-place summarization) can shrink the request, so re-estimate rather than trust
         the array length. Returns ``(deferred_verdict, shrank, new_tokens)``."""
-        from agent.conversation_loop import estimate_messages_tokens_rough
+        from agent.model_metadata import estimate_messages_tokens_rough
 
         original_len = len(self.messages)
         original_tokens = estimate_messages_tokens_rough(self.messages)
@@ -212,7 +210,7 @@ class _Recovery(OverflowVerdict):
     def request_tokens(self) -> int:
         """Overhead-aware request size (msgs + tools + system) so LCM forced-overflow
         recovery arms on the TRUE request, not the tool-blind message count."""
-        from agent.conversation_loop import estimate_request_tokens_rough
+        from agent.model_metadata import estimate_request_tokens_rough
 
         return estimate_request_tokens_rough(self.api_messages, tools=self.agent.tools or None)
 
@@ -221,7 +219,7 @@ def _recover_payload_too_large(st: _Recovery, _retry: TurnRetryState) -> Overflo
     """413: compress and retry. A 413 is a BYTE-size error, so progress is scored in
     payload bytes — never the token estimate, which is deliberately byte-blind to images
     and wedged sessions on "no progress"."""
-    from agent.conversation_loop import estimate_messages_tokens_rough
+    from agent.model_metadata import estimate_messages_tokens_rough
 
     agent = st.agent
     exhausted = st.count_attempt(payload_too_large=True)
@@ -317,7 +315,7 @@ def _adopt_provider_context_limit(st: _Recovery, error_msg: str, old_ctx: int) -
     """Shrink context_length only when the provider reports the real limit; else keep
     the window and compress. Guessed probe tiers can turn a configured 1M window into
     256K/128K/64K. Returns the provider-reported limit, or ``None``."""
-    from agent.conversation_loop import save_context_length
+    from agent.model_metadata import save_context_length
 
     agent = st.agent
     compressor = agent.context_compressor

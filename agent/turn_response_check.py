@@ -93,7 +93,7 @@ def check_api_response(
     """Verify ``response`` in the original order. The retry buffer is NOT cleared on success
     (bytes back != usable content); ``_preflight_compression_blocked``/``_last_preflight_pressure``
     reset only when the usage fold re-arms the compression budget."""
-    from agent.conversation_loop import validate_response_shape
+    from agent.turn_recovery import validate_response_shape
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ResponseCheckVerdict:
         return ResponseCheckVerdict(
@@ -232,10 +232,9 @@ def retry_invalid_response(
     """Malformed/empty provider response: fire the error hook, stop the spinner, eager
     fallback (empty responses often mean rate limiting), terminal result at max retries,
     else jittered backoff that preserves a pending redirect."""
-    from agent.conversation_loop import (
-        _arm_fallback_restart, describe_invalid_response, interruptible_backoff_sleep,
-        jittered_backoff,
-    )
+    from agent.conversation_loop import _arm_fallback_restart
+    from agent.retry_utils import jittered_backoff
+    from agent.turn_recovery import describe_invalid_response, interruptible_backoff_sleep
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> InvalidResponseVerdict:
         return InvalidResponseVerdict(
