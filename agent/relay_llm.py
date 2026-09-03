@@ -542,6 +542,10 @@ class ManagedLlmStream(Iterator[Any]):
         finally:
             self._release_runtime_lease()
 
+    def _keep_first_close_error(self, exc: BaseException) -> None:
+        if self._close_error is None:
+            self._close_error = exc
+
     def _close_provider_resources(self) -> None:
         """Close the unmanaged provider stream/resource once each (they may be the same object)."""
         resources = {id(r): r for r in (self._stream, self._raw_stream_resource) if r is not None}
@@ -554,8 +558,7 @@ class ManagedLlmStream(Iterator[Any]):
             try:
                 close()
             except Exception as exc:
-                if self._close_error is None:
-                    self._close_error = exc
+                self._keep_first_close_error(exc)
                 logger.debug("Provider stream cleanup failed", exc_info=True)
 
     def _close(self, *, logical_outcome: str) -> None:
@@ -573,8 +576,7 @@ class ManagedLlmStream(Iterator[Any]):
             try:
                 _aclose_on_loop(loop, self._stream)
             except Exception as exc:
-                if self._close_error is None:
-                    self._close_error = exc
+                self._keep_first_close_error(exc)
             self._finish_logical(logical_outcome)
             loop.close()
         finally:

@@ -529,9 +529,9 @@ class RelayRuntime:
         parent = self.ensure_session({"session_id": parent_session_id})
         parent_handle = None if parent is None else parent.handle
         turn = active_turn(parent_session_id)
+        # active_turn() already proved liveness and, for a RelayRuntime host, an open session.
         if (
-            turn is not None and not turn.closed and turn.handle is not None
-            and turn.lease.host is self and turn.lease.session is not None
+            turn is not None and turn.handle is not None and turn.lease.host is self
             and turn.lease.session.session_id == parent_session_id
         ):
             parent_handle = turn.handle
@@ -555,6 +555,11 @@ class RelayRuntime:
         with self._sessions_lock:
             self._subagent_parents.pop(session_id, None)
             self._subagent_parent_handles.pop(session_id, None)
+
+    def _lookup(self, session_id: str) -> RelaySession | None:
+        """Registry lookup (closing sessions included) without creating one."""
+        with self._sessions_lock:
+            return self._sessions.get(session_id)
 
     def get_session(self, session_id: str) -> RelaySession | None:
         """Return an active Hermes Relay session without creating one."""
@@ -751,8 +756,7 @@ class RelayRuntime:
     def _close_session(self, event: dict[str, Any]) -> None:
         """Close one session already admitted by the host lifecycle gate."""
         session_id = _session_id(event)
-        with self._sessions_lock:
-            session = self._sessions.get(session_id)
+        session = self._lookup(session_id)
         if session is None:
             self._forget_subagent(session_id)
             return
@@ -1097,11 +1101,8 @@ class RelaySessionCoordinator:
     def _close_turn_scope(self, host: RelayRuntime, turn: RelayTurnContext, *, outcome: str) -> None:
         """Pop the turn's logical LLM children, then the turn scope itself (LIFO)."""
         self._finish_logical_calls(turn, outcome=outcome)
-        if turn.handle is None:
-            return
         failure = host._close_scope_handle(
-            turn.lease.session, turn.handle, output={"outcome": outcome},
-            failure_label="turn scope close failed",
+            turn.lease.session, turn.handle, output={"outcome": outcome}, failure_label="turn scope close failed",
         )
         if failure:
             logger.warning("Hermes Relay turn finalization failed: %s", failure)
@@ -1148,17 +1149,13 @@ class RelaySessionCoordinator:
             return
         if old_session_id and old_session_id != session_id:
             # A LIVE turn on the old session: closing now would pop under it (LIFO).
-            with host._sessions_lock:
-                old_session = host._sessions.get(old_session_id)
-            if old_session is not None and self.has_active_turn(
-                profile_key=profile_key, session_id=old_session_id
-            ):
+            old_session = host._lookup(old_session_id)
+            if old_session is not None and self.has_active_turn(profile_key=profile_key, session_id=old_session_id):
                 _flag_open_session(old_session, "close_pending")
             else:
                 host.close_session({"session_id": old_session_id})
             return
-        with host._sessions_lock:
-            session = host._sessions.get(session_id)
+        session = host._lookup(session_id)
         if session is not None:
             _flag_open_session(session, "rotate_pending")
 
