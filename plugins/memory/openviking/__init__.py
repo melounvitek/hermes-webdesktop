@@ -3,7 +3,6 @@
 OpenViking (Volcengine/ByteDance) organizes agent knowledge into a viking://
 filesystem hierarchy with tiered context (L0 abstract / L1 overview / L2 full),
 automatic memory extraction on session commit, and semantic search.
-
 Config comes from env vars (OPENVIKING_ENDPOINT / _API_KEY / _ACCOUNT / _USER /
 _AGENT, profile-scoped via .env) or a linked OpenViking CLI config (ovcli.conf).
 The interactive setup wizard lives in ``_setup.py``.
@@ -56,20 +55,14 @@ _OPENVIKING_USER_AGENT = f"openviking-memory-hermes/{_HERMES_VERSION}"
 _OVCLI_CONFIG_ENV = "OPENVIKING_CLI_CONFIG_FILE"
 _OVCLI_DEFAULT_RELATIVE_PATH = ".openviking/ovcli.conf"
 _OVCLI_SAVED_PREFIX = "ovcli.conf."
-_OPENVIKING_ENV_KEYS = ("OPENVIKING_ENDPOINT", "OPENVIKING_API_KEY", "OPENVIKING_ACCOUNT", "OPENVIKING_USER", "OPENVIKING_AGENT")
+_CONNECTION_KEYS = ("endpoint", "api_key", "account", "user", "agent")
+_OPENVIKING_ENV_KEYS = tuple(f"OPENVIKING_{key.upper()}" for key in _CONNECTION_KEYS)
 _TIMEOUT = 30.0
 _SESSION_DRAIN_TIMEOUT = 10.0
 _DEFERRED_COMMIT_TIMEOUT = (_TIMEOUT * 2) + 5.0
 _SESSION_MESSAGE_BATCH_LIMIT = 100
 _REMOTE_RESOURCE_PREFIXES = ("http://", "https://", "git@", "ssh://", "git://")
 _SYNC_TRACE_ENV = "HERMES_OPENVIKING_SYNC_TRACE"
-_DEFAULT_RECALL_LIMIT = 6
-_DEFAULT_RECALL_SCORE_THRESHOLD = 0.15
-_DEFAULT_RECALL_MAX_INJECTED_CHARS = 4000
-_DEFAULT_PROFILE_TOKEN_BUDGET = 6000
-_DEFAULT_RECALL_TIMEOUT_SECONDS = 4.0
-_DEFAULT_RECALL_REQUEST_TIMEOUT_SECONDS = 3.0
-_DEFAULT_RECALL_FULL_READ_LIMIT = 2
 _RECALL_QUERY_MIN_CHARS = 5
 _RECALL_MIN_TIMEOUT_SECONDS = 0.05
 _READ_BATCH_LIMIT = 3
@@ -93,13 +86,13 @@ _CONFIG_SCHEMA = [
     _cfg_field("account", "Advanced local identity override (leave blank for user API keys)"),
     _cfg_field("user", "Advanced local user override (leave blank for user API keys)"),
     _cfg_field("agent", "Optional peer ID for separate assistant context. Uses user memory when no peer is configured.", default=_DEFAULT_AGENT),
-    _cfg_field("recall_limit", "Maximum memories injected by automatic recall", type="integer", minimum=1, maximum=100, default=_DEFAULT_RECALL_LIMIT),
-    _cfg_field("recall_score_threshold", "Minimum relevance score for automatic recall", type="number", minimum=0.0, maximum=1.0, step=0.01, default=_DEFAULT_RECALL_SCORE_THRESHOLD),
-    _cfg_field("recall_max_injected_chars", "Maximum total characters injected by recall", type="integer", minimum=100, maximum=50000, default=_DEFAULT_RECALL_MAX_INJECTED_CHARS),
-    _cfg_field("profile_token_budget", "Maximum session-start memory tokens injected", type="integer", minimum=500, maximum=50000, default=_DEFAULT_PROFILE_TOKEN_BUDGET),
-    _cfg_field("recall_timeout_seconds", "Total timeout for recall (seconds)", **_NUM, default=_DEFAULT_RECALL_TIMEOUT_SECONDS),
-    _cfg_field("recall_request_timeout_seconds", "Per-request timeout for recall (seconds)", **_NUM, default=_DEFAULT_RECALL_REQUEST_TIMEOUT_SECONDS),
-    _cfg_field("recall_full_read_limit", "Max full L2 content reads per recall", type="integer", minimum=0, maximum=100, default=_DEFAULT_RECALL_FULL_READ_LIMIT),
+    _cfg_field("recall_limit", "Maximum memories injected by automatic recall", type="integer", minimum=1, maximum=100, default=6),
+    _cfg_field("recall_score_threshold", "Minimum relevance score for automatic recall", type="number", minimum=0.0, maximum=1.0, step=0.01, default=0.15),
+    _cfg_field("recall_max_injected_chars", "Maximum total characters injected by recall", type="integer", minimum=100, maximum=50000, default=4000),
+    _cfg_field("profile_token_budget", "Maximum session-start memory tokens injected", type="integer", minimum=500, maximum=50000, default=6000),
+    _cfg_field("recall_timeout_seconds", "Total timeout for recall (seconds)", **_NUM, default=4.0),
+    _cfg_field("recall_request_timeout_seconds", "Per-request timeout for recall (seconds)", **_NUM, default=3.0),
+    _cfg_field("recall_full_read_limit", "Max full L2 content reads per recall", type="integer", minimum=0, maximum=100, default=2),
     _cfg_field("recall_prefer_abstract", "Use abstracts instead of full L2 reads", type="boolean", default=False),
     _cfg_field("recall_resources", "Include resources in recall", type="boolean", default=False),
 ]
@@ -109,35 +102,8 @@ _RECALL_SETTING_KEYS = tuple(k for k in _SETTING_SPECS if k.startswith("recall_"
 # Explicit-uid URIs (viking://user/<uid>/...) work under every auth mode; the `~`
 # alias only expands for USER/ADMIN roles and is rejected with 400 under dev/ROOT,
 # so the user space is resolved client-side from /api/v1/system/status.
-_PROFILE_SUFFIX = "memories/profile.md"
-_PREFERENCES_SUFFIX = "memories/preferences"
-_ENTITIES_SUFFIX = "memories/entities"
-
-
-def _resolve_user_space(client, *, timeout: Optional[float] = None) -> Optional[str]:
-    """Server-asserted current user for explicit-uid URIs.
-
-    Returns ``None`` when the probe fails or reports no user. Callers may fall
-    back to a configured value for that operation but must not cache an
-    unverified identity — a later probe can succeed.
-    """
-    try:
-        kwargs = {"timeout": timeout} if timeout is not None else {}
-        status = client.get("/api/v1/system/status", **kwargs)
-        user = str(((status or {}).get("result") or {}).get("user") or "").strip()
-        if user:
-            return user
-    except Exception:
-        logger.debug("OpenViking user-space probe failed; using configured fallback", exc_info=True)
-    return None
-
-
-def _user_scoped_uri(user_space: str, suffix: str) -> str:
-    return f"viking://user/{user_space}/{suffix}"
-
-
+_SESSION_START_SUFFIXES = ("memories/profile.md", "memories/preferences", "memories/entities")
 _SESSION_START_LIST_PARAMS = {"output": "agent", "recursive": True, "abs_limit": 512, "node_limit": 512}
-_DEFAULT_MEMORY_SUBDIR = "preferences"
 # Built-in memory tool `target` -> mirror subdir (user facts -> preferences, agent notes -> patterns).
 _MEMORY_WRITE_TARGET_SUBDIR_MAP = {"user": "preferences", "memory": "patterns"}
 # OpenViking-generated summaries; non-.md sidecars are already rejected by the .md check.
@@ -148,22 +114,13 @@ _LOCAL_OPENVIKING_PROBE_TIMEOUT = 2.0  # loopback connect budget; only guards ag
 _LOCAL_SERVER_STARTED = "started"
 _LOCAL_SERVER_OCCUPIED = "occupied"
 _LOCAL_SERVER_FAILED = "failed"
-# After a refresh attempt fails for a given (unchanged) config, skip re-probing
-# for this long. Keeps "unavailable endpoints reconnect on a later access"
-# true while preventing every provider access from paying a 3s health probe
-# (and emitting a warning) under _client_refresh_lock while a server is down.
+# After a refresh fails for an unchanged config, skip re-probing for this long so a
+# down server doesn't cost every access a 3s probe + warning under _client_refresh_lock.
 _FAILED_CONFIG_RETRY_COOLDOWN_SECONDS = 30.0
 _OPENVIKING_SERVER_LOG_RELATIVE_PATH = Path("logs") / "openviking-server.log"
 _OPENVIKING_RESPONDED_FAILURE_PREFIX = "OpenViking server responded"
-_OPENVIKING_IDENTITY_MODERN = "modern"
-_OPENVIKING_IDENTITY_LEGACY = "legacy"
-_OPENVIKING_IDENTITY_UNHEALTHY = "unhealthy"
-_OPENVIKING_IDENTITY_LEGACY_UNVERIFIED = "legacy-unverified"
-_OPENVIKING_IDENTITY_INVALID = "invalid"
-_OPENVIKING_IDENTIFIED_STATES = frozenset({
-    _OPENVIKING_IDENTITY_MODERN,
-    _OPENVIKING_IDENTITY_LEGACY,
-})
+# Identity probe states; "modern" and "legacy" are the two identified ones.
+_OPENVIKING_IDENTIFIED_STATES = frozenset({"modern", "legacy"})
 _RETRY_LATER = (
     "OpenViking memory is temporarily unavailable; Hermes will retry on a later access or when "
     "the config changes."
@@ -222,21 +179,20 @@ def _sanitize_openviking_error_message(message: str, status_code: Optional[int] 
     return text or status
 
 
+def _status_code_from_error(error: Exception) -> Optional[int]:
+    if isinstance(error, _OpenVikingHTTPError):
+        return error.status_code
+    return getattr(getattr(error, "response", None), "status_code", None)
+
+
 def _format_openviking_exception(error: Exception) -> str:
     return _sanitize_openviking_error_message(str(error), _status_code_from_error(error))
 
 
 def _derive_openviking_user_text(content: Any) -> str:
-    """Strip Hermes slash-skill scaffolding before sending content to OpenViking.
-
-    MemoryManager already strips this for the provider fan-out; kept so the
-    hooks stay correct if ever invoked outside the manager.
-    """
+    """Strip Hermes slash-skill scaffolding before sending content to OpenViking
+    (MemoryManager already does this for the fan-out; kept for direct hook callers)."""
     return extract_user_instruction_from_skill_message(content) or ""
-
-
-def _sync_trace_enabled() -> bool:
-    return env_var_enabled(_SYNC_TRACE_ENV)
 
 
 def _preview(value: Any, limit: int = 160) -> str:
@@ -321,9 +277,8 @@ class _VikingClient:
 
     @staticmethod
     def _needs_trusted_identity_retry(exc: Exception) -> bool:
-        """Trusted mode asks for X-OpenViking-Account/User with wording that
-        varies across versions; match the shape, but keep deliberate API-key
-        permission denials (non-400) non-retriable."""
+        """Trusted mode asks for X-OpenViking-Account/User with wording that varies across
+        versions; match the shape, but keep deliberate API-key denials (non-400) non-retriable."""
         message = str(exc)
         if "Trusted mode requests must include" not in message:
             return False
@@ -346,7 +301,6 @@ class _VikingClient:
             data = resp.json()
         except Exception:
             data = None
-
         if resp.status_code >= 400:
             message = _sanitize_openviking_error_message(getattr(resp, "text", ""), resp.status_code)
             if isinstance(data, dict):
@@ -357,7 +311,6 @@ class _VikingClient:
                 if data.get("status") == "error":
                     raise _OpenVikingHTTPError(str(data), resp.status_code)
             raise _OpenVikingHTTPError(message or f"HTTP {resp.status_code}", resp.status_code)
-
         if isinstance(data, dict) and data.get("status") == "error":
             error = data.get("error")
             if isinstance(error, dict):
@@ -414,11 +367,8 @@ class _VikingClient:
 
     def health_payload(self) -> dict:
         """``GET /health``, anonymous first so credentials never reach an unknown host.
-
-        Hosted OpenViking requires auth on /health; when an API key is configured
-        and the anonymous call is rejected with 401/403, retry once with the key
-        (no tenant headers) so memory mirroring is not silently disabled.
-        """
+        Hosted OpenViking requires auth on /health: when an API key is configured and the
+        anonymous call gets 401/403, retry once with the key (no tenant headers)."""
         try:
             return self._anonymous_json("/health")
         except _OpenVikingHTTPError as exc:
@@ -540,34 +490,34 @@ ADD_RESOURCE_SCHEMA = _tool_schema(
     ["url"],
 )
 
-
-# Recall tools (read-only) whose results we never re-ingest into OpenViking —
-# echoing recalled memory back into the session transcript would re-store it.
-# Write tools (viking_remember / viking_add_resource) are intentionally NOT
-# here. Derived from the canonical schema names so renames can't desync.
-_OPENVIKING_RECALL_TOOL_NAMES = {
-    SEARCH_SCHEMA["name"],
-    READ_SCHEMA["name"],
-    BROWSE_SCHEMA["name"],
-}
-
+_TOOL_SCHEMAS = [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, ADD_RESOURCE_SCHEMA]
+# Recall tools (read-only) whose results are never re-ingested — echoing recalled
+# memory back into the transcript would re-store it. Write tools are deliberately absent.
+_OPENVIKING_RECALL_TOOL_NAMES = {SEARCH_SCHEMA["name"], READ_SCHEMA["name"], BROWSE_SCHEMA["name"]}
 # viking_* tool name -> provider method (resolved via getattr so instance patches apply).
-_TOOL_HANDLERS = {
-    "viking_search": "_tool_search",
-    "viking_read": "_tool_read",
-    "viking_browse": "_tool_browse",
-    "viking_remember": "_tool_remember",
-    "viking_forget": "_tool_forget",
-    "viking_add_resource": "_tool_add_resource",
-}
-
-# Canonical tool_status values emitted in OpenViking batch tool parts.
-_TOOL_STATUS_COMPLETED = "completed"
-_TOOL_STATUS_ERROR = "error"
-_TOOL_STATUS_PENDING = "pending"
-# Inbound status aliases (from varied tool-result shapes) -> canonical above.
+_TOOL_HANDLERS = {schema["name"]: "_tool_" + schema["name"].removeprefix("viking_") for schema in _TOOL_SCHEMAS}
+# Inbound tool-result status aliases -> canonical "error" / "completed" (else "pending").
 _TOOL_STATUS_ERROR_ALIASES = {"error", "failed", "failure"}
 _TOOL_STATUS_COMPLETED_ALIASES = {"completed", "complete", "success", "succeeded"}
+
+
+def _resolve_user_space(client, *, timeout: Optional[float] = None) -> Optional[str]:
+    """Server-asserted current user for explicit-uid URIs; ``None`` when the probe fails or
+    reports no user. Callers may fall back to a configured value for that one operation but
+    must not cache an unverified identity — a later probe can succeed."""
+    try:
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        status = client.get("/api/v1/system/status", **kwargs)
+        user = str(((status or {}).get("result") or {}).get("user") or "").strip()
+        if user:
+            return user
+    except Exception:
+        logger.debug("OpenViking user-space probe failed; using configured fallback", exc_info=True)
+    return None
+
+
+def _user_scoped_uri(user_space: str, suffix: str) -> str:
+    return f"viking://user/{user_space}/{suffix}"
 
 
 def _zip_directory(dir_path: Path) -> Path:
@@ -731,9 +681,8 @@ def _validate_openviking_identity_value(value: str, *, field: str) -> tuple[bool
 
 @lru_cache(maxsize=128)
 def _openviking_endpoint_is_always_blocked(candidate: str) -> bool:
-    """SSRF floor check, cached per endpoint value: the live provider re-resolves
-    settings on every access (Dashboard / ``/reload``), so this keeps potentially
-    slow DNS lookups off the hot path while a changed URL still gets validated."""
+    """SSRF floor check, cached per endpoint value: the live provider re-resolves settings
+    on every access (Dashboard / ``/reload``), so slow DNS lookups stay off the hot path."""
     from tools.url_safety import is_always_blocked_url
 
     return is_always_blocked_url(candidate)
@@ -804,20 +753,21 @@ def _is_openviking_openapi_payload(payload: Any) -> bool:
 
 
 def _probe_openviking_identity(client: _VikingClient) -> tuple[str, Any]:
-    """Identify modern or legacy OpenViking before any authenticated request."""
+    """Identify modern or legacy OpenViking before any authenticated request.
+    -> ("modern" | "legacy" | "legacy-unverified" | "unhealthy" | "invalid", health)."""
     health = client.health_payload()
     if isinstance(health, dict) and health.get("healthy") is False:
-        return _OPENVIKING_IDENTITY_UNHEALTHY, health
+        return "unhealthy", health
     if _is_openviking_health_payload(health):
-        return _OPENVIKING_IDENTITY_MODERN, health
+        return "modern", health
     if not _is_legacy_openviking_health_payload(health):
-        return _OPENVIKING_IDENTITY_INVALID, health
+        return "invalid", health
     try:
         verified = _is_openviking_openapi_payload(client.openapi_payload())
     except Exception:
         logger.debug("Legacy OpenViking OpenAPI identity probe failed", exc_info=True)
         verified = False
-    return (_OPENVIKING_IDENTITY_LEGACY if verified else _OPENVIKING_IDENTITY_LEGACY_UNVERIFIED), health
+    return ("legacy" if verified else "legacy-unverified"), health
 
 
 def _legacy_openviking_identity_error(subject: str) -> str:
@@ -922,15 +872,20 @@ def _first_nonempty(*values: Optional[str], default: str = "") -> str:
     return default
 
 
+def _ovcli_values_for(provider_config: dict) -> dict:
+    """Connection values from the linked ovcli profile, or {} when none is linked."""
+    if not provider_config.get("use_ovcli_config"):
+        return {}
+    ovcli_path = _resolve_ovcli_config_path(str(provider_config.get("ovcli_config_path") or ""))
+    return _connection_values_from_ovcli(_load_ovcli_config(ovcli_path))
+
+
 def _resolve_connection_settings(provider_config: Optional[dict] = None) -> dict:
     """Layering: env -> linked ovcli profile -> config.yaml -> built-in default.
     An env account/user (even empty) is authoritative; the secret api_key never
     comes from config.yaml."""
     provider_config = dict(provider_config or {})
-    ovcli_values: dict = {}
-    if provider_config.get("use_ovcli_config"):
-        ovcli_path = _resolve_ovcli_config_path(str(provider_config.get("ovcli_config_path") or ""))
-        ovcli_values = _connection_values_from_ovcli(_load_ovcli_config(ovcli_path))
+    ovcli_values = _ovcli_values_for(provider_config)
 
     def layered(key: str, default: str = "", *, env_authoritative: bool = False) -> str:
         env = _env_value(f"OPENVIKING_{key.upper()}")
@@ -950,7 +905,7 @@ def _resolve_connection_settings(provider_config: Optional[dict] = None) -> dict
 
 def _env_writes_from_connection_values(values: dict) -> dict:
     writes = {}
-    for env_key, value_key in zip(_OPENVIKING_ENV_KEYS, ("endpoint", "api_key", "account", "user", "agent")):
+    for env_key, value_key in zip(_OPENVIKING_ENV_KEYS, _CONNECTION_KEYS):
         value = _clean_config_value(values.get(value_key))
         if value:
             writes[env_key] = value
@@ -976,9 +931,8 @@ def _precreate_secret_file(path: Path) -> None:
 
 
 def _env_line_safe(value: Any) -> str:
-    """Strip CR/LF/NUL so a value can only occupy the single ``KEY=VALUE`` line it
-    is written on — an embedded line break would otherwise be re-parsed as a
-    separate variable and let a pasted secret inject arbitrary entries."""
+    """Strip CR/LF/NUL so a value can only occupy its single ``KEY=VALUE`` line — an
+    embedded line break would be re-parsed as a separate variable (secret injection)."""
     text = value if isinstance(value, str) else str(value)
     return "".join(text.replace("\x00", "").splitlines())
 
@@ -1041,9 +995,9 @@ def _identity_failure(identity: str, subject: str, *, unhealthy_status: str = "s
     """Human message for a non-identified probe result, or "" when identified."""
     if identity in _OPENVIKING_IDENTIFIED_STATES:
         return ""
-    if identity == _OPENVIKING_IDENTITY_UNHEALTHY:
+    if identity == "unhealthy":
         return f"{subject} responded but reported unhealthy {unhealthy_status}."
-    if identity == _OPENVIKING_IDENTITY_LEGACY_UNVERIFIED:
+    if identity == "legacy-unverified":
         return _legacy_openviking_identity_error(legacy_subject or subject)
     return f"{subject} responded, but its /health response is not valid OpenViking."
 
@@ -1063,12 +1017,6 @@ def _validate_openviking_reachability(endpoint: str) -> tuple[bool, str]:
             return False, f"OpenViking server responded with {_format_openviking_exception(e)}."
         return False, f"OpenViking server is not reachable at {endpoint}: {_format_openviking_exception(e)}"
     return False, f"OpenViking server is not reachable at {endpoint}."
-
-
-def _status_code_from_error(error: Exception) -> Optional[int]:
-    if isinstance(error, _OpenVikingHTTPError):
-        return error.status_code
-    return getattr(getattr(error, "response", None), "status_code", None)
 
 
 def _should_probe_openviking_auth(health: dict, *, require_api_key: bool, has_api_key: bool) -> bool:
@@ -1099,7 +1047,7 @@ def _validate_openviking_setup_values(values: dict, *, require_api_key: bool = F
     try:
         client = _client_from_values(values, api_key)
         identity, health = _probe_openviking_identity(client)
-        if identity == _OPENVIKING_IDENTITY_INVALID:
+        if identity == "invalid":
             return False, "Server /health response is not valid OpenViking.", None
         message = _identity_failure(identity, "OpenViking server", legacy_subject="The server")
         if message:
@@ -1124,14 +1072,17 @@ def _local_openviking_bind(endpoint: str) -> tuple[str, int]:
     return parsed.hostname or "127.0.0.1", parsed.port or 1933
 
 
-def _openviking_server_log_path() -> Path:
+def _hermes_home_path() -> Path:
     try:
         from hermes_constants import get_hermes_home
-        home = get_hermes_home()
+        return get_hermes_home()
     except Exception:
         env_home = os.environ.get("HERMES_HOME")
-        home = Path(env_home).expanduser() if env_home else Path.home() / ".hermes"
-    return home / _OPENVIKING_SERVER_LOG_RELATIVE_PATH
+        return Path(env_home).expanduser() if env_home else Path.home() / ".hermes"
+
+
+def _openviking_server_log_path() -> Path:
+    return _hermes_home_path() / _OPENVIKING_SERVER_LOG_RELATIVE_PATH
 
 
 def _local_openviking_port_is_open(host: str, port: int) -> bool:
@@ -1293,6 +1244,184 @@ from ._setup import (  # noqa: E402,F401  re-exported: tests and callers patch t
 
 # -- MemoryProvider implementation ------------------------------------------
 
+_message_text = flatten_message_text  # OpenAI-style string/list content -> text
+
+
+def _text_part(content: str) -> Dict[str, str]:
+    return {"type": "text", "text": content}
+
+
+def _tool_part(tool_id: str, tool_name: str, tool_input: Dict[str, Any], tool_status: str, **extra) -> Dict[str, Any]:
+    return {"type": "tool", "tool_id": tool_id, "tool_name": tool_name, "tool_input": tool_input, **extra, "tool_status": tool_status}
+
+
+def _tool_call_id(tool_call: Dict[str, Any]) -> str:
+    return str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
+
+
+def _tool_call_name(tool_call: Dict[str, Any]) -> str:
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(tool_call.get("name") or "")
+
+
+def _is_openviking_recall_tool_name(tool_name: Any) -> bool:
+    return str(tool_name or "").strip().lower() in _OPENVIKING_RECALL_TOOL_NAMES
+
+
+def _tool_call_input(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    function = tool_call.get("function")
+    raw_args = function.get("arguments") if isinstance(function, dict) else None
+    if raw_args is None:
+        raw_args = tool_call.get("args")
+    if raw_args is None:
+        return {}
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        if not raw_args.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_args)
+        except Exception:
+            return {"value": raw_args}
+        return parsed if isinstance(parsed, dict) else {"value": parsed}
+    return {"value": raw_args}
+
+
+def _tool_result_status(message: Dict[str, Any]) -> str:
+    raw_status = str(message.get("status") or message.get("tool_status") or "").lower()
+    if raw_status in _TOOL_STATUS_ERROR_ALIASES:
+        return "error"
+    if raw_status in _TOOL_STATUS_COMPLETED_ALIASES:
+        return "completed"
+    text = _message_text(message.get("content")).strip()
+    if text:
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            exit_code = parsed.get("exit_code")
+            if (
+                str(parsed.get("status") or "").lower() in _TOOL_STATUS_ERROR_ALIASES
+                or parsed.get("success") is False
+                or bool(parsed.get("error"))
+                or (isinstance(exit_code, int) and exit_code != 0)
+            ):
+                return "error"
+    return "completed"
+
+
+def _rfind_message(messages: List[Any], role: str, start: int, expected: Any = None) -> Optional[int]:
+    """Index of the last ``role`` message at or before ``start`` (matching ``expected`` text if given)."""
+    expected_text = None if expected is None else _message_text(expected).strip()
+    for idx in range(start, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != role:
+            continue
+        if expected_text is None or (expected_text and _message_text(message.get("content")).strip() == expected_text):
+            return idx
+    return None
+
+
+def _index_tool_calls(messages: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], set[str], set[str]]:
+    """-> (assistant tool_calls by id, ids with a result in the slice, recall-tool ids to drop)."""
+    tool_calls_by_id: Dict[str, Dict[str, Any]] = {}
+    completed_tool_ids: set[str] = set()
+    skipped_tool_ids: set[str] = set()
+    for message in messages:
+        if message.get("role") == "tool":
+            tool_id = str(message.get("tool_call_id") or message.get("id") or "")
+            if tool_id:
+                completed_tool_ids.add(tool_id)
+                if _is_openviking_recall_tool_name(message.get("name")):
+                    skipped_tool_ids.add(tool_id)
+        elif message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_id = _tool_call_id(tool_call)
+                tool_name = _tool_call_name(tool_call)
+                if tool_id:
+                    tool_calls_by_id[tool_id] = {"tool_name": tool_name, "tool_input": _tool_call_input(tool_call)}
+                    if _is_openviking_recall_tool_name(tool_name):
+                        skipped_tool_ids.add(tool_id)
+    return tool_calls_by_id, completed_tool_ids, skipped_tool_ids
+
+
+class _TurnUpload:
+    """One turn's OpenViking upload: structured batches first, falling back to plain text
+    on a first-batch failure, and to individual messages after a failed retry."""
+
+    def __init__(self, provider: "OpenVikingMemoryProvider", sid: str, batch_messages: List[Dict[str, Any]],
+                 user_content: str, assistant_content: str):
+        self.provider, self.sid, self.batch_messages = provider, sid, batch_messages
+        self.user_content, self.assistant_content = user_content, assistant_content
+        self.next_index = 0
+
+    @property
+    def trace(self) -> bool:
+        return env_var_enabled(_SYNC_TRACE_ENV)
+
+    def post_remaining_individually(self, client: _VikingClient) -> None:
+        path = f"/api/v1/sessions/{self.sid}/messages"
+        while self.next_index < len(self.batch_messages):
+            if self.trace:
+                logger.info(
+                    "OpenViking sync_turn trace: POST %s message_index=%d payload=%s",
+                    path, self.next_index, json.dumps(self.batch_messages[self.next_index], ensure_ascii=False),
+                )
+            client.post(path, self.batch_messages[self.next_index])
+            self.next_index += 1
+
+    def post(self, client: _VikingClient) -> None:
+        if self.batch_messages:
+            while self.next_index < len(self.batch_messages):
+                batch_end = min(self.next_index + _SESSION_MESSAGE_BATCH_LIMIT, len(self.batch_messages))
+                payload = {"messages": self.batch_messages[self.next_index:batch_end]}
+                if self.trace:
+                    logger.info(
+                        "OpenViking sync_turn trace: POST /api/v1/sessions/%s/messages/batch range=%d:%d payload=%s",
+                        self.sid, self.next_index, batch_end, json.dumps(payload, ensure_ascii=False),
+                    )
+                try:
+                    client.post(f"/api/v1/sessions/{self.sid}/messages/batch", payload)
+                except Exception as batch_error:
+                    if self.next_index:
+                        raise
+                    logger.warning("OpenViking structured sync failed; falling back to text sync: %s", batch_error)
+                    break
+                self.next_index = batch_end
+            if self.next_index == len(self.batch_messages):
+                return
+        self.provider._post_session_turn(client, self.sid, self.user_content[:4000], _message_text(self.assistant_content)[:4000])
+
+    def run(self) -> None:
+        try:
+            self.post(self.provider._new_client())
+            return
+        except Exception as e:
+            logger.debug("OpenViking sync_turn failed, reconnecting: %s", e)
+        retry_client = None
+        try:
+            retry_client = self.provider._new_client()
+            self.post(retry_client)
+        except Exception as retry_error:
+            if retry_client is None or not self.batch_messages or self.next_index >= len(self.batch_messages):
+                logger.warning("OpenViking sync_turn failed: %s", retry_error)
+                return
+            logger.warning(
+                "OpenViking structured sync retry failed; writing %d remaining messages individually: %s",
+                len(self.batch_messages) - self.next_index, retry_error,
+            )
+            try:
+                self.post_remaining_individually(retry_client)
+            except Exception as fallback_error:
+                logger.warning("OpenViking sync_turn failed during individual-message fallback: %s", fallback_error)
+
+
 class OpenVikingMemoryProvider(MemoryProvider):
     """Full bidirectional memory via OpenViking context database."""
 
@@ -1357,11 +1486,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         provider_config = _load_hermes_openviking_config()
         if _clean_config_value(provider_config.get("endpoint")):
             return True
-        if not provider_config.get("use_ovcli_config"):
-            return False
         try:
-            ovcli_path = _resolve_ovcli_config_path(str(provider_config.get("ovcli_config_path") or ""))
-            return bool(_connection_values_from_ovcli(_load_ovcli_config(ovcli_path)).get("endpoint"))
+            return bool(_ovcli_values_for(provider_config).get("endpoint"))
         except Exception:
             return False
 
@@ -1391,11 +1517,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def get_status_config(self, provider_config: dict) -> dict:
         provider_config = dict(provider_config or {})
         if not provider_config.get("use_ovcli_config"):
-            display = dict(provider_config)
-            for key in ("api_key", "root_api_key"):
-                if key in display:
-                    display[key] = "(set)"
-            return display
+            return {key: "(set)" if key in ("api_key", "root_api_key") else value for key, value in provider_config.items()}
 
         ovcli_path = _resolve_ovcli_config_path(str(provider_config.get("ovcli_config_path") or ""))
         display = {"use_ovcli_config": True, "ovcli_config_path": str(ovcli_path)}
@@ -1417,6 +1539,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
         """Interactive setup that can reuse OpenViking's shared CLI config (see ``_setup``)."""
         _setup.run_setup(hermes_home, config)
 
+    # -- connection lifecycle ------------------------------------------------
+
+    def _runtime_start_active(self) -> bool:
+        # Caller holds _runtime_start_lock.
+        return self._runtime_start_pending or bool(self._runtime_start_thread and self._runtime_start_thread.is_alive())
+
     def _start_runtime_openviking_waiter(self, *, endpoint: str, status_callback=None, warning_callback=None) -> None:
         # Caller holds _runtime_start_lock and reserved ownership via _runtime_start_pending.
         if self._runtime_start_thread and self._runtime_start_thread.is_alive():
@@ -1429,15 +1557,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
         )
         self._runtime_start_thread.start()
 
+    def _settings_tuple(self, endpoint: Optional[str] = None) -> tuple:
+        return (endpoint or self._endpoint, self._api_key, self._account, self._user, self._agent)
+
     def _build_client(self, endpoint: Optional[str] = None) -> _VikingClient:
-        return _VikingClient(
-            endpoint or self._endpoint, self._api_key,
-            account=self._account, user=self._user, agent=self._agent,
-        )
+        endpoint, api_key, account, user, agent = self._settings_tuple(endpoint)
+        return _VikingClient(endpoint, api_key, account=account, user=user, agent=agent)
 
     def _publish_client(self, client: _VikingClient, endpoint: str) -> None:
         self._client = client
-        self._conn_snapshot = (endpoint, self._api_key, self._account, self._user, self._agent)
+        self._conn_snapshot = self._settings_tuple(endpoint)
         self._failed_refresh = None
 
     def _finish_runtime_openviking_start(self, *, endpoint: Optional[str] = None, status_callback=None, warning_callback=None) -> None:
@@ -1492,9 +1621,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return
 
         with self._runtime_start_lock:
-            if self._shutting_down or self._runtime_start_pending or (
-                self._runtime_start_thread and self._runtime_start_thread.is_alive()
-            ):
+            if self._shutting_down or self._runtime_start_active():
                 return
             self._runtime_start_pending = True
             start_state, start_message = _start_local_openviking_server(endpoint)
@@ -1525,7 +1652,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             settings = _resolve_connection_settings(_load_hermes_openviking_config())
         except _OpenVikingEndpointError as exc:
             connection_error = str(exc)
-            settings = {"endpoint": "", "api_key": "", "account": "", "user": "", "agent": _DEFAULT_AGENT}
+            settings = dict.fromkeys(_CONNECTION_KEYS, "")
         self._apply_settings(settings)
         # Baseline established — set here, not at the end, so an exception in the
         # connection attempt (swallowed by MemoryManager) can't leave the provider
@@ -1533,14 +1660,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._env_refresh_enabled = True
         self._session_id = session_id
         self._turn_count = 0
-        hermes_home = str(kwargs.get("hermes_home") or "").strip()
-        if not hermes_home:
-            try:
-                from hermes_constants import get_hermes_home
-                hermes_home = str(get_hermes_home())
-            except Exception:
-                hermes_home = str(Path.home() / ".hermes")
-        self._hermes_home = hermes_home
+        self._hermes_home = str(kwargs.get("hermes_home") or "").strip() or str(_hermes_home_path())
         self._acquire_run_lock()
         self._profile_prefetched_sessions.clear()
 
@@ -1564,25 +1684,21 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 self._client = None
 
         if self._client:
-            self._conn_snapshot = (self._endpoint, self._api_key, self._account, self._user, self._agent)
+            self._conn_snapshot = self._settings_tuple()
             self._recover_pending_sessions()
 
         global _last_active_provider  # atexit safety net
         _last_active_provider = self
 
     def _apply_settings(self, settings: dict) -> None:
-        self._endpoint = settings["endpoint"]
-        self._api_key = settings["api_key"]
-        self._account = settings["account"]
-        self._user = settings["user"]
-        self._agent = settings["agent"]
+        self._endpoint, self._api_key, self._account, self._user, self._agent = (settings[k] for k in _CONNECTION_KEYS)
 
     def _ensure_client(self) -> Optional["_VikingClient"]:
         """Active client, rebuilt if the resolved config changed.
 
         ``/reload`` only refreshes ``os.environ``; the provider instance is not
         re-initialized, so re-resolve settings on every access and rebuild +
-        health-check only when a value changed (hot path: one dict compare).
+        health-check only when a value changed (hot path: one tuple compare).
         """
         if not self._env_refresh_enabled:
             return self._client  # no baseline yet: keep whatever the caller wired up
@@ -1613,15 +1729,13 @@ class OpenVikingMemoryProvider(MemoryProvider):
             if should_warn:
                 logger.warning("%s %s", exc, _FIX_ENDPOINT)
             return None
-        settings_key = tuple(settings[k] for k in ("endpoint", "api_key", "account", "user", "agent"))
-        config_unchanged = settings_key == tuple(
-            getattr(self, attr, None) for attr in ("_endpoint", "_api_key", "_account", "_user", "_agent")
-        )
+        settings_key = tuple(settings[k] for k in _CONNECTION_KEYS)
+        config_unchanged = settings_key == self._settings_tuple()
         if config_unchanged and self._client is not None:
             return self._client
         if config_unchanged:
             with self._runtime_start_lock:
-                if self._runtime_start_pending or (self._runtime_start_thread and self._runtime_start_thread.is_alive()):
+                if self._runtime_start_active():
                     return self._client
             # Last attempt at this exact config failed: skip the 3s probe until the
             # cooldown elapses or the resolved config changes.
@@ -1651,6 +1765,18 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._handle_runtime_openviking_unreachable()
         self._client = None
         return None
+
+    def _new_client(self) -> _VikingClient:
+        """Client from the published snapshot (one tuple load: background writers run
+        without _client_refresh_lock and must not see torn fields); falls back to the
+        raw fields for legacy/hand-wired paths with no snapshot."""
+        snapshot = self._conn_snapshot
+        if snapshot is not None:
+            endpoint, api_key, account, user, agent = snapshot
+            return _VikingClient(endpoint, api_key, account=account, user=user, agent=agent)
+        return self._build_client()
+
+    # -- prompt / prefetch ---------------------------------------------------
 
     def system_prompt_block(self) -> str:
         if not self._ensure_client():
@@ -1706,6 +1832,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
         parts = [p for p in parts if p]
         return "## OpenViking Context\n" + "\n\n".join(parts) if parts else ""
 
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """OpenViking recall is current-query only; post-turn warming is unused."""
+        return
+
     @staticmethod
     def _remaining_recall_timeout(deadline: float, per_request_timeout: float) -> float:
         remaining = deadline - time.monotonic()
@@ -1729,30 +1859,648 @@ class OpenVikingMemoryProvider(MemoryProvider):
         timeout = cls._remaining_recall_timeout(deadline, request_timeout)
         return client.post("/api/v1/search/find", base_payload, timeout=timeout)
 
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """OpenViking recall is current-query only; post-turn warming is unused."""
-        return
+    def _search_prefetch_context(self, query: str, *, session_id: str = "", client: Optional[_VikingClient] = None) -> str:
+        query_text = (query or "").strip()
+        if len(query_text) < _RECALL_QUERY_MIN_CHARS:
+            return ""
+        if client is None:
+            if self._env_refresh_enabled:
+                client = self._ensure_client()
+            elif self._client is not None:
+                try:  # legacy/hand-wired path: no env baseline yet
+                    client = self._new_client()
+                except Exception as e:
+                    logger.debug("OpenViking prefetch client build failed: %s", e)
+                    return ""
+        if client is None:
+            return ""
+
+        try:
+            cfg = self._recall_config()
+            deadline = time.monotonic() + cfg["timeout_seconds"]
+            resp = self._post_prefetch_search(
+                client, query_text, session_id,
+                limit=max(cfg["limit"] * 4, 20),
+                context_type=["memory", "resource"] if cfg["resources"] else "memory",
+                deadline=deadline,
+                request_timeout=cfg["request_timeout_seconds"],
+            )
+            result = self._unwrap_result(resp)
+            if not isinstance(result, dict):
+                return ""
+            candidates = [
+                item for ctx_type in ("memories", "resources")
+                for item in (result.get(ctx_type, []) or []) if isinstance(item, dict)
+            ]
+            selected = self._select_recall_candidates(
+                candidates, query_text, limit=cfg["limit"], score_threshold=cfg["score_threshold"],
+            )
+            return "\n".join(self._build_prefetch_entries(
+                client, selected,
+                prefer_abstract=cfg["prefer_abstract"],
+                max_injected_chars=cfg["max_injected_chars"],
+                deadline=deadline,
+                request_timeout=cfg["request_timeout_seconds"],
+                full_read_limit=cfg["full_read_limit"],
+            ))
+        except Exception as e:
+            logger.debug("OpenViking context search failed: %s", e)
+            return ""
+
+    # -- typed settings ------------------------------------------------------
+
+    @staticmethod
+    def _parse_bool(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
+    def _parse_number(value: Any, *, integer: bool) -> Optional[float | int]:
+        try:
+            if isinstance(value, bool):
+                return None
+            numeric = float(value)
+            if not math.isfinite(numeric) or (integer and not numeric.is_integer()):
+                return None
+            return int(numeric) if integer else numeric
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @classmethod
+    def _setting(cls, key: str, provider_config: dict) -> Any:
+        """Typed, range-clamped setting per _SETTING_SPECS (config.yaml primary, env override);
+        an invalid value falls back to the default with one warning per (source, value)."""
+        spec = _SETTING_SPECS[key]
+        default = spec["default"]
+        env_name = spec["env_var"]
+        env_value = os.environ.get(env_name)
+        if env_value is not None and env_value.strip():
+            value, source = env_value, env_name
+        else:
+            value, source = provider_config.get(key, default), f"memory.openviking.{key}"
+        if spec["type"] == "boolean":
+            parsed = cls._parse_bool(value)
+        else:
+            parsed = cls._parse_number(value, integer=(spec["type"] == "integer"))
+        if parsed is None:
+            warning_key = (source, repr(value))
+            with _INVALID_SETTING_WARNINGS_LOCK:
+                first = warning_key not in _INVALID_SETTING_WARNINGS
+                _INVALID_SETTING_WARNINGS.add(warning_key)
+            if first:
+                logger.warning("Invalid %s value %r; using default %r.", source, value, default)
+            return default
+        return max(spec["minimum"], min(spec["maximum"], parsed)) if "minimum" in spec else parsed
+
+    def _recall_config(self) -> Dict[str, Any]:
+        cfg = _load_hermes_openviking_config()
+        return {key.removeprefix("recall_"): self._setting(key, cfg) for key in _RECALL_SETTING_KEYS}
+
+    def _profile_token_budget(self) -> int:
+        return self._setting("profile_token_budget", _load_hermes_openviking_config())
+
+    # -- session-start memory block -----------------------------------------
+
+    @staticmethod
+    def _unwrap_result(resp: Any) -> Any:
+        """Return OpenViking payload body regardless of wrapped/unwrapped shape."""
+        if isinstance(resp, dict) and "result" in resp:
+            return resp.get("result")
+        return resp
+
+    @classmethod
+    def _extract_text_content(cls, resp: Any) -> str:
+        """Text body from a content endpoint (plain string or {content|text} object)."""
+        result = cls._unwrap_result(resp)
+        if isinstance(result, str):
+            return result.strip()
+        if isinstance(result, dict):
+            return str(result.get("content") or result.get("text") or "").strip()
+        return ""
+
+    @classmethod
+    def _extract_memory_listing(cls, resp: Any) -> List[Dict[str, str]]:
+        result = cls._unwrap_result(resp)
+        if not isinstance(result, list):
+            return []
+        entries: List[Dict[str, str]] = []
+        for raw in result:
+            if not isinstance(raw, dict) or raw.get("isDir"):
+                continue
+            name = str(raw.get("rel_path") or raw.get("name") or "").strip()
+            if name.endswith(".md"):
+                entries.append({"name": name, "abstract": " ".join(str(raw.get("abstract") or "").split())[:200]})
+        entries.sort(key=lambda entry: entry["name"])
+        return entries
+
+    @staticmethod
+    def _token_units(content: str) -> int:
+        """Quarter-token units (shared OpenViking estimator: CJK-range chars weigh 6)."""
+        return sum(6 if ord(ch) >= 0x3000 else 1 for ch in content)
+
+    @classmethod
+    def _estimate_tokens(cls, content: str) -> int:
+        return (cls._token_units(content) + 3) // 4
+
+    @staticmethod
+    def _take_tokens(content: str, max_units: int, *, from_end: bool = False) -> str:
+        """Longest prefix (or suffix) of ``content`` within ``max_units``."""
+        if max_units <= 0:
+            return ""
+        used = 0
+        indices = range(len(content) - 1, -1, -1) if from_end else range(len(content))
+        for idx in indices:
+            used += 6 if ord(content[idx]) >= 0x3000 else 1
+            if used > max_units:
+                return content[idx + 1:] if from_end else content[:idx]
+        return content
+
+    @classmethod
+    def _truncate_profile_content(cls, content: str, max_units: int) -> str:
+        """Keep head + tail (first 8 lines, then the end) within max_units; head-only for short profiles."""
+        content = content.strip()
+        if cls._token_units(content) <= max_units:
+            return content
+
+        def _head_only() -> str:
+            marker = "\n... [profile truncated]"
+            marker_units = cls._token_units(marker)
+            if marker_units >= max_units:
+                return cls._take_tokens(content, max_units)
+            head = cls._take_tokens(content, max_units - marker_units).rstrip()
+            return f"{head}{marker}" if head else cls._take_tokens(content, max_units)
+
+        lines = content.split("\n")
+        head_line_count = 8
+        if len(lines) <= head_line_count + 4:
+            return _head_only()
+        marker = "\n... [profile middle elided] ...\n"
+        remaining = max_units - cls._token_units(marker)
+        if remaining <= 0:
+            return _head_only()
+        head = cls._take_tokens("\n".join(lines[:head_line_count]), remaining // 2).rstrip()
+        tail = cls._take_tokens("\n".join(lines[head_line_count:]), remaining - cls._token_units(head), from_end=True).lstrip()
+        return f"{head}{marker}{tail}" if tail else _head_only()
+
+    def _user_space(self, client=None, *, timeout: Optional[float] = None) -> str:
+        """Resolve the user space, caching only a confirmed connection identity.
+
+        Cache is keyed on the connection snapshot, not the client object:
+        _new_client() builds fresh clients from the same snapshot on every write.
+        getattr() throughout: hand-wired providers (``__new__``) may lack these fields.
+        """
+        active = client if client is not None else getattr(self, "_client", None)
+        snapshot = getattr(self, "_conn_snapshot", None)
+        cached = getattr(self, "_user_space_cache", None)
+        if active is not None and cached is not None and cached[0] == snapshot:
+            return cached[1]
+        if active is not None:
+            resolved = _resolve_user_space(active, timeout=timeout)
+            if resolved:
+                # Publish only if the snapshot hasn't changed under us.
+                if snapshot is not None and snapshot is getattr(self, "_conn_snapshot", None):
+                    self._user_space_cache = (snapshot, resolved)
+                return resolved
+        configured = str(getattr(active, "_user", "") or getattr(self, "_user", "") or "default").strip()
+        return configured or "default"
+
+    def _session_start_uris(self, user: Optional[str] = None) -> tuple:
+        user = user or self._user_space()
+        return tuple(_user_scoped_uri(user, suffix) for suffix in _SESSION_START_SUFFIXES)
+
+    def _read_session_start_memory_parts(self, *, client: Optional[_VikingClient] = None, deadline: float, request_timeout: float) -> Dict[str, Any]:
+        """{profile, preferences, entities, uris}; profile is None when the profile read failed
+        for any reason other than absence (404/410), and {} without a client."""
+        active_client = client or self._client
+        if not active_client:
+            return {}
+        empty = {"profile": None, "preferences": [], "entities": []}
+
+        def budgeted_get(path: str, params: dict) -> Any:
+            timeout = self._remaining_recall_timeout(deadline, request_timeout)
+            return active_client.get(path, params=params, timeout=timeout)
+
+        try:
+            user = self._user_space(active_client, timeout=self._remaining_recall_timeout(deadline, request_timeout))
+        except Exception:
+            return empty
+        uris = self._session_start_uris(user)
+        try:
+            profile = self._extract_text_content(budgeted_get("/api/v1/content/read", {"uri": uris[0]}))
+        except Exception as e:
+            if _status_code_from_error(e) not in {404, 410}:
+                return empty
+            profile = ""
+        listings = []
+        for uri in uris[1:]:
+            try:
+                listings.append(self._extract_memory_listing(budgeted_get("/api/v1/fs/ls", {"uri": uri, **_SESSION_START_LIST_PARAMS})))
+            except Exception:
+                listings.append([])
+        return {"profile": profile, "preferences": listings[0], "entities": listings[1], "uris": uris}
+
+    @staticmethod
+    def _assemble_session_start_memory_block(profile: str, preference_lines: List[str], entity_lines: List[str],
+                                             profile_uri: str = "viking://user/default/memories/profile.md") -> str:
+        lines: List[str] = []
+        if profile:
+            lines += [f'<user-profile uri="{profile_uri}">', profile, "</user-profile>"]
+        if preference_lines or entity_lines:
+            lines += ["<available-memories>", *preference_lines, *entity_lines, "</available-memories>"]
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_memory_listing(cls, uri: str, entries: List[Dict[str, str]], max_units: int) -> tuple[List[str], int]:
+        """Listing lines within max_units; degrades to a "+N more" tail or a one-line stub."""
+        if not entries or max_units <= 0:
+            return [], 0
+        header = f"  {uri}/"
+        header_units = cls._token_units(header)
+        if header_units > max_units:
+            stub = f"  {uri}/  ({len(entries)} entries; use `viking_search`)"
+            stub_units = cls._token_units(stub)
+            return ([stub], stub_units) if stub_units <= max_units else ([], 0)
+
+        lines = [header]
+        used = header_units
+        newline_units = cls._token_units("\n")
+        for index, entry in enumerate(entries):
+            abstract = entry.get("abstract", "")
+            line = f"    - {entry['name']}{f' — {abstract}' if abstract else ''}"
+            line_units = newline_units + cls._token_units(line)
+            if used + line_units > max_units:
+                tail = f"    ... +{len(entries) - index} more, use `viking_search`"
+                tail_units = newline_units + cls._token_units(tail)
+                if used + tail_units <= max_units:
+                    lines.append(tail)
+                    used += tail_units
+                break
+            lines.append(line)
+            used += line_units
+        return lines, used
+
+    @classmethod
+    def _build_session_start_memory_block(cls, *, profile: str, preferences: List[Dict[str, str]],
+                                          entities: List[Dict[str, str]], token_budget: int, uris: Optional[tuple] = None) -> str:
+        """Profile (<= half the budget) then preferences/entities listings sharing the rest."""
+        profile_uri, preferences_uri, entities_uri = uris or tuple(
+            _user_scoped_uri("default", suffix) for suffix in _SESSION_START_SUFFIXES
+        )
+        profile = profile.strip()
+        if not profile and not preferences and not entities:
+            return ""
+
+        placeholder = "\0"
+        scaffold = cls._assemble_session_start_memory_block(
+            placeholder if profile else "",
+            [placeholder] if preferences else [],
+            [placeholder] if entities else [],
+            profile_uri=profile_uri,
+        )
+        placeholder_count = int(bool(profile)) + int(bool(preferences)) + int(bool(entities))
+        available_units = max(0, (token_budget * 4) - (cls._token_units(scaffold) - placeholder_count))
+
+        profile_text = ""
+        if profile and available_units > 0:
+            profile_text = cls._truncate_profile_content(profile, min(available_units, token_budget * 2))
+            available_units -= cls._token_units(profile_text)
+
+        preference_budget = available_units // 2 if (preferences and entities) else available_units
+        preference_lines, preference_units = cls._format_memory_listing(preferences_uri, preferences, preference_budget)
+        entity_lines, _ = cls._format_memory_listing(entities_uri, entities, available_units - preference_units)
+        return cls._assemble_session_start_memory_block(profile_text, preference_lines, entity_lines, profile_uri=profile_uri)
+
+    def _session_start_memory_context(self, session_id: str) -> str:
+        session_key = session_id or self._session_id or "__openviking_default_session__"
+        if session_key in self._profile_prefetched_sessions:
+            return ""
+        try:
+            cfg = self._recall_config()
+            raw_parts = self._read_session_start_memory_parts(
+                deadline=time.monotonic() + cfg["timeout_seconds"],
+                request_timeout=cfg["request_timeout_seconds"],
+            )
+        except Exception as e:
+            logger.debug("OpenViking session-start memory prefetch failed: %s", e)
+            return ""
+        profile = raw_parts.get("profile")
+        if profile is None:
+            return ""
+        self._profile_prefetched_sessions.add(session_key)
+        return self._build_session_start_memory_block(
+            profile=profile,
+            preferences=raw_parts.get("preferences") or [],
+            entities=raw_parts.get("entities") or [],
+            token_budget=self._profile_token_budget(),
+            uris=raw_parts["uris"],
+        )
+
+    # -- recall ranking ------------------------------------------------------
+
+    @staticmethod
+    def _clamp_score(value: Any) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _recall_abstract(item: Dict[str, Any]) -> str:
+        for key in _RECALL_SUMMARY_KEYS:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return str(item.get("uri") or "").strip()
+
+    @classmethod
+    def _dedupe_key(cls, item: Dict[str, Any]) -> str:
+        """Same abstract+category collapses to one hit, except events/cases which stay URI-distinct."""
+        uri = str(item.get("uri") or "").strip()
+        category = str(item.get("category") or "").strip().lower() or "unknown"
+        abstract = " ".join(cls._recall_abstract(item).lower().split())
+        uri_lower = uri.lower()
+        if abstract and "/events/" not in uri_lower and "/cases/" not in uri_lower:
+            return f"abstract:{category}:{abstract}"
+        return f"uri:{uri}"
+
+    @staticmethod
+    def _query_tokens(query: str) -> List[str]:
+        tokens = ["".join(ch for ch in raw if ch.isalnum()) for raw in query.lower().replace("_", " ").split()]
+        return [token for token in tokens if len(token) >= 2][:8]
+
+    @classmethod
+    def _recall_rank(cls, item: Dict[str, Any], query_tokens: List[str]) -> float:
+        text = f"{item.get('uri', '')} {cls._recall_abstract(item)}".lower()
+        overlap = sum(1 for token in query_tokens if token in text)
+        overlap_boost = min(0.2, overlap * 0.05)
+        leaf_boost = 0.12 if item.get("level") == 2 else 0.0
+        return cls._clamp_score(item.get("score")) + leaf_boost + overlap_boost
+
+    @classmethod
+    def _select_recall_candidates(cls, items: List[Dict[str, Any]], query: str, *, limit: int, score_threshold: float) -> List[Dict[str, Any]]:
+        seen_uri = set()
+        seen_key = set()
+        filtered: List[Dict[str, Any]] = []
+        for item in items:
+            uri = str(item.get("uri") or "").strip()
+            if not uri or uri in seen_uri or cls._clamp_score(item.get("score")) < score_threshold:
+                continue
+            key = cls._dedupe_key(item)
+            if key in seen_key:
+                continue
+            seen_uri.add(uri)
+            seen_key.add(key)
+            filtered.append(item)
+        tokens = cls._query_tokens(query)
+        filtered.sort(key=lambda item: cls._recall_rank(item, tokens), reverse=True)
+        return filtered[:limit]
+
+    @classmethod
+    def _extract_read_content(cls, resp: Any) -> str:
+        result = cls._unwrap_result(resp)
+        if isinstance(result, str):
+            return result.strip()
+        if isinstance(result, dict):
+            for key in ("content", "text"):
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _resolve_recall_content(self, client: _VikingClient, item: Dict[str, Any], *, prefer_abstract: bool,
+                                deadline: float, request_timeout: float, read_state: Dict[str, int], full_read_limit: int) -> str:
+        abstract = self._recall_abstract(item)
+        has_explicit_summary = any(
+            isinstance(item.get(key), str) and item.get(key).strip() for key in _RECALL_SUMMARY_KEYS
+        )
+        if prefer_abstract and has_explicit_summary:
+            return abstract
+        uri = str(item.get("uri") or "")
+        if uri and (item.get("level") == 2 or not has_explicit_summary):
+            if read_state["full_reads"] >= full_read_limit:
+                return abstract
+            try:
+                timeout = self._remaining_recall_timeout(deadline, request_timeout)
+                read_state["full_reads"] += 1
+                content = self._extract_read_content(client.get("/api/v1/content/read", params={"uri": uri}, timeout=timeout))
+                if content:
+                    return content
+            except Exception as e:
+                logger.debug("OpenViking prefetch full read failed for %s: %s", uri, e)
+        return abstract
+
+    def _build_prefetch_entries(self, client: _VikingClient, items: List[Dict[str, Any]], *, prefer_abstract: bool,
+                                max_injected_chars: int, deadline: float, request_timeout: float, full_read_limit: int) -> List[str]:
+        entries: List[str] = []
+        total_chars = 0
+        read_state = {"full_reads": 0}
+        for item in items:
+            content = self._resolve_recall_content(
+                client, item, prefer_abstract=prefer_abstract, deadline=deadline,
+                request_timeout=request_timeout, read_state=read_state, full_read_limit=full_read_limit,
+            )
+            if not content:
+                continue
+            category = str(item.get("category") or "").strip() or "memory"
+            entry = "\n".join([
+                f"- [{category}]",
+                f"  <uri>{item.get('uri', '')}</uri>",
+                *[f"  {line}" for line in content.splitlines()],
+            ])
+            projected_chars = total_chars + (1 if entries else 0) + len(entry)
+            if projected_chars > max_injected_chars:
+                continue
+            entries.append(entry)
+            total_chars = projected_chars
+        return entries
+
+    # -- turn sync -----------------------------------------------------------
+
+    @staticmethod
+    def _extract_current_turn_messages(messages: Optional[List[Dict[str, Any]]], user_content: str, assistant_content: str) -> List[Dict[str, Any]]:
+        """Slice the completed turn out of Hermes' full canonical transcript: the last
+        assistant message matching assistant_content (else the last assistant message,
+        else the transcript end) back to the matching (else nearest) user message."""
+        if not messages:
+            return []
+        last = len(messages) - 1
+        end_idx = _rfind_message(messages, "assistant", last, assistant_content) if _message_text(assistant_content).strip() else None
+        if end_idx is None:
+            end_idx = _rfind_message(messages, "assistant", last)
+        if end_idx is None:
+            end_idx = last
+        start_idx = _rfind_message(messages, "user", end_idx, user_content) if _message_text(user_content).strip() else None
+        if start_idx is None:
+            start_idx = _rfind_message(messages, "user", end_idx)
+        if start_idx is None:
+            return []
+        return [message for message in messages[start_idx : end_idx + 1] if isinstance(message, dict)]
+
+    @staticmethod
+    def _messages_to_openviking_batch(messages: List[Dict[str, Any]], *, assistant_peer_id: str = "") -> List[Dict[str, Any]]:
+        """Convert Hermes canonical messages into OpenViking batch payloads.
+
+        Recall-tool calls/results are dropped (re-ingesting recalled memory would
+        re-store it); tool results are grouped into assistant messages; a tool call
+        whose result is in the slice is emitted only via its result part.
+        """
+        assistant_peer_id = str(assistant_peer_id or "").strip()
+        dict_messages = [m for m in messages if isinstance(m, dict)]
+        tool_calls_by_id, completed_tool_ids, skipped_tool_ids = _index_tool_calls(dict_messages)
+
+        payload_messages: List[Dict[str, Any]] = []
+        pending_tool_parts: List[Dict[str, Any]] = []
+
+        def emit(role: str, parts: List[Dict[str, Any]]) -> None:
+            payload: Dict[str, Any] = {"role": role, "parts": parts}
+            if role == "assistant" and assistant_peer_id:
+                payload["peer_id"] = assistant_peer_id
+            payload_messages.append(payload)
+
+        def flush_tool_parts() -> None:
+            nonlocal pending_tool_parts
+            if pending_tool_parts:
+                emit("assistant", pending_tool_parts)
+                pending_tool_parts = []
+
+        for message in dict_messages:
+            role = str(message.get("role") or "")
+            if role == "tool":
+                tool_id = str(message.get("tool_call_id") or message.get("id") or "")
+                prior_call = tool_calls_by_id.get(tool_id, {})
+                tool_name = str(message.get("name") or prior_call.get("tool_name") or "")
+                if tool_id in skipped_tool_ids or _is_openviking_recall_tool_name(tool_name):
+                    continue
+                pending_tool_parts.append(_tool_part(
+                    tool_id, tool_name, prior_call.get("tool_input", {}), _tool_result_status(message),
+                    tool_output=_message_text(message.get("content")),
+                ))
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+
+            flush_tool_parts()
+            parts: List[Dict[str, Any]] = []
+            text = _message_text(message.get("content"))
+            if text:
+                parts.append(_text_part(text))
+            if role == "assistant":
+                for tool_call in message.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    tool_id = _tool_call_id(tool_call)
+                    tool_name = _tool_call_name(tool_call)
+                    if tool_id in skipped_tool_ids or tool_id in completed_tool_ids or _is_openviking_recall_tool_name(tool_name):
+                        continue
+                    # Pre-scan caches non-empty ids; parse again for the uncached empty-id case.
+                    prior_call = tool_calls_by_id.get(tool_id) if tool_id else None
+                    tool_input = prior_call["tool_input"] if prior_call is not None else _tool_call_input(tool_call)
+                    parts.append(_tool_part(tool_id, tool_name, tool_input, "pending"))
+            if parts:
+                emit(role, parts)
+
+        flush_tool_parts()
+        return payload_messages
+
+    def _post_session_turn(self, client: _VikingClient, sid: str, user_content: str, assistant_content: str) -> None:
+        assistant_message: Dict[str, Any] = {"role": "assistant", "parts": [_text_part(assistant_content)]}
+        if self._agent:
+            assistant_message["peer_id"] = self._agent
+        client.post(
+            f"/api/v1/sessions/{sid}/messages/batch",
+            {"messages": [{"role": "user", "parts": [_text_part(user_content)]}, assistant_message]},
+        )
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
+                  messages: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Record the conversation turn in OpenViking's session (non-blocking)."""
+        if not self._ensure_client():
+            return
+        user_content = _derive_openviking_user_text(user_content)
+        if not user_content:
+            return
+
+        turn_messages = self._extract_current_turn_messages(messages, user_content, assistant_content) if messages is not None else []
+        if turn_messages:
+            turn_messages = [dict(message) for message in turn_messages]
+            for message in turn_messages:
+                if message.get("role") == "user":
+                    message["content"] = user_content
+                    break
+        batch_messages = self._messages_to_openviking_batch(turn_messages, assistant_peer_id=self._agent)
+        if env_var_enabled(_SYNC_TRACE_ENV):
+            logger.info(
+                "OpenViking sync_turn trace: session_arg=%r cached_session=%r "
+                "messages_param_supported=true messages_present=%s message_count=%s "
+                "turn_message_count=%d batch_message_count=%d user_len=%d assistant_len=%d "
+                "user_preview=%r assistant_preview=%r",
+                session_id, self._session_id, messages is not None,
+                len(messages) if messages is not None else None,
+                len(turn_messages), len(batch_messages),
+                len(str(user_content or "")), len(str(assistant_content or "")),
+                _preview(user_content), _preview(assistant_content),
+            )
+
+        # Snapshot sid + bump the counter atomically so a concurrent switch/end can't
+        # interleave its snapshot+reset (lost turn / misattributed session).
+        with self._session_state_lock:
+            sid = str(session_id or self._session_id).strip()
+            if not sid:
+                return
+            self._turn_count += 1
+        self._mark_session_pending(sid)
+        upload = _TurnUpload(self, sid, batch_messages, user_content, assistant_content)
+        self._spawn_writer(sid, upload.run, name="openviking-sync")
+
+    # -- tracked worker threads ---------------------------------------------
+
+    def _spawn_tracked(self, name: str, body: Callable[[], None], lock: threading.Lock,
+                       workers: Callable[[], Set[threading.Thread]], *, after_discard: Callable[[], None] = None,
+                       skip_if: Callable[[], bool] = None) -> None:
+        """Daemon thread registered in ``workers()`` (evaluated under ``lock``) for the
+        duration of ``body`` so shutdown / drains can join it."""
+
+        def _run() -> None:
+            try:
+                body()
+            finally:
+                with lock:
+                    workers().discard(thread)
+                    if after_discard is not None:
+                        after_discard()
+
+        thread = threading.Thread(target=_run, daemon=True, name=name)
+        with lock:
+            if skip_if is not None and skip_if():
+                return
+            workers().add(thread)
+            try:
+                thread.start()
+            except Exception as e:
+                workers().discard(thread)
+                logger.debug("OpenViking %s worker failed to start: %s", name, e)
 
     def _spawn_writer(self, sid: str, target: Callable[[], None], name: str) -> None:
-        """Daemon writer tracked in _inflight_writers[sid] so commits can drain every writer for that sid."""
-        holder: List[threading.Thread] = []
+        """Writer tracked in _inflight_writers[sid] so commits can drain every writer for that sid."""
 
-        def _wrapped():
-            try:
-                target()
-            finally:
-                with self._inflight_lock:
-                    workers = self._inflight_writers.get(sid)
-                    if workers is not None:
-                        workers.discard(holder[0])
-                        if not workers:
-                            self._inflight_writers.pop(sid, None)
+        def drop_empty() -> None:
+            if not self._inflight_writers.get(sid):
+                self._inflight_writers.pop(sid, None)
 
-        thread = threading.Thread(target=_wrapped, daemon=True, name=name)
-        holder.append(thread)
-        with self._inflight_lock:
-            self._inflight_writers.setdefault(sid, set()).add(thread)
-        thread.start()
+        self._spawn_tracked(name, target, self._inflight_lock, lambda: self._inflight_writers.setdefault(sid, set()),
+                            after_discard=drop_empty)
+
+    def _spawn_deferred_commit(self, name: str, body: Callable[[], None]) -> None:
+        """Run ``body`` on a tracked daemon thread (joined by shutdown / _drain_finalizers)."""
+        self._spawn_tracked(name, body, self._deferred_commit_lock, lambda: self._deferred_commit_threads)
 
     @staticmethod
     def _join_all(alive: Callable[[], List[threading.Thread]], timeout: float, *, slice_cap: Optional[float] = None) -> bool:
@@ -1788,28 +2536,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 return [t for t in self._inflight_writers.get(sid, ()) if t.is_alive()]
         return self._join_all(alive, timeout)
 
-    def _new_client(self) -> _VikingClient:
-        """Client from the published snapshot (one tuple load: background writers run
-        without _client_refresh_lock and must not see torn fields); falls back to the
-        raw fields for legacy/hand-wired paths with no snapshot."""
-        snapshot = self._conn_snapshot
-        if snapshot is not None:
-            endpoint, api_key, account, user, agent = snapshot
-            return _VikingClient(endpoint, api_key, account=account, user=user, agent=agent)
-        return self._build_client()
-
-    @staticmethod
-    def _text_part(content: str) -> Dict[str, str]:
-        return {"type": "text", "text": content}
-
-    def _post_session_turn(self, client: _VikingClient, sid: str, user_content: str, assistant_content: str) -> None:
-        assistant_message: Dict[str, Any] = {"role": "assistant", "parts": [self._text_part(assistant_content)]}
-        if self._agent:
-            assistant_message["peer_id"] = self._agent
-        client.post(
-            f"/api/v1/sessions/{sid}/messages/batch",
-            {"messages": [{"role": "user", "parts": [self._text_part(user_content)]}, assistant_message]},
-        )
+    # -- session commit / pending-session recovery --------------------------
 
     def _session_has_pending_tokens(self, sid: str) -> bool:
         try:
@@ -1827,9 +2554,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._committed_session_ids.add(sid)
 
     def _clear_session_committed(self, sid: str) -> None:
-        """Re-arm the commit guard for a still-live session. The per-sid latch is right
-        for a session being left behind, but in-place compression keeps the same id
-        and would otherwise reject every later commit for it."""
+        """Re-arm the commit guard for a still-live session (in-place compression keeps the
+        same id; the per-sid latch would otherwise reject every later commit for it)."""
         with self._committed_session_lock:
             self._committed_session_ids.discard(sid)
 
@@ -1838,9 +2564,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not name or not self._hermes_home:
             return None
         return Path(self._hermes_home) / relative_dir / f"{quote(name, safe='')}{suffix}"
-
-    def _pending_session_dir(self) -> Optional[Path]:
-        return Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR if self._hermes_home else None
 
     def _pending_session_marker_path(self, sid: str) -> Optional[Path]:
         return self._state_path(_PENDING_SESSIONS_RELATIVE_DIR, sid, ".json")
@@ -1867,21 +2590,18 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     @staticmethod
     def _flock_close(lock_file, path: Optional[Path], label: str) -> None:
+        steps = []
         if lock_file is not None:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            except Exception as e:
-                logger.debug("Could not unlock OpenViking %s %s: %s", label, path, e)
-            try:
-                lock_file.close()
-            except Exception as e:
-                logger.debug("Could not close OpenViking %s %s: %s", label, path, e)
+            if fcntl is not None:
+                steps.append(("unlock", lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)))
+            steps.append(("close", lock_file.close))
         if path is not None:
+            steps.append(("remove", lambda: path.unlink(missing_ok=True)))
+        for verb, step in steps:
             try:
-                path.unlink(missing_ok=True)
+                step()
             except Exception as e:
-                logger.debug("Could not remove OpenViking %s %s: %s", label, path, e)
+                logger.debug("Could not %s OpenViking %s %s: %s", verb, label, path, e)
 
     def _acquire_run_lock(self) -> None:
         if self._run_lock_path is not None:
@@ -1967,8 +2687,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
             logger.debug("Could not clear OpenViking pending session %s: %s", sid, e)
 
     def _pending_sessions(self) -> List[tuple[str, str]]:
-        directory = self._pending_session_dir()
-        if directory is None or not directory.is_dir():
+        """(sid, owner_run_id) for every marker file; sid falls back to the file name."""
+        if not self._hermes_home:
+            return []
+        directory = Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR
+        if not directory.is_dir():
             return []
         sessions: List[tuple[str, str]] = []
         for path in sorted(directory.glob("*.json")):
@@ -1984,24 +2707,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
             if sid:
                 sessions.append((sid, owner_run_id))
         return sessions
-
-    def _spawn_deferred_commit(self, name: str, body: Callable[[], None]) -> None:
-        """Run ``body`` on a tracked daemon thread (joined by shutdown / _drain_finalizers)."""
-        holder: List[threading.Thread] = []
-
-        def _run() -> None:
-            try:
-                body()
-            finally:
-                with self._deferred_commit_lock:
-                    if holder:
-                        self._deferred_commit_threads.discard(holder[0])
-
-        thread = threading.Thread(target=_run, daemon=True, name=name)
-        holder.append(thread)
-        with self._deferred_commit_lock:
-            self._deferred_commit_threads.add(thread)
-        thread.start()
 
     def _claim_deferred_sid(self, sid: str) -> bool:
         """Dedupe: one finalizer per sid at a time; never claim after shutdown began."""
@@ -2088,777 +2793,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         self._spawn_deferred_commit(f"openviking-finalize-{sid}", _finalize)
 
-    def _search_prefetch_context(self, query: str, *, session_id: str = "", client: Optional[_VikingClient] = None) -> str:
-        query_text = (query or "").strip()
-        if len(query_text) < _RECALL_QUERY_MIN_CHARS:
-            return ""
-        if client is None:
-            if self._env_refresh_enabled:
-                client = self._ensure_client()
-            elif self._client is not None:
-                try:  # legacy/hand-wired path: no env baseline yet
-                    client = self._new_client()
-                except Exception as e:
-                    logger.debug("OpenViking prefetch client build failed: %s", e)
-                    return ""
-        if client is None:
-            return ""
-
-        try:
-            cfg = self._recall_config()
-            deadline = time.monotonic() + cfg["timeout_seconds"]
-            resp = self._post_prefetch_search(
-                client, query_text, session_id,
-                limit=max(cfg["limit"] * 4, 20),
-                context_type=["memory", "resource"] if cfg["resources"] else "memory",
-                deadline=deadline,
-                request_timeout=cfg["request_timeout_seconds"],
-            )
-            result = self._unwrap_result(resp)
-            if not isinstance(result, dict):
-                return ""
-            candidates = [
-                item for ctx_type in ("memories", "resources")
-                for item in (result.get(ctx_type, []) or []) if isinstance(item, dict)
-            ]
-            selected = self._select_recall_candidates(
-                candidates, query_text, limit=cfg["limit"], score_threshold=cfg["score_threshold"],
-            )
-            return "\n".join(self._build_prefetch_entries(
-                client, selected,
-                prefer_abstract=cfg["prefer_abstract"],
-                max_injected_chars=cfg["max_injected_chars"],
-                deadline=deadline,
-                request_timeout=cfg["request_timeout_seconds"],
-                full_read_limit=cfg["full_read_limit"],
-            ))
-        except Exception as e:
-            logger.debug("OpenViking context search failed: %s", e)
-            return ""
-
-    @staticmethod
-    def _warn_invalid_setting_once(source: str, value: Any, default: Any) -> None:
-        warning_key = (source, repr(value))
-        with _INVALID_SETTING_WARNINGS_LOCK:
-            if warning_key in _INVALID_SETTING_WARNINGS:
-                return
-            _INVALID_SETTING_WARNINGS.add(warning_key)
-        logger.warning("Invalid %s value %r; using default %r.", source, value, default)
-
-    @staticmethod
-    def _setting_value(env_name: str, config_value: Any) -> tuple[Any, str]:
-        env_value = os.environ.get(env_name)
-        if env_value is not None and env_value.strip():
-            return env_value, env_name
-        return config_value, f"memory.openviking.{env_name.removeprefix('OPENVIKING_').lower()}"
-
-    @classmethod
-    def _setting(cls, key: str, provider_config: dict) -> Any:
-        """Typed, range-clamped setting per _SETTING_SPECS (config.yaml primary, env override)."""
-        spec = _SETTING_SPECS[key]
-        default = spec["default"]
-        value, source = cls._setting_value(spec["env_var"], provider_config.get(key, default))
-        if spec["type"] == "boolean":
-            parsed = cls._parse_bool(value)
-        else:
-            parsed = cls._parse_number(value, integer=(spec["type"] == "integer"))
-        if parsed is None:
-            cls._warn_invalid_setting_once(source, value, default)
-            return default
-        return max(spec["minimum"], min(spec["maximum"], parsed)) if "minimum" in spec else parsed
-
-    @staticmethod
-    def _parse_bool(value: Any) -> Optional[bool]:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        return None
-
-    @staticmethod
-    def _parse_number(value: Any, *, integer: bool) -> Optional[float | int]:
-        try:
-            if isinstance(value, bool):
-                return None
-            numeric = float(value)
-            if not math.isfinite(numeric) or (integer and not numeric.is_integer()):
-                return None
-            return int(numeric) if integer else numeric
-        except (TypeError, ValueError, OverflowError):
-            return None
-
-    def _recall_config(self) -> Dict[str, Any]:
-        cfg = _load_hermes_openviking_config()
-        return {key.removeprefix("recall_"): self._setting(key, cfg) for key in _RECALL_SETTING_KEYS}
-
-    def _profile_token_budget(self) -> int:
-        return self._setting("profile_token_budget", _load_hermes_openviking_config())
-
-    @staticmethod
-    def _extract_text_content(resp: Any) -> str:
-        """Text body from a content endpoint (plain string or {content|text} object)."""
-        result = OpenVikingMemoryProvider._unwrap_result(resp)
-        if isinstance(result, str):
-            return result.strip()
-        if isinstance(result, dict):
-            return str(result.get("content") or result.get("text") or "").strip()
-        return ""
-
-    @staticmethod
-    def _extract_memory_listing(resp: Any) -> List[Dict[str, str]]:
-        result = OpenVikingMemoryProvider._unwrap_result(resp)
-        if not isinstance(result, list):
-            return []
-        entries: List[Dict[str, str]] = []
-        for raw in result:
-            if not isinstance(raw, dict) or raw.get("isDir"):
-                continue
-            name = str(raw.get("rel_path") or raw.get("name") or "").strip()
-            if name.endswith(".md"):
-                entries.append({"name": name, "abstract": " ".join(str(raw.get("abstract") or "").split())[:200]})
-        entries.sort(key=lambda entry: entry["name"])
-        return entries
-
-    @staticmethod
-    def _token_units(content: str) -> int:
-        """Quarter-token units (shared OpenViking estimator: CJK-range chars weigh 6)."""
-        return sum(6 if ord(ch) >= 0x3000 else 1 for ch in content)
-
-    @classmethod
-    def _estimate_tokens(cls, content: str) -> int:
-        return (cls._token_units(content) + 3) // 4
-
-    @staticmethod
-    def _take_token_prefix(content: str, max_units: int) -> str:
-        if max_units <= 0:
-            return ""
-        used = 0
-        for index, ch in enumerate(content):
-            used += 6 if ord(ch) >= 0x3000 else 1
-            if used > max_units:
-                return content[:index]
-        return content
-
-    @staticmethod
-    def _take_token_suffix(content: str, max_units: int) -> str:
-        if max_units <= 0:
-            return ""
-        used = 0
-        start = len(content)
-        for idx in range(len(content) - 1, -1, -1):
-            used += 6 if ord(content[idx]) >= 0x3000 else 1
-            if used > max_units:
-                return content[start:]
-            start = idx
-        return content
-
-    @classmethod
-    def _truncate_profile_content(cls, content: str, max_units: int) -> str:
-        """Keep head + tail (first 8 lines, then the end) within max_units; head-only for short profiles."""
-        content = content.strip()
-        if cls._token_units(content) <= max_units:
-            return content
-
-        def _head_only() -> str:
-            marker = "\n... [profile truncated]"
-            marker_units = cls._token_units(marker)
-            if marker_units >= max_units:
-                return cls._take_token_prefix(content, max_units)
-            head = cls._take_token_prefix(content, max_units - marker_units).rstrip()
-            return f"{head}{marker}" if head else cls._take_token_prefix(content, max_units)
-
-        lines = content.split("\n")
-        head_line_count = 8
-        if len(lines) <= head_line_count + 4:
-            return _head_only()
-        marker = "\n... [profile middle elided] ...\n"
-        remaining = max_units - cls._token_units(marker)
-        if remaining <= 0:
-            return _head_only()
-        head = cls._take_token_prefix("\n".join(lines[:head_line_count]), remaining // 2).rstrip()
-        tail = cls._take_token_suffix("\n".join(lines[head_line_count:]), remaining - cls._token_units(head)).lstrip()
-        return f"{head}{marker}{tail}" if tail else _head_only()
-
-    def _user_space(self, client=None, *, timeout: Optional[float] = None) -> str:
-        """Resolve the user space, caching only a confirmed connection identity.
-
-        Cache is keyed on the connection snapshot, not the client object:
-        _new_client() builds fresh clients from the same snapshot on every write.
-        """
-        active = client if client is not None else getattr(self, "_client", None)
-        snapshot = getattr(self, "_conn_snapshot", None)
-        cached = getattr(self, "_user_space_cache", None)
-        if active is not None and cached is not None and cached[0] == snapshot:
-            return cached[1]
-        if active is not None:
-            resolved = _resolve_user_space(active, timeout=timeout)
-            if resolved:
-                # Publish only if the snapshot hasn't changed under us.
-                if snapshot is not None and snapshot is getattr(self, "_conn_snapshot", None):
-                    self._user_space_cache = (snapshot, resolved)
-                return resolved
-        configured = str(getattr(active, "_user", "") or getattr(self, "_user", "") or "default").strip()
-        return configured or "default"
-
-    def _session_start_uris(self, user: Optional[str] = None) -> tuple:
-        user = user or self._user_space()
-        return tuple(_user_scoped_uri(user, suffix) for suffix in (_PROFILE_SUFFIX, _PREFERENCES_SUFFIX, _ENTITIES_SUFFIX))
-
-    def _read_session_start_profile(self, client: _VikingClient, uri: str, *, deadline: float, request_timeout: float) -> Optional[str]:
-        """Profile text; "" when the file is absent (404/410), None on any other failure."""
-        try:
-            timeout = self._remaining_recall_timeout(deadline, request_timeout)
-            resp = client.get("/api/v1/content/read", params={"uri": uri}, timeout=timeout)
-        except Exception as e:
-            return "" if _status_code_from_error(e) in {404, 410} else None
-        return self._extract_text_content(resp)
-
-    def _list_session_start_memories(self, client: _VikingClient, uri: str, *, deadline: float, request_timeout: float) -> List[Dict[str, str]]:
-        try:
-            timeout = self._remaining_recall_timeout(deadline, request_timeout)
-            resp = client.get("/api/v1/fs/ls", params={"uri": uri, **_SESSION_START_LIST_PARAMS}, timeout=timeout)
-        except Exception:
-            return []
-        return self._extract_memory_listing(resp)
-
-    def _read_session_start_memory_parts(self, *, client: Optional[_VikingClient] = None, deadline: float, request_timeout: float) -> Dict[str, Any]:
-        active_client = client or self._client
-        if not active_client:
-            return {}
-        empty = {"profile": None, "preferences": [], "entities": []}
-        try:
-            user = self._user_space(active_client, timeout=self._remaining_recall_timeout(deadline, request_timeout))
-        except Exception:
-            return empty
-        uris = self._session_start_uris(user)
-        budget = dict(deadline=deadline, request_timeout=request_timeout)
-        profile = self._read_session_start_profile(active_client, uris[0], **budget)
-        if profile is None:
-            return empty
-        return {
-            "profile": profile,
-            "preferences": self._list_session_start_memories(active_client, uris[1], **budget),
-            "entities": self._list_session_start_memories(active_client, uris[2], **budget),
-            "uris": uris,
-        }
-
-    @staticmethod
-    def _assemble_session_start_memory_block(profile: str, preference_lines: List[str], entity_lines: List[str],
-                                             profile_uri: str = "viking://user/default/memories/profile.md") -> str:
-        lines: List[str] = []
-        if profile:
-            lines += [f'<user-profile uri="{profile_uri}">', profile, "</user-profile>"]
-        if preference_lines or entity_lines:
-            lines += ["<available-memories>", *preference_lines, *entity_lines, "</available-memories>"]
-        return "\n".join(lines)
-
-    @classmethod
-    def _format_memory_listing(cls, uri: str, entries: List[Dict[str, str]], max_units: int) -> tuple[List[str], int]:
-        """Listing lines within max_units; degrades to a "+N more" tail or a one-line stub."""
-        if not entries or max_units <= 0:
-            return [], 0
-        header = f"  {uri}/"
-        header_units = cls._token_units(header)
-        if header_units > max_units:
-            stub = f"  {uri}/  ({len(entries)} entries; use `viking_search`)"
-            stub_units = cls._token_units(stub)
-            return ([stub], stub_units) if stub_units <= max_units else ([], 0)
-
-        lines = [header]
-        used = header_units
-        newline_units = cls._token_units("\n")
-        for index, entry in enumerate(entries):
-            abstract = entry.get("abstract", "")
-            line = f"    - {entry['name']}{f' — {abstract}' if abstract else ''}"
-            line_units = newline_units + cls._token_units(line)
-            if used + line_units > max_units:
-                tail = f"    ... +{len(entries) - index} more, use `viking_search`"
-                tail_units = newline_units + cls._token_units(tail)
-                if used + tail_units <= max_units:
-                    lines.append(tail)
-                    used += tail_units
-                break
-            lines.append(line)
-            used += line_units
-        return lines, used
-
-    @classmethod
-    def _build_session_start_memory_block(cls, *, profile: str, preferences: List[Dict[str, str]],
-                                          entities: List[Dict[str, str]], token_budget: int, uris: Optional[tuple] = None) -> str:
-        """Profile (<= half the budget) then preferences/entities listings sharing the rest."""
-        profile_uri, preferences_uri, entities_uri = uris or tuple(
-            _user_scoped_uri("default", suffix) for suffix in (_PROFILE_SUFFIX, _PREFERENCES_SUFFIX, _ENTITIES_SUFFIX)
-        )
-        profile = profile.strip()
-        if not profile and not preferences and not entities:
-            return ""
-
-        placeholder = "\0"
-        scaffold = cls._assemble_session_start_memory_block(
-            placeholder if profile else "",
-            [placeholder] if preferences else [],
-            [placeholder] if entities else [],
-            profile_uri=profile_uri,
-        )
-        placeholder_count = int(bool(profile)) + int(bool(preferences)) + int(bool(entities))
-        available_units = max(0, (token_budget * 4) - (cls._token_units(scaffold) - placeholder_count))
-
-        profile_text = ""
-        if profile and available_units > 0:
-            profile_text = cls._truncate_profile_content(profile, min(available_units, token_budget * 2))
-            available_units -= cls._token_units(profile_text)
-
-        preference_budget = available_units // 2 if (preferences and entities) else available_units
-        preference_lines, preference_units = cls._format_memory_listing(preferences_uri, preferences, preference_budget)
-        entity_lines, _ = cls._format_memory_listing(entities_uri, entities, available_units - preference_units)
-        return cls._assemble_session_start_memory_block(profile_text, preference_lines, entity_lines, profile_uri=profile_uri)
-
-    def _session_start_memory_context(self, session_id: str) -> str:
-        session_key = session_id or self._session_id or "__openviking_default_session__"
-        if session_key in self._profile_prefetched_sessions:
-            return ""
-        try:
-            cfg = self._recall_config()
-            raw_parts = self._read_session_start_memory_parts(
-                deadline=time.monotonic() + cfg["timeout_seconds"],
-                request_timeout=cfg["request_timeout_seconds"],
-            )
-        except Exception as e:
-            logger.debug("OpenViking session-start memory prefetch failed: %s", e)
-            return ""
-        profile = raw_parts.get("profile")
-        if profile is None:
-            return ""
-        self._profile_prefetched_sessions.add(session_key)
-        return self._build_session_start_memory_block(
-            profile=profile,
-            preferences=raw_parts.get("preferences") or [],
-            entities=raw_parts.get("entities") or [],
-            token_budget=self._profile_token_budget(),
-            uris=raw_parts["uris"],
-        )
-
-    @staticmethod
-    def _clamp_score(value: Any) -> float:
-        try:
-            score = float(value)
-        except (TypeError, ValueError):
-            return 0.0
-        return max(0.0, min(1.0, score))
-
-    @staticmethod
-    def _recall_category(item: Dict[str, Any]) -> str:
-        category = str(item.get("category") or "").strip()
-        return category or "memory"
-
-    @staticmethod
-    def _recall_abstract(item: Dict[str, Any]) -> str:
-        for key in _RECALL_SUMMARY_KEYS:
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return str(item.get("uri") or "").strip()
-
-    @staticmethod
-    def _dedupe_key(item: Dict[str, Any]) -> str:
-        """Same abstract+category collapses to one hit, except events/cases which stay URI-distinct."""
-        uri = str(item.get("uri") or "").strip()
-        category = str(item.get("category") or "").strip().lower() or "unknown"
-        abstract = " ".join(OpenVikingMemoryProvider._recall_abstract(item).lower().split())
-        uri_lower = uri.lower()
-        if abstract and "/events/" not in uri_lower and "/cases/" not in uri_lower:
-            return f"abstract:{category}:{abstract}"
-        return f"uri:{uri}"
-
-    @staticmethod
-    def _query_tokens(query: str) -> List[str]:
-        tokens = ["".join(ch for ch in raw if ch.isalnum()) for raw in query.lower().replace("_", " ").split()]
-        return [token for token in tokens if len(token) >= 2][:8]
-
-    @classmethod
-    def _recall_rank(cls, item: Dict[str, Any], query_tokens: List[str]) -> float:
-        text = f"{item.get('uri', '')} {cls._recall_abstract(item)}".lower()
-        overlap = sum(1 for token in query_tokens if token in text)
-        overlap_boost = min(0.2, overlap * 0.05)
-        leaf_boost = 0.12 if item.get("level") == 2 else 0.0
-        return cls._clamp_score(item.get("score")) + leaf_boost + overlap_boost
-
-    @classmethod
-    def _select_recall_candidates(cls, items: List[Dict[str, Any]], query: str, *, limit: int, score_threshold: float) -> List[Dict[str, Any]]:
-        seen_uri = set()
-        seen_key = set()
-        filtered: List[Dict[str, Any]] = []
-        for item in items:
-            uri = str(item.get("uri") or "").strip()
-            if not uri or uri in seen_uri or cls._clamp_score(item.get("score")) < score_threshold:
-                continue
-            key = cls._dedupe_key(item)
-            if key in seen_key:
-                continue
-            seen_uri.add(uri)
-            seen_key.add(key)
-            filtered.append(item)
-        tokens = cls._query_tokens(query)
-        filtered.sort(key=lambda item: cls._recall_rank(item, tokens), reverse=True)
-        return filtered[:limit]
-
-    @staticmethod
-    def _extract_read_content(resp: Any) -> str:
-        result = OpenVikingMemoryProvider._unwrap_result(resp)
-        if isinstance(result, str):
-            return result.strip()
-        if isinstance(result, dict):
-            for key in ("content", "text"):
-                value = result.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return ""
-
-    def _resolve_recall_content(self, client: _VikingClient, item: Dict[str, Any], *, prefer_abstract: bool,
-                                deadline: float, request_timeout: float, read_state: Dict[str, int], full_read_limit: int) -> str:
-        abstract = self._recall_abstract(item)
-        has_explicit_summary = any(
-            isinstance(item.get(key), str) and item.get(key).strip() for key in _RECALL_SUMMARY_KEYS
-        )
-        if prefer_abstract and has_explicit_summary:
-            return abstract
-        uri = str(item.get("uri") or "")
-        if uri and (item.get("level") == 2 or not has_explicit_summary):
-            if read_state["full_reads"] >= full_read_limit:
-                return abstract
-            try:
-                timeout = self._remaining_recall_timeout(deadline, request_timeout)
-                read_state["full_reads"] += 1
-                content = self._extract_read_content(client.get("/api/v1/content/read", params={"uri": uri}, timeout=timeout))
-                if content:
-                    return content
-            except Exception as e:
-                logger.debug("OpenViking prefetch full read failed for %s: %s", uri, e)
-        return abstract
-
-    def _build_prefetch_entries(self, client: _VikingClient, items: List[Dict[str, Any]], *, prefer_abstract: bool,
-                                max_injected_chars: int, deadline: float, request_timeout: float, full_read_limit: int) -> List[str]:
-        entries: List[str] = []
-        total_chars = 0
-        read_state = {"full_reads": 0}
-        for item in items:
-            content = self._resolve_recall_content(
-                client, item, prefer_abstract=prefer_abstract, deadline=deadline,
-                request_timeout=request_timeout, read_state=read_state, full_read_limit=full_read_limit,
-            )
-            if not content:
-                continue
-            entry = "\n".join([
-                f"- [{self._recall_category(item)}]",
-                f"  <uri>{item.get('uri', '')}</uri>",
-                *[f"  {line}" for line in content.splitlines()],
-            ])
-            projected_chars = total_chars + (1 if entries else 0) + len(entry)
-            if projected_chars > max_injected_chars:
-                continue
-            entries.append(entry)
-            total_chars = projected_chars
-        return entries
-
-    @staticmethod
-    def _message_text(content: Any) -> str:
-        """Extract text from OpenAI-style string/list content."""
-        return flatten_message_text(content)
-
-    @classmethod
-    def _message_matches_text(cls, message: Dict[str, Any], expected: Any) -> bool:
-        expected_text = cls._message_text(expected).strip()
-        return bool(expected_text) and cls._message_text(message.get("content")).strip() == expected_text
-
-    @classmethod
-    def _rfind_message(cls, messages: List[Any], role: str, start: int, expected: Any = None) -> Optional[int]:
-        """Index of the last ``role`` message at or before ``start`` (matching ``expected`` text if given)."""
-        for idx in range(start, -1, -1):
-            message = messages[idx]
-            if not isinstance(message, dict) or message.get("role") != role:
-                continue
-            if expected is None or cls._message_matches_text(message, expected):
-                return idx
-        return None
-
-    @classmethod
-    def _extract_current_turn_messages(cls, messages: Optional[List[Dict[str, Any]]], user_content: str, assistant_content: str) -> List[Dict[str, Any]]:
-        """Slice the completed turn out of Hermes' full canonical transcript: the last
-        assistant message matching assistant_content (else the last assistant message,
-        else the transcript end) back to the matching (else nearest) user message."""
-        if not messages:
-            return []
-        last = len(messages) - 1
-        end_idx = cls._rfind_message(messages, "assistant", last, assistant_content) if cls._message_text(assistant_content).strip() else None
-        if end_idx is None:
-            end_idx = cls._rfind_message(messages, "assistant", last)
-        if end_idx is None:
-            end_idx = last
-        start_idx = cls._rfind_message(messages, "user", end_idx, user_content) if cls._message_text(user_content).strip() else None
-        if start_idx is None:
-            start_idx = cls._rfind_message(messages, "user", end_idx)
-        if start_idx is None:
-            return []
-        return [message for message in messages[start_idx : end_idx + 1] if isinstance(message, dict)]
-
-    @staticmethod
-    def _tool_call_id(tool_call: Dict[str, Any]) -> str:
-        return str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
-
-    @staticmethod
-    def _tool_call_name(tool_call: Dict[str, Any]) -> str:
-        function = tool_call.get("function")
-        if isinstance(function, dict):
-            return str(function.get("name") or "")
-        return str(tool_call.get("name") or "")
-
-    @staticmethod
-    def _is_openviking_recall_tool_name(tool_name: Any) -> bool:
-        return str(tool_name or "").strip().lower() in _OPENVIKING_RECALL_TOOL_NAMES
-
-    @staticmethod
-    def _tool_call_input(tool_call: Dict[str, Any]) -> Dict[str, Any]:
-        function = tool_call.get("function")
-        raw_args = function.get("arguments") if isinstance(function, dict) else None
-        if raw_args is None:
-            raw_args = tool_call.get("args")
-        if raw_args is None:
-            return {}
-        if isinstance(raw_args, dict):
-            return raw_args
-        if isinstance(raw_args, str):
-            if not raw_args.strip():
-                return {}
-            try:
-                parsed = json.loads(raw_args)
-            except Exception:
-                return {"value": raw_args}
-            return parsed if isinstance(parsed, dict) else {"value": parsed}
-        return {"value": raw_args}
-
-    @classmethod
-    def _tool_result_status(cls, message: Dict[str, Any]) -> str:
-        raw_status = str(message.get("status") or message.get("tool_status") or "").lower()
-        if raw_status in _TOOL_STATUS_ERROR_ALIASES:
-            return _TOOL_STATUS_ERROR
-        if raw_status in _TOOL_STATUS_COMPLETED_ALIASES:
-            return _TOOL_STATUS_COMPLETED
-        text = cls._message_text(message.get("content")).strip()
-        if text:
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, dict):
-                exit_code = parsed.get("exit_code")
-                if (
-                    str(parsed.get("status") or "").lower() in _TOOL_STATUS_ERROR_ALIASES
-                    or parsed.get("success") is False
-                    or bool(parsed.get("error"))
-                    or (isinstance(exit_code, int) and exit_code != 0)
-                ):
-                    return _TOOL_STATUS_ERROR
-        return _TOOL_STATUS_COMPLETED
-
-    @classmethod
-    def _messages_to_openviking_batch(cls, messages: List[Dict[str, Any]], *, assistant_peer_id: str = "") -> List[Dict[str, Any]]:
-        """Convert Hermes canonical messages into OpenViking batch payloads.
-
-        Recall-tool calls/results are dropped (re-ingesting recalled memory would
-        re-store it); tool results are grouped into assistant messages; a tool call
-        whose result is in the slice is emitted only via its result part.
-        """
-        assistant_peer_id = str(assistant_peer_id or "").strip()
-        tool_calls_by_id: Dict[str, Dict[str, Any]] = {}
-        completed_tool_ids: set[str] = set()
-        skipped_tool_ids: set[str] = set()
-        dict_messages = [m for m in messages if isinstance(m, dict)]
-        for message in dict_messages:
-            if message.get("role") == "tool":
-                tool_id = str(message.get("tool_call_id") or message.get("id") or "")
-                if tool_id:
-                    completed_tool_ids.add(tool_id)
-                    if cls._is_openviking_recall_tool_name(message.get("name")):
-                        skipped_tool_ids.add(tool_id)
-            elif message.get("role") == "assistant":
-                for tool_call in message.get("tool_calls") or []:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_id = cls._tool_call_id(tool_call)
-                    tool_name = cls._tool_call_name(tool_call)
-                    if tool_id:
-                        tool_calls_by_id[tool_id] = {"tool_name": tool_name, "tool_input": cls._tool_call_input(tool_call)}
-                        if cls._is_openviking_recall_tool_name(tool_name):
-                            skipped_tool_ids.add(tool_id)
-
-        payload_messages: List[Dict[str, Any]] = []
-        pending_tool_parts: List[Dict[str, Any]] = []
-
-        def payload_message(role: str, parts: List[Dict[str, Any]]) -> Dict[str, Any]:
-            payload: Dict[str, Any] = {"role": role, "parts": parts}
-            if role == "assistant" and assistant_peer_id:
-                payload["peer_id"] = assistant_peer_id
-            return payload
-
-        def flush_tool_parts() -> None:
-            nonlocal pending_tool_parts
-            if pending_tool_parts:
-                payload_messages.append(payload_message("assistant", pending_tool_parts))
-                pending_tool_parts = []
-
-        for message in dict_messages:
-            role = str(message.get("role") or "")
-            if role == "tool":
-                tool_id = str(message.get("tool_call_id") or message.get("id") or "")
-                prior_call = tool_calls_by_id.get(tool_id, {})
-                tool_name = str(message.get("name") or prior_call.get("tool_name") or "")
-                if tool_id in skipped_tool_ids or cls._is_openviking_recall_tool_name(tool_name):
-                    continue
-                pending_tool_parts.append({
-                    "type": "tool",
-                    "tool_id": tool_id,
-                    "tool_name": tool_name,
-                    "tool_input": prior_call.get("tool_input", {}),
-                    "tool_output": cls._message_text(message.get("content")),
-                    "tool_status": cls._tool_result_status(message),
-                })
-                continue
-            if role not in {"user", "assistant"}:
-                continue
-
-            flush_tool_parts()
-            parts: List[Dict[str, Any]] = []
-            text = cls._message_text(message.get("content"))
-            if text:
-                parts.append({"type": "text", "text": text})
-            if role == "assistant":
-                for tool_call in message.get("tool_calls") or []:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_id = cls._tool_call_id(tool_call)
-                    tool_name = cls._tool_call_name(tool_call)
-                    if tool_id in skipped_tool_ids or tool_id in completed_tool_ids or cls._is_openviking_recall_tool_name(tool_name):
-                        continue
-                    # Pre-scan caches non-empty ids; parse again for the uncached empty-id case.
-                    prior_call = tool_calls_by_id.get(tool_id) if tool_id else None
-                    parts.append({
-                        "type": "tool",
-                        "tool_id": tool_id,
-                        "tool_name": tool_name,
-                        "tool_input": prior_call["tool_input"] if prior_call is not None else cls._tool_call_input(tool_call),
-                        "tool_status": _TOOL_STATUS_PENDING,
-                    })
-            if parts:
-                payload_messages.append(payload_message(role, parts))
-
-        flush_tool_parts()
-        return payload_messages
-
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
-                  messages: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Record the conversation turn in OpenViking's session (non-blocking)."""
-        if not self._ensure_client():
-            return
-        user_content = _derive_openviking_user_text(user_content)
-        if not user_content:
-            return
-
-        turn_messages = self._extract_current_turn_messages(messages, user_content, assistant_content) if messages is not None else []
-        if turn_messages:
-            turn_messages = [dict(message) for message in turn_messages]
-            for message in turn_messages:
-                if message.get("role") == "user":
-                    message["content"] = user_content
-                    break
-        batch_messages = self._messages_to_openviking_batch(turn_messages, assistant_peer_id=getattr(self, "_agent", _DEFAULT_AGENT))
-        if _sync_trace_enabled():
-            logger.info(
-                "OpenViking sync_turn trace: session_arg=%r cached_session=%r "
-                "messages_param_supported=true messages_present=%s message_count=%s "
-                "turn_message_count=%d batch_message_count=%d user_len=%d assistant_len=%d "
-                "user_preview=%r assistant_preview=%r",
-                session_id, self._session_id, messages is not None,
-                len(messages) if messages is not None else None,
-                len(turn_messages), len(batch_messages),
-                len(str(user_content or "")), len(str(assistant_content or "")),
-                _preview(user_content), _preview(assistant_content),
-            )
-
-        # Snapshot sid + bump the counter atomically so a concurrent switch/end can't
-        # interleave its snapshot+reset (lost turn / misattributed session).
-        with self._session_state_lock:
-            sid = str(session_id or self._session_id).strip()
-            if not sid:
-                return
-            self._turn_count += 1
-        self._mark_session_pending(sid)
-
-        def _sync():
-            next_batch_index = 0
-
-            def _post_unsent_messages_individually(client: _VikingClient) -> None:
-                nonlocal next_batch_index
-                path = f"/api/v1/sessions/{sid}/messages"
-                while next_batch_index < len(batch_messages):
-                    if _sync_trace_enabled():
-                        logger.info(
-                            "OpenViking sync_turn trace: POST %s message_index=%d payload=%s",
-                            path, next_batch_index, json.dumps(batch_messages[next_batch_index], ensure_ascii=False),
-                        )
-                    client.post(path, batch_messages[next_batch_index])
-                    next_batch_index += 1
-
-            def _post_turn(client: _VikingClient) -> None:
-                """Structured batches; on a first-batch failure fall back to plain text."""
-                nonlocal next_batch_index
-                if batch_messages:
-                    while next_batch_index < len(batch_messages):
-                        batch_end = min(next_batch_index + _SESSION_MESSAGE_BATCH_LIMIT, len(batch_messages))
-                        payload = {"messages": batch_messages[next_batch_index:batch_end]}
-                        if _sync_trace_enabled():
-                            logger.info(
-                                "OpenViking sync_turn trace: POST /api/v1/sessions/%s/messages/batch range=%d:%d payload=%s",
-                                sid, next_batch_index, batch_end, json.dumps(payload, ensure_ascii=False),
-                            )
-                        try:
-                            client.post(f"/api/v1/sessions/{sid}/messages/batch", payload)
-                        except Exception as batch_error:
-                            if next_batch_index:
-                                raise
-                            logger.warning("OpenViking structured sync failed; falling back to text sync: %s", batch_error)
-                            break
-                        next_batch_index = batch_end
-                    if next_batch_index == len(batch_messages):
-                        return
-                self._post_session_turn(client, sid, user_content[:4000], self._message_text(assistant_content)[:4000])
-
-            try:
-                _post_turn(self._new_client())
-            except Exception as e:
-                logger.debug("OpenViking sync_turn failed, reconnecting: %s", e)
-                retry_client = None
-                try:
-                    retry_client = self._new_client()
-                    _post_turn(retry_client)
-                except Exception as retry_error:
-                    if retry_client is not None and batch_messages and next_batch_index < len(batch_messages):
-                        logger.warning(
-                            "OpenViking structured sync retry failed; writing %d remaining messages individually: %s",
-                            len(batch_messages) - next_batch_index, retry_error,
-                        )
-                        try:
-                            _post_unsent_messages_individually(retry_client)
-                        except Exception as fallback_error:
-                            logger.warning("OpenViking sync_turn failed during individual-message fallback: %s", fallback_error)
-                        return
-                    logger.warning("OpenViking sync_turn failed: %s", retry_error)
-
-        self._spawn_writer(sid, _sync, name="openviking-sync")
-
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Commit the session (synchronously — it must land before process exit) to
         trigger extraction of profile/preferences/entities/events/cases/patterns."""
@@ -2925,11 +2859,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
             old_session_id, new_id, parent_session_id, reset,
         )
 
+    # -- memory mirroring -----------------------------------------------------
+
     def _build_memory_uri(self, subdir: str, *, client=None, timeout: Optional[float] = None) -> str:
         """Explicit-uid user memory URI, under the configured peer when one is set.
 
         The peer is read from the captured client (not the provider) so a config
         reload mid-write can't borrow a later peer; an empty peer there is intentional.
+        getattr(): hand-wired providers (``__new__``) may lack ``_client`` / ``_agent``.
         """
         active_client = client if client is not None else getattr(self, "_client", None)
         agent = str(getattr(active_client, "_agent", getattr(self, "_agent", "")) or "").strip()
@@ -2943,7 +2880,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         """Mirror successful built-in memory additions to OpenViking."""
         if action != "add" or not content or not self._ensure_client():
             return
-        subdir = _MEMORY_WRITE_TARGET_SUBDIR_MAP.get(target, _DEFAULT_MEMORY_SUBDIR)
+        subdir = _MEMORY_WRITE_TARGET_SUBDIR_MAP.get(target, "preferences")
         try:
             # One connection snapshot for identity resolution, URI build, and write.
             client = self._new_client()
@@ -2957,23 +2894,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 client.post("/api/v1/content/write", {"uri": uri, "content": content, "mode": "create"})
             except Exception as e:
                 logger.debug("OpenViking memory mirror failed: %s", e)
-            finally:
-                with self._memory_write_lock:
-                    self._memory_write_threads.discard(threading.current_thread())
 
-        t = threading.Thread(target=_write, daemon=True, name="openviking-memwrite")
-        with self._memory_write_lock:
-            if self._shutting_down:
-                return
-            self._memory_write_threads.add(t)
-            try:
-                t.start()
-            except Exception as e:
-                self._memory_write_threads.discard(t)
-                logger.debug("OpenViking memory mirror worker failed to start: %s", e)
+        self._spawn_tracked("openviking-memwrite", _write, self._memory_write_lock, lambda: self._memory_write_threads,
+                            skip_if=lambda: self._shutting_down)
+
+    # -- tools ------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, READ_SCHEMA, BROWSE_SCHEMA, REMEMBER_SCHEMA, FORGET_SCHEMA, ADD_RESOURCE_SCHEMA]
+        return list(_TOOL_SCHEMAS)
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if not self._ensure_client():
@@ -3007,15 +2935,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if _last_active_provider is self:
             _last_active_provider = None
         self._release_run_lock()
-
-    # -- Tool implementations ------------------------------------------------
-
-    @staticmethod
-    def _unwrap_result(resp: Any) -> Any:
-        """Return OpenViking payload body regardless of wrapped/unwrapped shape."""
-        if isinstance(resp, dict) and "result" in resp:
-            return resp.get("result")
-        return resp
 
     @staticmethod
     def _normalize_summary_uri(uri: str) -> str:
@@ -3077,12 +2996,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         summary_level = level in {"abstract", "overview"}
         # Pseudo summary files (viking://x/.overview.md) are read as their directory.
         resolved_uri = self._normalize_summary_uri(uri) if summary_level else uri
-        used_fallback = False
         # abstract/overview are directory-only (v0.3.x returns 500/412 for files):
         # probe fs/stat for non-pseudo URIs and route files straight to content/read.
-        if summary_level and resolved_uri == uri and self._is_directory_uri(uri) is False:
-            used_fallback = True
-
+        used_fallback = summary_level and resolved_uri == uri and self._is_directory_uri(uri) is False
         endpoint = "/api/v1/content/read" if used_fallback else _LEVEL_ENDPOINTS[level if summary_level else "full"]
         try:
             resp = self._client.get(endpoint, params={"uri": resolved_uri})
@@ -3204,7 +3120,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 recovery_note=recovery_note,
             )
         try:
-            client.post(f"/api/v1/sessions/{session_id}/messages", {"role": "user", "parts": [self._text_part(content)]})
+            client.post(f"/api/v1/sessions/{session_id}/messages", {"role": "user", "parts": [_text_part(content)]})
         except Exception as e:
             logger.error("OpenViking remember message failed for %s: %s", session_id, e)
             return failure(
