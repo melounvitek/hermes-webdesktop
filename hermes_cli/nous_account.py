@@ -353,9 +353,7 @@ def _info_from_inference_key_pool(portal_base_url: Optional[str]) -> Optional[No
         if not _nonblank(getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")):
             return None
         return NousPortalAccountInfo(
-            logged_in=False,
-            source="inference_key",
-            fresh=False,
+            logged_in=False, source="inference_key", fresh=False,
             portal_base_url=getattr(entry, "portal_base_url", None) or portal_base_url,
             inference_base_url=_pool_entry_inference_url(entry),
             inference_credential_present=True,
@@ -378,10 +376,8 @@ def _info_from_oauth_pool(
     access_token = entry.access_token  # non-blank str: checked by _pool_entry_is_portal_oauth
     entry_portal_url = getattr(entry, "portal_base_url", None) or portal_base_url
     state = {
-        "access_token": access_token,
-        "client_id": getattr(entry, "client_id", None),
-        "inference_base_url": _pool_entry_inference_url(entry),
-        "agent_key": getattr(entry, "agent_key", None),
+        "access_token": access_token, "client_id": getattr(entry, "client_id", None),
+        "inference_base_url": _pool_entry_inference_url(entry), "agent_key": getattr(entry, "agent_key", None),
         "credential_source": f"pool:{getattr(entry, 'label', 'unknown')}",
     }
 
@@ -411,11 +407,7 @@ def _info_from_fetched_account(
 
 
 def _pool_entry_inference_url(entry: Any) -> Optional[str]:
-    return (
-        getattr(entry, "inference_base_url", None)
-        or getattr(entry, "runtime_base_url", None)
-        or getattr(entry, "base_url", None)
-    )
+    return getattr(entry, "inference_base_url", None) or getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None)
 
 
 def _select_nous_pool_entry() -> Optional[Any]:
@@ -468,15 +460,11 @@ def _info_from_valid_jwt(
         return None
     paid_access = _coerce_bool(claims.get("paid_access"))
     access_info = NousPaidServiceAccessInfo(
-        allowed=paid_access,
-        paid_access=paid_access,
-        organisation_id=_coerce_str(claims.get("org_id")),
+        allowed=paid_access, paid_access=paid_access, organisation_id=_coerce_str(claims.get("org_id")),
         subscription_tier=_coerce_num(claims.get("subscription_tier"), int),
     )
     return NousPortalAccountInfo(
-        logged_in=True,
-        source="jwt",
-        fresh=False,
+        logged_in=True, source="jwt", fresh=False,
         user_id=_coerce_str(claims.get("sub")),
         org_id=_coerce_str(claims.get("org_id")),
         client_id=_coerce_str(claims.get("client_id") or state.get("client_id")),
@@ -487,8 +475,7 @@ def _info_from_valid_jwt(
         inference_credential_present=True,
         credential_source=_coerce_str(state.get("credential_source")) or "auth_store",
         expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
-        paid_service_access=paid_access,
-        paid_service_access_info=access_info,
+        paid_service_access=paid_access, paid_service_access_info=access_info,
         tool_access=_tool_access_from_value(claims.get("tool_access")),
         raw_claims=dict(claims),
     )
@@ -499,16 +486,12 @@ def _info_from_account_payload(
 ) -> NousPortalAccountInfo:
     user = _dict_or_empty(payload.get("user"))
     organisation = _dict_or_empty(payload.get("organisation"))
-    subscription = _subscription_from_payload(payload.get("subscription"))
     access = _coerced_dataclass(NousPaidServiceAccessInfo, payload.get("paid_service_access"))
     paid_access = None
     if access is not None:
         paid_access = access.allowed if access.allowed is not None else access.paid_access
-
     return NousPortalAccountInfo(
-        logged_in=True,
-        source="account_api",
-        fresh=True,
+        logged_in=True, source="account_api", fresh=True,
         org_id=_coerce_str(organisation.get("id")) or (access.organisation_id if access else None),
         org_slug=_coerce_str(organisation.get("slug")),
         org_name=_coerce_str(organisation.get("name")),
@@ -519,9 +502,8 @@ def _info_from_account_payload(
         credential_source=_coerce_str(state.get("credential_source")) or "auth_store",
         email=_coerce_str(user.get("email")),
         privy_did=_coerce_str(user.get("privy_did")),
-        subscription=subscription,
-        paid_service_access=paid_access,
-        paid_service_access_info=access,
+        subscription=_subscription_from_payload(payload.get("subscription")),
+        paid_service_access=paid_access, paid_service_access_info=access,
         tool_access=_tool_access_from_value(payload.get("tool_access")),
         raw_account=dict(payload),
     )
