@@ -169,11 +169,8 @@ def _canonical_session_row(db, profile_path):
         tip_row = db.get_session(tip) or row
         started = row.get("started_at") or 0
         return {
-            "id": session_id,
-            "resolved_id": tip,
-            "root_title": row.get("title") or "",
-            "title": tip_row.get("title") or "",
-            "preview": _latest_message_preview(db, tip),
+            "id": session_id, "resolved_id": tip, "root_title": row.get("title") or "",
+            "title": tip_row.get("title") or "", "preview": _latest_message_preview(db, tip),
             "started_at": tip_row.get("started_at") or started,
             "last_active": tip_row.get("last_activity_at") or tip_row.get("started_at") or started,
             "message_count": tip_row.get("message_count") or 0,
@@ -199,16 +196,13 @@ def _latest_profile_session_rows(db):
                 continue
             if human is not None:
                 continue
+            # Rosters want "where the conversation IS": prefer the newest text.
             human = {
-                "id": s["id"],
-                "title": title,
-                "preview": s.get("preview") or "",
-                "started_at": s.get("started_at") or 0,
-                "last_active": last_active,
+                "id": s["id"], "title": title,
+                "preview": _latest_message_preview(db, s["id"]) or s.get("preview") or "",
+                "started_at": s.get("started_at") or 0, "last_active": last_active,
                 "message_count": s.get("message_count") or 0,
             }
-            # Rosters want "where the conversation IS": prefer the newest text.
-            human["preview"] = _latest_message_preview(db, s["id"]) or human["preview"]
             if worker is not None:
                 break
         return human, worker
@@ -259,14 +253,10 @@ def _(rid, params: dict) -> dict:
     out = []
     for p in list_profiles():
         row = {
-            "name": p.name,
-            "path": str(p.path),
-            "is_default": bool(p.is_default),
-            "model": p.model,
-            "provider": p.provider,
-            "description": getattr(p, "description", "") or "",
-            "display_name": getattr(p, "display_name", "") or "",
-            "skill_count": getattr(p, "skill_count", 0) or 0,
+            "name": p.name, "path": str(p.path), "is_default": bool(p.is_default),
+            "model": p.model, "provider": p.provider,
+            "description": p.description or "", "display_name": p.display_name or "",
+            "skill_count": p.skill_count or 0,
         }
         if include_sessions:
             _profile_session_fields(row, p.path)
@@ -413,10 +403,8 @@ def _(rid, params: dict) -> dict:
         model_set = _best_effort(lambda: _pin_profile_model(path, provider, model))
     elif is_truthy_value(params.get("mirror_credentials", True)):
         mirrored["model_inherited"] = _try(lambda: _inherit_launch_model(path), False)
-    return _ok(
-        rid,
-        {"ok": True, "name": name, "path": str(path), "soul_written": soul_written, "model_set": model_set, "mirrored": mirrored},
-    )
+    return _ok(rid, {"ok": True, "name": name, "path": str(path), "soul_written": soul_written,
+                     "model_set": model_set, "mirrored": mirrored})
 
 
 def _describe_toolsets(cfg):
@@ -437,9 +425,8 @@ def _describe_toolsets(cfg):
         if (ts_name in default_off or ts_name == "yuanbao") and not enabled:
             continue
         tool_count = _try(lambda: len(set(resolve_toolset(ts_name))), 0)
-        toolsets_out.append(
-            {"name": ts_name, "label": ts_label, "description": ts_desc or "", "tool_count": tool_count, "enabled": enabled}
-        )
+        toolsets_out.append({"name": ts_name, "label": ts_label, "description": ts_desc or "",
+                             "tool_count": tool_count, "enabled": enabled})
     return toolsets_out, pinned_set
 
 
@@ -448,19 +435,11 @@ def _describe_mcp_servers(cfg):
     mcp_cfg = cfg.get("mcp_servers")
     if not isinstance(mcp_cfg, dict):
         return []
-    return _try(
-        lambda: [
-            {
-                "name": str(srv_name),
-                "enabled": not is_truthy_value(entry.get("disabled", False)),
-                "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio",
-            }
-            for srv_name in sorted(mcp_cfg.keys())
-            for entry in (mcp_cfg[srv_name],)
-            if isinstance(entry, dict)
-        ],
-        [],
-    )
+    return _try(lambda: [
+        {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
+         "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio"}
+        for srv_name in sorted(mcp_cfg.keys()) for entry in (mcp_cfg[srv_name],) if isinstance(entry, dict)
+    ], [])
 
 
 @_profile_handler("profiles.describe", 5063)
@@ -485,17 +464,13 @@ def _(rid, params: dict) -> dict:
         mcp_out = _describe_mcp_servers(cfg)
         model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
         meta = _try(lambda: _lazy("hermes_cli.profiles", "read_profile_meta")(profile_dir), {})
-        result = {
-            "name": name,
-            "description": str(meta.get("description") or ""),
-            "soul": soul,
-            "model": {"provider": str(model_cfg.get("provider") or ""), "default": str(model_cfg.get("default") or "")},
-            "skills": installed,
-            "toolsets": toolsets_out,
-            "toolsets_pinned": pinned_set is not None,
+        return _ok(rid, {
+            "name": name, "description": str(meta.get("description") or ""), "soul": soul,
+            "model": {"provider": str(model_cfg.get("provider") or ""),
+                      "default": str(model_cfg.get("default") or "")},
+            "skills": installed, "toolsets": toolsets_out, "toolsets_pinned": pinned_set is not None,
             "mcp_servers": mcp_out,
-        }
-        return _ok(rid, result)
+        })
 
 
 def _configure_ui_meta(profile_dir, params, applied) -> None:
@@ -555,14 +530,9 @@ def _configure_model(profile_dir, params, applied):
     if not (model and provider):
         return None
     if not is_truthy_value(params.get("confirm_expensive_model", False)):
-        confirm_message = _try(
-            lambda: getattr(
-                _lazy("hermes_cli.model_selection_guards", "combined_selection_warning")(model, provider=provider or None),
-                "message",
-                None,
-            ),
-            None,
-        )
+        confirm_message = _try(lambda: getattr(
+            _lazy("hermes_cli.model_selection_guards", "combined_selection_warning")(model, provider=provider or None),
+            "message", None), None)
     if confirm_message is None:
         applied["model"] = _best_effort(lambda: _pin_profile_model(profile_dir, provider, model))
     return confirm_message
@@ -589,9 +559,8 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
         if isinstance(params.get("enabled_toolsets"), list):
             applied["toolsets"] = _best_effort(lambda: _save_toolset_pin(cfg, params["enabled_toolsets"], save_config))
         if want_mcp:
-            applied["mcp_servers"] = _best_effort(
-                lambda: _save_mcp_toggles(load_config() or {}, params["enabled_mcp_servers"], launch_mcp, save_config)
-            )
+            applied["mcp_servers"] = _best_effort(lambda: _save_mcp_toggles(
+                load_config() or {}, params["enabled_mcp_servers"], launch_mcp, save_config))
 
 
 def _clean_names(values) -> set:
@@ -640,11 +609,8 @@ def _(rid, params: dict) -> dict:
     if isinstance(params.get("soul"), str):
         applied["soul"] = _best_effort(lambda: (profile_dir / "SOUL.md").write_text(params["soul"], encoding="utf-8"))
     if isinstance(params.get("description"), str):
-        applied["description"] = _best_effort(
-            lambda: _lazy("hermes_cli.profiles", "write_profile_meta")(
-                profile_dir, description=params["description"].strip(), description_auto=False
-            )
-        )
+        applied["description"] = _best_effort(lambda: _lazy("hermes_cli.profiles", "write_profile_meta")(
+            profile_dir, description=params["description"].strip(), description_auto=False))
     confirm_message = _configure_model(profile_dir, params, applied)
     if any(isinstance(params.get(k), list) for k in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")):
         _configure_cfg_sections(profile_dir, params, applied)

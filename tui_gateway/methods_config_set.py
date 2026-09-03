@@ -52,18 +52,20 @@ def _emit_all_session_info() -> None:
 
 def _toggle_display_bool(rid, key, value, *, cfg_key, on_words, off_words):
     """Shared body of the on/off/toggle display booleans (``density``, ``battery``)."""
-    raw = str(value or "").strip().lower()
-    cur_b = bool(_display_section(_load_cfg()).get(cfg_key, False))
+    raw = _word(value)
+    cur_b = bool(_display_cfg().get(cfg_key, False))
     if raw in {"", "toggle"}:
         nv_b = not cur_b
-    elif raw in on_words:
-        nv_b = True
-    elif raw in off_words:
-        nv_b = False
+    elif raw in on_words or raw in off_words:
+        nv_b = raw in on_words
     else:
         return _err(rid, 4002, f"unknown {key} value: {value}")
     _write_config_key(f"display.{cfg_key}", nv_b)
     return _ok(rid, {"key": key, "value": "on" if nv_b else "off"})
+
+
+def _word(value) -> str:
+    return str(value or "").strip().lower()
 
 
 def _cfgset_await_agent(session, rid):
@@ -71,9 +73,7 @@ def _cfgset_await_agent(session, rid):
     init_err = _wait_agent(session, rid)
     if init_err:
         return init_err
-    if session.get("agent") is None:
-        return _err(rid, 5032, "agent initialization failed")
-    return None
+    return _err(rid, 5032, "agent initialization failed") if session.get("agent") is None else None
 
 
 def _cfgset_model_ok(rid, key, value, warning, confirm_required, confirm_message, scope, **extra):
@@ -92,7 +92,6 @@ def _set_model(rid, params, key, value, session):
         confirmed = bool(params.get("confirm_expensive_model", False))
         if session:
             from hermes_cli.model_switch import parse_model_switch_args
-
             sid = params.get("session_id", "")
             # No live swap while a turn streams: agent.switch_model() mutates model/provider/
             # base_url/client that the worker thread reads every iteration. Stash the pick and
@@ -138,8 +137,7 @@ def _set_model(rid, params, key, value, session):
             )
             if session.get("agent") is None and not explicit_provider.strip() and not failed_agent_init:
                 _start_agent_build(sid, session)
-                init_err = _cfgset_await_agent(session, rid)
-                if init_err:
+                if init_err := _cfgset_await_agent(session, rid):
                     return init_err
             with _session_profile_runtime_scope(session):
                 result = _apply_model_switch(
@@ -147,8 +145,7 @@ def _set_model(rid, params, key, value, session):
                 )
             if failed_agent_init and not result.get("confirm_required"):
                 _restart_completed_failed_agent_build(sid, session, failed_ready)
-                init_err = _cfgset_await_agent(session, rid)
-                if init_err:
+                if init_err := _cfgset_await_agent(session, rid):
                     return init_err
                 with _session_profile_runtime_scope(session):
                     _persist_live_session_runtime(session)
@@ -162,8 +159,11 @@ def _set_model(rid, params, key, value, session):
         return _err(rid, 5001, str(e))
 
 
+_FAST_WORDS = {"fast": "fast", "on": "fast", "normal": "normal", "off": "normal", "auto": "auto", "cold": "cold"}
+
+
 def _set_fast(rid, params, key, value, session):
-    raw = str(value or "").strip().lower()
+    raw = _word(value)
     agent = session.get("agent") if session else None
     if agent is not None:
         current_tier = getattr(agent, "service_tier", None)
@@ -174,23 +174,15 @@ def _set_fast(rid, params, key, value, session):
         current_tier = _load_service_tier()
     current_fast = current_tier == "priority"
 
-    if raw in {"status"}:
+    if raw == "status":
         return _ok(rid, {"key": key, "value": {"priority": "fast", None: "normal"}.get(current_tier, current_tier)})
-    if raw in {"", "toggle"}:
-        nv = "normal" if current_fast else "fast"
-    elif raw in {"fast", "on"}:
-        nv = "fast"
-    elif raw in {"normal", "off"}:
-        nv = "normal"
-    elif raw in {"auto", "cold"}:
-        nv = raw
-    else:
+    nv = _FAST_WORDS.get(raw, ("normal" if current_fast else "fast") if raw in {"", "toggle"} else None)
+    if nv is None:
         return _err(rid, 4002, f"unknown fast mode: {value}")
 
     overrides = None
     if nv == "fast":
         from hermes_cli.models import resolve_fast_mode_overrides
-
         if agent is not None:
             target_model = getattr(agent, "model", None)
         else:
@@ -200,8 +192,7 @@ def _set_fast(rid, params, key, value, session):
         if not target_model:
             return _err(rid, 4002, "fast mode is not available without a selected model")
         overrides = resolve_fast_mode_overrides(
-            target_model, provider=getattr(agent, "provider", None), base_url=getattr(agent, "base_url", None)
-        )
+            target_model, provider=getattr(agent, "provider", None), base_url=getattr(agent, "base_url", None))
         if overrides is None:
             return _err(rid, 4002, "fast mode is not available for this model")
 
@@ -226,7 +217,7 @@ def _set_fast(rid, params, key, value, session):
 
 
 def _set_busy(rid, params, key, value, session):
-    raw = str(value or "").strip().lower()
+    raw = _word(value)
     if raw in {"", "status"}:
         return _ok(rid, {"key": key, "value": _load_busy_input_mode()})
     if raw not in {"queue", "steer", "interrupt"}:
@@ -248,9 +239,8 @@ def _set_verbose(rid, params, key, value, session):
     _write_config_key("display.tool_progress", nv)
     if session:
         session["tool_progress_mode"] = nv
-        agent = session.get("agent")
-        if agent is not None:
-            agent.verbose_logging = nv == "verbose"
+        if session.get("agent") is not None:
+            session["agent"].verbose_logging = nv == "verbose"
     return _ok(rid, {"key": key, "value": nv})
 
 
@@ -258,8 +248,7 @@ def _set_focus(rid, params, key, value, session):
     # Focus view (/focus): display-only reduced output composed with tool_progress — enabling
     # stashes the configured mode and pins tool_progress "off"; disabling restores the stash.
     from hermes_cli.focus_view import FOCUS_TOOL_PROGRESS_MODE, normalize_tool_progress_mode, resolve_focus_arg
-
-    d_f = _display_section(_load_cfg())
+    d_f = _display_cfg()
     cur_focus = bool(d_f.get("focus_view", False))
     action, target = resolve_focus_arg(str(value or ""), cur_focus)
     if action == "usage":
@@ -280,15 +269,14 @@ def _set_focus(rid, params, key, value, session):
     if session:
         session["focus_view"] = bool(target)
         session["tool_progress_mode"] = effective
-        agent_f = session.get("agent")
-        if agent_f is not None:
+        if session.get("agent") is not None:
             with contextlib.suppress(Exception):
-                agent_f.tool_progress_mode = effective
+                session["agent"].tool_progress_mode = effective
     return _ok(rid, {"key": key, "value": "on" if target else "off", "tool_progress": effective})
 
 
 def _set_approval_mode(rid, params, key, value, session):
-    raw = str(value or "").strip().lower()
+    raw = _word(value)
     if raw not in _APPROVAL_MODES:
         return _err(rid, 4002, f"unknown approval mode: {value}; pick one of manual|smart|off")
     _write_config_key("approvals.mode", raw)
@@ -300,20 +288,17 @@ def _set_yolo(rid, params, key, value, session):
     # Approval bypass. scope="session" (default; TUI Shift+Tab) toggles ONLY this session's flag.
     # scope="global" (Shift+click the zap) flips persistent approvals.mode between "off" (bypass
     # on) and "manual" (bypass off) for every surface, surviving restarts.
-    scope = str(params.get("scope") or "session").strip().lower()
+    scope = _word(params.get("scope") or "session")
     try:
         from tools.approval import disable_session_yolo, enable_session_yolo, is_session_yolo_enabled
-
-        raw = str(value or "").strip().lower()
+        raw = _word(value)
 
         def _resolve_toggle(current: bool) -> bool:
             return _BOOL_WORDS.get(raw, not current)
 
         if scope == "global":
             from tools.approval import _normalize_approval_mode
-
-            cfg = _load_cfg()
-            appr = cfg.get("approvals") if isinstance(cfg, dict) else None
+            appr = _load_cfg().get("approvals")
             appr = appr if isinstance(appr, dict) else {}
             enable = _resolve_toggle(_normalize_approval_mode(appr.get("mode", "manual")) == "off")
             # Binary affordance: no restore of a prior "smart"/custom mode (those live in config.yaml).
@@ -351,9 +336,8 @@ _REASONING_DISPLAY_WORDS = (
 def _set_reasoning(rid, params, key, value, session):
     try:
         from hermes_constants import parse_reasoning_effort
-
-        arg = str(value or "").strip().lower()
-        scope = str(params.get("scope") or "").strip().lower()
+        arg = _word(value)
+        scope = _word(params.get("scope"))
         for words, reported, fields, thinking, show in _REASONING_DISPLAY_WORDS:
             if arg in words:
                 _write_display_sections(sections={"thinking": thinking}, **fields)
@@ -382,7 +366,7 @@ def _set_reasoning(rid, params, key, value, session):
 
 
 def _set_details_mode(rid, params, key, value, session):
-    nv = str(value or "").strip().lower()
+    nv = _word(value)
     if nv not in _DETAIL_MODES:
         return _err(rid, 4002, f"unknown details_mode: {value}")
     _write_display_sections(sections={section: nv for section in _DETAIL_SECTION_NAMES}, details_mode=nv)
@@ -395,7 +379,7 @@ def _set_details_section(rid, params, key, value, session):
     section = key.split(".", 1)[1]
     if section not in _DETAIL_SECTION_NAMES:
         return _err(rid, 4002, f"unknown section: {section}")
-    nv = str(value or "").strip().lower()
+    nv = _word(value)
     if not nv:
         _write_display_sections(drop_sections=(section,))
     elif nv not in _DETAIL_MODES:
@@ -406,7 +390,7 @@ def _set_details_section(rid, params, key, value, session):
 
 
 def _set_thinking_mode(rid, params, key, value, session):
-    nv = str(value or "").strip().lower()
+    nv = _word(value)
     if nv not in {"collapsed", "truncated", "full"}:
         return _err(rid, 4002, f"unknown thinking_mode: {value}")
     _write_config_key("display.thinking_mode", nv)
@@ -427,7 +411,7 @@ def _set_battery(rid, params, key, value, session):
 
 def _set_theme(rid, params, key, value, session):
     # 'light'/'dark' pin beats background auto-detection (xterm.js hosts misreport OSC 11).
-    raw = str(value or "").strip().lower()
+    raw = _word(value)
     if raw not in {"auto", "light", "dark"}:
         return _err(rid, 4002, f"unknown theme value: {value} (use auto|light|dark)")
     _write_config_key("display.tui_theme", raw)
@@ -435,14 +419,12 @@ def _set_theme(rid, params, key, value, session):
 
 
 def _set_statusbar(rid, params, key, value, session):
-    raw = str(value or "").strip().lower()
-    current = _coerce_statusbar(_display_section(_load_cfg()).get("tui_statusbar", "top"))
+    raw = _word(value)
+    current = _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))
     if raw in {"", "toggle"}:
         nv = "top" if current == "off" else "off"
-    elif raw == "on":
-        nv = "top"
-    elif raw in _STATUSBAR_MODES:
-        nv = raw
+    elif raw == "on" or raw in _STATUSBAR_MODES:
+        nv = "top" if raw == "on" else raw
     else:
         return _err(rid, 4002, f"unknown statusbar value: {value}")
     _write_config_key("display.tui_statusbar", nv)
@@ -453,7 +435,7 @@ def _set_mouse(rid, params, key, value, session):
     # Explicit None check (not `value or ""`) so falsy non-string inputs (0, False from
     # programmatic callers) reach the alias map as themselves (-> 'off') instead of toggling.
     raw = ("" if value is None else str(value)).strip().lower()
-    current = _display_mouse_tracking(_display_section(_load_cfg()))
+    current = _display_mouse_tracking(_display_cfg())
     if raw in {"", "toggle"}:
         nv = "all" if current == "off" else "off"
     elif raw in _MOUSE_TRACKING_ALIASES:
@@ -501,7 +483,6 @@ def _set_prompt_like(rid, params, key, value, session):
             # Personality text is an in-session overlay; persistence goes through
             # hermes_cli.personality (single owner), never the user-owned global system prompt.
             from hermes_cli.personality import persist_personality
-
             persist_personality(pname)
             resp["value"] = str(value or "none")
             history_reset, info = _apply_personality_to_session(params.get("session_id", ""), session, new_prompt, pname)
