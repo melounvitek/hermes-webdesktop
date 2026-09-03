@@ -7,16 +7,15 @@ tests patch them at call time). Prompt strings and config write order are behavi
 
 from __future__ import annotations
 
+import contextlib
 import os
-import subprocess
 import urllib.parse
 
 from hermes_cli.cli_output import line_input
 from hermes_cli.providers import custom_provider_slug
 from hermes_cli.model_setup_flows_common import (
     _HTTP, _ask, _commit_model_config, _load_config_model_section,
-    _prune_replaced_custom_model_config_credentials, _say,
-)
+    _prune_replaced_custom_model_config_credentials, _radiolist, _say)
 
 
 def _parse_context_length(text: str):
@@ -35,7 +34,6 @@ def _probe_custom_endpoint(effective_key: str, effective_url: str) -> tuple[dict
     """Verify a custom endpoint via ``probe_api_models`` and report; returns
     ``(probe, effective_url)`` where the URL may be the working fallback base."""
     from hermes_cli.models import probe_api_models
-
     probe = probe_api_models(effective_key, effective_url)
     if probe.get("used_fallback") and probe.get("resolved_base_url"):
         print(f"Warning: endpoint verification worked at {probe['resolved_base_url']}/models, "
@@ -74,16 +72,12 @@ def _pick_detected_model(detected_models: list) -> str:
 
 
 def _model_flow_custom(config):
-    """Custom endpoint: collect URL, API key, and model name.
-
-    Also saves the endpoint to ``custom_providers`` in config.yaml so it appears
-    in the provider menu on subsequent runs.
-    """
+    """Custom endpoint: collect URL, API key, and model name; also saved to ``custom_providers`` so
+    it appears in the provider menu on subsequent runs."""
     from hermes_cli.main import _auto_provider_name, _prompt_custom_api_mode_selection, _save_custom_provider
     from hermes_cli.auth import _save_model_choice, deactivate_provider
     from hermes_cli.config import custom_endpoint_key_env, get_env_value, save_env_value
     from hermes_cli.secret_prompt import masked_secret_prompt
-
     current_url = get_env_value("OPENAI_BASE_URL") or ""
     current_key = get_env_value("OPENAI_API_KEY") or ""
 
@@ -214,8 +208,7 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     from hermes_cli.config import normalize_extra_headers
     from hermes_cli.models import (
         fetch_api_models, fetch_ollama_local_models, _get_ollama_native_headers, _normalize_openai_base_url,
-        should_use_ollama_native_catalog,
-    )
+        should_use_ollama_native_catalog)
 
     name, base_url = provider_info["name"], provider_info["base_url"]
     api_mode = provider_info.get("api_mode", "")
@@ -256,12 +249,9 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     # (dashboard, desktop, ACP) show the full list; mirrors model_switch.py's
     # _save_discovered_models_to_config. A failed save is non-fatal.
     if live_models:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.model_switch import _save_discovered_models_to_config
-
             _save_discovered_models_to_config(base_url, live_models, api_mode=api_mode, headers=extra_headers or None)
-        except Exception:
-            pass
     return models, native_catalog_empty
 
 
@@ -269,13 +259,11 @@ def _pick_named_custom_model(name: str, models: list, saved_model: str):
     """Searchable radiolist over *models* (numbered prompt without curses); None = cancelled."""
     default_idx = models.index(saved_model) if saved_model and saved_model in models else 0
     print(f"Found {len(models)} model(s):\n")
-    try:
-        from hermes_cli.curses_ui import curses_radiolist
-
-        menu_items = [f"{m} (current)" if m == saved_model else m for m in models] + ["Cancel"]
-        idx = curses_radiolist(f"Select model from {name}:", menu_items, selected=default_idx, cancel_returns=-1, searchable=True)
+    menu_items = [f"{m} (current)" if m == saved_model else m for m in models] + ["Cancel"]
+    idx = _radiolist(f"Select model from {name}:", menu_items, default_idx, searchable=True)
+    if idx is not None:
         print()
-    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
+    else:
         for i, m in enumerate(models, 1):
             print(f"  {i}. {m}{' (current)' if m == saved_model else ''}")
         _say(f"  {len(models) + 1}. Cancel", "")
@@ -295,17 +283,13 @@ def _pick_named_custom_model(name: str, models: list, saved_model: str):
 
 
 def _model_flow_named_custom(config, provider_info):
-    """Handle a named custom provider from config.yaml custom_providers list.
-
-    Probes the endpoint's model catalog (native ``/api/tags`` for endpoints
-    conservatively identified as Ollama); a previously saved model is pre-selected
-    and used as the fallback when probing fails.
-    """
+    """Named custom provider from ``custom_providers`` / ``providers.<key>``: probes the model
+    catalog (native ``/api/tags`` for endpoints conservatively identified as Ollama); a previously
+    saved model is pre-selected and is the fallback when probing fails."""
     from hermes_cli.main import _custom_provider_api_key_config_value, _custom_provider_base_url_config_value, _save_custom_provider
     from hermes_cli.auth import _save_model_choice
     from hermes_cli.config import load_config, save_config
     from hermes_cli.model_switch import _entry_models_discovered, _models_config_is_allowlist
-
     name = provider_info["name"]
     base_url = provider_info["base_url"]
     api_mode = provider_info.get("api_mode", "")
@@ -329,8 +313,7 @@ def _model_flow_named_custom(config, provider_info):
     explicit_catalog = _models_config_is_allowlist(cfg_models, _entry_models_discovered(provider_info))
     configured_models = _configured_model_ids(cfg_models)
 
-    print(f"  Provider: {name}")
-    print(f"  URL:      {base_url}")
+    _say(f"  Provider: {name}", f"  URL:      {base_url}")
     if saved_model:
         print(f"  Current:  {saved_model}")
     print()
@@ -405,5 +388,4 @@ def _model_flow_named_custom(config, provider_info):
         # Save model name to the custom_providers entry for next time
         _save_custom_provider(base_url, config_api_key, model_name, api_mode=api_mode)
 
-    print(f"\n✅ Model set to: {model_name}")
-    print(f"   Provider: {name} ({base_url})")
+    _say(f"\n✅ Model set to: {model_name}", f"   Provider: {name} ({base_url})")

@@ -8,15 +8,13 @@ Prompt strings and config write order are behavior.
 from __future__ import annotations
 
 from hermes_cli.model_setup_flows_common import (
-    _ask, _ensure_dict_section, _finish_model, _pick_model_or_prompt, _say,
-)
+    _ask, _ensure_dict_section, _finish_model, _pick_model_or_prompt, _say)
 
 
 # AWS cross-region inference profile prefixes. A geo-prefixed profile only routes
 # from endpoints in its own geography (us.* from eu-central-2 is rejected by AWS
 # regardless of credentials); global.* routes from everywhere.
 BEDROCK_GEO_PREFIXES = ("us.", "eu.", "ap.", "apac.", "jp.", "ca.", "sa.", "me.", "af.")
-
 
 # region-name prefixes -> inference-profile geo prefix
 _REGION_GEO = (("us.", ("us-", "us_gov")), ("eu.", ("eu-",)), ("ap.", ("ap-",)), ("ca.", ("ca-",)),
@@ -30,11 +28,9 @@ def bedrock_region_geo_prefix(region_name: str) -> str:
 
 
 def bedrock_model_routable_from_region(model_id: str, region_name: str) -> bool:
-    """True when *model_id* can be invoked from *region_name*'s endpoint.
-
-    Bare foundation-model ids and ``global.*`` profiles route from anywhere;
-    geo-prefixed profiles only from their own geography. Unknown regions hide nothing.
-    """
+    """True when *model_id* can be invoked from *region_name*'s endpoint: bare foundation-model ids
+    and ``global.*`` profiles route from anywhere, geo-prefixed profiles only from their own
+    geography. Unknown regions hide nothing."""
     mid = (model_id or "").lower()
     matched_geo = next((p for p in BEDROCK_GEO_PREFIXES if mid.startswith(p)), None)
     if matched_geo is None or mid.startswith("global."):
@@ -49,15 +45,11 @@ def bedrock_model_routable_from_region(model_id: str, region_name: str) -> bool:
 
 
 def _model_flow_bedrock_api_key(config, region, current_model=""):
-    """Bedrock API Key mode — uses the OpenAI-compatible bedrock-mantle endpoint.
-
-    For developers without an AWS account who received a Bedrock API Key from
-    their AWS admin. Works like any OpenAI-compatible endpoint.
-    """
+    """Bedrock API Key mode on the OpenAI-compatible bedrock-mantle endpoint — for developers
+    without an AWS account who received a Bedrock API Key from their AWS admin."""
     from hermes_cli.auth import _resolve_api_key_provider_secret, ProviderConfig
     from hermes_cli.config import save_env_value
     from hermes_cli.models import _PROVIDER_MODELS
-
     mantle_base_url = f"https://bedrock-mantle.{region}.api.aws/v1"
 
     # Check env var and credential pool (keys added via `hermes auth`)
@@ -65,7 +57,6 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
     existing_key, existing_source = _resolve_api_key_provider_secret("bedrock", bedrock_pconfig)
     if existing_key:
         from hermes_cli.env_loader import format_secret_source_suffix
-
         source_suffix = format_secret_source_suffix(existing_source or "AWS_BEARER_TOKEN_BEDROCK")
         print(f"  Bedrock API Key: {existing_key[:12]}... ✓{source_suffix}")
     else:
@@ -86,8 +77,7 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
     print(f"  Showing {len(model_list)} curated models")
     selected = _pick_model_or_prompt(
         model_list, "  Model ID: ", current_model=current_model, confirm_provider="custom",
-        confirm_base_url=mantle_base_url, confirm_api_key=existing_key,
-    )
+        confirm_base_url=mantle_base_url, confirm_api_key=existing_key)
 
     def _finish(cfg, _model):
         # The bearer token rides on a named provider entry: a bare ``provider: custom``
@@ -112,19 +102,15 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
 _BEDROCK_EXCLUDE_PREFIXES = ("stability.", "cohere.embed", "twelvelabs.", "us.stability.", "us.cohere.embed",
                              "us.twelvelabs.", "global.cohere.embed", "global.twelvelabs.")
 
-
 _BEDROCK_EXCLUDE_SUBSTRINGS = ("safeguard", "voxtral", "palmyra-vision")
 
-
 _BEDROCK_PROFILE_PREFIXES = BEDROCK_GEO_PREFIXES + ("global.",)
-
 
 # Recommended models, matched geo-agnostically so an EU (eu.*) or APAC (apac.*)
 # picker pins its own region's profile rather than a us.* one.
 _BEDROCK_RECOMMENDED_BASES = (
     "anthropic.claude-sonnet-4-6", "anthropic.claude-opus-4-6", "anthropic.claude-haiku-4-5", "amazon.nova-pro",
-    "amazon.nova-lite", "amazon.nova-micro", "deepseek.v3", "meta.llama4-maverick", "meta.llama4-scout",
-)
+    "amazon.nova-lite", "amazon.nova-micro", "deepseek.v3", "meta.llama4-maverick", "meta.llama4-scout")
 
 
 def _bedrock_text_model_ids(live_models: list, region: str) -> list[str]:
@@ -139,8 +125,7 @@ def _bedrock_text_model_ids(live_models: list, region: str) -> list[str]:
         m for m in live_models
         if not any(m["id"].startswith(p) for p in _BEDROCK_EXCLUDE_PREFIXES)
         and not any(s in m["id"].lower() for s in _BEDROCK_EXCLUDE_SUBSTRINGS)
-        and bedrock_model_routable_from_region(m["id"], region)
-    ]
+        and bedrock_model_routable_from_region(m["id"], region)]
     # Deduplicate: prefer inference profiles (geo-prefixed or global.*) over bare foundation model IDs.
     profile_base_ids = {_base_id(m["id"]) for m in filtered if m["id"].startswith(_BEDROCK_PROFILE_PREFIXES)}
     deduped = [m for m in filtered if m["id"].startswith(_BEDROCK_PROFILE_PREFIXES) or m["id"] not in profile_base_ids]
@@ -161,12 +146,8 @@ def _bedrock_text_model_ids(live_models: list, region: str) -> list[str]:
 
 
 def _model_flow_bedrock(config, current_model=""):
-    """AWS Bedrock provider: verify credentials, pick region, discover models.
-
-    Uses the native Converse API via boto3 — not the OpenAI-compatible endpoint.
-    Auth is the AWS SDK default credential chain (env vars, profile, instance
-    role), so no API key prompt is needed.
-    """
+    """AWS Bedrock (native Converse API via boto3): verify credentials, pick region, discover models.
+    Auth is the AWS SDK default credential chain, so no API key prompt is needed."""
     from hermes_cli.models import _PROVIDER_MODELS
 
     # 1. Check for AWS credentials
@@ -180,8 +161,8 @@ def _model_flow_bedrock(config, current_model=""):
         _say("  ⚠ No AWS credentials detected via environment variables.",
              "  Bedrock will use boto3's default credential chain (IMDS, SSO, etc.)", "")
     auth_var = resolve_aws_auth_env_var()
-    print(f"  AWS credentials: {auth_var} ✓" if auth_var else "  AWS credentials: boto3 default chain (instance role / SSO)")
-    print()
+    _say(f"  AWS credentials: {auth_var} ✓" if auth_var else "  AWS credentials: boto3 default chain (instance role / SSO)",
+         "")
 
     # 2. Region selection
     current_region = resolve_bedrock_region()
