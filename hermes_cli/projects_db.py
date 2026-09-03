@@ -66,7 +66,6 @@ CREATE TABLE IF NOT EXISTS discovered_repos (
 );
 """
 
-
 # --- Slug + id helpers -------------------------------------------------------
 
 # Lowercase alphanumerics, hyphens, underscores; 1-64 chars; no leading separator. Strict enough to
@@ -172,12 +171,7 @@ class ProjectFolder:
     added_at: int = 0
 
     def to_dict(self) -> dict:
-        return {
-            "path": self.path,
-            "label": self.label,
-            "is_primary": bool(self.is_primary),
-            "added_at": self.added_at,
-        }
+        return {"path": self.path, "label": self.label, "is_primary": bool(self.is_primary), "added_at": self.added_at}
 
 
 @dataclass
@@ -195,19 +189,8 @@ class Project:
     folders: List[ProjectFolder] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "slug": self.slug,
-            "name": self.name,
-            "description": self.description,
-            "icon": self.icon,
-            "color": self.color,
-            "board_slug": self.board_slug,
-            "primary_path": self.primary_path,
-            "archived": bool(self.archived),
-            "created_at": self.created_at,
-            "folders": [f.to_dict() for f in self.folders],
-        }
+        d = {k: getattr(self, k) for k in ("id", "slug", "name", "description", "icon", "color", "board_slug", "primary_path")}
+        return {**d, "archived": bool(self.archived), "created_at": self.created_at, "folders": [f.to_dict() for f in self.folders]}
 
 
 # Nullable TEXT columns that may be absent from a legacy row.
@@ -218,18 +201,14 @@ def _load_project(conn: sqlite3.Connection, row: sqlite3.Row) -> Project:
     """Materialize a ``projects`` row together with its folders."""
     keys = row.keys()
     project = Project(
-        id=row["id"],
-        slug=row["slug"],
-        name=row["name"],
-        created_at=row["created_at"],
+        id=row["id"], slug=row["slug"], name=row["name"], created_at=row["created_at"],
         archived=bool(row["archived"]) if "archived" in keys else False,
         **{f: row[f] for f in _OPTIONAL_ROW_FIELDS if f in keys},
     )
     project.folders = [
         ProjectFolder(path=r["path"], label=r["label"], is_primary=bool(r["is_primary"]), added_at=r["added_at"])
         for r in conn.execute(
-            "SELECT path, label, is_primary, added_at FROM project_folders "
-            "WHERE project_id = ? ORDER BY is_primary DESC, added_at ASC",
+            "SELECT path, label, is_primary, added_at FROM project_folders WHERE project_id = ? ORDER BY is_primary DESC, added_at ASC",
             (project.id,),
         ).fetchall()
     ]
@@ -255,9 +234,7 @@ def _primary_path_key(path: str) -> str:
     return os.path.normcase(_normalize_path(path))
 
 
-def find_by_primary_path(
-    conn: sqlite3.Connection, path: str, *, include_archived: bool = False
-) -> Optional[Project]:
+def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
     """The first (oldest) project whose primary path matches ``path``, else None.
 
     Comparison is separator/case normalized so equivalent Windows spellings of the same folder do
@@ -268,8 +245,7 @@ def find_by_primary_path(
         return None
     for proj in list_projects(conn, include_archived=include_archived):
         primary = proj.primary_path or next(
-            (f.path for f in proj.folders if f.is_primary),
-            proj.folders[0].path if proj.folders else None,
+            (f.path for f in proj.folders if f.is_primary), proj.folders[0].path if proj.folders else None
         )
         if primary and _primary_path_key(primary) == key:
             return proj
@@ -326,43 +302,28 @@ def create_project(
     with write_txn(conn):
         unique = _unique_slug(conn, slug_candidate)
         conn.execute(
-            "INSERT INTO projects "
-            "(id, slug, name, description, icon, color, board_slug, "
-            " primary_path, created_at, archived) "
+            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (pid, unique, name, description, icon, color, normalize_slug(board_slug) if board_slug else None, primary, now),
         )
         for path in folder_paths:
             conn.execute(
-                "INSERT INTO project_folders "
-                "(project_id, path, label, is_primary, added_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, ?, ?)",
                 (pid, path, None, 1 if path == primary else 0, now),
             )
     return pid
 
 
-def list_projects(
-    conn: sqlite3.Connection, *, include_archived: bool = False
-) -> List[Project]:
-    sql = "SELECT * FROM projects"
-    if not include_archived:
-        sql += " WHERE archived = 0"
-    sql += " ORDER BY created_at ASC"
+def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False) -> List[Project]:
+    sql = "SELECT * FROM projects" + ("" if include_archived else " WHERE archived = 0") + " ORDER BY created_at ASC"
     return [_load_project(conn, r) for r in conn.execute(sql).fetchall()]
 
 
-def get_project(
-    conn: sqlite3.Connection, id_or_slug: str
-) -> Optional[Project]:
+def get_project(conn: sqlite3.Connection, id_or_slug: str) -> Optional[Project]:
     """Look up a project by id first, then by slug."""
-    row = conn.execute(
-        "SELECT * FROM projects WHERE id = ?", (id_or_slug,)
-    ).fetchone()
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
     if row is None:
-        row = conn.execute(
-            "SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)).fetchone()
     return None if row is None else _load_project(conn, row)
 
 
@@ -409,14 +370,7 @@ def _execute_rowcount(conn: sqlite3.Connection, sql: str, params) -> int:
     return cur.rowcount
 
 
-def add_folder(
-    conn: sqlite3.Connection,
-    project_id: str,
-    path: str,
-    *,
-    label: Optional[str] = None,
-    is_primary: bool = False,
-) -> str:
+def add_folder(conn: sqlite3.Connection, project_id: str, path: str, *, label: Optional[str] = None, is_primary: bool = False) -> str:
     """Add a folder to a project. Returns the normalized path."""
     norm = _normalize_path(path)
     if not norm:
@@ -425,22 +379,14 @@ def add_folder(
         raise ValueError(f"no such project: {project_id}")
     with write_txn(conn):
         conn.execute(
-            "INSERT OR IGNORE INTO project_folders "
-            "(project_id, path, label, is_primary, added_at) "
-            "VALUES (?, ?, ?, 0, ?)",
+            "INSERT OR IGNORE INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, 0, ?)",
             (project_id, norm, label, _now()),
         )
         if label is not None:
-            conn.execute(
-                "UPDATE project_folders SET label = ? "
-                "WHERE project_id = ? AND path = ?",
-                (label, project_id, norm),
-            )
+            conn.execute("UPDATE project_folders SET label = ? WHERE project_id = ? AND path = ?", (label, project_id, norm))
         # An explicit primary, or the first folder of an empty project, becomes primary.
         if is_primary or conn.execute(
-            "SELECT 1 FROM project_folders "
-            "WHERE project_id = ? AND is_primary = 1",
-            (project_id,),
+            "SELECT 1 FROM project_folders WHERE project_id = ? AND is_primary = 1", (project_id,)
         ).fetchone() is None:
             _set_primary_locked(conn, project_id, norm)
     return norm
@@ -451,55 +397,32 @@ def remove_folder(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
     norm = _normalize_path(path)
     with write_txn(conn):
         was_primary = conn.execute(
-            "SELECT is_primary FROM project_folders "
-            "WHERE project_id = ? AND path = ?",
-            (project_id, norm),
+            "SELECT is_primary FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)
         ).fetchone()
-        cur = conn.execute(
-            "DELETE FROM project_folders WHERE project_id = ? AND path = ?",
-            (project_id, norm),
-        )
+        cur = conn.execute("DELETE FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm))
         if was_primary is not None and was_primary["is_primary"]:
             nxt = conn.execute(
-                "SELECT path FROM project_folders WHERE project_id = ? "
-                "ORDER BY added_at ASC LIMIT 1",
-                (project_id,),
+                "SELECT path FROM project_folders WHERE project_id = ? ORDER BY added_at ASC LIMIT 1", (project_id,)
             ).fetchone()
             if nxt and nxt["path"]:
                 _set_primary_locked(conn, project_id, nxt["path"])
             else:
-                conn.execute(
-                    "UPDATE projects SET primary_path = NULL WHERE id = ?",
-                    (project_id,),
-                )
+                conn.execute("UPDATE projects SET primary_path = NULL WHERE id = ?", (project_id,))
     return cur.rowcount > 0
 
 
-def _set_primary_locked(
-    conn: sqlite3.Connection, project_id: str, path: str
-) -> None:
+def _set_primary_locked(conn: sqlite3.Connection, project_id: str, path: str) -> None:
     """Set the primary folder (caller already holds a write txn)."""
-    conn.execute(
-        "UPDATE project_folders SET is_primary = 0 WHERE project_id = ?",
-        (project_id,),
-    )
-    conn.execute(
-        "UPDATE project_folders SET is_primary = 1 "
-        "WHERE project_id = ? AND path = ?",
-        (project_id, path),
-    )
-    conn.execute(
-        "UPDATE projects SET primary_path = ? WHERE id = ?",
-        (path, project_id),
-    )
+    conn.execute("UPDATE project_folders SET is_primary = 0 WHERE project_id = ?", (project_id,))
+    conn.execute("UPDATE project_folders SET is_primary = 1 WHERE project_id = ? AND path = ?", (project_id, path))
+    conn.execute("UPDATE projects SET primary_path = ? WHERE id = ?", (path, project_id))
 
 
 def set_primary(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
     norm = _normalize_path(path)
     with write_txn(conn):
         exists = conn.execute(
-            "SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?",
-            (project_id, norm),
+            "SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)
         ).fetchone()
         if exists is None:
             return False
@@ -529,8 +452,7 @@ _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
 def _upsert_meta_locked(conn: sqlite3.Connection, key: str, value: str) -> None:
     """Upsert a project_meta row (caller already holds a write txn)."""
     conn.execute(
-        "INSERT INTO project_meta (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        "INSERT INTO project_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
 
@@ -557,12 +479,7 @@ def get_discovery_policy_key(conn: sqlite3.Connection) -> Optional[str]:
     return _get_meta(conn, _DISCOVERY_POLICY_META_KEY)
 
 
-def reconcile_discovered_repos_policy(
-    conn: sqlite3.Connection,
-    policy_key: str,
-    *,
-    preserve_unversioned: bool = False,
-) -> bool:
+def reconcile_discovered_repos_policy(conn: sqlite3.Connection, policy_key: str, *, preserve_unversioned: bool = False) -> bool:
     """Clear cached scan rows when their discovery policy changes.
 
     Existing pre-policy rows are retained only for the backward-compatible default policy. Returns
@@ -580,9 +497,7 @@ def reconcile_discovered_repos_policy(
     return cleared
 
 
-def clear_discovered_repos(
-    conn: sqlite3.Connection, *, policy_key: Optional[str] = None
-) -> None:
+def clear_discovered_repos(conn: sqlite3.Connection, *, policy_key: Optional[str] = None) -> None:
     with write_txn(conn):
         conn.execute("DELETE FROM discovered_repos")
         if policy_key is not None:
@@ -618,8 +533,7 @@ def record_discovered_repos(
         if rows:
             conn.executemany(
                 "INSERT INTO discovered_repos (root, label, last_seen) VALUES (?, ?, ?) "
-                "ON CONFLICT(root) DO UPDATE SET label = excluded.label, "
-                "last_seen = excluded.last_seen",
+                "ON CONFLICT(root) DO UPDATE SET label = excluded.label, last_seen = excluded.last_seen",
                 rows,
             )
         if policy_key is not None:
@@ -629,18 +543,14 @@ def record_discovered_repos(
 
 def list_discovered_repos(conn: sqlite3.Connection) -> List[dict]:
     """All cached discovered repo roots, most-recently-seen first."""
-    rows = conn.execute(
-        "SELECT root, label, last_seen FROM discovered_repos ORDER BY last_seen DESC"
-    ).fetchall()
+    rows = conn.execute("SELECT root, label, last_seen FROM discovered_repos ORDER BY last_seen DESC").fetchall()
     return [dict(r) for r in rows]
 
 
 # --- Resolution + naming -----------------------------------------------------
 
 
-def project_for_path(
-    conn: sqlite3.Connection, path: str, *, include_archived: bool = False
-) -> Optional[Project]:
+def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
     """Return the project owning ``path`` (longest-prefix folder match).
 
     A folder owns ``path`` when ``path`` equals the folder or is nested under it. The most specific
@@ -649,10 +559,7 @@ def project_for_path(
     if not str(path or "").strip():
         return None
     target = _normalize_path(path)
-    sql = (
-        "SELECT pf.project_id AS pid, pf.path AS folder "
-        "FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
-    )
+    sql = "SELECT pf.project_id AS pid, pf.path AS folder FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
     if not include_archived:
         sql += " WHERE p.archived = 0"
     best_pid: Optional[str] = None
