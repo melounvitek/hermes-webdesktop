@@ -100,6 +100,14 @@ def _section(tts_config: Dict[str, Any], key: str) -> Dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
+def _require_key(env_var: str, provider_id: str, hint: str) -> str:
+    """Resolve *env_var* via the origin key resolver; ValueError ``"<ENV> not set. <hint>"`` when absent."""
+    api_key = _origin()._resolve_provider_key(env_var, provider_id) or ""
+    if not api_key:
+        raise ValueError(f"{env_var} not set. {hint}")
+    return api_key
+
+
 # --- Bounded upstream response reading ---
 
 def _response_has_explicit_stream(response: Any) -> bool:
@@ -258,13 +266,9 @@ def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    origin = _origin()
-    api_key = origin._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs") or ""
-    if not api_key:
-        raise ValueError("ELEVENLABS_API_KEY not set. Get one at https://elevenlabs.io/")
-
+    api_key = _require_key("ELEVENLABS_API_KEY", "elevenlabs", "Get one at https://elevenlabs.io/")
     el_config = tts_config.get("elevenlabs") or {}
-    client = origin._import_elevenlabs()(api_key=api_key, **_elevenlabs_environment_kwargs(el_config))
+    client = _origin()._import_elevenlabs()(api_key=api_key, **_elevenlabs_environment_kwargs(el_config))
     audio_generator = client.text_to_speech.convert(
         text=text,
         voice_id=el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
@@ -555,16 +559,12 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
 # --- Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles ---
 
 def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    origin = _origin()
-    api_key = origin._resolve_provider_key("MISTRAL_API_KEY", "mistral") or ""
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set. Get one at https://console.mistral.ai/")
-
+    api_key = _require_key("MISTRAL_API_KEY", "mistral", "Get one at https://console.mistral.ai/")
     mi_config = tts_config.get("mistral") or {}
     client_kwargs: Dict[str, Any] = {"api_key": api_key}
     if mi_config.get("base_url"):
         client_kwargs["server_url"] = mi_config["base_url"]  # the Mistral SDK calls it server_url
-    Mistral = origin._import_mistral_client()
+    Mistral = _origin()._import_mistral_client()
     try:
         with Mistral(**client_kwargs) as client:
             response = client.audio.speech.complete(

@@ -37,8 +37,8 @@ def _unlink_quietly(path: Optional[str]) -> None:
             pass
 
 
-def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event) -> Iterator[bytes]:
-    """Yield int16-aligned byte chunks; a dangling odd byte is padded at the end."""
+def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event, *, pad_tail: bool = True) -> Iterator[bytes]:
+    """Yield int16-aligned byte chunks; a dangling odd byte is padded at the end (or dropped)."""
     leftover = b""
     for chunk in chunks:
         if stop_evt.is_set():
@@ -48,7 +48,7 @@ def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event) -> I
         if aligned_len >= 2:
             yield buf[:aligned_len]
         leftover = buf[aligned_len:] if aligned_len < len(buf) else b""
-    if leftover:
+    if leftover and pad_tail:
         yield b"\x00"
 
 
@@ -284,25 +284,17 @@ class _StreamerPlayback:
         if self._current_stream is None:
             self._play_sentence_via_tempfile(chunk_queue)
             return
-        pcm_leftover = b""
-        while True:
-            chunk = chunk_queue.get()
-            if chunk is None or self.stop_event.is_set():
-                return
-            buf = pcm_leftover + chunk
-            aligned_len = len(buf) - (len(buf) % 2)
-            if aligned_len >= 2:
+        for aligned in _align_int16_chunks(iter(chunk_queue.get, None), self.stop_event, pad_tail=False):
+            try:
+                self._write_pcm(aligned)
+            except Exception as write_exc:
+                logger.warning("PortAudio write failed, attempting stream reinit: %s", write_exc)
+                if not self._recover_stream():
+                    return
                 try:
-                    self._write_pcm(buf[:aligned_len])
-                except Exception as write_exc:
-                    logger.warning("PortAudio write failed, attempting stream reinit: %s", write_exc)
-                    if not self._recover_stream():
-                        return
-                    try:
-                        self._write_pcm(buf[:aligned_len])
-                    except Exception:
-                        pass
-            pcm_leftover = buf[aligned_len:] if aligned_len < len(buf) else b""
+                    self._write_pcm(aligned)
+                except Exception:
+                    pass
 
     def _playback_worker(self) -> None:
         """Single consumer: play audio segments from the queue in order."""
