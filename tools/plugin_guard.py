@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
 """Plugin Guard — security scanner for externally-installed plugins.
 
-Reuses the ``tools/skills_guard.py`` static-analysis engine for
-``hermes plugins install`` / ``update``, which otherwise clone and execute
-arbitrary Git repositories unscanned.
-
-Plugins run Python in-process (more dangerous than skills) but are *expected*
-to read their own API keys from env vars, call provider HTTP APIs and spawn
-subprocesses, so the raw skill patterns would flag every legitimate provider
-plugin. Hence: full pattern set on docs/config files (where prompt-injection
-lives); the "reads own env secret" / "HTTP call with key" family is exempt on
-*code* files while genuinely malicious signals stay; plugin-sized structural
-limits; VCS/venv noise skipped.
-
-Verdict → install policy: ``safe`` installs; ``caution`` requires explicit
-confirmation (prompt, ``--force``, or caller callback); ``dangerous`` is
+Reuses the ``tools/skills_guard.py`` engine for ``hermes plugins install``/``update``.
+Plugins run Python in-process but are *expected* to read their own env keys, call
+provider HTTP APIs and spawn subprocesses, so: full pattern set on docs/config files
+(where prompt-injection lives); the "reads own secret"/"HTTP call with key" family is
+exempt on *code* files; plugin-sized structural limits; VCS/venv noise skipped.
+Verdict policy: ``safe`` installs; ``caution`` needs confirmation; ``dangerous`` is
 blocked and ``--force`` does NOT override.
 """
 
@@ -41,14 +33,12 @@ EXCLUDED_DIRS = {
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
 }
 
-# Code files, where "reads an env secret" / "HTTP call with a key variable"
-# is the NORMAL, documented plugin pattern (requires_env).
-CODE_FILE_EXTENSIONS = {
-    ".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php",
-}
+# Code files, where "reads an env secret" / "HTTP call with a key" is the normal
+# documented plugin pattern (requires_env).
+CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php"}
 
-# skills_guard pattern ids exempt on code files (every legitimate provider
-# plugin exhibits them); they still apply in full to docs/config files.
+# skills_guard pattern ids exempt on code files (every legitimate provider plugin
+# exhibits them); they still apply in full to docs/config files.
 CODE_EXEMPT_PATTERN_IDS = {
     "python_environ_get_secret",
     "python_getenv_secret",
@@ -60,24 +50,22 @@ CODE_EXEMPT_PATTERN_IDS = {
     "env_exfil_fetch",
     "env_exfil_curl",
     "env_exfil_wget",
-    # Agent-facing instruction patterns are meaningless inside code
-    # (docstrings/comments about prompts trip them constantly).
+    # Agent-facing instruction patterns are meaningless inside code (docstrings
+    # about prompts trip them constantly).
     "context_exfil",
     "send_to_url",
     "fake_policy",
-    # Plugins legitimately write their own settings into config.yaml during
-    # post_setup, and encode credentials (e.g. HTTP Basic auth) with base64.
+    # Plugins legitimately write their settings into config.yaml during post_setup
+    # and base64-encode credentials (HTTP Basic auth).
     "agent_config_mod",
     "agent_config_contract",
     "encoded_exfil",
 }
 
-# Severity remaps for plugins. A bundled binary is warn-tier (plugin repos
-# occasionally vendor one legitimately; skills never should). A mere
-# ``~/.hermes/.env`` reference is the DOCUMENTED way plugin READMEs tell users
-# where keys go — informational; actually READING it still trips
-# ``read_secrets_file`` (critical). ``curl | sh`` install instructions are
-# common in READMEs: caution, not an unoverridable block.
+# Plugin severity remaps: a bundled binary is warn-tier (repos occasionally vendor
+# one legitimately); a mere ``~/.hermes/.env`` mention is how READMEs tell users where
+# keys go (READING it still trips ``read_secrets_file``, critical); ``curl | sh``
+# install instructions are common in READMEs — caution, not an unoverridable block.
 SEVERITY_REMAP = {
     "binary_file": "high",
     "hermes_env_access": "medium",
@@ -169,11 +157,7 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
-    """Scan a plugin directory (typically the temp clone) for security threats.
-
-    Returns a ScanResult with verdict ``safe`` | ``caution`` | ``dangerous``;
-    every externally installed plugin is ``community`` trust.
-    """
+    """Scan a plugin directory (typically the temp clone); every external plugin is ``community`` trust."""
     all_findings: List[Finding] = []
 
     if plugin_dir.is_dir():
@@ -205,15 +189,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     return result
 
 
-def should_allow_plugin_install(
-    result: ScanResult,
-    force: bool = False,
-) -> Tuple[Optional[bool], str]:
-    """Map a plugin scan verdict to ``(allowed, reason)``.
-
-    ``True`` installs, ``None`` needs explicit confirmation (caution), ``False``
-    is blocked — ``force`` never overrides ``dangerous``.
-    """
+def should_allow_plugin_install(result: ScanResult, force: bool = False) -> Tuple[Optional[bool], str]:
+    """Map a verdict to ``(allowed, reason)``: True installs, None needs confirmation, False is blocked."""
     n = len(result.findings)
     if result.verdict == "safe":
         return True, "Allowed (clean scan)"
