@@ -4,6 +4,7 @@ per-model usage rows, and billing-route columns. Writer thread state lives on th
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import threading
 import time
@@ -91,16 +92,13 @@ class SessionUsageMixin:
         self.flush_token_counts()
 
         def _do(conn):
-            conn.execute(
-                """UPDATE sessions SET
+            conn.execute("""UPDATE sessions SET
                    billing_provider = ?,
                    billing_base_url = ?,
                    billing_mode = COALESCE(?, billing_mode),
                    system_prompt = NULL,
                    system_prompt_hash = NULL
-                   WHERE id = ?""",
-                (provider, base_url, billing_mode, session_id),
-            )
+                   WHERE id = ?""", (provider, base_url, billing_mode, session_id))
             self._delete_unreferenced_system_prompts(conn)
         self._execute_write(_do)
 
@@ -217,7 +215,7 @@ class SessionUsageMixin:
         for session_id, kwargs in batch:
             key = None
             if not kwargs.get("absolute"):
-                key = (session_id,) + tuple(kwargs.get(f) for f in self._TOKEN_DELTA_ROUTE_FIELDS)
+                key = (session_id, *(kwargs.get(f) for f in self._TOKEN_DELTA_ROUTE_FIELDS))
             if groups and key is not None and groups[-1][0] == key:
                 merged = groups[-1][2]
                 for f in self._TOKEN_DELTA_SUM_FIELDS:
@@ -268,10 +266,8 @@ class SessionUsageMixin:
             self._apply_claimed_batch(batch)
 
     def _drain_token_queue_at_exit(self) -> None:
-        try:
+        with contextlib.suppress(Exception):  # never fatal at interpreter shutdown
             self._stop_token_writer()
-        except Exception:
-            pass  # never fatal at interpreter shutdown
 
     def update_token_counts(
         self, session_id: str, input_tokens: int=0, output_tokens: int=0, model: str=None, cache_read_tokens: int=0,
@@ -288,10 +284,8 @@ class SessionUsageMixin:
         # locking, and the UPDATE would silently affect 0 rows.
         self._insert_session_row(session_id, "unknown", model=model)
         sql = _TOKEN_UPDATE_ABSOLUTE_SQL if absolute else _TOKEN_UPDATE_DELTA_SQL
-        has_usage = bool(
-            input_tokens or output_tokens or cache_read_tokens
-            or cache_write_tokens or reasoning_tokens or api_call_count or estimated_cost_usd
-        )
+        has_usage = bool(input_tokens or output_tokens or cache_read_tokens or cache_write_tokens or reasoning_tokens
+                         or api_call_count or estimated_cost_usd)
         has_accounted_usage = bool(has_usage or actual_cost_usd)
         params = (
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
@@ -320,13 +314,10 @@ class SessionUsageMixin:
                 and (existing.get("model") != model or existing.get("billing_provider") != billing_provider)
             )
             if first_accounted_route:
-                conn.execute(
-                    """UPDATE sessions
+                conn.execute("""UPDATE sessions
                        SET model = ?, billing_provider = ?,
                        billing_base_url = ?, billing_mode = ?
-                       WHERE id = ?""",
-                    (model, billing_provider, billing_base_url, billing_mode, session_id),
-                )
+                       WHERE id = ?""", (model, billing_provider, billing_base_url, billing_mode, session_id))
             conn.execute(sql, params)
             if record_model_usage:
                 self._record_model_usage(conn, session_id, **usage)
@@ -350,16 +341,12 @@ class SessionUsageMixin:
         sess = dict(row) if (row is not None and not task) else {}
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
         now = time.time()
-        conn.execute(
-            _MODEL_USAGE_UPSERT_SQL,
-            (
-                session_id, model or sess.get("model") or "unknown",
-                billing_provider or sess.get("billing_provider") or "",
-                billing_base_url or sess.get("billing_base_url") or "",
-                billing_mode or sess.get("billing_mode") or "", task or "",
-                api_call_count or 0, *counts,
-                float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0),
-                cost_status, cost_source, now, now))
+        conn.execute(_MODEL_USAGE_UPSERT_SQL, (
+            session_id, model or sess.get("model") or "unknown",
+            billing_provider or sess.get("billing_provider") or "",
+            billing_base_url or sess.get("billing_base_url") or "",
+            billing_mode or sess.get("billing_mode") or "", task or "", api_call_count or 0, *counts,
+            float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0), cost_status, cost_source, now, now))
 
     def record_auxiliary_usage(
         self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
@@ -386,13 +373,10 @@ class SessionUsageMixin:
         params: List[Any] = [min_message_count]
         if not include_archived:
             where.append("COALESCE(archived, 0) = 0")
-        row = self._read_one(
-            f"""
+        row = self._read_one(f"""
             SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0),
                    COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd, 0)), 0)
               FROM sessions
              WHERE {' AND '.join(where)}
-            """,
-            params,
-        )
+            """, params)
         return {"tokens": int(row[0] or 0), "cost_usd": float(row[1] or 0.0)}
