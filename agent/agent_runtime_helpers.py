@@ -1370,6 +1370,22 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
 
 
 
+def _api_error_debug_info(error: Exception) -> Dict[str, Any]:
+    info: Dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
+    for attr_name in ("status_code", "request_id", "code", "param", "type", "body"):
+        attr_value = getattr(error, attr_name, None)
+        if attr_value is not None:
+            info[attr_name] = attr_value
+    response_obj = getattr(error, "response", None)
+    if response_obj is not None:
+        try:
+            info["response_status"] = getattr(response_obj, "status_code", None)
+            info["response_text"] = response_obj.text
+        except Exception as e:
+            _ra().logger.debug("Could not extract error response details: %s", e)
+    return info
+
+
 def dump_api_request_debug(
     agent,
     api_kwargs: Dict[str, Any],
@@ -1382,20 +1398,19 @@ def dump_api_request_debug(
         body = copy.deepcopy(api_kwargs)
         body.pop("timeout", None)
         body = {k: v for k, v in body.items() if v is not None}
-
         api_key = None
         try:
             api_key = getattr(agent.client, "api_key", None)
         except Exception as e:
             _ra().logger.debug("Could not extract API key for debug dump: %s", e)
-
+        endpoint = "/responses" if agent.api_mode == "codex_responses" else "/chat/completions"
         dump_payload: Dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
             "session_id": agent.session_id,
             "reason": reason,
             "request": {
                 "method": "POST",
-                "url": f"{agent.base_url.rstrip('/')}{'/responses' if agent.api_mode == 'codex_responses' else '/chat/completions'}",
+                "url": f"{agent.base_url.rstrip('/')}{endpoint}",
                 "headers": {
                     "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
                     "Content-Type": "application/json",
@@ -1403,49 +1418,22 @@ def dump_api_request_debug(
                 "body": body,
             },
         }
-
         if error is not None:
-            error_info: Dict[str, Any] = {
-                "type": type(error).__name__,
-                "message": str(error),
-            }
-            for attr_name in ("status_code", "request_id", "code", "param", "type"):
-                attr_value = getattr(error, attr_name, None)
-                if attr_value is not None:
-                    error_info[attr_name] = attr_value
-
-            body_attr = getattr(error, "body", None)
-            if body_attr is not None:
-                error_info["body"] = body_attr
-
-            response_obj = getattr(error, "response", None)
-            if response_obj is not None:
-                try:
-                    error_info["response_status"] = getattr(response_obj, "status_code", None)
-                    error_info["response_text"] = response_obj.text
-                except Exception as e:
-                    _ra().logger.debug("Could not extract error response details: %s", e)
-
-            dump_payload["error"] = error_info
-
+            dump_payload["error"] = _api_error_debug_info(error)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header)
         # so a "../"-shaped ID cannot write outside logs_dir.
         safe_sid = _ra()._safe_session_filename_component(agent.session_id)
         dump_file = agent.logs_dir / f"request_dump_{safe_sid}_{timestamp}.json"
-
         # Redact secrets first: this fires unconditionally on API errors and captures the full
         # request body, so context-embedded secrets would otherwise land in cleartext on disk.
         from agent.redact import redact_sensitive_text
         _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
         _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
         atomic_json_write(dump_file, _redacted_payload, default=str)
-
         agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
-
         if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
             print(json.dumps(_redacted_payload, ensure_ascii=False, indent=2, default=str))
-
         return dump_file
     except Exception as dump_error:
         if agent.verbose_logging:
@@ -1814,16 +1802,15 @@ def anthropic_prompt_cache_policy(
 def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
     """Ask the registered ProviderProfile for a custom client, if any.
 
-    Resolves by provider name first, then by the ``base_url`` scheme prefix so a
-    runtime configured only by URL (``acp://…``) still reaches its profile.
-    A profile that raises is logged and skipped: a third-party plugin must not
-    be able to take the turn down, it can only fail to provide a client.
+    Resolves by provider name first, then by the ``base_url`` scheme prefix so a runtime
+    configured only by URL (``acp://…``) still reaches its profile. A profile that raises
+    is logged and skipped: a third-party plugin must not be able to take the turn down,
+    it can only fail to provide a client.
     """
     try:
         from providers import get_provider_profile
     except Exception:
         return None
-
     profile = None
     provider_name = (getattr(agent, "provider", "") or "").strip()
     if provider_name:
@@ -1837,13 +1824,11 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
             profile = _profile_for_base_url(base_url)
     if profile is None:
         return None
-
     try:
         return profile.create_client(**client_kwargs)
     except Exception:
         _ra().logger.warning(
-            "Provider profile %r failed to create a client; falling back to the "
-            "standard client path",
+            "Provider profile %r failed to create a client; falling back to the standard client path",
             getattr(profile, "name", provider_name) or "?",
             exc_info=True,
         )
@@ -1851,104 +1836,29 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
 
 
 def _profile_for_base_url(base_url: str) -> Any | None:
-    """Find a registered profile whose own base_url matches ``base_url``.
+    """Registered profile whose own base_url is a prefix of ``base_url`` (used when the provider name did not resolve).
 
-    Only used when the provider name did not resolve. Matches on exact base_url
-    so a non-HTTP scheme (``acp://copilot``) routes to its profile even when the
-    caller passed no provider name.
+    Prefix match, not equality: the replaced copilot-acp branch keyed on
+    ``startswith("acp://copilot")``, so a base_url carrying a path or a user override
+    under the same root must still resolve.
     """
     try:
         from providers import list_providers
-    except Exception:
-        return None
-    target = base_url.rstrip("/").lower()
-    try:
         candidates = list_providers()
     except Exception:
         return None
+    target = base_url.rstrip("/").lower()
     for candidate in candidates or []:
         own = str(getattr(candidate, "base_url", "") or "").rstrip("/").lower()
-        # Prefix match, not equality: the replaced copilot-acp branch keyed on
-        # ``startswith("acp://copilot")``, so a base_url carrying a path or a
-        # user override under the same root must still resolve.
         if own and (target == own or target.startswith(own + "/")):
             return candidate
     return None
 
 
-def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
-    from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
-    from agent.ssl_verify import resolve_httpx_verify
-    # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place
-    # mutation leaks into later requests (#10933: a torn-down httpx transport got reused).
-    client_kwargs = dict(client_kwargs)
-    # The MoA virtual provider has no OpenAI wire endpoint; the facade *is* the client.
-    # Rebuild the facade, never a native client (#78382 TypeError, #53802 relay re-wire).
-    if (getattr(agent, "provider", "") or "").strip().lower() == "moa":
-        from agent.moa_loop import build_moa_facade
-        return build_moa_facade(agent, getattr(agent, "model", None) or "default")
-    ssl_ca_cert = client_kwargs.pop("ssl_ca_cert", None)
-    ssl_verify_cfg = client_kwargs.pop("ssl_verify", None)
-    httpx_verify = resolve_httpx_verify(ca_bundle=ssl_ca_cert, ssl_verify=ssl_verify_cfg)
-    _validate_proxy_env_urls()
-    _validate_base_url(client_kwargs.get("base_url"))
-    # ── Provider-supplied client (registration seam) ──────────────────────
-    # A provider whose wire protocol is not OpenAI-over-HTTP supplies its own
-    # client from its ProviderProfile.create_client(). Consulted before the
-    # built-in ladder so a profile registered from ~/.hermes/plugins/ or a pip
-    # entry point can ship a transport without editing this function — that is
-    # what makes an out-of-tree ACP provider possible at all. Returning None
-    # (the default) falls through to the paths below, so every existing
-    # provider is unaffected.
-    provider_client = _provider_supplied_client(agent, client_kwargs)
-    if provider_client is not None:
-        _ra().logger.info(
-            "%s client created from provider profile (%s, shared=%s) %s",
-            agent.provider,
-            reason,
-            shared,
-            agent._client_log_context(),
-        )
-        return provider_client
-    if agent.provider == "gemini":
-        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-
-        base_url = str(client_kwargs.get("base_url", "") or "")
-        if is_native_gemini_base_url(base_url):
-            safe_kwargs = {
-                k: v for k, v in client_kwargs.items()
-                if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
-            }
-            if "http_client" not in safe_kwargs:
-                keepalive_http = agent._build_keepalive_http_client(
-                    base_url, verify=httpx_verify,
-                )
-                if keepalive_http is not None:
-                    safe_kwargs["http_client"] = keepalive_http
-            client = GeminiNativeClient(**safe_kwargs)
-            _ra().logger.info(
-                "Gemini native client created (%s, shared=%s) %s",
-                reason,
-                shared,
-                agent._client_log_context(),
-            )
-            return client
-    # TCP keepalives so dead provider connections are detected (~60s) instead of hanging in
-    # CLOSE-WAIT (#10324). Injected into the local copy only (#10933), so each client gets its
-    # own httpx.Client; pinned by tests/run_agent/test_create_openai_client_reuse.py and
-    # tests/run_agent/test_sequential_chats_live.py.
-    if "http_client" not in client_kwargs:
-        keepalive_http = agent._build_keepalive_http_client(
-            client_kwargs.get("base_url", ""), verify=httpx_verify,
-        )
-        if keepalive_http is not None:
-            client_kwargs["http_client"] = keepalive_http
-    # Retries belong to the outer conversation loop (honors Retry-After); SDK retries would
-    # double-retry inside it (#26293). auxiliary_client keeps SDK retries as it isn't wrapped.
-    client_kwargs.setdefault("max_retries", 0)
-    # Defense-in-depth: primary_recovery/restore_primary rebuild from a _primary_runtime
-    # snapshot without re-running header wiring; missing Copilot-Integration-Id causes
-    # model_not_available_for_integrator 400s. Only ADD missing keys, never override.
+def _ensure_copilot_headers(client_kwargs: dict) -> None:
+    """Defense-in-depth: recovery/restore rebuild from a snapshot without re-running header
+    wiring; a missing Copilot-Integration-Id causes model_not_available_for_integrator 400s.
+    Only ADD missing keys, never override."""
     try:
         if base_url_host_matches(str(client_kwargs.get("base_url", "")), "githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
@@ -1960,17 +1870,81 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             client_kwargs["default_headers"] = existing
     except Exception:
         _ra().logger.debug("Copilot default-header guard skipped", exc_info=True)
+
+
+def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: str, shared: bool):
+    """Native Gemini client when the base_url is the Gemini API, else None."""
+    from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+
+    base_url = str(client_kwargs.get("base_url", "") or "")
+    if not is_native_gemini_base_url(base_url):
+        return None
+    safe_kwargs = {
+        k: v for k, v in client_kwargs.items()
+        if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
+    }
+    if "http_client" not in safe_kwargs:
+        keepalive_http = agent._build_keepalive_http_client(base_url, verify=httpx_verify)
+        if keepalive_http is not None:
+            safe_kwargs["http_client"] = keepalive_http
+    client = GeminiNativeClient(**safe_kwargs)
+    _ra().logger.info(
+        "Gemini native client created (%s, shared=%s) %s", reason, shared, agent._client_log_context()
+    )
+    return client
+
+
+def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
+    from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
+    from agent.ssl_verify import resolve_httpx_verify
+    # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place
+    # mutation leaks into later requests (a torn-down httpx transport got reused).
+    client_kwargs = dict(client_kwargs)
+    # The MoA virtual provider has no OpenAI wire endpoint; the facade *is* the client.
+    # Rebuild the facade, never a native client (TypeError; relay re-wire).
+    if (getattr(agent, "provider", "") or "").strip().lower() == "moa":
+        from agent.moa_loop import build_moa_facade
+        return build_moa_facade(agent, getattr(agent, "model", None) or "default")
+    ssl_ca_cert = client_kwargs.pop("ssl_ca_cert", None)
+    ssl_verify_cfg = client_kwargs.pop("ssl_verify", None)
+    httpx_verify = resolve_httpx_verify(ca_bundle=ssl_ca_cert, ssl_verify=ssl_verify_cfg)
+    _validate_proxy_env_urls()
+    _validate_base_url(client_kwargs.get("base_url"))
+    # Provider-supplied client (registration seam): a provider whose wire protocol is not
+    # OpenAI-over-HTTP supplies its own client from ProviderProfile.create_client(). Consulted
+    # before the built-in ladder so a profile registered from ~/.hermes/plugins/ or a pip entry
+    # point can ship a transport without editing this function (what makes an out-of-tree ACP
+    # provider possible). None (the default) falls through, so existing providers are unaffected.
+    provider_client = _provider_supplied_client(agent, client_kwargs)
+    if provider_client is not None:
+        _ra().logger.info(
+            "%s client created from provider profile (%s, shared=%s) %s",
+            agent.provider, reason, shared, agent._client_log_context(),
+        )
+        return provider_client
+    if agent.provider == "gemini":
+        client = _gemini_native_client(agent, client_kwargs, httpx_verify, reason=reason, shared=shared)
+        if client is not None:
+            return client
+    # TCP keepalives so dead provider connections are detected (~60s) instead of hanging in
+    # CLOSE-WAIT. Injected into the local copy only, so each client gets its own httpx.Client;
+    # pinned by tests/run_agent/test_create_openai_client_reuse.py and test_sequential_chats_live.py.
+    if "http_client" not in client_kwargs:
+        keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""), verify=httpx_verify)
+        if keepalive_http is not None:
+            client_kwargs["http_client"] = keepalive_http
+    # Retries belong to the outer conversation loop (honors Retry-After); SDK retries would
+    # double-retry inside it. auxiliary_client keeps SDK retries as it isn't wrapped.
+    client_kwargs.setdefault("max_retries", 0)
+    _ensure_copilot_headers(client_kwargs)
     # OpenCode Free is served anonymously: any unrecognized bearer is a 401, so an empty
     # Authorization default_header overrides the SDK's "Bearer <api_key>".
     if agent.provider == "opencode-free":
         from hermes_cli.models import opencode_zen_free_headers
 
-        _existing = dict(client_kwargs.get("default_headers") or {})
-        _existing.update(opencode_zen_free_headers())
-        client_kwargs["default_headers"] = _existing
-
-    # All primary construction and recovery paths must identify Hermes to the
-    # official Codex endpoint, including snapshots with custom header overrides.
+        client_kwargs["default_headers"] = {**(client_kwargs.get("default_headers") or {}), **opencode_zen_free_headers()}
+    # All primary construction and recovery paths must identify Hermes to the official Codex
+    # endpoint, including snapshots with custom header overrides.
     from agent.codex_headers import apply_required_codex_headers
 
     apply_required_codex_headers(
@@ -1980,12 +1954,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     # Module-level `OpenAI` is resolved lazily via __getattr__; tests patch `run_agent.OpenAI`.
     client = _ra().OpenAI(**client_kwargs)
-    _ra().logger.info(
-        "OpenAI client created (%s, shared=%s) %s",
-        reason,
-        shared,
-        agent._client_log_context(),
-    )
+    _ra().logger.info("OpenAI client created (%s, shared=%s) %s", reason, shared, agent._client_log_context())
     return client
 
 
@@ -2443,6 +2412,23 @@ def switch_model(
     _persist_switch_billing_route(agent)
 
 
+def _pre_tool_block_message(agent, function_name, function_args, effective_task_id, tool_call_id, middleware_trace):
+    """Plugin pre-tool-call hook verdict: ``(block_message, function_args)``; failures never block."""
+    try:
+        from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+        block_message, modified_args = _dispatch_pre_tool_call_hooks(
+            function_name, function_args, task_id=effective_task_id or "",
+            session_id=getattr(agent, "session_id", "") or "",
+            tool_call_id=tool_call_id or "",
+            turn_id=getattr(agent, "_current_turn_id", "") or "",
+            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+            middleware_trace=list(middleware_trace),
+        )
+        return block_message, (modified_args if modified_args is not None else function_args)
+    except Exception:
+        return None, function_args
+
+
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
                  pre_tool_block_checked: bool = False,
@@ -2463,39 +2449,23 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
     if not isinstance(function_args, dict):
         function_args = {}
-
+    hook_ids = tool_hook_ids(agent, effective_task_id, tool_call_id)
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
     try:
         from hermes_cli.middleware import apply_tool_request_middleware
 
         if not skip_tool_request_middleware:
-            _tool_request_mw = apply_tool_request_middleware(
-                function_name,
-                function_args,
-                **tool_hook_ids(agent, effective_task_id, tool_call_id),
-            )
+            _tool_request_mw = apply_tool_request_middleware(function_name, function_args, **hook_ids)
             function_args = _tool_request_mw.payload
             _tool_middleware_trace = _tool_request_mw.trace
     except Exception as _mw_err:
         logger.debug("tool_request middleware error: %s", _mw_err)
 
-    # Check plugin hooks for a block or approval directive before executing.
     block_message: Optional[str] = None
     if not pre_tool_block_checked:
-        try:
-            from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
-            block_message, modified_args = _dispatch_pre_tool_call_hooks(
-                function_name, function_args, task_id=effective_task_id or "",
-                session_id=getattr(agent, "session_id", "") or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=getattr(agent, "_current_turn_id", "") or "",
-                api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                middleware_trace=list(_tool_middleware_trace),
-            )
-            if modified_args is not None:
-                function_args = modified_args
-        except Exception:
-            block_message = None
+        block_message, function_args = _pre_tool_block_message(
+            agent, function_name, function_args, effective_task_id, tool_call_id, _tool_middleware_trace
+        )
     if block_message is not None:
         result = json.dumps({"error": block_message}, ensure_ascii=False)
         emit_terminal_post_tool_call(
@@ -2513,30 +2483,25 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         return result
 
     tool_start_time = time.monotonic()
-
-    def _finish_agent_tool(result: Any, observed_args: Optional[dict] = None) -> Any:
-        emit_terminal_post_tool_call(
-            agent,
-            function_name=function_name,
-            function_args=observed_args if isinstance(observed_args, dict) else function_args,
-            result=result,
-            effective_task_id=effective_task_id,
-            tool_call_id=tool_call_id,
-            duration_ms=int((time.monotonic() - tool_start_time) * 1000),
-            middleware_trace=_tool_middleware_trace,
-        )
-        return result
-
     inline_executor = resolve_invoke_tool_executor(agent, function_name)
     if inline_executor is not None:
         inline_ctx = InlineToolContext(
-            effective_task_id=effective_task_id,
-            tool_call_id=tool_call_id,
-            messages=messages,
+            effective_task_id=effective_task_id, tool_call_id=tool_call_id, messages=messages
         )
 
         def _execute(next_args: dict) -> Any:
-            return _finish_agent_tool(inline_executor(agent, next_args, inline_ctx), next_args)
+            result = inline_executor(agent, next_args, inline_ctx)
+            emit_terminal_post_tool_call(
+                agent,
+                function_name=function_name,
+                function_args=next_args if isinstance(next_args, dict) else function_args,
+                result=result,
+                effective_task_id=effective_task_id,
+                tool_call_id=tool_call_id,
+                duration_ms=int((time.monotonic() - tool_start_time) * 1000),
+                middleware_trace=_tool_middleware_trace,
+            )
+            return result
     else:
         def _execute(next_args: dict) -> Any:
             dispatch_kwargs = dict(
@@ -2553,16 +2518,10 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
-            return _ra().handle_function_call(
-                function_name,
-                next_args,
-                effective_task_id,
-                **dispatch_kwargs,
-            )
+            return _ra().handle_function_call(function_name, next_args, effective_task_id, **dispatch_kwargs)
 
     if skip_tool_execution_middleware:
         return _execute(function_args)
-
     from hermes_cli.middleware import run_tool_execution_middleware
 
     return run_tool_execution_middleware(
@@ -2570,7 +2529,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         function_args,
         lambda next_args: _execute(next_args if isinstance(next_args, dict) else function_args),
         original_args=function_args,
-        **tool_hook_ids(agent, effective_task_id, tool_call_id),
+        **hook_ids,
     )
 
 
@@ -2578,19 +2537,16 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 def repair_tool_call(agent, tool_name: str) -> str | None:
     """Repair a mismatched tool name (case, separators, CamelCase, ``_tool`` suffixes, then fuzzy match) before aborting.
 
-    Suffix stripping is applied twice so ``TodoTool_tool`` reduces fully (#14784).
+    Suffix stripping is applied twice so ``TodoTool_tool`` reduces fully.
     Returns the repaired name if in valid_tool_names, else None.
     """
-    import re
     from difflib import get_close_matches
 
     if not tool_name:
         return None
-
-    # VolcEngine api/plan (#33007) leaks XML attribute fragments into tool_use.name
+    # VolcEngine api/plan leaks XML attribute fragments into tool_use.name
     # (`terminal" parameter="command" ...`); trim at the first quote/angle bracket.
-    # Do NOT split on whitespace: "write file" must reach ``_norm`` -> ``write_file``
-    # (test_space_to_underscore in tests/run_agent/test_repair_tool_call_name.py).
+    # Do NOT split on whitespace: "write file" must reach ``_norm`` -> ``write_file``.
     for _xml_sep in ('"', "'", "<", ">"):
         _idx = tool_name.find(_xml_sep)
         if _idx > 0:
@@ -2618,28 +2574,19 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     normalized = _norm(tool_name)
     if normalized in agent.valid_tool_names:
         return normalized
-
     cands: set[str] = {tool_name, lowered, normalized, _camel_snake(tool_name)}
-    # Strip trailing tool-suffix up to twice (TodoTool_tool needs it).
-    for _ in range(2):
+    for _ in range(2):  # strip trailing tool-suffix up to twice (TodoTool_tool needs it)
         extra: set[str] = set()
         for c in cands:
             stripped = _strip_tool_suffix(c)
             if stripped:
-                extra.add(stripped)
-                extra.add(_norm(stripped))
-                extra.add(_camel_snake(stripped))
+                extra.update((stripped, _norm(stripped), _camel_snake(stripped)))
         cands |= extra
-
     for c in cands:
         if c and c in agent.valid_tool_names:
             return c
-
     matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)
-    if matches:
-        return matches[0]
-
-    return None
+    return matches[0] if matches else None
 
 
 # Placeholder for an empty non-final message the provider would reject. Kept identical to
@@ -3192,6 +3139,17 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 
+_ACK_FUTURE_RE = re.compile(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b")
+_ACK_ACTION_MARKERS = (
+    "look into", "look at", "inspect", "scan", "check", "analyz", "review", "explore", "read", "open",
+    "run", "test", "fix", "debug", "search", "find", "walkthrough", "report back", "summarize",
+)
+_ACK_WORKSPACE_MARKERS = (
+    "directory", "current directory", "current dir", "cwd", "repo", "repository", "codebase",
+    "project", "folder", "filesystem", "file tree", "files", "path",
+)
+
+
 def looks_like_codex_intermediate_ack(
     agent,
     user_message: Any,
@@ -3201,84 +3159,33 @@ def looks_like_codex_intermediate_ack(
 ) -> bool:
     """Detect a planning/ack message that should continue instead of ending the turn.
 
-    ``require_workspace=False`` (user opted into ``agent.intent_ack_continuation``
-    for all api_modes) drops the filesystem/repo reference requirement; the
-    future-ack + short-content + no-prior-tools + action-verb checks always apply.
+    ``require_workspace=False`` (user opted into ``agent.intent_ack_continuation`` for all
+    api_modes) drops the filesystem/repo reference requirement; the future-ack +
+    short-content + no-prior-tools + action-verb checks always apply.
     """
     if any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages):
         return False
-
     assistant_text = agent._strip_think_blocks(assistant_content or "").strip().lower()
-    if not assistant_text:
+    if not assistant_text or len(assistant_text) > 1200:
         return False
-    if len(assistant_text) > 1200:
+    if not _ACK_FUTURE_RE.search(assistant_text):
         return False
-
-    has_future_ack = bool(
-        re.search(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b", assistant_text)
-    )
-    if not has_future_ack:
+    if not any(marker in assistant_text for marker in _ACK_ACTION_MARKERS):
         return False
-
-    action_markers = (
-        "look into",
-        "look at",
-        "inspect",
-        "scan",
-        "check",
-        "analyz",
-        "review",
-        "explore",
-        "read",
-        "open",
-        "run",
-        "test",
-        "fix",
-        "debug",
-        "search",
-        "find",
-        "walkthrough",
-        "report back",
-        "summarize",
-    )
-    workspace_markers = (
-        "directory",
-        "current directory",
-        "current dir",
-        "cwd",
-        "repo",
-        "repository",
-        "codebase",
-        "project",
-        "folder",
-        "filesystem",
-        "file tree",
-        "files",
-        "path",
-    )
-
-    assistant_mentions_action = any(marker in assistant_text for marker in action_markers)
-    if not assistant_mentions_action:
-        return False
-
     # Opted-in (all-api_mode) path: future-ack + action verb + no prior tool call suffices.
     if not require_workspace:
         return True
-
     # ``user_message`` may be a multi-part content list (vision via the OpenAI-compat
     # server); a list survives ``or ""`` and ``.strip()`` raises, so flatten first.
     from agent.codex_responses_adapter import _summarize_user_message_for_log
 
     user_text = _summarize_user_message_for_log(user_message).strip().lower()
-    user_targets_workspace = (
-        any(marker in user_text for marker in workspace_markers)
+    return (
+        any(marker in user_text for marker in _ACK_WORKSPACE_MARKERS)
         or "~/" in user_text
         or "/" in user_text
+        or any(marker in assistant_text for marker in _ACK_WORKSPACE_MARKERS)
     )
-    assistant_targets_workspace = any(
-        marker in assistant_text for marker in workspace_markers
-    )
-    return user_targets_workspace or assistant_targets_workspace
 
 
 # Narrow "trailing continue-intent" detector for the stall guard (agent.stall_guards):
@@ -3302,23 +3209,25 @@ def trailing_continue_intent(text: str) -> bool:
     return bool(_TRAILING_CONTINUE_INTENT_RE.search(t[-160:]))
 
 
+_INTENT_ACK_ON = {"true", "always", "yes", "on"}
+_INTENT_ACK_OFF = {"false", "never", "no", "off"}
+
+
 def intent_ack_continuation_mode(agent) -> str:
     """Resolve the intent-ack continuation mode: ``"off"``, ``"codex_only"`` (workspace acks on codex_responses), or ``"all"``.
 
-    Mirrors ``agent.tool_use_enforcement``: ``"auto"`` -> codex_only; true-ish
-    values -> all; false-ish -> off; ``list`` -> all when a substring matches
-    the active model name, else off.
+    Mirrors ``agent.tool_use_enforcement``: ``"auto"`` -> codex_only; true-ish values -> all;
+    false-ish -> off; ``list`` -> all when a substring matches the active model name, else off.
     """
     mode = getattr(agent, "_intent_ack_continuation", "auto")
-
-    if mode is True or (isinstance(mode, str) and mode.lower() in {"true", "always", "yes", "on"}):
+    if mode is True or (isinstance(mode, str) and mode.lower() in _INTENT_ACK_ON):
         return "all"
-    if mode is False or (isinstance(mode, str) and mode.lower() in {"false", "never", "no", "off"}):
+    if mode is False or (isinstance(mode, str) and mode.lower() in _INTENT_ACK_OFF):
         return "off"
     if isinstance(mode, list):
         model_lower = (agent.model or "").lower()
         return "all" if any(p.lower() in model_lower for p in mode if isinstance(p, str)) else "off"
-    # "auto" or any unrecognised value — historical codex-only behavior.
+    # "auto" or any unrecognised value: historical codex-only behavior.
     return "codex_only" if agent.api_mode == "codex_responses" else "off"
 
 
@@ -3349,19 +3258,10 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
 def _iter_httpx_pool_objects(http_client: Any):
     """Yield httpcore pool objects reachable from an httpx client, including mounted transports.
 
-    Keepalive (#10324) and proxy configs put live connections on ``client._mounts``;
-    walking only ``_transport`` made ``force_close_tcp_sockets`` miss them (#72975).
+    Keepalive and proxy configs put live connections on ``client._mounts``; walking
+    only ``_transport`` made ``force_close_tcp_sockets`` miss them.
     """
     seen_pools: set[int] = set()
-
-    def _emit(pool: Any):
-        if pool is None:
-            return
-        marker = id(pool)
-        if marker in seen_pools:
-            return
-        seen_pools.add(marker)
-        yield pool
 
     def _pools_for_transport(transport: Any):
         if transport is None:
@@ -3369,11 +3269,11 @@ def _iter_httpx_pool_objects(http_client: Any):
         # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a
         # ConnectionPool, so ``_connections`` may sit on the transport itself.
         pool = getattr(transport, "_pool", None)
-        if pool is not None:
-            yield from _emit(pool)
-            return
-        if getattr(transport, "_connections", None) is not None:
-            yield from _emit(transport)
+        if pool is None and getattr(transport, "_connections", None) is not None:
+            pool = transport
+        if pool is not None and id(pool) not in seen_pools:
+            seen_pools.add(id(pool))
+            yield pool
 
     try:
         yield from _pools_for_transport(getattr(http_client, "_transport", None))
@@ -3465,35 +3365,32 @@ def _iter_pool_sockets(client: Any):
                 yield sock
 
 
+def _socket_is_dead(sock) -> bool:
+    """Probe socket health with a non-blocking recv peek."""
+    import socket as _socket
+    try:
+        sock.setblocking(False)
+        return sock.recv(1, _socket.MSG_PEEK | _socket.MSG_DONTWAIT) == b""
+    except BlockingIOError:
+        return False  # no data available: socket is healthy
+    except OSError:
+        return True
+    finally:
+        try:
+            sock.setblocking(True)
+        except OSError:
+            pass
+
+
 def cleanup_dead_connections(agent) -> bool:
     """Force-close and rebuild the primary client if its pool has dead sockets (CLOSE-WAIT, errors); returns True if cleaned."""
     client = getattr(agent, "client", None)
     if client is None:
         return False
     try:
-        dead_count = 0
-        for sock in _iter_pool_sockets(client):
-            # Probe socket health with a non-blocking recv peek
-            import socket as _socket
-            try:
-                sock.setblocking(False)
-                data = sock.recv(1, _socket.MSG_PEEK | _socket.MSG_DONTWAIT)
-                if data == b"":
-                    dead_count += 1
-            except BlockingIOError:
-                pass  # No data available — socket is healthy
-            except OSError:
-                dead_count += 1
-            finally:
-                try:
-                    sock.setblocking(True)
-                except OSError:
-                    pass
+        dead_count = sum(1 for sock in _iter_pool_sockets(client) if _socket_is_dead(sock))
         if dead_count > 0:
-            _ra().logger.warning(
-                "Found %d dead connection(s) in client pool — rebuilding client",
-                dead_count,
-            )
+            _ra().logger.warning("Found %d dead connection(s) in client pool — rebuilding client", dead_count)
             agent._replace_primary_openai_client(reason="dead_connection_cleanup")
             return True
     except Exception as exc:
@@ -3578,6 +3475,18 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
 
 
 
+def _requeue_pending_steer(agent, steer_text: str) -> None:
+    """Put drained steer text back so the caller's fallback delivers it as a next-turn user message."""
+    lock = getattr(agent, "_pending_steer_lock", None)
+    if lock is not None:
+        with lock:
+            existing = agent._pending_steer
+            agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+        return
+    existing = getattr(agent, "_pending_steer", None)
+    agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+
+
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
     """Append pending /steer text to the last ``role:"tool"`` message of this batch, marked as user-origin.
 
@@ -3590,29 +3499,22 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     if not steer_text:
         return
     # Skip non-tool messages in the tail in case something else is appended at the boundary.
-    target_idx = None
-    for j in range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1):
-        msg = messages[j]
-        if isinstance(msg, dict) and msg.get("role") == "tool":
-            target_idx = j
-            break
+    target_idx = next(
+        (
+            j for j in range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
+            if isinstance(messages[j], dict) and messages[j].get("role") == "tool"
+        ),
+        None,
+    )
     if target_idx is None:
-        # No tool result in this batch (e.g. all skipped by interrupt): put the steer
-        # back so the caller's fallback delivers it as a next-turn user message.
-        _lock = getattr(agent, "_pending_steer_lock", None)
-        if _lock is not None:
-            with _lock:
-                if agent._pending_steer:
-                    agent._pending_steer = agent._pending_steer + "\n" + steer_text
-                else:
-                    agent._pending_steer = steer_text
-        else:
-            existing = getattr(agent, "_pending_steer", None)
-            agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+        # No tool result in this batch (e.g. all skipped by interrupt).
+        _requeue_pending_steer(agent, steer_text)
         return
     marker = format_steer_marker(steer_text)
     existing_content = messages[target_idx].get("content", "")
-    if not isinstance(existing_content, str):
+    if isinstance(existing_content, str):
+        messages[target_idx]["content"] = existing_content + marker
+    else:
         # Anthropic multimodal content blocks: preserve them and append a text block.
         try:
             blocks = list(existing_content) if existing_content else []
@@ -3621,8 +3523,6 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
         except Exception:
             # Fall back to string replacement if content shape is unexpected.
             messages[target_idx]["content"] = f"{existing_content}{marker}"
-    else:
-        messages[target_idx]["content"] = existing_content + marker
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars): %s",
         len(steer_text),
