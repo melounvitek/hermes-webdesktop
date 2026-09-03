@@ -86,6 +86,12 @@ def _probe(module: str, name: str, default, *args):
         return default
 
 
+class _TTYBuf(StringIO):
+    """StringIO that claims to be a TTY so ``hermes_cli.colors.color()`` still emits ANSI escapes."""
+    def isatty(self) -> bool:
+        return True
+
+
 _FAILED = object()
 
 
@@ -214,6 +220,8 @@ _WORKTREE_SUBCOMMANDS = {
 # Message fields copied verbatim onto a /branch row (plus role / tool_name / api_content).
 _BRANCH_COPY_KEYS = ("content", "tool_calls", "tool_call_id", "reasoning", "reasoning_details",
                      "codex_reasoning_items", "codex_message_items", "timestamp")
+
+_HATCH_PROGRESS = {"compose": "  ┊ composing spritesheet…", "save": "  ┊ saving…"}
 
 # /diff argument -> mode (anything else is a path; --stat/stat is the stat flag).
 _DIFF_MODES = {
@@ -994,10 +1002,9 @@ class CLICommandsMixin:
                 return _cp("  Usage: /copy [number]")
             if idx < 0 or idx >= len(assistant):
                 return _cp(f"  Invalid response number. Use 1-{len(assistant)}.")
-        else:
-            idx = len(assistant) - 1
-            while idx >= 0 and not _assistant_copy_text(assistant[idx].get("content")):
-                idx -= 1
+        else:  # latest response that has copyable text
+            idx = next((i for i in range(len(assistant) - 1, -1, -1)
+                        if _assistant_copy_text(assistant[i].get("content"))), -1)
             if idx < 0:
                 return _cp("  Nothing to copy in assistant responses yet.")
         text = _assistant_copy_text(assistant[idx].get("content"))
@@ -1043,33 +1050,12 @@ class CLICommandsMixin:
         """Handle /tools [list|disable|enable]. Bare shows the tool list; ``list`` shows per-toolset
         status; disable/enable save to config and reset the session so the new tool set takes
         effect cleanly (no prompt-cache breakage mid-conversation)."""
-        from argparse import Namespace
-        from hermes_cli.tools_config import tools_disable_enable_command
-
-        def _run_capture(ns: Namespace) -> None:
-            """Inside the interactive TUI, route the ANSI print() output through _cprint so
-            patch_stdout's StdoutProxy doesn't garble the escapes; standalone/tests call straight
-            through so real stdout / pytest capture works."""
-            if getattr(self, "_app", None) is None:
-                tools_disable_enable_command(ns)
-                return
-            # isatty()=True so color() in hermes_cli/colors.py still emits ANSI escapes.
-            class _TTYBuf(StringIO):
-                def isatty(self) -> bool:
-                    return True
-
-            buf = _TTYBuf()
-            with redirect_stdout(buf):
-                tools_disable_enable_command(ns)
-            for line in buf.getvalue().splitlines():
-                _cp(line)
-
         parts = _shlex_args(cmd)
         subcommand = parts[0] if parts else ""
         if subcommand not in {"list", "disable", "enable"}:
             return self.show_tools()
         if subcommand == "list":
-            return _run_capture(Namespace(tools_action="list", platform="cli"))
+            return self._run_tools_config(tools_action="list", platform="cli")
         names = parts[1:]
         if not names:
             return _pr(f"(._.) Usage: /tools {subcommand} <name> [name ...]",
@@ -1078,12 +1064,25 @@ class CLICommandsMixin:
         # Typing the command is consent. Do NOT use input() — it hangs in prompt_toolkit's loop.
         verb = "Disabling" if subcommand == "disable" else "Enabling"
         _cp(_accent(f"{verb} {', '.join(names)}..."))
-        _run_capture(Namespace(tools_action=subcommand, names=names, platform="cli"))
+        self._run_tools_config(tools_action=subcommand, names=names, platform="cli")
         from hermes_cli.tools_config import _get_platform_tools
         from hermes_cli.config import load_config
         self.enabled_toolsets = _get_platform_tools(load_config(), "cli")
         self.new_session()
         _cp(_dim("Session reset. New tool configuration is active."))
+
+    def _run_tools_config(self, **ns) -> None:
+        """Run ``tools_disable_enable_command``. Inside the interactive TUI its ANSI print() output
+        is captured (isatty=True so colors still render) and re-emitted through _cprint so
+        patch_stdout's StdoutProxy doesn't garble the escapes; standalone/tests call straight through."""
+        from argparse import Namespace
+        from hermes_cli.tools_config import tools_disable_enable_command
+        if getattr(self, "_app", None) is None:
+            return tools_disable_enable_command(Namespace(**ns))
+        buf = _TTYBuf()
+        with redirect_stdout(buf):
+            tools_disable_enable_command(Namespace(**ns))
+        _cp(*buf.getvalue().splitlines())
 
     def _handle_profile_command(self):
         """Display active profile name and home directory."""
@@ -1609,10 +1608,8 @@ class CLICommandsMixin:
         def _progress(event: str, detail: str) -> None:
             if event == "row":  # detail is "<state>:<done>:<total>"; show the state name.
                 print(f"  ┊ drawing {detail.split(':', 1)[0]}…")
-            elif event == "compose":
-                print("  ┊ composing spritesheet…")
-            elif event == "save":
-                print("  ┊ saving…")
+            elif event in _HATCH_PROGRESS:
+                print(_HATCH_PROGRESS[event])
 
         try:
             result = orchestrate.hatch_pet(
@@ -1628,8 +1625,7 @@ class CLICommandsMixin:
         """Handle the /cron command to manage scheduled tasks."""
         tokens = shlex.split(cmd)
         if len(tokens) == 1:
-            self._cron_overview()
-            return
+            return self._cron_overview()
         subcommand = tokens[1].lower()
         opts = _parse_cron_flags(tokens[2:])
         if opts is None:
@@ -1641,18 +1637,14 @@ class CLICommandsMixin:
         getattr(self, handler)(subcommand, opts)
 
     def _cron_overview(self) -> None:
-        print()
-        _pr("+" + "-" * 68 + "+", "|" + " " * 22 + "(^_^) Scheduled Tasks" + " " * 23 + "|",
-            "+" + "-" * 68 + "+")
-        print()
-        _pr("  Commands:", "    /cron list",
+        _pr("", "+" + "-" * 68 + "+", "|" + " " * 22 + "(^_^) Scheduled Tasks" + " " * 23 + "|",
+            "+" + "-" * 68 + "+", "", "  Commands:", "    /cron list",
             '    /cron add "every 2h" "Check server status" [--skill blogwatcher]',
             '    /cron edit <job_id> --schedule "every 4h" --prompt "New task"',
             "    /cron edit <job_id> --skill blogwatcher --skill maps",
             "    /cron edit <job_id> --remove-skill blogwatcher",
             "    /cron edit <job_id> --clear-skills", "    /cron pause <job_id>",
-            "    /cron resume <job_id>", "    /cron run <job_id>", "    /cron remove <job_id>")
-        print()
+            "    /cron resume <job_id>", "    /cron run <job_id>", "    /cron remove <job_id>", "")
         result = _cron_api(action="list")
         jobs = result.get("jobs", []) if result.get("success") else []
         if jobs:
