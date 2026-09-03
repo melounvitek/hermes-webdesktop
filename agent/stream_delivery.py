@@ -76,14 +76,12 @@ class StreamDeliveryMixin:
 
     def _interim_content_was_streamed(self, content: str) -> bool:
         visible_content = self._normalize_interim_visible_text(self._strip_think_blocks(content or ""))
-        if not visible_content:
-            return False
         streamed = self._normalize_interim_visible_text(
             self._strip_think_blocks(getattr(self, "_current_streamed_assistant_text", "") or "")
         )
         # Prefix match, not equality: the final may be streamed text plus a trailing delta. The
         # reverse (streamed longer) is NOT matched — it could suppress a needed resend.
-        return bool(streamed) and visible_content.startswith(streamed)
+        return bool(visible_content and streamed) and visible_content.startswith(streamed)
 
     def _extract_codex_interim_visible_parts(self, assistant_msg: Dict[str, Any]) -> List[str]:
         """Visible Codex commentary (``phase=commentary`` items), one string per message item.
@@ -91,14 +89,9 @@ class StreamDeliveryMixin:
         ``phase=analysis`` stays hidden (scratchpad); with ``display.show_commentary=false``
         commentary stays on the reasoning channel.
         """
-        if not getattr(self, "show_commentary", True):
-            return []
-        items = assistant_msg.get("codex_message_items")
-        if not isinstance(items, list):
-            return []
-
+        items = assistant_msg.get("codex_message_items") if getattr(self, "show_commentary", True) else None
         messages: List[str] = []
-        for item in items:
+        for item in items if isinstance(items, list) else ():
             if not isinstance(item, dict) or item.get("type") != "message":
                 continue
             phase, content_parts = item.get("phase"), item.get("content")
