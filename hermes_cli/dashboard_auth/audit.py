@@ -1,10 +1,7 @@
-"""Audit log for dashboard-auth events.
-
-Profile-aware location: ``$HERMES_HOME/logs/dashboard-auth.log``, one JSON
-object per line. Token-like fields are stripped before serialisation so
-refresh tokens / JWTs never reach disk. Minimal import surface (no
-``hermes_constants`` at import time) so early-loading middleware can import it.
-"""
+"""Audit log for dashboard-auth events: ``$HERMES_HOME/logs/dashboard-auth.log``, one JSON object
+per line. Token-like fields are stripped before serialisation so refresh tokens / JWTs never
+reach disk. Minimal import surface (no ``hermes_constants`` at import time) so early-loading
+middleware can import it."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -26,7 +23,6 @@ _REDACTED_FIELDS: frozenset = frozenset({
 
 class AuditEvent(enum.Enum):
     """Event types; values are the literal ``event`` field on the JSON line."""
-
     LOGIN_START = "login_start"
     LOGIN_SUCCESS = "login_success"
     LOGIN_FAILURE = "login_failure"
@@ -47,19 +43,14 @@ class AuditEvent(enum.Enum):
 
 
 def _resolve_log_path() -> Path:
-    """``$HERMES_HOME/logs/dashboard-auth.log`` (lazy leaf import: honours
-    profile overrides and the native-Windows ``%LOCALAPPDATA%`` fallback)."""
+    """Lazy leaf import: honours profile overrides + the native-Windows ``%LOCALAPPDATA%`` fallback."""
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "logs" / "dashboard-auth.log"
 
 
 def audit_log(event: AuditEvent, **fields: Any) -> None:
-    """Append one event; token-like fields dropped, log dir created.
-
-    Write failures are logged at WARNING but never raise — auth must not
-    fail because the audit logger broke.
-    """
+    """Append one event; token-like fields dropped, log dir created. Write failures are logged at
+    WARNING but never raise — auth must not fail because the audit logger broke."""
     entry = {
         "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "event": event.value,

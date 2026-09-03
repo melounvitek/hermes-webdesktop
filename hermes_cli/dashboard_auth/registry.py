@@ -1,9 +1,6 @@
-"""Module-level registry for DashboardAuthProvider instances.
-
-Plugins call ``register_provider`` via the plugin context hook at startup.
-The auth gate middleware iterates ``list_providers()`` and uses
-``get_provider`` to dispatch on the session's ``provider`` field.
-"""
+"""Module-level registry for DashboardAuthProvider instances. Plugins call ``register_provider``
+via the plugin context hook at startup; the auth gate iterates ``list_providers()`` and uses
+``get_provider`` to dispatch on the session's ``provider`` field."""
 from __future__ import annotations
 
 import logging
@@ -37,12 +34,7 @@ def _log_registered(kind: str, provider: DashboardAuthProvider) -> None:
 
 
 def register_provider(provider: DashboardAuthProvider, *, scope: Optional[str] = None) -> None:
-    """Register a provider.
-
-    Raises:
-        TypeError: on protocol violation.
-        ValueError: if a provider with the same name is already registered.
-    """
+    """Raises ``TypeError`` on protocol violation, ``ValueError`` on a duplicate name."""
     assert_protocol_compliance(type(provider))
     with _lock:
         target = _target(scope, create=True)
@@ -89,31 +81,24 @@ def list_providers(*, scope: Optional[str] = None) -> List[DashboardAuthProvider
 
 
 def list_token_providers() -> List[DashboardAuthProvider]:
-    """Providers with ``supports_token`` True, in registration order.
-
-    The ``token_auth`` seam consults only these, so OAuth/password-only
-    providers are never asked to ``verify_token``. Empty => a token-authable
-    route fails closed (401), never open.
-    """
+    """Providers with ``supports_token`` True, in registration order. The ``token_auth`` seam
+    consults only these, so OAuth/password-only providers are never asked to ``verify_token``;
+    empty => a token-authable route fails closed (401)."""
     return [p for p in list_providers() if getattr(p, "supports_token", False)]
 
 
 def list_session_providers() -> List[DashboardAuthProvider]:
-    """Providers with ``supports_session`` True (interactive cookie sessions);
-    the login page, /auth/login and the gate's verify/refresh loops use only these."""
+    """Providers with ``supports_session`` True (interactive cookie sessions); the login page,
+    /auth/login and the gate's verify/refresh loops use only these."""
     return [p for p in list_providers() if getattr(p, "supports_session", True)]
 
 
 def register_global_provider(provider: DashboardAuthProvider) -> None:
-    """Register a host-owned provider in the process-global slot (upsert).
-
-    The registry is process-global and shared across every profile one
-    dashboard process serves, so these providers outlive any per-home plugin
-    manager. Always targets ``_providers`` (never a per-home overlay) and
-    *replaces* a same-name entry instead of raising, so a forced plugin
-    re-discovery (e.g. after a password change) rotates the provider in place.
-    Pairs with ``unregister_global_provider``.
-    """
+    """Register a host-owned provider in the process-global slot (upsert). The registry is shared
+    across every profile one dashboard process serves, so these outlive any per-home plugin
+    manager: always targets ``_providers`` (never a per-home overlay) and *replaces* a same-name
+    entry instead of raising, so a forced plugin re-discovery (e.g. after a password change)
+    rotates the provider in place. Pairs with ``unregister_global_provider``."""
     assert_protocol_compliance(type(provider))
     with _lock:
         _providers[provider.name] = provider
@@ -121,8 +106,8 @@ def register_global_provider(provider: DashboardAuthProvider) -> None:
 
 
 def unregister_global_provider(name: str, provider: DashboardAuthProvider) -> bool:
-    """Remove a global registration if ``provider`` is still current (a stale
-    handle whose provider was already replaced never clears the live one)."""
+    """Remove a global registration if ``provider`` is still current (a stale handle whose
+    provider was already replaced never clears the live one)."""
     with _lock:
         if _providers.get(name) is provider:
             _providers.pop(name, None)

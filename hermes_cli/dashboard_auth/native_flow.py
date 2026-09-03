@@ -25,14 +25,11 @@ from typing import Dict, Optional
 
 from hermes_cli.dashboard_auth.base import Session
 
-# Pending authorization: the whole interactive login (mirrors the PKCE cookie).
-_PENDING_TTL_SECONDS = 600
-# Minted code: only the loopback redirect + immediate token POST.
-_CODE_TTL_SECONDS = 120
-# Global cap so a misbehaving client cannot grow the store unbounded.
-_MAX_ENTRIES = 256
-# Per-IP cap on PENDING entries: /auth/native/authorize is a public pre-auth
-# route, so one spammer must not fill the global store and lock out logins.
+_PENDING_TTL_SECONDS = 600  # whole interactive login (mirrors the PKCE cookie)
+_CODE_TTL_SECONDS = 120  # loopback redirect + immediate token POST only
+_MAX_ENTRIES = 256  # global cap so a misbehaving client cannot grow the store unbounded
+# Per-IP cap on PENDING entries: /auth/native/authorize is a public pre-auth route, so one
+# spammer must not fill the global store and lock out logins.
 _MAX_PENDING_PER_IP = 8
 
 _lock = threading.Lock()
@@ -41,7 +38,6 @@ _lock = threading.Lock()
 @dataclass
 class _Pending:
     """In-flight native authorization awaiting the upstream callback."""
-
     code_challenge: str  # the DESKTOP's S256 challenge (cc_d), base64url no-pad
     redirect_uri: str  # the desktop's loopback redirect (127.0.0.1:<port>/...)
     client_state: str  # the desktop's own ``state`` (echoed back on redirect)
@@ -52,7 +48,6 @@ class _Pending:
 @dataclass
 class _IssuedCode:
     """A minted one-time gateway authorization code bound to a Session."""
-
     code_challenge: str  # cc_d — verified against cv_d at redemption
     session: Session
     expires_at: int
@@ -95,12 +90,20 @@ def _now(now: Optional[int]) -> int:
     return int(time.time()) if now is None else now
 
 
+def _pop_pending_locked(broker_state: str, *, consume: bool) -> _Pending:
+    """Look up (optionally consuming) a pending entry; :class:`PendingNotFound` if unknown."""
+    entry = (_pending.pop if consume else _pending.get)(broker_state, None)
+    if entry is None:
+        raise PendingNotFound("unknown or expired native authorization")
+    return entry
+
+
 def register_pending(
     *, code_challenge: str, redirect_uri: str, client_state: str, client_ip: str = "",
     now: Optional[int] = None) -> str:
-    """Stash a pending native authorization; return an opaque ``broker_state``.
-    ``code_challenge`` is the DESKTOP's cc_d. Raises ``NativeFlowError`` (fail closed)
-    at store capacity or when ``client_ip`` holds ``_MAX_PENDING_PER_IP`` entries."""
+    """Stash a pending native authorization; return an opaque ``broker_state``. ``code_challenge``
+    is the DESKTOP's cc_d. Raises ``NativeFlowError`` (fail closed) at store capacity or when
+    ``client_ip`` holds ``_MAX_PENDING_PER_IP`` entries."""
     now = _now(now)
     broker_state = secrets.token_urlsafe(32)
     with _lock:
@@ -117,26 +120,19 @@ def register_pending(
 
 
 def get_pending(broker_state: str, *, now: Optional[int] = None) -> _Pending:
-    """Peek (without consuming) the pending authorization; raises
-    :class:`PendingNotFound` if unknown or expired."""
+    """Peek (without consuming) the pending authorization."""
     with _lock:
         _gc_locked(_now(now))
-        entry = _pending.get(broker_state)
-        if entry is None:
-            raise PendingNotFound("unknown or expired native authorization")
-        return entry
+        return _pop_pending_locked(broker_state, consume=False)
 
 
 def complete_pending(broker_state: str, *, session: Session, now: Optional[int] = None) -> str:
-    """Consume a pending authorization (single use) and mint a one-time gateway code
-    bound to the desktop's challenge + ``session``; :class:`PendingNotFound` if
-    unknown/expired."""
+    """Consume a pending authorization (single use) and mint a one-time gateway code bound to the
+    desktop's challenge + ``session``."""
     now = _now(now)
     with _lock:
         _gc_locked(now)
-        pending = _pending.pop(broker_state, None)
-        if pending is None:
-            raise PendingNotFound("unknown or expired native authorization")
+        pending = _pop_pending_locked(broker_state, consume=True)
         if not _capacity_ok_locked():
             raise NativeFlowError("native-flow code store at capacity")
         gw_code = secrets.token_urlsafe(32)
@@ -147,9 +143,8 @@ def complete_pending(broker_state: str, *, session: Session, now: Optional[int] 
 
 
 def redeem_code(*, code: str, code_verifier: str, now: Optional[int] = None) -> Session:
-    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. The
-    entry is popped BEFORE the PKCE check so a wrong verifier cannot be retried
-    (no oracle, no replay). Raises :class:`CodeInvalid`."""
+    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. The entry is popped
+    BEFORE the PKCE check so a wrong verifier cannot be retried (no oracle, no replay)."""
     now = _now(now)
     with _lock:
         _gc_locked(now)

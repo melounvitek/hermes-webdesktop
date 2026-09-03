@@ -16,57 +16,51 @@ from typing import Optional
 
 _log = logging.getLogger(__name__)
 
-# Home Assistant ingress prefixes are already 63 chars before a deployment adds
-# its own sub-path; keep a bounded header budget with room for real mounts.
+# Home Assistant ingress prefixes are already 63 chars before a deployment adds its own
+# sub-path; keep a bounded header budget with room for real mounts.
 _MAX_PREFIX_LENGTH = 256
-
-# Presence of any of these in a public_url / prefix means a typo or a
-# header-injection attempt: reject the whole value, never sanitise.
+# Any of these in a public_url / prefix means a typo or a header-injection attempt: reject the
+# whole value, never sanitise.
 _REJECT_CHARS = frozenset(('"', "'", "<", ">", " ", "\n", "\r", "\t"))
-
-# ``resolve_public_url`` runs on every authenticated request, so warnings are
-# de-duplicated per distinct (source, value) — a changed value warns afresh.
+# ``resolve_public_url`` runs on every authenticated request, so warnings are de-duplicated per
+# distinct (source, value) — a changed value warns afresh.
 _warned_malformed_public_urls: set = set()
 _warned_malformed_prefixes: set = set()
 
 
-def _warn_if_malformed(source: str, raw: str) -> None:
-    """Warn once when a non-empty public-url value was rejected (almost always
-    a missing scheme; silently falling back to header reconstruction can yield
-    the wrong scheme behind a proxy)."""
-    cleaned = raw.strip() if raw else ""
-    if not cleaned or (source, cleaned) in _warned_malformed_public_urls:
+def _warn_once(seen: set, key: tuple, cleaned: str, msg: str, *args) -> None:
+    if not cleaned or key in seen:
         return
-    _warned_malformed_public_urls.add((source, cleaned))
-    _log.warning(
+    seen.add(key)
+    _log.warning(msg, *args)
+
+
+def _warn_if_malformed(source: str, raw: str) -> None:
+    """Warn once when a non-empty public-url value was rejected (almost always a missing scheme;
+    silently falling back to header reconstruction can yield the wrong scheme behind a proxy)."""
+    cleaned = raw.strip() if raw else ""
+    _warn_once(
+        _warned_malformed_public_urls, (source, cleaned), cleaned,
         "%s is set to %r but was ignored because it is not a valid "
         "absolute URL — it must include an http:// or https:// scheme "
         "(e.g. https://%s). Falling back to reconstructing the OAuth "
         "redirect URI from request headers, which may produce the wrong "
         "scheme behind a reverse proxy.",
-        source,
-        cleaned,
-        cleaned.split("://")[-1] or "hermes.example.com")
+        source, cleaned, cleaned.split("://")[-1] or "hermes.example.com")
 
 
 def _warn_if_malformed_prefix(raw: Optional[str], reason: str) -> None:
     """Warn once when a non-empty X-Forwarded-Prefix value is rejected."""
     cleaned = raw.strip() if raw else ""
-    if not cleaned or (cleaned, reason) in _warned_malformed_prefixes:
-        return
-    _warned_malformed_prefixes.add((cleaned, reason))
-    _log.warning(
+    _warn_once(
+        _warned_malformed_prefixes, (cleaned, reason), cleaned,
         "X-Forwarded-Prefix header %r was ignored because %s. "
-        "Dashboard URLs will be generated without a reverse-proxy path prefix.",
-        cleaned,
-        reason)
+        "Dashboard URLs will be generated without a reverse-proxy path prefix.", cleaned, reason)
 
 
 def normalise_prefix(raw: Optional[str]) -> str:
-    """Normalise an X-Forwarded-Prefix header to ``"/hermes"`` form (no trailing
-    slash) or ``""`` when unset/malformed. ``..``, ``//`` and injection
-    characters are rejected so a hostile proxy cannot smuggle HTML or traversal.
-    """
+    """``"/hermes"`` form (no trailing slash) or ``""`` when unset/malformed. ``..``, ``//`` and
+    injection characters are rejected so a hostile proxy cannot smuggle HTML or traversal."""
     p = raw.strip() if raw else ""
     if not p:
         return ""
@@ -89,11 +83,9 @@ def prefix_from_request(request) -> str:
 
 # --- HERMES_DASHBOARD_PUBLIC_URL / dashboard.public_url --------------------
 
-
 def _normalise_public_url(raw: Optional[str]) -> str:
     """Cleaned ``scheme://netloc[/path]`` (trailing slash stripped) or ``""`` when
-    empty/malformed/injection-suspect; ``""`` means "fall back to request
-    reconstruction" (an explicit empty value equals an unset env var)."""
+    empty/malformed/injection-suspect (= fall back to request reconstruction)."""
     url = raw.strip() if raw else ""
     if not url or any(c in url for c in _REJECT_CHARS):
         return ""
@@ -107,8 +99,7 @@ def _normalise_public_url(raw: Optional[str]) -> str:
 
 
 def _load_dashboard_section() -> dict:
-    """``dashboard`` block of config.yaml as a dict, or ``{}`` when the config
-    cannot be loaded or the block is absent/non-dict."""
+    """``dashboard`` block of config.yaml as a dict, or ``{}`` when unloadable/absent/non-dict."""
     try:
         from hermes_cli.config import load_config
     except Exception:
@@ -116,20 +107,17 @@ def _load_dashboard_section() -> dict:
     try:
         cfg = load_config()
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional
-        _log.debug(
-            "dashboard-auth.prefix: load_config() raised %s; "
-            "falling back to env-only configuration",
-            exc)
+        _log.debug("dashboard-auth.prefix: load_config() raised %s; "
+                   "falling back to env-only configuration", exc)
         return {}
     section = cfg.get("dashboard") if isinstance(cfg, dict) else None
     return section if isinstance(section, dict) else {}
 
 
 def resolve_public_url() -> str:
-    """Operator-declared dashboard public URL, or ``""`` (reconstruct from request).
-    Precedence: ``HERMES_DASHBOARD_PUBLIC_URL`` env (blank counts as unset so a
-    provisioned-but-blank secret cannot shadow config.yaml), then
-    ``dashboard.public_url``; a malformed value warns and falls through."""
+    """Operator-declared dashboard public URL, or ``""`` (reconstruct from request). Precedence:
+    ``HERMES_DASHBOARD_PUBLIC_URL`` env (blank counts as unset so a provisioned-but-blank secret
+    cannot shadow config.yaml), then ``dashboard.public_url``; malformed warns and falls through."""
     env_raw = os.environ.get("HERMES_DASHBOARD_PUBLIC_URL", "")
     env_clean = _normalise_public_url(env_raw)
     if env_clean:

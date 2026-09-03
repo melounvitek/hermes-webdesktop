@@ -90,8 +90,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("stop", "Kill all running background processes", "Session",
                busy_policy="interrupt_then_dispatch", busy_handler="stop"),
     CommandDef("pause", "Pause new work globally (emergency stop); '/pause off' resumes", "Session",
-               gateway_only=True, args_hint="[reason | off]",
-               busy_policy="dispatch"),
+               gateway_only=True, args_hint="[reason | off]", busy_policy="dispatch"),
     CommandDef("approve", "Approve a pending dangerous command", "Session",
                gateway_only=True, args_hint="[session|always]", busy_policy="dispatch",
                desktop="messaging"),
@@ -106,11 +105,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("tasks",), busy_policy="dispatch"),
     CommandDef("journey", "Open the learning journey timeline",
                "Session", aliases=("learning", "memory-graph"), cli_only=True,
-               args_hint="[list|delete <id>|edit <id>]",
-               subcommands=("list", "delete", "edit")),
+               args_hint="[list|delete <id>|edit <id>]", subcommands=("list", "delete", "edit")),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
-               aliases=("q",), args_hint="<prompt>",
-               busy_policy="dispatch", busy_handler="queue"),
+               aliases=("q",), args_hint="<prompt>", busy_policy="dispatch", busy_handler="queue"),
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>", busy_policy="dispatch", busy_handler="steer"),
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
@@ -137,12 +134,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("status", "Show session, model, token, and context info", "Session",
                busy_policy="dispatch"),
     CommandDef("egress", "Show Docker egress proxy status", "Session",
-               args_hint="[status]", subcommands=("status",),
-               busy_policy="dispatch", busy_handler="egress",
-               execute="egress"),
+               args_hint="[status]", subcommands=("status",), busy_policy="dispatch",
+               busy_handler="egress", execute="egress"),
     CommandDef("context", "Show detailed context window view with usage gauge, category breakdown, compression stats, and throughput", "Session",
-               aliases=("ctx",), args_hint="[all]", subcommands=("all",),
-               busy_policy="dispatch"),
+               aliases=("ctx",), args_hint="[all]", subcommands=("all",), busy_policy="dispatch"),
     CommandDef("whoami", "Show your slash command access (admin / user)", "Info"),
     CommandDef("profile", "Show active profile name and home directory", "Info",
                busy_policy="dispatch", execute="profile"),
@@ -159,8 +154,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[model] [--provider name] [--global|--session] [--refresh]",
                busy_policy="reject", busy_handler="model", desktop="hidden"),
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
-               "Configuration", aliases=("codex_runtime",),
-               args_hint="[auto|codex_app_server]",
+               "Configuration", aliases=("codex_runtime",), args_hint="[auto|codex_app_server]",
                busy_policy="reject", busy_handler="codex-runtime"),
     CommandDef("personality", "Set a predefined personality", "Configuration",
                args_hint="[name]", argument_mode="options"),
@@ -176,16 +170,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[staged|all|session] [--stat] [path...]",
                subcommands=("staged", "all", "session")),
     CommandDef("verbose", "Cycle tool progress display: off -> new -> all -> verbose",
-               "Configuration", cli_only=True,
-               gateway_config_gate="display.tool_progress_command",
+               "Configuration", cli_only=True, gateway_config_gate="display.tool_progress_command",
                busy_policy="dispatch", desktop="terminal"),
     CommandDef("focus", "Toggle focus view — show only your prompt and the final response",
                "Configuration", cli_only=True, args_hint="[on|off|status]",
                subcommands=("on", "off", "status")),
     CommandDef("footer", "Toggle gateway runtime-metadata footer on final replies",
-               "Configuration", args_hint="[on|off|status]",
-               subcommands=("on", "off", "status"), busy_policy="dispatch",
-               desktop="terminal"),
+               "Configuration", args_hint="[on|off|status]", subcommands=("on", "off", "status"),
+               busy_policy="dispatch", desktop="terminal"),
     CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
                "Configuration", busy_policy="dispatch"),
     CommandDef("approvals", "Show or set the persistent dangerous-command approval mode",
@@ -208,8 +200,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status"),
                desktop="composer-voice"),
     CommandDef("wake", "Toggle the 'Hey Hermes' wake word listener", "Configuration",
-               cli_only=True, args_hint="[on|off|status]",
-               subcommands=("on", "off", "status")),
+               cli_only=True, args_hint="[on|off|status]", subcommands=("on", "off", "status")),
     CommandDef("busy", "Control how messages behave while Hermes is working", "Configuration",
                args_hint="[queue|steer|interrupt|status]",
                subcommands=("queue", "steer", "interrupt", "status"),
@@ -217,8 +208,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
 
     # Tools & Skills
     CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
-               args_hint="[list|disable|enable] [name...]", cli_only=True,
-               argument_mode="options"),
+               args_hint="[list|disable|enable] [name...]", cli_only=True, argument_mode="options"),
     CommandDef("toolsets", "List available toolsets", "Tools & Skills",
                cli_only=True, desktop="terminal"),
     CommandDef("skills", "Search, install, inspect, or manage skills",
@@ -228,8 +218,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                             "pending", "approve", "reject", "diff", "approval"),
                desktop="settings"),
     CommandDef("memory", "Review pending memory writes / toggle the approval gate",
-               "Tools & Skills",
-               args_hint="[pending|approve|reject|approval] [id|on|off]",
+               "Tools & Skills", args_hint="[pending|approve|reject|approval] [id|on|off]",
                subcommands=("pending", "approve", "reject", "approval")),
     CommandDef("bundles", "List skill bundles (aliases /<name> for multiple skills)",
                "Tools & Skills", execute="bundles"),
@@ -311,9 +300,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
 
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
-               cli_only=True, aliases=("exit",), args_hint="[--delete]",
-               desktop="terminal"),
-]
+               cli_only=True, aliases=("exit",), args_hint="[--delete]", desktop="terminal")]
 
 
 # Distinguishes ``mixed`` (subcommands plus free-text) from ``options``; no subcommands => ``text``.
@@ -382,8 +369,7 @@ HELP_SESSION_SUBGROUPS: dict[str, tuple[str, ...]] = {
     "Context": ("compress", "compact", "context", "ctx", "status"),
     "Background & Automation": (
         "bg", "btw", "agents", "tasks", "queue", "q", "steer", "goal", "subgoal", "heartbeat", "hb",
-        "refine", "loop", "proactive", "moa", "journey", "learning", "memory-graph"),
-}
+        "refine", "loop", "proactive", "moa", "journey", "learning", "memory-graph")}
 
 # All names + aliases the gateway dispatches. Config-gated commands are
 # included; their handler checks the gate at runtime.

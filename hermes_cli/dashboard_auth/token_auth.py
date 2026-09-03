@@ -1,16 +1,11 @@
 """Route-agnostic non-interactive (bearer-token) auth seam for the dashboard.
 
-Any machine-credential provider plugs in here (the drain bearer-secret plugin is
-the first consumer). A route opts in by registering its exact path via
-:func:`register_token_route`; only registered paths are token-authable, so the
-auth surface of existing routes never widens.
-
-:func:`token_auth_middleware` runs OUTERMOST (installed last in web_server.py)
-and fully owns the decision for a token route: a recognised token attaches
-``request.state.token_principal`` + ``token_authenticated`` (the cookie gates
-honour that flag and never bounce to /login); otherwise 401, or 503 when a
-provider's backing store was unreachable. Fails closed: no provider, no token,
-or an unrecognised token is always 401.
+Any machine-credential provider plugs in here. A route opts in by registering its exact path via
+:func:`register_token_route`; only registered paths are token-authable, so the auth surface of
+existing routes never widens. :func:`token_auth_middleware` runs OUTERMOST (installed last) and
+owns the decision for a token route: a recognised token attaches ``request.state.token_principal``
++ ``token_authenticated`` (the cookie gates honour that flag and never bounce to /login);
+otherwise 401, or 503 when a provider's backing store was unreachable. Fails closed.
 """
 from __future__ import annotations
 
@@ -34,8 +29,7 @@ _lock = threading.Lock()
 
 
 def register_token_route(path: str) -> None:
-    """Mark ``path`` (exact match) as token-authable. Idempotent; does NOT make
-    the route public — it authenticates by token instead of by cookie."""
+    """Mark ``path`` (exact match) as token-authable. Idempotent; does NOT make the route public."""
     with _lock:
         _token_routes.add(path)
 
@@ -53,13 +47,9 @@ def clear_token_routes() -> None:
 
 
 def authenticate_token(request: Request) -> Tuple[Optional[TokenPrincipal], Optional[str]]:
-    """Try every token provider against the request's bearer token.
-
-    Returns ``(principal, None)`` on success; ``(None, None)`` for no token or
-    no recogniser (401); ``(None, name)`` when no provider accepted it AND at
-    least one was unreachable (caller surfaces 503, not "bad credentials").
-    Never raises — a buggy provider must not 500 the gate.
-    """
+    """Try every token provider against the request's bearer token. Returns ``(principal, None)``
+    on success; ``(None, None)`` for no token or no recogniser (401); ``(None, name)`` when no
+    provider accepted it AND at least one was unreachable (caller surfaces 503). Never raises."""
     token = extract_bearer_token(request)
     if not token:
         return None, None
@@ -84,18 +74,16 @@ def authenticate_token(request: Request) -> Tuple[Optional[TokenPrincipal], Opti
 
 async def token_auth_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-    """Outermost auth seam: pass-through for unregistered paths; for a token
-    route, valid token -> attach principal + flag, unreachable -> 503, else 401."""
+    """Pass-through for unregistered paths; for a token route, valid token -> attach principal +
+    flag, unreachable -> 503, else 401."""
     path = request.url.path
     if not is_token_route(path):
         return await call_next(request)
-
     principal, unreachable = authenticate_token(request)
     if principal is not None:
         request.state.token_principal = principal
         request.state.token_authenticated = True
         return await call_next(request)
-
     if unreachable:
         audit_log(
             AuditEvent.TOKEN_AUTH_FAILURE, provider=unreachable, reason="provider_unreachable",
