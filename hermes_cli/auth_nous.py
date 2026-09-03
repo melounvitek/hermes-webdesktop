@@ -225,13 +225,6 @@ def _assert_nous_inference_jwt_usable(
         raise _unusable_invoke_jwt_error(reason)
 
 
-def _log_nous_invoke_jwt_selected(*, access_token: Any, sequence_id: Optional[str] = None) -> None:
-    logger.debug("Nous inference auth: using NAS invoke JWT")
-    _oauth_trace(
-        "nous_invoke_jwt_selected", sequence_id=sequence_id,
-        access_token_fp=_token_fingerprint(access_token))
-
-
 def _remaining_ttl(expires_at: Any, fallback_expires_in: Any) -> int:
     """Seconds until *expires_at* (ISO), else *fallback_expires_in* coerced to a TTL."""
     from hermes_cli.auth import _coerce_ttl_seconds, _parse_iso_timestamp
@@ -284,7 +277,10 @@ def _select_nous_invoke_jwt(
     if _nonempty_str(access_token):
         state["access_token"] = access_token
     _set_nous_agent_key_from_invoke_jwt(state)
-    _log_nous_invoke_jwt_selected(access_token=state.get("access_token"), sequence_id=sequence_id)
+    logger.debug("Nous inference auth: using NAS invoke JWT")
+    _oauth_trace(
+        "nous_invoke_jwt_selected", sequence_id=sequence_id,
+        access_token_fp=_token_fingerprint(state.get("access_token")))
 
 
 # Derived from expires_at/JWT exp and tick down between reads; persisting only these changes makes
@@ -824,47 +820,6 @@ def _sync_nous_pool_from_auth_store() -> None:
         logger.debug("Failed to sync Nous credential pool from auth store: %s", exc)
 
 
-class _NousStatePersister:
-    """Writes Nous provider state to its source store, skipping no-op writes.
-
-    Writes where only derived TTL countdowns changed are skipped (keeps the mtime-keyed auth-status
-    cache warm). Every real write is mirrored to the shared store so sibling profiles don't hold
-    stale refresh_tokens after rotation (best-effort inside ``_write_shared_nous_state``).
-    """
-
-    def __init__(
-        self, auth_store: Dict[str, Any], state: Dict[str, Any], state_source_path: Optional[Path],
-        sequence_id: str) -> None:
-        self._auth_store = auth_store
-        self._state = state
-        self._source_path = state_source_path
-        self._sequence_id = sequence_id
-        self._persisted_state = dict(state)
-        self.persisted_any = False
-
-    def persist(self, reason: str) -> None:
-        from hermes_cli.auth import _save_provider_state_to_source, _write_shared_nous_state
-        state = self._state
-        persisted = _nous_effective_provider_state(self._persisted_state)
-        if _nous_effective_provider_state(state) == persisted:
-            _oauth_trace("nous_state_persist_skipped", sequence_id=self._sequence_id, reason=reason)
-            return
-        try:
-            _save_provider_state_to_source(self._auth_store, "nous", state, self._source_path)
-        except Exception as exc:
-            _oauth_trace(
-                "nous_state_persist_failed", sequence_id=self._sequence_id, reason=reason,
-                error_type=type(exc).__name__)
-            raise
-        _oauth_trace(
-            "nous_state_persisted", sequence_id=self._sequence_id, reason=reason,
-            refresh_token_fp=_token_fingerprint(state.get("refresh_token")),
-            access_token_fp=_token_fingerprint(state.get("access_token")))
-        self._persisted_state = dict(state)
-        self.persisted_any = True
-        _write_shared_nous_state(state)
-
-
 def _nous_effective_routing(state: Dict[str, Any]) -> tuple[str, str, str, str]:
     """``(portal_url, stored_inference_url, effective_inference_url, client_id)`` from *state*.
 
@@ -908,18 +863,24 @@ def _nous_effective_routing(state: Dict[str, Any]) -> tuple[str, str, str, str]:
 
 
 class _NousRuntimeResolve:
-    """Working set for one ``resolve_nous_runtime_credentials`` call: the token pair and routing
-    tuple that shared-store merges / refreshes replace mid-flight.
+    """Working set for one ``resolve_nous_runtime_credentials`` call.
+
+    Holds the token pair and routing tuple that shared-store merges / refreshes replace mid-flight,
+    and persists state to its source store skipping no-op writes: writes where only derived TTL
+    countdowns changed are skipped (keeps the mtime-keyed auth-status cache warm), and every real
+    write is mirrored to the shared store so sibling profiles don't hold stale refresh_tokens after
+    rotation (best-effort inside ``_write_shared_nous_state``).
     """
 
     def __init__(
         self, auth_store: Dict[str, Any], state: Dict[str, Any], state_source_path: Optional[Path],
         *, force_refresh: bool, stale_access_token: Optional[str], timeout_seconds: float) -> None:
-        self.auth_store, self.state = auth_store, state
+        self.auth_store, self.state, self._source_path = auth_store, state, state_source_path
         self.force_refresh, self.stale_access_token = force_refresh, stale_access_token
         self.timeout_seconds = timeout_seconds
         self.sequence_id = uuid.uuid4().hex[:12]
-        self.persister = _NousStatePersister(auth_store, state, state_source_path, self.sequence_id)
+        self._persisted_state = dict(state)
+        self.persisted_any = False
         self.access_token = state.get("access_token")
         self.refresh_token = state.get("refresh_token")
         self._reload_routing()
@@ -931,7 +892,26 @@ class _NousRuntimeResolve:
         ) = _nous_effective_routing(self.state)
 
     def persist(self, reason: str) -> None:
-        self.persister.persist(reason)
+        from hermes_cli.auth import _save_provider_state_to_source, _write_shared_nous_state
+        state = self.state
+        persisted = _nous_effective_provider_state(self._persisted_state)
+        if _nous_effective_provider_state(state) == persisted:
+            _oauth_trace("nous_state_persist_skipped", sequence_id=self.sequence_id, reason=reason)
+            return
+        try:
+            _save_provider_state_to_source(self.auth_store, "nous", state, self._source_path)
+        except Exception as exc:
+            _oauth_trace(
+                "nous_state_persist_failed", sequence_id=self.sequence_id, reason=reason,
+                error_type=type(exc).__name__)
+            raise
+        _oauth_trace(
+            "nous_state_persisted", sequence_id=self.sequence_id, reason=reason,
+            refresh_token_fp=_token_fingerprint(state.get("refresh_token")),
+            access_token_fp=_token_fingerprint(state.get("access_token")))
+        self._persisted_state = dict(state)
+        self.persisted_any = True
+        _write_shared_nous_state(state)
 
     def shared_lock(self):
         return _nous_shared_store_lock(timeout_seconds=_shared_lock_timeout(self.timeout_seconds))
@@ -1062,7 +1042,7 @@ def resolve_nous_runtime_credentials(
             state["tls"] = _tls_state_from_verify(verify)
         run.persist("resolve_nous_runtime_credentials_final")
 
-    if run.persister.persisted_any:
+    if run.persisted_any:
         _sync_nous_pool_from_auth_store()
 
     api_key = state.get("agent_key")
