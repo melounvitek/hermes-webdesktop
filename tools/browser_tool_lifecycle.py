@@ -69,8 +69,7 @@ def _emergency_cleanup_all_sessions():
     except Exception as e:
         _bt.logger.debug("Real-profile chrome cleanup on exit failed: %s", e)
     if _bt._active_sessions:
-        _bt.logger.info("Emergency cleanup: closing %s active session(s)...",
-                    len(_bt._active_sessions))
+        _bt.logger.info("Emergency cleanup: closing %s active session(s)...", len(_bt._active_sessions))
         try:
             _bt.cleanup_all_browsers()
         except Exception as e:
@@ -112,9 +111,7 @@ def _session_owner_scope(task_id: str):
         yield
         return
 
-    from agent.secret_scope import (
-        build_profile_secret_scope, reset_secret_scope, set_secret_scope
-    )
+    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
     from hermes_cli.env_loader import hydrate_profile_secret_sources
 
     home_token = set_hermes_home_override(owner_home)
@@ -189,8 +186,7 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
         with open(path, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
     except OSError as exc:
-        _bt.logger.debug("Could not write owner_pid file for %s: %s",
-                     session_name, exc)
+        _bt.logger.debug("Could not write owner_pid file for %s: %s", session_name, exc)
 
 
 def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
@@ -234,14 +230,11 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
 
     socket_dir_l = socket_dir.lower()
     socket_base_l = os.path.basename(socket_dir).lower()
-    bound = socket_dir_l in cmdline or (
-        socket_base_l and socket_base_l in cmdline)
+    bound = socket_dir_l in cmdline or (socket_base_l and socket_base_l in cmdline)
     if not bound:
         try:
-            env_dir = (proc.environ() or {}).get(
-                "AGENT_BROWSER_SOCKET_DIR", "")
-            bound = bool(env_dir) and os.path.normpath(env_dir) == \
-                os.path.normpath(socket_dir)
+            env_dir = (proc.environ() or {}).get("AGENT_BROWSER_SOCKET_DIR", "")
+            bound = bool(env_dir) and os.path.normpath(env_dir) == os.path.normpath(socket_dir)
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             bound = False  # environ() can be denied even same-user; cmdline already failed — fail closed
 
@@ -361,8 +354,7 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
                 "Refusing to reap browser daemon PID %d (session %s): "
                 "no start-time fingerprint available", daemon_pid, session_name)
             return False
-        _bt.logger.info("Reaped orphaned browser daemon PID %d (session %s)",
-                    daemon_pid, session_name)
+        _bt.logger.info("Reaped orphaned browser daemon PID %d (session %s)", daemon_pid, session_name)
         reaped = True
     except (ProcessLookupError, PermissionError, OSError):
         pass
@@ -519,25 +511,11 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
 
 
 def _pid_exists(pid: int) -> bool:
-    """Best-effort 'is this PID alive' check (signal 0 / psutil on Windows)."""
+    """Best-effort 'is this PID alive' (cross-platform via gateway.status; zombies count as dead)."""
     if pid <= 0:
         return False
-    if os.name == "nt":
-        try:
-            import psutil
-
-            return psutil.pid_exists(pid)
-        except Exception:
-            return False
-    try:
-        os.kill(pid, 0)  # windows-footgun: ok — psutil.pid_exists above handles Windows
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    from gateway.status import _pid_exists as _gateway_pid_exists
+    return _gateway_pid_exists(pid)
 
 
 def _unlink_older_than(directory: Path, pattern: str, max_age_hours: float, label: str) -> None:
@@ -713,15 +691,11 @@ def _cleanup_single_browser_session(task_id: str) -> None:
         except Exception as e:
             _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
     elif _bt._session_has_expired(session_info):
-        _bt.logger.debug(
-            "Skipping agent-browser close for expired session %s", task_id
-        )
+        _bt.logger.debug("Skipping agent-browser close for expired session %s", task_id)
     else:
         try:
             _bt._run_browser_command(task_id, "close", [], timeout=10)
-            _bt.logger.debug(
-                "agent-browser close command completed for task %s", task_id
-            )
+            _bt.logger.debug("agent-browser close command completed for task %s", task_id)
         except Exception as e:
             _bt.logger.warning("agent-browser close failed for task %s: %s", task_id, e)
 

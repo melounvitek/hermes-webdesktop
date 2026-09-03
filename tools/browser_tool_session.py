@@ -220,8 +220,7 @@ def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict
         return _bt._create_lightpanda_session(task_id)
 
     info = _session_record("h", None, {"local": True})
-    _bt.logger.info("Created local browser session %s for task %s",
-                info["session_name"], task_id)
+    _bt.logger.info("Created local browser session %s for task %s", info["session_name"], task_id)
     return info
 
 
@@ -230,14 +229,10 @@ def _create_lightpanda_session(task_id: str) -> Dict[str, Any]:
     from tools.browser_lightpanda import launch_lightpanda
 
     session_name = f"lp_{uuid.uuid4().hex[:10]}"
-    server, err = launch_lightpanda(
-        session_name, block_private_networks=not _bt._is_local_backend()
-    )
+    server, err = launch_lightpanda(session_name, block_private_networks=not _bt._is_local_backend())
     if err:
         raise RuntimeError(err)
-    _bt.logger.info(
-        "Created Lightpanda session %s (port %s) for task %s", session_name, server.port, task_id
-    )
+    _bt.logger.info("Created Lightpanda session %s (port %s) for task %s", session_name, server.port, task_id)
     return {
         "session_name": session_name,
         "bb_session_id": None,
@@ -361,9 +356,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
         ):
             return existing_session
         else:
-            _bt.logger.info(
-                "Replacing expired or dead browser session for task %s", task_id
-            )
+            _bt.logger.info("Replacing expired or dead browser session for task %s", task_id)
             _bt._cleanup_single_browser_session(task_id)
             replacement = _replacement_after_teardown()
             if replacement is not None:
@@ -491,9 +484,7 @@ def _handle_browser_command_timeout(
         _bt._discard_timed_out_browser_session(task_id, session_info, task_socket_dir)
         return
 
-    _bt._browser_session_backend(task_id).mark_suspect(
-        "browser command timed out; session may be poisoned"
-    )
+    _bt._browser_session_backend(task_id).mark_suspect("browser command timed out; session may be poisoned")
 
     session_name = str(session_info.get("session_name") or "")
     daemon_pid = _bt._read_browser_daemon_pid(task_socket_dir, session_name) if session_name else None
@@ -640,9 +631,7 @@ def _spawn_and_collect(
         _bt._unlink_command_output_files(stdout_path, stderr_path)
         _bt._handle_browser_command_timeout(task_id, session_info, task_socket_dir)
         if stderr and stderr.strip():
-            _bt.logger.warning(
-                "browser '%s' stderr after timeout: %s", command, stderr.strip()[:500]
-            )
+            _bt.logger.warning("browser '%s' stderr after timeout: %s", command, stderr.strip()[:500])
         _bt.logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                        command, timeout, task_id, task_socket_dir)
         return {

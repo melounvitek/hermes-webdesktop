@@ -102,9 +102,7 @@ from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
     get_provider as _registry_get_browser_provider,
 )
 try:
-    from agent.browser_registry import (
-        registry_generation as _browser_registry_generation,
-    )
+    from agent.browser_registry import registry_generation as _browser_registry_generation
 except ImportError:
     # Isolated compat tests install a minimal ``agent.browser_registry`` stub
     # with only ``get_provider``; no mutable registry → constant generation.
@@ -151,24 +149,12 @@ _SANE_PATH = os.pathsep.join(_SANE_PATH_DIRS)
 
 
 from tools.browser_tool_install import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _discover_homebrew_node_dirs,
-    _browser_candidate_path_dirs,
-    _merge_browser_path,
-    _browser_install_hint,
-    _is_npx_agent_browser_sentinel,
-    _requires_real_termux_browser_install,
-    _termux_browser_install_error,
-    _agent_browser_candidate_present,
-    _resolve_npx_bin,
-    _agent_browser_candidates,
-    _find_agent_browser,
-    warm_agent_browser_npx_cache,
-    _chromium_search_roots,
-    _chromium_installed,
-    _maybe_autoinstall_chromium,
-    _running_in_docker,
-    check_browser_requirements,
-    check_browser_vision_requirements,
+    _discover_homebrew_node_dirs, _browser_candidate_path_dirs, _merge_browser_path,
+    _browser_install_hint, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install,
+    _termux_browser_install_error, _agent_browser_candidate_present, _resolve_npx_bin,
+    _agent_browser_candidates, _find_agent_browser, warm_agent_browser_npx_cache,
+    _chromium_search_roots, _chromium_installed, _maybe_autoinstall_chromium, _running_in_docker,
+    check_browser_requirements, check_browser_vision_requirements,
 )
 
 # Throttle screenshot cleanup to avoid repeated full directory scans.
@@ -269,27 +255,13 @@ def _get_open_command_timeout(*, first_open: bool = False) -> int:
 
 
 from tools.browser_tool_session import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _needs_chromium_sandbox_bypass,
-    _apply_chromium_sandbox_args,
-    _read_command_output_files,
-    _unlink_command_output_files,
-    _format_browser_timeout_error,
-    _agent_browser_argv,
-    _prepare_session_socket_dir,
-    _agent_browser_command_env,
-    _popen_agent_browser,
-    _create_local_session,
-    _create_lightpanda_session,
-    _local_backend_process_dead,
-    _create_cdp_session,
-    _create_cloud_session_or_fallback,
-    _create_session_for_key,
-    _get_session_info,
-    _discard_timed_out_browser_session,
-    _read_browser_daemon_pid,
-    _browser_daemon_responsive,
-    _handle_browser_command_timeout,
-    _interpret_browser_command_output,
+    _needs_chromium_sandbox_bypass, _apply_chromium_sandbox_args, _read_command_output_files,
+    _unlink_command_output_files, _format_browser_timeout_error, _agent_browser_argv,
+    _prepare_session_socket_dir, _agent_browser_command_env, _popen_agent_browser,
+    _create_local_session, _create_lightpanda_session, _local_backend_process_dead,
+    _create_cdp_session, _create_cloud_session_or_fallback, _create_session_for_key,
+    _get_session_info, _discard_timed_out_browser_session, _read_browser_daemon_pid,
+    _browser_daemon_responsive, _handle_browser_command_timeout, _interpret_browser_command_output,
     _run_browser_command,
 )
 
@@ -300,12 +272,8 @@ def _get_vision_model() -> Optional[str]:
 
 
 from tools.browser_tool_cdp import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _resolve_cdp_override,
-    _get_cdp_override_raw,
-    _get_cdp_override,
-    _get_dialog_policy_config,
-    _ensure_cdp_supervisor,
-    _stop_cdp_supervisor,
+    _resolve_cdp_override, _get_cdp_override_raw, _get_cdp_override, _get_dialog_policy_config,
+    _ensure_cdp_supervisor, _stop_cdp_supervisor,
 )
 
 # ----------------------------------------------------------------------------
@@ -324,9 +292,7 @@ _DEFAULT_PROVIDER_REGISTRY: Dict[str, type] = dict(_PROVIDER_REGISTRY)
 _cached_cloud_provider: Optional[CloudBrowserProvider] = None
 _cloud_provider_resolved = False
 _cached_cloud_provider_scope: Optional[str] = None
-_cached_cloud_providers: Dict[
-    tuple[str, tuple[int, int]], Optional[CloudBrowserProvider]
-] = {}
+_cached_cloud_providers: Dict[tuple[str, tuple[int, int]], Optional[CloudBrowserProvider]] = {}
 _cloud_provider_cache_lock = threading.RLock()
 _allow_private_urls_resolved = False
 _cached_allow_private_urls: Optional[bool] = None
@@ -338,21 +304,11 @@ _browser_engine_resolved = False
 
 
 from tools.browser_tool_cloud import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _is_legacy_provider_registry_overridden,
-    _ensure_browser_plugins_loaded,
-    _get_cloud_provider,
-    _instantiate_explicit_cloud_provider,
-    _autodetect_cloud_provider,
-    _resolve_cloud_provider_uncached,
-    _is_local_mode,
-    _is_local_backend,
-    _get_browser_engine,
-    _is_headed_mode,
-    _should_inject_engine,
-    _auto_local_for_private_urls,
-    _use_real_profile,
-    _allow_private_urls,
-    _resolve_allow_private_urls,
+    _is_legacy_provider_registry_overridden, _ensure_browser_plugins_loaded, _get_cloud_provider,
+    _instantiate_explicit_cloud_provider, _autodetect_cloud_provider,
+    _resolve_cloud_provider_uncached, _is_local_mode, _is_local_backend, _get_browser_engine,
+    _is_headed_mode, _should_inject_engine, _auto_local_for_private_urls, _use_real_profile,
+    _allow_private_urls, _resolve_allow_private_urls,
 )
 
 from hermes_constants import is_termux as _is_termux_environment  # noqa: F401  (read via origin)
@@ -374,14 +330,9 @@ _headed_mode_resolved = False
 
 
 from tools.browser_tool_lightpanda_fallback import (  # noqa: F401
-    _using_lightpanda_engine,
-    lightpanda_engine_status,
-    _lightpanda_fallback_reason,
-    _needs_lightpanda_fallback,
-    _annotate_lightpanda_fallback,
-    _copy_fallback_warning,
-    _run_chrome_fallback_command,
-    _chrome_fallback_screenshot,
+    _using_lightpanda_engine, lightpanda_engine_status, _lightpanda_fallback_reason,
+    _needs_lightpanda_fallback, _annotate_lightpanda_fallback, _copy_fallback_warning,
+    _run_chrome_fallback_command, _chrome_fallback_screenshot,
 )
 
 
@@ -394,17 +345,10 @@ _real_profile_chrome_procs: list = []  # Popen handles of directly-launched real
 
 
 from tools.browser_tool_real_profile import (  # noqa: F401
-    _terminate_real_profile_chrome,
-    _cdp_http_ready,
-    _agent_browser_get_cdp,
-    _cdp_on_data_dir,
-    _agent_browser_close_session,
-    _REAL_PROFILE_CHROME_FLAGS,
-    _real_profile_unsupported_reason,
-    _real_profile_snapshot_error,
-    _launch_real_profile_chrome,
-    _attach_agent_browser_to_real_profile,
-    _real_profile_cdp,
+    _terminate_real_profile_chrome, _cdp_http_ready, _agent_browser_get_cdp, _cdp_on_data_dir,
+    _agent_browser_close_session, _REAL_PROFILE_CHROME_FLAGS, _real_profile_unsupported_reason,
+    _real_profile_snapshot_error, _launch_real_profile_chrome,
+    _attach_agent_browser_to_real_profile, _real_profile_cdp,
 )
 
 
@@ -603,9 +547,7 @@ class _BrowserSessionBackend:
         reason = _suspect_browser_sessions.pop(self._session_key, None)
         if reason is None:
             return True
-        logger.info(
-            "Recycling suspect browser session %s before reuse (%s)", self._session_key, reason
-        )
+        logger.info("Recycling suspect browser session %s before reuse (%s)", self._session_key, reason)
         try:
             _cleanup_single_browser_session(self._session_key)
         except Exception:
@@ -628,33 +570,14 @@ _cleanup_lock = threading.Lock()
 
 
 from tools.browser_tool_lifecycle import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _session_expiry_timestamp,
-    _session_has_expired,
-    _emergency_cleanup_all_sessions,
-    _session_owner_scope,
-    _cleanup_inactive_browser_sessions,
-    _write_owner_pid,
-    _verify_reapable_browser_daemon,
-    _socket_dir_idle_seconds,
-    _owner_pid_alive,
-    _reap_socket_dir,
-    _reap_orphaned_browser_sessions,
-    _browser_cleanup_thread_worker,
-    _start_browser_cleanup_thread,
-    _stop_browser_cleanup_thread,
-    _update_session_activity,
-    _kill_process_tree,
-    _legacy_kill_process_tree,
-    _pid_exists,
-    _cleanup_old_screenshots,
-    _cleanup_old_recordings,
-    _drop_last_active_binding,
-    cleanup_browser,
-    _kill_verified_daemon,
-    _release_session_resources,
-    _force_reap_browser_session,
-    _cleanup_single_browser_session,
-    cleanup_all_browsers,
+    _session_expiry_timestamp, _session_has_expired, _emergency_cleanup_all_sessions,
+    _session_owner_scope, _cleanup_inactive_browser_sessions, _write_owner_pid,
+    _verify_reapable_browser_daemon, _socket_dir_idle_seconds, _owner_pid_alive, _reap_socket_dir,
+    _reap_orphaned_browser_sessions, _browser_cleanup_thread_worker, _start_browser_cleanup_thread,
+    _stop_browser_cleanup_thread, _update_session_activity, _kill_process_tree,
+    _legacy_kill_process_tree, _pid_exists, _cleanup_old_screenshots, _cleanup_old_recordings,
+    _drop_last_active_binding, cleanup_browser, _kill_verified_daemon, _release_session_resources,
+    _force_reap_browser_session, _cleanup_single_browser_session, cleanup_all_browsers,
 )
 
 # atexit only — NO SIGINT/SIGTERM handlers calling sys.exit(): a SystemExit raised
@@ -812,9 +735,7 @@ BROWSER_TOOL_SCHEMAS = [
 
 
 from tools.browser_tool_snapshot import (  # noqa: F401
-    _store_full_snapshot,
-    _truncate_snapshot,
-    _redact_browser_output,
+    _store_full_snapshot, _truncate_snapshot, _redact_browser_output,
     _extract_screenshot_path_from_text,
 )
 
@@ -1097,39 +1018,37 @@ def _camofox(func_name: str, *args):
     return getattr(importlib.import_module("tools.browser_camofox"), func_name)(*args)
 
 
-def _guarded_action_session(task_id: Optional[str], action: str) -> tuple[str, Optional[str]]:
-    """``(session_key, blocked_payload)`` for an input action on the task's current page."""
+def _guarded_action(task_id: Optional[str], action: str, command: str, args: list, ok: Dict[str, Any], err: str) -> str:
+    """Input action on the task's current page, refused when the SSRF guard flags the page."""
     effective_task_id = _last_session_key(task_id or "default")
-    return effective_task_id, _blocked_private_page_action(effective_task_id, action)
+    blocked = _blocked_private_page_action(effective_task_id, action)
+    if blocked is not None:
+        return blocked
+    return _tool_response(_run_browser_command(effective_task_id, command, args), ok, err)
 
 
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     """Click the element ``ref`` (e.g. "@e5")."""
     if _is_camofox_mode():
         return _camofox("camofox_click", ref, task_id)
-    effective_task_id, blocked = _guarded_action_session(task_id, "click")
-    if blocked is not None:
-        return blocked
     if not ref.startswith("@"):
         ref = f"@{ref}"
-    result = _run_browser_command(effective_task_id, "click", [ref])
-    return _tool_response(result, {"clicked": ref}, f"Failed to click {ref}")
+    return _guarded_action(task_id, "click", "click", [ref], {"clicked": ref}, f"Failed to click {ref}")
 
 
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     """Type ``text`` into the element ``ref`` (fill: clears, then types)."""
     if _is_camofox_mode():
         return _camofox("camofox_type", ref, text, task_id)
-    effective_task_id, blocked = _guarded_action_session(task_id, "type")
+    effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(effective_task_id, "type")
     if blocked is not None:
         return blocked
     if not ref.startswith("@"):
         ref = f"@{ref}"
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
-    from agent.display import (
-        redact_browser_typed_text_for_display, redact_tool_args_for_display
-    )
+    from agent.display import redact_browser_typed_text_for_display, redact_tool_args_for_display
     # Typed text goes through the secret-pattern redactor so API keys / tokens don't
     # leak into tool progress or chat history (the raw value already went to the browser).
     display_text = (redact_tool_args_for_display("browser_type", {"text": text}) or {})["text"]
@@ -1177,11 +1096,7 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     """Press a keyboard key (e.g. "Enter", "Tab")."""
     if _is_camofox_mode():
         return _camofox("camofox_press", key, task_id)
-    effective_task_id, blocked = _guarded_action_session(task_id, "press")
-    if blocked is not None:
-        return blocked
-    result = _run_browser_command(effective_task_id, "press", [key])
-    return _tool_response(result, {"pressed": key}, f"Failed to press {key}")
+    return _guarded_action(task_id, "press", "press", [key], {"pressed": key}, f"Failed to press {key}")
 
 
 def _blocked_private_page_json(blocked_url: str, why: str) -> str:
@@ -1245,9 +1160,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     errors = []
     if errors_result.get("success"):
         for err in errors_result.get("data", {}).get("errors", []):
-            errors.append({
-                "message": _redact_browser_output(err.get("message", "")), "source": "exception"
-            })
+            errors.append({"message": _redact_browser_output(err.get("message", "")), "source": "exception"})
 
     response = {
         "success": True,
@@ -1262,21 +1175,11 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
 
 
 from tools.browser_tool_eval_policy import (  # noqa: F401
-    _eval_ssrf_guard_active,
-    _JS_URL_LITERAL_RE,
-    _expression_targets_private_url,
-    _current_page_private_url,
-    _RISKY_BROWSER_EVAL_PATTERNS,
-    _JS_STRING_LITERAL_RE,
-    _SENSITIVE_BROWSER_EVAL_TOKENS,
-    _allow_unsafe_browser_evaluate,
-    _restrict_browser_evaluate,
-    _decode_js_string_literal,
-    _decoded_js_string_literals,
-    _sensitive_browser_eval_token_reason,
-    _risky_browser_eval_reason,
-    _enforce_browser_eval_policy,
-    _camofox_current_page_private_url,
+    _eval_ssrf_guard_active, _JS_URL_LITERAL_RE, _expression_targets_private_url,
+    _current_page_private_url, _RISKY_BROWSER_EVAL_PATTERNS, _JS_STRING_LITERAL_RE,
+    _SENSITIVE_BROWSER_EVAL_TOKENS, _allow_unsafe_browser_evaluate, _restrict_browser_evaluate,
+    _decode_js_string_literal, _decoded_js_string_literals, _sensitive_browser_eval_token_reason,
+    _risky_browser_eval_reason, _enforce_browser_eval_policy, _camofox_current_page_private_url,
 )
 
 
@@ -1323,9 +1226,7 @@ def _eval_supervisor_fast_path(effective_task_id: str, expression: str) -> Optio
         err = sup_result.get("error") or "evaluate_runtime failed"
         if "supervisor" not in err.lower():
             return _dumps(_err(err))
-        logger.debug(
-            "browser_eval: supervisor path unavailable (%s), falling back to subprocess", err
-        )
+        logger.debug("browser_eval: supervisor path unavailable (%s), falling back to subprocess", err)
     except ImportError:
         pass
     except Exception as exc:  # pragma: no cover — defensive
@@ -1499,9 +1400,7 @@ _LP_VISION_FALLBACK_REASON = (
 
 
 from tools.browser_tool_vision import (  # noqa: F401  (re-exported; tests patch tools.browser_tool.<name>)
-    _vision_mode_label,
-    _lightpanda_vision_preroute,
-    _native_vision_result,
+    _vision_mode_label, _lightpanda_vision_preroute, _native_vision_result,
     _analyze_screenshot_with_aux_llm,
 )
 
@@ -1609,9 +1508,7 @@ _chromium_autoinstall_attempted = False
 # Registry
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
-from tools.browser_extension_router import (
-    extension_controller_available, routed_browser_handler
-)
+from tools.browser_extension_router import extension_controller_available, routed_browser_handler
 
 _BROWSER_SCHEMA_MAP = {s["name"]: s for s in BROWSER_TOOL_SCHEMAS}
 
@@ -1621,33 +1518,33 @@ def check_browser_routed_requirements(action: str = "browser_snapshot") -> bool:
     return check_browser_requirements() or extension_controller_available(action)
 
 
-# (tool name, emoji, availability gate, fallback call) — routed-through-extension
-# tools (gate None) use the per-action gate; get_images/console/vision keep the plain
-# requirement checks. ``_fallback`` receives (args, kw).
+def _fallback_call(fn_name: str, arg_defaults: Dict[str, Any], extra_kw: tuple = ()):
+    """Adapter from the registry's ``(args, kw)`` to ``<fn_name>(**schema_args, task_id=...)``;
+    the function is looked up in module globals at call time so monkeypatching works."""
+    def call(args, kw):
+        params = {a: args.get(a, d) for a, d in arg_defaults.items()}
+        params["task_id"] = kw.get("task_id")
+        for k in extra_kw:
+            params[k] = kw.get(k)
+        return globals()[fn_name](**params)
+    return call
+
+
+# (tool name, emoji, availability gate, schema-arg defaults[, extra kw names]) — the tool
+# function is the module global of the same name. —
+# routed-through-extension tools (gate None) use the per-action gate; get_images/console/vision
+# keep the plain requirement checks.
 _BROWSER_TOOL_TABLE = (
-    ("browser_navigate", "🌐", None,
-     lambda args, kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id"))),
-    ("browser_snapshot", "📸", None,
-     lambda args, kw: browser_snapshot(
-         full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task"))),
-    ("browser_click", "👆", None,
-     lambda args, kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id"))),
-    ("browser_type", "⌨️", None,
-     lambda args, kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id"))),
-    ("browser_scroll", "📜", None,
-     lambda args, kw: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id"))),
-    ("browser_back", "◀️", None,
-     lambda args, kw: browser_back(task_id=kw.get("task_id"))),
-    ("browser_press", "⌨️", None,
-     lambda args, kw: browser_press(key=args.get("key", ""), task_id=kw.get("task_id"))),
-    ("browser_get_images", "🖼️", check_browser_requirements,
-     lambda args, kw: browser_get_images(task_id=kw.get("task_id"))),
-    ("browser_vision", "👁️", check_browser_vision_requirements,
-     lambda args, kw: browser_vision(
-         question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id"))),
-    ("browser_console", "🖥️", check_browser_requirements,
-     lambda args, kw: browser_console(
-         clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id"))),
+    ("browser_navigate", "🌐", None, {"url": ""}),
+    ("browser_snapshot", "📸", None, {"full": False}, ("user_task",)),
+    ("browser_click", "👆", None, {"ref": ""}),
+    ("browser_type", "⌨️", None, {"ref": "", "text": ""}),
+    ("browser_scroll", "📜", None, {"direction": "down"}),
+    ("browser_back", "◀️", None, {}),
+    ("browser_press", "⌨️", None, {"key": ""}),
+    ("browser_get_images", "🖼️", check_browser_requirements, {}),
+    ("browser_vision", "👁️", check_browser_vision_requirements, {"question": "", "annotate": False}),
+    ("browser_console", "🖥️", check_browser_requirements, {"clear": False, "expression": None}),
 )
 
 
@@ -1670,14 +1567,11 @@ def _routed_handler(name: str, fallback):
 
 # Legacy per-tool gate names (tests + external callers); also looked up by the
 # registration loop below via globals().
-for _name, _emoji, _check_fn, _fallback in _BROWSER_TOOL_TABLE:
+for _name, _emoji, _check_fn, _defaults, *_extra in _BROWSER_TOOL_TABLE:
     if _check_fn is None:
         _check_fn = globals()[f"check_{_name}_requirements"] = _routed_check_fn(_name)
     registry.register(
-        name=_name,
-        toolset="browser",
-        schema=_BROWSER_SCHEMA_MAP[_name],
-        handler=_routed_handler(_name, _fallback),
-        check_fn=_check_fn,
-        emoji=_emoji,
+        name=_name, toolset="browser", schema=_BROWSER_SCHEMA_MAP[_name],
+        handler=_routed_handler(_name, _fallback_call(_name, _defaults, *_extra)),
+        check_fn=_check_fn, emoji=_emoji,
     )
