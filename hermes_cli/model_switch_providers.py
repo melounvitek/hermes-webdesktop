@@ -360,18 +360,16 @@ def _has_fast_aws_sdk_signal() -> bool:
     Deliberately avoids botocore's full credential chain: picker discovery runs for non-Bedrock
     providers too, and botocore may probe EC2 IMDS (169.254.169.254) before giving up.
     """
-    env = os.environ
-    if env.get("AWS_BEARER_TOKEN_BEDROCK", "").strip():
-        return True
-    if env.get("AWS_ACCESS_KEY_ID", "").strip() and env.get("AWS_SECRET_ACCESS_KEY", "").strip():
-        return True
-    return any(
-        env.get(name, "").strip()
-        for name in (
-            "AWS_PROFILE",
-            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-            "AWS_WEB_IDENTITY_TOKEN_FILE"))
+    def _set(name: str) -> bool:
+        return bool(os.environ.get(name, "").strip())
+
+    return (
+        _set("AWS_BEARER_TOKEN_BEDROCK")
+        or (_set("AWS_ACCESS_KEY_ID") and _set("AWS_SECRET_ACCESS_KEY"))
+        or any(_set(name) for name in (
+            "AWS_PROFILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE"))
+    )
 
 
 def _has_aws_sdk_creds_for_listing(slug: str, current_provider: str) -> bool:
@@ -638,15 +636,13 @@ class _PickerBuild:
         if normed:
             self.builtin_endpoints.add(normed)
 
-    def add_builtin_row(self, slug: str, name: str, is_current: bool, model_ids: list, source: str, *, uncapped_ok: bool = True) -> None:
+    def add_builtin_row(
+        self, slug: str, name: str, is_current: bool, model_ids: list, source: str, *, uncapped_ok: bool = True,
+    ) -> None:
         self.results.append({
-            "slug": slug,
-            "name": name,
-            "is_current": is_current,
-            "is_user_defined": False,
+            "slug": slug, "name": name, "is_current": is_current, "is_user_defined": False,
             "models": _cap_models(model_ids, self.max_models, slug if uncapped_ok else ""),
-            "total_models": len(model_ids),
-            "source": source})
+            "total_models": len(model_ids), "source": source})
         self.seen_slugs.add(slug.lower())
         self.record_builtin_endpoint(slug)
 
@@ -655,15 +651,9 @@ class _PickerBuild:
         *, source: str = "user-config", shown: list | None = None) -> None:
         """Append a user-defined endpoint row (sections 3, 3b, 4)."""
         self.results.append({
-            "slug": slug,
-            "name": name,
-            "is_current": is_current,
-            "is_user_defined": True,
-            "models": models if shown is None else shown,
-            "total_models": len(models),
-            "source": source,
-            "api_url": api_url,
-            "native_catalog_empty": native_catalog_empty})
+            "slug": slug, "name": name, "is_current": is_current, "is_user_defined": True,
+            "models": models if shown is None else shown, "total_models": len(models), "source": source,
+            "api_url": api_url, "native_catalog_empty": native_catalog_empty})
         self.seen_slugs.add(slug.lower())
 
     def endpoint_is_current(self, slug: str, aliases: set, url_norm: str, *, url_match_ok: bool = True) -> bool:
@@ -872,20 +862,13 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
             cut_at = next((i for i, t in enumerate(toks) if any(c.isdigit() for c in t.strip(".,()"))), None)
             if cut_at is not None and cut_at >= 2:
                 grp_display = " ".join(toks[:cut_at]).strip()
+            # slug = first ep_name encountered; probe key from the first member (inline api_key,
+            # else key_env through the per-profile secret scope).
             ep_groups[group_key] = {
-                "slug": ep_name,  # first ep_name encountered
-                "name": grp_display or display_name,
-                "api_url": api_url,
-                "models": [],
-                "has_explicit_models": False,
-                # Probe key from the first member: inline api_key, else key_env through the
-                # per-profile secret scope.
-                "api_key": inline_api_key or _scoped_key_env(key_env),
-                "headers": headers,
-                "api_mode": ep_cfg.get("api_mode"),
-                "discovery_allowed": bool(api_url) and _discover_flag(ep_cfg),
-                "raw_names": [],
-                "aliases": set()}
+                "slug": ep_name, "name": grp_display or display_name, "api_url": api_url, "models": [],
+                "has_explicit_models": False, "api_key": inline_api_key or _scoped_key_env(key_env),
+                "headers": headers, "api_mode": ep_cfg.get("api_mode"),
+                "discovery_allowed": bool(api_url) and _discover_flag(ep_cfg), "raw_names": [], "aliases": set()}
         grp = ep_groups[group_key]
         for m in entry_models:
             if m and m not in grp["models"]:
@@ -987,15 +970,9 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
         if group_key not in groups:
             display_name = prefix or raw_name
             groups[group_key] = {
-                "slug": custom_provider_slug(display_name, provider_key),
-                "name": display_name,
-                "api_url": api_url,
-                "api_key": api_key,
-                "models": [],
-                "has_explicit_models": False,
-                "discover_models": discover,
-                "api_mode": api_mode,
-                "extra_headers": entry_extra_headers,
+                "slug": custom_provider_slug(display_name, provider_key), "name": display_name,
+                "api_url": api_url, "api_key": api_key, "models": [], "has_explicit_models": False,
+                "discover_models": discover, "api_mode": api_mode, "extra_headers": entry_extra_headers,
                 "aliases": set()}
         else:
             if api_key and not groups[group_key].get("api_key"):
@@ -1141,19 +1118,13 @@ def list_authenticated_providers(
     user_providers = stringify_provider_map(user_providers)
     data = fetch_models_dev()
 
+    # A single excluded entry like ``copilot`` hides the provider under every key it surfaces
+    # as (hermes_id / mdev_id / canonical slug).
     b = _PickerBuild(
-        current_provider=current_provider,
-        current_base_url=current_base_url,
-        current_model=current_model,
-        max_models=max_models,
-        for_picker=for_picker,
-        force_fresh_nous_tier=force_fresh_nous_tier,
-        probe_custom_providers=probe_custom_providers,
-        probe_current_custom_provider=probe_current_custom_provider,
-        refresh=refresh,
-        # A single entry like ``copilot`` hides the provider under every key it surfaces as
-        # (hermes_id / mdev_id / canonical slug).
-        excluded={str(p).strip().lower() for p in (excluded_providers or []) if p},
+        current_provider=current_provider, current_base_url=current_base_url, current_model=current_model,
+        max_models=max_models, for_picker=for_picker, force_fresh_nous_tier=force_fresh_nous_tier,
+        probe_custom_providers=probe_custom_providers, probe_current_custom_provider=probe_current_custom_provider,
+        refresh=refresh, excluded={str(p).strip().lower() for p in (excluded_providers or []) if p},
         curated=_build_curated_lists(current_provider, current_base_url, current_model))
 
     # Warm the disk cache in parallel before the serial section loops (otherwise 15-30s of live
@@ -1174,10 +1145,13 @@ def list_authenticated_providers(
     _lap_bare_custom_row(b, custom_providers)
     if custom_providers and isinstance(custom_providers, list):
         _lap_custom_provider_rows(b, custom_providers)
-    results = b.results
+    return _finalize_picker_rows(b.results, user_providers, current_model)
 
-    # ``providers.<name>.enabled: false`` post-filter covers built-in rows (sections 1-2) that
-    # bypass the per-section gate; matched by slug and ``provider_id``.
+
+def _finalize_picker_rows(results: list, user_providers, current_model: str) -> list:
+    """Post-passes: drop ``providers.<name>.enabled: false`` rows, inject the current model, sort."""
+    # The enabled post-filter covers built-in rows (sections 1-2) that bypass the per-section
+    # gate; matched by slug and ``provider_id``.
     try:
         from hermes_cli.config import is_provider_enabled
         if isinstance(user_providers, dict):
@@ -1195,7 +1169,7 @@ def list_authenticated_providers(
 
     # A custom/uncurated model set via `/model <provider>/<name>` would be invisible in every
     # picker (main and MoA slot pickers read these rows); inject it at the front of the current
-    # provider's row as a uniform post-pass.
+    # provider's row.
     if current_model:
         for row in results:
             if not row.get("is_current") or row.get("native_catalog_empty"):

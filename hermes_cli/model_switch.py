@@ -23,16 +23,11 @@ from hermes_cli.model_normalize import normalize_model_for_provider
 from agent.models_dev import (
     ModelCapabilities, ModelInfo, get_model_capabilities, get_model_info, list_provider_models)
 from utils import base_url_hostname, base_url_origin
-from hermes_cli.model_switch_providers import (  # noqa: F401  (re-exported; callers/tests patch hermes_cli.model_switch.<name>)
-    _NativePickerModelList,
-    _collect_authed_provider_slugs,
-    _credential_pool_is_usable,
-    _fetch_picker_live_models,
-    _picker_prewarm_done,
-    _prefetch_provider_models_parallel,
-    _save_discovered_models_to_config,
-    list_authenticated_providers,
-    list_picker_providers,
+# Re-exported: callers/tests patch hermes_cli.model_switch.<name>.
+from hermes_cli.model_switch_providers import (  # noqa: F401
+    _NativePickerModelList, _collect_authed_provider_slugs, _credential_pool_is_usable,
+    _fetch_picker_live_models, _picker_prewarm_done, _prefetch_provider_models_parallel,
+    _save_discovered_models_to_config, list_authenticated_providers, list_picker_providers,
     prewarm_picker_cache_async)
 
 
@@ -41,34 +36,31 @@ logger = logging.getLogger(__name__)
 
 def _declared_model_ids(value: Any) -> list[str]:
     """Configured model IDs from ``{"id": {...}}``, ``["a", "b"]``, ``[{"id"|"name": ...}]`` or ``"a"``."""
+    if isinstance(value, str):
+        candidates: Any = [value]
+    elif isinstance(value, dict):
+        # Pre-fix Hermes wrote sentinel keys inside the user-facing ``models`` mapping.
+        candidates = (k for k in value if k not in ("__explicit_model_allowlist__", "__discovered_model_catalog__"))
+    elif isinstance(value, (list, tuple)):
+        candidates = (_declared_item_id(item) if isinstance(item, dict) else item for item in value)
+    else:
+        return []
     ids: list[str] = []
     seen: set[str] = set()
-
-    def _add(candidate: Any) -> None:
+    for candidate in candidates:
         if not isinstance(candidate, str):
-            return
+            continue  # non-str items are dropped
         model_id = candidate.strip()
         if model_id and model_id.lower() not in seen:
             seen.add(model_id.lower())
             ids.append(model_id)
-
-    if isinstance(value, str):
-        _add(value)
-    elif isinstance(value, dict):
-        # Pre-fix Hermes wrote sentinel keys inside the user-facing ``models`` mapping.
-        for model_id in value:
-            if model_id not in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
-                _add(model_id)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            if isinstance(item, dict):
-                model_id = item.get("id")
-                if not isinstance(model_id, str) or not model_id.strip():
-                    model_id = item.get("name")
-                _add(model_id)
-            else:
-                _add(item)  # non-str items are dropped by _add
     return ids
+
+
+def _declared_item_id(item: dict) -> Any:
+    """``id`` of a ``[{"id": ...}]`` entry, falling back to ``name`` when blank/missing."""
+    model_id = item.get("id")
+    return model_id if isinstance(model_id, str) and model_id.strip() else item.get("name")
 
 
 def _entry_models_discovered(entry: Any) -> bool:
@@ -857,25 +849,11 @@ def resolve_display_context_length(
     return None
 
 
-async def resolve_display_context_length_async(
-    model: str,
-    provider: str,
-    base_url: str = "",
-    api_key: str = "",
-    model_info: Optional[ModelInfo] = None,
-    custom_providers: list | None = None,
-    config_context_length: int | None = None,
-    configured_model: str | None = None,
-    configured_provider: str | None = None,
-    configured_base_url: str | None = None) -> Optional[int]:
-    """Thread-offloaded :func:`resolve_display_context_length` — the sync version runs blocking
-    provider probes that async gateway handlers must not run on the event loop."""
+async def resolve_display_context_length_async(model: str, provider: str, **kwargs) -> Optional[int]:
+    """Thread-offloaded :func:`resolve_display_context_length` (same keyword arguments) — the sync
+    version runs blocking provider probes that async gateway handlers must not run on the loop."""
     import asyncio
-    return await asyncio.to_thread(
-        resolve_display_context_length, model, provider, base_url=base_url, api_key=api_key,
-        model_info=model_info, custom_providers=custom_providers, config_context_length=config_context_length,
-        configured_model=configured_model, configured_provider=configured_provider,
-        configured_base_url=configured_base_url)
+    return await asyncio.to_thread(resolve_display_context_length, model, provider, **kwargs)
 
 
 # --- Configured-provider detection for typed model names
@@ -1532,22 +1510,12 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
         request_overrides = None
 
     return ModelSwitchResult(
-        success=True,
-        new_model=st.new_model,
-        target_provider=st.target_provider,
-        provider_changed=st.provider_changed,
-        api_key=st.api_key,
-        base_url=st.base_url,
-        api_mode=st.api_mode,
-        request_overrides=dict(request_overrides or {}),
-        warning_message=" | ".join(warnings) if warnings else "",
-        provider_label=st.provider_label,
-        resolved_via_alias=st.resolved_alias,
-        capabilities=capabilities,
-        runtime_capabilities={k: v for k, v in runtime_capabilities.items()
-                              if isinstance(k, str) and isinstance(v, bool)},
-        model_info=model_info,
-        is_global=st.is_global)
+        success=True, new_model=st.new_model, target_provider=st.target_provider,
+        provider_changed=st.provider_changed, api_key=st.api_key, base_url=st.base_url, api_mode=st.api_mode,
+        request_overrides=dict(request_overrides or {}), warning_message=" | ".join(warnings) if warnings else "",
+        provider_label=st.provider_label, resolved_via_alias=st.resolved_alias, capabilities=capabilities,
+        runtime_capabilities={k: v for k, v in runtime_capabilities.items() if isinstance(k, str) and isinstance(v, bool)},
+        model_info=model_info, is_global=st.is_global)
 
 
 def switch_model(
