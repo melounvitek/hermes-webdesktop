@@ -115,18 +115,12 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     return env_values
 
 
-def _chmod_owner_only(path: Path) -> None:
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
 def _secure_write_profile_env(profile_env: Path, content: str) -> None:
     """Create/overwrite *profile_env* owner-only (0600); a pre-existing file is
     tightened BEFORE the plaintext LLM API key is written."""
     if profile_env.exists():
-        _chmod_owner_only(profile_env)
+        with contextlib.suppress(OSError):
+            os.chmod(profile_env, 0o600)
     fd = os.open(str(profile_env), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -139,7 +133,8 @@ def _validate_profile_env_permissions(profile_env: Path) -> None:
     import stat
 
     if stat.S_IMODE(profile_env.stat().st_mode) != 0o600:
-        _chmod_owner_only(profile_env)
+        with contextlib.suppress(OSError):
+            os.chmod(profile_env, 0o600)
         if stat.S_IMODE(profile_env.stat().st_mode) != 0o600:
             raise PermissionError(
                 f"Embedded Hindsight profile environment is not owner-only: {profile_env}"

@@ -92,20 +92,16 @@ def _normalize_observation_scopes(value: Any) -> Any:
             except Exception:
                 return None
         return None
-    if isinstance(value, (list, tuple)):
-        if all(isinstance(entry, str) for entry in value):
-            inner = [entry.strip() for entry in value if entry.strip()]
-            return [inner] if inner else None
-        scopes: list[list[str]] = []
-        for entry in value:
-            if isinstance(entry, (list, tuple)):
-                inner = [str(tag).strip() for tag in entry if str(tag).strip()]
-                if inner:
-                    scopes.append(inner)
-            elif isinstance(entry, str) and entry.strip():
-                scopes.append([entry.strip()])
-        return scopes or None
-    return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    if all(isinstance(entry, str) for entry in value):  # flat tag list -> one scope
+        value = [value]
+    scopes = [
+        [str(tag).strip() for tag in entry if str(tag).strip()] if isinstance(entry, (list, tuple))
+        else [entry.strip()] if isinstance(entry, str) and entry.strip() else []
+        for entry in value
+    ]
+    return [s for s in scopes if s] or None
 
 
 def _sanitize_bank_segment(value: str) -> str:

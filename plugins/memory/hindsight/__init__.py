@@ -81,11 +81,12 @@ def _maybe_upgrade_client() -> None:
             outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
             if outcome.ok:
                 logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
+            elif outcome.blocked:
+                logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
+                               outcome.reason, _MIN_CLIENT_VERSION)
             else:
-                what, why = (("unavailable", outcome.reason) if outcome.blocked
-                             else ("failed", (outcome.stderr or "").strip() or "install error"))
-                logger.warning("Auto-upgrade %s: %s. Run: uv pip install 'hindsight-client>=%s'",
-                               what, why, _MIN_CLIENT_VERSION)
+                logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
+                               (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
     except Exception:
         pass  # packaging not available or other issue — proceed anyway
 
@@ -103,9 +104,7 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
     if not api_url:
         return None
     url = api_url.rstrip("/") + "/version"
-    req = urllib.request.Request(url)
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -296,6 +295,9 @@ _SYSTEM_PROMPT_TAILS = {
 class HindsightMemoryProvider(MemoryProvider):
     """Hindsight long-term memory with knowledge graph and multi-strategy retrieval."""
 
+    # Each server-side op status poll is a round trip — coarser than the 0.05s queue poll.
+    _RETAIN_OP_POLL_INTERVAL_S = 0.5
+
     def backup_paths(self) -> List[str]:
         """Legacy shared config + embedded-mode profile env files live under ~/.hindsight."""
         with contextlib.suppress(Exception):
@@ -339,8 +341,6 @@ class HindsightMemoryProvider(MemoryProvider):
         self._pending_retain_ops: set[str] = set()
         self._pending_retain_ops_lock = threading.Lock()
         self._retain_ops_bank_id = ""
-        # Each status poll is a server round trip — coarser than the 0.05s queue poll.
-        self._RETAIN_OP_POLL_INTERVAL_S = 0.5
         # The next turn's warm prefetch could read BEFORE an async retain is
         # recall-visible; when True it first waits (bounded, off the reply path)
         # for the queue to drain AND the server-side op(s) to complete.
@@ -833,7 +833,7 @@ class HindsightMemoryProvider(MemoryProvider):
             _log(f"\n=== Daemon startup failed: {e} ===\n" + traceback.format_exc())
 
     def system_prompt_block(self) -> str:
-        mode = self._memory_mode if self._memory_mode in ("context", "tools") else "hybrid"
+        mode = self._memory_mode if self._memory_mode in _SYSTEM_PROMPT_TAILS else "hybrid"
         label = "" if mode == "hybrid" else f" ({mode} mode)"
         return f"# Hindsight Memory\nActive{label}. Bank: {self._bank_id}, budget: {self._budget}.\n{_SYSTEM_PROMPT_TAILS[mode]}"
 
@@ -969,12 +969,8 @@ class HindsightMemoryProvider(MemoryProvider):
             "timestamp": (occurred_at or "").strip() or _event_timestamp(),
         }
         merged_tags = _normalize_retain_tags(list(self._retain_tags) + _normalize_retain_tags(tags))
-        for key, value in (("context", context), ("update_mode", update_mode)):
-            if value is not None:
-                item[key] = value
-        for key, value in (("tags", merged_tags), ("observation_scopes", self._observation_scopes)):
-            if value:
-                item[key] = value
+        item.update({k: v for k, v in (("context", context), ("update_mode", update_mode)) if v is not None})
+        item.update({k: v for k, v in (("tags", merged_tags), ("observation_scopes", self._observation_scopes)) if v})
         return item
 
     def _retain_batch(self, item: dict, *, bank_id: str, document_id: str | None = None,
