@@ -1,9 +1,6 @@
-"""Turn-end verification guard for coding edits.
-
-Policy-only: it never runs checks itself. It turns the passive verification
-ledger into a bounded follow-up when the model tries to finish right after
-editing code without fresh evidence.
-"""
+"""Turn-end verification guard for coding edits. Policy-only: it never runs
+checks itself, it turns the passive verification ledger into a bounded follow-up
+when the model tries to finish right after editing code without fresh evidence."""
 
 from __future__ import annotations
 
@@ -36,15 +33,12 @@ def _is_non_code_path(raw: str) -> bool:
     except Exception:
         return False
     suffix = p.suffix.lower()
-    return suffix in _NON_CODE_VERIFY_EXTENSIONS or (
-        not suffix and p.name.lower() in _NON_CODE_VERIFY_FILENAMES
-    )
+    return suffix in _NON_CODE_VERIFY_EXTENSIONS or (not suffix and p.name.lower() in _NON_CODE_VERIFY_FILENAMES)
 
 
 def _session_is_messaging_surface() -> bool:
-    """Whether this turn is delivered over a human messaging channel
-    (``gateway.session_context``). An unreachable gateway package means no
-    messaging channel, so report a local surface (keeps verify-on-stop enabled)."""
+    """Whether this turn is delivered over a human messaging channel. An
+    unreachable gateway package means no messaging channel (verify-on-stop stays on)."""
     try:
         from gateway.session_context import session_is_messaging_surface
 
@@ -56,12 +50,11 @@ def _session_is_messaging_surface() -> bool:
 def verify_on_stop_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether edit -> verify-before-finish behavior is enabled.
 
-    Precedence: explicit ``HERMES_VERIFY_ON_STOP`` env var, then explicit
-    ``agent.verify_on_stop`` config. Default OFF (opt-in). A bool forces the
-    behavior; ``"auto"`` is the legacy surface-aware mode: ON for interactive
-    coding surfaces (CLI, TUI, desktop) and programmatic callers, OFF for
-    messaging surfaces where the verification narrative is chat noise.
-    Missing/unrecognized values fall back to OFF.
+    Precedence: ``HERMES_VERIFY_ON_STOP`` env var, then ``agent.verify_on_stop``
+    config; default OFF (opt-in). A bool forces the behavior; ``"auto"`` is the
+    legacy surface-aware mode: ON for interactive coding surfaces and
+    programmatic callers, OFF for messaging surfaces where the verification
+    narrative is chat noise. Missing/unrecognized values fall back to OFF.
     """
     env = os.environ.get("HERMES_VERIFY_ON_STOP")
     if env is not None:
@@ -77,21 +70,16 @@ def verify_on_stop_enabled(config: dict[str, Any] | None = None) -> bool:
     cfg_val = agent_cfg.get("verify_on_stop") if isinstance(agent_cfg, dict) else None
     if isinstance(cfg_val, bool):
         return cfg_val
-    if isinstance(cfg_val, str):
-        token = cfg_val.strip().lower()
-        if token == "auto":
-            return not _session_is_messaging_surface()
-        if token in _TRUTHY_TOKENS | _FALSY_TOKENS:
-            return token in _TRUTHY_TOKENS
-    return False
+    token = cfg_val.strip().lower() if isinstance(cfg_val, str) else ""
+    if token == "auto":
+        return not _session_is_messaging_surface()
+    return token in _TRUTHY_TOKENS
 
 
 def _candidate_cwds(paths: Iterable[str]) -> list[Path]:
     """Distinct resolved directories (a file's parent) for the edited paths, in order."""
     seen: dict[str, None] = {}
-    for raw in paths:
-        if not raw:
-            continue
+    for raw in filter(None, paths):
         try:
             path = Path(raw).expanduser()
             seen.setdefault(str((path if path.is_dir() else path.parent).resolve()))
@@ -101,14 +89,10 @@ def _candidate_cwds(paths: Iterable[str]) -> list[Path]:
 
 
 def _verification_snapshot(
-    *,
-    session_id: str | None,
-    changed_paths: list[str],
+    *, session_id: str | None, changed_paths: list[str]
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Return ``(status, facts)`` for the first edited workspace needing proof.
-
-    Falls back to the first recognized workspace when every one is ``passed``.
-    """
+    """``(status, facts)`` for the first edited workspace needing proof, else the
+    first recognized workspace when every one is ``passed``."""
     try:
         from agent.coding_context import project_facts_for
         from agent.verification_evidence import verification_status
@@ -141,13 +125,12 @@ def _workspace_has_runnable_recipe(root: Any) -> bool:
     if not root:
         return False
     try:
-        root_path = Path(str(root))
         from agent.verify.environment import manifest_path
-
-        if manifest_path(root_path).is_file():
-            return True
         from agent.verify.recipes import detect_recipe
 
+        root_path = Path(str(root))
+        if manifest_path(root_path).is_file():
+            return True
         recipe = detect_recipe(root_path)
         return bool(recipe is not None and recipe.start)
     except Exception:
@@ -173,11 +156,7 @@ def _status_detail(status: dict[str, Any]) -> str:
 
 
 def build_verify_on_stop_nudge(
-    *,
-    session_id: str | None,
-    changed_paths: Iterable[str],
-    attempts: int = 0,
-    max_attempts: int = 2,
+    *, session_id: str | None, changed_paths: Iterable[str], attempts: int=0, max_attempts: int=2,
 ) -> str | None:
     """Return a synthetic follow-up when edited code lacks fresh verification."""
     # Prose-only turns (markdown, skills, README, LICENSE, ...) have nothing to verify.

@@ -1,23 +1,11 @@
-"""
-Text-to-Speech Provider ABC
-============================
+"""Text-to-Speech Provider ABC.
 
-Pluggable-backend interface for TTS synthesis. Providers register via
-``PluginContext.register_tts_provider()``; the one named by ``tts.provider``
-services ``text_to_speech`` **only when that name is neither a built-in nor a
-``tts.providers.<name>: type: command`` entry**. Resolution order:
-
-1. Built-in providers (``BUILTIN_TTS_PROVIDERS`` in :mod:`tools.tts_tool`) —
-   always win; :func:`agent.tts_registry.register_provider` rejects colliding
-   names and the dispatcher re-checks at dispatch time.
-2. Command-type providers from ``config.yaml`` — win over a same-name plugin
-   because config is more local than a plugin install.
-3. Plugin providers (this ABC) — for backends needing a Python SDK, streaming
-   bytes, OAuth refresh, or voice-listing APIs the shell template can't express.
-
-:meth:`TTSProvider.synthesize` writes audio to ``output_path`` and returns the
-path; it should raise on failure — the dispatcher converts exceptions into the
-standard ``{success: False, error: …}`` envelope.
+Providers register via ``PluginContext.register_tts_provider()`` and service
+``text_to_speech`` only when ``tts.provider`` names neither a built-in
+(``BUILTIN_TTS_PROVIDERS`` in :mod:`tools.tts_tool`; the registry rejects
+colliding names) nor a ``tts.providers.<name>: type: command`` entry (config is
+more local than a plugin install, so it wins). :meth:`TTSProvider.synthesize`
+should raise on failure — the dispatcher builds the ``{success: False}`` envelope.
 """
 
 from __future__ import annotations
@@ -50,21 +38,12 @@ class TTSProvider(CatalogProviderBase):
     def default_voice(self) -> Optional[str]:
         """Id of the first voice entry, or None if not applicable."""
         voices = self.list_voices()
-        if voices:
-            return voices[0].get("id")
-        return None
+        return voices[0].get("id") if voices else None
 
     @abc.abstractmethod
     def synthesize(
-        self,
-        text: str,
-        output_path: str,
-        *,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        speed: Optional[float] = None,
-        format: str = DEFAULT_OUTPUT_FORMAT,
-        **extra: Any,
+        self, text: str, output_path: str, *, voice: Optional[str]=None, model: Optional[str]=None,
+        speed: Optional[float]=None, format: str=DEFAULT_OUTPUT_FORMAT, ** extra: Any,
     ) -> str:
         """Synthesize ``text`` into ``output_path`` and return the written path.
 
@@ -77,13 +56,8 @@ class TTSProvider(CatalogProviderBase):
         """
 
     def stream(
-        self,
-        text: str,
-        *,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        format: str = "opus",
-        **extra: Any,
+        self, text: str, *, voice: Optional[str] = None, model: Optional[str] = None,
+        format: str = "opus", **extra: Any,
     ) -> Iterator[bytes]:
         """Stream synthesized audio bytes (optional).
 
@@ -100,10 +74,8 @@ class TTSProvider(CatalogProviderBase):
 
     def warm(self) -> None:
         """Speech output was just turned on; pre-load so the first reply is hot.
-
-        Called from the TTS lease path (Desktop read-aloud / voice conversation)
-        when this is the configured provider. Best-effort; default no-op.
-        """
+        Called from the TTS lease path when this is the configured provider.
+        Best-effort; default no-op."""
 
     def release(self) -> None:
         """Last speech-output lease released; free resident resources (counterpart
@@ -112,11 +84,9 @@ class TTSProvider(CatalogProviderBase):
     @property
     def voice_compatible(self) -> bool:
         """Whether output suits voice-bubble delivery (mirrors
-        ``tts.providers.<name>.voice_compatible``).
-
-        True → the gateway converts to Opus via ffmpeg if needed; False →
-        delivered as a regular audio attachment. Default False (opt in).
-        """
+        ``tts.providers.<name>.voice_compatible``): True → the gateway converts
+        to Opus via ffmpeg if needed; False → regular audio attachment. Default
+        False (opt in)."""
         return False
 
 
@@ -124,9 +94,5 @@ def resolve_output_format(value: Optional[str]) -> str:
     """Clamp an output_format to :data:`VALID_OUTPUT_FORMATS`; invalid values
     coerce to :data:`DEFAULT_OUTPUT_FORMAT` so the tool surface forgives agent
     mistakes instead of rejecting them."""
-    if not isinstance(value, str):
-        return DEFAULT_OUTPUT_FORMAT
-    v = value.strip().lower()
-    if v in VALID_OUTPUT_FORMATS:
-        return v
-    return DEFAULT_OUTPUT_FORMAT
+    v = value.strip().lower() if isinstance(value, str) else None
+    return v if v in VALID_OUTPUT_FORMATS else DEFAULT_OUTPUT_FORMAT

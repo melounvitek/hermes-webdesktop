@@ -7,6 +7,7 @@ MRO unchanged.
 """
 import logging
 import uuid
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.lazy_forward import forward as _forward
@@ -20,22 +21,16 @@ class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
     def run_conversation(
-        self,
-        user_message: Any,
-        system_message: str = None,
-        conversation_history: List[Dict[str, Any]] = None,
-        task_id: str = None,
-        stream_callback: Optional[callable] = None,
-        persist_user_message: Optional[Any] = None,
-        persist_user_timestamp: Optional[float] = None,
-        persist_user_display_kind: Optional[str] = None,
-        persist_user_display_metadata: Optional[Dict[str, Any]] = None,
-        persist_user_platform_id: Optional[str] = None,
-        moa_config: Optional[dict[str, Any]] = None,
+        self, user_message: Any, system_message: str=None,
+        conversation_history: List[Dict[str, Any]]=None, task_id: str=None,
+        stream_callback: Optional[callable]=None, persist_user_message: Optional[Any]=None,
+        persist_user_timestamp: Optional[float]=None, persist_user_display_kind: Optional[str]=None,
+        persist_user_display_metadata: Optional[Dict[str, Any]]=None,
+        persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-        # A review shares this session_id for cache parity: fence review startup or interrupt an admitted
-        # request and await its exit before opening live-turn instrumentation.
+        # A review shares this session_id for cache parity: fence review startup or interrupt
+        # an admitted request and await its exit before opening live-turn instrumentation.
         from agent.background_review import cancel_background_review_for_live_turn
 
         cancel_background_review_for_live_turn(self)
@@ -45,9 +40,7 @@ class TurnFacadeMixin:
         from agent.auxiliary_client import scoped_runtime_main
         from agent.conversation_loop import run_conversation
         from agent.portal_tags import (
-            reset_affinity_scope,
-            reset_conversation_context,
-            set_affinity_scope,
+            reset_affinity_scope, reset_conversation_context, set_affinity_scope,
             set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
@@ -71,21 +64,17 @@ class TurnFacadeMixin:
             else ""
         )
         relay_lease = relay_turn = lease = None
-        # Scope tokens start None: early returns leave the try before the set_*() calls and the finally
-        # resets each one unconditionally.
+        # Scope tokens start None: early returns leave the try before the set_*() calls and
+        # the finally resets each one unconditionally.
         token = affinity_token = acct_token = None
         task_started = task_finished = False
         relay_outcome = "failed"
 
         try:
-            # Turn liveness for the deferred-review idle queue: first statement of the try so the finally's
-            # note_turn_finished balances every exit.
+            # First statement of the try so the finally's note_turn_finished balances every exit.
             _review_queue.note_turn_started()
             admission = admit_durable_turn_lease(
-                self,
-                session_id=session_id,
-                relay_turn_id=relay_turn_id,
-                task_context=task_context,
+                self, session_id=session_id, relay_turn_id=relay_turn_id, task_context=task_context,
                 conversation_history=conversation_history,
             )
             if admission.early_result is not None:
@@ -98,62 +87,53 @@ class TurnFacadeMixin:
 
             relay_lease = relay_runtime.SESSION_COORDINATOR.acquire_conversation(
                 profile_key=relay_runtime.current_profile_key(),
-                session_id=task_context["session_id"],
-                platform=task_context["platform"],
+                session_id=task_context["session_id"], platform=task_context["platform"],
                 parent_session_id=relay_parent_session_id,
                 model=str(getattr(self, "model", None) or ""),
             )
             relay_turn = relay_runtime.SESSION_COORDINATOR.begin_turn(
                 relay_lease, turn_id=relay_turn_id, task_id=effective_task_id
             )
-            # Minimal relay-runtime shims (tests, external) may lack the opt-out flag: default enabled.
+            # Minimal relay-runtime shims may lack the opt-out flag: default enabled.
             if getattr(relay_turn, "relay_enabled", True):
                 start_task_run(
                     **task_context,
                     parent_session_id=getattr(self, "_parent_session_id", None) or "",
                 )
                 task_started = True
-            # Publish the conversation id for ambient Nous Portal tagging: every LLM call in this turn
-            # (loop, compression, vision, MoA, review forks) inherits `conversation=<root>`.
+            # Ambient Nous Portal tagging: every LLM call in this turn (loop, compression,
+            # vision, MoA, review forks) inherits `conversation=<root>`; host-declared
+            # affinity scope falls back to it; accounting handles route aux usage to the session.
             token = set_conversation_context(self._conversation_root_id())
-            # Routing/affinity scope the HOST declared; providers fall back to the id above when unset.
             affinity_token = set_affinity_scope(declared_conversation_scope_safe(self))
-            # Session accounting handles so auxiliary calls record usage into session_model_usage.
             acct_token = set_accounting_context(
                 getattr(self, "_session_db", None), getattr(self, "session_id", None)
             )
 
-            # Keep the ContextVar scope local (tokens on the agent may be observed from another thread).
+            # Keep the ContextVar scope local (agent tokens may be observed from another thread).
             with bind_subagent_parent(self), scoped_runtime_main({}):
                 try:
                     if lease is not None:
                         lease.start()
                     result = run_conversation(
-                        self,
-                        user_message,
-                        system_message,
-                        conversation_history,
-                        effective_task_id,
-                        stream_callback,
-                        persist_user_message,
+                        self, user_message, system_message, conversation_history, effective_task_id,
+                        stream_callback, persist_user_message,
                         persist_user_timestamp=persist_user_timestamp,
                         persist_user_display_kind=persist_user_display_kind,
                         persist_user_display_metadata=persist_user_display_metadata,
-                        persist_user_platform_id=persist_user_platform_id,
-                        moa_config=moa_config,
+                        persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
                     )
                 finally:
-                    # Post-loop relay/task finalization must not receive a late refresh interrupt. The
-                    # interrupt clear itself waits for the thread join in the outer finally.
+                    # Post-loop relay/task finalization must not receive a late refresh interrupt;
+                    # the interrupt clear itself waits for the thread join in the outer finally.
                     if lease is not None:
                         lease.stop_refresher()
             terminal = result if isinstance(result, dict) else {}
-            if terminal.get("interrupted") is True:
-                relay_outcome = "cancelled"
-            elif terminal.get("failed") is True:
-                relay_outcome = "failed"
-            else:
-                relay_outcome = "success"
+            relay_outcome = (
+                "cancelled" if terminal.get("interrupted") is True
+                else "failed" if terminal.get("failed") is True
+                else "success"
+            )
             relay_runtime.SESSION_COORDINATOR.finish_logical_calls(relay_turn, outcome=relay_outcome)
             if task_started:
                 task_finished = True
@@ -186,15 +166,12 @@ class TurnFacadeMixin:
                     if lease is not None:
                         lease.stop_refresher()
                         lease.join_threads()
-                        # Clear any refresher interrupt fired between stop and join; must run AFTER join.
-                        lease.clear_interrupt()
+                        lease.clear_interrupt()  # refresher interrupt between stop and join; AFTER join
                         lease.release()
-                    # Always clear mid-turn labels when the turn exits — including interrupted early
-                    # returns that skip finalize_turn. Keep ts.
-                    try:
+                    # Always clear mid-turn labels on exit — including interrupted early returns
+                    # that skip finalize_turn. Keep ts.
+                    with suppress(Exception):
                         self._reset_activity_labels_after_turn()
-                    except Exception:
-                        pass
                     if getattr(self, "_relay_pending_turn_id", None) == relay_turn_id:
                         self._relay_pending_turn_id = None
                     if acct_token is not None:
@@ -203,12 +180,9 @@ class TurnFacadeMixin:
                         reset_conversation_context(token)
                     if affinity_token is not None:
                         reset_affinity_scope(affinity_token)
-                    # Balance note_turn_started on every exit so the idle queue's live-turn count
-                    # cannot leak.
-                    try:
+                    # Balance note_turn_started so the idle queue's live-turn count cannot leak.
+                    with suppress(Exception):
                         _review_queue.note_turn_finished()
-                    except Exception:
-                        pass
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

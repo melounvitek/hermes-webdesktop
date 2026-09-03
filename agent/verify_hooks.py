@@ -1,9 +1,8 @@
 """Verification-loop helpers for the ``pre_verify`` round-end gate.
 
-After code edits, the loop fires ``pre_verify`` (directives resolved by
-:func:`hermes_cli.plugins.get_pre_verify_continue_message`); a directive keeps the
-agent going one more turn. The shipped coding guidance rides on the evidence-based
-verification-stop nudge (``agent/verification_stop.py``) rather than a second
+After code edits the loop fires ``pre_verify`` (directives resolved by
+:func:`hermes_cli.plugins.get_pre_verify_continue_message`). The shipped coding
+guidance rides on the evidence-based verification-stop nudge rather than a second
 default stop gate, so default token cost stays tied to the "missing verification
 evidence" decision while ``pre_verify`` remains free for user/plugin policy.
 """

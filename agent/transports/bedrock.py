@@ -15,12 +15,8 @@ class BedrockTransport(ProviderTransport):
 
     # The adapter already maps inside normalize_converse_response; this serves raw-response access.
     _STOP_REASON_MAP = {
-        "end_turn": "stop",
-        "tool_use": "tool_calls",
-        "max_tokens": "length",
-        "stop_sequence": "stop",
-        "guardrail_intervened": "content_filter",
-        "content_filtered": "content_filter",
+        "end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "stop_sequence": "stop",
+        "guardrail_intervened": "content_filter", "content_filtered": "content_filter",
     }
 
     @property
@@ -38,22 +34,15 @@ class BedrockTransport(ProviderTransport):
         return convert_tools_to_converse(tools)
 
     def build_kwargs(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **params,
+        self, model: str, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Build converse() kwargs; params: max_tokens (4096), temperature, guardrail_config, region ('us-east-1')."""
         from agent.bedrock_adapter import build_converse_kwargs
 
         kwargs = build_converse_kwargs(
-            model=model,
-            messages=messages,
-            tools=tools,
-            max_tokens=params.get("max_tokens", 4096),
-            temperature=params.get("temperature"),
-            guardrail_config=params.get("guardrail_config"),
+            model=model, messages=messages, tools=tools, max_tokens=params.get("max_tokens", 4096),
+            temperature=params.get("temperature"), guardrail_config=params.get("guardrail_config"),
         )
         # Sentinel keys for dispatch — agent pops these before the boto3 call
         kwargs["__bedrock_converse__"] = True
@@ -68,26 +57,18 @@ class BedrockTransport(ProviderTransport):
         choice = ns.choices[0]
         msg = choice.message
 
-        tool_calls = None
-        if msg.tool_calls:
-            tool_calls = [ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments) for tc in msg.tool_calls]
-        usage = None
-        if hasattr(ns, "usage") and ns.usage:
-            usage = Usage.from_openai(ns.usage)
-
-        provider_data = {}
-        if getattr(msg, "reasoning_details", None):
-            provider_data["reasoning_details"] = msg.reasoning_details
-        if getattr(msg, "bedrock_content_blocks", None):
-            provider_data["bedrock_content_blocks"] = msg.bedrock_content_blocks
-
+        tool_calls = (
+            [ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments) for tc in msg.tool_calls]
+            if msg.tool_calls else None
+        )
+        provider_data = {
+            key: getattr(msg, key) for key in ("reasoning_details", "bedrock_content_blocks") if getattr(msg, key, None)
+        }
         return NormalizedResponse(
-            content=msg.content,
-            tool_calls=tool_calls,
+            content=msg.content, tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             reasoning=getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None),
-            usage=usage,
-            provider_data=provider_data or None,
+            usage=Usage.from_openai(ns.usage) if getattr(ns, "usage", None) else None, provider_data=provider_data or None,
         )
 
     def validate_response(self, response: Any) -> bool:

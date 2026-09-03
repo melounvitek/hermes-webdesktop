@@ -1,13 +1,11 @@
-"""Coding verification evidence ledger.
-
-Records what the agent actually proved while working in a code workspace. It is
-deliberately passive: it never decides to run a suite, never blocks completion,
-and never upgrades targeted checks into "repo green".
-"""
+"""Coding verification evidence ledger: records what the agent actually proved in
+a code workspace. Deliberately passive — it never runs a suite, never blocks
+completion, and never upgrades targeted checks into "repo green"."""
 
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sqlite3
 import tempfile
@@ -36,8 +34,7 @@ _TARGET_PREFIXES = ("test_", "tests", "spec", "__tests__")
 # command is not itself a test command; anything else is a test.
 _KIND_KEYWORDS = (
     (("lint", "eslint", "ruff"), "lint"),
-    (("typecheck", "tsc", "mypy", "pyright", "ty"), "typecheck"),
-    (("build",), "build"),
+    (("typecheck", "tsc", "mypy", "pyright", "ty"), "typecheck"), (("build",), "build"),
     (("fmt", "format"), "format"),
 )
 _PYTEST_SPELLINGS = (
@@ -136,9 +133,8 @@ def _connect() -> sqlite3.Connection:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, and ALWAYS close it.
 
-    ``sqlite3.Connection`` as a context manager only commits/rolls back; it does
-    not close. Relying on it alone leaks a connection (and its WAL/SHM fds) per
-    call until GC runs, which can exhaust ``RLIMIT_NOFILE`` in a long process.
+    ``sqlite3.Connection`` as a context manager only commits/rolls back; without
+    the close, each call leaks a connection (and WAL/SHM fds) until GC runs.
     """
     conn = _connect()
     try:
@@ -209,19 +205,14 @@ def _split_shell_segments(command: str, *, posix: bool = True) -> list[_ShellSeg
     trailing = command[start:].strip()
     if trailing:
         raw_segments.append((trailing, None))
-    elif raw_segments and raw_segments[-1][1] not in {";"}:
+    elif raw_segments and raw_segments[-1][1] != ";":
         return []
 
-    segments: list[_ShellSegment] = []
-    for raw, operator in raw_segments:
-        try:
-            tokens = shlex.split(raw, posix=posix)
-        except ValueError:
-            return []
-        if not tokens:
-            return []
-        segments.append(_ShellSegment(tokens=tokens, following_operator=operator))
-    return segments
+    try:
+        segments = [_ShellSegment(shlex.split(raw, posix=posix), operator) for raw, operator in raw_segments]
+    except ValueError:
+        return []
+    return segments if all(s.tokens for s in segments) else []
 
 
 def _exit_status_is_attributable(segments: list[_ShellSegment], match_index: int, exit_code: int) -> bool:
@@ -239,39 +230,28 @@ def _exit_status_is_attributable(segments: list[_ShellSegment], match_index: int
     if match_index < sequence_start:
         return False
 
-    sequence = segments[sequence_start:]
-    operators = [segment.following_operator for segment in sequence[:-1]]
-    if any(operator in {"|", "|&", "||"} for operator in operators):
+    operators = {segment.following_operator for segment in segments[sequence_start:-1]}
+    if operators & {"|", "|&", "||"}:
         return False
-    if len(sequence) == 1:
-        return True
-    return int(exit_code) == 0 and all(operator == "&&" for operator in operators)
+    return not operators or (int(exit_code) == 0 and operators == {"&&"})
 
 
 def _canonical_tokens(canonical: str) -> list[str]:
     """Tokenize a canonical command, stripping leading ``./`` from each token."""
-    def clean(token: str) -> str:
-        token = token.strip()
-        while token.startswith("./"):
-            token = token[2:]
-        return token
-
     try:
-        return [clean(t) for t in shlex.split(canonical) if t]
+        return [re.sub(r"^(?:\./)+", "", t.strip()) for t in shlex.split(canonical) if t]
     except ValueError:
         return []
 
 
 def _strip_command_prefix(tokens: list[str]) -> list[str]:
     """Remove harmless command prefixes (env, VAR=x, command/time/noglob)."""
-    remaining = list(tokens)
-    if remaining and remaining[0] == "env":
-        remaining = remaining[1:]
-    while remaining and "=" in remaining[0] and not remaining[0].startswith("-"):
-        remaining = remaining[1:]
-    while remaining and remaining[0] in {"command", "time", "noglob"}:
-        remaining = remaining[1:]
-    return remaining
+    i = 1 if tokens and tokens[0] == "env" else 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    while i < len(tokens) and tokens[i] in {"command", "time", "noglob"}:
+        i += 1
+    return list(tokens[i:])
 
 
 def _equivalent_needles(needle: list[str]) -> list[list[str]]:
@@ -280,9 +260,9 @@ def _equivalent_needles(needle: list[str]) -> list[list[str]]:
     if len(needle) >= 3 and needle[1] == "run" and needle[0] in {"npm", "pnpm", "yarn", "bun"}:
         candidates.append([needle[0], needle[2]])
     if len(needle) == 1 and "/" in needle[0]:
-        candidates.extend([["bash", needle[0]], ["sh", needle[0]]])
+        candidates += [["bash", needle[0]], ["sh", needle[0]]]
     if needle == ["pytest"]:
-        candidates.extend(_PYTEST_SPELLINGS)
+        candidates += _PYTEST_SPELLINGS
     return candidates
 
 
@@ -303,18 +283,14 @@ def _find_canonical_match(command: str, canonical_commands: list[str], exit_code
 
 def _kind_for_command(canonical: str) -> str:
     lowered = canonical.lower()
-    for words, kind in _KIND_KEYWORDS:
-        if any(word in lowered for word in words):
-            return kind
-    if "check" in lowered and "test" not in lowered:
-        return "check"
-    return "test"
+    kind = next((k for words, k in _KIND_KEYWORDS if any(w in lowered for w in words)), None)
+    return kind or ("check" if "check" in lowered and "test" not in lowered else "test")
 
 
 def _looks_like_target(arg: str) -> bool:
-    if not arg or arg.startswith("-") or "=" in arg:
-        return False
-    return any(m in arg for m in ("/", "\\", "::")) or arg.endswith(_TARGET_EXTENSIONS) or arg.startswith(_TARGET_PREFIXES)
+    return bool(arg) and not arg.startswith("-") and "=" not in arg and (
+        any(m in arg for m in ("/", "\\", "::")) or arg.endswith(_TARGET_EXTENSIONS) or arg.startswith(_TARGET_PREFIXES)
+    )
 
 
 def _is_under(token: str, base: str | Path | None) -> bool:
@@ -325,8 +301,7 @@ def _is_under(token: str, base: str | Path | None) -> bool:
         path = Path(token).expanduser()
         if not path.is_absolute():
             return False
-        resolved = path.resolve()
-        base_path = Path(base).expanduser().resolve()
+        resolved, base_path = path.resolve(), Path(base).expanduser().resolve()
         return resolved == base_path or base_path in resolved.parents
     except Exception:
         return False
@@ -351,11 +326,9 @@ def _ad_hoc_script_args(tokens: list[str], root: str | Path | None) -> Optional[
     if command in _INTERPRETERS:
         # Skip interpreter flags; the first positional must be the script.
         for idx, token in enumerate(candidate_tokens[1:], start=1):
-            if token == "--":
-                continue
             if _is_temp_script_path(token, root):
                 return candidate_tokens[idx + 1:]
-            if not token.startswith("-"):
+            if token != "--" and not token.startswith("-"):
                 return None
     return None
 
@@ -376,8 +349,10 @@ def _summarize_output(output: str) -> str:
     if len(text) <= _MAX_OUTPUT_SUMMARY_CHARS:
         return text
     head = _MAX_OUTPUT_SUMMARY_CHARS // 3
-    omitted = len(text) - _MAX_OUTPUT_SUMMARY_CHARS
-    return f"{text[:head]}\n... [{omitted} chars omitted] ...\n{text[head - _MAX_OUTPUT_SUMMARY_CHARS:]}"
+    return (
+        f"{text[:head]}\n... [{len(text) - _MAX_OUTPUT_SUMMARY_CHARS} chars omitted] ...\n"
+        f"{text[head - _MAX_OUTPUT_SUMMARY_CHARS:]}"
+    )
 
 
 def _prune_old_events(conn: sqlite3.Connection, *, session_id: str, root: str) -> None:
@@ -452,26 +427,19 @@ def classify_verification_command(
 
     verify_commands = list(facts.get("verifyCommands") or [])
     match = _find_canonical_match(command, verify_commands, int(exit_code))
-    is_ad_hoc = False
-    if match is None and not verify_commands:
-        ad_hoc_args = _find_ad_hoc_match(command, facts.get("root"), int(exit_code))
-        is_ad_hoc = ad_hoc_args is not None
-        match = ("ad-hoc verification script", ad_hoc_args) if is_ad_hoc else None
-    if match is None:
-        return None
-
-    canonical, trailing_args = match
+    if match is not None:
+        canonical, trailing_args = match
+        kind = _kind_for_command(canonical)
+        scope = "targeted" if any(map(_looks_like_target, trailing_args)) else "full"
+    else:
+        if verify_commands or _find_ad_hoc_match(command, facts.get("root"), int(exit_code)) is None:
+            return None
+        canonical, kind, scope = "ad-hoc verification script", "ad_hoc", "targeted"
     return VerificationEvidence(
-        command=command,
-        canonical_command=canonical,
-        kind="ad_hoc" if is_ad_hoc else _kind_for_command(canonical),
-        scope="targeted" if is_ad_hoc or any(map(_looks_like_target, trailing_args)) else "full",
-        status="passed" if int(exit_code) == 0 else "failed",
-        exit_code=int(exit_code),
-        cwd=str(Path(cwd or ".").resolve()),
-        root=_root_for(facts, cwd),
-        session_id=str(session_id or "default"),
-        output_summary=_summarize_output(output),
+        command=command, canonical_command=canonical, kind=kind, scope=scope,
+        status="passed" if int(exit_code) == 0 else "failed", exit_code=int(exit_code),
+        cwd=str(Path(cwd or ".").resolve()), root=_root_for(facts, cwd),
+        session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     )
 
 
@@ -489,31 +457,25 @@ def record_verify_run(
 ) -> Optional[dict[str, Any]]:
     """Record a completed ``hermes verify`` run as verification evidence.
 
-    Explicit CLI-side write with nothing to classify: a pass marks the workspace
-    ``passed`` for the verify-on-stop guard like a canonical test command would;
-    a failure keeps the guard asking for a fix. ``root`` is re-resolved through
-    project facts so it matches what :func:`verification_status` derives later.
+    A pass marks the workspace ``passed`` for the verify-on-stop guard like a
+    canonical test command would. ``root`` is re-resolved through project facts
+    so it matches what :func:`verification_status` derives later.
     """
     resolved = str(Path(root).resolve())
     return _insert_evidence(VerificationEvidence(
-        command=command,
-        canonical_command="hermes verify",
-        kind="verify",
+        command=command, canonical_command="hermes verify", kind="verify",
         scope=scope if scope in {"full", "targeted"} else "full",
-        status="passed" if ok else "failed",
-        exit_code=0 if ok else 1,
-        cwd=resolved,
+        status="passed" if ok else "failed", exit_code=0 if ok else 1, cwd=resolved,
         root=str((_project_facts(root) or {}).get("root") or resolved),
-        session_id=str(session_id or "default"),
-        output_summary=_summarize_output(output),
+        session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     ))
 
 
 def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
     """Insert a classified evidence row and repoint the workspace state."""
     created_at = _utc_now()
+    e = evidence
     with _DB_LOCK, _transaction() as conn:
-        e = evidence
         cur = conn.execute(
             "INSERT INTO verification_events("
             " created_at, session_id, cwd, root, command, canonical_command,"
@@ -533,12 +495,12 @@ def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
             " last_event_id = excluded.last_event_id,"
             " last_edit_at = NULL,"
             " changed_paths_json = '[]'",
-            (evidence.session_id, evidence.root, event_id),
+            (e.session_id, e.root, event_id),
         )
-        _prune_old_events(conn, session_id=evidence.session_id, root=evidence.root)
+        _prune_old_events(conn, session_id=e.session_id, root=e.root)
         conn.commit()
 
-    return {"id": event_id, **evidence.__dict__, "created_at": created_at}
+    return {"id": event_id, **e.__dict__, "created_at": created_at}
 
 
 def mark_workspace_edited(
@@ -559,9 +521,9 @@ def mark_workspace_edited(
             "SELECT changed_paths_json FROM verification_state WHERE session_id = ? AND root = ?",
             (sid, root),
         ).fetchone()
-        existing = set(_load_changed_paths(row["changed_paths_json"])) if row is not None else set()
         # Merge with what was already recorded, bounded to the last 200 paths.
-        merged = sorted(existing | set(changed_paths))[-200:]
+        existing = _load_changed_paths(row["changed_paths_json"]) if row is not None else []
+        merged = sorted(set(existing) | set(changed_paths))[-200:]
         conn.execute(
             "INSERT INTO verification_state("
             " session_id, root, last_event_id, last_edit_at, changed_paths_json"
@@ -599,12 +561,12 @@ def verification_status(*, session_id: str | None, cwd: str | Path | None) -> di
         if state["last_event_id"] is not None:
             event = conn.execute("SELECT * FROM verification_events WHERE id = ?", (state["last_event_id"],)).fetchone()
 
-    result = {"evidence": None, "root": root, "session_id": sid,
-              "changed_paths": _load_changed_paths(state["changed_paths_json"])}
+    result = {
+        "evidence": None, "root": root, "session_id": sid, "changed_paths": _load_changed_paths(state["changed_paths_json"])
+    }
     if event is None:
         return {"status": "unverified", **result}
 
     evidence = dict(event)
     stale = bool(state["last_edit_at"]) and state["last_edit_at"] > evidence["created_at"]
-    result["evidence"] = evidence
-    return {"status": "stale" if stale else evidence["status"], **result}
+    return {"status": "stale" if stale else evidence["status"], **result, "evidence": evidence}

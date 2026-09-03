@@ -1,17 +1,12 @@
 """Static run-recipe detection for project verification.
 
-Ported nearly 1:1 from superagent-ai/grok-cli ``src/verify/recipes.ts``, keeping
-its detection order and command choices: Node (lockfile-based package manager +
-framework), Python (Django / FastAPI / Flask / generic, uv/poetry/pipenv aware),
-Go, Rust, Java (Maven/Gradle), Makefile fallback, docker-compose.
-
-Layer ownership vs :mod:`agent.coding_context`: ``detect_project_facts`` owns the
-cheap, byte-stable prompt-time facts (manifests, package managers, verify
-commands) — never push runtime detection into it. This module owns the deep
-runtime recipe (framework id, bootstrap/build/test, start command, port,
-readiness path) that lets ``hermes verify`` boot the app and prove it serves
-HTTP; the CLI merges project-facts verify commands the recipe missed into its
-test list (``hermes_cli.verify_cmd._merge_project_facts_commands``).
+Ported nearly 1:1 from superagent-ai/grok-cli ``src/verify/recipes.ts`` (same
+detection order and command choices). Layer ownership: ``detect_project_facts``
+in :mod:`agent.coding_context` owns the cheap, byte-stable prompt-time facts —
+never push runtime detection into it. This module owns the deep runtime recipe
+(framework, bootstrap/build/test, start command, port, readiness path) that lets
+``hermes verify`` boot the app; the CLI merges project-facts verify commands the
+recipe missed (``hermes_cli.verify_cmd._merge_project_facts_commands``).
 """
 
 from __future__ import annotations
@@ -24,21 +19,15 @@ from typing import Any
 
 
 def _as_strings(value: Any) -> list[str]:
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    if not isinstance(value, list):
-        return []
-    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
+    values = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [v.strip() for v in values if isinstance(v, str) and v.strip()]
 
 
 @dataclass
 class Recipe:
-    """A runnable verification recipe for a project.
-
-    Mirrors grok-cli's ``VerifyRecipe`` (scoped): ``name`` is the human label
-    (``appLabel``), ``kind`` the detector id (``appKind``); command lists are
-    shell strings executed in the project root.
-    """
+    """A runnable verification recipe (grok-cli's ``VerifyRecipe``): ``name`` is the
+    human label (``appLabel``), ``kind`` the detector id (``appKind``); command
+    lists are shell strings executed in the project root."""
 
     name: str
     kind: str = "unknown"
@@ -66,24 +55,21 @@ class Recipe:
         name = raw.get("name") or raw.get("appLabel")
         if not isinstance(name, str) or not name.strip():
             return None
-        kind = raw.get("kind") or raw.get("appKind") or "unknown"
+        kind = raw.get("kind") or raw.get("appKind")
         if not isinstance(kind, str) or not kind.strip():
             kind = "unknown"
 
         start = raw.get("start") or raw.get("startCommand")
-        start = start.strip() if isinstance(start, str) and start.strip() else None
-
         port_raw = raw.get("port") or raw.get("startPort")
         if isinstance(port_raw, str) and port_raw.strip().isdigit():
             port_raw = int(port_raw.strip())
-        port = port_raw if isinstance(port_raw, int) and 0 < port_raw < 65536 else None
-
         readiness = raw.get("readinessPath") or raw.get("readiness_path") or "/"
-        if not (isinstance(readiness, str) and readiness.startswith("/")):
-            readiness = "/"
 
         return cls(
-            name=name.strip(), kind=kind.strip(), start=start, port=port, readiness_path=readiness,
+            name=name.strip(), kind=kind.strip(),
+            start=start.strip() if isinstance(start, str) and start.strip() else None,
+            port=port_raw if isinstance(port_raw, int) and 0 < port_raw < 65536 else None,
+            readiness_path=readiness if isinstance(readiness, str) and readiness.startswith("/") else "/",
             bootstrap=_as_strings(raw.get("bootstrap") or raw.get("installCommands")),
             build=_as_strings(raw.get("build") or raw.get("buildCommands")),
             test=_as_strings(raw.get("test") or raw.get("testCommands")),
@@ -99,25 +85,17 @@ def _read_text(root: Path, name: str) -> str | None:
 
 
 def _read_package_json(root: Path) -> dict[str, Any] | None:
-    raw = _read_text(root, "package.json")
-    if raw is None:
-        return None
     try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        parsed = json.loads(_read_text(root, "package.json") or "")
+    except ValueError:  # includes JSONDecodeError; also the missing-file "" case
         return None
     return parsed if isinstance(parsed, dict) else None
 
 
 # Ordered: the first lockfile present wins (grok's detectPackageManager).
 _LOCKFILE_MANAGERS = (
-    ("pnpm-lock.yaml", "pnpm"),
-    ("bun.lock", "bun"),
-    ("bun.lockb", "bun"),
-    ("yarn.lock", "yarn"),
-    ("package-lock.json", "npm"),
-    ("uv.lock", "uv"),
-    ("poetry.lock", "poetry"),
+    ("pnpm-lock.yaml", "pnpm"), ("bun.lock", "bun"), ("bun.lockb", "bun"), ("yarn.lock", "yarn"),
+    ("package-lock.json", "npm"), ("uv.lock", "uv"), ("poetry.lock", "poetry"),
     ("Pipfile.lock", "pipenv"),
 )
 
@@ -149,12 +127,10 @@ _SCRIPT_RUNNERS = {"pnpm": "pnpm {}", "bun": "bun run {}", "yarn": "yarn {}"}
 _NODE_INSTALL = {"pnpm": "pnpm install", "bun": "bun install", "yarn": "yarn install"}
 # Ordered: the first dependency present decides the framework (kind, label, default port).
 _NODE_FRAMEWORKS = (
-    (("next",), "nextjs", "Next.js", 3000),
-    (("@sveltejs/kit",), "sveltekit", "SvelteKit", 5173),
+    (("next",), "nextjs", "Next.js", 3000), (("@sveltejs/kit",), "sveltekit", "SvelteKit", 5173),
     (("astro",), "astro", "Astro", 4321),
     (("@remix-run/dev", "@remix-run/react"), "remix", "Remix", 3000),
-    (("react-scripts",), "cra", "Create React App", 3000),
-    (("vite",), "vite", "Vite", 5173),
+    (("react-scripts",), "cra", "Create React App", 3000), (("vite",), "vite", "Vite", 5173),
 )
 
 
@@ -166,8 +142,7 @@ def _detect_node_recipe(root: Path, pkg: dict[str, Any]) -> Recipe:
     raw_scripts = pkg.get("scripts")
     scripts: dict[str, str] = raw_scripts if isinstance(raw_scripts, dict) else {}
     deps: dict[str, Any] = {}
-    for key in ("dependencies", "devDependencies"):
-        section = pkg.get(key)
+    for section in (pkg.get("dependencies"), pkg.get("devDependencies")):
         if isinstance(section, dict):
             deps.update(section)
 
@@ -177,20 +152,15 @@ def _detect_node_recipe(root: Path, pkg: dict[str, Any]) -> Recipe:
         ("node", "Node.js app", None),
     )
 
-    start_script = next((s for s in ("dev", "start") if scripts.get(s)), None)
-    start = port = None
-    if start_script:
-        start = _script_runner(package_manager, start_script)
-        port = _infer_port_from_command(scripts[start_script]) or default_port
-
-    def runners(names: tuple[str, ...]) -> list[str]:
+    def runners(*names: str) -> list[str]:
         return _dedupe([_script_runner(package_manager, s) for s in names if scripts.get(s)])
 
+    start_script = next((s for s in ("dev", "start") if scripts.get(s)), None)
     return Recipe(
-        name=label, kind=kind, start=start, port=port,
+        name=label, kind=kind, start=runners(start_script)[0] if start_script else None,
+        port=(_infer_port_from_command(scripts[start_script]) or default_port) if start_script else None,
         bootstrap=[_NODE_INSTALL.get(package_manager or "", "npm install")],
-        build=runners(("build", "typecheck")),
-        test=runners(("test", "check", "lint")),
+        build=runners("build", "typecheck"), test=runners("test", "check", "lint"),
         evidence=_dedupe([
             "Detected package.json",
             f"Package manager: {package_manager}" if package_manager else None,
@@ -210,9 +180,9 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
         return None
 
     lower = f"{pyproject or ''}\n{requirements or ''}".lower()
-    install = _PYTHON_INSTALL.get(detect_package_manager(root) or "")
-    if install is None:
-        install = "pip install -e ." if pyproject and not requirements else "pip install -r requirements.txt"
+    install = _PYTHON_INSTALL.get(detect_package_manager(root) or "") or (
+        "pip install -e ." if pyproject and not requirements else "pip install -r requirements.txt"
+    )
     pytest_or_empty = ["pytest"] if (root / "tests").exists() else []
 
     # Precedence: Django, then FastAPI/uvicorn, then Flask, then generic.
@@ -220,10 +190,8 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
         return Recipe(
             name="Django app", kind="django", bootstrap=[install], test=["python manage.py test"],
             start="python manage.py runserver 0.0.0.0:8000", port=8000,
-            evidence=_dedupe([
-                "Detected manage.py" if manage_py else "Detected Django dependency",
-                "Detected pyproject.toml" if pyproject else None,
-            ]),
+            evidence=["Detected manage.py" if manage_py else "Detected Django dependency"]
+            + (["Detected pyproject.toml"] if pyproject else []),
         )
     if "fastapi" in lower or "uvicorn" in lower:
         app_module = (_first_existing(root, ("main.py", "app.py")) or "main.py").removesuffix(".py") + ":app"
@@ -246,30 +214,26 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
     )
 
 
-def _detect_go_recipe(root: Path) -> Recipe | None:
-    if not (root / "go.mod").exists():
-        return None
-    return Recipe(
-        name="Go project", kind="go", build=["go build ./..."], test=["go test ./..."],
-        start="go run ." if (root / "main.go").exists() else None, evidence=["Detected go.mod"],
-    )
+# Single-manifest toolchains: manifest -> (label, kind, build, test, start command, entry file).
+_SIMPLE_TOOLCHAINS = (
+    ("go.mod", "Go project", "go", "go build ./...", "go test ./...", "go run .", Path("main.go")),
+    ("Cargo.toml", "Rust project", "rust", "cargo build", "cargo test", "cargo run", Path("src") / "main.rs"),
+)
 
 
-def _detect_rust_recipe(root: Path) -> Recipe | None:
-    if not (root / "Cargo.toml").exists():
-        return None
-    return Recipe(
-        name="Rust project", kind="rust", build=["cargo build"], test=["cargo test"],
-        start="cargo run" if (root / "src" / "main.rs").exists() else None, evidence=["Detected Cargo.toml"],
-    )
+def _detect_simple_recipe(root: Path) -> Recipe | None:
+    for manifest, label, kind, build, test, start, entry in _SIMPLE_TOOLCHAINS:
+        if (root / manifest).exists():
+            return Recipe(
+                name=label, kind=kind, build=[build], test=[test],
+                start=start if (root / entry).exists() else None, evidence=[f"Detected {manifest}"],
+            )
+    return None
 
 
 def _detect_java_recipe(root: Path) -> Recipe | None:
     if (root / "pom.xml").exists():
-        return Recipe(
-            name="Maven project", kind="maven", build=["mvn package"], test=["mvn test"],
-            evidence=["Detected pom.xml"],
-        )
+        return Recipe(name="Maven project", kind="maven", build=["mvn package"], test=["mvn test"], evidence=["Detected pom.xml"])
     if _first_existing(root, ("build.gradle", "build.gradle.kts")):
         gradle = "./gradlew" if (root / "gradlew").exists() else "gradle"
         return Recipe(
@@ -295,14 +259,12 @@ def _detect_make_recipe(root: Path) -> Recipe | None:
         return None
     targets = [m.group(1) for m in map(_MAKE_TARGET_RE.match, makefile.splitlines()) if m]
     picked = {
-        phase: next((f"make {n}" for n in names if n in targets), None)
+        phase: [f"make {n}" for n in names if n in targets][:1]
         for phase, names in _MAKE_PHASE_TARGETS.items()
     }
     return Recipe(
-        name="Makefile-driven project", kind="make", start=picked["start"],
-        bootstrap=[picked["bootstrap"]] if picked["bootstrap"] else [],
-        build=[picked["build"]] if picked["build"] else [],
-        test=[picked["test"]] if picked["test"] else [],
+        name="Makefile-driven project", kind="make", start=(picked["start"] or [None])[0],
+        bootstrap=picked["bootstrap"], build=picked["build"], test=picked["test"],
         evidence=["Detected Makefile", f"Targets: {', '.join(targets) or '(none)'}"],
     )
 
@@ -312,29 +274,22 @@ _COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "c
 
 def _detect_compose_recipe(root: Path) -> Recipe | None:
     compose_file = _first_existing(root, _COMPOSE_FILES)
-    if compose_file is None:
-        return None
-    return Recipe(
+    return None if compose_file is None else Recipe(
         name="docker-compose project", kind="compose", build=["docker compose build"],
         start="docker compose up", evidence=[f"Detected {compose_file}"],
     )
 
 
 def detect_recipe(root: Path) -> Recipe | None:
-    """Detect a verification recipe for the project at ``root``.
-
-    Order mirrors grok-cli's ``inferFallbackRecipe``: package.json wins, then
-    Python, Go, Rust, Java, then Makefile / docker-compose fallbacks. ``None``
-    when nothing recognizable is found.
-    """
+    """Detect a recipe for ``root`` (grok-cli's ``inferFallbackRecipe`` order): package.json
+    wins, then Python, Go, Rust, Java, then Makefile / docker-compose; ``None`` if nothing matches."""
     root = Path(root)
     pkg = _read_package_json(root)
     if pkg is not None:
         return _detect_node_recipe(root, pkg)
     return (
         _detect_python_recipe(root)
-        or _detect_go_recipe(root)
-        or _detect_rust_recipe(root)
+        or _detect_simple_recipe(root)
         or _detect_java_recipe(root)
         or _detect_make_recipe(root)
         or _detect_compose_recipe(root)
