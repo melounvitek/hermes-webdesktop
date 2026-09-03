@@ -11,11 +11,9 @@ _THINKING_TYPES = ("thinking", "redacted_thinking")
 
 def _unprefix_oauth_tool_name(name: str) -> str:
     """Reverse the OAuth-wire ``mcp__`` prefix back to the registered tool name.
-
     Two originals map onto one wire name (``read_file`` / ``mcp_linear_get_issue``), so
     resolve by registry lookup, never rewriting a name that already resolves natively.
-    OAuth wire aliases are checked LAST so a real tool under the wire name still wins.
-    """
+    OAuth wire aliases are checked LAST so a real tool under the wire name still wins."""
     from agent.anthropic_adapter import _OAUTH_TOOL_NAME_REVERSE_ALIASES
     from tools.registry import registry as _tool_registry
     bare = name[len(_MCP_PREFIX):]

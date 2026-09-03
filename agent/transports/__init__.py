@@ -1,8 +1,6 @@
 """Transport registry for provider response normalization.
-
     transport = get_transport("anthropic_messages")
-    result = transport.normalize_response(raw_response)
-"""
+    result = transport.normalize_response(raw_response)"""
 
 import importlib
 

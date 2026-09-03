@@ -95,10 +95,8 @@ class _ManagedAttempt:
 
     def run_callback(self, callback: Callable[..., Any], *args: Any) -> Any:
         """Run a Hermes callback in a fresh copy of the captured context.
-
         Relay can invoke callbacks while another still owns the captured Context (hence the
-        copy); nested relay calls run unmanaged — see relay_runtime.managed_callback_guard.
-        """
+        copy); nested relay calls run unmanaged — see relay_runtime.managed_callback_guard."""
         def guarded() -> Any:
             with relay_runtime.managed_callback_guard():
                 return callback(*args)
@@ -142,9 +140,7 @@ class _ManagedAttempt:
 
     def resolve_failure(self, exc: BaseException, defer_logical_completion: bool) -> Any:
         """Re-raise the provider's own error, or recover a completed provider result.
-
-        Must be called from the ``except`` handling ``exc`` (bare ``raise``).
-        """
+        Must be called from the ``except`` handling ``exc`` (bare ``raise``)."""
         callback_error = self.raw_response.get("error")
         if (
             callback_error is not None
@@ -246,13 +242,11 @@ def stream_current(
     defer_logical_completion: bool = False, completed_response_predicate: Callable[[Any], bool] | None = None,
 ) -> Any:
     """Run a provider stream under the inherited Hermes turn when present.
-
     With ``completed_response_predicate`` set, a factory that ignores ``stream=True`` and
     returns a complete response is unwrapped and returned directly (pre-Relay behavior)
     instead of staying trapped as ``final_response``. Detecting that primes the lazy
     pipeline: a genuine first chunk is buffered, but provider latency and pre-first-yield
-    errors may surface before this returns.
-    """
+    errors may surface before this returns."""
     session_id = _current_session_id()
     if session_id is None:
         return stream_factory(request)
