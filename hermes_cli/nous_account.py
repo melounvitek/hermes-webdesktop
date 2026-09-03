@@ -289,11 +289,7 @@ def reset_nous_portal_account_info_cache() -> None:
     _account_info_cache = None
 
 
-def get_nous_portal_account_info(
-    *,
-    force_fresh: bool = False,
-    min_jwt_ttl_seconds: int = 60,
-) -> NousPortalAccountInfo:
+def get_nous_portal_account_info(*, force_fresh: bool = False, min_jwt_ttl_seconds: int = 60) -> NousPortalAccountInfo:
     """Normalized Nous Portal account entitlement.
 
     A valid unexpired OAuth JWT serves as a local snapshot (UX gating only; the server stays
@@ -310,23 +306,15 @@ def get_nous_portal_account_info(
     portal_base_url = _portal_base_url(state)
     if not _nonblank(access_token):
         return (
-            _info_from_oauth_pool(
-                force_fresh=force_fresh,
-                min_jwt_ttl_seconds=min_jwt_ttl_seconds,
-                portal_base_url=portal_base_url,
-            )
+            _info_from_oauth_pool(force_fresh, min_jwt_ttl_seconds, portal_base_url)
             or _info_from_inference_key_pool(portal_base_url)
             or NousPortalAccountInfo(logged_in=False, source="none", fresh=False, portal_base_url=portal_base_url)
         )
-
     if not force_fresh:
-        jwt_info = _info_from_valid_jwt(
-            access_token, state=state, portal_base_url=portal_base_url, min_jwt_ttl_seconds=min_jwt_ttl_seconds
-        )
+        jwt_info = _info_from_valid_jwt(access_token, state, portal_base_url, min_jwt_ttl_seconds)
         if jwt_info is not None:
             return jwt_info
-
-    return _fresh_account_info(state=state, force_fresh=force_fresh, portal_base_url=portal_base_url)
+    return _fresh_account_info(state, force_fresh, portal_base_url)
 
 
 def nous_policy_present() -> Optional[bool]:
@@ -361,12 +349,7 @@ def nous_policy_notice(*, removed: bool) -> str:
     )
 
 
-def _fresh_account_info(
-    *,
-    state: dict[str, Any],
-    force_fresh: bool,
-    portal_base_url: Optional[str],
-) -> NousPortalAccountInfo:
+def _fresh_account_info(state: dict[str, Any], force_fresh: bool, portal_base_url: Optional[str]) -> NousPortalAccountInfo:
     global _account_info_cache
 
     try:
@@ -384,7 +367,7 @@ def _fresh_account_info(
                 if cached_key == cache_key and (time.monotonic() - cached_at) < _ACCOUNT_INFO_CACHE_TTL:
                     return cached_info
 
-        info = _info_from_fetched_account(access_token, state=refreshed_state, portal_base_url=portal_base_url)
+        info = _info_from_fetched_account(access_token, refreshed_state, portal_base_url)
         if info.source != "error":
             with _ACCOUNT_INFO_CACHE_LOCK:
                 _account_info_cache = (cache_key, time.monotonic(), info)
@@ -393,18 +376,14 @@ def _fresh_account_info(
         return _error_info(error=exc, logged_in=bool(state.get("access_token")), portal_base_url=portal_base_url)
 
 
-def _info_from_inference_key_pool(
-    portal_base_url: Optional[str],
-) -> Optional[NousPortalAccountInfo]:
+def _info_from_inference_key_pool(portal_base_url: Optional[str]) -> Optional[NousPortalAccountInfo]:
     """Return an explicit unknown-entitlement snapshot for opaque Nous keys."""
     try:
         entry = _select_nous_pool_entry()
         if entry is None:
             return None
-        runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
-        if not _nonblank(runtime_key):
+        if not _nonblank(getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")):
             return None
-
         return NousPortalAccountInfo(
             logged_in=False,
             source="inference_key",
@@ -420,10 +399,7 @@ def _info_from_inference_key_pool(
 
 
 def _info_from_oauth_pool(
-    *,
-    force_fresh: bool,
-    min_jwt_ttl_seconds: int,
-    portal_base_url: Optional[str],
+    force_fresh: bool, min_jwt_ttl_seconds: int, portal_base_url: Optional[str]
 ) -> Optional[NousPortalAccountInfo]:
     try:
         entry = _select_nous_pool_entry()
@@ -431,11 +407,7 @@ def _info_from_oauth_pool(
         return None
     if entry is None or not _pool_entry_is_portal_oauth(entry):
         return None
-
-    access_token = getattr(entry, "access_token", None)
-    if not _nonblank(access_token):
-        return None
-
+    access_token = entry.access_token  # non-blank str: checked by _pool_entry_is_portal_oauth
     entry_portal_url = getattr(entry, "portal_base_url", None) or portal_base_url
     state = {
         "access_token": access_token,
@@ -446,23 +418,17 @@ def _info_from_oauth_pool(
     }
 
     if not force_fresh:
-        jwt_info = _info_from_valid_jwt(
-            access_token, state=state, portal_base_url=entry_portal_url, min_jwt_ttl_seconds=min_jwt_ttl_seconds
-        )
+        jwt_info = _info_from_valid_jwt(access_token, state, entry_portal_url, min_jwt_ttl_seconds)
         if jwt_info is not None:
             return jwt_info
-
     try:
-        return _info_from_fetched_account(access_token, state=state, portal_base_url=entry_portal_url)
+        return _info_from_fetched_account(access_token, state, entry_portal_url)
     except Exception as exc:
         return _error_info(error=exc, logged_in=True, portal_base_url=entry_portal_url)
 
 
 def _info_from_fetched_account(
-    access_token: str,
-    *,
-    state: dict[str, Any],
-    portal_base_url: Optional[str],
+    access_token: str, state: dict[str, Any], portal_base_url: Optional[str]
 ) -> NousPortalAccountInfo:
     """Call ``/api/oauth/account`` and normalize; empty or ``error`` payloads become error infos."""
     payload = _fetch_nous_account_info(access_token, portal_base_url)
@@ -470,10 +436,8 @@ def _info_from_fetched_account(
         return _error_info(error="empty_account_response", logged_in=True, portal_base_url=portal_base_url)
     if isinstance(payload.get("error"), str):
         return _error_info(
-            error=payload.get("error") or "account_response_error",
-            logged_in=True,
-            portal_base_url=portal_base_url,
-            raw_account=payload,
+            error=payload["error"] or "account_response_error", logged_in=True,
+            portal_base_url=portal_base_url, raw_account=payload,
         )
     return _info_from_account_payload(payload, state=state, portal_base_url=portal_base_url)
 
@@ -487,6 +451,7 @@ def _pool_entry_inference_url(entry: Any) -> Optional[str]:
 
 
 def _select_nous_pool_entry() -> Optional[Any]:
+    """Pool entry with the latest agent-key expiry, then access expiry, then lowest priority."""
     from agent.credential_pool import load_pool
 
     pool = load_pool("nous")
@@ -499,8 +464,7 @@ def _select_nous_pool_entry() -> Optional[Any]:
     def _entry_sort_key(entry: Any) -> tuple[float, float, int]:
         agent_exp = _parse_iso_timestamp(getattr(entry, "agent_key_expires_at", None)) or 0.0
         access_exp = _parse_iso_timestamp(getattr(entry, "expires_at", None)) or 0.0
-        priority = int(getattr(entry, "priority", 0) or 0)
-        return (agent_exp, access_exp, -priority)
+        return (agent_exp, access_exp, -int(getattr(entry, "priority", 0) or 0))
 
     return max(entries, key=_entry_sort_key)
 
@@ -512,10 +476,7 @@ def _pool_entry_is_portal_oauth(entry: Any) -> bool:
     return auth_type.startswith("oauth") or bool(getattr(entry, "refresh_token", None))
 
 
-def _fetch_nous_account_info(
-    access_token: str,
-    portal_base_url: Optional[str] = None,
-) -> dict[str, Any]:
+def _fetch_nous_account_info(access_token: str, portal_base_url: Optional[str] = None) -> dict[str, Any]:
     base = (portal_base_url or "https://portal.nousresearch.com").rstrip("/")
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     req = urllib.request.Request(f"{base}/api/oauth/account", headers=headers)
@@ -525,25 +486,18 @@ def _fetch_nous_account_info(
 
 
 def _info_from_valid_jwt(
-    token: str,
-    *,
-    state: dict[str, Any],
-    portal_base_url: Optional[str],
-    min_jwt_ttl_seconds: int,
+    token: str, state: dict[str, Any], portal_base_url: Optional[str], min_jwt_ttl_seconds: int
 ) -> Optional[NousPortalAccountInfo]:
     try:
         from hermes_cli.auth import _decode_jwt_claims
     except Exception:
         return None
-
     claims = _decode_jwt_claims(token)
     if not claims:
         return None
-
     exp = _coerce_num(claims.get("exp"), float)
     if exp is None or exp <= time.time() + max(0, int(min_jwt_ttl_seconds)):
         return None
-
     paid_access = _coerce_bool(claims.get("paid_access"))
     access_info = NousPaidServiceAccessInfo(
         allowed=paid_access,
@@ -551,7 +505,6 @@ def _info_from_valid_jwt(
         organisation_id=_coerce_str(claims.get("org_id")),
         subscription_tier=_coerce_num(claims.get("subscription_tier"), int),
     )
-
     return NousPortalAccountInfo(
         logged_in=True,
         source="jwt",
@@ -574,10 +527,7 @@ def _info_from_valid_jwt(
 
 
 def _info_from_account_payload(
-    payload: dict[str, Any],
-    *,
-    state: dict[str, Any],
-    portal_base_url: Optional[str],
+    payload: dict[str, Any], *, state: dict[str, Any], portal_base_url: Optional[str]
 ) -> NousPortalAccountInfo:
     user = _dict_or_empty(payload.get("user"))
     organisation = _dict_or_empty(payload.get("organisation"))
@@ -633,19 +583,11 @@ def _subscription_from_payload(value: Any) -> Optional[NousPortalSubscriptionInf
 
 
 def _error_info(
-    *,
-    error: object,
-    logged_in: bool,
-    portal_base_url: Optional[str] = None,
-    raw_account: Optional[dict[str, Any]] = None,
+    *, error: object, logged_in: bool, portal_base_url: Optional[str] = None, raw_account: Optional[dict[str, Any]] = None
 ) -> NousPortalAccountInfo:
     return NousPortalAccountInfo(
-        logged_in=logged_in,
-        source="error",
-        fresh=False,
-        portal_base_url=portal_base_url,
-        raw_account=raw_account,
-        error=str(error),
+        logged_in=logged_in, source="error", fresh=False, portal_base_url=portal_base_url,
+        raw_account=raw_account, error=str(error),
     )
 
 
