@@ -410,11 +410,8 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
         return False
     try:
         subprocess.run(
-            [git, "restore", "--", tui_dir.name],
-            cwd=str(tui_dir.parent),
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            check=False,
+            [git, "restore", "--", tui_dir.name], cwd=str(tui_dir.parent), capture_output=True,
+            text=True, encoding="utf-8", errors="replace", check=False,
         )
     except OSError:
         return False
@@ -501,13 +498,8 @@ def _exit_on_npm_failure(result: subprocess.CompletedProcess, message: str, *, s
 def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
     """``npm run build`` in *cwd*; exit with *failure_message* + output tail on failure."""
     result = subprocess.run(
-        [npm, "run", "build"],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=_npm_lifecycle_env(),
+        [npm, "run", "build"], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=_npm_lifecycle_env(),
     )
     _exit_on_npm_failure(result, failure_message, sep="")
 
@@ -539,13 +531,8 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
         # Managed tree first on PATH: if the EBADENGINE repair provisioned a
         # managed Node, npm's shebang/lifecycle scripts must resolve that node.
         return subprocess.run(
-            npm_install_cmd,
-            cwd=str(npm_cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            npm_install_cmd, cwd=str(npm_cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
             env=_npm_lifecycle_env(with_hermes_node_path()),
         )
 
@@ -763,21 +750,11 @@ def _setup_tui_worktree() -> dict:
 
 
 def _launch_tui(
-    resume_session_id: Optional[str] = None,
-    tui_dev: bool = False,
-    model: Optional[str] = None,
-    provider: Optional[str] = None,
-    toolsets: object = None,
-    skills: object = None,
-    verbose: Optional[bool] = None,
-    quiet: bool = False,
-    query: Optional[str] = None,
-    image: Optional[str] = None,
-    worktree: bool = False,
-    checkpoints: bool = False,
-    pass_session_id: bool = False,
-    max_turns: Optional[int] = None,
-    accept_hooks: bool = False,
+    resume_session_id: Optional[str] = None, tui_dev: bool = False, model: Optional[str] = None,
+    provider: Optional[str] = None, toolsets: object = None, skills: object = None,
+    verbose: Optional[bool] = None, quiet: bool = False, query: Optional[str] = None,
+    image: Optional[str] = None, worktree: bool = False, checkpoints: bool = False,
+    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False,
 ):
     """Replace current process with the TUI."""
     from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv, _resolve_tui_heap_mb
@@ -821,8 +798,7 @@ def _launch_tui(
         if value:
             env["HERMES_TUI_SKILLS"] = value
     for key, value in (
-        ("HERMES_TUI_QUERY", query),
-        ("HERMES_TUI_IMAGE", image),
+        ("HERMES_TUI_QUERY", query), ("HERMES_TUI_IMAGE", image),
         ("HERMES_TUI_CHECKPOINTS", "1" if checkpoints else None),
         ("HERMES_TUI_PASS_SESSION_ID", "1" if pass_session_id else None),
         ("HERMES_TUI_MAX_TURNS", str(max_turns) if max_turns is not None else None),

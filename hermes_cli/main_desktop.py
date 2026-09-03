@@ -815,10 +815,7 @@ def _desktop_macos_local_codesign(app: Path, *, desktop_dir: Path, identity: str
         raise FileNotFoundError(f"desktop entitlement plists missing under {desktop_dir / 'electron'}")
 
     def sign_path(
-        path: Path,
-        *,
-        entitlements: Optional[Path] = None,
-        identifier: Optional[str] = None,
+        path: Path, *, entitlements: Optional[Path] = None, identifier: Optional[str] = None,
         runtime: bool = True,
     ) -> None:
         args = [codesign, "--force", "--sign", identity, "--timestamp=none"]
@@ -899,9 +896,7 @@ def _macos_legacy_adhoc_resign(codesign: str, app: Path) -> bool:
 
 
 def _desktop_macos_relaunchable_fixup(
-    desktop_dir: Path,
-    *,
-    publisher_signing_configured: Optional[bool] = None,
+    desktop_dir: Path, *, publisher_signing_configured: Optional[bool] = None,
     release_dir: Optional[Path] = None,
 ) -> bool:
     """Make a locally-built macOS app survive in-place self-update without resetting TCC grants.

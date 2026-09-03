@@ -70,10 +70,7 @@ _SYSTEMCTL_ERRORS = (FileNotFoundError, subprocess.TimeoutExpired, OSError)
 def _run_probe(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
     """Captured, text-decoded ``subprocess.run`` for short local probes (systemctl, ps)."""
     return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
-        timeout=timeout,
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
     )
 
 
@@ -276,12 +273,8 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
                 command = [*command, "--no-open"]
             with open(log_path, "ab") as log_f:
                 subprocess.Popen(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_f,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    close_fds=True,
+                    command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                    start_new_session=True, close_fds=True,
                 )
             respawned.append(command)
         except (OSError, ValueError) as exc:
@@ -367,10 +360,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
     ``_finalize_update_output`` consumes on exit.
     """
     state = {
-        "prev_stdout": sys.stdout,
-        "prev_stderr": sys.stderr,
-        "log_file": None,
-        "installed": False,
+        "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False
     }
 
     if gateway_mode:

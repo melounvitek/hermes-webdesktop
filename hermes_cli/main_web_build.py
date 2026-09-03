@@ -20,9 +20,7 @@ import time as _time
 from pathlib import Path
 from typing import Callable
 from hermes_cli.main_tui_launch import (
-    _npm_lifecycle_env,
-    _termux_workspace_install_context,
-    _workspace_root,
+    _npm_lifecycle_env, _termux_workspace_install_context, _workspace_root
 )
 
 # Log-record parity with the origin module.
@@ -217,11 +215,7 @@ def _console_print(text: str) -> None:
 
 
 def _run_with_idle_timeout(
-    cmd: list[str],
-    cwd: Path,
-    *,
-    idle_timeout_seconds: int = 180,
-    indent: str = "    ",
+    cmd: list[str], cwd: Path, *, idle_timeout_seconds: int = 180, indent: str = "    ",
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess that streams output, killing it after *idle_timeout_seconds* of silence.
@@ -328,11 +322,7 @@ def _nixos_build_env() -> dict[str, str] | None:
 
 
 def _run_npm_install_deterministic(
-    npm: str,
-    cwd: Path,
-    *,
-    extra_args: tuple[str, ...] = (),
-    capture_output: bool = True,
+    npm: str, cwd: Path, *, extra_args: tuple[str, ...] = (), capture_output: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Deterministic npm install that never mutates ``package-lock.json``.
@@ -378,11 +368,7 @@ def _run_npm_install_deterministic(
 
 
 def _run_npm_watching_for_engine_failure(
-    cmd: list[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    capture_output: bool,
+    cmd: list[str], *, cwd: Path, env: dict[str, str], capture_output: bool
 ) -> subprocess.CompletedProcess:
     """Run *cmd*, always retaining stderr so ``EBADENGINE`` stays detectable.
 
