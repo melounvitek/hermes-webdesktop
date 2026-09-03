@@ -1,20 +1,15 @@
-"""Shared curses-based UI components for Hermes CLI.
-
-Curses checklist / radiolist / single-select menus with keyboard navigation and fuzzy ``/``
-search, plus a numbered text fallback for terminals without curses.
-"""
+"""Curses checklist / radiolist / single-select menus with keyboard navigation and fuzzy ``/``
+search, plus a numbered text fallback for terminals without curses."""
 import sys
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, List, Optional, Protocol, Sequence, Set, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Set, Tuple, Union
 
 from hermes_cli.colors import Colors, color
 
 # Rich radiolist rows: (text, style). style is None | "yellow" | "dim". Plain ``str`` works too.
 RadioItem = Union[str, Sequence[Tuple[str, Optional[str]]]]
-
-
 _NO_REPLAY = object()
 
 
@@ -37,26 +32,19 @@ class MenuNavigationEvent(str, Enum):
     BACK = "back"
 
 
-class MenuNavigationHandler(Protocol):
-    """Typed contract between shared menus and a scoped flow controller."""
-
-    def __call__(
-        self, event: MenuNavigationEvent, value: object = None
-    ) -> MenuNavigationStart | None: ...
-
-
+# Scoped flow controller: ``handler(event, value=None) -> MenuNavigationStart | None``.
+MenuNavigationHandler = Callable[..., "MenuNavigationStart | None"]
 _MENU_NAVIGATION_HANDLER: ContextVar[MenuNavigationHandler | None] = ContextVar(
     "hermes_menu_navigation_handler", default=None)
 _NUMBERED_BACK_ENABLED: ContextVar[bool] = ContextVar("hermes_numbered_back_enabled", default=False)
 
 
-def set_menu_navigation_handler(
-    handler: MenuNavigationHandler) -> Token[MenuNavigationHandler | None]:
+def set_menu_navigation_handler(handler: MenuNavigationHandler) -> Token:
     """Scope setup-style cancel/back behavior to the current CLI invocation."""
     return _MENU_NAVIGATION_HANDLER.set(handler)
 
 
-def reset_menu_navigation_handler(token: Token[MenuNavigationHandler | None]) -> None:
+def reset_menu_navigation_handler(token: Token) -> None:
     """Restore the menu navigation handler active before ``token``."""
     _MENU_NAVIGATION_HANDLER.reset(token)
 
@@ -76,11 +64,8 @@ _NAV_ABORT = object()
 
 
 def _read_numbered_choice(prompt_text: str) -> int | None | object:
-    """Numbered-fallback choice as a 0-based index.
-
-    ``None`` for empty input; ``_NAV_ABORT`` when cancelled, backed out of, interrupted, or
-    non-integer (scoped navigation is notified for cancel/back).
-    """
+    """Numbered-fallback choice as a 0-based index; ``None`` for empty input, ``_NAV_ABORT`` when
+    cancelled / backed out / interrupted / non-integer (scoped navigation is notified)."""
     try:
         val = _read_numbered_input(prompt_text)
     except (KeyboardInterrupt, EOFError):
@@ -96,14 +81,10 @@ def _read_numbered_choice(prompt_text: str) -> int | None | object:
 
 
 def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
-    """Read a numbered fallback choice.
-
-    Plain ``input()`` outside setup flows. Inside a scoped flow, prompt_toolkit supplies
-    portable Escape / Ctrl+C / Left bindings on POSIX and native Windows.
-    """
+    """Plain ``input()`` outside setup flows; inside a scoped flow prompt_toolkit supplies portable
+    Escape / Ctrl+C / Left bindings on POSIX and native Windows."""
     if _MENU_NAVIGATION_HANDLER.get() is None:
         return input(prompt_text)
-
     from prompt_toolkit import PromptSession
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.key_binding import KeyBindings
@@ -120,11 +101,9 @@ def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
         event.app.exit(result=_NumberedNavigation.CANCEL)
 
     if _NUMBERED_BACK_ENABLED.get():
-
         @bindings.add(Keys.Left)
         def _back(event) -> None:
             event.app.exit(result=_NumberedNavigation.BACK)
-
     return PromptSession().prompt(ANSI(prompt_text), key_bindings=bindings)
 
 
@@ -140,15 +119,15 @@ def _curses_style_attr(curses, style: Optional[str], *, is_cursor: bool):
         return curses.A_BOLD | (curses.color_pair(1) if has_colors else 0)
     if style == "yellow" and has_colors:
         return curses.color_pair(2)
-    if style == "dim":
-        attr = curses.A_DIM
-        if has_colors:
-            try:
-                attr |= curses.color_pair(3)  # dim-gray status pair (extra_color_pairs)
-            except curses.error:
-                pass
-        return attr
-    return curses.A_NORMAL
+    if style != "dim":
+        return curses.A_NORMAL
+    attr = curses.A_DIM
+    if has_colors:
+        try:
+            attr |= curses.color_pair(3)  # dim-gray status pair (extra_color_pairs)
+        except curses.error:
+            pass
+    return attr
 
 
 def _addnstr(stdscr, y: int, x: int, text: str, n: int, attr) -> None:
@@ -220,25 +199,19 @@ def _is_boundary(target: str, index: int) -> bool:
     """Mirrors ``isBoundary`` in the TS scorer: start, after a separator, or lower->Upper."""
     if index == 0:
         return True
-    prev = target[index - 1]
-    if prev in _WORD_BOUNDARY:
-        return True
-    cur = target[index]
-    return prev == prev.lower() and cur != cur.lower() and cur == cur.upper()
+    prev, cur = target[index - 1], target[index]
+    return prev in _WORD_BOUNDARY or (
+        prev == prev.lower() and cur != cur.lower() and cur == cur.upper())
 
 
 def _token_score(orig: str, lower: str, token: str) -> float | None:
-    """Score one token against a target; None if not a subsequence.
-
-    Faithful port of ``fuzzyScore`` in ui-tui / web ``fuzzy.ts`` so all surfaces rank model ids
-    identically. Matches run against ``lower``; boundary detection uses ``orig`` for camelCase.
-    """
-    score = 0.0
-    prev = -1
-    search_from = 0
+    """Score one token against a target; None if not a subsequence. Faithful port of ``fuzzyScore``
+    in ui-tui / web ``fuzzy.ts`` so all surfaces rank identically; matches run against ``lower``,
+    boundary detection uses ``orig`` for camelCase."""
+    score, prev = 0.0, -1
     positions: list[int] = []
     for ch in token:
-        idx = lower.find(ch, search_from)
+        idx = lower.find(ch, prev + 1)
         if idx < 0:
             return None
         positions.append(idx)
@@ -252,7 +225,6 @@ def _token_score(orig: str, lower: str, token: str) -> float | None:
         if idx == 0:
             score += 5
         prev = idx
-        search_from = idx + 1
     if positions and positions[0] == 0 and positions[-1] == len(positions) - 1:
         score += 8  # contiguous prefix
     if lower == token:
@@ -263,13 +235,8 @@ def _token_score(orig: str, lower: str, token: str) -> float | None:
 def _fuzzy_score(label: str, query: str) -> float | None:
     """Multi-token AND score (``fuzzyScoreMulti``): sum of per-token scores, None if any fails."""
     lower = label.lower()
-    total = 0.0
-    for token in query.lower().split():
-        token_score = _token_score(label, lower, token)
-        if token_score is None:
-            return None
-        total += token_score
-    return total
+    scores = [_token_score(label, lower, token) for token in query.lower().split()]
+    return None if None in scores else sum(scores)
 
 
 def _filter_indices(items: List[str], query: str) -> List[int]:
@@ -285,7 +252,6 @@ def _filter_indices(items: List[str], query: str) -> List[int]:
 @dataclass
 class _SearchState:
     """Mutable search state shared by curses picker loops."""
-
     active: bool = False
     query: str = ""
 
@@ -294,9 +260,7 @@ def _reconcile_cursor(filtered: List[int], cursor: int) -> tuple[int, int]:
     """Return ``(cursor, cursor_pos)`` inside the filtered index list."""
     if not filtered:
         return cursor, 0
-    if cursor not in filtered:
-        cursor = filtered[0]
-    return cursor, filtered.index(cursor)
+    return (cursor, filtered.index(cursor)) if cursor in filtered else (filtered[0], 0)
 
 
 def _move_filtered_cursor(filtered: List[int], cursor: int, cursor_pos: int, delta: int) -> int:
@@ -341,10 +305,8 @@ def _handle_active_search_key(
 
 
 def flush_stdin() -> None:
-    """Drain stray stdin bytes after ``curses.wrapper()`` and before the next ``input()``.
-
-    ``curses.endwin()`` restores the terminal but does NOT drain the OS input buffer.
-    """
+    """Drain stray stdin bytes after ``curses.wrapper()`` and before the next ``input()``:
+    ``curses.endwin()`` restores the terminal but does NOT drain the OS input buffer."""
     try:
         if sys.stdin.isatty():
             import termios
@@ -354,22 +316,13 @@ def flush_stdin() -> None:
 
 
 # Normalized menu actions returned by ``read_menu_key``.
-NAV_UP = "up"
-NAV_DOWN = "down"
-NAV_BACK = "back"
-NAV_SELECT = "select"
-NAV_TOGGLE = "toggle"
-NAV_CANCEL = "cancel"
-NAV_INTERRUPT = "interrupt"
-NAV_NONE = "none"
+NAV_UP, NAV_DOWN, NAV_BACK, NAV_SELECT = "up", "down", "back", "select"
+NAV_TOGGLE, NAV_CANCEL, NAV_INTERRUPT, NAV_NONE = "toggle", "cancel", "interrupt", "none"
 
 
 def read_menu_key(stdscr) -> str:
-    """Read one keypress and normalize it to a ``NAV_*`` action.
-
-    A lone ESC (no continuation byte within a short window) and ``q`` cancel; unknown sequences
-    map to ``NAV_NONE`` so the caller ignores them rather than misfiring.
-    """
+    """Read one keypress and normalize it to a ``NAV_*`` action: lone ESC (no continuation byte
+    within a short window) and ``q`` cancel; unknown sequences map to ``NAV_NONE``."""
     return _decode_menu_key(stdscr, stdscr.getch())
 
 
@@ -407,9 +360,7 @@ def _enhanced_key_action(codepoint: int, modifier: int = 1) -> str:
     # CSI-u encodes Ctrl+C as `c` plus the Ctrl modifier bit; lock-state bits may be added, so
     # test the Ctrl bit rather than the canonical value 5.
     has_ctrl = bool((max(1, modifier) - 1) & 4)
-    if codepoint == 3 or (codepoint in (ord("c"), ord("C")) and has_ctrl):
-        return NAV_INTERRUPT
-    return NAV_NONE
+    return NAV_INTERRUPT if codepoint == 3 or (codepoint in (99, 67) and has_ctrl) else NAV_NONE
 
 
 def _read_csi_tail(stdscr) -> tuple[str, int | None]:
@@ -474,11 +425,11 @@ def _decode_menu_key(stdscr, key: int) -> str:
         stdscr.timeout(-1)  # restore blocking mode
 
 
-# An on_action reducer returns this to keep looping (state changed, menu not resolved).
-_KEEP = object()
+_KEEP = object()  # on_action reducer result: keep looping (state changed, menu not resolved)
+_CONSUMED = object()  # ``_route_key`` result: key eaten by the search prompt; redraw, no action
 
-# Sentinel from ``_route_key``: the key was consumed by the search prompt; redraw, no action.
-_CONSUMED = object()
+
+_RESOLVING = frozenset({NAV_SELECT, NAV_TOGGLE, NAV_CANCEL, NAV_INTERRUPT, NAV_BACK})
 
 
 def _init_colors(curses, extra_color_pairs: bool) -> None:
@@ -493,12 +444,11 @@ def _init_colors(curses, extra_color_pairs: bool) -> None:
 
 
 def _route_key(curses, stdscr, key: int, search: _SearchState, use_search: bool):
-    """Turn a raw key into a ``NAV_*`` action, honoring an active ``/`` search prompt.
-
-    Returns ``(action, changed)``; ``action`` may be ``_CONSUMED`` (redraw only) or
-    ``NAV_SELECT`` for Enter inside the prompt; ``changed`` means the query changed.
-    """
-    if use_search and search.active and key == 27:
+    """Turn a raw key into ``(action, changed)`` honoring an active ``/`` search prompt; ``action``
+    may be ``_CONSUMED`` (redraw only), ``changed`` means the query changed."""
+    if not use_search:
+        return _decode_menu_key(stdscr, key), False
+    if search.active and key == 27:
         # Enhanced keys (Ghostty/Kitty) also start with ESC: decode the full sequence before
         # treating a genuine Escape as "stop search".
         action = _decode_menu_key(stdscr, key)
@@ -507,38 +457,26 @@ def _route_key(curses, stdscr, key: int, search: _SearchState, use_search: bool)
             search.query = ""
             return _CONSUMED, True
         return (_CONSUMED if action == NAV_NONE else action), False
-    if use_search and search.active:
+    if search.active:
         # Active search consumes query-editing keys; nav keys fall through.
         handled, confirm, changed = _handle_active_search_key(curses, key, search)
         if confirm:
             return NAV_SELECT, changed
-        if handled:
-            return _CONSUMED, changed
-        return _decode_menu_key(stdscr, key), changed
-    if use_search and key == ord("/"):
+        return (_CONSUMED if handled else _decode_menu_key(stdscr, key)), changed
+    if key == ord("/"):
         search.active = True
         return _CONSUMED, False
     return _decode_menu_key(stdscr, key), False
 
 
 def _run_curses_menu(
-    *,
-    initial_cursor,
-    item_count,
-    draw_header,
-    draw_row,
-    on_action,
-    reserve_bottom=1,
-    draw_footer=None,
-    extra_color_pairs=False,
-    fallback,
-    cancel_value,
-    searchable=False,
+    *, initial_cursor, item_count, draw_header, draw_row, on_action, reserve_bottom=1,
+    draw_footer=None, extra_color_pairs=False, fallback, cancel_value, searchable=False,
     search_labels=None):
-    """Shared curses single-/multi-select event loop.
+    """Shared curses single-/multi-select event loop: non-TTY guard, ``curses.wrapper`` setup,
+    clear/refresh cycle, scroll math, key dispatch with cursor wrap, KeyboardInterrupt /
+    curses-unavailable fallback.
 
-    Owns the non-TTY guard, ``curses.wrapper`` setup, clear/refresh cycle, scroll math, key
-    dispatch with cursor wrap, and the KeyboardInterrupt / curses-unavailable fallback.
     ``draw_row`` always receives the ORIGINAL item index; ``on_action`` returns ``_KEEP`` to
     continue or any other value to resolve; a ``draw_footer`` row budget must be included in
     ``reserve_bottom``; with ``searchable``, ``/`` filters over ``search_labels`` (length ==
@@ -550,19 +488,17 @@ def _run_curses_menu(
         if navigation_handler is not None:
             navigation_handler(event, *value)
 
-    navigation_start = navigation_handler(MenuNavigationEvent.BEGIN) if navigation_handler else None
-    if navigation_start is not None and not isinstance(navigation_start, MenuNavigationStart):
+    start = navigation_handler(MenuNavigationEvent.BEGIN) if navigation_handler else None
+    if start is not None and not isinstance(start, MenuNavigationStart):
         raise TypeError("menu navigation 'begin' must return MenuNavigationStart")
-    allow_back = bool(navigation_start and navigation_start.allow_back)
-    if navigation_start is not None and navigation_start.should_replay:
-        _notify(MenuNavigationEvent.RESOLVE, navigation_start.replay_value)
-        return navigation_start.replay_value
-
+    allow_back = bool(start and start.allow_back)
+    if start is not None and start.should_replay:
+        _notify(MenuNavigationEvent.RESOLVE, start.replay_value)
+        return start.replay_value
     # Non-TTY stdin: curses and input() both hang or spin, so return the cancel value directly
     # (the numbered fallback is only for curses errors on a real TTY).
     if not sys.stdin.isatty():
         return cancel_value
-
     use_search = searchable and search_labels is not None and len(search_labels) == item_count
 
     def _run_fallback():
@@ -578,24 +514,12 @@ def _run_curses_menu(
         import curses
     except ImportError:
         return _run_fallback()
-
     try:
         result_holder = [_KEEP]
 
-        def _resolve(outcome) -> bool:
-            """Record a non-``_KEEP`` outcome; True when the menu is done."""
-            if outcome is _KEEP:
-                return False
-            _notify(MenuNavigationEvent.RESOLVE, outcome)
-            result_holder[0] = outcome
-            return True
-
         def _draw(stdscr):
             _init_colors(curses, extra_color_pairs)
-            cursor = initial_cursor
-            scroll_offset = 0
-            search = _SearchState()
-
+            cursor, scroll_offset, search = initial_cursor, 0, _SearchState()
             while True:
                 stdscr.clear()
                 max_y, max_x = stdscr.getmaxyx()
@@ -618,29 +542,29 @@ def _run_curses_menu(
                 if draw_footer is not None:
                     draw_footer(stdscr, max_y, max_x)
                 stdscr.refresh()
-
                 action, changed = _route_key(curses, stdscr, stdscr.getch(), search, use_search)
                 if changed:
                     scroll_offset = 0
                     if search.active:  # Esc-clear resets scroll only; the loop re-reconciles
                         cursor, cursor_pos = _reconcile_cursor(
                             _filter_indices(search_labels, search.query), cursor)
-                if action is _CONSUMED:
+                if action in (NAV_UP, NAV_DOWN):
+                    delta = -1 if action == NAV_UP else 1
+                    cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, delta)
                     continue
-                if action == NAV_UP:
-                    cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, -1)
-                elif action == NAV_DOWN:
-                    cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, 1)
-                elif action in (NAV_SELECT, NAV_TOGGLE, NAV_CANCEL, NAV_INTERRUPT) or (
-                    action == NAV_BACK and allow_back):
-                    if action == NAV_SELECT and use_search and not filtered:
-                        continue
-                    if action in (NAV_CANCEL, NAV_INTERRUPT):
-                        _notify(MenuNavigationEvent.CANCEL)
-                    elif action == NAV_BACK:
-                        _notify(MenuNavigationEvent.BACK)
-                    if _resolve(on_action(action, cursor)):
-                        return
+                if action is _CONSUMED or action not in _RESOLVING or (
+                    action == NAV_BACK and not allow_back) or (
+                    action == NAV_SELECT and use_search and not filtered):
+                    continue
+                if action in (NAV_CANCEL, NAV_INTERRUPT):
+                    _notify(MenuNavigationEvent.CANCEL)
+                elif action == NAV_BACK:
+                    _notify(MenuNavigationEvent.BACK)
+                outcome = on_action(action, cursor)
+                if outcome is not _KEEP:
+                    _notify(MenuNavigationEvent.RESOLVE, outcome)
+                    result_holder[0] = outcome
+                    return
 
         curses.wrapper(_draw)
         flush_stdin()
@@ -653,25 +577,18 @@ def _run_curses_menu(
 
 
 def curses_checklist(
-    title: str,
-    items: List[str],
-    selected: Set[int],
-    *,
-    cancel_returns: Set[int] | None = None,
+    title: str, items: List[str], selected: Set[int], *, cancel_returns: Set[int] | None = None,
     status_fn: Optional[Callable[[Set[int]], str]] = None) -> Set[int]:
-    """Curses multi-select checklist. Returns set of selected indices.
-
-    ``cancel_returns`` (default: the original *selected*) is returned on ESC/q.
-    ``status_fn(chosen)`` renders on the bottom row for live aggregate info such as token estimates.
-    """
+    """Curses multi-select checklist -> set of selected indices. ``cancel_returns`` (default: the
+    original *selected*) is returned on ESC/q; ``status_fn(chosen)`` renders on the bottom row
+    for live aggregate info such as token estimates."""
     if cancel_returns is None:
         cancel_returns = set(selected)
     chosen = set(selected)
 
     def _draw_row(stdscr, y, i, is_cursor, max_x):
-        check = "✓" if i in chosen else " "
-        arrow = "→" if is_cursor else " "
-        _draw_plain_row(stdscr, y, f" {arrow} [{check}] {items[i]}", max_x, is_cursor=is_cursor)
+        line = f" {'→' if is_cursor else ' '} [{'✓' if i in chosen else ' '}] {items[i]}"
+        _draw_plain_row(stdscr, y, line, max_x, is_cursor=is_cursor)
 
     def _draw_footer(stdscr, max_y, max_x):
         import curses
@@ -690,14 +607,10 @@ def curses_checklist(
         return cancel_returns  # NAV_CANCEL
 
     return _run_curses_menu(
-        initial_cursor=0,
-        item_count=len(items),
+        initial_cursor=0, item_count=len(items),
         draw_header=_simple_header(title, "SPACE toggle  ENTER confirm", "ESC cancel", False),
-        draw_row=_draw_row,
-        on_action=_on_action,
-        reserve_bottom=(2 if status_fn else 1),
-        draw_footer=_draw_footer if status_fn else None,
-        extra_color_pairs=bool(status_fn),
+        draw_row=_draw_row, on_action=_on_action, reserve_bottom=(2 if status_fn else 1),
+        draw_footer=_draw_footer if status_fn else None, extra_color_pairs=bool(status_fn),
         fallback=lambda: _numbered_fallback(title, items, selected, cancel_returns, status_fn),
         cancel_value=cancel_returns)
 
@@ -724,15 +637,10 @@ def _simple_header(title: str, confirm: str, cancel: str, searchable: bool):
 
 
 def curses_radiolist(
-    title: str,
-    items: List[RadioItem],
-    selected: int = 0,
-    *,
-    cancel_returns: int | None = None,
-    description: str | None = None,
-    searchable: bool = False,
+    title: str, items: List[RadioItem], selected: int = 0, *, cancel_returns: int | None = None,
+    description: str | None = None, searchable: bool = False,
     search_labels: List[str] | None = None) -> int:
-    """Curses single-select radio list. Returns the selected index.
+    """Curses single-select radio list -> selected index.
 
     Items are plain strings or ``(text, style)`` segment sequences (``None``/``"yellow"``/
     ``"dim"``); the cursor row is forced green. ``description`` is shown between title and list
@@ -742,7 +650,10 @@ def curses_radiolist(
     if cancel_returns is None:
         cancel_returns = selected
     desc_lines = description.splitlines() if description else []
-    plain_labels = [radio_item_plain(item) for item in items] if searchable else None
+    if searchable:
+        search_labels = (
+            list(search_labels) if search_labels is not None
+            else [radio_item_plain(item) for item in items])
 
     def _draw_header(stdscr, max_y, max_x, search=None, back_enabled=False):
         row = 1
@@ -754,8 +665,7 @@ def curses_radiolist(
         return row + 2  # one blank row between the hint and the item list
 
     def _draw_row(stdscr, y, i, is_cursor, max_x):
-        radio = "\u25cf" if i == selected else "\u25cb"
-        arrow = "\u2192" if is_cursor else " "
+        radio, arrow = "\u25cf" if i == selected else "\u25cb", "\u2192" if is_cursor else " "
         prefix = f" {arrow} ({radio}) "
         _draw_plain_row(stdscr, y, prefix, max_x, is_cursor=is_cursor)
         _draw_radio_item(stdscr, y, len(prefix), items[i], max_x, is_cursor=is_cursor)
@@ -764,19 +674,12 @@ def curses_radiolist(
         return cursor if action in (NAV_SELECT, NAV_TOGGLE) else cancel_returns  # NAV_CANCEL
 
     return _run_curses_menu(
-        initial_cursor=selected,
-        item_count=len(items),
-        draw_header=_draw_header,
-        draw_row=_draw_row,
-        on_action=_on_action,
-        reserve_bottom=1,
+        initial_cursor=selected, item_count=len(items), draw_header=_draw_header,
+        draw_row=_draw_row, on_action=_on_action,
         extra_color_pairs=True,  # dim gray (pair 3) for unselected "was …" sale chrome
         fallback=lambda: _radio_numbered_fallback(title, items, selected, cancel_returns),
-        cancel_value=cancel_returns,
-        searchable=searchable,
-        search_labels=(
-            (list(search_labels) if search_labels is not None else plain_labels)
-            if searchable else None))
+        cancel_value=cancel_returns, searchable=searchable,
+        search_labels=search_labels if searchable else None)
 
 
 _ANSI_STYLE = {"yellow": Colors.YELLOW, "dim": Colors.DIM}
@@ -806,23 +709,16 @@ def _radio_numbered_fallback(
 
 
 def curses_single_select(
-    title: str,
-    items: List[str],
-    default_index: int = 0,
-    *,
-    cancel_label: str = "Cancel",
+    title: str, items: List[str], default_index: int = 0, *, cancel_label: str = "Cancel",
     searchable: bool = False) -> int | None:
-    """Curses single-select menu. Returns selected index or None on cancel.
-
-    With ``searchable``, ``/`` opens a type-to-filter prompt; the return value is always the
-    original item index (or None for cancel).
-    """
+    """Curses single-select menu -> selected index or None on cancel. With ``searchable``, ``/``
+    opens a type-to-filter prompt; the return value is always the original item index."""
     all_items = list(items) + [cancel_label]
     cancel_idx = len(items)
 
     def _draw_row(stdscr, y, i, is_cursor, max_x):
-        arrow = "→" if is_cursor else " "
-        _draw_plain_row(stdscr, y, f" {arrow} {all_items[i]}", max_x, is_cursor=is_cursor)
+        line = f" {'→' if is_cursor else ' '} {all_items[i]}"
+        _draw_plain_row(stdscr, y, line, max_x, is_cursor=is_cursor)
 
     def _on_action(action, cursor):
         if action == NAV_SELECT:  # the synthetic cancel row resolves to None
@@ -832,15 +728,11 @@ def curses_single_select(
         return _KEEP  # NAV_TOGGLE — no-op for this menu
 
     return _run_curses_menu(
-        initial_cursor=min(default_index, len(all_items) - 1),
-        item_count=len(all_items),
+        initial_cursor=min(default_index, len(all_items) - 1), item_count=len(all_items),
         draw_header=_simple_header(title, "ENTER confirm", "ESC/q cancel", searchable),
-        draw_row=_draw_row,
-        on_action=_on_action,
-        reserve_bottom=1,
+        draw_row=_draw_row, on_action=_on_action,
         fallback=lambda: _numbered_single_fallback(title, all_items, cancel_idx),
-        cancel_value=None,
-        searchable=searchable,
+        cancel_value=None, searchable=searchable,
         search_labels=list(all_items) if searchable else None)
 
 
@@ -855,10 +747,7 @@ def _numbered_single_fallback(title: str, items: List[str], cancel_idx: int) -> 
 
 
 def _numbered_fallback(
-    title: str,
-    items: List[str],
-    selected: Set[int],
-    cancel_returns: Set[int],
+    title: str, items: List[str], selected: Set[int], cancel_returns: Set[int],
     status_fn: Optional[Callable[[Set[int]], str]] = None) -> Set[int]:
     """Text-based toggle fallback for terminals without curses."""
     chosen = set(selected)
