@@ -460,14 +460,12 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     """
     dump_text = _capture_dump()
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
-
     report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
                                   log_snapshots=log_snapshots)
     banner = _REDACTION_BANNER if redact else ""
     bundle: dict[str, str] = {"report": banner + report}
     for name in _FULL_LOGS:
-        full = log_snapshots[name].full_text
-        if full:
+        if full := log_snapshots[name].full_text:
             bundle[f"{name}.log"] = banner + dump_text + f"\n\n--- full {name}.log ---\n" + full
     return bundle
 
@@ -506,35 +504,24 @@ def build_debug_share(
     Blocking network I/O — callers inside an event loop must run it in a worker thread.
     """
     _best_effort_sweep_expired_pastes()
-
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
-
     if redact:
         logger.info(
             "hermes debug share: applied force-mode redaction to log snapshots before upload"
         )
-
     report = bundle["report"]
-
-    urls: dict[str, str] = {}
     failures: list[str] = []
-
-    # Summary report is required — raises on failure so callers can fall back.
-    urls["Report"] = upload_to_pastebin(report, expiry_days=expiry)
-
-    # Full logs are optional — failures are collected, not raised.
-    for name in _FULL_LOGS:
-        label = f"{name}.log"
-        content = bundle.get(label)
-        if not content:
+    # Summary report is required — raises on failure so callers can fall back; full logs are
+    # optional — failures are collected, not raised.
+    urls = {"Report": upload_to_pastebin(report, expiry_days=expiry)}
+    for label, content in bundle.items():
+        if label == "report":
             continue
         try:
             urls[label] = upload_to_pastebin(content, expiry_days=expiry)
         except Exception as exc:
             failures.append(f"{label}: {exc}")
-
     _schedule_auto_delete(list(urls.values()))
-
     return DebugShareResult(urls=urls, failures=failures, redacted=redact,
                             auto_delete_seconds=_AUTO_DELETE_SECONDS, report=report)
 
@@ -574,11 +561,9 @@ def run_debug_share(args):
         print("Collecting debug report...")
         bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
         print(bundle["report"])
-        for name in _FULL_LOGS:
-            body = bundle.get(f"{name}.log")
-            if body:
-                print(f"\n\n{'=' * 60}\nFULL {name}.log\n{'=' * 60}\n")
-                print(body)
+        for label, body in bundle.items():
+            if label != "report":
+                print(f"\n\n{'=' * 60}\nFULL {label}\n{'=' * 60}\n\n{body}")
         return
 
     if getattr(args, "nous", False):
