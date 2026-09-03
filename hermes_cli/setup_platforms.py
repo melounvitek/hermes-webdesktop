@@ -368,7 +368,6 @@ def setup_gateway(config: dict):
     # `hermes setup gateway`). Gating it on messaging config left install-then-import machines
     # with cron jobs and bot tokens but no process to serve them.
     from hermes_cli.gateway import _is_service_running, supports_systemd_services, ensure_gateway_service
-
     supports_systemd = supports_systemd_services()
 
     print()

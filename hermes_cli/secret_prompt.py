@@ -91,7 +91,6 @@ def _masked_secret_prompt_windows(prompt: str, *, mask: str) -> str:
 def _masked_secret_prompt_posix(prompt: str, *, mask: str) -> str:
     import termios
     import tty
-
     fd = sys.stdin.fileno()
     old_attrs = termios.tcgetattr(fd)
     try:

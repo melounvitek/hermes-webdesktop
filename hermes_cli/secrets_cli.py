@@ -48,7 +48,6 @@ _NOT_BSM_TOKEN_WARNING_CONTINUING = (
 def _load_bw():
     """Import ``agent.secret_sources.bitwarden`` on first use (crypto payload)."""
     from agent.secret_sources import bitwarden as _bw
-
     return _bw
 
 
@@ -332,8 +331,7 @@ def cmd_token(args: argparse.Namespace) -> int:
             console.print(
                 f"[yellow]Warning: configured project {project_id} is not visible "
                 "to this machine account.  Grant it access in the Bitwarden web "
-                "app or re-run `hermes secrets bitwarden setup` to pick a "
-                "different project.[/yellow]"
+                "app or re-run `hermes secrets bitwarden setup` to pick a different project.[/yellow]"
             )
         return True
 

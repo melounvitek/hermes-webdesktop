@@ -598,7 +598,6 @@ def _record_send_consent_change(*, enabled: bool) -> None:
         from hermes_cli.observability.shared_metrics import SharedMetricsStore
         from hermes_cli.observability.shared_metrics_sender import reconcile_send_consent
         from hermes_cli.sqlite_util import write_txn
-
         with SharedMetricsStore()._connection() as connection, write_txn(connection):
             reconcile_send_consent(connection, enabled)
     except Exception:

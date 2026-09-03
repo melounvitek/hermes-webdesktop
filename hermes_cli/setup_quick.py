@@ -164,7 +164,6 @@ def _blank_slate_minimal_toolsets(config: dict):
     try:
         from toolsets import TOOLSETS
         from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_plugin_toolset_keys
-
         all_keys = {k for k, _, _ in CONFIGURABLE_TOOLSETS}
         all_keys.update(_get_plugin_toolset_keys())
         # Plain TOOLSETS entries catch recovered toolsets like ``kanban``. Skip "hermes-*" platform

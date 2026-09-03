@@ -97,7 +97,6 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
     # outbound sends) so `--list` never hides a working send target.
     try:
         from gateway.config import load_gateway_config
-
         for plat in load_gateway_config().get_connected_platforms():
             plat_name = getattr(plat, "value", str(plat))
             if plat_name not in ("local", "api_server", "webhook"):
@@ -171,7 +170,6 @@ def _load_hermes_env() -> None:
                 # utf-8-sig can't strip a BOM once we fall back to latin-1.
                 import codecs
                 import io
-
                 raw = env_path.read_bytes()
                 if raw.startswith(codecs.BOM_UTF8):
                     raw = raw[len(codecs.BOM_UTF8) :]
@@ -266,8 +264,7 @@ _SEND_ARGUMENTS = (
             "Delivery target. Format: 'platform' (home channel), "
             "'platform:chat_id', 'platform:chat_id:thread_id', or "
             "'platform:#channel-name'. Examples: telegram, "
-            "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, "
-            "signal:+15551234567."
+            "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, signal:+15551234567."
         ),
     )),
     (("message",), dict(nargs="?", default=None, help="Message text. If omitted, read from --file or stdin.")),
@@ -276,8 +273,7 @@ _SEND_ARGUMENTS = (
         default=None,
         help=(
             "Read message body from PATH (text only). Use '-' to force stdin. "
-            "To send an image/document as an attachment, use MEDIA:<path> in "
-            "the message text instead."
+            "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."
         ),
     )),
     (("-s", "--subject"), dict(metavar="LINE", default=None, help="Prepend a subject/header line before the message body.")),
