@@ -294,14 +294,9 @@ class SlashCommandCompleter(Completer):
 
     # Module-level helpers exposed as staticmethods for existing callers/tests.
     _extract_path_word = staticmethod(_extract_path_word)
-    _dir_completions = staticmethod(_dir_completions)
     _path_completions = staticmethod(_path_completions)
-    _score_path = staticmethod(_score_path)
-    _skin_completions = staticmethod(_skin_completions)
     _personality_completions = staticmethod(_personality_completions)
     _tools_completions = staticmethod(_tools_completions)
-    _handoff_completions = staticmethod(_handoff_completions)
-    _DYNAMIC_COMPLETIONS = _DYNAMIC_COMPLETIONS
 
     def __init__(
         self,
