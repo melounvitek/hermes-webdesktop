@@ -241,42 +241,41 @@ def _batch_progress_token(child_agents: List[Any]) -> tuple:
             parts.append(None)
     return tuple(parts), in_tool
 
+_BACKGROUND_NOTES = {
+    "one": (
+        "Subagent is running in the background. You and the user can keep working; its full result re-enters the "
+        "conversation as a new message when it finishes. Do not wait or poll — just continue."
+    ),
+    "many": (
+        "{n} subagents are running in parallel in the background. You and the user can keep working; they wait on "
+        "each other and their consolidated results re-enter the conversation as a single message once ALL of them "
+        "finish. Do not wait or poll — just continue."
+    ),
+    "control_hint": (
+        "While a child runs you can orchestrate it live with this same tool: delegate_task(action='list') to see live "
+        "children, action='steer' with subagent_id + message to redirect one, action='stop' with subagent_id to end "
+        "one early."
+    ),
+    "live_transcripts_hint": (
+        "Each subagent streams a human-readable transcript of its operations to the file listed above (append-only, "
+        "one per task). Read or `tail -f` these paths at any time to watch a child work while it runs."
+    ),
+}
+
 def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any], live_paths: List[str]) -> dict:
     """Model-facing handle for an accepted background batch."""
     n = len(goals)
     payload = {
-        "status": "dispatched",
-        "mode": "background",
-        "count": n,
-        "delegation_id": dispatch["delegation_id"],
-        "goals": goals,
-        "note": (
-            "Subagent is running in the background. You and the user can "
-            "keep working; its full result re-enters the conversation as a "
-            "new message when it finishes. Do not wait or poll — just continue."
-            if n == 1 else
-            f"{n} subagents are running in parallel in the background. You "
-            f"and the user can keep working; they wait on each other and "
-            f"their consolidated results re-enter the conversation as a "
-            f"single message once ALL of them finish. Do not wait or poll — just continue."
-        ),
+        "status": "dispatched", "mode": "background", "count": n, "delegation_id": dispatch["delegation_id"],
+        "goals": goals, "note": _BACKGROUND_NOTES["one"] if n == 1 else _BACKGROUND_NOTES["many"].format(n=n),
     }
     sids = [getattr(c, "_subagent_id", None) for c in child_agents]
     if any(isinstance(s, str) and s for s in sids):
         payload["subagent_ids"] = sids
-        payload["control_hint"] = (
-            "While a child runs you can orchestrate it live with this "
-            "same tool: delegate_task(action='list') to see live "
-            "children, action='steer' with subagent_id + message to "
-            "redirect one, action='stop' with subagent_id to end one early."
-        )
+        payload["control_hint"] = _BACKGROUND_NOTES["control_hint"]
     if live_paths:
         payload["live_transcripts"] = list(live_paths)
-        payload["live_transcripts_hint"] = (
-            "Each subagent streams a human-readable transcript of its "
-            "operations to the file listed above (append-only, one per "
-            "task). Read or `tail -f` these paths at any time to watch a child work while it runs."
-        )
+        payload["live_transcripts_hint"] = _BACKGROUND_NOTES["live_transcripts_hint"]
     return payload
 
 def _dispatch_background(batch: _Batch) -> str:
@@ -306,29 +305,22 @@ def _dispatch_background(batch: _Batch) -> str:
 
     goals = [t["goal"] for t in batch.task_list]
     dispatch = dispatch_async_delegation_batch(
-        goals=goals,
-        context=batch.context,
-        # Metadata for the completion block only; subagents inherit the
-        # parent's toolsets (no model-facing toolsets arg).
-        toolsets=None,
-        role=batch.top_role,
-        model=batch.creds["model"],
-        session_key=session_key,
-        origin_ui_session_id=origin_ui_session_id,
-        origin_session_id=wake_sid,
+        goals=goals, context=batch.context,
+        toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
+        role=batch.top_role, model=batch.creds["model"], session_key=session_key,
+        origin_ui_session_id=origin_ui_session_id, origin_session_id=wake_sid,
         parent_session_id=getattr(parent_agent, "session_id", None),
         runner=lambda: _execute_and_aggregate(batch, honor_parent_interrupt=False),
-        interrupt_fn=_batch_interrupt,
-        max_async_children=_get_max_async_children(),
-        # Reuse the live-transcript directory's id (when created) so the
-        # returned delegation_id matches cache/delegation/live/<id>/.
+        interrupt_fn=_batch_interrupt, max_async_children=_get_max_async_children(),
+        # Reuse the live-transcript directory's id (when created) so the returned delegation_id matches
+        # cache/delegation/live/<id>/.
         delegation_id=batch.live_deleg_id,
         progress_fn=lambda: _batch_progress_token(child_agents),
     )
     if dispatch.get("status") == "dispatched":
         return json.dumps(_dispatched_payload(dispatch, goals, child_agents, batch.live_paths), ensure_ascii=False)
-    # Pool at capacity / schedule failure: the async unit was never accepted,
-    # so just run inline (re-attaching to the parent list is not needed).
+    # Pool at capacity / schedule failure: the async unit was never accepted, so just run inline (re-attaching to the
+    # parent list is not needed).
     logger.info(
         "delegate_task: async pool at capacity (%s); running the whole batch synchronously instead.",
         dispatch.get("error", "rejected"),
