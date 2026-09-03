@@ -811,54 +811,48 @@ class SessionDB(
                 ):
                     continue
                 raise
-            except sqlite3.OperationalError as exc:
-                err_msg = str(exc).lower()
-                if "locked" in err_msg or "busy" in err_msg:
-                    if self._sleep_before_write_retry(deadline, patience_s):
-                        continue
-                    # Say what actually happened, not disk/permission damage.
-                    raise sqlite3.OperationalError(
-                        f"database is locked (another Hermes process held the "
-                        f"state.db write lock for over {patience_s:.0f}s — "
-                        "likely a long maintenance operation such as VACUUM, "
-                        "a large WAL checkpoint, or an older pre-update "
-                        "process; the database itself is healthy)"
-                    ) from exc
-                if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
-                    continue
-                if (
-                    _DISK_IO_ERROR_MARKER in err_msg
-                    and not fn_started
-                    and not ioerr_begin_retried
-                    and self._sleep_before_write_retry(deadline, patience_s)
-                ):
-                    # Retry on the SAME connection: close()+reopen would cancel this process's POSIX
-                    # locks for every sibling (howtocorrupt §2.2).
-                    ioerr_begin_retried = True
-                    continue
-                raise  # non-lock error, callback already ran, or patience exhausted
-            except sqlite3.DatabaseError as exc:
-                if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
-                    continue
-                # An out-of-band replace surfaces as this same corruption class; in-file repair
-                # on a NEW generation amplifies the damage.
-                if (
-                    "not a database" in str(exc).lower() or is_malformed_db_error(exc)
-                    or self._is_fts_write_corruption_error(exc)
-                ):
-                    self._raise_if_db_replaced()
-                # Corrupt FTS shadow tables fail every write via the sync triggers while canonical rows
-                # are intact: detach the derived indexes atomically and retry (never rebuild here).
-                if self._enter_fts_fail_open(exc):
-                    continue
-                # What survives both checks is structural damage: quarantine.
-                if self._is_structural_corruption_error(exc):
-                    self._halt_db_corrupt(exc)
-                raise
             except sqlite3.Error as exc:
-                # Some builds raise 'no more rows' as InterfaceError (sibling of DatabaseError).
+                # 'no more rows' is a transient engine error on contended WAL appends (some builds
+                # raise it as InterfaceError, a sibling of DatabaseError): retry like locked/busy.
                 if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
                     continue
+                err_msg = str(exc).lower()
+                if isinstance(exc, sqlite3.OperationalError):
+                    if "locked" in err_msg or "busy" in err_msg:
+                        if self._sleep_before_write_retry(deadline, patience_s):
+                            continue
+                        # Say what actually happened, not disk/permission damage.
+                        raise sqlite3.OperationalError(
+                            f"database is locked (another Hermes process held the "
+                            f"state.db write lock for over {patience_s:.0f}s — "
+                            "likely a long maintenance operation such as VACUUM, "
+                            "a large WAL checkpoint, or an older pre-update "
+                            "process; the database itself is healthy)"
+                        ) from exc
+                    if (
+                        _DISK_IO_ERROR_MARKER in err_msg and not fn_started and not ioerr_begin_retried
+                        and self._sleep_before_write_retry(deadline, patience_s)
+                    ):
+                        # Retry on the SAME connection: close()+reopen would cancel this process's
+                        # POSIX locks for every sibling (howtocorrupt §2.2).
+                        ioerr_begin_retried = True
+                        continue
+                    raise  # non-lock error, callback already ran, or patience exhausted
+                if isinstance(exc, sqlite3.DatabaseError):
+                    # An out-of-band replace surfaces as this same corruption class; in-file repair
+                    # on a NEW generation amplifies the damage.
+                    if (
+                        "not a database" in err_msg or is_malformed_db_error(exc)
+                        or self._is_fts_write_corruption_error(exc)
+                    ):
+                        self._raise_if_db_replaced()
+                    # Corrupt FTS shadow tables fail every write via the sync triggers while canonical
+                    # rows are intact: detach the derived indexes atomically and retry (never rebuild here).
+                    if self._enter_fts_fail_open(exc):
+                        continue
+                    # What survives both checks is structural damage: quarantine.
+                    if self._is_structural_corruption_error(exc):
+                        self._halt_db_corrupt(exc)
                 raise
 
     def _write_sql(
