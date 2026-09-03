@@ -286,9 +286,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         media_files = media_files or []
         thread_kwargs = _telegram_thread_kwargs(thread_id)
         # disable_web_page_preview is only valid for send_message, not media sends.
-        text_kwargs = dict(thread_kwargs)
-        if disable_link_previews:
-            text_kwargs["disable_web_page_preview"] = True
+        text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         last_msg, warnings = None, []
 
         # MEDIA caption: a single captionable file + short text rides on the bubble as
@@ -694,8 +692,7 @@ async def _send_qqbot(pconfig, chat_id, message):
     from gateway.config import _getenv
     extra = pconfig.extra or {}
     appid = extra.get("app_id") or _getenv("QQ_APP_ID", "")
-    secret = (pconfig.token or extra.get("client_secret")
-              or _getenv("QQ_CLIENT_SECRET", ""))
+    secret = pconfig.token or extra.get("client_secret") or _getenv("QQ_CLIENT_SECRET", "")
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
@@ -711,8 +708,7 @@ async def _send_qqbot(pconfig, chat_id, message):
                 return _error("QQBot: no access_token in response")
 
             # Separate endpoints for guild channels, C2C (private) and groups; first 2xx wins.
-            headers = {
-                "Authorization": f"QQBot {access_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"QQBot {access_token}", "Content-Type": "application/json"}
             payload = {"content": message[:4000], "msg_type": 0}
             endpoints = (
                 ("channel", f"https://api.sgroup.qq.com/channels/{chat_id}/messages"),

@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+from functools import partial
 
 from agent.secret_scope import get_secret
 
@@ -106,9 +107,7 @@ def _handle_react(args, remove=False):
     if not callable(react_fn):
         return tool_error(f"Platform '{platform_name}' does not support message reactions.")
 
-    kwargs = {"chat_id": chat_id, "message_id": message_id}
-    if not remove:
-        kwargs["emoji"] = emoji
+    kwargs = {"chat_id": chat_id, "message_id": message_id, **({} if remove else {"emoji": emoji})}
     try:
         from model_tools import _run_async
         result = _run_async(react_fn(**kwargs))
@@ -537,14 +536,11 @@ _CHUNKED_ROUTES = {
     "wecom": (True, None, _via_adapter_route)}
 
 
-def _registry_text_sender(name):
-    return lambda pc, cid, chunk, tid: _registry_standalone_send(name, pc, cid, chunk, tid)
-
-
 # Text-only senders for built-in platforms (generic path; media is dropped with a
 # warning). Signature: (pconfig, chat_id, chunk, thread_id) -> result.
 _TEXT_SENDERS = {
-    **{name: _registry_text_sender(name) for name in ("whatsapp", "email", "sms", "dingtalk", "feishu", "wecom")},
+    **{name: partial(_registry_standalone_send, name)
+       for name in ("whatsapp", "email", "sms", "dingtalk", "feishu", "wecom")},
     "signal": lambda pc, cid, chunk, tid: _send_signal(pc.extra, cid, chunk),
     "bluebubbles": lambda pc, cid, chunk, tid: _send_bluebubbles(pc.extra, cid, chunk),
     "qqbot": lambda pc, cid, chunk, tid: _send_qqbot(pc, cid, chunk),
@@ -611,9 +607,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             try:
                 import inspect
                 result = handler(args or {}, chat_id, platform_name, pconfig)
-                if inspect.isawaitable(result):
-                    result = await result
-                return result
+                return await result if inspect.isawaitable(result) else result
             except Exception as e:
                 return {"error": f"Plugin send_message handler failed: {e}"}
         # Plugin platform: live gateway adapter if available, else standalone_sender_fn.
