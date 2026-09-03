@@ -1,9 +1,6 @@
-"""Peer-backed session transport for one hosted-room member task.
-
-This adapter implements :class:`InternalSessionRPC` without using canonical
-Bot Chat. The remote client must resolve a hidden ``Group: <room_id>`` session
-with ``source=bot_room`` and verify the scoped grant at admission.
-"""
+"""Peer-backed session transport for one hosted-room member task: implements
+:class:`InternalSessionRPC` without canonical Bot Chat. The remote client must resolve a hidden
+``Group: <room_id>`` session with ``source=bot_room`` and verify the scoped grant at admission."""
 
 from __future__ import annotations
 
@@ -24,27 +21,16 @@ class HostedRoomPeerClient(Protocol):
     """Authenticated client for a target gateway's narrow room-member API."""
 
     def bind_room_scope(self, **scope: Any) -> None: ...
-
-    def prepare(
-        self, *, room_id: str, profile: str, source: str, grant: str, create: bool,
-        expected_session_id: str | None = None,
-    ) -> Mapping[str, Any] | None: ...
-
+    def prepare(self, *, room_id: str, profile: str, source: str, grant: str, create: bool,
+                expected_session_id: str | None = None) -> Mapping[str, Any] | None: ...
     def dispatch(self, *, dispatch: Mapping[str, Any], grant: str) -> Mapping[str, Any]: ...
-
-    def history(
-        self, *, room_id: str, profile: str, session_id: str, grant: str
-    ) -> Sequence[Mapping[str, Any]]: ...
-
-    def status(
-        self, *, room_id: str, profile: str, session_id: str, grant: str
-    ) -> Mapping[str, Any]: ...
-
+    def history(self, *, room_id: str, profile: str, session_id: str, grant: str
+                ) -> Sequence[Mapping[str, Any]]: ...
+    def status(self, *, room_id: str, profile: str, session_id: str, grant: str
+               ) -> Mapping[str, Any]: ...
     def stop(self, *, dispatch: Mapping[str, Any], grant: str) -> Mapping[str, Any] | None: ...
-
-    def stop_receipt(
-        self, *, task_id: str, execution_generation: int, grant: str
-    ) -> Mapping[str, Any] | None: ...
+    def stop_receipt(self, *, task_id: str, execution_generation: int, grant: str
+                     ) -> Mapping[str, Any] | None: ...
 
 
 @dataclass(frozen=True)
@@ -69,10 +55,8 @@ class FailoverHostedRoomPeerClient:
             raise ValueError("RoomLink candidates must target one installation")
         if reprobe_interval_seconds <= 0:
             raise ValueError("reprobe_interval_seconds must be positive")
-        self.candidates = tuple(candidates)
-        self._active = 0
+        self.candidates, self._active, self.clock = tuple(candidates), 0, clock
         self.reprobe_interval_seconds = float(reprobe_interval_seconds)
-        self.clock = clock
         self._last_primary_probe = 0.0
 
     @property
@@ -80,11 +64,9 @@ class FailoverHostedRoomPeerClient:
         return self.candidates[self._active]
 
     def _call(self, method: str, **kwargs):
-        """Try the active link (re-probing the primary after a cooldown), then the rest.
-
-        Ambiguous or non-retryable failures propagate immediately: failing over
-        after an ambiguous dispatch could run the same task twice.
-        """
+        """Try the active link (re-probing the primary after a cooldown), then the rest. Ambiguous
+        or non-retryable failures propagate: failing over after an ambiguous dispatch could run
+        the same task twice."""
         now = self.clock()
         order = [self._active]
         if self._active != 0 and now - self._last_primary_probe >= self.reprobe_interval_seconds:
@@ -102,29 +84,20 @@ class FailoverHostedRoomPeerClient:
                 continue
             self._active = index
             return result
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("no RoomLink candidate was attempted")
+        raise last_error if last_error is not None else RuntimeError("no RoomLink candidate was attempted")
 
-    def prepare(self, **kwargs):
-        return self._call("prepare", **kwargs)
+    def _delegate(method: str):
+        def call(self, **kwargs):
+            return self._call(method, **kwargs)
+        call.__name__ = method
+        return call
 
-    def dispatch(self, **kwargs):
-        return self._call("dispatch", **kwargs)
-
-    def history(self, **kwargs):
-        return self._call("history", **kwargs)
-
-    def status(self, **kwargs):
-        return self._call("status", **kwargs)
-
-    def stop(self, **kwargs):
-        return self._call("stop", **kwargs)
+    prepare, dispatch, history, status, stop = map(_delegate, ("prepare", "dispatch", "history", "status", "stop"))
+    del _delegate
 
     def bind_room_scope(self, **kwargs):
         for candidate in self.candidates:
-            bind = getattr(candidate.client, "bind_room_scope", None)
-            if callable(bind):
+            if callable(bind := getattr(candidate.client, "bind_room_scope", None)):
                 bind(**kwargs)
 
 
@@ -149,23 +122,15 @@ def build_member_dispatch(
     trace_id: str) -> HostedMemberDispatch:
     """Build the fully fenced member dispatch shared by submit and recovery."""
     return HostedMemberDispatch.from_mapping({
-        "protocol_version": PROTOCOL_VERSION,
-        "room_id": room_id,
-        "home_install_id": route.home_install_id,
-        "authority_gateway_id": binding.gateway_id,
-        "authority_epoch": binding.authority_epoch,
-        "member_id": route.member_id,
-        "target_install_id": route.target_install_id,
-        "target_profile": target_profile,
-        "task_id": task_id,
-        "execution_generation": execution_generation,
-        "source_event_seq": source_event_seq,
-        "cancellation_scope_id": route.cancellation_scope_id,
-        "prompt": prompt,
-        "prompt_digest": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "protocol_version": PROTOCOL_VERSION, "room_id": room_id,
+        "home_install_id": route.home_install_id, "authority_gateway_id": binding.gateway_id,
+        "authority_epoch": binding.authority_epoch, "member_id": route.member_id,
+        "target_install_id": route.target_install_id, "target_profile": target_profile,
+        "task_id": task_id, "execution_generation": execution_generation,
+        "source_event_seq": source_event_seq, "cancellation_scope_id": route.cancellation_scope_id,
+        "prompt": prompt, "prompt_digest": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "capability_digest": route.capability_digest,
-        "execution_policy_digest": route.execution_policy_digest,
-        "trace_id": trace_id})
+        "execution_policy_digest": route.execution_policy_digest, "trace_id": trace_id})
 
 
 class PeerHostedRoomTransport(InternalSessionRPC):
@@ -185,8 +150,7 @@ class PeerHostedRoomTransport(InternalSessionRPC):
         self.execution_generation = execution_generation
         self._session_id: str | None = None
         self._dispatch: HostedMemberDispatch | None = None
-        bind_scope = getattr(self.client, "bind_room_scope", None)
-        if callable(bind_scope):
+        if callable(bind_scope := getattr(self.client, "bind_room_scope", None)):
             bind_scope(
                 room_id=binding.room_id, home_install_id=route.home_install_id,
                 authority_gateway_id=binding.gateway_id, authority_epoch=binding.authority_epoch,
@@ -205,26 +169,23 @@ class PeerHostedRoomTransport(InternalSessionRPC):
         """Room id + grant keyword arguments shared by every scoped client call."""
         return {"room_id": self.binding.room_id, "grant": self.route.grant, **extra}
 
-    def _prepare(self, *, profile: str, source: str, create: bool, **extra):
-        return self.client.prepare(
-            **self._scoped(profile=profile, source=source, create=create, **extra))
+    def _prepare(self, *, profile: str, source: str, create: bool, title: str | None = None, **extra):
+        """Validate coordinates, then the scoped ``prepare`` call."""
+        self._validate_coordinates(profile=profile, source=source, title=title)
+        return self.client.prepare(**self._scoped(profile=profile, source=source, create=create, **extra))
 
     def resolve_exact(self, *, profile: str, title: str, source: str) -> Mapping[str, Any] | None:
-        self._validate_coordinates(profile=profile, source=source, title=title)
-        return self._prepare(profile=profile, source=source, create=False)
+        return self._prepare(profile=profile, source=source, create=False, title=title)
 
     def create(self, *, profile: str, title: str, source: str) -> Mapping[str, Any]:
-        self._validate_coordinates(profile=profile, source=source, title=title)
-        session = self._prepare(profile=profile, source=source, create=True)
+        session = self._prepare(profile=profile, source=source, create=True, title=title)
         if session is None:
             raise RuntimeError("peer did not create the room session")
         self._session_id = str(session.get("session_id") or session.get("id") or "")
         return session
 
     def resume(self, *, profile: str, session_id: str, source: str) -> Mapping[str, Any]:
-        self._validate_coordinates(profile=profile, source=source)
-        session = self._prepare(
-            profile=profile, source=source, create=False, expected_session_id=session_id)
+        session = self._prepare(profile=profile, source=source, create=False, expected_session_id=session_id)
         if session is None:
             raise RuntimeError("peer room session is unavailable")
         self._session_id = session_id
@@ -262,15 +223,13 @@ class PeerHostedRoomTransport(InternalSessionRPC):
     ) -> Mapping[str, Any] | None:
         self._validate_coordinates(profile=profile, source=source)
         dispatch = self._dispatch
-        if dispatch is None:
-            if (
-                self.task_id != expected_task_id
-                or not self.execution_generation
-                or not hasattr(self.client, "stop_receipt")):
+        if dispatch is not None:
+            if dispatch.task_id != expected_task_id:
                 return None
-            return self.client.stop_receipt(
-                task_id=expected_task_id, execution_generation=self.execution_generation,
-                grant=self.route.grant)
-        if dispatch.task_id != expected_task_id:
+            return self.client.stop(dispatch=dispatch.as_mapping(), grant=self.route.grant)
+        if (self.task_id != expected_task_id or not self.execution_generation
+                or not hasattr(self.client, "stop_receipt")):
             return None
-        return self.client.stop(dispatch=dispatch.as_mapping(), grant=self.route.grant)
+        return self.client.stop_receipt(
+            task_id=expected_task_id, execution_generation=self.execution_generation,
+            grant=self.route.grant)

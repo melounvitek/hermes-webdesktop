@@ -1,8 +1,6 @@
-"""Skin + config-change watcher: signatures for skin/pet/cron/sessions/platforms/pairing/bot-relay state and the broadcast loop that pushes *.changed events.
-
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
-"""
+"""Skin + config-change watcher: on-disk signatures for skin/pet/cron/sessions/platforms/
+pairing/bot-relay state and the broadcast loop that pushes *.changed events. Bodies are
+rebound onto server.py's globals at install time (method_ctx.bind_module)."""
 
 from __future__ import annotations
 
@@ -14,12 +12,11 @@ _registry = HandlerRegistry()
 def resolve_skin() -> dict:
     try:
         from hermes_cli.skin_engine import init_skin_from_config, get_active_skin
-
         init_skin_from_config(_load_cfg())
         skin = get_active_skin()
+        # light/dark are paired palettes: the TUI prefers the block matching terminal polarity.
         return {
             "name": skin.name, "colors": skin.colors,
-            # Paired palettes: the TUI prefers the block matching terminal polarity.
             "light_colors": skin.light_colors, "dark_colors": skin.dark_colors,
             "branding": skin.branding, "banner_logo": skin.banner_logo,
             "banner_hero": skin.banner_hero, "tool_prefix": skin.tool_prefix,
@@ -47,10 +44,13 @@ def _watcher_mtime_ns(path: Path):
         return None
 
 
+def _home_mtime_ns(*parts: str):
+    return _watcher_mtime_ns(_watcher_home().joinpath(*parts))
+
+
 def _newest_mtime_ns(paths) -> int | None:
     """Max ``st_mtime_ns`` across ``paths`` (unstat-able ignored); None when none stat'ed."""
-    mtimes = (_watcher_mtime_ns(p) for p in paths)
-    return max((m for m in mtimes if m is not None), default=None)
+    return max((m for m in map(_watcher_mtime_ns, paths) if m is not None), default=None)
 
 
 def _skin_sig() -> tuple[str, float | None]:
@@ -58,10 +58,9 @@ def _skin_sig() -> tuple[str, float | None]:
     their name moves; a user skin's mtime lets an in-place color edit repaint too."""
     name = str((_load_cfg().get("display") or {}).get("skin") or "default")
     try:
-        mtime: float | None = (_watcher_home() / "skins" / f"{name}.yaml").stat().st_mtime
+        return name, (_watcher_home() / "skins" / f"{name}.yaml").stat().st_mtime
     except OSError:
-        mtime = None
-    return name, mtime
+        return name, None
 
 
 def _note_skin_broadcast() -> None:
@@ -75,14 +74,11 @@ def _broadcast_skin_if_changed() -> None:
     """Emit ``skin.changed`` when the active skin moved, via the SAME live path as
     ``/skin`` so every surface repaints. The check is a dict lookup + one stat."""
     global _last_skin_sig
-    try:
-        sig = _skin_sig()
-    except Exception:
-        return
-    if sig == _last_skin_sig:
-        return
-    _last_skin_sig = sig
     with contextlib.suppress(Exception):
+        sig = _skin_sig()
+        if sig == _last_skin_sig:
+            return
+        _last_skin_sig = sig
         _broadcast_global_event("skin.changed", resolve_skin())
 
 
@@ -99,55 +95,39 @@ def _pet_sig() -> tuple:
     if not pet_cfg or not is_truthy_value(pet_cfg.get("enabled"), default=False):
         return ("off",)
     try:
-        active = _active_pet()
-        if not active:
-            return ("off",)
-        pet, scale = active
-        return (pet.slug, _pet_sheet_revision(pet.spritesheet), scale)
+        if active := _active_pet():
+            pet, scale = active
+            return (pet.slug, _pet_sheet_revision(pet.spritesheet), scale)
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
-        return ("off",)
+        pass
+    return ("off",)
 
 
 def _pet_changed_payload() -> dict:
     """``pet.info.meta``-shaped payload so the renderer can decide whether to refetch sprites."""
     try:
-        active = _active_pet()
-        if not active:
-            return {"enabled": False}
-        pet, scale = active
-        return {
-            "enabled": True, "slug": pet.slug, "displayName": pet.display_name, "scale": scale,
-            "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)}
+        if active := _active_pet():
+            pet, scale = active
+            return {"enabled": True, "slug": pet.slug, "displayName": pet.display_name,
+                    "scale": scale, "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)}
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
-        return {"enabled": False}
-
-
-def _cron_sig():
-    """mtime of cron/jobs.json — moves on edits AND scheduler tick bookkeeping."""
-    return _watcher_mtime_ns(_watcher_home() / "cron" / "jobs.json")
+        pass
+    return {"enabled": False}
 
 
 def _sessions_sig():
-    """Newest mtime across state.db + WAL: the one thing messaging-gateway turns and
-    cron runs (which never touch this gateway's transports) all move. Served sibling
-    profile homes are probed too, else a routed profile's Bot Chat never refreshes."""
+    """Newest mtime across state.db + WAL: the one thing messaging-gateway turns and cron runs
+    all move. Served sibling profile homes are probed too, else a routed Bot Chat never refreshes."""
     return _newest_mtime_ns(
         root / name
         for root in (_watcher_home(), *_served_profile_homes)
-        for name in ("state.db", "state.db-wal")
-    )
-
-
-def _platforms_sig():
-    """mtime of gateway_state.json — where the messaging gateway persists platform
-    connect/disconnect/health, i.e. the Messaging page's status-changed signal."""
-    return _watcher_mtime_ns(_watcher_home() / "gateway_state.json")
+        for name in ("state.db", "state.db-wal"))
 
 
 def _pairing_sig():
     """Newest mtime across every profile's pairing ledgers (legacy ``pairing/`` and
-    ``platforms/pairing/``). Pending codes are written by the gateway process, so the
-    files are the only shared signal; a pairing request moves nothing in gateway_state.json."""
+    ``platforms/pairing/``): the gateway process writes pending codes, so the files are the only
+    shared signal (a pairing request moves nothing in gateway_state.json)."""
     home = _watcher_home()
     roots = [home / "pairing", home / "platforms" / "pairing"]
     with contextlib.suppress(OSError):
@@ -168,29 +148,27 @@ _bot_relay_outbox_seen = 0
 
 
 def _bot_relay_outbox_sig():
-    """Newest mtime across pending bot-relay outbox envelopes (monotone). Written by
-    the AGENT process, so the files are the only shared signal; the Desktop reacts
-    to ``bot_relay.outbox.pending`` with an immediate debounced drain."""
+    """Newest mtime across pending bot-relay outbox envelopes (monotone). Written by the AGENT
+    process, so the files are the only shared signal; the Desktop reacts with a debounced drain."""
     global _bot_relay_outbox_seen
     home = _watcher_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
-    newest = 0
     with contextlib.suppress(OSError):
         for entry in (root / "bot_relay" / "outbox").iterdir():
             if entry.name.endswith(".json"):
-                newest = max(newest, _watcher_mtime_ns(entry) or 0)
-    if newest > _bot_relay_outbox_seen:
-        _bot_relay_outbox_seen = newest
+                _bot_relay_outbox_seen = max(_bot_relay_outbox_seen, _watcher_mtime_ns(entry) or 0)
     return _bot_relay_outbox_seen or None
 
 
-# event → (check interval, signature fn, payload fn). Signatures are stat-cheap;
-# the interval keeps pricier probes (pet resolves the sheet off disk) off the 0.5s tick.
+# event → (check interval, signature fn, payload fn). Signatures are stat-cheap; the interval
+# keeps pricier probes (pet resolves the sheet off disk) off the 0.5s tick. cron/jobs.json
+# moves on edits AND scheduler ticks; gateway_state.json is where the messaging gateway
+# persists platform connect/disconnect/health (the Messaging page's status signal).
 _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "pet.changed": (2.0, _pet_sig, _pet_changed_payload),
-    "cron.changed": (1.0, _cron_sig, lambda: {}),
+    "cron.changed": (1.0, lambda: _home_mtime_ns("cron", "jobs.json"), lambda: {}),
     "sessions.changed": (0.5, _sessions_sig, lambda: {}),
-    "platforms.changed": (2.0, _platforms_sig, lambda: {}),
+    "platforms.changed": (2.0, lambda: _home_mtime_ns("gateway_state.json"), lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
     # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
     "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {})}
@@ -220,9 +198,9 @@ def _broadcast_watched_changes(now: float | None = None) -> None:
         if event not in _change_sigs:
             _change_sigs[event] = sig
             continue
+        floor = _CHANGE_BROADCAST_FLOOR_S.get(event, 0.0)
         if sig == _change_sigs[event]:
             continue
-        floor = _CHANGE_BROADCAST_FLOOR_S.get(event, 0.0)
         if floor and now - _change_broadcast_at.get(event, -floor) < floor:
             continue  # floored: old signature stays so it re-fires when the window opens
         _change_sigs[event] = sig
@@ -235,9 +213,8 @@ _skin_watcher_started = False
 
 
 def _ensure_skin_watcher() -> None:
-    """Start the process's one change watcher (named for its original skin-only
-    duty): cheap on-disk signatures → broadcast events, so skin/pet/cron/cross-process
-    changes go live everywhere within seconds without client polling. Idempotent."""
+    """Start the process's one change watcher (named for its original skin-only duty): cheap
+    on-disk signatures → broadcast events, so changes go live without client polling. Idempotent."""
     global _skin_watcher_started
     if _skin_watcher_started:
         return
@@ -249,7 +226,6 @@ def _ensure_skin_watcher() -> None:
             time.sleep(0.5)
             _broadcast_skin_if_changed()
             _broadcast_watched_changes()
-
     threading.Thread(target=_loop, name="hermes-change-watcher", daemon=True).start()
 
 

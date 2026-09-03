@@ -23,7 +23,6 @@ from hermes_constants import get_hermes_home
 from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger(__name__)
-_Thread = threading.Thread
 
 MUTATOR_ROUTE_TABLE: dict[str, str] = {
     "prompt.submit": "turn-path", "session.interrupt": "turn-path", "reload.mcp": "run-concurrent",
@@ -36,9 +35,8 @@ MUTATOR_ROUTE_TABLE: dict[str, str] = {
 _REGISTRY_NAME = "dashboard-compute-host.json"
 _RESPAWN_WINDOW_SECS = 300.0
 _SHUTDOWN_TIMEOUT_SECS = 10.0
-# Late control-ack handlers: a compress that outlives its RPC waiter can run for the
-# full compression ceiling plus a stall-fallback retry, so keep registrations well
-# past that — but bounded.
+# Late control-ack handlers: a compress that outlives its RPC waiter can run for the full
+# compression ceiling plus a stall-fallback retry, so keep registrations past that — bounded.
 _LATE_CONTROL_TTL_SECS = 1800.0
 _LATE_CONTROL_MAX = 64
 # Host frames whose ``request_id`` resolves a pending/late control waiter.
@@ -64,17 +62,15 @@ def _repo_root() -> Path:
 
 def _check_output(argv: list[str], **kwargs: Any) -> str:
     """Stripped stdout of a short subprocess, or ``""`` on any failure."""
-    try:
+    with contextlib.suppress(Exception):
         return subprocess.check_output(
             argv, text=True, encoding="utf-8", errors="replace", stderr=subprocess.DEVNULL,
             timeout=2, **kwargs).strip()
-    except Exception:
-        return ""
+    return ""
 
 
 def _build_sha() -> str:
-    """Current checkout's HEAD sha, or ``"unknown"``. Shared with ``compute_host`` so
-    the hello handshake and the supervisor's expectation agree byte-for-byte."""
+    """HEAD sha or ``"unknown"``; shared with ``compute_host`` so the hello handshake agrees."""
     return _check_output(["git", "rev-parse", "HEAD"], cwd=str(_repo_root())) or "unknown"
 
 
@@ -91,21 +87,21 @@ def _pid_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
+        return True
     except Exception as exc:
         return isinstance(exc, PermissionError)
-    return True
 
 
 def _signal_pid(pid: int, sig: int, label: str) -> bool:
     """Send ``sig``; False when the pid is gone or the signal failed (logged)."""
     try:
         os.kill(pid, sig)
+        return True
     except ProcessLookupError:
         return False
     except Exception:
         logger.debug("failed to %s compute host pid=%s", label, pid, exc_info=True)
         return False
-    return True
 
 
 def _pid_command(pid: int) -> str:
@@ -140,10 +136,9 @@ class HostSupervisor:
         self.rpc_sink = rpc_sink or (lambda _obj: None)
         self.respawn_max = max(0, int(respawn_max))
         self.heartbeat_secs = max(1, int(heartbeat_secs))
-        self.expected_build_sha = (
-            expected_build_sha if expected_build_sha is not None else _build_sha())
+        self.expected_build_sha = _build_sha() if expected_build_sha is None else expected_build_sha
         self.expected_hermes_home = (
-            expected_hermes_home if expected_hermes_home is not None else str(get_hermes_home()))
+            str(get_hermes_home()) if expected_hermes_home is None else expected_hermes_home)
         self._lock = threading.RLock()
         self._proc: subprocess.Popen[str] | None = None
         self._hello_event = threading.Event()
@@ -153,9 +148,8 @@ class HostSupervisor:
         self._restart_times: list[float] = []
         self._pending_turns: dict[str, tuple[str, Callable[[dict], None] | None]] = {}
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
-        # request_id -> (registered_at, handler) for control waiters that timed out
-        # while their host work still runs; without it the eventual control.ack
-        # matched no queue and was silently dropped.
+        # request_id -> (registered_at, handler) for control waiters that timed out while their
+        # host work still runs, so the eventual control.ack is not silently dropped.
         self._late_control_handlers: dict[str, tuple[float, Callable[[dict], None]]] = {}
         self._stderr_tail: list[str] = []
         self._last_progress_counter = 0
@@ -201,25 +195,24 @@ class HostSupervisor:
         except FileNotFoundError:
             return "none"
         except Exception:
-            self._remove_registry()
-            return "invalid-registry"
+            data = None
         try:
-            pid = int(data.get("host_pid") or 0)
+            pid = int((data or {}).get("host_pid") or 0)
         except Exception:
             pid = 0
-        if pid <= 0 or not _pid_alive(pid):
-            self._remove_registry()
-            return "not-running"
-        if not self._pid_matches_compute_host(pid):
-            # PID was reused by another process. Never signal it.
-            self._remove_registry()
-            return "pid-reuse-ignored"
-        self._terminate_pid(pid, timeout=_SHUTDOWN_TIMEOUT_SECS)
+        if data is None:
+            outcome = "invalid-registry"
+        elif pid <= 0 or not _pid_alive(pid):
+            outcome = "not-running"
+        elif not self._pid_matches_compute_host(pid):
+            outcome = "pid-reuse-ignored"  # PID reused by another process: never signal it
+        else:
+            self._terminate_pid(pid, timeout=_SHUTDOWN_TIMEOUT_SECS)
+            outcome = "terminated"
         self._remove_registry()
-        return "terminated"
+        return outcome
 
-    def submit_turn(
-        self, frame: dict[str, Any], *, on_complete: Callable[[dict], None] | None = None) -> str:
+    def submit_turn(self, frame: dict[str, Any], *, on_complete: Callable[[dict], None] | None = None) -> str:
         self.start()
         request_id = str(frame.get("request_id") or uuid.uuid4().hex)
         sid = str(frame.get("sid") or "")
@@ -232,16 +225,15 @@ class HostSupervisor:
             with self._lock:
                 self._pending_turns.pop(request_id, None)
             if on_complete is not None:
-                on_complete({
-                    "type": "turn.error", "sid": sid, "request_id": request_id,
-                    "reason": "send_failed", "message": str(exc)})
+                on_complete({"type": "turn.error", "sid": sid, "request_id": request_id,
+                             "reason": "send_failed", "message": str(exc)})
             raise
         return request_id
 
     def interrupt(self, sid: str, *, request_id: str | None = None) -> None:
         self.start()
-        self._send_frame({
-            "type": "interrupt", "sid": sid, "request_id": request_id or uuid.uuid4().hex})
+        self._send_frame(
+            {"type": "interrupt", "sid": sid, "request_id": request_id or uuid.uuid4().hex})
 
     def _await_reply(self, frame: dict[str, Any], request_id: str, timeout: float) -> dict:
         """Send ``frame`` and block for the host reply carrying ``request_id``."""
@@ -263,28 +255,24 @@ class HostSupervisor:
         return self._await_reply(frame, request_id, timeout)
 
     def reload_mcp(self, sid: str, *, request_id: str | None = None) -> dict:
-        return self.control(
-            sid, route_name="reload.mcp", wait=True,
-            payload={
-                "type": "reload_mcp", "sid": sid, "request_id": request_id or uuid.uuid4().hex})
+        payload = {"type": "reload_mcp", "sid": sid, "request_id": request_id or uuid.uuid4().hex}
+        return self.control(sid, route_name="reload.mcp", wait=True, payload=payload)
 
     def control(
         self, sid: str, *, route_name: str, payload: dict[str, Any] | None = None,
         wait: bool = True, timeout: float = 30.0, on_late_ack: Callable[[dict], None] | None = None,
     ) -> dict:
-        """Send a control frame; with ``wait`` block up to ``timeout`` for its ack.
-
-        ``on_late_ack`` (only with ``wait``) keeps the request adoptable after the waiter
-        gives up: the host's eventual ``control.ack``/``control.error``/``error`` fires it
-        once instead of being dropped (bounded by ``_LATE_CONTROL_TTL_SECS``/``_MAX``).
-        """
+        """Send a control frame; with ``wait`` block up to ``timeout`` for its ack. ``on_late_ack``
+        (only with ``wait``) keeps the request adoptable after the waiter gives up: the host's
+        eventual ``control.ack``/``control.error``/``error`` fires it once (bounded by
+        ``_LATE_CONTROL_TTL_SECS``/``_MAX``) instead of being dropped."""
         if route_name not in MUTATOR_ROUTE_TABLE:
             raise ValueError(f"unclassified host mutator route: {route_name}")
         self.start()
-        request_id = str((payload or {}).get("request_id") or uuid.uuid4().hex)
-        frame = {
-            "type": "control", **(payload or {}), "sid": sid, "route_name": route_name,
-            "request_id": request_id}
+        payload = payload or {}
+        request_id = str(payload.get("request_id") or uuid.uuid4().hex)
+        frame = {"type": "control", **payload, "sid": sid, "route_name": route_name,
+                 "request_id": request_id}
         if not wait:
             self._send_frame(frame)
             return {"status": "sent", "request_id": request_id}
@@ -295,13 +283,11 @@ class HostSupervisor:
                 self._register_late_control_handler(request_id, on_late_ack)
             raise
 
-    def _register_late_control_handler(
-        self, request_id: str, handler: Callable[[dict], None]) -> None:
+    def _register_late_control_handler(self, request_id: str, handler: Callable[[dict], None]) -> None:
         now = time.monotonic()
         with self._lock:
             handlers = self._late_control_handlers
-            expired = [r for r, (at, _cb) in handlers.items() if now - at > _LATE_CONTROL_TTL_SECS]
-            for rid in expired:
+            for rid in [r for r, (at, _cb) in handlers.items() if now - at > _LATE_CONTROL_TTL_SECS]:
                 handlers.pop(rid, None)
             while len(handlers) >= _LATE_CONTROL_MAX:
                 handlers.pop(min(handlers, key=lambda rid: handlers[rid][0]), None)
@@ -314,11 +300,8 @@ class HostSupervisor:
         if q is not None:
             with contextlib.suppress(queue.Full):
                 q.put_nowait(frame)
-            return
-        if late is not None:
-            _call_logged(
-                late[1], frame,
-                f"compute host late control ack handler failed (request_id={request_id})")
+        elif late is not None:
+            _call_logged(late[1], frame, f"compute host late control ack handler failed (request_id={request_id})")
 
     def _spawn_locked(self, *, reason: str) -> None:
         if self._stopped_respawning:
@@ -331,18 +314,16 @@ class HostSupervisor:
         env.setdefault("PYTHONPATH", root)
         if root not in env["PYTHONPATH"].split(os.pathsep):
             env["PYTHONPATH"] = root + os.pathsep + env["PYTHONPATH"]
+        # Lossy UTF-8 decode: a locale-mismatched byte must not raise inside the drain threads.
         proc = subprocess.Popen(
             self.argv, cwd=str(self.cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
-            # Lossy UTF-8 decode: a locale-mismatched byte must not raise inside the
-            # drain threads and kill the supervisor.
-            encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
+            start_new_session=True)
         self._proc = proc
-        for target, name in (
-            (self._drain_stdout, "compute-host-stdout"),
-            (self._drain_stderr, "compute-host-stderr"), (self._wait_for_exit, "compute-host-wait"),
-        ):
-            _Thread(target=target, args=(proc,), name=name, daemon=True).start()
+        for target, name in ((self._drain_stdout, "compute-host-stdout"),
+                             (self._drain_stderr, "compute-host-stderr"),
+                             (self._wait_for_exit, "compute-host-wait")):
+            threading.Thread(target=target, args=(proc,), name=name, daemon=True).start()
         if not self._hello_event.wait(timeout=10.0):
             self._terminate_process(proc)
             raise RuntimeError(f"compute host did not send hello; stderr={self._stderr_tail[-5:]}")
@@ -366,10 +347,9 @@ class HostSupervisor:
     def _persist_registry(self) -> None:
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.registry_path.with_suffix(self.registry_path.suffix + ".tmp")
-        payload = {
-            "host_pid": self.pid, "boot_id": self._hello.get("boot_id") or "",
-            "build_sha": self._hello.get("build_sha") or "", "started_at": time.time(),
-            "argv": self.argv}
+        payload = {"host_pid": self.pid, "boot_id": self._hello.get("boot_id") or "",
+                   "build_sha": self._hello.get("build_sha") or "", "started_at": time.time(),
+                   "argv": self.argv}
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         tmp.replace(self.registry_path)
 
@@ -401,45 +381,29 @@ class HostSupervisor:
     def _drain_stderr(self, proc: subprocess.Popen[str]) -> None:
         assert proc.stderr is not None
         for raw in proc.stderr:
-            text = raw.rstrip("\n")
-            if text:
+            if text := raw.rstrip("\n"):
                 self._stderr_tail = (self._stderr_tail + [text])[-80:]
                 logger.warning("compute host stderr: %s", text)
 
     def _handle_host_frame(self, frame: dict[str, Any]) -> None:
         ftype = str(frame.get("type") or "")
-        if ftype in _CONTROL_REPLY_TYPES or (ftype == "error" and frame.get("request_id")):
-            self._deliver_control_frame(str(frame.get("request_id") or ""), frame)
-            return
-        handler = self._HOST_FRAME_HANDLERS.get(ftype)
-        if handler is not None:
-            getattr(self, handler)(frame)
-
-    # host frame ``type`` -> handler method name (see also _CONTROL_REPLY_TYPES).
-    _HOST_FRAME_HANDLERS: dict[str, str] = {
-        "hello": "_on_hello", "hb": "_on_heartbeat", "rpc": "_on_rpc", "turn.end": "_complete_turn",
-        "turn.error": "_complete_turn"}
-
-    def _on_hello(self, frame: dict[str, Any]) -> None:
-        self._hello = dict(frame)
-        self._hello_event.set()
-
-    def _on_heartbeat(self, frame: dict[str, Any]) -> None:
-        self._last_progress_counter = int(
-            frame.get("progress_counter") or self._last_progress_counter)
-        logger.debug("compute host heartbeat: %s", frame)
-
-    def _on_rpc(self, frame: dict[str, Any]) -> None:
-        message = frame.get("message")
-        if isinstance(message, dict):
-            self.rpc_sink(message)
-
-    def _complete_turn(self, frame: dict[str, Any]) -> None:
         request_id = str(frame.get("request_id") or "")
-        with self._lock:
-            pending = self._pending_turns.pop(request_id, None)
-        if pending is not None and pending[1] is not None:
-            _call_logged(pending[1], frame, "compute host turn completion callback failed")
+        if ftype in _CONTROL_REPLY_TYPES or (ftype == "error" and request_id):
+            self._deliver_control_frame(request_id, frame)
+        elif ftype == "hello":
+            self._hello = dict(frame)
+            self._hello_event.set()
+        elif ftype == "hb":
+            self._last_progress_counter = int(frame.get("progress_counter") or self._last_progress_counter)
+            logger.debug("compute host heartbeat: %s", frame)
+        elif ftype == "rpc":
+            if isinstance(frame.get("message"), dict):
+                self.rpc_sink(frame["message"])
+        elif ftype in ("turn.end", "turn.error"):
+            with self._lock:
+                pending = self._pending_turns.pop(request_id, None)
+            if pending is not None and pending[1] is not None:
+                _call_logged(pending[1], frame, "compute host turn completion callback failed")
 
     def _wait_for_exit(self, proc: subprocess.Popen[str]) -> None:
         code = proc.wait()
@@ -459,14 +423,13 @@ class HostSupervisor:
             self._pending_turns = {}
         failure = {"reason": reason, "message": message}
         for request_id, (sid, cb) in pending.items():
-            self.rpc_sink({
-                "jsonrpc": "2.0", "method": "event",
-                "params": {"type": "error", "session_id": sid, "payload": dict(failure)}})
+            self.rpc_sink({"jsonrpc": "2.0", "method": "event",
+                           "params": {"type": "error", "session_id": sid, "payload": dict(failure)}})
             if cb is not None:
                 frame = {"type": "turn.error", "sid": sid, "request_id": request_id, **failure}
                 _call_logged(cb, frame, "compute host error callback failed")
-        # A crashed host never emits the late acks timed-out control waiters still
-        # expect; fail them too so the client's "still running" notice can't hang.
+        # A crashed host never emits the late acks timed-out control waiters still expect; fail
+        # them too so the client's "still running" notice can't hang.
         with self._lock:
             late = self._late_control_handlers
             self._late_control_handlers = {}
@@ -496,18 +459,19 @@ class HostSupervisor:
                     self._spawn_locked(reason="crash")
                 except Exception:
                     logger.exception("compute host respawn failed")
-        _Thread(target=_respawn, name="compute-host-respawn", daemon=True).start()
+        threading.Thread(target=_respawn, name="compute-host-respawn", daemon=True).start()
+
     _pid_matches_compute_host = staticmethod(is_compute_host_identity)
 
     def _terminate_pid(self, pid: int, *, timeout: float = _SHUTDOWN_TIMEOUT_SECS) -> None:
         if not _signal_pid(pid, signal.SIGTERM, "SIGTERM"):
             return
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not _pid_alive(pid):
+        while _pid_alive(pid):
+            if time.monotonic() >= deadline:
+                _signal_pid(pid, signal.SIGKILL, "SIGKILL")
                 return
             time.sleep(0.05)
-        _signal_pid(pid, signal.SIGKILL, "SIGKILL")
 
     def _terminate_process(self, proc: subprocess.Popen[str]) -> None:
         if proc.poll() is not None:
@@ -516,10 +480,9 @@ class HostSupervisor:
             proc.terminate()
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECS)
             return
-        with contextlib.suppress(Exception):
-            proc.kill()
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=2)
+        for step in (proc.kill, lambda: proc.wait(timeout=2)):
+            with contextlib.suppress(Exception):
+                step()
 
 
 __all__ = ["MUTATOR_ROUTE_TABLE", "HostSupervisor", "append_log_record", "is_compute_host_identity"]
