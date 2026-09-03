@@ -1,18 +1,11 @@
 """Microsoft Entra ID adapter for Microsoft Foundry.
 
-Keyless auth via the `azure-identity` ``DefaultAzureCredential`` chain (env
-service principal → workload identity → managed identity → VS Code → Azure
-CLI → azd → PowerShell → broker). Mirrors ``agent/bedrock_adapter.py``:
-
-* Lazy import: `azure-identity` loads only when ``model.auth_mode = entra_id``.
-* ``build_token_provider`` returns the zero-arg callable Microsoft's sample
-  plugs into ``OpenAI(api_key=token_provider, ...)``; the SDK calls it before
-  every request, so refresh is transparent.
-* Consumer helpers are split by purpose (display / cache / http-bearer) so
-  logging paths never mint tokens and tokens never leak into cache keys.
-* No persisted JWT: azure-identity caches in-process / OS keychain; Hermes
-  does not duplicate that in ``auth.json``.
-
+Keyless auth via the `azure-identity` ``DefaultAzureCredential`` chain (env service principal →
+workload identity → managed identity → VS Code → Azure CLI → azd → PowerShell → broker). Mirrors
+``agent/bedrock_adapter.py``: `azure-identity` is imported lazily (only for ``auth_mode = entra_id``);
+``build_token_provider`` returns the zero-arg callable the OpenAI SDK calls before every request
+(transparent refresh); consumer helpers are split by purpose so logging paths never mint tokens and
+tokens never leak into cache keys; no JWT is persisted (azure-identity caches in-process / OS keychain).
 Reference: https://learn.microsoft.com/azure/ai-foundry/foundry-models/how-to/configure-entra-id
 """
 
@@ -27,11 +20,9 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Microsoft-documented Foundry inference scope for ALL endpoint shapes
-# (*.openai.azure.com, *.services.ai.azure.com, *.ai.azure.com). The older
-# ``https://cognitiveservices.azure.com/.default`` is an ARM control-plane
-# scope rejected for inference by newer resources; override via
-# ``model.entra.scope`` if required.
+# Microsoft-documented Foundry inference scope for ALL endpoint shapes. The older
+# ``https://cognitiveservices.azure.com/.default`` is an ARM control-plane scope rejected for
+# inference by newer resources; override via ``model.entra.scope`` if required.
 SCOPE_AI_AZURE_DEFAULT = "https://ai.azure.com/.default"
 
 _AZURE_IDENTITY_FEATURE = "provider.azure_identity"
@@ -61,19 +52,16 @@ def _require_azure_identity():
             from tools.lazy_deps import ensure, FeatureUnavailable
         except ImportError as exc:
             raise ImportError(_INSTALL_MSG + "Install it with: pip install azure-identity") from exc
-
         try:
             ensure(_AZURE_IDENTITY_FEATURE, prompt=False)
         except FeatureUnavailable as exc:
             raise ImportError(_INSTALL_MSG + str(exc)) from exc
-
         import azure.identity as _ai  # noqa: WPS440 — retry after lazy install
         return _ai
 
 
 def reset_credential_cache() -> None:
-    """Clear the cached ``DefaultAzureCredential`` (tests, profile switches). Tolerates
-    tests that monkeypatch ``build_credential`` with a plain function lacking ``cache_clear``."""
+    """Clear the cached ``DefaultAzureCredential`` (tests, profile switches); tolerates a monkeypatched plain function."""
     cache_clear = getattr(build_credential, "cache_clear", None)
     if callable(cache_clear):
         cache_clear()
@@ -81,22 +69,18 @@ def reset_credential_cache() -> None:
 
 @dataclass(frozen=True)
 class EntraIdentityConfig:
-    """Hermes-managed Entra knobs. Everything else (tenant, SP secret,
-    federated token file, sovereign authority, ``AZURE_CLIENT_ID``...) flows
-    through azure-identity's standard ``AZURE_*`` env vars.
+    """Hermes-managed Entra knobs; everything else (tenant, SP secret, federated token file, authority,
+    ``AZURE_CLIENT_ID``...) flows through azure-identity's standard ``AZURE_*`` env vars.
 
-    ``exclude_interactive_browser`` is an internal knob keeping probes
-    non-interactive; the setup wizard never writes it. Frozen so it is
-    hashable for ``lru_cache`` and serializable across multiprocessing
-    (workers rebuild the credential in their own process).
+    ``exclude_interactive_browser`` keeps probes non-interactive; the setup wizard never writes it.
+    Frozen so it is hashable for ``lru_cache`` and picklable across multiprocessing workers.
     """
 
     scope: str = SCOPE_AI_AZURE_DEFAULT
     exclude_interactive_browser: bool = True
 
     def __post_init__(self) -> None:
-        scope = str(self.scope or "").strip() or SCOPE_AI_AZURE_DEFAULT
-        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "scope", str(self.scope or "").strip() or SCOPE_AI_AZURE_DEFAULT)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"scope": self.scope, "exclude_interactive_browser": self.exclude_interactive_browser}
@@ -112,19 +96,16 @@ class EntraIdentityConfig:
 
 @functools.lru_cache(maxsize=1)
 def build_credential(config: EntraIdentityConfig) -> Any:
-    """Cached ``DefaultAzureCredential``. ``maxsize=1`` is intentional: a process uses one
-    ``model.entra.*`` block at a time (a second config just evicts the first). Only Hermes
-    knobs are passed as kwargs; the rest comes from ``AZURE_*`` env vars."""
+    """Cached ``DefaultAzureCredential``. ``maxsize=1`` is intentional: a process uses one ``model.entra.*``
+    block at a time. Only Hermes knobs are passed as kwargs; the rest comes from ``AZURE_*`` env vars."""
     ai = _require_azure_identity()
     kwargs: Dict[str, Any] = {}
-    # SDK default already excludes the browser; only pass when opting in.
-    if not config.exclude_interactive_browser:
+    if not config.exclude_interactive_browser:  # SDK default already excludes the browser
         kwargs["exclude_interactive_browser_credential"] = False
     return ai.DefaultAzureCredential(**kwargs)
 
 
-def _resolve_config(config: Optional[EntraIdentityConfig], scope: Optional[str],
-                    **overrides: Any) -> EntraIdentityConfig:
+def _resolve_config(config: Optional[EntraIdentityConfig], scope: Optional[str], **overrides: Any) -> EntraIdentityConfig:
     if config is not None:
         return config
     return EntraIdentityConfig(scope=(scope or "").strip() or SCOPE_AI_AZURE_DEFAULT, **overrides)
@@ -149,13 +130,12 @@ def build_token_provider(scope: Optional[str] = None, *, config: Optional[EntraI
                          ) -> Callable[[], str]:
     """Zero-arg callable minting a fresh Entra bearer JWT — pass as ``OpenAI(api_key=...)``.
 
-    Scope precedence: ``config.scope`` > ``scope`` kwarg > default. ``base_url`` is unused
-    (back-compat). Not picklable: ship the ``EntraIdentityConfig`` and rebuild in the worker.
+    Scope precedence: ``config.scope`` > ``scope`` kwarg > default. ``base_url`` is unused (back-compat).
+    Not picklable: ship the ``EntraIdentityConfig`` and rebuild in the worker.
     """
     ai = _require_azure_identity()
     config = _resolve_config(config, scope, exclude_interactive_browser=exclude_interactive_browser)
-    credential = build_credential(config)
-    return ai.get_bearer_token_provider(credential, config.scope)
+    return ai.get_bearer_token_provider(build_credential(config), config.scope)
 
 
 def _probe_token(config: EntraIdentityConfig, timeout_seconds: float) -> Optional[Dict[str, Any]]:
@@ -179,16 +159,15 @@ def has_azure_identity_credentials(scope: Optional[str] = None, *, config: Optio
                                    **overrides: Any) -> bool:
     """Timeout-bounded probe: can the chain mint a token now? Never raises.
 
-    ``allow_install=False`` makes it a strict "is installed?" check for hot paths (CLI startup)
-    where pip must never run. NOT used by ``is_provider_configured()`` (structural, no mint).
+    ``allow_install=False`` makes it a strict "is installed?" check for hot paths (CLI startup) where pip
+    must never run. NOT used by ``is_provider_configured()`` (structural, no mint).
     """
     failure = _install_failure(allow_install)
     if failure is not None:
         if "exc" in failure:
             logger.debug("azure-identity lazy install unavailable: %s", failure["exc"])
         return False
-    config = _resolve_config(config, scope, **overrides)
-    result = _probe_token(config, timeout_seconds)
+    result = _probe_token(_resolve_config(config, scope, **overrides), timeout_seconds)
     if result is None:
         logger.debug("Entra token service probe timed out after %ss", timeout_seconds)
         return False
@@ -203,8 +182,8 @@ def _env(name: str) -> str:
 
 
 def _scoped_env(name: str) -> str:
-    """Credential-bearing env read via the profile secret scope so a multiplexed profile never
-    reports another profile's env-bridged credentials; unscoped CLI probes fall back to plain env."""
+    """Credential-bearing env read via the profile secret scope so a multiplexed profile never reports
+    another profile's env-bridged credentials; unscoped CLI probes fall back to plain env."""
     try:
         from agent.secret_scope import UnscopedSecretError, get_secret
 
@@ -231,22 +210,19 @@ def describe_active_credential(config: Optional[EntraIdentityConfig] = None, *, 
                                **overrides: Any) -> Dict[str, Any]:
     """Doctor / preflight diagnostics. Never raises; ``{"ok": False, "error": ...}`` on failure.
 
-    azure-identity hides the winning inner credential, so this reports a coarse picture (env
-    sources, token expiry) rather than a class name; ``AZURE_LOG_LEVEL=DEBUG`` shows the chain.
+    azure-identity hides the winning inner credential, so this reports a coarse picture (env sources,
+    token expiry) rather than a class name; ``AZURE_LOG_LEVEL=DEBUG`` shows the chain.
     """
     info: Dict[str, Any] = {"ok": False}
     failure = _install_failure(allow_install)
     if failure is not None:
         info["error"], info["hint"] = failure["error"], failure["hint"]
         return info
-
     config = _resolve_config(config, scope, **overrides)
     info["scope"] = config.scope
     if _env("AZURE_TENANT_ID"):
         info["tenant_id_env"] = _env("AZURE_TENANT_ID")
-
     info["env_sources"] = [label for label, present in _ENV_SOURCE_CHECKS if present()]
-
     result = _probe_token(config, timeout_seconds)
     if result is None:
         info["error"] = f"Token probe timed out after {timeout_seconds:.0f}s"
@@ -277,9 +253,9 @@ def is_token_provider(value: Any) -> bool:
 def materialize_bearer_for_http(value: Any) -> str:
     """Mint a fresh Bearer JWT for a manual HTTP request (calls the provider once).
 
-    Only for sites building ``Authorization`` outside the OpenAI SDK; the Anthropic SDK can't take
-    a callable, so :func:`build_bearer_http_client` calls this from an httpx hook. ``ValueError``
-    on an unusable value or empty token.
+    Only for sites building ``Authorization`` outside the OpenAI SDK; the Anthropic SDK can't take a
+    callable, so :func:`build_bearer_http_client` calls this from an httpx hook. ``ValueError`` on an
+    unusable value or empty token.
     """
     if is_token_provider(value):
         token = value()
@@ -299,21 +275,13 @@ def _strip_auth_headers(request: Any) -> None:
 def build_bearer_http_client(token_provider: Callable[[], str], **httpx_kwargs: Any) -> Any:
     """``httpx.Client`` minting a fresh Entra bearer JWT per outbound request.
 
-    The Anthropic SDK computes ``Authorization`` once at construction, so per-request refresh needs
-    a ``request`` hook: mint (cheap — azure-identity caches), strip pre-set auth headers, set
+    The Anthropic SDK computes ``Authorization`` once at construction, so per-request refresh needs a
+    ``request`` hook: mint (cheap — azure-identity caches), strip pre-set auth headers, set
     ``Authorization: Bearer``. ``httpx_kwargs`` are forwarded verbatim (``timeout``, ``transport``...).
     """
     if not is_token_provider(token_provider):
         raise ValueError("build_bearer_http_client requires a zero-arg callable token provider")
-
-    try:
-        import httpx
-    except ImportError as exc:  # pragma: no cover — httpx ships with openai/anthropic
-        raise ImportError(
-            "httpx is required for Entra ID bearer auth on Microsoft Foundry "
-            "Anthropic-style endpoints. It is normally a transitive "
-            "dependency of the openai/anthropic SDKs."
-        ) from exc
+    import httpx
 
     def _inject_bearer(request: "httpx.Request") -> None:
         try:

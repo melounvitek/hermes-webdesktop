@@ -1,12 +1,11 @@
 """OpenAI-shape bridge shared by Hermes' ACP clients.
 
-ACP has no OpenAI-style ``tools``/``tool_calls`` channel, so Hermes' tool
-schemas travel INTO the prompt as text (:func:`render_tool_bridge_sections`) and
-calls are parsed back OUT of the response text (:func:`extract_tool_calls_from_text`).
-Clients differ only in WHICH tools they forward (``allowlist``): a CLI with no
-tools of its own forwards everything; an autonomous agent with its own
-read/edit/execute tools forwards only Hermes' agent-level tools, since
-re-offering overlapping ones makes Hermes redo finished work.
+ACP has no OpenAI-style ``tools``/``tool_calls`` channel, so Hermes' tool schemas travel INTO the
+prompt as text (:func:`render_tool_bridge_sections`) and calls are parsed back OUT of the response
+text (:func:`extract_tool_calls_from_text`). Clients differ only in WHICH tools they forward
+(``allowlist``): a CLI with no tools of its own forwards everything; an autonomous agent with its own
+read/edit/execute tools forwards only Hermes' agent-level tools, since re-offering overlapping ones
+makes Hermes redo finished work.
 """
 
 from __future__ import annotations
@@ -16,10 +15,7 @@ import re
 from types import SimpleNamespace
 from typing import Any, Iterable
 
-from openai.types.chat.chat_completion_message_tool_call import (
-    ChatCompletionMessageToolCall,
-    Function,
-)
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 
 TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 TOOL_CALL_JSON_RE = re.compile(
@@ -34,14 +30,8 @@ TOOL_CALL_CONTRACT = (
 )
 
 __all__ = [
-    "TOOL_CALL_BLOCK_RE",
-    "TOOL_CALL_JSON_RE",
-    "TOOL_CALL_CONTRACT",
-    "StreamChunks",
-    "build_openai_tool_call",
-    "tool_specs_from_openai_tools",
-    "render_tool_bridge_sections",
-    "extract_tool_calls_from_text",
+    "TOOL_CALL_BLOCK_RE", "TOOL_CALL_JSON_RE", "TOOL_CALL_CONTRACT", "StreamChunks", "build_openai_tool_call",
+    "tool_specs_from_openai_tools", "render_tool_bridge_sections", "extract_tool_calls_from_text",
     "completion_to_stream_chunks",
 ]
 
@@ -81,8 +71,7 @@ def completion_to_stream_chunks(completion: SimpleNamespace) -> StreamChunks:
     )
     data_chunk = SimpleNamespace(
         choices=[SimpleNamespace(index=0, delta=delta, finish_reason=choice.finish_reason)],
-        model=completion.model,
-        usage=None,
+        model=completion.model, usage=None,
     )
     usage_chunk = SimpleNamespace(choices=[], model=completion.model, usage=completion.usage)
     chunks = StreamChunks([data_chunk, usage_chunk])
@@ -95,41 +84,35 @@ def completion_to_stream_chunks(completion: SimpleNamespace) -> StreamChunks:
 def build_openai_tool_call(*, call_id: str, name: str, arguments: str) -> ChatCompletionMessageToolCall:
     """Build an OpenAI-compatible tool-call object for downstream handling."""
     return ChatCompletionMessageToolCall(
-        id=call_id,
-        call_id=call_id,
-        response_item_id=None,
-        type="function",
+        id=call_id, call_id=call_id, response_item_id=None, type="function",
         function=Function(name=name, arguments=arguments),
     )
 
 
+def _named_function(container: Any) -> tuple[dict[str, Any], str] | None:
+    """``(fn, stripped name)`` from ``container["function"]`` when it is a dict with a non-blank name, else None."""
+    fn = container.get("function") if isinstance(container, dict) else None
+    name = fn.get("name") if isinstance(fn, dict) else None
+    return (fn, name.strip()) if isinstance(name, str) and name.strip() else None
+
+
 def tool_specs_from_openai_tools(
-    tools: list[dict[str, Any]] | None,
-    *,
-    allowlist: Iterable[str] | None = None,
+    tools: list[dict[str, Any]] | None, *, allowlist: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Flatten OpenAI ``tools`` into ``{name, description, parameters}`` specs; malformed entries are skipped."""
     allowed = {str(n).strip() for n in allowlist} if allowlist is not None else None
     specs: list[dict[str, Any]] = []
     for t in tools or []:
-        fn = t.get("function") or {} if isinstance(t, dict) else None
-        if not isinstance(fn, dict):
+        named = _named_function(t)
+        if named is None or (allowed is not None and named[1] not in allowed):
             continue
-        name = fn.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        name = name.strip()
-        if allowed is not None and name not in allowed:
-            continue
+        fn, name = named
         specs.append({"name": name, "description": fn.get("description", ""), "parameters": fn.get("parameters", {})})
     return specs
 
 
 def render_tool_bridge_sections(
-    tools: list[dict[str, Any]] | None,
-    tool_choice: Any = None,
-    *,
-    allowlist: Iterable[str] | None = None,
+    tools: list[dict[str, Any]] | None, tool_choice: Any = None, *, allowlist: Iterable[str] | None = None,
 ) -> list[str]:
     """Prompt sections carrying the forwarded tool schemas + choice hint (empty list when neither applies)."""
     specs = tool_specs_from_openai_tools(tools, allowlist=allowlist)
@@ -141,45 +124,43 @@ def render_tool_bridge_sections(
     return sections
 
 
+def _parse_tool_call(raw_json: str, ordinal: int) -> ChatCompletionMessageToolCall | None:
+    """One ``<tool_call>`` JSON body → tool call, or None when malformed. Missing id → ``acp_call_<ordinal>``."""
+    try:
+        obj = json.loads(raw_json)
+    except Exception:
+        return None
+    named = _named_function(obj)
+    if named is None:
+        return None
+    fn, fn_name = named
+    fn_args = fn.get("arguments", "{}")
+    if not isinstance(fn_args, str):
+        fn_args = json.dumps(fn_args, ensure_ascii=False)
+    call_id = obj.get("id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        call_id = f"acp_call_{ordinal}"
+    return build_openai_tool_call(call_id=call_id, name=fn_name, arguments=fn_args)
+
+
 def extract_tool_calls_from_text(text: str) -> tuple[list[ChatCompletionMessageToolCall], str]:
     """Pull ``<tool_call>`` blocks out of an ACP response.
 
-    Returns ``(tool_calls, cleaned_text)`` with the consumed blocks removed so the
-    assistant message doesn't show raw JSON. Bare-JSON fallback runs only when no
-    XML block parsed.
+    Returns ``(tool_calls, cleaned_text)`` with the consumed blocks removed so the assistant message
+    doesn't show raw JSON. Bare-JSON fallback runs only when no XML block parsed.
     """
     if not isinstance(text, str) or not text.strip():
         return [], ""
-
     extracted: list[ChatCompletionMessageToolCall] = []
     consumed_spans: list[tuple[int, int]] = []
-
-    def _try_add_tool_call(raw_json: str) -> None:
-        try:
-            obj = json.loads(raw_json)
-        except Exception:
-            return
-        fn = obj.get("function") if isinstance(obj, dict) else None
-        if not isinstance(fn, dict):
-            return
-        fn_name = fn.get("name")
-        if not isinstance(fn_name, str) or not fn_name.strip():
-            return
-        fn_args = fn.get("arguments", "{}")
-        if not isinstance(fn_args, str):
-            fn_args = json.dumps(fn_args, ensure_ascii=False)
-        call_id = obj.get("id")
-        if not isinstance(call_id, str) or not call_id.strip():
-            call_id = f"acp_call_{len(extracted)+1}"
-        extracted.append(build_openai_tool_call(call_id=call_id, name=fn_name.strip(), arguments=fn_args))
-
-    for m in TOOL_CALL_BLOCK_RE.finditer(text):
-        _try_add_tool_call(m.group(1))
-        consumed_spans.append((m.start(), m.end()))
-    if not extracted:
-        for m in TOOL_CALL_JSON_RE.finditer(text):
-            _try_add_tool_call(m.group(0))
+    for pattern, group in ((TOOL_CALL_BLOCK_RE, 1), (TOOL_CALL_JSON_RE, 0)):
+        for m in pattern.finditer(text):
+            call = _parse_tool_call(m.group(group), len(extracted) + 1)
+            if call is not None:
+                extracted.append(call)
             consumed_spans.append((m.start(), m.end()))
+        if extracted:
+            break
     if not consumed_spans:
         return extracted, text.strip()
 
@@ -190,7 +171,6 @@ def extract_tool_calls_from_text(text: str) -> tuple[list[ChatCompletionMessageT
             merged.append((start, end))
         else:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-
     parts: list[str] = []
     cursor = 0
     for start, end in merged:
