@@ -131,7 +131,7 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     # (PYTHONPATH is in _SAFE_ENV_PREFIXES so it passes the scrub). They are redundant for same-Hermes-
     # environment children and may be incompatible with external interpreters (project mode can select a
     # different venv), so they must not shadow or poison the child's sys.path (#74817).
-    from tools.environments.local import _strip_hermes_owned_pythonpath
+    from tools.environments.local_pythonpath import _strip_hermes_owned_pythonpath
     _strip_hermes_owned_pythonpath(child_env)
     _existing_pp = child_env.get("PYTHONPATH", "")
     _pp_parts = [tmpdir]

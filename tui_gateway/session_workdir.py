@@ -523,7 +523,7 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
     # The synchronous DB write claims ordering authority; git probes may publish only for that exact generation.
     _persist_session_cwd_and_schedule_git_meta(session, resolved)
     with contextlib.suppress(Exception):
-        from tools.terminal_tool import cleanup_vm
+        from tools.terminal_tool_lifecycle import cleanup_vm
         cleanup_vm(session["session_key"])
     return resolved
 

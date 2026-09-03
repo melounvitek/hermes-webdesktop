@@ -547,7 +547,7 @@ class TestSessionCwdSurvivesEnvRecreation:
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
     @patch("tools.file_tools._file_ops_cache", new_callable=dict)
     @patch("tools.terminal_tool._get_env_config")
-    @patch("tools.terminal_tool._create_environment")
+    @patch("tools.terminal_tool_backends._create_environment")
     def test_recorded_cwd_used_for_recreated_env(
         self, mock_create_env, mock_config, mock_cache, mock_active
     ):
@@ -588,7 +588,7 @@ class TestSessionCwdSurvivesEnvRecreation:
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
     @patch("tools.file_tools._file_ops_cache", new_callable=dict)
     @patch("tools.terminal_tool._get_env_config")
-    @patch("tools.terminal_tool._create_environment")
+    @patch("tools.terminal_tool_backends._create_environment")
     def test_stale_cache_cwd_rescued_into_record_on_cleanup_detection(
         self, mock_create_env, mock_config, mock_cache, mock_active
     ):

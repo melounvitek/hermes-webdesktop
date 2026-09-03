@@ -28,14 +28,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from tools.thread_context import propagate_context_to_thread
 from tools.registry import registry, tool_error
 
-# Sibling-module symbols re-exported so `from tools.code_execution_tool import X` / patch() keep working.
-from tools.code_execution_env import (  # noqa: F401
-    _SAFE_ENV_PREFIXES, _SECRET_SUBSTRINGS, _HERMES_CHILD_ALLOWED, _WINDOWS_ESSENTIAL_ENV_VARS,
-    _scrub_child_env, _build_child_env, _PROBE_CACHE_MAX, _usable_python_cache, _python_prefix_cache,
-    _external_env_logged, _cache_probe_result, _is_usable_python, _probe_python,
-    _python_environment_prefix, _uses_hermes_python_environment, _resolve_child_python, _resolve_child_cwd,
-)
-from tools.code_execution_rpc import _TERMINAL_BLOCKED_PARAMS, _rpc_server_loop, _rpc_poll_loop  # noqa: F401
+from tools.code_execution_env import _resolve_child_cwd, _resolve_child_python
+from tools.code_execution_rpc import _rpc_poll_loop
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +104,8 @@ def check_sandbox_requirements() -> bool:
     if not SANDBOX_AVAILABLE:
         return False
     try:
-        from tools.terminal_tool import _check_vercel_sandbox_requirements, _get_env_config
+        from tools.terminal_tool import _get_env_config
+        from tools.terminal_tool_backends import _check_vercel_sandbox_requirements
         config = _get_env_config()
     except Exception:
         logger.debug("Could not resolve terminal config for execute_code availability", exc_info=True)
@@ -409,8 +404,9 @@ _CONTAINER_CONFIG_DEFAULTS = (
 def _get_or_create_env(task_id: str):
     """``(env, env_type)`` — the environment the terminal/file tools share for *task_id*, created on
     first use (same double-checked per-task lock pattern as file_tools._get_file_ops)."""
+    from tools.terminal_tool_backends import _create_environment
     from tools.terminal_tool import (
-        _active_environments, _env_lock, _create_environment, _get_env_config, _last_activity,
+        _active_environments, _env_lock, _get_env_config, _last_activity,
         _start_cleanup_thread, _creation_locks, _creation_locks_lock, _task_env_overrides,
         _resolve_container_task_id, _resolve_task_host_cwd, _is_container_backend, _select_image,
         _ssh_config_from_config,

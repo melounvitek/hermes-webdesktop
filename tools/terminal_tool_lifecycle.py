@@ -69,7 +69,8 @@ def _create_configured_env(
 ):
     """``_create_environment`` with the ssh/container kwargs shaped from *config*
     (shared by the terminal tool and the lazy :func:`ensure_task_env` bring-up)."""
-    from tools.terminal_tool import _create_environment, _is_container_backend
+    from tools.terminal_tool_backends import _create_environment
+    from tools.terminal_tool_config import _is_container_backend
     return _create_environment(
         env_type=env_type, image=image, cwd=cwd, timeout=timeout,
         ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
@@ -197,8 +198,7 @@ def ensure_task_env(task_id: Optional[str] = None):
     from tools.terminal_tool import (
         _active_environments, _creation_locks, _creation_locks_lock, _env_lock,
         _get_env_config, _last_activity, _resolve_container_task_id,
-        _resolve_task_host_cwd, _select_image, _start_cleanup_thread, get_active_env,
-        resolve_task_overrides,
+        _resolve_task_host_cwd, _select_image, _start_cleanup_thread, resolve_task_overrides,
     )
     config = _get_env_config()
     env_type = config["env_type"]
@@ -256,7 +256,6 @@ def is_persistent_env(task_id: str) -> bool:
     docker containers count as persistent HERE: their lifetime is the session
     (removed by ``AIAgent.close()`` → ``cleanup_vm`` and the idle reaper).
     """
-    from tools.terminal_tool import get_active_env
     env = get_active_env(task_id)
     if env is None:
         return False
@@ -265,7 +264,7 @@ def is_persistent_env(task_id: str) -> bool:
 
 def cleanup_all_environments():
     """Clean up ALL active environments. Use with caution."""
-    from tools.terminal_tool import _active_environments, cleanup_vm
+    from tools.terminal_tool import _active_environments
     cleaned = 0
     for task_id in list(_active_environments.keys()):
         try:

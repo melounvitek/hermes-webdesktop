@@ -41,7 +41,7 @@ def _is_hermes_provider_credential(name: str) -> bool:
     in the ``execute_code`` child); non-Hermes keys (TENOR_API_KEY, …) stay
     registerable. Fails closed when the blocklist cannot be imported."""
     try:
-        from tools.environments.local import (
+        from tools.environments.local_env_policy import (
             _HERMES_PROVIDER_ENV_BLOCKLIST, _is_hermes_internal_secret)
     except Exception as e:
         logger.warning(

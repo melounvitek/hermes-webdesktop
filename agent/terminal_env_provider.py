@@ -2,7 +2,7 @@
 
 Pluggable-backend interface for terminal execution environments (cloud sandboxes, remote
 runners). Providers register via :meth:`PluginContext.register_terminal_environment_provider`;
-:func:`tools.terminal_tool._create_environment` consults the registry for any ``TERMINAL_ENV``
+:func:`tools.terminal_tool_backends._create_environment` consults the registry for any ``TERMINAL_ENV``
 / ``terminal.backend`` value that is not a built-in (built-ins stay in ``tools/environments/``;
 third-party sandbox vendors do NOT have to live in core). :meth:`create_environment` returns
 any ``BaseEnvironment`` duck type (``execute()``, ``cleanup()`` …); the factory stamps

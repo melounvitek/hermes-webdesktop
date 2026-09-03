@@ -20,7 +20,7 @@ def _prompt_vercel_sandbox_settings(config: dict):
     terminal = config.setdefault("terminal", {})
     _setup._info(None, "Vercel Sandbox settings:", "  Filesystem persistence uses Vercel snapshots.",
                  "  Snapshots restore files only; live processes do not continue after sandbox recreation.")
-    from tools.terminal_tool import _SUPPORTED_VERCEL_RUNTIMES
+    from tools.terminal_tool_backends import _SUPPORTED_VERCEL_RUNTIMES
     current_runtime = terminal.get("vercel_runtime") or "node24"
     supported_label = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
     runtime = _setup.prompt(f"  Runtime ({supported_label})", current_runtime).strip() or current_runtime
@@ -176,8 +176,8 @@ def _setup_backend_modal(config: dict) -> None:
     from tools.managed_tool_gateway import is_managed_tool_gateway_ready
     from tools.tool_backend_helpers import normalize_modal_mode
     managed_modal_available = bool(
-        _setup.managed_nous_tools_enabled()
-        and _setup.get_nous_subscription_features(config).nous_auth_present
+        tool_backend_helpers.managed_nous_tools_enabled()
+        and nous_subscription.get_nous_subscription_features(config).nous_auth_present
         and is_managed_tool_gateway_ready("modal"))
     modal_mode = normalize_modal_mode(_setup.cfg_get(config, "terminal", "modal_mode"))
     use_managed_modal = False

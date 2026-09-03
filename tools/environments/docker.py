@@ -20,15 +20,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from tools.environments.base import BaseEnvironment, EnvironmentConnectionError, _SHELL_ENV_NAME_RE, _popen_bash
-from tools.environments.docker_egress import (  # noqa: F401 — re-exported for tests/patch targets
+from tools.environments.base import BaseEnvironment, EnvironmentConnectionError, _SHELL_ENV_NAME_RE
+from tools.environments.base_output import _popen_bash
+from tools.environments.docker_egress import (
     _EGRESS_LABEL_KEY, _critical_egress_env_names, _egress_enforce_on_docker, _egress_proxy_args_for_docker,
-    _egress_reuse_fingerprint, _extra_args_egress_collisions, check_docker_env_collisions,
-    check_extra_args_collisions, check_forward_env_collisions, merge_egress_env,
+    _egress_reuse_fingerprint, check_docker_env_collisions, check_extra_args_collisions,
+    check_forward_env_collisions, merge_egress_env,
 )
 from tools.environments.path_utils import sanitize_task_id_for_path
 from tools.environments.remote_common import bash_argv, run_capture
-from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST, _is_hermes_internal_secret
+from tools.environments.local_env_policy import _HERMES_PROVIDER_ENV_BLOCKLIST, _is_hermes_internal_secret
 
 logger = logging.getLogger(__name__)
 

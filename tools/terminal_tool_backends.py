@@ -1,6 +1,6 @@
 """Execution-environment backends for the terminal tool: per-backend builders, config-to-kwargs
 shapers, and requirement checkers, routed by dispatch/spec tables. Split out of ``tools/terminal_tool.py``;
-every public/patched name is re-imported there, so ``tools.terminal_tool.<name>`` keeps resolving."""
+the terminal tool imports the builders/checkers it uses from here."""
 
 import functools
 import importlib.util
@@ -10,13 +10,16 @@ import shutil
 import subprocess
 from typing import Any, Dict, Optional
 
+from tools.environments.docker import DockerEnvironment as _DockerEnvironment
 from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
-from tools.tool_backend_helpers import (has_direct_modal_credentials, nous_tool_gateway_unavailable_message,
-                                        resolve_modal_backend_state)
+from tools.managed_tool_gateway import is_managed_tool_gateway_ready
+from tools.terminal_tool_config import _get_plugin_env_provider
+from tools.tool_backend_helpers import (has_direct_modal_credentials, managed_nous_tools_enabled,
+                                        nous_tool_gateway_unavailable_message, resolve_modal_backend_state)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.terminal_tool")
@@ -69,7 +72,6 @@ def _is_supported_vercel_runtime(runtime: str) -> bool:
 
 def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
     """Resolve direct vs managed Modal backend selection."""
-    from tools.terminal_tool import is_managed_tool_gateway_ready
     return resolve_modal_backend_state(modal_mode, has_direct=has_direct_modal_credentials(),
                                        managed_ready=is_managed_tool_gateway_ready("modal"))
 
@@ -77,7 +79,6 @@ def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
 def _modal_unavailable_reason(modal_state: Dict[str, Any]) -> tuple[str, str]:
     """(log message, ValueError message) for a modal_state with no selected backend.
     Single decision shared by the requirements checker and the env builder."""
-    from tools.terminal_tool import managed_nous_tools_enabled
     gateway = nous_tool_gateway_unavailable_message("managed Modal execution")
     if modal_state["managed_mode_blocked"] or modal_state["mode"] == "managed":
         tail = (("Nous Tool Gateway access is not currently available and no direct Modal credentials/config "
@@ -103,8 +104,8 @@ def _build_local_env(*, cwd, timeout, **_):
 
 
 def _build_docker_env(*, image, cwd, timeout, cc, task_id, host_cwd, **_):
-    from tools.terminal_tool import (_DockerEnvironment, _docker_session_isolation_enabled,
-                                     _has_isolation_overrides, _maybe_reap_docker_orphans)
+    from tools.terminal_tool import (_docker_session_isolation_enabled, _has_isolation_overrides,
+                                     _maybe_reap_docker_orphans)
     # One-shot reaper for labeled containers orphaned by prior Hermes processes that died before
     # atexit (SIGKILL / OOM / closed terminal); ``terminal.docker_orphan_reaper: false`` disables it.
     _maybe_reap_docker_orphans(cc)
@@ -179,7 +180,6 @@ def _build_ssh_env(*, cwd, timeout, ssh_config, **_):
 
 
 def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
-    from tools.terminal_tool import _get_plugin_env_provider
     provider = _get_plugin_env_provider(env_type)
     if provider is not None:
         env_obj = provider.create_environment(cwd=cwd, timeout=timeout, task_id=task_id, image=image,
@@ -309,7 +309,6 @@ def _check_requirements(env_type: str, config: Dict[str, Any]) -> bool:
 
 
 def _check_plugin_requirements(config: Dict[str, Any]) -> bool:
-    from tools.terminal_tool import _get_plugin_env_provider
     env_type = config["env_type"]
     provider = _get_plugin_env_provider(env_type)
     if provider is not None:

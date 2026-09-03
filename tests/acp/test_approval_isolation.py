@@ -120,7 +120,7 @@ class TestThreadLocalApprovalCallback:
 
     def test_sudo_password_cache_does_not_leak_across_threads(self):
         """Interactive sudo cache must not bleed into another executor thread."""
-        from tools.terminal_tool import (
+        from tools.terminal_tool_sudo import (
             _get_cached_sudo_password,
             _reset_cached_sudo_passwords,
             _set_cached_sudo_password,

@@ -99,7 +99,7 @@ class TestRunBashCwdRecovery:
         try:
             with patch("tools.environments.local._find_bash", return_value="/bin/bash"), \
                  patch("subprocess.Popen", side_effect=_make_fake_popen(captured, fds)), \
-                 patch("tools.terminal_tool._interrupt_event", _fake_interrupt()), \
+                 patch("tools.interrupt._interrupt_event", _fake_interrupt()), \
                  caplog.at_level("WARNING", logger="tools.environments.local"):
                 env.execute("echo hello")
         finally:
@@ -124,7 +124,7 @@ class TestRunBashCwdRecovery:
         try:
             with patch("tools.environments.local._find_bash", return_value="/bin/bash"), \
                  patch("subprocess.Popen", side_effect=_make_fake_popen(captured, fds)), \
-                 patch("tools.terminal_tool._interrupt_event", _fake_interrupt()), \
+                 patch("tools.interrupt._interrupt_event", _fake_interrupt()), \
                  caplog.at_level("WARNING", logger="tools.environments.local"):
                 env.execute("echo hello")
         finally:

@@ -27,7 +27,7 @@ import textwrap
 
 import pytest
 
-from tools.code_execution_tool import (
+from tools.code_execution_env import (
     _SECRET_SUBSTRINGS,
     _WINDOWS_ESSENTIAL_ENV_VARS,
     _scrub_child_env,

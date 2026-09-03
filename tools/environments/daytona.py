@@ -12,7 +12,8 @@ import shlex
 import threading
 from pathlib import Path
 
-from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle
+from tools.environments.base import BaseEnvironment
+from tools.environments.base_output import _ThreadedProcessHandle
 from tools.environments.file_sync import (
     FileSyncManager, iter_sync_files, quoted_mkdir_command, quoted_rm_command, unique_parent_dirs)
 from tools.environments.remote_common import ensure_lazy_dep

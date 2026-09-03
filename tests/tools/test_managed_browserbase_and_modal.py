@@ -264,14 +264,15 @@ def test_terminal_tool_respects_direct_modal_mode_without_falling_back_to_manage
     env.pop("MODAL_TOKEN_SECRET", None)
 
     with patch.dict(os.environ, env, clear=True):
-        terminal_tool = _load_tool_module("tools.terminal_tool", "terminal_tool.py")
+        _load_tool_module("tools.terminal_tool", "terminal_tool.py")
+        terminal_tool_backends = sys.modules["tools.terminal_tool_backends"]
 
         with (
-            patch.object(terminal_tool, "is_managed_tool_gateway_ready", return_value=True),
+            patch.object(terminal_tool_backends, "is_managed_tool_gateway_ready", return_value=True),
             patch.object(Path, "exists", return_value=False),
         ):
             with pytest.raises(ValueError, match="direct Modal credentials"):
-                terminal_tool._create_environment(
+                terminal_tool_backends._create_environment(
                     env_type="modal",
                     image="python:3.11",
                     cwd="/root",

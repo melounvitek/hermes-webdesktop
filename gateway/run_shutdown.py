@@ -1397,7 +1397,7 @@ class GatewayShutdownMixin:
         _marked_cron_jobs = _step("mark_running_jobs_interrupted", _mark_cron_interrupted) or []
         _step("async interrupt_all", _interrupt_delegations)
         def _cleanup_environments() -> None:
-            from tools.terminal_tool import cleanup_all_environments
+            from tools.terminal_tool_lifecycle import cleanup_all_environments
             cleanup_all_environments()
 
         def _cleanup_browsers() -> None:

@@ -27,8 +27,6 @@ import atexit
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 
-from utils import env_var_enabled  # noqa: F401  (terminal_tool_result imports it lazily via origin)
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,36 +37,20 @@ def _redact_terminal_error_text(value: Any) -> str:
     return redact_sensitive_text("" if value is None else str(value), force=True)
 
 
-# Interrupt event set by the agent on user interrupt; executors poll it to
-# kill long-running subprocesses instead of blocking until timeout.
-from tools.interrupt import _interrupt_event  # noqa: F401 — re-exported (tests patch it here)
 from tools.registry import tool_error
-from tools.terminal_tool_lifecycle import (  # noqa: F401  (re-exported; tests patch tools.terminal_tool.<name>)
-    _check_disk_usage_warning, _cleanup_env, _cleanup_inactive_envs, _create_configured_env,
-    _evict_environment_for_task, cleanup_all_environments, cleanup_vm, ensure_task_env,
-    get_active_env, is_persistent_env,
+from tools.terminal_tool_lifecycle import (
+    _check_disk_usage_warning, _cleanup_inactive_envs, _create_configured_env,
+    _evict_environment_for_task, cleanup_all_environments, ensure_task_env,
 )
-from tools.terminal_tool_config import (  # noqa: F401  (re-exported; tests patch tools.terminal_tool.<name>)
-    _CONTAINER_BACKENDS, _HOST_CWD_PREFIXES, _get_plugin_env_provider, _is_container_backend,
-    _is_unusable_container_cwd, _parse_env_var, _plugin_env_flag, _quiet, _safe_getcwd, _tenv,
-    _tenv_bool,
+from tools.terminal_tool_config import (
+    _HOST_CWD_PREFIXES, _is_container_backend, _is_unusable_container_cwd, _parse_env_var,
+    _plugin_env_flag, _quiet, _safe_getcwd, _tenv, _tenv_bool,
 )
-from tools.terminal_tool_backends import (  # noqa: F401  (re-exported; tests patch tools.terminal_tool.<name>)
-    _REQUIREMENT_CHECKERS, _SUPPORTED_VERCEL_RUNTIMES, _VERCEL_SANDBOX_DEFAULT_CWD,
-    _check_plugin_requirements, _check_vercel_sandbox_requirements, _create_environment,
-)
-from tools.terminal_tool_sudo import (  # noqa: F401  (re-exported; tests patch tools.terminal_tool.<name>)
-    _count_real_sudo_invocations, _get_cached_sudo_password, _handle_sudo_failure,
-    _in_delegated_child_context, _invalidate_cached_sudo_on_auth_failure,
-    _prompt_for_sudo_password, _reset_cached_sudo_passwords, _rewrite_compound_background,
-    _set_cached_sudo_password, _sudo_nopasswd_works, _sudo_wrong_password_failure,
-    _transform_sudo_command,
+from tools.terminal_tool_backends import (
+    _REQUIREMENT_CHECKERS, _VERCEL_SANDBOX_DEFAULT_CWD, _check_plugin_requirements,
 )
 # display_hermes_home imported lazily at call site (stale-module safety during hermes update)
-from tools.tool_backend_helpers import (  # noqa: F401  (managed_nous_tools_enabled: test patch target)
-    coerce_modal_mode,
-    managed_nous_tools_enabled,
-)
+from tools.tool_backend_helpers import coerce_modal_mode, managed_nous_tools_enabled
 
 
 def _safe_parse_import_env(name: str, default: Any, converter, type_label: str):
@@ -169,10 +151,6 @@ def _check_all_guards(command: str, env_type: str,
 
 
 from tools.environments.base import EnvironmentConnectionError
-# Resolved lazily by terminal_tool_backends through this module so tests can
-# monkeypatch ``tools.terminal_tool._DockerEnvironment`` / the gateway probes.
-from tools.environments.docker import DockerEnvironment as _DockerEnvironment  # noqa: F401
-from tools.managed_tool_gateway import is_managed_tool_gateway_ready  # noqa: F401
 
 
 # Tool description for LLM
@@ -748,14 +726,12 @@ def _command_requires_pipe_stdin(command: str) -> bool:
     return normalized.startswith("gh auth login") and "--with-token" in normalized
 
 
-from tools.terminal_tool_guards import (  # noqa: F401 — re-exported (tests, plugins)
-    _foreground_background_guidance, _safe_command_preview, _strip_quotes, _validate_workdir,
+from tools.terminal_tool_guards import (
+    _foreground_background_guidance, _safe_command_preview, _validate_workdir,
     gateway_lifecycle_block, self_repo_block,
 )
 from tools.terminal_tool_background import spawn_background_process
-from tools.terminal_tool_result import (  # noqa: F401 — re-exported (tests)
-    _interpret_exit_code, _interpret_signal_exit, finalize_foreground_result,
-)
+from tools.terminal_tool_result import finalize_foreground_result
 
 
 def _resolve_notification_flag_conflict(*, notify_on_complete: bool, watch_patterns, background: bool) -> tuple:

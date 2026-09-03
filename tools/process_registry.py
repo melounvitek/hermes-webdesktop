@@ -823,7 +823,7 @@ class ProcessRegistry:
         # pipe open forever when B is a long-running server. The rewriter turns it into
         # ``A && { B & }``. Lazy import: terminal_tool imports this module.
         # Guard against the `A && B &` subshell-wait trap (issue #68915).
-        from tools.terminal_tool import _rewrite_compound_background as _rewrite_bg
+        from tools.terminal_tool_sudo import _rewrite_compound_background as _rewrite_bg
 
         safe_command = _rewrite_bg(command)
         session = self._new_session(command, task_id, owner_task_id, session_key, _resolve_safe_cwd(cwd or os.getcwd()))

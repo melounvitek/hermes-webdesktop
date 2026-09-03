@@ -289,7 +289,7 @@ def _looks_like_absolute_file_path(value: str) -> bool:
 
 def _active_terminal_env(task_id: str | None):
     try:
-        from tools.terminal_tool import get_active_env
+        from tools.terminal_tool_lifecycle import get_active_env
         return get_active_env(task_id or "default")
     except Exception as exc:  # noqa: BLE001 - artifact hinting must not break generation
         logger.debug("Could not inspect active terminal environment: %s", exc)

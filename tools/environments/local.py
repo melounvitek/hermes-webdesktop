@@ -17,25 +17,19 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from hermes_constants import get_process_hermes_home
-from tools.environments.base import BaseEnvironment, _pipe_stdin
+from tools.environments.base import BaseEnvironment
+from tools.environments.base_output import _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
-# Re-exported so ``from tools.environments.local import X`` and
-# ``patch("tools.environments.local.X")`` keep working after the split.
-from tools.environments.local_env_policy import (  # noqa: F401
-    _ACTIVE_VENV_MARKER_VARS, _ALWAYS_STRIP_KEYS, _AWS_SDK_CREDENTIAL_ENV_VARS,
-    _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
-    _TERMINAL_FIRST_PARTY_ENV_PREFIXES, _build_provider_env_blocklist,
-    _buzz_terminal_context_active, _is_hermes_internal_secret,
-    _is_terminal_first_party_env, _matches_terminal_first_party_prefix,
-    _plugin_terminal_env_strip_keys)
-from tools.environments.local_gitbash_probe import (  # noqa: F401
-    _BASH_EXTERNAL_PROGRAM_PROBE, _bash_probe_details_cache, _bash_starts,
-    _bash_starts_cache, _git_bash_aslr_help, _git_root_from_bash,
+from tools.environments.local_env_policy import (
+    _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
+    _is_hermes_internal_secret, _is_terminal_first_party_env,
+    _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys)
+from tools.environments.local_gitbash_probe import (
+    _bash_probe_details_cache, _bash_starts, _git_bash_aslr_help,
     _looks_like_msys_spawn_failure, _mandatory_aslr_enabled)
-from tools.environments.local_pythonpath import (  # noqa: F401
-    _build_hermes_repo_root_aliases, _get_hermes_site_packages, _same_path,
-    _strip_hermes_owned_pythonpath, _strip_hermes_owned_pythonpath_and_runtime_markers,
-    _validated_runtime_venv)
+from tools.environments.local_pythonpath import (
+    _build_hermes_repo_root_aliases, _strip_hermes_owned_pythonpath_and_runtime_markers)
+
 
 _IS_WINDOWS = platform.system() == "Windows"
 

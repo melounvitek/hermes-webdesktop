@@ -187,7 +187,7 @@ def _get_active_env(task_id: Optional[str]):
     if not task_id:
         return None
     try:
-        from tools.terminal_tool import get_active_env
+        from tools.terminal_tool_lifecycle import get_active_env
         return get_active_env(task_id)
     except Exception:
         return None

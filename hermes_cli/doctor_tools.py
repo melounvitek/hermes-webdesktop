@@ -180,7 +180,7 @@ def _check_daytona_backend(issues: list[str]) -> None:
 
 
 def _check_vercel_backend(issues: list[str]) -> None:
-    from tools.terminal_tool import _SUPPORTED_VERCEL_RUNTIMES
+    from tools.terminal_tool_backends import _SUPPORTED_VERCEL_RUNTIMES
     runtime = os.getenv("TERMINAL_VERCEL_RUNTIME", "node24").strip() or "node24"
     supported = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
     _require(runtime in _SUPPORTED_VERCEL_RUNTIMES, ("Vercel runtime", f"({runtime})"),

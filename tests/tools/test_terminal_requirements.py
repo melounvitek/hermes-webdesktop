@@ -39,6 +39,7 @@ def _clear_terminal_env(monkeypatch):
     monkeypatch.setattr(terminal_tool_module, "managed_nous_tools_enabled", lambda: False)
     import tools.tool_backend_helpers as _tbh
     monkeypatch.setattr(_tbh, "managed_nous_tools_enabled", lambda: False)
+    monkeypatch.setattr("tools.terminal_tool_backends.managed_nous_tools_enabled", lambda: False)
 
 
 def test_local_terminal_requirements(monkeypatch, caplog):
@@ -73,7 +74,7 @@ def test_modal_backend_managed_mode_without_feature_flag_logs_clear_error(monkey
     monkeypatch.setenv("TERMINAL_MODAL_MODE", "managed")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    monkeypatch.setattr(terminal_tool_module, "is_managed_tool_gateway_ready", lambda _vendor: False)
+    monkeypatch.setattr("tools.terminal_tool_backends.is_managed_tool_gateway_ready", lambda _vendor: False)
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()

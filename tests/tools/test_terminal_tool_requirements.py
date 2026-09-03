@@ -34,7 +34,7 @@ class TestTerminalRequirements:
 
     def test_terminal_and_execute_code_tools_resolve_for_managed_modal(self, monkeypatch, tmp_path):
         monkeypatch.setattr("tools.tool_backend_helpers.managed_nous_tools_enabled", lambda: True)
-        monkeypatch.setattr(terminal_tool_module, "managed_nous_tools_enabled", lambda: True)
+        monkeypatch.setattr("tools.terminal_tool_backends.managed_nous_tools_enabled", lambda: True)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
@@ -45,8 +45,7 @@ class TestTerminalRequirements:
             lambda: {"env_type": "modal", "modal_mode": "managed"},
         )
         monkeypatch.setattr(
-            terminal_tool_module,
-            "is_managed_tool_gateway_ready",
+            "tools.terminal_tool_backends.is_managed_tool_gateway_ready",
             lambda _vendor: True,
         )
         tools = get_tool_definitions(enabled_toolsets=["terminal", "code_execution"], quiet_mode=True)

@@ -4,8 +4,7 @@ Unified spawn-per-call model: every command spawns a fresh ``bash -c`` process.
 A session snapshot (env vars, functions, aliases) is captured once at init and
 re-sourced before each command. CWD persists via in-band stdout markers (remote)
 or a temp file (local). Cohesive pieces live in sibling modules (``base_output``,
-``base_session_env``, ``base_wait``, ``path_utils``) and are re-exported here so
-``from tools.environments.base import X`` / ``patch("tools.environments.base.X")`` keep working.
+``base_session_env``, ``base_wait``, ``path_utils``).
 """
 
 import json
@@ -21,19 +20,14 @@ from typing import Callable, Iterable
 
 from hermes_constants import get_hermes_home
 from tools.interrupt import is_interrupted, is_thread_interrupted
-from tools.environments.base_output import (  # noqa: F401
-    ProcessHandle, _BoundedOutputCollector, _ThreadedProcessHandle, _UNBOUNDED_CAPTURE_CHARS,
-    _finalize_wait_result, _new_output_collector, _pipe_stdin, _popen_bash, _start_drain_thread,
+from tools.environments.base_output import (
+    ProcessHandle, _finalize_wait_result, _new_output_collector, _start_drain_thread,
 )
-from tools.environments.base_session_env import (  # noqa: F401
-    _SHELL_ENV_NAME_RE, _SNAP_TMP, _SNAP_TMP_SUFFIX, _SNAPSHOT_EXCLUDED_ENV_REGEX, _cwd_marker,
-    _export_dump_excluding_session_vars, _snapshot_bootstrap_script, _split_cwd_marker,
+from tools.environments.base_session_env import (
+    _SHELL_ENV_NAME_RE, _SNAP_TMP_SUFFIX, _cwd_marker, _snapshot_bootstrap_script, _split_cwd_marker,
     _wrap_command_script,
 )
 from tools.environments.base_wait import _WaitTrace
-from tools.environments.path_utils import (  # noqa: F401
-    _SANDBOX_DIR_HASH_LEN, _SANDBOX_DIR_MAX_LEN, _SANDBOX_DIR_UNSAFE_RE, sanitize_task_id_for_path,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -440,7 +434,7 @@ class BaseEnvironment(ABC):
         # Guard against the `A && B &` subshell-wait trap by default; callers
         # that already produce shell-safe wrappers (spawn_via_env) pass False.
         if rewrite_compound_background:
-            from tools.terminal_tool import _rewrite_compound_background
+            from tools.terminal_tool_sudo import _rewrite_compound_background
             exec_command = _rewrite_compound_background(exec_command)
         effective_timeout = timeout or self.timeout
         effective_cwd = cwd or self.cwd
@@ -518,10 +512,6 @@ class BaseEnvironment(ABC):
             logger.debug("terminal wait-bound kill_process_tree failed", exc_info=True)
 
     # --- Shared helpers ---
-    def stop(self):
-        """Alias for cleanup (compat with older callers)."""
-        self.cleanup()
-
     def __del__(self):
         try:
             self.cleanup()
@@ -530,5 +520,5 @@ class BaseEnvironment(ABC):
 
     def _prepare_command(self, command: str) -> tuple[str, str | None]:
         """Transform sudo commands if SUDO_PASSWORD is available."""
-        from tools.terminal_tool import _transform_sudo_command
+        from tools.terminal_tool_sudo import _transform_sudo_command
         return _transform_sudo_command(command)

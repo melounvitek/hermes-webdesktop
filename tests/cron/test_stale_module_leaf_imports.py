@@ -57,7 +57,7 @@ def test_docker_import_ignores_stale_base_environment(monkeypatch):
 
     # Model base.py cached before the shared sanitizer existed. A Docker module
     # imported later by tool discovery must get the helper from the leaf module.
-    monkeypatch.delattr(base, "sanitize_task_id_for_path")
+    monkeypatch.delattr(base, "sanitize_task_id_for_path", raising=False)
     previous = sys.modules.pop("tools.environments.docker", None)
     try:
         docker = importlib.import_module("tools.environments.docker")

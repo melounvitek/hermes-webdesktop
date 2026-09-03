@@ -168,9 +168,10 @@ class TestCwdHandling:
             captured.update(kwargs)
             return sentinel
 
-        monkeypatch.setattr(_tt_mod, "_DockerEnvironment", _fake_docker_environment)
+        from tools.terminal_tool_backends import _create_environment
+        monkeypatch.setattr("tools.terminal_tool_backends._DockerEnvironment", _fake_docker_environment)
 
-        env = _tt_mod._create_environment(
+        env = _create_environment(
             env_type="docker",
             image="python:3.11",
             cwd="/workspace",

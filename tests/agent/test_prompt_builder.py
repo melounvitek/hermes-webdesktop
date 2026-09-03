@@ -816,9 +816,9 @@ class TestEnvironmentHints:
             created["env_type"] = env_type
             return _FakeEnv()
 
-        # Patch the REAL factory in tools.terminal_tool — the probe imports it
+        # Patch the REAL factory in tools.terminal_tool_backends — the probe imports it
         # locally, so the import itself must succeed (the bug was here).
-        import tools.terminal_tool as _tt
+        import tools.terminal_tool_backends as _tt
         monkeypatch.setattr(_tt, "_create_environment", _fake_create_environment)
 
         line = _pb._probe_remote_backend("docker")
@@ -858,7 +858,7 @@ class TestEnvironmentHints:
             def cleanup(self, *, force_remove=False):
                 cleaned["force_remove"] = force_remove
 
-        import tools.terminal_tool as _tt
+        import tools.terminal_tool_backends as _tt
         monkeypatch.setattr(_tt, "_create_environment", lambda **kw: _FakeEnv())
 
         assert _pb._probe_remote_backend("docker") is not None
@@ -882,7 +882,7 @@ class TestEnvironmentHints:
             def cleanup(self, *, force_remove=False):
                 cleaned.append(force_remove)
 
-        import tools.terminal_tool as _tt
+        import tools.terminal_tool_backends as _tt
         monkeypatch.setattr(_tt, "_create_environment", lambda **kw: _ExplodingEnv())
 
         assert _pb._probe_remote_backend("docker") is None
@@ -911,7 +911,7 @@ class TestEnvironmentHints:
             def cleanup(self):
                 calls.append("bare")
 
-        import tools.terminal_tool as _tt
+        import tools.terminal_tool_backends as _tt
         monkeypatch.setattr(_tt, "_create_environment", lambda **kw: _LegacyEnv())
 
         assert _pb._probe_remote_backend("singularity") is not None
@@ -941,7 +941,7 @@ class TestEnvironmentHints:
             def cleanup(self):
                 calls.append("cleanup")
 
-        import tools.terminal_tool as _tt
+        import tools.terminal_tool_backends as _tt
         monkeypatch.setattr(_tt, "_create_environment", lambda **kw: _SharedSshEnv())
 
         assert _pb._probe_remote_backend("ssh") is not None

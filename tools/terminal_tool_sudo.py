@@ -116,7 +116,6 @@ def _sudo_wrong_password_failure(output: str) -> bool:
 def _invalidate_cached_sudo_on_auth_failure(command: str | None, output: str) -> bool:
     """Drop a session-cached sudo password after sudo rejects it. Env-configured
     ``SUDO_PASSWORD`` is left alone — an explicit operator choice, not a cache entry."""
-    from tools.terminal_tool import _count_real_sudo_invocations, _sudo_wrong_password_failure
     if (
         "SUDO_PASSWORD" in os.environ
         or not _sudo_wrong_password_failure(output)
@@ -402,7 +401,7 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     returned unchanged and ``sudo_stdin`` is None, so it fails gracefully with "sudo: a password
     is required". Password sources, in order: configured SUDO_PASSWORD, the session cache, then
     an interactive prompt (45s timeout, cached on success) when a UI is reachable."""
-    from tools.terminal_tool import _get_sudo_password_callback, _prompt_for_sudo_password, _sudo_nopasswd_works
+    from tools.terminal_tool import _get_sudo_password_callback
     if command is None:
         return None, None
     transformed, sudo_count = _rewrite_real_sudo_invocations(command)

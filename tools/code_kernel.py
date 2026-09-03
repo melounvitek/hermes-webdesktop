@@ -256,7 +256,7 @@ class CellAuthority:
 
     def dispatch(self, tool_name: str, tool_args: dict) -> str:
         """Run one tool call under THIS cell's context and callbacks."""
-        from tools.code_execution_tool import tool_error
+        from tools.registry import tool_error
         if not self.active:
             return tool_error("No active execute_code cell: the cell this kernel call "
                               "belonged to has settled, so its tool authority is retired.")
@@ -415,7 +415,7 @@ def _resolve_owner(task_id: str) -> str:
     (verified live, both directions). Children get their own kernels keyed by delegation session id.
     """
     try:
-        from tools.approval import get_current_session_key
+        from tools.approval_context import get_current_session_key
         session_key = get_current_session_key(default="")
     except Exception:
         session_key = ""
@@ -455,7 +455,8 @@ def _rpc_forever(kernel: SessionKernel, max_tool_calls: int,
     its 300s idle timeout, and a kernel idles longer between cells, so re-accept until teardown
     (the client stub reconnects: HERMES_RPC_PERSISTENT). The serving thread carries NO frozen
     authority — every dispatch routes through the CURRENT cell's ``CellAuthority``."""
-    from tools.code_execution_tool import _rpc_server_loop, tool_error
+    from tools.code_execution_rpc import _rpc_server_loop
+    from tools.registry import tool_error
     def _dispatch(tool_name: str, tool_args: dict) -> str:
         authority = kernel.cell_authority
         if authority is None:
@@ -580,7 +581,8 @@ def _parent_process_handle(child_env: Dict[str, str]):
 
 def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
            sandbox_tools: frozenset, max_tool_calls: int, task_id: str = "") -> None:
-    from tools.code_execution_tool import _build_child_env, generate_hermes_tools_module
+    from tools.code_execution_env import _build_child_env
+    from tools.code_execution_tool import generate_hermes_tools_module
     kernel.tmpdir = tempfile.mkdtemp(prefix="hermes_kernel_")
     kernel.rpc_token = secrets.token_urlsafe(32)
     kernel.sentinel = "@@HERMES-KERNEL-" + secrets.token_urlsafe(16) + "@@"

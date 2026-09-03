@@ -857,11 +857,12 @@ _BACKEND_PROBE_CMD = (
 
 def _run_backend_probe(env_type: str, terminal_tool) -> str:
     """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
-    from tools.terminal_tool_backends import _ssh_config_from_config
+    from tools.terminal_tool_backends import _create_environment, _ssh_config_from_config
+    from tools.terminal_tool_lifecycle import _cleanup_env
 
     config = terminal_tool._get_env_config()
     # Mirrors tools/terminal_tool.py's live-command assembly (`_create_environment` is the factory).
-    env = terminal_tool._create_environment(
+    env = _create_environment(
         env_type=env_type, image=config.get(_BACKEND_IMAGE_KEYS[env_type], "") if env_type in _BACKEND_IMAGE_KEYS else "", cwd=config.get("cwd", ""),
         timeout=config.get("timeout", 180),
         ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
@@ -878,7 +879,7 @@ def _run_backend_probe(env_type: str, terminal_tool) -> str:
         # (keyed by user@host:port) shared with the agent's real environment; ControlPersist expires it.
         if env_type != "ssh":
             try:
-                terminal_tool._cleanup_env(env, force_remove=True)
+                _cleanup_env(env, force_remove=True)
             except Exception:
                 logger.debug("Backend probe cleanup failed", exc_info=True)
     if result.get("returncode") != 0:
