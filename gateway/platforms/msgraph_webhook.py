@@ -177,11 +177,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
         return web.json_response({
-            "status": "ok",
-            "platform": self.platform.value,
-            "webhook_path": self._webhook_path,
-            "accepted": self._accepted_count,
-            "duplicates": self._duplicate_count})
+            "status": "ok", "platform": self.platform.value, "webhook_path": self._webhook_path,
+            "accepted": self._accepted_count, "duplicates": self._duplicate_count})
 
     async def _handle_validation(self, request: "web.Request") -> "web.Response":
         """Graph subscription validation handshake: echo ``validationToken`` verbatim
@@ -319,8 +316,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         template = self.config.extra.get("prompt", "")
         if template:
             return _render_template(template, {
-                "notification": notification,
-                "resource": notification.get("resource", ""),
+                "notification": notification, "resource": notification.get("resource", ""),
                 "change_type": notification.get("changeType", ""),
                 "subscription_id": notification.get("subscriptionId", "")})
         rendered = json.dumps(notification, indent=2, sort_keys=True)[:4000]

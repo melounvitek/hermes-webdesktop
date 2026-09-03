@@ -312,9 +312,8 @@ class SignalAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 logger.debug("Signal SSE: connecting to %s", url)
-                async with self.client.stream(
-                    "GET", url, headers={"Accept": "text/event-stream"}, timeout=None,
-                ) as response:
+                headers = {"Accept": "text/event-stream"}
+                async with self.client.stream("GET", url, headers=headers, timeout=None) as response:
                     self._sse_response = response
                     backoff = SSE_RETRY_DELAY_INITIAL  # Reset on successful connection
                     self._last_sse_activity = time.time()
@@ -491,8 +490,7 @@ class SignalAdapter(BasePlatformAdapter):
             chat_id=chat_id, chat_name=group_info.get("groupName") if group_info else sender_name,
             chat_type="group" if is_group else "dm", user_id=sender,
             user_name=sender_name or sender, user_id_alt=sender_uuid if sender_uuid else None,
-            chat_id_alt=group_id if is_group else None,
-        )
+            chat_id_alt=group_id if is_group else None)
         # First matching MIME prefix wins; everything else (application/*, text/*, unknown)
         # is a DOCUMENT so run.py's document-context injection surfaces the cached path.
         msg_type = MessageType.TEXT if not media_types else next(

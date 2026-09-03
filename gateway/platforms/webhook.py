@@ -46,10 +46,9 @@ _PROFILE_REJECTED = object()
 _UNPARSEABLE = object()
 
 _BUILTIN_DELIVER_PLATFORMS = {
-    "telegram", "discord", "slack", "signal", "sms", "whatsapp",
-    "matrix", "mattermost", "homeassistant", "email", "dingtalk",
-    "feishu", "wecom", "wecom_callback", "weixin", "bluebubbles",
-    "qqbot", "yuanbao"}
+    "telegram", "discord", "slack", "signal", "sms", "whatsapp", "matrix", "mattermost",
+    "homeassistant", "email", "dingtalk", "feishu", "wecom", "wecom_callback", "weixin",
+    "bluebubbles", "qqbot", "yuanbao"}
 
 # ``None`` → aiohttp binds BOTH address families. "0.0.0.0" is IPv4-only and was
 # unreachable on IPv6-only networks (Fly.io 6PN); "::" becomes IPv6-only where the

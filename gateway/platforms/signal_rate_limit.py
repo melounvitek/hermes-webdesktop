@@ -107,8 +107,7 @@ class SignalAttachmentScheduler:
     ``acquire(n)`` calls serialize through an ``asyncio.Lock`` — FIFO across sessions."""
 
     def __init__(
-        self,
-        capacity: float = float(SIGNAL_RATE_LIMIT_BUCKET_CAPACITY),
+        self, capacity: float = float(SIGNAL_RATE_LIMIT_BUCKET_CAPACITY),
         default_retry_after: float = float(SIGNAL_RATE_LIMIT_DEFAULT_RETRY_AFTER)) -> None:
         self.capacity = float(capacity)
         self.tokens = float(capacity)
