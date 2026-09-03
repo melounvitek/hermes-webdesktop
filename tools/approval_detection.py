@@ -168,13 +168,10 @@ _SHELL_CARRIER_NAMES = frozenset({"eval", "sh", "bash", "zsh", "ksh", "dash", "s
 
 def _contains_shell_carrier(command: str) -> bool:
     """Return whether any command-position word is a shell-carrying command."""
-    for _, _, word in _iter_shell_command_word_spans(command):
-        name = os.path.basename(
-            _deobfuscate_shell_word_for_detection(word)
-        ).lower()
-        if name in _SHELL_CARRIER_NAMES:
-            return True
-    return False
+    return any(
+        os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower() in _SHELL_CARRIER_NAMES
+        for _, _, word in _iter_shell_command_word_spans(command)
+    )
 
 
 def _mask_quoted_prose(command: str) -> str:
@@ -207,10 +204,7 @@ def _check_sudo_stdin_guard(command: str) -> tuple:
     When SUDO_PASSWORD is set, ``_transform_sudo_command`` injects ``-S`` itself,
     so this guard only fires when the LLM wrote it explicitly.
     """
-    if "SUDO_PASSWORD" in os.environ:
-        return (False, None)
-    normalized = _normalize_command_for_detection(command).lower()
-    if _SUDO_STDIN_RE.search(normalized):
+    if "SUDO_PASSWORD" not in os.environ and _SUDO_STDIN_RE.search(_normalize_command_for_detection(command).lower()):
         return (True, "sudo password guessing via stdin (sudo -S)")
     return (False, None)
 
@@ -227,20 +221,16 @@ def detect_hardline_command(command: str) -> tuple:
         variant_lower = command_variant.lower()
         masked_lower: str | None = None
         for pattern_re, description, quote_masked in HARDLINE_PATTERNS_COMPILED:
-            if quote_masked:
+            if quote_masked and masked_lower is None:
                 # Positionless rules see quoted prose as DATA, except under
                 # shell carriers (sh -c, eval, source) whose quoted argument is
                 # code — those scan raw. bash -c payloads also surface as their
                 # own raw variants via _execution_flag_findings.
-                if masked_lower is None:
-                    if _contains_shell_carrier(command_variant):
-                        masked_lower = variant_lower
-                    else:
-                        masked_lower = _mask_quoted_prose(command_variant).lower()
-                haystack = masked_lower
-            else:
-                haystack = variant_lower
-            if pattern_re.search(haystack):
+                masked_lower = (
+                    variant_lower if _contains_shell_carrier(command_variant)
+                    else _mask_quoted_prose(command_variant).lower()
+                )
+            if pattern_re.search(masked_lower if quote_masked else variant_lower):
                 return (True, description)
     return (False, None)
 
@@ -550,67 +540,48 @@ def _home_prefix_fold_regex(path: str):
     Returns ``None`` for an unset/degenerate path (fewer than two components:
     ``/``, ``C:\\``, ``""``) so a stray HOME cannot rewrite unrelated prefixes.
     """
-    if not path:
-        return None
-    components = [c for c in re.split(r"[/\\]+", path) if c]
+    components = [c for c in re.split(r"[/\\]+", path) if c] if path else []
     if len(components) < 2:
         return None
-    body = r"[/\\]+".join(re.escape(c) for c in components)
     # Optional leading root separator; a Windows drive letter is a component.
-    return re.compile(r"[/\\]*" + body + _PATH_TAIL)
+    return re.compile(r"[/\\]*" + r"[/\\]+".join(re.escape(c) for c in components) + _PATH_TAIL)
 
 
 def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
     """Fold each resolved home prefix in *command* to *replacement* (no trailing
     separator; the tail supplies it). Longest first so a deeper home folds
     before a shorter overlapping one that would otherwise clobber it."""
-    seen: set[str] = set()
-    for path in sorted((p for p in paths if p), key=len, reverse=True):
-        if path in seen:
-            continue
-        seen.add(path)
+    for path in dict.fromkeys(sorted((p for p in paths if p), key=len, reverse=True)):
         pattern = _home_prefix_fold_regex(path)
         if pattern is not None:
-            command = pattern.sub(
-                lambda m: replacement + m.group("tail").replace("\\", "/"),
-                command,
-            )
+            command = pattern.sub(lambda m: replacement + m.group("tail").replace("\\", "/"), command)
     return command
 
 
-def _user_home_candidates() -> list[str]:
-    # expanduser, realpath, and an explicit HOME — Windows expanduser uses
-    # USERPROFILE and ignores HOME.
-    home = os.path.expanduser("~")
-    return [home, os.path.realpath(home), os.environ.get("HOME", "")]
-
-
-def _hermes_home_candidates() -> list[str]:
-    from hermes_constants import get_hermes_home
-    home = get_hermes_home().expanduser()
-    return [str(home), str(home.resolve(strict=False))]
-
-
-def _rewrite_home(command: str, candidates, replacement: str) -> str:
-    """Fold a resolved absolute home prefix to its ``~`` spelling; no-op when
-    the home is unset, degenerate, or unresolvable."""
+def _rewrite_resolved_user_home(command: str) -> str:
+    """User home (expanduser / realpath / $HOME) -> ``~/``; no-op when the home
+    is unset, degenerate, or unresolvable."""
     try:
-        paths = candidates()
+        # expanduser, realpath, and an explicit HOME — Windows expanduser uses
+        # USERPROFILE and ignores HOME.
+        home = os.path.expanduser("~")
+        paths = [home, os.path.realpath(home), os.environ.get("HOME", "")]
     except Exception:
         return command
-    return _fold_home_prefixes(command, paths, replacement)
-
-
-def _rewrite_resolved_user_home(command: str) -> str:
-    """User home (expanduser / realpath / $HOME) -> ``~/``."""
-    return _rewrite_home(command, _user_home_candidates, "~")
+    return _fold_home_prefixes(command, paths, "~")
 
 
 def _rewrite_resolved_hermes_home(command: str) -> str:
     """Resolved HERMES_HOME (and its realpath) -> ``~/.hermes/`` so the
     _HERMES_CONFIG_PATH / _HERMES_ENV_PATH rules match Docker/gateway
     deployments that spell the absolute path."""
-    return _rewrite_home(command, _hermes_home_candidates, "~/.hermes")
+    try:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home().expanduser()
+        paths = [str(home), str(home.resolve(strict=False))]
+    except Exception:
+        return command
+    return _fold_home_prefixes(command, paths, "~/.hermes")
 
 
 _PARAM_REPLACEMENT_RE = re.compile(r"\$\{[^}/\s]+/[^}/]*/(?P<replacement>[^}]*)\}")
@@ -698,18 +669,9 @@ def _command_parser_limit_exceeded(command: str) -> bool:
         return True
     # Long separator-free input has no compound-command utility and would make
     # every regex inspect one giant token.
-    if (
-        len(command) > _MAX_SEPARATOR_FREE_COMMAND_CHARS
-        and not any(char in command for char in ";&|\n")
-    ):
+    if len(command) > _MAX_SEPARATOR_FREE_COMMAND_CHARS and not any(char in command for char in ";&|\n"):
         return True
-    separators = 0
-    for char in command:
-        if char in ";&|\n":
-            separators += 1
-            if separators >= _MAX_DETECTION_SEGMENTS:
-                return True
-    return False
+    return sum(command.count(char) for char in ";&|\n") >= _MAX_DETECTION_SEGMENTS
 
 
 def _shell_tokens_with_spans(segment: str, start: int):
@@ -773,16 +735,13 @@ def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], boo
         segment_at = command.find(segment, offset)
         offset = segment_at + len(segment)
         for start, _, word in _iter_shell_command_word_spans(segment):
-            if os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower() not in {
-                "grep", "egrep",
-            }:
+            if os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower() not in {"grep", "egrep"}:
                 continue
             tokens = _shell_tokens_with_spans(segment, start)
             if tokens is None:
                 return [], True
             args = tokens[1:]
-            pcre = False
-            explicit_patterns = False
+            pcre = explicit_patterns = False
             pattern_indexes: list[int] = []
             operand_index = None
             i = 0
@@ -791,49 +750,32 @@ def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], boo
                 token = args[i][0]
                 if options and token == "--":
                     options = False
-                    i += 1
-                    continue
-                if options and token.startswith("--"):
+                elif options and token.startswith("--"):
                     option, equals, _ = token.partition("=")
-                    if option == "--perl-regexp":
-                        pcre = True
-                    if option in {"--regexp", "--file"}:
-                        explicit_patterns = True
-                    if option in _GREP_OPTIONS_WITH_ARG and not equals:
-                        if i + 1 >= len(args):
-                            return [], True
-                        if option == "--regexp":
-                            pattern_indexes.append(i + 1)
-                        i += 2
-                        continue
-                    if option == "--regexp" and equals:
-                        pattern_indexes.append(i)
-                    i += 1
-                    continue
-                if options and token.startswith("-") and token != "-":
+                    pcre = pcre or option == "--perl-regexp"
+                    explicit_patterns = explicit_patterns or option in {"--regexp", "--file"}
+                    takes_next = option in _GREP_OPTIONS_WITH_ARG and not equals
+                    if takes_next and i + 1 >= len(args):
+                        return [], True
+                    if option == "--regexp":
+                        pattern_indexes.append(i + 1 if takes_next else i)
+                    i += 1 if takes_next else 0
+                elif options and token.startswith("-") and token != "-":
                     chars = token[1:]
-                    j = 0
-                    while j < len(chars):
-                        char = chars[j]
-                        if char == "P":
-                            pcre = True
-                        if char in {"e", "f"}:
-                            explicit_patterns = True
+                    for j, char in enumerate(chars):
+                        pcre = pcre or char == "P"
+                        explicit_patterns = explicit_patterns or char in {"e", "f"}
                         if char in _GREP_SHORT_OPTIONS_WITH_ARG:
-                            if j + 1 < len(chars):
-                                if char == "e":
-                                    pattern_indexes.append(i)
-                            else:
-                                if i + 1 >= len(args):
-                                    return [], True
-                                if char == "e":
-                                    pattern_indexes.append(i + 1)
-                                i += 1
+                            # The first argument-taking short option owns the rest
+                            # of the bundle, or the next token when it comes last.
+                            attached = j + 1 < len(chars)
+                            if not attached and i + 1 >= len(args):
+                                return [], True
+                            if char == "e":
+                                pattern_indexes.append(i if attached else i + 1)
+                            i += 0 if attached else 1
                             break
-                        j += 1
-                    i += 1
-                    continue
-                if operand_index is None:
+                elif operand_index is None:
                     operand_index = i
                 i += 1
             if not explicit_patterns:
@@ -841,24 +783,30 @@ def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], boo
                     return [], pcre
                 pattern_indexes.append(operand_index)
             if pcre:
-                for index in pattern_indexes:
-                    _, token_start, token_end, quoted = args[index]
-                    if quoted:
-                        spans.append((segment_at + token_start, segment_at + token_end))
+                spans.extend(
+                    (segment_at + token_start, segment_at + token_end)
+                    for _, token_start, token_end, quoted in map(args.__getitem__, pattern_indexes) if quoted
+                )
     return spans, False
+
+
+def _splice(command: str, edits) -> str:
+    """Rebuild *command* with sorted, non-overlapping ``(start, end, text)`` edits
+    applied in one pass (re-slicing per edit is quadratic on 10k+ segments)."""
+    parts: list[str] = []
+    previous = 0
+    for start, end, text in edits:
+        parts.extend((command[previous:start], text))
+        previous = end
+    parts.append(command[previous:])
+    return "".join(parts)
 
 
 def _grep_safe_detection_variant(command: str) -> tuple[str, bool]:
     spans, malformed = _quoted_grep_pattern_spans(command)
     if malformed or not spans:
         return command, malformed
-    parts = []
-    previous = 0
-    for start, end in spans:
-        parts.extend((command[previous:start], " " * (end - start)))
-        previous = end
-    parts.append(command[previous:])
-    return "".join(parts), False
+    return _splice(command, [(start, end, " " * (end - start)) for start, end in spans]), False
 
 
 _INTERPRETER_NAME_RES = (
@@ -873,10 +821,7 @@ _INTERPRETER_NAME_RES = (
 
 def _interpreter_family(executable: str) -> str | None:
     name = os.path.basename(executable).lower()
-    for family, name_re in _INTERPRETER_NAME_RES:
-        if name_re.fullmatch(name):
-            return family
-    return None
+    return next((family for family, name_re in _INTERPRETER_NAME_RES if name_re.fullmatch(name)), None)
 
 
 def _shell_segment_tokens(segment: str, start: int) -> list[str] | None:
@@ -887,8 +832,7 @@ def _shell_segment_tokens(segment: str, start: int) -> list[str] | None:
     """
     try:
         lexer = shlex.shlex(segment[start:], posix=True, punctuation_chars="<>")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
+        lexer.whitespace_split, lexer.commenters = True, ""
         return list(lexer)
     except ValueError:
         return None
@@ -907,50 +851,38 @@ def _iter_top_level_shell_segments(command: str):
 
 
 def _split_option(token: str) -> tuple[str, str | None]:
-    if "=" in token:
-        option, value = token.split("=", 1)
-        return option, value
-    return token, None
+    option, equals, value = token.partition("=")
+    return option, (value if equals else None)
 
 
 def _interpreter_exec_flag(family: str, args: list[str]) -> str | None:
     """Return an execution-bearing interpreter option, if present."""
-    flags = _INTERPRETER_EXEC_FLAGS[family]
+    flags, with_arg = _INTERPRETER_EXEC_FLAGS[family], _INTERPRETER_WITH_ARG[family]
+    powershell = family == "powershell"
     skip_value = False
     for token in args:
         if skip_value:
             skip_value = False
             continue
-        if token == "--":
-            break
-        if family != "powershell" and not token.startswith("-"):
+        if token == "--" or (not powershell and not token.startswith("-")):
             break
         option, attached = _split_option(token)
-        comparable = option.lower() if family == "powershell" else option
+        comparable = option.lower() if powershell else option
         if comparable in flags:
             return comparable
-        with_arg = _INTERPRETER_WITH_ARG[family]
         # `-Wonce` and `ruby -rjson` attach an option value; they are not
         # short-option bundles containing an execution flag. PowerShell's
         # normal long options also use one dash, so bundle parsing never
         # applies to that family.
         has_attached_option_value = any(
             option.startswith(short) and len(option) > len(short)
-            for short in with_arg
-            if short.startswith("-") and not short.startswith("--")
+            for short in with_arg if short.startswith("-") and not short.startswith("--")
         )
-        if (
-            family != "powershell"
-            and not option.startswith("--")
-            and len(option) > 2
-            and not has_attached_option_value
-        ):
+        if not powershell and not option.startswith("--") and len(option) > 2 and not has_attached_option_value:
             for char in option[1:]:
-                short = f"-{char}"
-                if short in flags:
-                    return short
-        if comparable in with_arg and attached is None:
-            skip_value = True
+                if f"-{char}" in flags:
+                    return f"-{char}"
+        skip_value = comparable in with_arg and attached is None
     return None
 
 
@@ -974,23 +906,17 @@ def _bash_exec_payload(args: list[str]) -> tuple[bool, str | None]:
         if token in _BASH_OPTIONS_WITH_ARG:
             index += 2
             continue
-        if token.startswith("--"):
-            index += 1
-            continue
-
         chars = token[1:]
         # Bash option letters are case-sensitive; restricting to the documented
         # alphabet preserves invalid controls such as `-Wc`.
-        if not set(chars) <= _BASH_SHORT_OPTION_LETTERS:
+        if token.startswith("--") or not set(chars) <= _BASH_SHORT_OPTION_LETTERS:
             index += 1
             continue
-        consumed_option_arg = "O" in chars or "o" in chars
-        if "c" not in chars:
-            index += 1 + int(consumed_option_arg)
-            continue
-        payload_index = index + 1 + int(consumed_option_arg)
-        payload = args[payload_index] if payload_index < len(args) else None
-        return True, payload
+        consumed_option_arg = int("O" in chars or "o" in chars)
+        if "c" in chars:
+            payload_index = index + 1 + consumed_option_arg
+            return True, (args[payload_index] if payload_index < len(args) else None)
+        index += 1 + consumed_option_arg
     return False, None
 
 
@@ -1014,23 +940,16 @@ def _read_tool_exec_flag(tool: str, args: list[str]) -> tuple[str, str] | None:
             if payload:
                 return matched, payload
             index += 2 if payload is not None and "=" not in token else 1
-            continue
-
-        if option in _READ_TOOL_LONG_OPTIONS_WITH_ARG[tool] and payload is None:
+        elif option in _READ_TOOL_LONG_OPTIONS_WITH_ARG[tool] and payload is None:
             index += 2
-            continue
-
-        # In a short bundle, the first argument-taking option owns the rest of
-        # the token, or the following token when it occurs last.
-        if token.startswith("-") and not token.startswith("--") and len(token) > 1:
-            for short_index, char in enumerate(token[1:], start=1):
-                if char in _READ_TOOL_SHORT_OPTIONS_WITH_ARG[tool]:
-                    index += 2 if short_index == len(token) - 1 else 1
-                    break
-            else:
-                index += 1
-            continue
-        index += 1
+        elif token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            # In a short bundle, the first argument-taking option owns the rest of
+            # the token, or the following token when it occurs last.
+            shorts = _READ_TOOL_SHORT_OPTIONS_WITH_ARG[tool]
+            owner = next((k for k, char in enumerate(token[1:], start=1) if char in shorts), None)
+            index += 2 if owner == len(token) - 1 else 1
+        else:
+            index += 1
     return None
 
 
@@ -1042,18 +961,14 @@ def _execution_flag_findings(command: str):
             tokens = _shell_segment_tokens(segment, start)
             executable_name = os.path.basename(executable).lower()
             family = _interpreter_family(executable)
-            is_program_bearing = (
-                family is not None or executable_name in _READ_TOOL_EXEC_FLAGS
-            )
             if tokens is None:
-                if is_program_bearing:
+                if family is not None or executable_name in _READ_TOOL_EXEC_FLAGS:
                     yield (_MALFORMED_EXEC_DESCRIPTION, None)
                 continue
             if not tokens:
                 continue
             if family:
-                flag = _interpreter_exec_flag(family, tokens[1:])
-                if flag:
+                if _interpreter_exec_flag(family, tokens[1:]):
                     yield ("script execution via -e/-c flag", None)
                     continue
                 if any(token.startswith("<<") for token in tokens[1:]):
@@ -1066,8 +981,7 @@ def _execution_flag_findings(command: str):
             if executable_name in _READ_TOOL_EXEC_FLAGS:
                 finding = _read_tool_exec_flag(executable_name, tokens[1:])
                 if finding:
-                    option, payload = finding
-                    yield (f"arbitrary program execution via {executable_name} {option}", payload)
+                    yield (f"arbitrary program execution via {executable_name} {finding[0]}", finding[1])
 
 
 def _skip_shell_whitespace(command: str, pos: int) -> int:
@@ -1157,10 +1071,6 @@ def _read_shell_word(command: str, pos: int) -> tuple[int, int, str]:
     return (start, end, command[start:end])
 
 
-def _is_simple_shell_literal(value: str) -> bool:
-    return bool(value and _SIMPLE_SHELL_LITERAL_RE.fullmatch(value))
-
-
 def _literal_command_substitution_output(script: str) -> str | None:
     """Resolve tiny literal command substitutions without executing a shell."""
     try:
@@ -1169,25 +1079,16 @@ def _literal_command_substitution_output(script: str) -> str | None:
         return None
     if not tokens:
         return None
-
-    command = tokens[0].lower()
-    args = tokens[1:]
+    command, args = tokens[0].lower(), tokens[1:]
     if command == "echo":
         while args and re.fullmatch(r"-[nEe]+", args[0]):
             args = args[1:]
-        if len(args) == 1 and _is_simple_shell_literal(args[0]):
-            return args[0]
+    elif command != "printf":
         return None
-
-    if command == "printf":
-        if len(args) == 1 and _is_simple_shell_literal(args[0]):
-            return args[0]
-        if (
-            len(args) == 2
-            and args[0] == "%s"
-            and _is_simple_shell_literal(args[1])
-        ):
-            return args[1]
+    if len(args) == 1 and _SIMPLE_SHELL_LITERAL_RE.fullmatch(args[0]):
+        return args[0]
+    if command == "printf" and len(args) == 2 and args[0] == "%s" and _SIMPLE_SHELL_LITERAL_RE.fullmatch(args[1]):
+        return args[1]
     return None
 
 
@@ -1278,17 +1179,7 @@ def _mark_command_starts(command: str) -> str:
     produced, so ``--title "block (reboot)"`` is left as-is.
     """
     offsets = sorted(o for o in _iter_shell_command_starts(command) if o > 0)
-    if not offsets:
-        return command
-    # Build once rather than re-slicing the full command per segment (quadratic
-    # at 10k+ compound-command segments).
-    parts: list[str] = []
-    previous = 0
-    for offset in offsets:
-        parts.extend((command[previous:offset], "\n"))
-        previous = offset
-    parts.append(command[previous:])
-    return "".join(parts)
+    return _splice(command, [(o, o, "\n") for o in offsets]) if offsets else command
 
 
 def _mask_quoted_newlines(command: str) -> str:
@@ -1313,44 +1204,28 @@ def _mask_quoted_newlines(command: str) -> str:
 
 def _iter_shell_command_word_spans(command: str):
     """Yield command-position words that may be executable names."""
-    for command_start in _iter_shell_command_starts(command):
-        pos = command_start
-        prefix_words = 0
-        skip_wrapper_options = False
-        skip_next_wrapper_arg = False
-        while prefix_words < 12:
+    for pos in _iter_shell_command_starts(command):
+        skip_wrapper_options = skip_next_wrapper_arg = False
+        for _ in range(12):
             word_start, word_end, word = _read_shell_word(command, pos)
             if word_start == word_end:
                 break
+            pos = word_end
             deobfuscated = _deobfuscate_shell_word_for_detection(word)
             lower_word = deobfuscated.lower()
             if skip_next_wrapper_arg:
                 skip_next_wrapper_arg = False
-                pos = word_end
-                prefix_words += 1
                 continue
             if skip_wrapper_options and lower_word.startswith("-"):
-                option_name = lower_word.split("=", 1)[0]
-                skip_next_wrapper_arg = (
-                    "=" not in lower_word
-                    and option_name in _SUDO_OPTIONS_WITH_ARG
-                )
-                pos = word_end
-                prefix_words += 1
+                skip_next_wrapper_arg = "=" not in lower_word and lower_word in _SUDO_OPTIONS_WITH_ARG
                 continue
-
             yield (word_start, word_end, word)
-            prefix_words += 1
-
             if lower_word in _COMMAND_WRAPPER_WORDS:
                 skip_wrapper_options = lower_word in {"sudo", "env"}
-                pos = word_end
-                continue
-            if _ENV_ASSIGNMENT_RE.fullmatch(deobfuscated):
+            elif _ENV_ASSIGNMENT_RE.fullmatch(deobfuscated):
                 skip_wrapper_options = False
-                pos = word_end
-                continue
-            break
+            else:
+                break
 
 
 def _command_detection_variants(command: str):
@@ -1424,17 +1299,14 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
         return False
     if len(argv) != 3 or argv[0] != "rm" or argv[1] != "-f":
         return False
-
     operand = argv[2]
     temp_dir = os.path.realpath(tempfile.gettempdir())
     basename = os.path.basename(operand)
-    if operand != os.path.join(temp_dir, basename):
-        return False
-
-    target = os.path.realpath(operand)
-    if os.path.dirname(target) != temp_dir:
-        return False
-    return re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
+    return (
+        operand == os.path.join(temp_dir, basename)
+        and os.path.dirname(os.path.realpath(operand)) == temp_dir
+        and re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
+    )
 
 
 _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION = (
@@ -1468,7 +1340,6 @@ def detect_dangerous_command(command: str) -> tuple:
         return (True, _PARSER_LIMIT_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION)
     if _is_verification_artifact_cleanup(command):
         return (False, None, None)
-
     for command_variant in _command_detection_variants(command):
         command_lower = command_variant.lower()
         for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
@@ -1478,9 +1349,5 @@ def detect_dangerous_command(command: str) -> tuple:
     for description, _ in _execution_flag_findings(normalized):
         return (True, description, description)
     if _is_shell_token_spliced_gateway_lifecycle(command):
-        return (
-            True,
-            _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION,
-            _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION,
-        )
+        return (True, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION)
     return (False, None, None)
