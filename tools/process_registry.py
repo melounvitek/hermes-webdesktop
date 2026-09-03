@@ -837,13 +837,9 @@ class ProcessRegistry:
 
         safe_command = _rewrite_bg(command)
         session = ProcessSession(
-            id=f"proc_{uuid.uuid4().hex[:12]}",
-            command=command,
-            task_id=task_id,
-            owner_task_id=owner_task_id or task_id,
-            session_key=session_key,
-            cwd=_resolve_safe_cwd(cwd or os.getcwd()),
-            started_at=time.time(),
+            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
+            owner_task_id=owner_task_id or task_id, session_key=session_key,
+            cwd=_resolve_safe_cwd(cwd or os.getcwd()), started_at=time.time(),
         )
 
         pty_scope_attempted = False
@@ -923,15 +919,9 @@ class ProcessRegistry:
         the correct sandbox context.
         """
         session = ProcessSession(
-            id=f"proc_{uuid.uuid4().hex[:12]}",
-            command=command,
-            task_id=task_id,
-            owner_task_id=owner_task_id or task_id,
-            session_key=session_key,
-            cwd=cwd,
-            started_at=time.time(),
-            env_ref=env,
-            pid_scope="sandbox",
+            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
+            owner_task_id=owner_task_id or task_id, session_key=session_key, cwd=cwd,
+            started_at=time.time(), env_ref=env, pid_scope="sandbox",
         )
         temp_dir = self._env_temp_dir(env)
         log_path, pid_path, exit_path = (f"{temp_dir}/hermes_bg_{session.id}.{ext}" for ext in ("log", "pid", "exit"))
@@ -1997,10 +1987,8 @@ class ProcessRegistry:
             fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
             fields.update(
                 command=entry.get("command", "unknown"),
-                owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
-                pid=pid,
-                host_start_time=recorded_start,
-                pid_scope=pid_scope,
+                owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""), pid=pid,
+                host_start_time=recorded_start, pid_scope=pid_scope,
                 started_at=entry.get("started_at", time.time()),
             )
             # detached: can't read output, but can report status + kill
