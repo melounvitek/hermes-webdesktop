@@ -949,8 +949,7 @@ def _read_git_revision_fingerprint(repo_root: Path) -> str | None:
                     common_dir = (git_dir / rel).resolve()
             except OSError:
                 pass
-        head_file = git_dir / "HEAD"
-        head = head_file.read_text(encoding="utf-8", errors="replace").strip()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
         if head.startswith("ref:"):
             ref = head.split(":", 1)[1].strip()
             # Loose refs may live in the worktree gitdir OR the common dir
@@ -1035,6 +1034,44 @@ def _termux_should_prefetch_update_check() -> bool:
     return os.environ.get("HERMES_TERMUX_PREFETCH_UPDATES") == "1"
 
 
+def _dotenv_has_provider_key(env_file: Path, provider_env_vars: set) -> bool:
+    """True if ~/.hermes/.env assigns a non-empty value to any provider key."""
+    if not env_file.exists():
+        return False
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:]
+            key, _, val = line.partition("=")
+            if key.strip() in provider_env_vars and val.strip().strip("'\""):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _auth_store_logged_in(auth_file: Path, registry, strict_profile_scope: bool) -> bool:
+    """True if auth.json's active provider is logged in (api_key providers ignored under strict scope)."""
+    from hermes_cli.auth import get_auth_status
+
+    if not auth_file.exists():
+        return False
+    try:
+        auth = json.loads(auth_file.read_text(encoding="utf-8-sig"))
+        active = auth.get("active_provider")
+        active_config = registry.get(str(active or "").strip().lower())
+        if active and not (
+            strict_profile_scope and active_config and active_config.auth_type == "api_key"
+        ):
+            return bool(get_auth_status(active).get("logged_in"))
+    except Exception:
+        pass
+    return False
+
+
 def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     """Check if at least one inference provider is usable.
 
@@ -1043,13 +1080,8 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     env and host-wide fallbacks (gh auth, Claude Code credentials) must not
     make it appear ready. Unscoped callers keep the legacy behavior.
     """
-    from hermes_cli.config import get_env_path, get_hermes_home, load_config
-    from hermes_cli.auth import get_auth_status
-
-    # "Explicitly configured" = model differs from the hardcoded default; gates
-    # external tool credentials (Claude Code) so they don't skip setup on a
-    # fresh install.
-    from hermes_cli.config import DEFAULT_CONFIG
+    from hermes_cli.config import DEFAULT_CONFIG, get_env_path, get_hermes_home, load_config
+    from hermes_cli.auth import PROVIDER_REGISTRY, get_auth_status
 
     cfg = load_config()
     model_cfg = cfg.get("model")
@@ -1060,12 +1092,12 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
             from hermes_cli.config import split_model_config_default
             _model_name, _ = split_model_config_default(_model_name)
     _model_name = str(_model_name).strip()
+    # "Explicitly configured" = model differs from the hardcoded default; gates
+    # Claude Code credentials so they don't skip setup on a fresh install.
     _has_hermes_config = _model_name and _model_name != DEFAULT_CONFIG.get("model", "")
 
     # Env vars (.env or shell). OPENAI_BASE_URL alone counts — local models
     # (vLLM, llama.cpp) often need no API key.
-    from hermes_cli.auth import PROVIDER_REGISTRY
-
     provider_env_vars = {
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
@@ -1084,60 +1116,31 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
         read_provider_env = os.getenv
     if any(read_provider_env(v) for v in provider_env_vars):
         return True
-
-    # Check .env file for keys
-    env_file = get_env_path()
-    if env_file.exists():
-        try:
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                if line.startswith("export "):
-                    line = line[7:]
-                key, _, val = line.partition("=")
-                val = val.strip().strip("'\"")
-                if key.strip() in provider_env_vars and val:
-                    return True
-        except Exception:
-            pass
+    if _dotenv_has_provider_key(get_env_path(), provider_env_vars):
+        return True
 
     # Cheap on-disk checks (auth.json, config.yaml) first: the PROVIDER_REGISTRY
     # sweep below spawns subprocesses (gh) and can take 15-20s — long enough
     # that desktop setup.status calls time out.
-    auth_file = get_hermes_home() / "auth.json"
-    if auth_file.exists():
-        try:
-            auth = json.loads(auth_file.read_text(encoding="utf-8-sig"))
-            active = auth.get("active_provider")
-            active_config = PROVIDER_REGISTRY.get(str(active or "").strip().lower())
-            if active and not (
-                strict_profile_scope and active_config and active_config.auth_type == "api_key"
-            ):
-                status = get_auth_status(active)
-                if status.get("logged_in"):
-                    return True
-        except Exception:
-            pass
+    if _auth_store_logged_in(get_hermes_home() / "auth.json", PROVIDER_REGISTRY, strict_profile_scope):
+        return True
 
     # model as a dict with provider/base_url/api_key means setup ran (fresh
     # installs have a plain string); also covers custom endpoints kept in config.
-    if isinstance(model_cfg, dict):
-        cfg_provider = (model_cfg.get("provider") or "").strip()
-        cfg_base_url = (model_cfg.get("base_url") or "").strip()
-        cfg_api_key = (model_cfg.get("api_key") or "").strip()
-        if cfg_provider or cfg_base_url or cfg_api_key:
-            return True
+    if isinstance(model_cfg, dict) and any(
+        (model_cfg.get(k) or "").strip() for k in ("provider", "base_url", "api_key")
+    ):
+        return True
 
     # Provider-specific auth fallbacks (e.g. Copilot via gh auth).
     if not strict_profile_scope:
         try:
-            for provider_id, pconfig in PROVIDER_REGISTRY.items():
-                if pconfig.auth_type != "api_key":
-                    continue
-                status = get_auth_status(provider_id)
-                if status.get("logged_in"):
-                    return True
+            if any(
+                get_auth_status(pid).get("logged_in")
+                for pid, pconfig in PROVIDER_REGISTRY.items()
+                if pconfig.auth_type == "api_key"
+            ):
+                return True
         except Exception:
             pass
 
@@ -1210,22 +1213,15 @@ def _confirm_startup_expensive_model_override(args) -> None:
     # Intentionally independent of --yolo / --accept-hooks: those approve local
     # command risk, not paid aggregator spend or a surprising provider route.
     is_interactive = sys.stdin.isatty()
-    allow_unattended_data_training = (
-        security_cfg.get("allow_data_training_tiers_noninteractive") is True
-    )
-    if not is_interactive and allow_unattended_data_training:
-        acknowledged = [
-            warning for warning in warnings if warning.kind == "data_policy"
-        ]
+    if not is_interactive and security_cfg.get("allow_data_training_tiers_noninteractive") is True:
+        acknowledged = [w for w in warnings if w.kind == "data_policy"]
         if acknowledged:
             sys.stderr.write(combined_message(acknowledged) + "\n")
             sys.stderr.write(
                 "Proceeding in non-interactive mode because "
                 "security.allow_data_training_tiers_noninteractive is true.\n"
             )
-            warnings = [
-                warning for warning in warnings if warning.kind != "data_policy"
-            ]
+            warnings = [w for w in warnings if w.kind != "data_policy"]
             if not warnings:
                 return
 
@@ -1541,6 +1537,47 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
                     sys.exit(1)
 
 
+def _apply_in_dir(args) -> None:
+    """--in DIR: chdir first so workspace-scoped lookups key off DIR; pins the session there."""
+    in_dir = getattr(args, "in_dir", None)
+    if not in_dir:
+        return
+    # Git Bash / MSYS hands us POSIX-style paths (`--in ~` → `/c/Users/x`);
+    # translate drive-root spellings to native Windows form. No-op elsewhere.
+    from tools.environments.local import _msys_to_windows_path
+
+    _target_dir = os.path.abspath(os.path.expanduser(_msys_to_windows_path(in_dir)))
+    if not os.path.isdir(_target_dir):
+        print(f"Error: --in directory not found: {in_dir}")
+        sys.exit(1)
+    try:
+        os.chdir(_target_dir)
+    except OSError as e:
+        print(f"Error: cannot enter --in directory {in_dir}: {e}")
+        sys.exit(1)
+    args.no_restore_cwd = True
+
+
+def _import_foreign_resume(args) -> None:
+    """--resume @claude / @codex: import a foreign session and resume it."""
+    _resume_foreign = getattr(args, "resume", None)
+    if not (isinstance(_resume_foreign, str) and _resume_foreign.strip().lower() in ("@claude", "@codex")):
+        return
+    from hermes_cli.foreign_sessions import import_foreign_session, pick_foreign_session
+
+    _picked = pick_foreign_session(_resume_foreign.strip().lower().lstrip("@"))
+    if _picked is None:
+        sys.exit(1)
+    try:
+        _imported_id = import_foreign_session(_picked.source, _picked.path)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"✓ Imported as {_imported_id} — resuming it now.")
+    print(f"  (later: hermes --resume {_imported_id})")
+    args.resume = _imported_id
+
+
 def _resolve_chat_session_args(args, use_tui: bool) -> None:
     """Normalize --in / --resume / --continue on ``args`` before agent init.
 
@@ -1551,24 +1588,7 @@ def _resolve_chat_session_args(args, use_tui: bool) -> None:
     cd back into a resumed session's recorded cwd (best-effort, opt-out via
     --no-restore-cwd, skipped under --worktree).
     """
-    in_dir = getattr(args, "in_dir", None)
-    if in_dir:
-        # Git Bash / MSYS hands us POSIX-style paths (`--in ~` → `/c/Users/x`);
-        # translate drive-root spellings to native Windows form. No-op elsewhere.
-        from tools.environments.local import _msys_to_windows_path
-
-        _target_dir = os.path.abspath(
-            os.path.expanduser(_msys_to_windows_path(in_dir))
-        )
-        if not os.path.isdir(_target_dir):
-            print(f"Error: --in directory not found: {in_dir}")
-            sys.exit(1)
-        try:
-            os.chdir(_target_dir)
-        except OSError as e:
-            print(f"Error: cannot enter --in directory {in_dir}: {e}")
-            sys.exit(1)
-        args.no_restore_cwd = True
+    _apply_in_dir(args)
 
     # --resume latest: same resolution as bare `-c`. The keyword wins over a
     # session literally titled "latest" (still reachable by ID or `-c latest`).
@@ -1585,29 +1605,7 @@ def _resolve_chat_session_args(args, use_tui: bool) -> None:
 
     _resolve_continue_arg(args, use_tui=use_tui)
 
-    # --resume @claude / @codex: import a foreign session and resume it.
-    _resume_foreign = getattr(args, "resume", None)
-    if isinstance(_resume_foreign, str) and _resume_foreign.strip().lower() in (
-        "@claude",
-        "@codex",
-    ):
-        from hermes_cli.foreign_sessions import (
-            import_foreign_session,
-            pick_foreign_session,
-        )
-
-        _foreign_source = _resume_foreign.strip().lower().lstrip("@")
-        _picked = pick_foreign_session(_foreign_source)
-        if _picked is None:
-            sys.exit(1)
-        try:
-            _imported_id = import_foreign_session(_picked.source, _picked.path)
-        except ValueError as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-        print(f"✓ Imported as {_imported_id} — resuming it now.")
-        print(f"  (later: hermes --resume {_imported_id})")
-        args.resume = _imported_id
+    _import_foreign_resume(args)
 
     resume_val = getattr(args, "resume", None)
     if resume_val:
@@ -2185,7 +2183,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_stop_process_trees", "_sync_with_upstream_if_needed", "_update_node_dependencies",
         "_update_via_zip", "_upgrade_pip_before_lazy_refresh", "_validate_critical_files_syntax",
         "_validate_critical_modules_import", "_venv_launcher_ancestors",
-        "_wait_for_windows_update_gateway_exit",
+        "_wait_for_windows_update_gateway_exit", "_warn_orphaned_update_autostashes",
         "_warn_pending_fleet_restart_on_startup", "_write_marker_file",
         "_write_update_incomplete_marker",
     ),
@@ -2350,16 +2348,13 @@ def _finalize_update_receipt(code: int, reason: str) -> None:
         pass
 
 
-def cmd_update(args):
-    """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
-    from hermes_cli.config import (
-        is_managed,
-        managed_error,
-    )
+def _update_preflight_handled(args) -> bool:
+    """Managed-install refusal, --plan, admission gate, --check. True = nothing more to do."""
+    from hermes_cli.config import is_managed, managed_error
 
     if is_managed():
         managed_error("update Hermes Agent")
-        return
+        return True
 
     # --plan is read-only and deployment-kind aware, so it runs BEFORE the
     # docker/nix/apt refusal gates: on an image/package-managed install the
@@ -2371,7 +2366,7 @@ def cmd_update(args):
         )
 
         print_update_plan(collect_runtime_inventory())
-        return
+        return True
 
     # Image/package-managed admission gate: baked provenance marker first
     # (fail-closed on malformed), then docker/nix/apt heuristics. Records a
@@ -2394,8 +2389,14 @@ def cmd_update(args):
             branch=branch,
             branch_explicit=bool(getattr(args, "branch", None)),
         )
-        return
+        return True
+    return False
 
+
+def cmd_update(args):
+    """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
+    if _update_preflight_handled(args):
+        return
     gateway_mode = getattr(args, "gateway", False)
 
     _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
