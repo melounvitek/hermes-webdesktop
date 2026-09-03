@@ -78,7 +78,6 @@ def _reset_background_review_read_marks() -> None:
 def _resolved_roots(skill_path: Path):
     """``(resolved skill_path, [(root, resolved_root), ...])`` over every resolvable skills root."""
     from agent.skill_utils import get_all_skills_dirs
-
     try:
         resolved = skill_path.resolve()
     except OSError:
@@ -93,7 +92,6 @@ def _resolved_roots(skill_path: Path):
 def _containing_skills_root(skill_path: Path) -> Path:
     """Skills root (local or external_dirs) containing ``skill_path``; local dir if none match."""
     from tools import skill_manager_tool as _smt
-
     resolved, roots = _resolved_roots(skill_path)
     return next((root for root, r in roots if resolved.is_relative_to(r)), _smt._skills_dir())
 
@@ -173,12 +171,10 @@ def _background_review_write_guard(
         from agent.skill_utils import is_external_skill_path
         if is_external_skill_path(skill_dir):
             return _refusal(
-                f"{refuse} skill '{name}': "
-                "the skill lives in skills.external_dirs, which are "
-                "externally owned and read-only to autonomous curation.")
+                f"{refuse} skill '{name}': the skill lives in skills.external_dirs, which are "
+                f"externally owned and read-only to autonomous curation.")
     except Exception:
         logger.debug("external skill guard lookup failed for %s", name, exc_info=True)
-
     try:
         from tools import skill_usage
         for predicate, label in (
@@ -256,7 +252,6 @@ def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
     the tool result or None; never raises (the edit is saved locally and can be proposed later)."""
     try:
         from tools import skills_sync_client as ssc
-
         if not _is_org_mirror(skill_path):
             return None
         if not ssc.sync_org_auto_propose():

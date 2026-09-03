@@ -320,19 +320,16 @@ def capture_before(
 
 def list_entries(skill: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Read the ledger, newest first. Malformed lines are skipped."""
-    path = ledger_path()
-    if not path.exists():
+    try:
+        lines = ledger_path().read_text(encoding="utf-8").splitlines()
+    except OSError:  # missing or unreadable ledger == empty
         return []
     rows: List[Dict[str, Any]] = []
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                with suppress(json.JSONDecodeError):
-                    row = json.loads(line) if line.strip() else None
-                    if isinstance(row, dict):
-                        rows.append(row)
-    except OSError:
-        return []
+    for line in lines:
+        with suppress(json.JSONDecodeError):
+            row = json.loads(line) if line.strip() else None
+            if isinstance(row, dict):
+                rows.append(row)
     if skill:
         rows = [r for r in rows if r.get("skill") == skill]
     rows.reverse()
@@ -366,7 +363,6 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
         return False, f"no ledger entry with id '{entry_id}'"
     if path_err := _validate_entry_paths(entry):
         return False, f"refusing rollback: {path_err}"
-
     before = list(entry.get("before") or [])
     after = list(entry.get("after") or [])
     # Historical hollow delete/archive/purge entries (SKILL.md only): fill from the
@@ -383,7 +379,6 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
         if read_blob(str(item.get("sha256", ""))) is None:
             return False, (f"missing blob {item.get('sha256')} for {item.get('path')}; "
                            "rollback aborted, nothing was changed")
-
     # Safety entry: CURRENT state of every touched path, so the rollback itself is undoable.
     touched = {str(i["path"]) for i in before + after if i.get("path")}
     try:
@@ -398,7 +393,6 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     if safety_id is None:
         return False, ("pre-rollback safety capture failed (ledger disabled or "
                        "unwritable); rollback aborted and current skills were not changed")
-
     # Restore: write every before-file, remove files the mutation created.
     before_paths = {str(i["path"]) for i in before}
     for item in before:
@@ -415,7 +409,6 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
                     removed += 1
             except OSError as e:
                 logger.warning("skill_ledger: could not remove %s during rollback: %s", p, e)
-
     append_entry(
         "rollback", entry.get("skill", "?"), before=safety_before, after=before,
         evidence={"rollback_target": entry_id, "restored": restored, "removed": removed})

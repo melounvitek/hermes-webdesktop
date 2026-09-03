@@ -206,7 +206,6 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     categorized relative path (``mlops/axolotl``) — the two forms skill_view resolves. The
     categorized form matches RELATIVE to the local root only (relative_to raises for external dirs)."""
     from agent.skill_utils import get_all_skills_dirs
-
     local_root = None
     if "/" in name or "\\" in name:
         try:
@@ -216,7 +215,6 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
                 "skills dir resolve failed; categorized lookups fall back to the unresolved path",
                 exc_info=True)
             local_root = _skills_dir()
-
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
@@ -281,7 +279,6 @@ def _skill_not_found_error(name: str, suffix: str = "") -> str:
 def _validate_file_path(file_path: str) -> Optional[str]:
     """Validate a write_file/remove_file path: under an allowed subdir, no escape."""
     from tools.path_security import has_traversal_component
-
     if not file_path:
         return "file_path is required."
     parts = Path(file_path).parts
@@ -303,7 +300,6 @@ def _resolve_supporting_file(skill_dir: Path, file_path: str):
     """Validate ``file_path`` and resolve it inside ``skill_dir``
     -> ``(target, None)`` | ``(None, error_dict)``."""
     from tools.path_security import validate_within_dir
-
     target = skill_dir / (file_path or "")
     err = _validate_file_path(file_path) or validate_within_dir(target, skill_dir)
     return (None, _err(err)) if err else (target, None)
@@ -363,7 +359,7 @@ def _attach_lint_findings(result: Dict[str, Any], skill_md: Path) -> None:
         from tools.skill_linter import lint_skill  # local import: optional path
         findings = lint_skill(skill_md)
     except Exception:
-        return
+        findings = None
     if not findings:
         return
     result["lint_warnings"] = [
@@ -386,7 +382,6 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         return _err(err)
     if existing := _find_skill(name):
         return _err(f"A skill named '{name}' already exists at {existing['path']}.")
-
     skill_dir = _resolve_skill_dir(name, category)
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md = skill_dir / "SKILL.md"
@@ -394,7 +389,6 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     if scan_error := _security_scan_skill(skill_dir):
         shutil.rmtree(skill_dir, ignore_errors=True)
         return _err(scan_error)
-
     root = _skills_dir()
     # Relative when under the profile dir; absolute when created under skills.create_dir.
     display = skill_dir.relative_to(root) if skill_dir.is_relative_to(root) else skill_dir
@@ -456,7 +450,6 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         return _err(f"File not found: {target.relative_to(skill_dir)}")
     if read_guard := _background_review_read_before_write_guard(name, target, "patch", target_label):
         return read_guard
-
     content = target.read_text(encoding="utf-8")
     # Same fuzzy engine as the file patch tool (whitespace/indent/escape normalization,
     # block anchors) so minor formatting mismatches don't fail.
@@ -468,7 +461,6 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
             from tools.fuzzy_match import format_no_match_hint
             match_error += format_no_match_hint(match_error, match_count, old_string, content)
         return _err(match_error) | {"file_preview": _clip(content, 500, "...")}
-
     if err := _validate_content_size(new_content, label=target_label):
         return _err(err)
     if not file_path and (err := _validate_frontmatter(new_content)):
@@ -491,7 +483,6 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
         return guard
     if pinned_err := _pinned_guard(name):
         return _err(pinned_err)
-
     absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
     if absorbed_target:
         if absorbed_target == name:
@@ -499,7 +490,6 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
         if not _find_skill(absorbed_target):
             return _err(f"absorbed_into='{absorbed_target}' does not exist. "
                         f"Create or patch the umbrella skill first, then retry the delete.")
-
     skills_root = _containing_skills_root(skill_dir)
     if unsafe := _validate_delete_target(skill_dir):  # defense-in-depth before rmtree
         return _err(unsafe)
@@ -517,7 +507,6 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
         return {"success": True,
                 "message": f"Skill '{name}' archived ({archive_msg}).{absorbed_note}",
                 "_archived": True}
-
     shutil.rmtree(skill_dir)
     _rmdir_if_empty(skill_dir.parent, skills_root)  # empty category dir, never the root
     return {"success": True, "message": f"Skill '{name}' deleted.{absorbed_note}"}
@@ -540,7 +529,6 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
                     f"bytes / 1 MiB). Consider splitting into smaller files.")
     if err := _validate_content_size(file_content, label=file_path):
         return _err(err)
-
     skill_dir, guard = _locate_for_write(name, "write_file", " Create it first with action='create'.")
     if guard:
         return guard
@@ -572,7 +560,6 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
                 "available_files": available if available else None}
     if read_guard := _background_review_read_before_write_guard(name, target, "remove_file", file_path):
         return read_guard
-
     target.unlink()
     _rmdir_if_empty(target.parent, skill_dir)
     return {"success": True, "message": f"File '{file_path}' removed from skill '{name}'."}
@@ -608,14 +595,12 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
     """Flat-shape gate: stage the full kwargs so approval can replay them; bypassed during replay."""
     if action not in _ACTION_HANDLERS or _skill_gate_bypass.get():
         return None
-
     def _staging(wa):
         payload = {"action": action, "name": name,
                    **{k: v for k, v in payload_kwargs.items() if v is not None}}
         gist_kw = {k: payload_kwargs.get(k) or ""
                    for k in ("content", "file_path", "old_string", "new_string")}
         return payload, wa.skill_gist(action, name, **gist_kw)
-
     return _run_write_gate(_staging)
 
 
@@ -656,12 +641,10 @@ def _maybe_debounced_sync_push(skill_name: str) -> None:
             return
     except Exception:
         return
-
     def _fire():
         with suppress(Exception):
             from tools.skills_sync_client import maybe_push_skills
             maybe_push_skills(message=f"sync: {skill_name}")
-
     with _sync_push_lock:
         if _sync_push_timer is not None:
             _sync_push_timer.cancel()  # only sets an Event; never raises
@@ -750,7 +733,6 @@ def skill_manage(
             operations, default_name=name or None, task_id=task_id, session_id=session_id)
     if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
-
     # Approval gate: skills are too large to review inline, so they always stage regardless
     # of origin; bypassed when replaying an approved staged write.
     args = dict(content=content, category=category, file_path=file_path, file_content=file_content,
@@ -758,7 +740,6 @@ def skill_manage(
                 absorbed_into=absorbed_into)
     if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
-
     # Ledger pre-capture: telemetry, not a gate — failures must NEVER block the mutation. delete
     # destroys the whole package (consolidation may have re-homed support files first), so
     # complete it from the newest curator backup or a restore is hollow.
@@ -768,18 +749,14 @@ def skill_manage(
         _pre = _find_skill(name)
         _ledger_before = _ledger.capture_before(
             _pre["path"] if _pre else None, complete_package=(action == "delete"), skill=name)
-
-    handler = _ACTION_HANDLERS.get(action)
-    if handler is None:
-        result = _err(f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file")
-    else:
-        for arg, missing, message in _REQUIRED_ARGS.get(action, ()):
-            if missing(args[arg]):
-                return tool_error(message, success=False)
-        result = handler({"name": name, **args})
-        if isinstance(result, str):
-            return result  # tool_error JSON for argument-shape problems (patch)
-
+    for arg, missing, message in _REQUIRED_ARGS.get(action, ()):
+        if missing(args[arg]):
+            return tool_error(message, success=False)
+    handler = _ACTION_HANDLERS.get(action, lambda a: _err(
+        f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"))
+    result = handler({"name": name, **args})
+    if isinstance(result, str):
+        return result  # tool_error JSON for argument-shape problems (patch)
     if result.get("success"):
         _record_success(
             action, name, result, file_path=file_path, absorbed_into=absorbed_into,
