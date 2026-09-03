@@ -14,9 +14,9 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from tools.computer_use.cua_backend_parse import _extract_tool_result, _mcp_field
+from tools.computer_use.cua_backend_parse import _extract_tool_result, _mcp_field, _tool_envelope
 
 logger = logging.getLogger("tools.computer_use.cua_backend")
 
@@ -85,8 +85,7 @@ def _outcome_unknown(name: str, exc: Exception, code: str) -> Dict[str, Any]:
     message = _UNKNOWN_OUTCOME_MESSAGES[code].format(name=name)
     structured = {"ok": False, "code": code, "message": message, "operation": name,
                   "next_step": "fresh_state", "detail": str(exc)}
-    return {"data": message, "images": [], "image_mime_types": [],
-            "structuredContent": structured, "isError": True}
+    return _tool_envelope(message, [], structured, True, [])
 
 def _tool_field(obj: Any, *names: str) -> Any:
     """``_mcp_field`` plus the ``model_extra`` fallback some MCP SDKs (Pydantic v2) forward custom fields via."""
@@ -138,7 +137,7 @@ def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float
 def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     """Remap a ``cua-driver call`` JSON body into the ``_extract_tool_result`` shape."""
     if not isinstance(parsed, dict):
-        return {"data": None, "images": [], "structuredContent": None, "isError": False}
+        return _tool_envelope(None, [], None, False)
     # In-band logical failures with exit 0 must still fail closed.
     is_error = parsed.get("isError") is True or parsed.get("is_error") is True
     shot = parsed.get("screenshot_png_b64")
@@ -153,7 +152,7 @@ def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     data: Any = parsed.get("tree_markdown")
     if data is not None and parsed.get("element_count") is not None:
         data = f"{parsed['element_count']} elements\n{data}"
-    return {"data": data, "images": [shot] if shot else [], "structuredContent": parsed, "isError": is_error}
+    return _tool_envelope(data, [shot] if shot else [], parsed, is_error)
 
 
 class _CuaDriverSession:
@@ -224,10 +223,9 @@ class _CuaDriverSession:
                 raise RuntimeError(_cb.cua_driver_install_hint())
             self._startup_phase = "manifest-discovery"
             daemon = self._embedded_daemon
-            if daemon is not None:
-                (command, args), child_env = daemon.proxy_invocation(), daemon.child_env()
-            else:
-                (command, args), child_env = _cb._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()
+            (command, args), child_env = (
+                (daemon.proxy_invocation(), daemon.child_env()) if daemon is not None
+                else (_cb._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
             _t_manifest = _time.monotonic()
             # Telemetry policy first (default: disabled), then strip Hermes secrets.
             params = StdioServerParameters(command=command, args=args,
@@ -268,8 +266,7 @@ class _CuaDriverSession:
                 if not isinstance(tool_name, str):
                     continue
                 caps = _tool_field(tool, "capabilities")
-                self._capabilities[tool_name] = (
-                    {c for c in caps if isinstance(c, str)} if isinstance(caps, list) else set())
+                self._capabilities[tool_name] = {c for c in caps if isinstance(c, str)} if isinstance(caps, list) else set()
                 schema = _tool_field(tool, "input_schema", "inputSchema")
                 self._tool_schemas[tool_name] = dict(schema) if isinstance(schema, dict) else {}
             # capability_version is a sibling of `tools` in tools/list (NOT in initialize).
@@ -447,32 +444,39 @@ class _CuaDriverSession:
         if getattr(self, "_declared_session_id", None):
             self._redeclare_session(timeout, "cua-driver public session label %s could not be restored: %s")
 
-    def _restart_session_locked(self) -> None:
-        """Recreate the MCP session after the transport closed. Caller holds self._lock."""
-        try:
-            if self._started:
-                self._stop_lifecycle_locked()
-        except Exception as e:
-            logger.debug("cua-driver session cleanup before reconnect failed: %s", e)
-        self._started = False
-        self._reset_capability_state()  # repopulated from scratch by the next start
-        self._start_lifecycle_locked()
-        self._started = True
-
-    def _recreate_session(self, timeout: float, *, clear_timeout_suspect: bool = False) -> None:
-        """Restart the private lifecycle, then re-attach the declared public label."""
-        with self._lock:
-            self._restart_session_locked()
-        if clear_timeout_suspect:
-            self._timeout_suspect = False
+    def _recreate_session(self, name: str, timeout: float, log_msg: str, *, restart: bool = True,
+                          clear_timeout_suspect: bool = False) -> None:
+        """Log *log_msg* (``%s`` = *name*), then either start() a dead session or (``restart``)
+        tear down and rebuild the MCP lifecycle under ``_lock`` with capabilities repopulated
+        from scratch; finally re-attach the declared public label."""
+        logger.warning(log_msg, name)
+        if not restart:
+            self.start()
+        else:
+            with self._lock:
+                try:
+                    if self._started:
+                        self._stop_lifecycle_locked()
+                except Exception as e:
+                    logger.debug("cua-driver session cleanup before reconnect failed: %s", e)
+                self._started = False
+                self._reset_capability_state()
+                self._start_lifecycle_locked()
+                self._started = True
+            if clear_timeout_suspect:
+                self._timeout_suspect = False
         self._restore_declared_session_after_transport_reset(timeout)
 
-    def _cli_command(self, name: str, args: Dict[str, Any]) -> Tuple[List[str], Dict[str, str], Optional[str]]:
-        """Build ``(cmd, child_env, shot_file)`` for the CLI fallback. ``get_window_state`` routes
-        its screenshot to a temp file (``screenshot_out_file``) so the daemon returns a tiny JSON
-        body, not the multi-megabyte base64 blob that congests the socket; ``_cli_result`` reads it."""
+    def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+        """Fallback transport: ``cua-driver call <tool> <json>`` subprocess. The MCP stdio bridge
+        can persistently fail heavy calls (``get_window_state``) with EAGAIN while the plain CLI,
+        on its own daemon socket, keeps working. Output is remapped to the ``_extract_tool_result``
+        shape. ``get_window_state`` routes its screenshot to a temp file (``screenshot_out_file``)
+        so the daemon returns a tiny JSON body, not the multi-megabyte base64 blob that congests
+        the socket; ``_cli_result`` reads it back."""
         import tempfile as _tempfile
         from tools.computer_use import cua_backend as _cb
+        from tools.environments.local import _sanitize_subprocess_env
 
         call_args = dict(args)
         shot_file: Optional[str] = None
@@ -488,18 +492,9 @@ class _CuaDriverSession:
         if daemon is not None:
             driver_command, child_env = daemon.proxy_invocation()[0], daemon.child_env()
             socket_args = ["--socket", daemon.socket_path]
-        return [driver_command, "call", name, json.dumps(call_args), *socket_args], child_env, shot_file
-
-    def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        """Fallback transport: ``cua-driver call <tool> <json>`` subprocess. The MCP stdio bridge
-        can persistently fail heavy calls (``get_window_state``) with EAGAIN while the plain CLI,
-        on its own daemon socket, keeps working. Output is remapped to the ``_extract_tool_result`` shape."""
-        from tools.environments.local import _sanitize_subprocess_env
-
-        cmd, child_env, shot_file = self._cli_command(name, args)
+        cmd = [driver_command, "call", name, json.dumps(call_args), *socket_args]
         try:
-            parsed = _cli_run_json(cmd, _sanitize_subprocess_env(child_env), name, timeout)
-            return _cli_result(parsed, shot_file)
+            return _cli_result(_cli_run_json(cmd, _sanitize_subprocess_env(child_env), name, timeout), shot_file)
         finally:
             if shot_file and os.path.exists(shot_file):
                 with contextlib.suppress(OSError):
@@ -508,14 +503,15 @@ class _CuaDriverSession:
     def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
         # A prior MCP timeout marks the session suspect (possibly wedged): recreate it
         # so one timeout never poisons the run. Healthy sessions are never restarted here.
-        if self._timeout_suspect and name not in self._LIFECYCLE_CALLS:
-            logger.warning("cua-driver session suspect after earlier MCP timeout; recreating before %s", name)
-            self._recreate_session(timeout, clear_timeout_suspect=True)
-        # A prior session may have died (MCP drop / driver crash) and reset _started.
-        if not self._started and name not in self._LIFECYCLE_CALLS:
-            logger.warning("cua-driver session not active on %s; (re)starting before call", name)
-            self.start()
-            self._restore_declared_session_after_transport_reset(timeout)
+        if name not in self._LIFECYCLE_CALLS:
+            if self._timeout_suspect:
+                self._recreate_session(
+                    name, timeout, "cua-driver session suspect after earlier MCP timeout; recreating before %s",
+                    clear_timeout_suspect=True)
+            # A prior session may have died (MCP drop / driver crash) and reset _started.
+            if not self._started:
+                self._recreate_session(
+                    name, timeout, "cua-driver session not active on %s; (re)starting before call", restart=False)
         self._require_started()
         try:
             result = self._run_call(name, args, timeout)
@@ -535,19 +531,16 @@ class _CuaDriverSession:
                 return self._call_tool_via_cli(name, args, timeout)
             if not self._is_closed_session_error(e):
                 raise
-            logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
-            self._recreate_session(timeout)
+            self._recreate_session(name, timeout, "cua-driver MCP session closed during %s; reconnecting once")
             if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                 return _outcome_unknown(name, e, "transport_outcome_unknown")
             result = self._run_call(name, args, timeout)
         # Remember only a SUCCESSFULLY declared identity: no stale recovery state.
-        declared_id = args.get("session")
-        if (name == "start_session" and result.get("isError") is not True
-                and isinstance(declared_id, str) and declared_id):
+        declared_id, ok = args.get("session"), result.get("isError") is not True
+        if name == "start_session" and ok and isinstance(declared_id, str) and declared_id:
             self._declared_session_id = declared_id
-        if self._is_ended_session_result(result):
+        if self._is_ended_session_result(result):  # never re-runs lifecycle calls -> end_session result is final
             result = self._revive_declared_session_once(name, args, result, timeout)
-        if (name == "end_session" and result.get("isError") is not True
-                and args.get("session") == self._declared_session_id):
+        elif name == "end_session" and ok and declared_id == self._declared_session_id:
             self._declared_session_id = None
         return result

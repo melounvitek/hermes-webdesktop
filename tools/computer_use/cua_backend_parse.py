@@ -5,13 +5,12 @@ function depends only on its inputs, so the MCP and CLI transports share them sa
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.computer_use.backend import ActionResult, UIElement, image_dimensions_from_bytes
-
-_MISSING = object()
 
 # Linux/X11 surfaces GNOME Shell / desktop backdrop windows ahead of real app windows with
 # no useful z-order; they are targetable but capture as empty, so default capture skips them.
@@ -38,11 +37,7 @@ def _mcp_field(obj, snake: str, camel: str, default=None):
     "isError", False)`` is False for every 2.x result and a denied call looks like success.
     Deliberately duplicated from ``tools.mcp_tool.mcp_field`` so computer_use never loads
     the much larger config-driven MCP client module."""
-    value = getattr(obj, snake, _MISSING)
-    if value is not _MISSING:
-        return value
-    value = getattr(obj, camel, _MISSING)
-    return default if value is _MISSING else value
+    return getattr(obj, snake, getattr(obj, camel, default))
 
 def _action_result_from(name: str, ok: bool, message: str, meta: Dict[str, Any],
                         structured: Dict[str, Any], *, requested_delivery: Optional[str] = None) -> ActionResult:
@@ -115,11 +110,9 @@ def _parse_elements_from_structured(raw_elements: List[Dict[str, Any]]) -> List[
             continue
         role, label, frame, token = (raw.get(k) for k in ("role", "label", "frame", "element_token"))
         bounds: Tuple[int, int, int, int] = (0, 0, 0, 0)
-        if isinstance(frame, dict) and frame:
-            try:
+        with contextlib.suppress(TypeError, ValueError):
+            if isinstance(frame, dict) and frame:
                 bounds = tuple(int(frame.get(k, 0)) for k in ("x", "y", "w", "h"))  # type: ignore[assignment]
-            except (TypeError, ValueError):
-                bounds = (0, 0, 0, 0)
         elements.append(UIElement(
             index=idx,
             role=role if isinstance(role, str) else "",
@@ -155,6 +148,17 @@ def _parse_key_combo(keys: str) -> Tuple[Optional[str], List[str]]:
             key = part
     return key, modifiers
 
+def _tool_envelope(data: Any, images: List[str], structured: Any, is_error: bool,
+                   image_mime_types: Optional[List[str]] = None) -> Dict[str, Any]:
+    """The normalised tool-result dict every transport emits: ``{data, images,
+    [image_mime_types,] structuredContent, isError}``. ``image_mime_types`` is only present
+    when the transport can report it (MCP image parts); the CLI remap omits the key."""
+    out: Dict[str, Any] = {"data": data, "images": images}
+    if image_mime_types is not None:
+        out["image_mime_types"] = image_mime_types
+    out["structuredContent"], out["isError"] = structured, is_error
+    return out
+
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
     """Flatten an mcp CallToolResult into ``{data, images, image_mime_types, structuredContent,
     isError}``. ``data`` is the joined text parts (parsed as JSON when it looks like JSON);
@@ -177,14 +181,10 @@ def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
             data = json.loads(joined) if joined.strip().startswith(("{", "[")) else joined
         except json.JSONDecodeError:
             data = joined
-    return {
-        "data": data,
-        "images": images,
-        "image_mime_types": image_mime_types,
-        "structuredContent": _mcp_field(mcp_result, "structured_content", "structuredContent") or None,
+    return _tool_envelope(
+        data, images, _mcp_field(mcp_result, "structured_content", "structuredContent") or None,
         # Identity, not truthiness: mocks/proxies synthesize truthy attributes.
-        "isError": _mcp_field(mcp_result, "is_error", "isError", False) is True,
-    }
+        _mcp_field(mcp_result, "is_error", "isError", False) is True, image_mime_types)
 
 def _image_from_tool_result(out: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     """Pull ``(b64, mime_type)`` out of a flattened tool result. cua-driver delivers screenshots
@@ -200,26 +200,26 @@ def _image_from_tool_result(out: Dict[str, Any]) -> tuple[Optional[str], Optiona
         return b64, (structured.get("screenshot_mime_type") or structured.get("mime_type") or None)
     return None, None
 
-def _positive_int(value: Any) -> Optional[int]:
-    """Return a positive integer, rejecting booleans and malformed values."""
+def _int_or_none(value: Any) -> Optional[int]:
+    """``int(value)`` for int/numeric-str inputs; None for bools, other types and malformed strings."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
     try:
-        parsed = int(value)
+        return int(value)
     except ValueError:
         return None
-    return parsed if parsed > 0 else None
+
+def _positive_int(value: Any) -> Optional[int]:
+    """Return a positive integer, rejecting booleans and malformed values."""
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 def _is_placeholder_id(value: Any) -> bool:
     """True when *value* is a schema-filler id (``0`` / negative) rather than a target: some
     providers zero-fill every optional integer, and treating that as targeting would drop the
     caller's ``app=``. Non-numeric values are NOT placeholders — they still reach validation."""
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        return False
-    try:
-        return int(value) <= 0
-    except ValueError:
-        return False
+    parsed = _int_or_none(value)
+    return parsed is not None and parsed <= 0
 
 def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalise cua-driver ``list_windows`` entries, dropping unusable ones. Every downstream
@@ -264,10 +264,8 @@ def _apps_from_windows(windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     apps: List[Dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
     for summary in _ingest_windows(windows):
-        name = summary["app_name"]
-        key = (name, summary["pid"])
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        apps.append({"name": name, "pid": summary["pid"]})
+        name, key = summary["app_name"], (summary["app_name"], summary["pid"])
+        if name and key not in seen:
+            seen.add(key)
+            apps.append({"name": name, "pid": summary["pid"]})
     return apps
