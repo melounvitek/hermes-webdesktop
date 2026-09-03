@@ -2,19 +2,11 @@
 
 Outbound SMS via the Twilio REST API; inbound via an aiohttp webhook server.
 
-Shares credentials with the optional telephony skill — same env vars:
-  - TWILIO_ACCOUNT_SID
-  - TWILIO_AUTH_TOKEN
-  - TWILIO_PHONE_NUMBER  (E.164 from-number, e.g. +15551234567)
-
-Gateway-specific env vars:
-  - SMS_WEBHOOK_PORT     (default 8080)
-  - SMS_WEBHOOK_HOST     (default 127.0.0.1)
-  - SMS_WEBHOOK_URL      (public URL for Twilio signature validation — required)
-  - SMS_INSECURE_NO_SIGNATURE  (true to disable signature validation — dev only)
-  - SMS_ALLOWED_USERS    (comma-separated E.164 phone numbers)
-  - SMS_ALLOW_ALL_USERS  (true/false)
-  - SMS_HOME_CHANNEL     (phone number for cron delivery)
+Env vars — shared with the telephony skill: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
+TWILIO_PHONE_NUMBER (E.164 from-number). Gateway-specific: SMS_WEBHOOK_PORT (8080),
+SMS_WEBHOOK_HOST (127.0.0.1), SMS_WEBHOOK_URL (public URL for Twilio signature
+validation — required), SMS_INSECURE_NO_SIGNATURE (true disables validation — dev only),
+SMS_ALLOWED_USERS (comma-separated E.164), SMS_ALLOW_ALL_USERS, SMS_HOME_CHANNEL (cron).
 """
 
 import asyncio
@@ -101,9 +93,6 @@ class SmsAdapter(BasePlatformAdapter):
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
 
-    def _basic_auth_header(self) -> str:
-        return _basic_auth(self._account_sid, self._auth_token)
-
     # -- Lifecycle -----------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -169,7 +158,7 @@ class SmsAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(self.format_message(content))
         last_result = SendResult(success=True)
         url = f"{TWILIO_API_BASE}/{self._account_sid}/Messages.json"
-        headers = {"Authorization": self._basic_auth_header()}
+        headers = {"Authorization": _basic_auth(self._account_sid, self._auth_token)}
         session = self._http_session or _new_session(trust_env=gateway_trust_env())
         try:
             for chunk in chunks:
@@ -287,11 +276,10 @@ class SmsAdapter(BasePlatformAdapter):
         return _twiml_response()
 
 
-# -- Plugin registration -----------------------------------------------------
-# TWILIO_* env→PlatformConfig seeding stays in core (gateway/config.py).
+# -- Plugin registration (TWILIO_* env→PlatformConfig seeding stays in gateway/config.py)
 
-# Standalone-send markdown stripping (looser than helpers.strip_markdown: no
-# word-boundary guards on underscores, ``[a-z]*`` fence tags — kept for parity).
+# Standalone-send markdown stripping: looser than helpers.strip_markdown (no
+# word-boundary guards on underscores, ``[a-z]*`` fence tags) — kept for parity.
 _SMS_MARKDOWN_SUBS = (
     (re.compile(r"\*\*(.+?)\*\*", re.DOTALL), r"\1"),
     (re.compile(r"\*(.+?)\*", re.DOTALL), r"\1"),

@@ -1,22 +1,13 @@
 """User OAuth helper for the Google Chat gateway adapter.
 
 Google Chat's ``media.upload`` rejects service-account auth, so for native file
-attachments each user grants the bot ``chat.messages.create`` ONCE in their own
-DM; the bot stores per-user refresh tokens and uploads *as the user*
-(https://developers.google.com/chat/api/guides/auth/users).
-
-Library: load_user_credentials(email=None), refresh_or_none(creds, email=None),
-build_user_chat_service(creds), list_authorized_emails().
-CLI (driven by ``/setup-files``): --check | --client-secret PATH | --auth-url |
---auth-code CODE | --revoke | --install-deps [--email EMAIL] (legacy single-user
-mode when --email is omitted).
-
-Token storage layout (all under ``${HERMES_HOME}``):
-- Per-user tokens:       ``google_chat_user_tokens/<sanitized_email>.json``
-- Legacy single-user:    ``google_chat_user_token.json``
-- Per-user pending PKCE: ``google_chat_user_oauth_pending/<sanitized_email>.json``
-- Legacy pending state:  ``google_chat_user_oauth_pending.json``
-- OAuth client secret:   ``google_chat_user_client_secret.json``
+attachments each user grants the bot ``chat.messages.create`` ONCE in their own DM;
+the bot stores per-user refresh tokens and uploads *as the user*
+(https://developers.google.com/chat/api/guides/auth/users). Library API for the
+adapter plus a CLI driven by ``/setup-files`` (``--help``; ``--email`` omitted ==
+legacy single-user mode). Files under ``${HERMES_HOME}``: ``google_chat_user_tokens/
+<email>.json`` (per-user) / ``google_chat_user_token.json`` (legacy); pending PKCE state
+in ``google_chat_user_oauth_pending[/<email>].json``; ``google_chat_user_client_secret.json``.
 """
 
 from __future__ import annotations
@@ -26,7 +17,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import stat
 import sys
 from importlib.metadata import version as _distribution_version
@@ -36,7 +26,7 @@ from typing import Any, List, NoReturn, Optional, Tuple
 from packaging.requirements import Requirement
 
 from hermes_constants import display_hermes_home, get_hermes_home
-from utils import atomic_replace
+from utils import atomic_write_text
 
 # Pinned legacy logger name so operator log filters keep matching (see adapter.py).
 logger = logging.getLogger("gateway.platforms.google_chat_user_oauth")
@@ -65,11 +55,6 @@ _REQUIRED_PACKAGES = [
 _REDIRECT_URI = "http://localhost:1"
 
 
-def _hermes_home() -> Path:
-    """Resolve HERMES_HOME at call time (late-binding for tests / profile switches)."""
-    return get_hermes_home()
-
-
 def _sanitize_email(email: str) -> str:
     cleaned = _EMAIL_FS_RE.sub("_", (email or "").strip().lower())
     return cleaned or "_unknown_"
@@ -81,27 +66,25 @@ def _token_rel(email: Optional[str]) -> str:
 
 
 def _user_tokens_dir() -> Path:
-    return _hermes_home() / "google_chat_user_tokens"
+    return get_hermes_home() / "google_chat_user_tokens"
 
 
 def _token_path(email: Optional[str] = None) -> Path:
     """Per-user token path for ``email``, or the legacy single-user path."""
-    return _hermes_home() / _token_rel(email)
+    return get_hermes_home() / _token_rel(email)
 
 
 def _client_secret_path() -> Path:
-    return _hermes_home() / "google_chat_user_client_secret.json"
+    return get_hermes_home() / "google_chat_user_client_secret.json"
 
 
 def _pending_auth_path(email: Optional[str] = None) -> Path:
     if email:
-        return _hermes_home() / "google_chat_user_oauth_pending" / f"{_sanitize_email(email)}.json"
-    return _hermes_home() / "google_chat_user_oauth_pending.json"
+        return get_hermes_home() / "google_chat_user_oauth_pending" / f"{_sanitize_email(email)}.json"
+    return get_hermes_home() / "google_chat_user_oauth_pending.json"
 
 
-# =============================================================================
-# Library API — called from the adapter at runtime
-# =============================================================================
+# -- Library API — called from the adapter at runtime -------------------------
 
 
 def _refresh_and_persist(creds: Any, token_path: Path, request_cls: Any, *, failure_msg: str) -> Optional[Any]:
@@ -192,9 +175,7 @@ def _persist_credentials(creds: Any, token_path: Path) -> None:
         logger.debug("[google_chat_user_oauth] failed to persist credentials at %s", token_path, exc_info=True)
 
 
-# =============================================================================
-# CLI commands — driven by the agent via /setup-files
-# =============================================================================
+# -- CLI commands — driven by the agent via /setup-files ----------------------
 
 
 def _normalize_authorized_user_payload(payload: dict) -> dict:
@@ -213,24 +194,12 @@ def _chmod_quiet(path: Path, mode: int) -> None:
 
 
 def _write_private_json(path: Path, data: Any) -> None:
-    """Atomically write JSON with 0o600 permissions where supported."""
+    """Atomically write JSON with 0o600 permissions (0o700 parent) where supported."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_quiet(path.parent, 0o700)
-    tmp_path = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
-    try:
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        atomic_replace(tmp_path, path)
-        _chmod_quiet(path, stat.S_IRUSR | stat.S_IWUSR)
-    finally:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
+    # mkstemp's 0o600 temp + atomic rename never exposes the token at process umask.
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False), create_mode=0o600)
+    _chmod_quiet(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def _fail(*lines: str) -> NoReturn:

@@ -3,17 +3,16 @@
 Subscribes to a topic on ntfy.sh or a self-hosted server via HTTP streaming
 (``/json`` with ``poll=false``) and publishes replies via HTTP POST (httpx only).
 
-config.yaml ``platforms.ntfy.extra``: ``server`` (default https://ntfy.sh),
-``topic`` (subscribe, required), ``publish_topic`` (defaults to topic), ``token``
-(Bearer or ``user:pass`` Basic), ``markdown`` (default false).
-Env (read at construct time; env wins over ``extra``): NTFY_TOPIC, NTFY_SERVER_URL,
-NTFY_TOKEN, NTFY_PUBLISH_TOPIC, NTFY_MARKDOWN ("true"/"1"/"yes"), NTFY_ALLOWED_USERS
-(topic names), NTFY_ALLOW_ALL_USERS (dev only), NTFY_HOME_CHANNEL, NTFY_HOME_CHANNEL_NAME.
+config.yaml ``platforms.ntfy.extra``: ``server`` (default https://ntfy.sh), ``topic``
+(subscribe, required), ``publish_topic`` (defaults to topic), ``token`` (Bearer or
+``user:pass`` Basic), ``markdown`` (default false). Env (read at construct time; env
+wins over ``extra``): NTFY_TOPIC, NTFY_SERVER_URL, NTFY_TOKEN, NTFY_PUBLISH_TOPIC,
+NTFY_MARKDOWN ("true"/"1"/"yes"), NTFY_ALLOWED_USERS (topic names), NTFY_ALLOW_ALL_USERS
+(dev only), NTFY_HOME_CHANNEL, NTFY_HOME_CHANNEL_NAME.
 
-Identity model: ntfy has no authenticated user identity; ``title`` is
-publisher-controlled and NOT used for authorization. Each topic is a single
-trusted channel (``user_id`` == topic name). Protect the topic with a read
-token for any real trust boundary.
+Identity model: ntfy has no authenticated user identity; ``title`` is publisher-controlled
+and NOT used for authorization. Each topic is a single trusted channel (``user_id`` ==
+topic name). Protect the topic with a read token for any real trust boundary.
 """
 
 import asyncio
@@ -50,7 +49,6 @@ RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 STREAM_TIMEOUT_SECONDS = 90  # ntfy keepalive default is 55s; give margin
 _ECHO_TAG = "hermes-agent"  # tag added to outgoing messages for echo-loop prevention
 _MARKDOWN_TRUTHY = ("1", "true", "yes")
-_BASE_HEADERS = {"Content-Type": "text/plain; charset=utf-8", "X-Tags": _ECHO_TAG}
 
 
 def _build_auth_header(token: str) -> Dict[str, str]:
@@ -66,6 +64,19 @@ def _build_auth_header(token: str) -> Dict[str, str]:
         import base64
         return {"Authorization": f"Basic {base64.b64encode(token.encode()).decode()}"}
     return {"Authorization": f"Bearer {token}"}
+
+
+def _publish_headers(token: str, markdown: bool, *, auth_first: bool = True) -> Dict[str, str]:
+    """Headers for a publish POST: auth (if any), plain-text body, echo tag, optional X-Markdown.
+
+    ``auth_first`` pins the header order each call site has always sent on the wire.
+    """
+    auth = _build_auth_header(token)
+    base = {"Content-Type": "text/plain; charset=utf-8", "X-Tags": _ECHO_TAG}
+    headers = {**auth, **base} if auth_first else {**base, **auth}
+    if markdown:
+        headers["X-Markdown"] = "true"
+    return headers
 
 
 def _truncate_body(message: str, *, context: str) -> bytes:
@@ -111,7 +122,9 @@ class NtfyAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform("ntfy"))
         extra = config.extra or {}
-        self._server: str = (extra.get("server") or _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER)).rstrip("/")
+        self._server: str = (
+            extra.get("server") or _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER)
+        ).rstrip("/")
         self._topic: str = extra.get("topic") or _get_scoped_secret("NTFY_TOPIC", "")
         self._publish_topic: str = (
             extra.get("publish_topic") or _get_scoped_secret("NTFY_PUBLISH_TOPIC", "") or self._topic
@@ -248,11 +261,14 @@ class NtfyAdapter(BasePlatformAdapter):
         # No native user identity on ntfy: the publisher-controlled title must
         # NOT drive authorization, so user_id is fixed to the topic name.
         topic = event.get("topic") or self._topic
-        source = self.build_source(chat_id=topic, chat_name=topic, chat_type="dm", user_id=topic, user_name=topic)
+        source = self.build_source(
+            chat_id=topic, chat_name=topic, chat_type="dm", user_id=topic, user_name=topic,
+        )
         unix_ts = event.get("time")
         try:
             timestamp = (
-                datetime.fromtimestamp(int(unix_ts), tz=timezone.utc) if unix_ts else datetime.now(tz=timezone.utc)
+                datetime.fromtimestamp(int(unix_ts), tz=timezone.utc)
+                if unix_ts else datetime.now(tz=timezone.utc)
             )
         except (ValueError, OSError, TypeError):
             timestamp = datetime.now(tz=timezone.utc)
@@ -285,9 +301,7 @@ class NtfyAdapter(BasePlatformAdapter):
         if not self._http_client:
             return SendResult(success=False, error="HTTP client not initialized")
         url = f"{self._server}/{publish_topic}"
-        headers = {**self._auth_headers(), **_BASE_HEADERS}
-        if (self.config.extra or {}).get("markdown", False):
-            headers["X-Markdown"] = "true"
+        headers = _publish_headers(self._token, bool((self.config.extra or {}).get("markdown", False)))
         if len(content) > self.MAX_MESSAGE_LENGTH:
             logger.warning(
                 "[%s] Message truncated from %d to %d chars (ntfy limit)",
@@ -295,7 +309,9 @@ class NtfyAdapter(BasePlatformAdapter):
             )
         body = content[:self.MAX_MESSAGE_LENGTH]
         try:
-            resp = await self._http_client.post(url, content=body.encode("utf-8"), headers=headers, timeout=15.0)
+            resp = await self._http_client.post(
+                url, content=body.encode("utf-8"), headers=headers, timeout=15.0,
+            )
             if resp.status_code < 300:
                 return SendResult(success=True, message_id=_response_message_id(resp))
             body_text = resp.text
@@ -328,7 +344,10 @@ def _env_enablement() -> dict | None:
     topic = _get_scoped_secret("NTFY_TOPIC", "").strip()
     if not topic:
         return None
-    seed: dict = {"topic": topic, "server": _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER).rstrip("/")}
+    seed: dict = {
+        "topic": topic,
+        "server": _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER).rstrip("/"),
+    }
     for key, env in (("publish_topic", "NTFY_PUBLISH_TOPIC"), ("token", "NTFY_TOKEN")):
         value = _get_scoped_secret(env, "").strip()
         if value:
@@ -367,16 +386,18 @@ async def _standalone_send(
         return {"error": "ntfy standalone send: NTFY_TOPIC not configured"}
     token = extra.get("token") or _get_scoped_secret("NTFY_TOKEN", "")
     markdown_env = _get_scoped_secret("NTFY_MARKDOWN", "").strip().lower()
-    headers = {**_BASE_HEADERS, **_build_auth_header(token)}
-    if bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY:
-        headers["X-Markdown"] = "true"
+    headers = _publish_headers(
+        token, bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY, auth_first=False,
+    )
     body = _truncate_body(message, context="ntfy standalone")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(f"{server}/{publish_topic}", content=body, headers=headers)
         if resp.status_code >= 300:
             return {"error": f"ntfy HTTP {resp.status_code}: {resp.text[:200]}"}
-        return {"success": True, "platform": "ntfy", "chat_id": publish_topic, "message_id": _response_message_id(resp)}
+        return {
+            "success": True, "platform": "ntfy", "chat_id": publish_topic, "message_id": _response_message_id(resp),
+        }
     except Exception as e:
         return {"error": f"ntfy standalone send failed: {e}"}
 
