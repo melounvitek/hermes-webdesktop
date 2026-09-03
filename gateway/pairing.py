@@ -1,12 +1,10 @@
 """DM pairing: code-based approval of new users on messaging platforms.
 
-Unknown users receive a one-time pairing code that the bot owner approves via
-the CLI, instead of maintaining static user-ID allowlists.
-
-Security properties (OWASP + NIST SP 800-63-4): 8-char codes from a 32-char
-unambiguous alphabet via ``secrets``, 1-hour expiry, max 3 pending per
-platform, 1 request per user per 10 min, lockout after 5 failed approvals,
-chmod 0600 data files, codes never logged. Storage: ~/.hermes/pairing/
+Unknown users receive a one-time pairing code that the bot owner approves via the
+CLI, instead of static user-ID allowlists. Security properties (OWASP + NIST SP
+800-63-4): 8-char codes from a 32-char unambiguous alphabet via ``secrets``, 1-hour
+expiry, max 3 pending per platform, 1 request per user per 10 min, lockout after 5
+failed approvals, chmod 0600 data files, codes never logged. Storage: ~/.hermes/pairing/
 """
 
 import contextlib
@@ -21,15 +19,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from gateway.whatsapp_identity import (
-    expand_whatsapp_aliases,
-    normalize_whatsapp_identifier,
-)
-from hermes_constants import (
-    get_default_hermes_root,
-    get_hermes_dir,
-    get_hermes_home,
-)
+from gateway.whatsapp_identity import expand_whatsapp_aliases, normalize_whatsapp_identifier
+from hermes_constants import get_default_hermes_root, get_hermes_dir, get_hermes_home
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -53,9 +44,7 @@ PAIRING_DIR = None
 
 
 def _default_pairing_dir() -> Path:
-    if PAIRING_DIR is not None:
-        return PAIRING_DIR
-    return get_hermes_dir("platforms/pairing", "pairing")
+    return PAIRING_DIR if PAIRING_DIR is not None else get_hermes_dir("platforms/pairing", "pairing")
 
 
 # Platform value -> allowlist env var. Approving a code also writes the user into
@@ -63,36 +52,25 @@ def _default_pairing_dir() -> Path:
 # the visible source of truth. Platforms absent here (or with no allowlist
 # configured) keep the pairing store as the sole grant record (authz union).
 _PLATFORM_ALLOWLIST_ENV = {
-    "telegram": "TELEGRAM_ALLOWED_USERS",
-    "discord": "DISCORD_ALLOWED_USERS",
-    "whatsapp": "WHATSAPP_ALLOWED_USERS",
-    "whatsapp_cloud": "WHATSAPP_CLOUD_ALLOWED_USERS",
-    "slack": "SLACK_ALLOWED_USERS",
-    "signal": "SIGNAL_ALLOWED_USERS",
-    "email": "EMAIL_ALLOWED_USERS",
-    "sms": "SMS_ALLOWED_USERS",
-    "mattermost": "MATTERMOST_ALLOWED_USERS",
-    "matrix": "MATRIX_ALLOWED_USERS",
-    "dingtalk": "DINGTALK_ALLOWED_USERS",
-    "feishu": "FEISHU_ALLOWED_USERS",
-    "wecom": "WECOM_ALLOWED_USERS",
-    "wecom_callback": "WECOM_CALLBACK_ALLOWED_USERS",
-    "weixin": "WEIXIN_ALLOWED_USERS",
-    "bluebubbles": "BLUEBUBBLES_ALLOWED_USERS",
-    "qqbot": "QQ_ALLOWED_USERS",
-    "yuanbao": "YUANBAO_ALLOWED_USERS",
+    "telegram": "TELEGRAM_ALLOWED_USERS", "discord": "DISCORD_ALLOWED_USERS",
+    "whatsapp": "WHATSAPP_ALLOWED_USERS", "whatsapp_cloud": "WHATSAPP_CLOUD_ALLOWED_USERS",
+    "slack": "SLACK_ALLOWED_USERS", "signal": "SIGNAL_ALLOWED_USERS",
+    "email": "EMAIL_ALLOWED_USERS", "sms": "SMS_ALLOWED_USERS",
+    "mattermost": "MATTERMOST_ALLOWED_USERS", "matrix": "MATRIX_ALLOWED_USERS",
+    "dingtalk": "DINGTALK_ALLOWED_USERS", "feishu": "FEISHU_ALLOWED_USERS",
+    "wecom": "WECOM_ALLOWED_USERS", "wecom_callback": "WECOM_CALLBACK_ALLOWED_USERS",
+    "weixin": "WEIXIN_ALLOWED_USERS", "bluebubbles": "BLUEBUBBLES_ALLOWED_USERS",
+    "qqbot": "QQ_ALLOWED_USERS", "yuanbao": "YUANBAO_ALLOWED_USERS",
 }
 
 
 def _allowlist_env_for_platform(platform: str) -> Optional[str]:
     """Allowlist env var name for ``platform`` (plugin registry fallback), or None."""
     platform = (platform or "").lower().strip()
-    env_var = _PLATFORM_ALLOWLIST_ENV.get(platform)
-    if env_var:
+    if env_var := _PLATFORM_ALLOWLIST_ENV.get(platform):
         return env_var
     with contextlib.suppress(Exception):
         from gateway.platform_registry import platform_registry
-
         return platform_registry.get(platform).allowed_users_env or None
     return None
 
@@ -139,14 +117,13 @@ def _matching_ids(platform: str, approved: dict, user_id: str) -> list:
 def _read_allowlist_env(env_var: str) -> str:
     """Read a platform allowlist env var through the profile secret scope.
 
-    Under multiplexing the process env may hold ANOTHER profile's allowlist, so a
-    scoped miss must return empty rather than borrow it. Unscoped callers keep the
-    legacy ``os.getenv`` read. Writes go through ``save_env_value``/``remove_env_value``,
-    which target the active profile's ``.env`` / installed scope, not ``os.environ``.
+    Under multiplexing the process env may hold ANOTHER profile's allowlist, so a scoped
+    miss must return empty rather than borrow it; unscoped callers keep the legacy
+    ``os.getenv`` read. Writes (``save_env_value``/``remove_env_value``) target the
+    active profile's ``.env`` / installed scope, not ``os.environ``.
     """
     with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
-
         try:
             return (get_secret(env_var) or "").strip()
         except UnscopedSecretError:
@@ -169,7 +146,6 @@ def _write_allowlist_env(env_var: str, ids: list) -> None:
     """Best-effort persist (empty list removes the key); the pairing store grant still authorizes via the union."""
     with contextlib.suppress(Exception):
         from hermes_cli.config import save_env_value, remove_env_value
-
         save_env_value(env_var, ",".join(ids)) if ids else remove_env_value(env_var)
 
 
@@ -189,12 +165,10 @@ def _iter_live_gateway_adapters():
     runner = None
     with contextlib.suppress(Exception):
         from gateway.run import _gateway_runner_ref
-
         runner = _gateway_runner_ref()
     if runner is None:
         return
-    mappings = [getattr(runner, "adapters", None) or {}]
-    mappings.extend((getattr(runner, "_profile_adapters", None) or {}).values())
+    mappings = [getattr(runner, "adapters", None) or {}, *(getattr(runner, "_profile_adapters", None) or {}).values()]
     for mapping in mappings:
         for adapter in (mapping or {}).values():
             if adapter is not None:
@@ -203,16 +177,13 @@ def _iter_live_gateway_adapters():
 
 def _adapter_platform_name(adapter) -> str:
     value = getattr(getattr(adapter, "platform", None), "value", None)
-    if value:
-        return str(value).strip().lower()
-    return str(getattr(adapter, "name", None) or "").strip().lower()
+    return str(value or getattr(adapter, "name", None) or "").strip().lower()
 
 
 def _purge_allowlist_entries(entries, platform: str, user_id: str):
     """Drop alias-equivalent allowlist entries while preserving ``*``."""
     def keep(entry) -> bool:
         return str(entry).strip() == "*" or not _user_ids_match(platform, str(entry), str(user_id))
-
     if isinstance(entries, str):
         return ",".join(filter(keep, _split_allowlist(entries)))
     if isinstance(entries, (set, frozenset)):
@@ -233,15 +204,11 @@ def _sync_live_adapter_allowlist_remove(platform: str, user_id: str) -> None:
             continue
         if hasattr(adapter, "_allow_from"):
             with contextlib.suppress(Exception):
-                adapter._allow_from = _purge_allowlist_entries(
-                    set(adapter._allow_from or ()), platform_name, user_id
-                )
+                adapter._allow_from = _purge_allowlist_entries(set(adapter._allow_from or ()), platform_name, user_id)
         extra = getattr(getattr(adapter, "config", None), "extra", None)
         if isinstance(extra, dict) and "allow_from" in extra:
             with contextlib.suppress(Exception):
-                extra["allow_from"] = _purge_allowlist_entries(
-                    extra.get("allow_from"), platform_name, user_id
-                )
+                extra["allow_from"] = _purge_allowlist_entries(extra.get("allow_from"), platform_name, user_id)
 
 
 def _sync_allowlist_remove(platform: str, user_id: str) -> None:
@@ -249,10 +216,11 @@ def _sync_allowlist_remove(platform: str, user_id: str) -> None:
 
     Approve mirrors a normalized phone while revoke is often given a JID/device
     form, so matching uses alias rules -- exact delete would leave the sender authorized.
+    An unconfigured allowlist is left alone (config-only snapshots are not touched).
     """
     configured = _configured_allowlist(platform)
     if configured is None:
-        return  # No allowlist configured — do not touch config-only snapshots.
+        return
     env_var, ids = configured
     remaining = _purge_allowlist_entries(ids, platform, user_id)
     if len(remaining) == len(ids):
@@ -342,28 +310,31 @@ def _is_hashed_entry(entry) -> bool:
     return isinstance(entry, dict) and "salt" in entry and "hash" in entry
 
 
+def _entry_created_at(info):
+    """Numeric ``created_at`` of a pending entry, or None for malformed/legacy entries."""
+    created_at = info.get("created_at") if isinstance(info, dict) else None
+    return created_at if isinstance(created_at, (int, float)) else None
+
+
 class PairingStore:
     """Pairing codes and approved user lists.
 
-    Files per platform: ``{platform}-pending.json``, ``{platform}-approved.json``,
-    plus shared ``_rate_limits.json``. With ``profile="<name>"`` storage resolves from
-    that profile's HERMES_HOME exactly as ``hermes -p <name> pairing ...`` does, so
-    multiplex gateways and profile-scoped CLI approvals share one whitelist.
+    Files per platform: ``{platform}-pending.json``, ``{platform}-approved.json``, plus
+    shared ``_rate_limits.json``. With ``profile="<name>"`` storage resolves from that
+    profile's HERMES_HOME exactly as ``hermes -p <name> pairing ...`` does, so multiplex
+    gateways and profile-scoped CLI approvals share one whitelist.
     """
 
     def __init__(self, profile: Optional[str] = None):
+        profile_home = None
         if profile:
             root = get_default_hermes_root()
             profile_home = root if profile == "default" else root / "profiles" / profile
-            self._dir = get_hermes_dir("platforms/pairing", "pairing", home=profile_home)
-        else:
-            profile_home = None
-            self._dir = _default_pairing_dir()
+        self._dir = get_hermes_dir("platforms/pairing", "pairing", home=profile_home) if profile else _default_pairing_dir()
         self._dir.mkdir(parents=True, exist_ok=True)
         # Merge the alternate old/new layout so upgrades cannot split approvals.
         _migrate_split_pairing_dirs(home=profile_home, active=self._dir)
-        # Adapters run concurrently in threads sharing one store.
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # adapters run concurrently in threads sharing one store
         self._profile = profile  # for diagnostics / log lines
 
     @property
@@ -383,6 +354,9 @@ class PairingStore:
     _load_json = staticmethod(_load_json_file)
     _save_json = staticmethod(_save_json_file)
 
+    def _platforms(self, platform: Optional[str], suffix: str) -> list:
+        return [platform] if platform else self._all_platforms(suffix)
+
     # ----- Approved users -----
 
     def is_approved(self, platform: str, user_id: str) -> bool:
@@ -391,11 +365,11 @@ class PairingStore:
 
     def list_approved(self, platform: str = None) -> list:
         """List approved users, optionally filtered by platform."""
-        results = []
-        for p in [platform] if platform else self._all_platforms("approved"):
-            for uid, info in self._load_json(self._approved_path(p)).items():
-                results.append({"platform": p, "user_id": uid, **info})
-        return results
+        return [
+            {"platform": p, "user_id": uid, **info}
+            for p in self._platforms(platform, "approved")
+            for uid, info in self._load_json(self._approved_path(p)).items()
+        ]
 
     def _approve_user(self, platform: str, user_id: str, user_name: str = "") -> None:
         """Add a user to the approved list. Must be called under self._lock."""
@@ -403,10 +377,7 @@ class PairingStore:
         normalized_user_id = _normalize_user_id(platform, user_id)
         for approved_user_id in _matching_ids(platform, approved, normalized_user_id):
             del approved[approved_user_id]
-        approved[normalized_user_id] = {
-            "user_name": user_name,
-            "approved_at": time.time(),
-        }
+        approved[normalized_user_id] = {"user_name": user_name, "approved_at": time.time()}
         self._save_json(self._approved_path(platform), approved)
         # Mirror the grant into the operator's allowlist when one is configured.
         _sync_allowlist_add(platform, normalized_user_id)
@@ -436,11 +407,9 @@ class PairingStore:
         """Remove a pending request and approve its user. Must hold self._lock."""
         del pending[matched_key]
         self._save_json(self._pending_path(platform), pending)
-
         # A successful approval proves legitimacy, so the persisted brute-force streak
         # must not carry over (isolated typos would accumulate into a spurious lockout).
         self._reset_failed_attempts(platform)
-
         result = {"user_id": matched_entry["user_id"], "user_name": matched_entry.get("user_name", "")}
         self._approve_user(platform, result["user_id"], result["user_name"])
         return result
@@ -448,29 +417,23 @@ class PairingStore:
     def generate_code(self, platform: str, user_id: str, user_name: str = "") -> Optional[str]:
         """Generate a pairing code for a new user.
 
-        Returns None if the user is rate-limited, the platform hit
-        MAX_PENDING_PER_PLATFORM, or the platform is locked out. Only a salted
-        SHA-256 hash of the code is persisted, never the plaintext.
+        Returns None if the user is rate-limited, the platform hit MAX_PENDING_PER_PLATFORM,
+        or the platform is locked out. Only a salted SHA-256 hash of the code is persisted.
         """
         with self._lock:
             self._cleanup_expired(platform)
             normalized_user_id = _normalize_user_id(platform, user_id)
-
             if self._is_locked_out(platform) or self._is_rate_limited(platform, user_id):
                 return None
             pending = self._load_json(self._pending_path(platform))
             if len(pending) >= MAX_PENDING_PER_PLATFORM:
                 return None
-
             code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
             salt = os.urandom(16)
             # Keyed by a random entry id, not the code itself.
             pending[secrets.token_hex(8)] = {
-                "hash": self._hash_code(code, salt),
-                "salt": salt.hex(),
-                "user_id": normalized_user_id,
-                "user_name": user_name,
-                "created_at": time.time(),
+                "hash": self._hash_code(code, salt), "salt": salt.hex(),
+                "user_id": normalized_user_id, "user_name": user_name, "created_at": time.time(),
             }
             self._save_json(self._pending_path(platform), pending)
             self._record_rate_limit(platform, user_id)
@@ -479,18 +442,16 @@ class PairingStore:
     def approve_code(self, platform: str, code: str) -> Optional[dict]:
         """Approve a pairing code and add its user to the approved list.
 
-        Returns ``{user_id, user_name}``, or ``None`` if the code is invalid/expired OR
-        the platform is locked out (disambiguate with ``_is_locked_out``). Constant-time
+        Returns ``{user_id, user_name}``, or ``None`` if the code is invalid/expired OR the
+        platform is locked out (disambiguate with ``_is_locked_out``). Constant-time
         salted-hash compare; legacy plaintext entries are ignored and pruned at TTL.
         """
         with self._lock:
             self._cleanup_expired(platform)
             code = code.upper().strip()
-
             # Before the lookup, or an already-issued valid code would bypass lockout.
             if self._is_locked_out(platform):
                 return None
-
             pending = self._load_json(self._pending_path(platform))
             # Skip legacy/malformed entries so an in-place upgrade doesn't crash.
             for entry_id, entry in pending.items():
@@ -502,7 +463,6 @@ class PairingStore:
                     continue
                 if secrets.compare_digest(self._hash_code(code, salt), entry["hash"]):
                     return self._finish_approval(platform, pending, entry_id, entry)
-
             self._record_failed_attempt(platform)
             return None
 
@@ -526,7 +486,6 @@ class PairingStore:
             request_id = str(request_id or "").strip().lower()
             if not request_id:
                 return None
-
             pending = self._load_json(self._pending_path(platform))
             for entry_id, entry in pending.items():
                 if _is_hashed_entry(entry) and secrets.compare_digest(str(entry_id).lower(), request_id):
@@ -538,20 +497,17 @@ class PairingStore:
         for :meth:`approve_request`; legacy pre-hash entries report an empty id)."""
         results = []
         with self._lock:
-            for p in [platform] if platform else self._all_platforms("pending"):
+            for p in self._platforms(platform, "pending"):
                 self._cleanup_expired(p)
                 for entry_id, info in self._load_json(self._pending_path(p)).items():
-                    if not isinstance(info, dict):
-                        continue
-                    created_at = info.get("created_at")
-                    if not isinstance(created_at, (int, float)):
+                    created_at = _entry_created_at(info)
+                    if created_at is None:
                         continue
                     is_modern = isinstance(info.get("hash"), str) and isinstance(info.get("salt"), str)
                     results.append({
                         "platform": p,
                         "request_id": str(entry_id) if is_modern else "",
-                        "user_id": info.get("user_id", ""),
-                        "user_name": info.get("user_name", ""),
+                        "user_id": info.get("user_id", ""), "user_name": info.get("user_name", ""),
                         "age_minutes": int((time.time() - created_at) / 60),
                     })
         return results
@@ -560,35 +516,40 @@ class PairingStore:
         """Clear all pending requests. Returns count removed."""
         with self._lock:
             count = 0
-            for p in [platform] if platform else self._all_platforms("pending"):
+            for p in self._platforms(platform, "pending"):
                 count += len(self._load_json(self._pending_path(p)))
                 self._save_json(self._pending_path(p), {})
         return count
 
     # ----- Rate limiting and lockout -----
 
+    def _limits(self) -> dict:
+        return self._load_json(self._rate_limit_path())
+
+    def _save_limits(self, limits: dict) -> None:
+        self._save_json(self._rate_limit_path(), limits)
+
     def _is_rate_limited(self, platform: str, user_id: str) -> bool:
         """Whether a user (under any alias) has requested a code too recently."""
-        limits = self._load_json(self._rate_limit_path())
+        limits = self._limits()
         return any(
             (time.time() - limits.get(f"{platform}:{alias}", 0)) < RATE_LIMIT_SECONDS
             for alias in _user_id_aliases(platform, user_id)
         )
 
     def _record_rate_limit(self, platform: str, user_id: str) -> None:
-        limits = self._load_json(self._rate_limit_path())
+        limits = self._limits()
         now = time.time()
         for alias in _user_id_aliases(platform, user_id):
             limits[f"{platform}:{alias}"] = now
-        self._save_json(self._rate_limit_path(), limits)
+        self._save_limits(limits)
 
     def _is_locked_out(self, platform: str) -> bool:
-        limits = self._load_json(self._rate_limit_path())
-        return time.time() < limits.get(f"_lockout:{platform}", 0)
+        return time.time() < self._limits().get(f"_lockout:{platform}", 0)
 
     def _record_failed_attempt(self, platform: str) -> None:
         """Record a failed approval attempt; triggers lockout after MAX_FAILED_ATTEMPTS."""
-        limits = self._load_json(self._rate_limit_path())
+        limits = self._limits()
         fail_key = f"_failures:{platform}"
         fails = limits.get(fail_key, 0) + 1
         limits[fail_key] = fails
@@ -597,15 +558,15 @@ class PairingStore:
             limits[fail_key] = 0
             print(f"[pairing] Platform {platform} locked out for {LOCKOUT_SECONDS}s "
                   f"after {MAX_FAILED_ATTEMPTS} failed attempts", flush=True)
-        self._save_json(self._rate_limit_path(), limits)
+        self._save_limits(limits)
 
     def _reset_failed_attempts(self, platform: str) -> None:
         """Clear the failed-approval counter after a success (it tracks *consecutive* failures)."""
-        limits = self._load_json(self._rate_limit_path())
+        limits = self._limits()
         fail_key = f"_failures:{platform}"
         if limits.get(fail_key):
             limits[fail_key] = 0
-            self._save_json(self._rate_limit_path(), limits)
+            self._save_limits(limits)
 
     # ----- Cleanup -----
 
@@ -616,9 +577,7 @@ class PairingStore:
         now = time.time()
         expired = [
             entry_id for entry_id, info in pending.items()
-            if not isinstance(info, dict)
-            or not isinstance(info.get("created_at"), (int, float))
-            or (now - info["created_at"]) > CODE_TTL_SECONDS
+            if (created := _entry_created_at(info)) is None or (now - created) > CODE_TTL_SECONDS
         ]
         if expired:
             self._save_json(path, {k: v for k, v in pending.items() if k not in expired})
@@ -626,5 +585,5 @@ class PairingStore:
     def _all_platforms(self, suffix: str) -> list:
         """Platforms that have a ``-<suffix>.json`` data file (``_``-prefixed files are shared state)."""
         tail = f"-{suffix}.json"
-        platforms = [f.name.replace(tail, "") for f in self._dir.iterdir() if f.name.endswith(tail)]
+        platforms = (f.name.replace(tail, "") for f in self._dir.iterdir() if f.name.endswith(tail))
         return [p for p in platforms if not p.startswith("_")]

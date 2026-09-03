@@ -105,19 +105,20 @@ def _normalize_transport_token(value: Any) -> str:
     return str(value).strip().lower() or "auto"
 
 
-def _coerce_float(value: Any, default: float) -> float:
+def _coerce_num(cast, value: Any, default):
+    # OverflowError: ``int(float("inf"))`` — non-finite YAML must degrade, not abort loading.
     try:
-        return default if value is None else float(value)
-    except (TypeError, ValueError):
+        return default if value is None else cast(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    return _coerce_num(float, value, default)
 
 
 def _coerce_int(value: Any, default: int) -> int:
-    # OverflowError: ``int(float("inf"))`` — non-finite YAML must degrade, not abort loading.
-    try:
-        return default if value is None else int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
+    return _coerce_num(int, value, default)
 
 
 def _coerce_optional_positive_int(value: Any, key: str) -> Optional[int]:

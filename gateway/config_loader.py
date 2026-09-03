@@ -58,10 +58,6 @@ def _quick_commands_ok(value: Any) -> bool:
     return False
 
 
-def _is_dict(value: Any) -> bool:
-    return isinstance(value, dict)
-
-
 def _dm_behavior_choice(value: Any, default: str = "pair") -> str:
     return _normalize_choice(value, {"pair", "ignore"}, default)
 
@@ -74,7 +70,7 @@ def _presence(*keys: str) -> tuple:
 _TOPLEVEL_BRIDGE: tuple = (
     ("session_reset", "default_reset_policy", "presence", lambda v: bool(v) and isinstance(v, dict), None),
     ("quick_commands", "quick_commands", "none", _quick_commands_ok, None),
-    ("stt", "stt", "presence", _is_dict, None),
+    ("stt", "stt", "presence", lambda v: isinstance(v, dict), None),
     *_presence("stt_echo_transcripts", "group_sessions_per_user", "thread_sessions_per_user"),
     ("multiplex_profiles", "multiplex_profiles", "gwdata", None, None),
     *_presence("multiplex_profile_allowlist", "room_link_url"),
