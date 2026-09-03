@@ -46,6 +46,13 @@ ALL_POSSIBLE_TOOLS = set(TOOL_TO_TOOLSET_MAP.keys())
 DEFAULT_TOOL_STATS = {'count': 0, 'success': 0, 'failure': 0}
 _REASONING_KEYS = ("total_assistant_turns", "turns_with_reasoning", "turns_without_reasoning")
 
+# BatchRunner attributes forwarded verbatim to every AIAgent in the worker config.
+_AGENT_PASSTHROUGH = (
+    "base_url", "api_key", "ephemeral_system_prompt", "providers_allowed", "providers_ignored",
+    "providers_order", "provider_sort", "openrouter_min_coding_score", "max_tokens",
+    "reasoning_config", "prefill_messages",
+)
+
 
 def _normalize_tool_stats(tool_stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
     """All possible tools with zero defaults (consistent HF schema), plus any unexpected tools."""
@@ -237,26 +244,16 @@ def _process_single_prompt(
             print(f"   Prompt {prompt_index}: Using toolsets {selected_toolsets}")
 
         agent = AIAgent(
-            base_url=config.get("base_url"),
-            api_key=config.get("api_key"),
             model=config["model"],
             max_iterations=config["max_iterations"],
             enabled_toolsets=selected_toolsets,
             save_trajectories=False,  # We handle saving ourselves
             verbose_logging=config.get("verbose", False),
-            ephemeral_system_prompt=config.get("ephemeral_system_prompt"),
             log_prefix_chars=config.get("log_prefix_chars", 100),
             log_prefix=f"[B{batch_num}:P{prompt_index}]",
-            providers_allowed=config.get("providers_allowed"),
-            providers_ignored=config.get("providers_ignored"),
-            providers_order=config.get("providers_order"),
-            provider_sort=config.get("provider_sort"),
-            openrouter_min_coding_score=config.get("openrouter_min_coding_score"),
-            max_tokens=config.get("max_tokens"),
-            reasoning_config=config.get("reasoning_config"),
-            prefill_messages=config.get("prefill_messages"),
             skip_context_files=True,  # Don't pollute trajectories with SOUL.md/AGENTS.md
             skip_memory=True,  # Don't use persistent memory in batch runs
+            **{key: config.get(key) for key in _AGENT_PASSTHROUGH},
         )
 
         # task_id ensures each task gets its own isolated VM
@@ -266,11 +263,7 @@ def _process_single_prompt(
         tool_stats = _extract_tool_stats(result["messages"])
         reasoning_stats = _extract_reasoning_stats(result["messages"])
 
-        trajectory = agent._convert_to_trajectory_format(
-            result["messages"],
-            prompt,
-            result["completed"]
-        )
+        trajectory = agent._convert_to_trajectory_format(result["messages"], prompt, result["completed"])
 
         return {
             "success": True,
@@ -282,11 +275,7 @@ def _process_single_prompt(
             "partial": result.get("partial", False),
             "api_calls": result["api_calls"],
             "toolsets_used": selected_toolsets,
-            "metadata": {
-                "batch_num": batch_num,
-                "timestamp": datetime.now().isoformat(),
-                "model": config["model"]
-            }
+            "metadata": {"batch_num": batch_num, "timestamp": datetime.now().isoformat(), "model": config["model"]},
         }
 
     except Exception as e:
@@ -323,13 +312,7 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
 
     if not prompts_to_process:
         print(f"✅ Batch {batch_num}: Already completed (skipping)")
-        return {
-            "batch_num": batch_num,
-            "processed": 0,
-            "skipped": len(batch_data),
-            "tool_stats": {},
-            "completed_prompts": []
-        }
+        return {"batch_num": batch_num, "processed": 0, "skipped": len(batch_data), "tool_stats": {}, "completed_prompts": []}
 
     print(f"   Processing {len(prompts_to_process)} prompts (skipping {len(batch_data) - len(prompts_to_process)} already completed)")
 
@@ -339,12 +322,7 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
     discarded_no_reasoning = 0
 
     for prompt_index, prompt_data in prompts_to_process:
-        result = _process_single_prompt(
-            prompt_index,
-            prompt_data,
-            batch_num,
-            config
-        )
+        result = _process_single_prompt(prompt_index, prompt_data, batch_num, config)
 
         if result["success"] and result["trajectory"]:
             reasoning = result.get("reasoning_stats", {})
@@ -679,38 +657,20 @@ class BatchRunner:
         else:
             worker_api_key = self.api_key
 
-        return {
-            "distribution": self.distribution,
-            "model": self.model,
-            "max_iterations": self.max_iterations,
-            "base_url": self.base_url,
-            "api_key": worker_api_key,
-            "verbose": self.verbose,
-            "ephemeral_system_prompt": self.ephemeral_system_prompt,
-            "log_prefix_chars": self.log_prefix_chars,
-            "providers_allowed": self.providers_allowed,
-            "providers_ignored": self.providers_ignored,
-            "providers_order": self.providers_order,
-            "provider_sort": self.provider_sort,
-            "openrouter_min_coding_score": self.openrouter_min_coding_score,
-            "max_tokens": self.max_tokens,
-            "reasoning_config": self.reasoning_config,
-            "prefill_messages": self.prefill_messages,
-        }
+        config = {key: getattr(self, key) for key in _AGENT_PASSTHROUGH}
+        config["api_key"] = worker_api_key
+        for key in ("distribution", "model", "max_iterations", "verbose", "log_prefix_chars"):
+            config[key] = getattr(self, key)
+        return config
 
     def _run_pool(self, config, checkpoint_data, completed_prompts_set, checkpoint_lock) -> List[Dict[str, Any]]:
         """Process all batches in a worker pool, checkpointing after each result."""
         print(f"\n🔧 Initializing {self.num_workers} worker processes...")
 
         with Pool(processes=self.num_workers) as pool:
+            # output_dir as str for pickling
             tasks = [
-                (
-                    batch_num,
-                    batch_data,
-                    str(self.output_dir),  # Convert Path to string for pickling
-                    completed_prompts_set,
-                    config
-                )
+                (batch_num, batch_data, str(self.output_dir), completed_prompts_set, config)
                 for batch_num, batch_data in enumerate(self.batches)
             ]
 
@@ -722,17 +682,10 @@ class BatchRunner:
             results = []
             console = Console(force_terminal=True)
             with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]📦 Batches"),
-                BarColumn(bar_width=40),
-                MofNCompleteColumn(),
-                TextColumn("•"),
-                TimeRemainingColumn(),
-                console=console,
-                refresh_per_second=2,
-                transient=False,
-                redirect_stdout=False,
-                redirect_stderr=False,
+                SpinnerColumn(), TextColumn("[bold blue]📦 Batches"), BarColumn(bar_width=40),
+                MofNCompleteColumn(), TextColumn("•"), TimeRemainingColumn(),
+                console=console, refresh_per_second=2, transient=False,
+                redirect_stdout=False, redirect_stderr=False,
             ) as progress:
                 task = progress.add_task("Processing", total=len(tasks))
 
@@ -754,9 +707,7 @@ class BatchRunner:
 
                             if isinstance(batch_num, int):
                                 checkpoint_data.setdefault('batch_stats', {})[str(batch_num)] = {
-                                    'processed': result.get('processed', 0),
-                                    'skipped': result.get('skipped', 0),
-                                    'discarded_no_reasoning': result.get('discarded_no_reasoning', 0),
+                                    key: result.get(key, 0) for key in ('processed', 'skipped', 'discarded_no_reasoning')
                                 }
 
                             checkpoint_data['completed_prompts'] = sorted(completed_prompts_set)
@@ -841,22 +792,12 @@ class BatchRunner:
         print("-" * 70)
 
         if total_tool_stats:
-            sorted_tools = sorted(
-                total_tool_stats.items(),
-                key=lambda x: x[1]["count"],
-                reverse=True
-            )
+            sorted_tools = sorted(total_tool_stats.items(), key=lambda x: x[1]["count"], reverse=True)
 
             print(f"{'Tool Name':<25} {'Count':<10} {'Success':<10} {'Failure':<10} {'Success Rate':<12}")
             print("-" * 70)
             for tool_name, stats in sorted_tools:
-                print(
-                    f"{tool_name:<25} "
-                    f"{stats['count']:<10} "
-                    f"{stats['success']:<10} "
-                    f"{stats['failure']:<10} "
-                    f"{stats['success_rate']:.1f}%"
-                )
+                print(f"{tool_name:<25} {stats['count']:<10} {stats['success']:<10} {stats['failure']:<10} {stats['success_rate']:.1f}%")
         else:
             print("No tool calls were made during this run.")
 
@@ -925,12 +866,8 @@ class BatchRunner:
 
         for stats in total_tool_stats.values():
             total_calls = stats["success"] + stats["failure"]
-            if total_calls > 0:
-                stats["success_rate"] = round(stats["success"] / total_calls * 100, 2)
-                stats["failure_rate"] = round(stats["failure"] / total_calls * 100, 2)
-            else:
-                stats["success_rate"] = 0.0
-                stats["failure_rate"] = 0.0
+            stats["success_rate"] = round(stats["success"] / total_calls * 100, 2) if total_calls > 0 else 0.0
+            stats["failure_rate"] = round(stats["failure"] / total_calls * 100, 2) if total_calls > 0 else 0.0
 
         kept, batch_files_found = self._combine_batch_files()
 
@@ -945,9 +882,7 @@ class BatchRunner:
             "duration_seconds": round(time.time() - start_time, 2),
             "tool_statistics": total_tool_stats,
             "reasoning_statistics": total_reasoning_stats,
-            "discarded_no_reasoning": sum(
-                r.get("discarded_no_reasoning", 0) for r in results
-            ),
+            "discarded_no_reasoning": sum(r.get("discarded_no_reasoning", 0) for r in results),
         }
 
         with open(self.stats_file, 'w', encoding='utf-8') as f:
@@ -1050,17 +985,14 @@ def main(
         print("                         --run_name=my_run --distribution=<name>")
         return
 
-    if not dataset_file:
-        print("❌ Error: --dataset_file is required")
-        raise SystemExit(1)
-
-    if not batch_size or batch_size < 1:
-        print("❌ Error: --batch_size must be a positive integer")
-        raise SystemExit(1)
-
-    if not run_name:
-        print("❌ Error: --run_name is required")
-        raise SystemExit(1)
+    for invalid, message in (
+        (not dataset_file, "--dataset_file is required"),
+        (not batch_size or batch_size < 1, "--batch_size must be a positive integer"),
+        (not run_name, "--run_name is required"),
+    ):
+        if invalid:
+            print(f"❌ Error: {message}")
+            raise SystemExit(1)
 
     # --reasoning_disabled takes priority, then --reasoning_effort, then default (medium)
     reasoning_config = None
