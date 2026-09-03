@@ -487,10 +487,9 @@ def _capture_image_ext(cap: CaptureResult) -> str:
 def _bounds_unknown(bounds) -> bool:
     # No real geometry: KDE/Qt apps report [0, 0, 0, 0] for elements clickable by index; serializing that as a
     # rect invites coordinate=[0, 0] clicks.
-    try:
+    with contextlib.suppress(TypeError, ValueError):
         return all(int(v) == 0 for v in bounds)
-    except (TypeError, ValueError):
-        return False
+    return False
 
 def _element_to_dict(e: UIElement) -> Dict[str, Any]:
     # A zero rect is "geometry unknown", not a position — null it so no coordinate= is ever derived from it.
@@ -518,11 +517,9 @@ def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
         return None, None
     max_x = max_y = 0
     for e in elements:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             x, y, w, h = e.bounds
-        except (TypeError, ValueError):
-            continue
-        max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
+            max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
     if max_x <= image_width * 1.05 and max_y <= image_height * 1.05:
         return None, None
     note = (f"element bounds are in native desktop coordinates (extend to ~{max_x}x{max_y}), "
@@ -561,12 +558,10 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
 def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
     summary names indices the model can't find."""
-    cap, bounds_note = v.cap, v.bounds_note
-    if bounds_note and v.bounds_scale:
-        bounds_note += (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
-                        f"{v.bounds_scale} ≈ native coordinate)")
+    cap = v.cap
     notes = (
-        bounds_note,
+        v.bounds_note and v.bounds_note + (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
+                                           f"{v.bounds_scale} ≈ native coordinate)" if v.bounds_scale else ""),
         v.screenshot_path and f"shareable screenshot saved to {v.screenshot_path}",
         cap.note,
         v.elements_file and (f"full element tree with untruncated labels saved to {v.elements_file} — "
