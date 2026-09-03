@@ -1,7 +1,7 @@
 """Constants, result envelopes and tiny config readers shared by every STT module.
 
-Split out of ``tools/transcription_tools.py``; every name is re-imported there, so
-``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching) as before.
+Every name is re-imported by ``tools/transcription_tools.py``, so
+``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching).
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ import logging
 import os
 import subprocess  # noqa: F401  (type annotation only)
 from typing import Any, Dict
+
+from tools.tts_command_provider import _get_provider_section as _get_stt_section  # noqa: F401  (re-exported)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -39,10 +41,9 @@ MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
 OPENAI_MODELS = {"whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"}
 GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"}
 
-# Providers with native handlers. Kept in sync with
-# ``agent.transcription_registry._BUILTIN_NAMES`` (a regression test fails on
-# drift); plugins may not register under these names and the dispatcher
-# short-circuits them before command/plugin lookup.
+# Providers with native handlers. Kept in sync with ``agent.transcription_registry._BUILTIN_NAMES``
+# (a regression test fails on drift); plugins may not register under these names and the
+# dispatcher short-circuits them before command/plugin lookup.
 BUILTIN_STT_PROVIDERS = frozenset({
     "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra",
 })
@@ -57,14 +58,6 @@ def _error_result(error: str, **extra: Any) -> Dict[str, Any]:
 
 def _ok_result(transcript: str, provider: str) -> Dict[str, Any]:
     return {"success": True, "transcript": transcript, "provider": provider}
-
-
-def _get_stt_section(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """Return an stt sub-section if it's a dict, else an empty dict."""
-    if not isinstance(stt_config, dict):
-        return {}
-    section = stt_config.get(name)
-    return section if isinstance(section, dict) else {}
 
 
 def _lazy_ensure_quietly(dep: str) -> None:
