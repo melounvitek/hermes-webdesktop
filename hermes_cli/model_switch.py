@@ -1115,6 +1115,10 @@ class _Switch:
     def fail(self, message: str, **fields) -> ModelSwitchResult:
         return ModelSwitchResult(success=False, is_global=self.is_global, error_message=message, **fields)
 
+    def fail_on_target(self, message: str) -> ModelSwitchResult:
+        """Failure carrying the already-settled ``target_provider`` / ``provider_label``."""
+        return self.fail(message, target_provider=self.target_provider, provider_label=self.provider_label)
+
     @property
     def provider_changed(self) -> bool:
         return self.target_provider != self.current_provider
@@ -1129,29 +1133,26 @@ def _route_explicit_provider(st: _Switch) -> Optional[ModelSwitchResult]:
     if pdef is None:
         return st.fail(_unknown_provider_message(st.explicit_provider))
 
-    st.target_provider = pdef.id
+    st.target_provider, st.provider_label = pdef.id, pdef.name  # label is re-derived in the credential step
     if st.target_provider == "moa" and not st.new_model:
         st.new_model = _moa_default_preset()
 
     agg_err = _aggregator_alias_error(
-        st.explicit_provider, st.target_provider, st.current_provider, st.user_providers, st.custom_providers,
-    )
+        st.explicit_provider, st.target_provider, st.current_provider, st.user_providers, st.custom_providers)
     if agg_err:
-        return st.fail(agg_err, target_provider=st.target_provider, provider_label=pdef.name)
+        return st.fail_on_target(agg_err)
 
     if not st.new_model:
         if not pdef.base_url:
-            return st.fail(
+            return st.fail_on_target(
                 f"Provider '{pdef.name}' has no base URL configured. "
-                f"Specify a model: /model <model-name> --provider {st.explicit_provider}",
-                target_provider=st.target_provider, provider_label=pdef.name)
+                f"Specify a model: /model <model-name> --provider {st.explicit_provider}")
         from hermes_cli.runtime_provider import _auto_detect_local_model
         st.new_model = _auto_detect_local_model(pdef.base_url)
         if not st.new_model:
-            return st.fail(
+            return st.fail_on_target(
                 f"No model detected on {pdef.name} ({pdef.base_url}). "
-                f"Specify the model explicitly: /model <model-name> --provider {st.explicit_provider}",
-                target_provider=st.target_provider, provider_label=pdef.name)
+                f"Specify the model explicitly: /model <model-name> --provider {st.explicit_provider}")
 
     try:
         alias_result = resolve_alias(st.new_model, st.target_provider)
@@ -1331,9 +1332,7 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
             st.api_key, st.base_url, st.api_mode, st.validation_headers = _runtime_creds(
                 st.validation_headers, requested=st.target_provider, target_model=st.new_model)
         except Exception as e:
-            return st.fail(
-                f"Could not resolve credentials for provider '{st.provider_label}': {e}",
-                target_provider=st.target_provider, provider_label=st.provider_label)
+            return st.fail_on_target(f"Could not resolve credentials for provider '{st.provider_label}': {e}")
     return None
 
 
