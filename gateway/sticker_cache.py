@@ -4,6 +4,7 @@ Stickers are described via the vision tool once and cached by file_unique_id
 (``~/.hermes/sticker_cache.json``) so the same image is never re-analyzed.
 """
 
+import contextlib
 import json
 import os
 import tempfile
@@ -11,7 +12,6 @@ import time
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
-import contextlib
 
 
 CACHE_PATH = get_hermes_home() / "sticker_cache.json"
@@ -24,12 +24,10 @@ STICKER_VISION_PROMPT = (
 
 
 def _load_cache() -> dict:
-    if CACHE_PATH.exists():
-        try:
-            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    try:
+        return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
 
 
 def _save_cache(cache: dict) -> None:
@@ -65,11 +63,9 @@ def build_sticker_injection(description: str, emoji: str = "", set_name: str = "
     ``[The user sent a sticker 😀 from "MyPack"~ It shows: "A cat waving" (=^.w.^=)]``.
     ``set_name`` is only shown together with an emoji.
     """
-    context = ""
+    context = f" {emoji}" if emoji else ""
     if set_name and emoji:
-        context = f" {emoji} from \"{set_name}\""
-    elif emoji:
-        context = f" {emoji}"
+        context += f" from \"{set_name}\""
     return f"[The user sent a sticker{context}~ It shows: \"{description}\" (=^.w.^=)]"
 
 
