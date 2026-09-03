@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+DbPath = Path | str
 
 
 def identifier(
@@ -44,9 +45,8 @@ non_negative_int = partial(bounded_int, low=0)
 
 
 def exact_fields(
-    value: Any, *, label: str, required: frozenset[str] | set[str],
-    optional: frozenset[str] | set[str] = frozenset(), error: type[Exception], not_object: str | None = None,
-    missing_fmt: str = "{label} is missing fields: {fields}",
+    value: Any, *, label: str, required: frozenset[str] | set[str], optional: frozenset[str] | set[str] = frozenset(),
+    error: type[Exception], not_object: str | None = None, missing_fmt: str = "{label} is missing fields: {fields}",
     unknown_fmt: str = "{label} has unknown fields: {fields}") -> Mapping[str, Any]:
     """Require exactly ``required`` (+ any ``optional``) keys; formats name the offenders sorted."""
     if not isinstance(value, Mapping):
@@ -99,7 +99,7 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
-def open_sqlite(path: Path | str, *, timeout: float = 10) -> sqlite3.Connection:
+def open_sqlite(path: DbPath, *, timeout: float = 10) -> sqlite3.Connection:
     """Row-factory connection with foreign keys on; no journal or schema work."""
     conn = sqlite3.connect(path, timeout=timeout)
     conn.row_factory = sqlite3.Row
@@ -108,7 +108,7 @@ def open_sqlite(path: Path | str, *, timeout: float = 10) -> sqlite3.Connection:
 
 
 def connect(
-    db_path: Path | str, *, db_label: str, ready: Callable[[sqlite3.Connection], bool],
+    db_path: DbPath, *, db_label: str, ready: Callable[[sqlite3.Connection], bool],
     initialize: Callable[[sqlite3.Connection], None], lock_retries: int = 1) -> sqlite3.Connection:
     """Open the shared root store: WAL, foreign keys, then ``initialize`` in one IMMEDIATE txn if not ``ready``.
 
@@ -119,7 +119,6 @@ def connect(
     first opener initializes the DB, especially on Windows).
     """
     from hermes_state import apply_wal_with_fallback
-
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
@@ -156,7 +155,7 @@ def table_columns(conn: sqlite3.Connection, table: str) -> frozenset[str]:
 
 @contextmanager
 def transaction(
-    connect: Callable[[Path | str], sqlite3.Connection], db_path: Path | str, *, immediate: bool
+    connect: Callable[[DbPath], sqlite3.Connection], db_path: DbPath, *, immediate: bool
 ) -> Iterator[sqlite3.Connection]:
     """Open via ``connect``, optionally ``BEGIN IMMEDIATE``, commit on success, always close."""
     conn = connect(db_path)

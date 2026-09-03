@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import re
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from gateway.hosted_rooms_common import compact_json, identifier
 
 POLICY_VERSION = 1
 MAX_POLICY_TOOLSETS = 128
 MAX_POLICY_ITERATIONS = (1 << 53) - 1
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _POLICY_FIELDS = {"version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
 
 
@@ -21,16 +19,12 @@ class RoomExecutionPolicyError(ValueError): """A RoomLink execution policy is ma
 
 
 def _policy_digest(unsigned: Mapping[str, Any]) -> str:
-    encoded = json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(compact_json(unsigned).encode("ascii")).hexdigest()
 
 
 def _identifier(value: Any, *, field: str) -> str:
     # Stringifies first (``None`` -> ""), so non-strings also fail as "is invalid".
-    normalized = str(value or "").strip()
-    if not normalized or len(normalized) > 128 or _IDENTIFIER_RE.fullmatch(normalized) is None:
-        raise RoomExecutionPolicyError(f"{field} is invalid")
-    return normalized
+    return identifier(str(value or ""), label=field, error=RoomExecutionPolicyError, invalid=f"{field} is invalid")
 
 
 @dataclass(frozen=True)
@@ -68,8 +62,7 @@ class RoomExecutionPolicy:
             raise RoomExecutionPolicyError("max_iterations is invalid")
         unsigned = {
             "version": POLICY_VERSION, "target_profile": target_profile, "enabled_toolsets": list(toolsets),
-            "approval_mode": approval_mode, "max_iterations": max_iterations,
-        }
+            "approval_mode": approval_mode, "max_iterations": max_iterations}
         supplied = str(value["policy_digest"] or "").strip().lower()
         if supplied != _policy_digest(unsigned):
             raise RoomExecutionPolicyError("policy_digest does not match the execution policy")
@@ -83,15 +76,12 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
     """Resolve the effective API-server policy from the target's own config."""
     if config is None:
         from gateway.run import _load_gateway_config
-
         config = _load_gateway_config()
     if not isinstance(config, Mapping):
         raise RoomExecutionPolicyError("gateway config is invalid")
-
     from hermes_cli.config import resolve_turn_limit
     from hermes_cli.tools_config import _get_platform_tools
     from tools.approval import _YOLO_MODE_FROZEN, _normalize_approval_mode
-
     toolsets = sorted({*_get_platform_tools(dict(config), "api_server"), "bot_room"})
     agent = config.get("agent") if isinstance(config.get("agent"), Mapping) else {}
     approvals = config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
@@ -99,8 +89,7 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
         "version": POLICY_VERSION, "target_profile": _identifier(target_profile, field="target_profile"),
         "enabled_toolsets": toolsets,
         "approval_mode": ("off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))),
-        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS),
-    }
+        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS)}
     value = {**unsigned, "policy_digest": _policy_digest(unsigned)}
     return RoomExecutionPolicy.from_mapping(value).as_mapping()
 
@@ -123,5 +112,4 @@ def current_room_execution_policy() -> RoomExecutionPolicy | None:
 __all__ = [
     "MAX_POLICY_ITERATIONS", "POLICY_VERSION", "RoomExecutionPolicy", "RoomExecutionPolicyError",
     "bind_room_execution_policy", "current_room_execution_policy", "execution_policy_mapping",
-    "reset_room_execution_policy",
-]
+    "reset_room_execution_policy"]
