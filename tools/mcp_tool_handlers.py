@@ -1,4 +1,6 @@
-"""Registry-facing sync handlers for MCP tools and utility tools (resources/prompts), plus the per-call recovery ladder: trust gating, circuit breaker, auth (401) refresh, session-expired reconnect and dead-stdio respawn retry. Split from tools/mcp_tool.py."""
+"""Registry-facing sync handlers for MCP tools and utility tools (resources/prompts), plus
+the per-call recovery ladder: trust gating, circuit breaker, auth (401) refresh,
+session-expired reconnect and dead-stdio respawn retry."""
 
 import logging
 import asyncio
@@ -12,7 +14,10 @@ from typing import Any, Callable, Dict, List, Optional
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
-from tools.mcp_tool_content import _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block, _render_mcp_resource_block, _strip_reserved_meta_keys, _truncate_mcp_text_result
+from tools.mcp_tool_content import (
+    _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block,
+    _render_mcp_resource_block, _strip_reserved_meta_keys, _truncate_mcp_text_result,
+)
 from tools.mcp_tool_errors import _is_session_expired_error
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -21,8 +26,8 @@ logger = logging.getLogger("tools.mcp_tool")
 # --------------------------------------------------------------- pre-call gates
 
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
-    """Approval gate for write-capable tools on ``trust: untrusted`` servers.
-    None to proceed, else a ``tool_error``. Fail-closed: approval-system errors block."""
+    """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
+    else a ``tool_error``. Fail-closed: approval-system errors block."""
     trust = _core._server_trust_levels.get(server_name, _core._TRUST_FULL)
     if trust != _core._TRUST_UNTRUSTED or _core._tool_read_only_hints.get(server_name, {}).get(tool_name) is True:
         return None
@@ -35,8 +40,7 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
             f"tool is write-capable (no readOnlyHint=true annotation) and may modify external state.",
             f"Server '{server_name}' is configured 'trust: untrusted'. "
             f"Approve to run '{tool_name}' once, or deny to block it.",
-            surface=f"mcp-trust/{server_name}",
-        )
+            surface=f"mcp-trust/{server_name}")
     except Exception as exc:
         logger.error("MCP trust gate: approval check failed for %s.%s: %s", server_name, tool_name, exc, exc_info=True)
         return tool_error(f"MCP tool '{tool_name}' on untrusted server '{server_name}' was blocked: the approval "
@@ -67,10 +71,9 @@ def _check_circuit_breaker(server_name: str) -> Optional[str]:
 def _acquire_call_server(server_name: str, tool_timeout: float):
     """``(server, None)`` when a call may be dispatched, else ``(None, error)``.
     No session: a reconnect may be completing (fresh session swaps in asynchronously), so wait
-    briefly before charging a breaker strike. Still down → reconnecting or parked (e.g. dead
+    briefly before charging a breaker strike. Still down -> reconnecting or parked (e.g. dead
     stdio child); probing a dead transport would re-arm the breaker forever, so ask the server
-    task to rebuild and return a clean "reconnecting" error — the breaker resets once the
-    fresh session initializes."""
+    task to rebuild and return a clean "reconnecting" error."""
     not_connected = tool_error(f"MCP server '{server_name}' is not connected")
     server = _core._get_connected_server_for_call(server_name)
     if not server:
@@ -110,6 +113,11 @@ def _strike(server_name: str, message: str, **extra) -> str:
     return tool_error(message, **extra)
 
 
+def _mcp_loop_running() -> bool:
+    loop = _core._mcp_loop
+    return loop is not None and loop.is_running()
+
+
 def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     """The registered server object when it can be signalled to reconnect, else None.
     With *require_loop*, also None unless the MCP loop is running (nothing to wait on)."""
@@ -118,11 +126,6 @@ def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     if srv is None or not hasattr(srv, "_reconnect_event") or (require_loop and not _mcp_loop_running()):
         return None
     return srv
-
-
-def _mcp_loop_running() -> bool:
-    loop = _core._mcp_loop
-    return loop is not None and loop.is_running()
 
 
 def _retry_once(server_name: str, retry_call, op_description: str, what: str):
@@ -198,9 +201,8 @@ def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retr
 
 
 class _StdioChildExited(RuntimeError):
-    """A server's stdio subprocess was gone when (or while) a call ran.
-    Deliberately NOT a TimeoutError: nothing timed out — the child was already dead
-    (typically a gateway restart killed it under a live agent session)."""
+    """A server's stdio subprocess was gone when (or while) a call ran. Deliberately NOT a
+    TimeoutError: nothing timed out — the child was already dead (typically a gateway restart)."""
 
 
 def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str):
@@ -249,17 +251,12 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
             f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"))
 
 
-def _interrupted_call_result() -> str:
-    """Standardized JSON error for a user-interrupted MCP tool call."""
-    return tool_error("MCP call interrupted: user sent a new message")
-
-
 def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: str,
                           recoverers, on_final_failure: Callable[[BaseException], None],
                           record_outcome: bool = False) -> str:
     """Run ``call_once``, walking the recovery ladder on failure. Each recoverer
     ``(server_name, exc, retry_call, op) -> Optional[str]`` returns None when the exception is
-    not its kind; order matters: dead stdio child → auth → session expiry. Unrecovered
+    not its kind; order matters: dead stdio child -> auth -> session expiry. Unrecovered
     exceptions go through ``on_final_failure`` (breaker strike / logging) and become the generic
     call-failed error. ``record_outcome`` applies breaker bookkeeping to the FIRST attempt only;
     retries own their bookkeeping inside the recoverers."""
@@ -267,7 +264,7 @@ def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: st
         result = call_once()
         return _record_call_outcome(server_name, result) if record_outcome else result
     except InterruptedError:
-        return _interrupted_call_result()
+        return tool_error("MCP call interrupted: user sent a new message")
     except Exception as exc:
         for recover in recoverers:
             recovered = recover(server_name, exc, call_once, op)
@@ -386,7 +383,7 @@ def _capped_structured_content(result):
 
 
 def _render_call_tool_result(result, server_name: str) -> str:
-    """Pure: ``CallToolResult`` → the handler's JSON string. ``content`` is the primary
+    """Pure: ``CallToolResult`` -> the handler's JSON string. ``content`` is the primary
     (model-oriented) payload; ``structuredContent`` supplements it (or becomes ``result`` when
     there is no text). Server-level ``_meta`` is surfaced minus protocol-reserved keys.
     ``.is_error`` is ``.isError`` before mcp 2.0."""
@@ -440,7 +437,6 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 finally:
                     server._pending_call_context = None
             # Round-trip completed: transport is healthy even if the tool returned isError.
-            # Clear the rapid-drop budget.
             _mark_proven = getattr(server, "_mark_session_proven", None)
             if _mark_proven is not None:
                 _mark_proven()
@@ -453,18 +449,17 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         return _invoke_with_recovery(
             server_name, lambda: _core._run_on_mcp_loop(_call, timeout=tool_timeout), op,
             (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
-            _on_failure, record_outcome=True,
-        )
+            _on_failure, record_outcome=True)
 
     return _handler
 
 
 def _make_utility_handler(server_name: str, tool_timeout: float, op: str, log_label: str,
                           rpc, render, required: Optional[str] = None):
-    """Shared shape of the four utility handlers (resources/prompts): ``rpc(session, args)``
-    is awaited under ``_rpc_lock``, ``render(result, server_name)`` builds the JSON-able payload,
-    ``required`` names a parameter validated before any transport work. The wrapper owns the
-    connected check and the auth / session-expired recovery ladder."""
+    """Shared shape of the four utility handlers (resources/prompts): ``rpc(session, args,
+    server_name)`` is awaited under ``_rpc_lock``, ``render(result, server_name)`` builds the
+    JSON-able payload, ``required`` names a parameter validated before any transport work. The
+    wrapper owns the connected check and the auth / session-expired recovery ladder."""
 
     def _handler(args: dict, **kwargs) -> str:
         server = _core._get_connected_server_for_call(server_name)
@@ -476,14 +471,13 @@ def _make_utility_handler(server_name: str, tool_timeout: float, op: str, log_la
         async def _call():
             _mark_server_call_started(server)
             async with server._rpc_lock:
-                result = await rpc(server.session, args)
+                result = await rpc(server.session, args, server_name)
             return json.dumps(render(result, server_name), ensure_ascii=False)
 
         return _invoke_with_recovery(
             server_name, lambda: _core._run_on_mcp_loop(_call, timeout=tool_timeout), op,
             (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
-            lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc),
-        )
+            lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc))
 
     return _handler
 
@@ -536,8 +530,7 @@ def _render_prompt_list(all_prompts, server_name: str) -> dict:
         if getattr(p, "arguments", None):
             entry["arguments"] = [
                 {"name": a.name, **_pick(a, ("description", "description", True), ("required", "required"))}
-                for a in p.arguments
-            ]
+                for a in p.arguments]
         prompts.append(entry)
     return {"prompts": prompts}
 
@@ -556,31 +549,28 @@ def _render_get_prompt(result, server_name: str) -> dict:
     return resp
 
 
-def _make_list_resources_handler(server_name: str, tool_timeout: float):
-    """Sync handler that lists resources from an MCP server."""
-    return _make_utility_handler(server_name, tool_timeout, "resources/list", "list_resources",
-                                 lambda session, args: _core._paginate_full_list(session.list_resources, "resources", server_name),
-                                 _render_resource_list)
+def _utility_factory(op: str, log_label: str, rpc, render, required: Optional[str] = None):
+    """``(server_name, tool_timeout) -> sync handler`` for one utility tool."""
+    def _factory(server_name: str, tool_timeout: float):
+        return _make_utility_handler(server_name, tool_timeout, op, log_label, rpc, render, required)
+    return _factory
 
 
-def _make_read_resource_handler(server_name: str, tool_timeout: float):
-    """Sync handler that reads a resource by URI from an MCP server."""
-    return _make_utility_handler(server_name, tool_timeout, "resources/read", "read_resource",
-                                 lambda session, args: session.read_resource(args["uri"]), _render_read_resource, required="uri")
-
-
-def _make_list_prompts_handler(server_name: str, tool_timeout: float):
-    """Sync handler that lists prompts from an MCP server."""
-    return _make_utility_handler(server_name, tool_timeout, "prompts/list", "list_prompts",
-                                 lambda session, args: _core._paginate_full_list(session.list_prompts, "prompts", server_name),
-                                 _render_prompt_list)
-
-
-def _make_get_prompt_handler(server_name: str, tool_timeout: float):
-    """Sync handler that gets a prompt by name from an MCP server."""
-    return _make_utility_handler(server_name, tool_timeout, "prompts/get", "get_prompt",
-                                 lambda session, args: session.get_prompt(args["name"], arguments=args.get("arguments", {})),
-                                 _render_get_prompt, required="name")
+_make_list_resources_handler = _utility_factory(
+    "resources/list", "list_resources",
+    lambda session, args, sn: _core._paginate_full_list(session.list_resources, "resources", sn),
+    _render_resource_list)
+_make_read_resource_handler = _utility_factory(
+    "resources/read", "read_resource",
+    lambda session, args, sn: session.read_resource(args["uri"]), _render_read_resource, required="uri")
+_make_list_prompts_handler = _utility_factory(
+    "prompts/list", "list_prompts",
+    lambda session, args, sn: _core._paginate_full_list(session.list_prompts, "prompts", sn),
+    _render_prompt_list)
+_make_get_prompt_handler = _utility_factory(
+    "prompts/get", "get_prompt",
+    lambda session, args, sn: session.get_prompt(args["name"], arguments=args.get("arguments", {})),
+    _render_get_prompt, required="name")
 
 
 def _make_check_fn(server_name: str):

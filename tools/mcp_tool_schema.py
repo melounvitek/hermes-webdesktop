@@ -1,6 +1,6 @@
 """MCP tool schema conversion and naming: JSON-schema normalisation for provider
-compatibility, mcp__server__tool naming, utility-tool schemas, include/exclude
-filters and description injection scanning."""
+compatibility, mcp__server__tool naming, utility-tool schemas, include/exclude filters and
+description injection scanning."""
 
 import logging
 import fnmatch
@@ -11,8 +11,8 @@ from tools.mcp_tool_common import mcp_field
 
 logger = logging.getLogger("tools.mcp_tool")
 
-# Prompt-injection indicators in MCP tool descriptions. WARNING-level only:
-# log but never block, since false positives would break legitimate servers.
+# Prompt-injection indicators in MCP tool descriptions. WARNING-level only: log but never
+# block, since false positives would break legitimate servers.
 _MCP_INJECTION_PATTERNS = [
     (re.compile(pattern, re.I), reason)
     for pattern, reason in (
@@ -31,16 +31,14 @@ _MCP_INJECTION_PATTERNS = [
 
 
 def _scan_mcp_description(server_name: str, tool_name: str, description: str) -> List[str]:
-    """Scan a tool description for injection patterns; returns finding strings
-    (empty = clean) and logs a warning when any match."""
+    """Scan a tool description for injection patterns; returns finding strings (empty =
+    clean) and logs a warning when any match."""
     if not description:
         return []
     findings = [reason for pattern, reason in _MCP_INJECTION_PATTERNS if pattern.search(description)]
     if findings:
-        logger.warning(
-            "MCP server '%s' tool '%s': suspicious description content — %s. Description: %.200s",
-            server_name, tool_name, "; ".join(findings), description,
-        )
+        logger.warning("MCP server '%s' tool '%s': suspicious description content — %s. Description: %.200s",
+                       server_name, tool_name, "; ".join(findings), description)
     return findings
 
 
@@ -48,11 +46,11 @@ _EMPTY_OBJECT_SCHEMA = {"type": "object", "properties": {}}
 
 
 def _rewrite_local_refs(node):
-    """Promote legacy ``definitions`` to ``$defs`` (Moonshot rejects the draft-07
-    form) — ONLY where it is a JSON Schema meta-keyword, never as a property NAME
-    inside ``properties``/``patternProperties``: a parameter legitimately named
-    ``definitions`` rewritten to ``$defs`` would 400 the whole tool array
-    (Anthropic/OpenAI forbid ``$`` in property names)."""
+    """Promote legacy ``definitions`` to ``$defs`` (Moonshot rejects the draft-07 form) — ONLY
+    where it is a JSON Schema meta-keyword, never as a property NAME inside
+    ``properties``/``patternProperties``: a parameter legitimately named ``definitions``
+    rewritten to ``$defs`` would 400 the whole tool array (Anthropic/OpenAI forbid ``$`` in
+    property names)."""
     if isinstance(node, list):
         return [_rewrite_local_refs(item) for item in node]
     if not isinstance(node, dict):
@@ -70,9 +68,9 @@ def _rewrite_local_refs(node):
 
 
 def _repair_object_shape(node):
-    """Recursively fill a missing object ``type``, ensure ``properties`` (so
-    ``required`` can't dangle) and prune ``required`` to names present in
-    ``properties`` (Gemini 400s otherwise)."""
+    """Recursively fill a missing object ``type``, ensure ``properties`` (so ``required``
+    can't dangle) and prune ``required`` to names present in ``properties`` (Gemini 400s
+    otherwise)."""
     if isinstance(node, list):
         return [_repair_object_shape(item) for item in node]
     if not isinstance(node, dict):
@@ -96,13 +94,12 @@ def _repair_object_shape(node):
 
 
 def _normalize_mcp_input_schema(schema: dict | None) -> dict:
-    """Normalize MCP input schemas so one form is valid on OpenAI, Anthropic,
-    Gemini and Moonshot. Order matters: ``definitions`` -> ``$defs``; nullable
-    ``anyOf`` unions collapsed to the non-null branch (Anthropic rejects nullable
-    branches; optionality lives in the parent's ``required``; the ``nullable:
-    true`` hint is kept so runtime coercion can map a model-emitted ``"null"``
-    string to ``None``); same-typed const unions -> enum (AFTER the nullable
-    strip); then object-shape repair."""
+    """Normalize MCP input schemas so one form is valid on OpenAI, Anthropic, Gemini and
+    Moonshot. Order matters: ``definitions`` -> ``$defs``; nullable ``anyOf`` unions collapsed
+    to the non-null branch (Anthropic rejects nullable branches; optionality lives in the
+    parent's ``required``; the ``nullable: true`` hint is kept so runtime coercion can map a
+    model-emitted ``"null"`` string to ``None``); same-typed const unions -> enum (AFTER the
+    nullable strip); then object-shape repair."""
     if not schema:
         return dict(_EMPTY_OBJECT_SCHEMA)
     from tools.schema_sanitizer import collapse_const_unions, strip_nullable_unions
@@ -120,14 +117,14 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
 
 
 def sanitize_mcp_name_component(value: str) -> str:
-    """Replace every char outside ``[A-Za-z0-9_]`` with ``_`` (hyphens included,
-    the historical behavior) so generated names pass provider validation."""
+    """Replace every char outside ``[A-Za-z0-9_]`` with ``_`` (hyphens included, the
+    historical behavior) so generated names pass provider validation."""
     return re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
 
 
-# ``mcp__<server>__<tool>``: the convention shared by Claude Code, Codex and
-# OpenCode. The double underscore disambiguates the server/tool boundary even
-# when either contains underscores, and matches the Anthropic-OAuth wire form.
+# ``mcp__<server>__<tool>``: the convention shared by Claude Code, Codex and OpenCode. The
+# double underscore disambiguates the server/tool boundary even when either contains
+# underscores, and matches the Anthropic-OAuth wire form.
 MCP_TOOL_NAME_PREFIX = "mcp__"
 _MCP_NAME_DELIM = "__"
 
@@ -139,8 +136,8 @@ def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
-    """Convert an MCP ``Tool`` (``.input_schema``, or ``.inputSchema`` before
-    mcp 2.0) to a ``registry.register(schema=...)`` dict."""
+    """Convert an MCP ``Tool`` (``.input_schema``, or ``.inputSchema`` before mcp 2.0) to a
+    ``registry.register(schema=...)`` dict."""
     return {
         "name": mcp_prefixed_tool_name(server_name, mcp_tool.name),
         "description": strip_unicode_tags(mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}"),
@@ -148,9 +145,9 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
     }
 
 
-# Utility tools generated per server: handler_key -> (description template,
-# parameter properties, required names). Schemas are FROZEN wire bytes — the
-# key order emitted by ``_build_utility_schemas`` must not change.
+# Utility tools generated per server: handler_key -> (description template, parameter
+# properties, required names). Schemas are FROZEN wire bytes — the key order emitted by
+# ``_build_utility_schemas`` must not change.
 _UTILITY_TOOL_SPECS = (
     ("list_resources", "List available resources from MCP server '{server}'", {}, None),
     ("read_resource", "Read a resource by URI from MCP server '{server}'",
@@ -200,9 +197,9 @@ def _normalize_name_filter(value: Any, label: str) -> set[str]:
 
 
 def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
-    """True if ``tool_name`` matches any entry: exact names literally, entries
-    with ``*``/``?``/``[`` as case-sensitive globs (same semantics as
-    ``approvals.deny``). Exact membership is checked first so big lists stay O(1)."""
+    """True if ``tool_name`` matches any entry: exact names literally, entries with
+    ``*``/``?``/``[`` as case-sensitive globs (same semantics as ``approvals.deny``). Exact
+    membership is checked first so big lists stay O(1)."""
     if not patterns:
         return False
     if tool_name in patterns:
@@ -210,17 +207,15 @@ def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
     return any(fnmatch.fnmatchcase(tool_name, p) for p in patterns if "*" in p or "?" in p or "[" in p)
 
 
-# Utility handler -> ClientSession method it needs (legacy gate when no
-# initialize_result was captured).
+# Utility handler -> ClientSession method it needs (legacy gate when no initialize_result
+# was captured).
 _UTILITY_CAPABILITY_METHODS = {key: key for key, *_ in _UTILITY_TOOL_SPECS}
 
-# Utility handler -> capability key that must be non-None on the server's
-# ``initialize`` response for the handler to be registered. Without this gate a
-# tools-only server got all four stubs and every call returned JSON-RPC -32601,
-# making the model conclude the server was broken.
+# Utility handler -> capability key that must be non-None on the server's ``initialize``
+# response for the handler to be registered. Without this gate a tools-only server got all
+# four stubs and every call returned JSON-RPC -32601, making the model conclude the server
+# was broken.
 _UTILITY_CAPABILITY_ATTRS = {
-    "list_resources": "resources",
-    "read_resource": "resources",
-    "list_prompts": "prompts",
-    "get_prompt": "prompts",
+    "list_resources": "resources", "read_resource": "resources",
+    "list_prompts": "prompts", "get_prompt": "prompts",
 }
