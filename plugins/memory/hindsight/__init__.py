@@ -549,10 +549,9 @@ class HindsightMemoryProvider(MemoryProvider):
             try:
                 if job is _WRITER_SENTINEL:
                     return
-                try:
-                    job()
-                except Exception as exc:
-                    logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
+                job()
+            except Exception as exc:
+                logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
             finally:
                 self._retain_queue.task_done()
 
@@ -702,11 +701,10 @@ class HindsightMemoryProvider(MemoryProvider):
         self._apply_retain_settings(cfg)
         self._apply_recall_settings(cfg)
 
-        try:
+        client_version = "unknown"
+        with contextlib.suppress(Exception):
             from importlib.metadata import version as pkg_version
             client_version = pkg_version("hindsight-client")
-        except Exception:
-            client_version = "unknown"
         logger.info("Hindsight initialized: mode=%s, api_url=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
                     self._mode, self._api_url, self._bank_id, self._budget, self._memory_mode, self._prefetch_method, client_version)
         if self._bank_id_template:
@@ -747,20 +745,18 @@ class HindsightMemoryProvider(MemoryProvider):
         self._bank_retain_mission = cfg.get("bank_retain_mission") or None
 
     def _apply_retain_settings(self, cfg: dict) -> None:
-        def _text(key: str, env_var: str, default: str) -> str:
-            return str(cfg.get(key) or os.environ.get(env_var, default)).strip()
+        def _cfg_or_env(key: str, env_var: str, default: str = "") -> Any:
+            return cfg.get(key) or os.environ.get(env_var, default)
 
-        self._retain_tags = _normalize_retain_tags(
-            cfg.get("retain_tags") or os.environ.get("HINDSIGHT_RETAIN_TAGS", "")
-        )
+        self._retain_tags = _normalize_retain_tags(_cfg_or_env("retain_tags", "HINDSIGHT_RETAIN_TAGS"))
         self._tags = self._retain_tags or None
         self._observation_scopes = _normalize_observation_scopes(
-            cfg.get("observation_scopes") or os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "")
-        )
-        self._retain_source = _text("retain_source", "HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE)
-        self._retain_user_prefix = _text("retain_user_prefix", "HINDSIGHT_RETAIN_USER_PREFIX", "User") or "User"
+            _cfg_or_env("observation_scopes", "HINDSIGHT_RETAIN_OBSERVATION_SCOPES"))
+        self._retain_source = str(_cfg_or_env("retain_source", "HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE)).strip()
+        self._retain_user_prefix = str(_cfg_or_env("retain_user_prefix", "HINDSIGHT_RETAIN_USER_PREFIX", "User")).strip() or "User"
         self._retain_assistant_prefix = (
-            _text("retain_assistant_prefix", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant") or "Assistant"
+            str(_cfg_or_env("retain_assistant_prefix", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant")).strip()
+            or "Assistant"
         )
         self._auto_retain = cfg.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
@@ -818,11 +814,9 @@ class HindsightMemoryProvider(MemoryProvider):
         log_path = get_hermes_home() / "logs" / "hindsight-embed.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        def _log(text: str, exc: bool = False) -> None:
+        def _log(text: str) -> None:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(text)
-                if exc:
-                    traceback.print_exc(file=f)
 
         try:
             # Rich console -> our log file (redirecting global fds would capture other threads).
@@ -841,7 +835,7 @@ class HindsightMemoryProvider(MemoryProvider):
             client._ensure_started()
             _log("\n=== Daemon started successfully ===\n")
         except Exception as e:
-            _log(f"\n=== Daemon startup failed: {e} ===\n", exc=True)
+            _log(f"\n=== Daemon startup failed: {e} ===\n" + traceback.format_exc())
 
     def system_prompt_block(self) -> str:
         mode = self._memory_mode if self._memory_mode in ("context", "tools") else "hybrid"

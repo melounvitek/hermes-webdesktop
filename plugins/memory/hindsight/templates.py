@@ -49,16 +49,14 @@ def fetch_hermes_templates(url: str | None = None) -> list[dict]:
 
 
 def fetch_manifest(entry: dict, url: str | None = None) -> dict:
-    """Fetch the BankTemplateManifest JSON for a catalog entry."""
-    # manifest_file is relative to the catalog (e.g. "templates/foo.json").
-    manifest_url = urljoin(url or catalog_url(), entry["manifest_file"])
-    return _get_json(manifest_url)
+    """Fetch the BankTemplateManifest JSON for a catalog entry (``manifest_file`` is
+    relative to the catalog, e.g. "templates/foo.json")."""
+    return _get_json(urljoin(url or catalog_url(), entry["manifest_file"]))
 
 
-def _bank_request(api_url: str, bank_id: str, api_key: str | None, action: str, **kwargs) -> urllib.request.Request:
-    headers = dict(kwargs.pop("headers"))
+def _bank_request(api_url: str, bank_id: str, api_key: str | None, action: str, *, headers: dict, **kwargs):
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        headers = {**headers, "Authorization": f"Bearer {api_key}"}
     endpoint = f"{api_url.rstrip('/')}/v1/default/banks/{bank_id}/{action}"
     return urllib.request.Request(endpoint, headers=headers, **kwargs)  # noqa: S310
 
