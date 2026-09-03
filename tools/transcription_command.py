@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -19,11 +20,9 @@ from tools.tts_command_provider import (
     _command_output_format, _command_timeout, _is_command_provider_config as _is_command_stt_provider_config,
     _named_provider_config, _resolve_command_config, command_env_passthrough as _command_stt_env_passthrough,
     command_failure_detail, render_command_template as _render_command_stt_template,
-    run_command_provider as _run_command_stt,
-)
+    run_command_provider as _run_command_stt)
 from tools.transcription_common import (
-    BUILTIN_STT_PROVIDERS, _error_result, _log_prompt_unsupported, _ok_result,
-)
+    BUILTIN_STT_PROVIDERS, _error_result, _log_prompt_unsupported, _ok_result)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -43,81 +42,57 @@ COMMAND_STT_OUTPUT_FORMATS = frozenset({"txt", "json", "srt", "vtt"})
 _NON_COMMAND_STT_NAMES = frozenset(BUILTIN_STT_PROVIDERS | {"none"})
 
 
-def _get_named_stt_provider_config(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """``stt.providers.<name>`` (canonical), else ``stt.<name>`` for non-built-in names only."""
-    return _named_provider_config(stt_config, name, BUILTIN_STT_PROVIDERS)
-
-
-def _resolve_command_stt_provider_config(provider: str, stt_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The provider config if *provider* is a command type; None for built-ins, ``none``, unknown."""
-    return _resolve_command_config(provider, stt_config, _NON_COMMAND_STT_NAMES)
-
-
-def _get_command_stt_timeout(config: Dict[str, Any]) -> float:
-    return _command_timeout(config, DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
-
-
-def _get_command_stt_output_format(config: Dict[str, Any]) -> str:
-    return _command_output_format(config, COMMAND_STT_OUTPUT_FORMATS, DEFAULT_COMMAND_STT_OUTPUT_FORMAT)
+# ``stt.providers.<name>`` (canonical), else ``stt.<name>`` for non-built-in names only.
+_get_named_stt_provider_config = partial(_named_provider_config, builtins=BUILTIN_STT_PROVIDERS)
+# The provider config if it is a command type; None for built-ins, ``none``, unknown.
+_resolve_command_stt_provider_config = partial(_resolve_command_config,
+                                               reserved=_NON_COMMAND_STT_NAMES)
+_get_command_stt_timeout = partial(_command_timeout, default=DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
+_get_command_stt_output_format = partial(_command_output_format, formats=COMMAND_STT_OUTPUT_FORMATS,
+                                         default=DEFAULT_COMMAND_STT_OUTPUT_FORMAT)
 
 
 def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
     """Transcript: non-empty output file > non-empty stdout (curl one-liners) > RuntimeError. JSON is returned raw."""
-    if output_path.exists():
-        try:
-            content = output_path.read_text(encoding="utf-8").strip()
-        except UnicodeDecodeError:
-            content = output_path.read_bytes().decode("utf-8", errors="replace").strip()
-        if content:
-            return content
-    if stdout and stdout.strip():
-        return stdout.strip()
+    content = (output_path.read_bytes().decode("utf-8", errors="replace").strip()
+               if output_path.exists() else "")
+    if content or (stdout or "").strip():
+        return content or stdout.strip()
     raise RuntimeError(f"Command STT provider wrote no output file at {output_path} and produced no stdout")
 
 
 def _transcribe_command_stt(
     file_path: str, provider_name: str, config: Dict[str, Any], stt_config: Dict[str, Any],
     model_override: Optional[str] = None, language_override: Optional[str] = None,
-    prompt: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
-
-    Placeholders (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``,
-    ``{output_path}`` (transcript file), ``{output_dir}``, ``{format}`` txt/json/srt/vtt,
-    ``{language}`` (default ``en``), ``{model}`` (empty when unset).
-    """
+    prompt: Optional[str] = None) -> Dict[str, Any]:
+    """Transcribe via a user-declared ``stt.providers.<name>: type: command``. Placeholders
+    (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``, ``{output_path}`` (transcript
+    file), ``{output_dir}``, ``{format}`` txt/json/srt/vtt, ``{language}`` (default ``en``),
+    ``{model}`` (empty when unset)."""
     from tools.transcription_tools import _resolve_stt_language
     if prompt:
         _log_prompt_unsupported(f"Command STT provider '{provider_name}'")
 
     def fail(error: str) -> Dict[str, Any]:
         return _error_result(error, provider=provider_name)
-
     command_template = str(config.get("command") or "").strip()
     if not command_template:
         return fail(f"stt.providers.{provider_name}.command is not configured")
-
     audio = Path(file_path).expanduser()
     if not audio.exists():
         return fail(f"Audio file not found: {file_path}")
-
     timeout = _get_command_stt_timeout(config)
     output_format = _get_command_stt_output_format(config)
-    language = (
-        language_override or config.get("language")
-        or _resolve_stt_language(provider_name, stt_config) or DEFAULT_COMMAND_STT_LANGUAGE
-    )
-    model = model_override or config.get("model") or ""
-
+    language = (language_override or config.get("language")
+                or _resolve_stt_language(provider_name, stt_config) or DEFAULT_COMMAND_STT_LANGUAGE)
     try:
         with tempfile.TemporaryDirectory(prefix=f"hermes-cmd-stt-{provider_name}-") as tmpdir:
             output_path = Path(tmpdir) / f"transcript.{output_format}"
-            placeholders = {
+            command = _render_command_stt_template(command_template, {
                 "input_path": str(audio.resolve()), "output_path": str(output_path),
                 "output_dir": str(output_path.parent), "format": output_format,
-                "language": str(language), "model": str(model),
-            }
-            command = _render_command_stt_template(command_template, placeholders)
+                "language": str(language), "model": str(model_override or config.get("model") or ""),
+            })
             logger.info("Transcribing %s via command STT provider '%s'...", audio.name, provider_name)
             result = _run_command_stt(command, timeout, env_passthrough=_command_stt_env_passthrough(config))
             transcript_text = _read_command_stt_output(output_path, result.stdout or "", output_format)
@@ -131,7 +106,6 @@ def _transcribe_command_stt(
         return fail(str(exc))
     except OSError as exc:
         return fail(f"STT command provider '{provider_name}' failed: {exc}")
-
     logger.info("Transcribed %s via command STT provider '%s' (%d chars)", audio.name, provider_name, len(transcript_text))
     return _ok_result(transcript_text, provider_name)
 
@@ -144,8 +118,7 @@ def _unregistered_stt_provider_error(provider: str) -> Dict[str, Any]:
         "installed STT plugins, or configure a command provider under "
         f"`stt.providers.{key}.command`.",
         provider=key,
-        error_type="provider_not_registered",
-    )
+        error_type="provider_not_registered")
 
 
 def _dispatch_to_plugin_provider(
@@ -153,23 +126,18 @@ def _dispatch_to_plugin_provider(
     model: Optional[str] = None, language: Optional[str] = None, prompt: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Route to a plugin-registered transcription provider; None when no plugin claims the name.
-
-    Invariants re-verified here so a caller refactor can't break them: built-in names never
-    reach the registry; a same-name command provider wins over a plugin. A matched plugin with
+    Invariants re-verified here so a caller refactor can't break them: built-in names never reach
+    the registry; a same-name command provider wins over a plugin. A matched plugin with
     ``is_available() == False`` returns an error envelope — not None — because the user
-    explicitly opted in via ``stt.provider``. Provider exceptions become the error envelope.
-    """
-    if not provider:
-        return None
-    key = provider.lower().strip()
-    if key in _NON_COMMAND_STT_NAMES:
+    explicitly opted in via ``stt.provider``. Provider exceptions become the error envelope."""
+    key = (provider or "").lower().strip()
+    if not key or key in _NON_COMMAND_STT_NAMES:
         return None
     if stt_config is not None and _is_command_stt_provider_config(_get_named_stt_provider_config(stt_config, key)):
         return None
     try:
         from agent.transcription_registry import get_provider
         from hermes_cli.plugins import _ensure_plugins_discovered
-
         _ensure_plugins_discovered()
         plugin_provider = get_provider(key)
         if plugin_provider is None:
@@ -182,7 +150,6 @@ def _dispatch_to_plugin_provider(
         return None
     if plugin_provider is None:
         return None
-
     # ``is_available()`` MUST NOT raise per the ABC contract; defend anyway so
     # a buggy plugin can't break dispatch for everyone.
     try:
@@ -196,9 +163,7 @@ def _dispatch_to_plugin_provider(
         logger.info("STT plugin provider '%s' reports not available; returning unavailability envelope.", key)
         return _error_result(
             f"STT plugin '{key}' is not available — check that its required credentials / dependencies are configured.",
-            provider=key,
-        )
-
+            provider=key)
     logger.info("Transcribing with plugin STT provider '%s'...", key)
     # The prompt travels via the ABC's ``**extra`` kwargs and is only sent when
     # set, so pre-prompt providers see byte-identical calls on the no-prompt path.
@@ -208,7 +173,6 @@ def _dispatch_to_plugin_provider(
     except Exception as exc:  # noqa: BLE001
         logger.warning("STT plugin provider '%s' raised: %s", key, exc, exc_info=True)
         return _error_result(f"STT plugin '{key}' raised: {exc}", provider=key)
-
     if not isinstance(result, dict):
         return _error_result(f"STT plugin '{key}' returned a non-dict result", provider=key)
     result.setdefault("provider", key)
@@ -229,16 +193,13 @@ _WHISPER_PROMPT_CAPPED_PROVIDERS = frozenset({"local", "openai", "groq", "deepin
 def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Optional[str]:
     """Truncate *prompt* to the whisper-family token cap, keeping the TAIL (whisper conditions
     on the final context window, so the newest hints survive). Other providers self-validate."""
-    if not prompt or provider not in _WHISPER_PROMPT_CAPPED_PROVIDERS:
-        return prompt
     max_chars = _WHISPER_PROMPT_TOKEN_CAP * _PROMPT_CHARS_PER_TOKEN
-    if len(prompt) <= max_chars:
+    if not prompt or provider not in _WHISPER_PROMPT_CAPPED_PROVIDERS or len(prompt) <= max_chars:
         return prompt
     logger.warning(
         "Transcription prompt is ~%d tokens; whisper-family provider '%s' "
         "only uses the final ~%d — truncating to the last %d characters.",
-        len(prompt) // _PROMPT_CHARS_PER_TOKEN, provider, _WHISPER_PROMPT_TOKEN_CAP, max_chars,
-    )
+        len(prompt) // _PROMPT_CHARS_PER_TOKEN, provider, _WHISPER_PROMPT_TOKEN_CAP, max_chars)
     return prompt[-max_chars:]
 
 
@@ -247,32 +208,24 @@ def _apply_pre_transcription_hook(
     prompt: Optional[str], source: Optional[str],
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Fire the ``pre_transcription`` plugin hook; returns ``(model, language_override, prompt)``.
-
-    Gated on ``has_hook`` (the no-hook path never builds kwargs) and fail-open: any
-    plumbing error leaves the dispatch untouched. Results apply field-by-field in
-    registration order (last hook wins). ``language_override`` is None unless a hook
-    explicitly set ``language``, so backends keep their own config/env resolution.
-    """
+    Gated on ``has_hook`` (the no-hook path never builds kwargs) and fail-open: any plumbing error
+    leaves the dispatch untouched. Results apply field-by-field in registration order (last hook
+    wins). ``language_override`` is None unless a hook explicitly set ``language``, so backends keep
+    their own config/env resolution."""
     try:
         from hermes_cli.plugins import has_hook, invoke_hook
-
         if not has_hook("pre_transcription"):
             return model, None, prompt
-
         hook_results = invoke_hook(
             "pre_transcription", file_path=file_path, provider=provider,
-            model=model, language=language, prompt=prompt, source=source,
-        )
+            model=model, language=language, prompt=prompt, source=source)
         overrides: Dict[str, Any] = {}
         for hook_result in hook_results:
-            if not isinstance(hook_result, dict):
-                continue
-            for key, value in hook_result.items():
+            for key, value in (hook_result.items() if isinstance(hook_result, dict) else ()):
                 if key == "file_path":
                     logger.warning(
                         "pre_transcription hook attempted to change "
-                        "file_path (read-only) — ignoring the attempt."
-                    )
+                        "file_path (read-only) — ignoring the attempt.")
                 elif key not in _PRE_TRANSCRIPTION_MUTABLE_FIELDS:
                     logger.debug("pre_transcription hook returned unsupported field %r — ignoring.", key)
                 elif not isinstance(value, str):
@@ -281,13 +234,10 @@ def _apply_pre_transcription_hook(
                     )
                 else:
                     overrides[key] = value
-
-        if "model" in overrides:
-            model = overrides["model"]
+        # Hooks win over the static ``stt.prompt`` config; "" clears it.
         if "prompt" in overrides:
-            # Hooks win over the static ``stt.prompt`` config; "" clears it.
             prompt = overrides["prompt"] or None
-        return model, overrides.get("language") or None, prompt
+        return overrides.get("model", model), overrides.get("language") or None, prompt
     except Exception as _hook_err:  # noqa: BLE001 — hook plumbing is fail-open
         logger.debug("pre_transcription hook error: %s", _hook_err)
         return model, None, prompt

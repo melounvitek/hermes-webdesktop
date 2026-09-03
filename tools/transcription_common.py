@@ -45,8 +45,7 @@ GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-lar
 # (a regression test fails on drift); plugins may not register under these names and the
 # dispatcher short-circuits them before command/plugin lookup.
 BUILTIN_STT_PROVIDERS = frozenset({
-    "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra",
-})
+    "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"})
 # Built-in providers that upload audio to a remote API.
 CLOUD_STT_PROVIDERS = frozenset(BUILTIN_STT_PROVIDERS - {"local", "local_command"})
 
@@ -62,10 +61,8 @@ def _ok_result(transcript: str, provider: str) -> Dict[str, Any]:
 
 def _lazy_ensure_quietly(dep: str) -> None:
     """Best-effort ``tools.lazy_deps.ensure(dep, prompt=False)``; failures are swallowed.
-
-    prompt=False: a bare input() deadlocks under the interactive CLI where
-    prompt_toolkit owns stdin; installs are gated by ``security.allow_lazy_installs``.
-    """
+    prompt=False: a bare input() deadlocks under the interactive CLI where prompt_toolkit owns
+    stdin; installs are gated by ``security.allow_lazy_installs``."""
     try:
         from tools.lazy_deps import ensure
         ensure(dep, prompt=False)
