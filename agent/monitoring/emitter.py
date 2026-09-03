@@ -1,11 +1,9 @@
-"""Monitoring emitter: fire-and-forget queue + background dispatcher.
-
-The single seam between producers (gateway status hooks, diagnostic log handler)
-and consumers (OTLP streamers). Hot-path invariant: ``emit()`` MUST return in
-O(microseconds), MUST NOT block on disk/network, and MUST NEVER raise into the
-caller — a monitoring failure is logged locally and dropped. On a full queue the
-*oldest* event is dropped. A daemon thread fans batches out to fail-isolated
-subscribers. Nothing is persisted: monitoring is an egress path, not a store.
+"""Monitoring emitter: fire-and-forget queue + background dispatcher — the single seam between
+producers (gateway status hooks, diagnostic log handler) and consumers (OTLP streamers).
+Hot-path invariant: ``emit()`` MUST return in O(microseconds), MUST NOT block on disk/network, and
+MUST NEVER raise into the caller — a monitoring failure is logged locally and dropped.  On a full
+queue the *oldest* event is dropped.  A daemon thread fans batches out to fail-isolated
+subscribers.  Nothing is persisted: monitoring is an egress path, not a store.
 """
 
 from __future__ import annotations
@@ -14,6 +12,7 @@ import logging
 import queue
 import threading
 import time
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -67,9 +66,7 @@ class MonitoringEmitter:
         with self._lock:
             if self._started:
                 return
-            self._thread = threading.Thread(
-                target=self._run, name="hermes-monitoring-dispatch", daemon=True
-            )
+            self._thread = threading.Thread(target=self._run, name="hermes-monitoring-dispatch", daemon=True)
             self._thread.start()
             self._started = True
 
@@ -106,10 +103,8 @@ class MonitoringEmitter:
         self._enabled = True
 
     def unsubscribe(self, callback) -> None:
-        try:
+        with suppress(ValueError):
             self._subscribers.remove(callback)
-        except ValueError:
-            pass
         if not self._subscribers:
             self._enabled = False
 
@@ -118,28 +113,17 @@ class MonitoringEmitter:
         """Wait boundedly for queued and in-flight batches to finish dispatch."""
         if timeout <= 0:
             return
-
         finished = threading.Event()
 
         def _wait_for_completion() -> None:
             self._q.join()
             finished.set()
 
-        waiter = threading.Thread(
-            target=_wait_for_completion,
-            name="hermes-monitoring-flush",
-            daemon=True,
-        )
-        waiter.start()
+        threading.Thread(target=_wait_for_completion, name="hermes-monitoring-flush", daemon=True).start()
         finished.wait(timeout=timeout)
 
     def stats(self) -> Dict[str, int]:
-        return {
-            "queued": self._q.qsize(),
-            "dispatched": self._dispatched,
-            "dropped": self._dropped,
-            "subscribers": len(self._subscribers),
-        }
+        return {"queued": self._q.qsize(), "dispatched": self._dispatched, "dropped": self._dropped, "subscribers": len(self._subscribers)}
 
     def close(self) -> None:
         self._stop.set()
@@ -175,16 +159,9 @@ def reset_emitter_for_tests(emitter: Optional[MonitoringEmitter] = None) -> None
     global _EMITTER
     with _EMITTER_LOCK:
         if _EMITTER is not None and emitter is not _EMITTER:
-            try:
+            with suppress(Exception):
                 _EMITTER.close()
-            except Exception:
-                pass
         _EMITTER = emitter
 
 
-__all__ = [
-    "MonitoringEmitter",
-    "get_emitter",
-    "emit",
-    "reset_emitter_for_tests",
-]
+__all__ = ["MonitoringEmitter", "get_emitter", "emit", "reset_emitter_for_tests"]
