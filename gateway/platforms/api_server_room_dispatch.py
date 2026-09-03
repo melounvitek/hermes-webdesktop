@@ -15,13 +15,9 @@ from gateway.platforms.api_server_room_grants import _json_error
 
 
 async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
-    """Create or verify the target's canonical hidden group session.
-
-    Reusing the ``Group: <room_id>`` namespace is intentional: a room that
-    moves from Desktop-assisted to hosted execution keeps one transcript.
-    A conflicting title with a different session id fails closed instead
-    of merging unrelated conversations.
-    """
+    """Create or verify the target's canonical hidden group session. The ``Group: <room_id>``
+    namespace is reused on purpose (Desktop-assisted -> hosted keeps one transcript); a
+    conflicting title under another session id fails closed rather than merging."""
     db = await self._ensure_session_db_async()
     if db is None:
         raise RuntimeError("session database unavailable")

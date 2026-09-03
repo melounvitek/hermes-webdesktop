@@ -82,12 +82,10 @@ def _initialize_run_state(self, *, store_factory) -> None:
         self._run_owner_started = int(get_process_start_time(self._run_owner_pid) or 0)
     except Exception:
         self._run_owner_started = 0
-    # All keyed by run_id. _run_streams: SSE event queues (+ creation time for the TTL
-    # sweep); _run_stream_subscribers: runs with a connected, draining consumer;
-    # _active_run_agents/_active_run_tasks: live refs for cooperative stop (the executor
-    # thread may outlive the HTTP request, hence the separate _stopping_run_ids set);
-    # _run_statuses: pollable status for dashboards; _run_approval_sessions: approval
-    # session key (the approval core resolves by session key, API clients by run_id).
+    # All keyed by run_id: SSE queues (+creation time for the TTL sweep), connected
+    # subscribers, live agent/task refs for cooperative stop (the executor thread may
+    # outlive the request, hence the separate stopping set), pollable statuses, and
+    # approval session keys (approval core resolves by session key, clients by run_id).
     self._run_idempotency_ids: set[str] = set()
     self._run_stream_subscribers: set[str] = set()
     self._stopping_run_ids: set[str] = set()
@@ -162,9 +160,8 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
             loop.call_soon_threadsafe(q.put_nowait, event)
 
     def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
-        # _thinking, subagent.tool, and subagent_progress are deliberately not
-        # forwarded (high-volume UI noise); lifecycle boundaries must land so
-        # clients can observe delegate_task timeouts and failures.
+        # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
+        # lifecycle boundaries must land so clients can observe delegate_task failures.
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
             _push(_run_event(run_id, event_type, **fields(tool_name, preview, kwargs)))
@@ -176,8 +173,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
                 value = kwargs.get(key)
                 if value is None:
                     continue
-                # Free text can carry child terminal/tool output: force the same
-                # secret redaction the API applies to error text on this public stream.
+                # Free text may carry child tool output: force secret redaction on this public stream.
                 if key in _SUBAGENT_TEXT_KEYS and isinstance(value, str):
                     value = redact_sensitive_text(value, force=True)
                 event[key] = value
@@ -265,11 +261,8 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
 def _resolve_conversation_history(
     self, body: dict, raw_input: Any, *, _openai_error
 ) -> "tuple[List[Dict[str, str]], Any, Any, web.Response | None]":
-    """Return ``(history, instructions, stored_session_id, error)``.
-
-    Precedence: explicit ``conversation_history`` > ``previous_response_id``
-    chain > all-but-last messages of a multi-message ``input`` array.
-    """
+    """Return ``(history, instructions, stored_session_id, error)``; precedence:
+    ``conversation_history`` > ``previous_response_id`` chain > all-but-last ``input`` messages."""
     instructions = body.get("instructions")
     previous_response_id = body.get("previous_response_id")
     conversation_history: List[Dict[str, str]] = []
@@ -331,11 +324,8 @@ def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _op
 
 @dataclass(slots=True)
 class _RunLaunch:
-    """Everything an admitted run needs once the HTTP request has returned.
-
-    The background task outlives the request (and thus the middleware profile
-    scope), so contextvar values are captured here and re-entered later.
-    """
+    """State for an admitted run's background task; contextvars are captured here
+    because the task outlives the request (and its middleware profile scope)."""
 
     owner: Any
     run_id: str
@@ -343,17 +333,18 @@ class _RunLaunch:
     session_id: str
     gateway_session_key: Optional[str]
     declared_selected: bool
-    approval_session_key: str
     user_message: str
     conversation_history: List[Dict[str, str]]
-    ephemeral_system_prompt: Any
-    agent_overrides: dict
-    route: Any
-    room_dispatch: Optional[dict]
-    room_execution_policy: Optional[dict]
+    agent_kwargs: dict  # ``_create_agent`` keyword arguments (prompt, model overrides, route, room policy)
     request_profile: Any
     browser_control_principal: Any
     browser_control_transport_family: Any
+
+    @property
+    def approval_session_key(self) -> str:
+        # Approval queues are isolated per run: session ids are conversation scopes, not
+        # authorization namespaces, so resolving one run's approval must not unblock another's.
+        return self.run_id
 
     def put_event(self, event: Optional[Dict]) -> None:
         """Enqueue only while this run still owns live transport state."""
@@ -454,9 +445,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if selection_error:
         return _json_error(_openai_error, selection_error, status=400)
 
-    # A lost-acceptance replay must resolve even while the original run
-    # consumes the final concurrency slot. This read does not reserve a
-    # missing key; the atomic reserve below closes the concurrent-miss race.
+    # A lost-acceptance replay must resolve even while the original run holds the last
+    # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
     if idempotency_key:
         outcome, record = self._run_idempotency_store.lookup(
             idempotency_scope, idempotency_key, idempotency_fingerprint,
@@ -474,22 +464,16 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
 
     run_id = f"run_{uuid.uuid4().hex}"
     self._run_owners[run_id] = self._run_idempotency_scope(request)
-    # Same precedence as /v1/responses: explicit body session_id wins, then the
-    # response chain, then the conversation declared via X-Hermes-Session-Key.
-    # Falling straight through to run_id would make the run id the conversation
-    # identity and re-key every affinity surface once per run. An explicit or
-    # chained session owns its routing key and must not be rebound to the header.
+    # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
+    # conversation > run_id (which would otherwise re-key every affinity surface per run).
+    # An explicit or chained session owns its routing key and is never rebound to the header.
     _declared_selected = not session_id and bool(gateway_session_key)
     session_id = session_id or self._declared_conversation_session(gateway_session_key) or run_id
-    # Approval queues gate host-side tool execution and must be isolated per
-    # run: session ids / memory keys are conversation scopes, not authorization
-    # namespaces, and resolving one run's approval must not unblock another's.
-    approval_session_key = run_id
     q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
     created_at = time.time()
     self._run_streams[run_id] = q
     self._run_streams_created[run_id] = created_at
-    self._run_approval_sessions[run_id] = approval_session_key
+    self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
         run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name)
     )
@@ -506,31 +490,28 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self._run_idempotency_ids.add(run_id)
 
     launch = _RunLaunch(
-        self, run_id=run_id, queue=q, session_id=session_id,
-        gateway_session_key=gateway_session_key, declared_selected=_declared_selected,
-        approval_session_key=approval_session_key, user_message=user_message,
-        conversation_history=conversation_history, ephemeral_system_prompt=instructions,
-        agent_overrides=agent_overrides, route=route, room_dispatch=room_dispatch,
-        room_execution_policy=room_execution_policy,
+        self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
+        conversation_history,
+        agent_kwargs=dict(
+            ephemeral_system_prompt=instructions, session_id=session_id,
+            gateway_session_key=gateway_session_key,
+            requested_model=agent_overrides.get("requested_model"),
+            requested_provider=agent_overrides.get("requested_provider"),
+            model_options=agent_overrides.get("model_options"), route=route,
+            room_dispatch=room_dispatch, room_execution_policy=room_execution_policy),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
-        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-    )
-    _start_run_task(self, launch, _api_server=_api_server)
-    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
-
-
-def _start_run_task(self, launch: _RunLaunch, *, _api_server) -> None:
-    """Admit the run and schedule its background task, tracked for shutdown drain."""
+        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get())
     self._activate_admitted_request()
     task = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
-    self._active_run_tasks[launch.run_id] = task
+    self._active_run_tasks[run_id] = task
     try:
-        self._background_tasks.add(task)
+        self._background_tasks.add(task)  # tracked for shutdown drain
     except TypeError:
         pass
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
+    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
 def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server):
@@ -548,36 +529,30 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     resets: list[tuple[Any, Callable]] = []
     with self._profile_scope(run.request_profile):
         try:
-            # Bind approval/session identity via contextvars so concurrent
-            # runs do not share process environment state.
+            # Contextvars, not process env: concurrent runs must not share identity.
             resets.append((set_current_session_key(run.approval_session_key), reset_current_session_key))
-            # chat_id carries the raw session id exactly like the other
-            # agent-entry routes bind it via _run_agent(); without it
-            # tools.async_delegation sees an empty HERMES_SESSION_CHAT_ID and
-            # background delegations stay forced-sync (no wake target).
+            # chat_id carries the raw session id like _run_agent() does; without it
+            # tools.async_delegation sees no HERMES_SESSION_CHAT_ID and forces delegations sync.
             session_tokens = self._bind_api_server_session(
                 chat_id=session_id or "", session_key=run.approval_session_key, session_id=session_id or "",
                 browser_control_principal=run.browser_control_principal,
                 browser_control_transport_family=run.browser_control_transport_family)
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
-            if run.room_dispatch is not None:
-                policy = RoomExecutionPolicy.from_mapping(run.room_execution_policy or {})
+            if run.agent_kwargs["room_dispatch"] is not None:
+                policy = RoomExecutionPolicy.from_mapping(run.agent_kwargs["room_execution_policy"] or {})
                 resets.append((bind_room_execution_policy(policy), reset_room_execution_policy))
             register_gateway_notify(run.approval_session_key, approval_notify)
-            # /v1/runs owns its agent lifecycle (no TurnRunner/_run_agent):
-            # record turn process ownership so stop/cancel reaps only the
-            # background processes this run created.
+            # /v1/runs owns its agent lifecycle (no TurnRunner): record process ownership
+            # so stop/cancel reaps only the background processes this run created.
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             r = agent.run_conversation(
                 user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id)
         finally:
-            # Clear ownership immediately so a later stop/cancel can't reap
-            # background work this run deliberately left running.
+            # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)
-            # Record the declared conversation ourselves (not via _run_agent's
-            # bind_declared_conversation), with the same precedence gate.
+            # Declared-conversation binding, same precedence gate as _run_agent.
             if run.declared_selected:
                 self._bind_declared_conversation(
                     getattr(agent, "session_id", None) or session_id, run.gateway_session_key)
@@ -599,8 +574,7 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
 
     def _approval_notify(approval_data: Dict[str, Any]) -> None:
         event = dict(approval_data or {})
-        # Redact credentials before the command enters the SSE/API stream;
-        # API/desktop clients must never receive the raw flagged command.
+        # Clients must never receive the raw flagged command: redact before it hits the stream.
         if "command" in event:
             from gateway.run import _redact_approval_command
 
@@ -621,8 +595,7 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
 
 
 async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
-    """Background task for one admitted run: drives the agent, then publishes
-    the terminal event/status and releases live state."""
+    """Drive one admitted run, publish its terminal event/status, release live state."""
     _redact_api_error_text = _api_server._redact_api_error_text
     run_id, loop = run.run_id, asyncio.get_running_loop()
 
@@ -633,10 +606,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
 
     def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
-        """Publish a terminal status, then the matching ``run.<status>`` event (best effort).
-
-        Field order is part of the pollable status shape: *fields*, ``last_event``, then *extra*.
-        """
+        """Terminal status, then best-effort ``run.<status>`` event; key order is wire shape."""
         extra = extra or {}
         self._set_run_status(run_id, status, **fields, last_event=f"run.{status}", **extra)
         with suppress(Exception):
@@ -649,13 +619,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             return
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
-                ephemeral_system_prompt=run.ephemeral_system_prompt, session_id=run.session_id,
                 stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                gateway_session_key=run.gateway_session_key,
-                requested_model=run.agent_overrides.get("requested_model"),
-                requested_provider=run.agent_overrides.get("requested_provider"),
-                model_options=run.agent_overrides.get("model_options"), route=run.route,
-                room_dispatch=run.room_dispatch, room_execution_policy=run.room_execution_policy)
+                **run.agent_kwargs)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage = await loop.run_in_executor(
@@ -666,12 +631,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._stopping_run_ids and result.get("interrupted") is True:
             _finish("cancelled")
         elif result.get("failed"):
-            # Non-retryable client errors (401/400) return failed=True instead
-            # of raising, so the except branches below never fire for them.
+            # Non-retryable client errors (401/400) return failed=True rather than raising.
             _finish("failed", error=_redact_api_error_text(result.get("error") or "agent run failed"))
         else:
-            # Undelivered steer text (accepted after the final response) rides on
-            # the terminal event/status so the client can replay it as the next turn.
+            # Undelivered steer text rides on the terminal event/status for client replay.
             pending_steer = result.get("pending_steer")
             extra = {"pending_steer": pending_steer} if pending_steer else {}
             _finish("completed", extra, output=result.get("final_response", ""), usage=usage)
@@ -679,17 +642,15 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
-        # /v1/runs bypasses _run_agent(), so it needs its own branch to surface
-        # the same controlled provider-auth message the other endpoints give.
+        # Same controlled provider-auth message the _run_agent() endpoints give.
         logger.warning("Provider authentication failed for run=%s: %s", run_id, exc)
         _finish("failed", error=f"⚠️ Provider authentication failed: {exc}")
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
         _finish("failed", error=_redact_api_error_text(exc))
     finally:
-        # If the asyncio wrapper is cancelled (e.g. via /stop) the executor
-        # thread may still block on an approval Event; unregistering here
-        # releases it. Harmlessly idempotent on normal completion.
+        # On cancellation (/stop) the executor thread may still block on an approval
+        # Event; unregistering releases it. Idempotent on normal completion.
         _unregister_approval_notify(run.approval_session_key)
         with suppress(Exception):
             run.put_event(None)  # sentinel: close the SSE stream
@@ -706,12 +667,8 @@ def _unregister_approval_notify(approval_session_key: Optional[str]) -> None:
 
 
 def _release_run_owner_if_forgotten(self, run_id: str) -> None:
-    """Drop the owner stamp only once nothing keyed by *run_id* survives.
-
-    Ownership must outlive every surface it protects (statuses, live
-    agent/task refs, SSE transport, approval sessions), which are retired on
-    different clocks; ``_request_owns_run`` treats ownerless state as fail-closed.
-    """
+    """Drop the owner stamp only once nothing keyed by *run_id* survives: ownership must
+    outlive every surface it protects (retired on different clocks); ownerless = fail-closed."""
     if any(
         run_id in table
         for table in (
@@ -726,20 +683,15 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     owner = self._run_owners.get(run_id)
     if owner is not None:
         return owner == scope
-    # No in-memory owner: only a durable record under the caller's own scope
-    # admits it. Ownerless run state is an unanswered authorization question;
-    # under multiplex_profiles every served profile holds a valid key, so
-    # admitting it would make the boundary allow-all.
+    # No in-memory owner: only a durable record under the caller's scope admits it.
+    # Under multiplex_profiles every profile holds a valid key, so ownerless = allow-all.
     return self._run_idempotency_store.owns_run(scope, run_id)
 
 
 def _load_owned_run(self, request: "web.Request", *, _api_server, permission: Optional[str], active_fallback: bool):
-    """Authenticate and resolve ``(run_id, status, agent, task, error)`` for a control endpoint.
-
-    *permission* selects room-grant auth (``None`` = plain API-key auth). With
-    *active_fallback*, an in-process run registered before pollable status
-    existed is reported as ``running`` instead of 404.
-    """
+    """Authenticate (*permission* -> room-grant aware; ``None`` -> API key only) and resolve
+    ``(run_id, status, agent, task, error)``; *active_fallback* reports a live in-process run
+    without pollable status as ``running`` instead of 404."""
     auth_err = self._check_run_auth(request, permission=permission) if permission else self._check_auth(request)
     if auth_err:
         return None, None, None, None, auth_err
@@ -891,9 +843,8 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
         self, request, _api_server=_api_server, permission=None, active_fallback=False)
     if err is not None:
         return err
-    # Only genuinely running runs are steerable. /stop retains agent/task refs
-    # during cooperative shutdown, so the status gate (not the mere presence
-    # of an agent ref) is what rejects stop-then-steer.
+    # /stop keeps agent refs during cooperative shutdown, so the status gate (not the
+    # agent ref) is what rejects stop-then-steer.
     if status.get("status") != "running" or not hasattr(agent, "steer"):
         return _json_error(
             _openai_error, f"Run is not currently accepting steer input: {run_id}",
@@ -943,9 +894,8 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
     if agent is not None:
         with suppress(Exception):
             _api_server.request_hard_interrupt(agent, "Stop requested via API")
-        # The stopped run is abandoned — reap only the background processes it
-        # created. Epoch-gated inside, so a concurrent run sharing the same
-        # session_id keeps its own processes; no-op if the run already finished.
+        # Reap only this run's background processes (epoch-gated inside, so a concurrent
+        # run on the same session_id keeps its own); no-op if the run already finished.
         _api_server._reap_disconnected_agent_processes(agent, source="api_server_run_stop")
 
     return web.json_response({"run_id": run_id, "status": "stopping"})
@@ -969,8 +919,7 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     for run_id in stale:
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)
-        # The transport TTL always bounds buffering. Live control state is
-        # independent and survives until the executor-backed task returns.
+        # Transport TTL bounds buffering; live control state survives until the task returns.
         _drop_run_transport(self, run_id)
         if task is None or task.done():
             _unregister_approval_notify(self._run_approval_sessions.get(run_id))

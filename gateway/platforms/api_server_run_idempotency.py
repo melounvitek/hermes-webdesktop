@@ -39,11 +39,8 @@ def _encode_status(status: Dict[str, Any]) -> str:
 
 def _record(run_id, status_json, owner_pid, owner_started, updated_at) -> dict[str, Any]:
     return {
-        "run_id": run_id,
-        "status": json.loads(status_json),
-        "owner_pid": int(owner_pid or 0),
-        "owner_started": int(owner_started or 0),
-        "updated_at": float(updated_at or 0)}
+        "run_id": run_id, "status": json.loads(status_json), "owner_pid": int(owner_pid or 0),
+        "owner_started": int(owner_started or 0), "updated_at": float(updated_at or 0)}
 
 
 def _outcome(row, fingerprint):
@@ -52,13 +49,9 @@ def _outcome(row, fingerprint):
 
 
 class RunIdempotencyStore:
-    """Durable, tenant-scoped reservations for ``POST /v1/runs``.
-
-    A unique ``(scope, key)`` row is inserted inside ``BEGIN IMMEDIATE`` so
-    separate gateway workers/processes cannot both admit the same request.
-    Only request fingerprints and public run status are stored; request bodies
-    and credentials are deliberately excluded.
-    """
+    """Durable, tenant-scoped reservations for ``POST /v1/runs``: a unique ``(scope, key)`` row
+    inserted inside ``BEGIN IMMEDIATE`` so separate workers cannot both admit one request. Only
+    fingerprints and public run status are stored — never request bodies or credentials."""
 
     RETENTION_SECONDS = 24 * 60 * 60
     ACKNOWLEDGED_RETENTION_SECONDS = 24 * 60 * 60
@@ -159,9 +152,7 @@ class RunIdempotencyStore:
                     scope, key, fingerprint, run_id, encoded,
                     int(owner_pid or 0), int(owner_started or 0), retention_until, now, now))
             self._conn.commit()
-            return "created", {
-                "run_id": run_id, "status": status, "owner_pid": int(owner_pid or 0),
-                "owner_started": int(owner_started or 0), "updated_at": now}
+            return "created", _record(run_id, encoded, owner_pid, owner_started, now) | {"status": status}
 
     def lookup(self, scope: str, key: str, fingerprint: str, *, retention_until: float = 0):
         """Return ``missing``, ``reused`` or ``conflict`` without reserving."""
@@ -176,12 +167,8 @@ class RunIdempotencyStore:
         return ("missing", None) if row is None else _outcome(row, fingerprint)
 
     def _prune_stale_terminal_locked(self, now: float) -> None:
-        """Prune replay records only after their stored run is terminal.
-
-        The caller owns ``self._lock`` and an active transaction. Age alone
-        can never release an in-flight idempotency reservation: a long or
-        disconnected room turn may legitimately outlive the retention window.
-        """
+        """Prune aged replay records only once their stored run is terminal (caller holds the
+        lock + transaction): a long or disconnected room turn may outlive the retention window."""
         stale = self._conn.execute(
             """SELECT scope, idempotency_key, status_json
                  FROM run_idempotency
@@ -212,9 +199,7 @@ class RunIdempotencyStore:
                 "FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
         if row is None:
             return None
-        return {
-            "status": json.loads(row[0]), "owner_pid": int(row[1] or 0),
-            "owner_started": int(row[2] or 0), "updated_at": float(row[3] or 0)}
+        return {k: v for k, v in _record(None, *row).items() if k != "run_id"}
 
     def extend_retention(self, scope: str, run_id: str, until: float) -> bool:
         """Persist the latest verified recovery horizon for an active grant."""
