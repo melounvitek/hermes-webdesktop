@@ -256,6 +256,50 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
     return False, ""
 
 
+# Guardrail verdict text injected into the conversation, keyed by decision code.
+# ``same_tool_failure_warning`` is built by _tool_failure_recovery_hint (tool-specific).
+_DECISION_MESSAGES: dict[str, str] = {
+    "repeated_exact_failure_block": (
+        "Blocked {tool_name}: the same tool call failed {count} times with identical arguments. "
+        "Stop retrying it unchanged; change strategy or explain the blocker."
+    ),
+    "idempotent_no_progress_block": (
+        "Blocked {tool_name}: this read-only call returned the same result {count} times. "
+        "Stop repeating it unchanged; use the result already provided or try a different query."
+    ),
+    "same_tool_failure_halt": (
+        "Stopped {tool_name}: it failed {count} times this turn. "
+        "Stop retrying the same failing tool path and choose a different approach."
+    ),
+    "repeated_exact_failure_warning": (
+        "{tool_name} has failed {count} times with identical arguments. This looks like a loop; "
+        "inspect the error and change strategy instead of retrying it unchanged."
+    ),
+    "idempotent_no_progress_warning": (
+        "{tool_name} returned the same result {count} times. Use the result already provided "
+        "or change the query instead of repeating it unchanged."
+    ),
+    "identical_call_streak_halt": (
+        "Stopped {tool_name}: the same call with identical arguments returned the same result "
+        "{count} times in a row. Stop repeating it unchanged; use the result already provided or change strategy."
+    ),
+    "loop_web_search_cap": (
+        "Blocked web_search: this turn has already made {cap} web searches, the per-turn limit. "
+        "This looks like a runaway search loop. Work with the results you already have and give the user your answer."
+    ),
+    "loop_subagent_cap": (
+        "Blocked delegate_task: this turn has already spawned {count} subagents (limit {cap}). "
+        "This looks like a runaway delegation loop. Finish the work with the results you have and answer the user."
+    ),
+}
+
+# tool -> (LoopCapConfig field, controller counter attribute, decision code)
+_LOOP_CAPS: dict[str, tuple[str, str, str]] = {
+    "web_search": ("max_web_searches", "_turn_web_search_count", "loop_web_search_cap"),
+    "delegate_task": ("max_subagents", "_turn_subagent_count", "loop_subagent_cap"),
+}
+
+
 class ToolCallGuardrailController:
     """Per-turn controller for repeated failed/non-progressing tool calls."""
 
@@ -286,16 +330,19 @@ class ToolCallGuardrailController:
     def halt_decision(self) -> ToolGuardrailDecision | None:
         return self._halt_decision
 
-    def _halt(
-        self, action: str, code: str, message: str,
-        tool_name: str, count: int, signature: ToolCallSignature,
+    def _decide(
+        self, action: str, code: str, tool_name: str, count: int, signature: ToolCallSignature,
+        *, message: str | None = None, **fmt: Any,
     ) -> ToolGuardrailDecision:
-        """Build a block/halt decision and record it as the turn's halt decision."""
-        self._halt_decision = ToolGuardrailDecision(
-            action=action, code=code, message=message,
-            tool_name=tool_name, count=count, signature=signature,
+        """Build a warn/block/halt decision; block/halt is also recorded as the turn's halt decision."""
+        if message is None:
+            message = _DECISION_MESSAGES[code].format(tool_name=tool_name, count=count, **fmt)
+        decision = ToolGuardrailDecision(
+            action=action, code=code, message=message, tool_name=tool_name, count=count, signature=signature,
         )
-        return self._halt_decision
+        if decision.should_halt:
+            self._halt_decision = decision
+        return decision
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
         args = _coerce_args(args)
@@ -313,25 +360,12 @@ class ToolCallGuardrailController:
         # A mutation since this call last failed makes the retry a new experiment.
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
-            return self._halt(
-                "block", "repeated_exact_failure_block",
-                f"Blocked {tool_name}: the same tool call failed {exact_count} "
-                "times with identical arguments. Stop retrying it unchanged; "
-                "change strategy or explain the blocker.",
-                tool_name, exact_count, signature,
-            )
+            return self._decide("block", "repeated_exact_failure_block", tool_name, exact_count, signature)
 
         if self._is_idempotent(tool_name):
             record = self._no_progress.get(signature)
             if record is not None and record[1] >= self.config.no_progress_block_after:
-                repeat_count = record[1]
-                return self._halt(
-                    "block", "idempotent_no_progress_block",
-                    f"Blocked {tool_name}: this read-only call returned the same "
-                    f"result {repeat_count} times. Stop repeating it unchanged; "
-                    "use the result already provided or try a different query.",
-                    tool_name, repeat_count, signature,
-                )
+                return self._decide("block", "idempotent_no_progress_block", tool_name, record[1], signature)
 
         return allow
 
@@ -343,12 +377,7 @@ class ToolCallGuardrailController:
         signature = ToolCallSignature.from_call(tool_name, args)
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
-
-        def warn(code: str, message: str, count: int) -> ToolGuardrailDecision:
-            return ToolGuardrailDecision(
-                action="warn", code=code, message=message,
-                tool_name=tool_name, count=count, signature=signature,
-            )
+        warnings = self.config.warnings_enabled
 
         if failed:
             # An identical failing call is only a REPLAY if nothing landed in between;
@@ -369,29 +398,14 @@ class ToolCallGuardrailController:
                 and tool_name not in FAILURE_TOLERANT_TOOL_NAMES
                 and same_count >= self.config.same_tool_failure_halt_after
             ):
-                return self._halt(
-                    "halt", "same_tool_failure_halt",
-                    f"Stopped {tool_name}: it failed {same_count} times this turn. "
-                    "Stop retrying the same failing tool path and choose a different approach.",
-                    tool_name, same_count, signature,
+                return self._decide("halt", "same_tool_failure_halt", tool_name, same_count, signature)
+            if warnings and exact_count >= self.config.exact_failure_warn_after:
+                return self._decide("warn", "repeated_exact_failure_warning", tool_name, exact_count, signature)
+            if warnings and same_count >= self.config.same_tool_failure_warn_after:
+                return self._decide(
+                    "warn", "same_tool_failure_warning", tool_name, same_count, signature,
+                    message=_tool_failure_recovery_hint(tool_name, same_count),
                 )
-
-            if self.config.warnings_enabled and exact_count >= self.config.exact_failure_warn_after:
-                return warn(
-                    "repeated_exact_failure_warning",
-                    f"{tool_name} has failed {exact_count} times with identical arguments. "
-                    "This looks like a loop; inspect the error and change strategy "
-                    "instead of retrying it unchanged.",
-                    exact_count,
-                )
-
-            if self.config.warnings_enabled and same_count >= self.config.same_tool_failure_warn_after:
-                return warn(
-                    "same_tool_failure_warning",
-                    _tool_failure_recovery_hint(tool_name, same_count),
-                    same_count,
-                )
-
             return ToolGuardrailDecision(tool_name=tool_name, count=exact_count, signature=signature)
 
         self._exact_failure_counts.pop(signature, None)
@@ -413,15 +427,8 @@ class ToolCallGuardrailController:
         repeat_count = previous[1] + 1 if previous is not None and previous[0] == result_hash else 1
         self._no_progress[signature] = (result_hash, repeat_count)
 
-        if self.config.warnings_enabled and repeat_count >= self.config.no_progress_warn_after:
-            return warn(
-                "idempotent_no_progress_warning",
-                f"{tool_name} returned the same result {repeat_count} times. "
-                "Use the result already provided or change the query instead of "
-                "repeating it unchanged.",
-                repeat_count,
-            )
-
+        if warnings and repeat_count >= self.config.no_progress_warn_after:
+            return self._decide("warn", "idempotent_no_progress_warning", tool_name, repeat_count, signature)
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
 
     def _is_idempotent(self, tool_name: str) -> bool:
@@ -445,11 +452,7 @@ class ToolCallGuardrailController:
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
         result_hash = _result_hash(result) if is_plain_str else ""
 
-        if (
-            is_plain_str
-            and self._identical_streak_sig == signature
-            and self._identical_streak_result_hash == result_hash
-        ):
+        if is_plain_str and (signature, result_hash) == (self._identical_streak_sig, self._identical_streak_result_hash):
             self._identical_streak_count += 1
         else:
             # New streak; non-string (multimodal) results never form one.
@@ -457,7 +460,6 @@ class ToolCallGuardrailController:
             self._identical_streak_result_hash = result_hash
             self._identical_streak_count = 1 if is_plain_str else 0
             self._identical_streak_first_call_id = tool_call_id or ""
-
         count = self._identical_streak_count
 
         notice = None
@@ -477,19 +479,11 @@ class ToolCallGuardrailController:
                 and count >= self.config.no_progress_block_after
                 and self._halt_decision is None
             ):
-                self._halt(
-                    "halt", "identical_call_streak_halt",
-                    f"Stopped {tool_name}: the same call with identical arguments "
-                    f"returned the same result {count} times in a row. Stop "
-                    "repeating it unchanged; use the result already provided or "
-                    "change strategy.",
-                    tool_name, count, signature,
-                )
+                self._decide("halt", "identical_call_streak_halt", tool_name, count, signature)
 
         stub = None
         if is_plain_str and count >= 2 and not failed and len(result) >= IDENTICAL_RESULT_STUB_MIN_CHARS:
             stub = self._build_result_reference_stub(tool_name, args)
-
         return IdenticalCallObservation(notice=notice, stub=stub)
 
     def record_persisted_result(self, tool_call_id: str, file_path: str) -> None:
@@ -522,39 +516,22 @@ class ToolCallGuardrailController:
     ) -> ToolGuardrailDecision | None:
         """Block once a per-turn cap is reached, else advance the counter and return None.
 
-        A cap of 0 disables that limit. Blocking happens BEFORE the call when
-        the count is already at the cap, so the (cap+1)-th call is refused.
+        A cap of 0 disables that limit. Blocking happens BEFORE the call when the count is
+        already at the cap, so the (cap+1)-th call is refused. delegate_task control actions
+        (list/steer/stop) spawn nothing and must keep working after the cap is hit.
         """
-        caps = self.config.loop_caps
-        if tool_name == "web_search":
-            cap, count, increment = caps.max_web_searches, self._turn_web_search_count, 1
-            code, message = "loop_web_search_cap", (
-                f"Blocked web_search: this turn has already made {cap} "
-                "web searches, the per-turn limit. This looks like a "
-                "runaway search loop. Work with the results you already "
-                "have and give the user your answer."
-            )
-        elif tool_name == "delegate_task":
-            cap, count = caps.max_subagents, self._turn_subagent_count
-            # Control actions (list/steer/stop) spawn nothing and must keep working after the cap is hit.
-            increment = _subagent_spawn_count(args) if cap else 0
-            if increment == 0:
-                return None
-            code, message = "loop_subagent_cap", (
-                f"Blocked delegate_task: this turn has already spawned "
-                f"{count} subagents (limit {cap}). "
-                "This looks like a runaway delegation loop. Finish the "
-                "work with the results you have and answer the user."
-            )
-        else:
+        spec = _LOOP_CAPS.get(tool_name)
+        if spec is None:
             return None
-
+        cap_field, count_attr, code = spec
+        cap = getattr(self.config.loop_caps, cap_field)
+        count = getattr(self, count_attr)
+        increment = 1 if tool_name == "web_search" else (_subagent_spawn_count(args) if cap else 0)
+        if increment == 0:
+            return None
         if cap and count >= cap:
-            return self._halt("block", code, message, tool_name, count, signature)
-        if tool_name == "web_search":
-            self._turn_web_search_count += increment
-        else:
-            self._turn_subagent_count += increment
+            return self._decide("block", code, tool_name, count, signature, cap=cap)
+        setattr(self, count_attr, count + increment)
         return None
 
 
