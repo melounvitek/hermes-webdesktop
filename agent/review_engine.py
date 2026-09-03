@@ -34,8 +34,7 @@ _REVIEW_GOAL = (
     "from the excerpt alone. Produce a full, structured review: what "
     "the work does, whether it is correct and complete, concrete "
     "defects or risks found (with file/line references where possible), "
-    "what was verified vs. only read, and a clear final verdict with "
-    "recommended next steps."
+    "what was verified vs. only read, and a clear final verdict with recommended next steps."
 )
 
 
@@ -232,8 +231,7 @@ def format_dispatch_note(result: Dict[str, Any], user_prompt: str = "") -> str:
         return (
             f"⚖ Review subagent dispatched{model_note}{focus_note} — it is "
             f"investigating the last {DEFAULT_CONTEXT_MESSAGES} messages in "
-            f"the background and its full review will re-enter this "
-            f"conversation when it finishes."
+            f"the background and its full review will re-enter this conversation when it finishes."
         )
     # Synchronous fallback (channels that cannot route async completions).
     return (

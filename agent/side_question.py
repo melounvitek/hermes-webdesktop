@@ -26,29 +26,21 @@ _PER_MESSAGE_CHAR_CAP = 2000
 _TRANSCRIPT_CHAR_BUDGET = 24000
 
 _FORK_PROMPT = (
-    "The user asked a quick SIDE question with /btw while the main work "
-    "continues in the original session.\n"
-    "Rules:\n"
+    "The user asked a quick SIDE question with /btw while the main work continues in the original session.\nRules:\n"
     "- Answer ONLY the side question, using the conversation above as "
     "context. Do not continue, redo, or critique the main task.\n"
-    "- Do NOT call any tools — they are disabled for this side question. "
-    "Answer directly in text.\n"
-    "- If the conversation does not contain enough information to answer, "
-    "say so plainly instead of guessing.\n"
+    "- Do NOT call any tools — they are disabled for this side question. Answer directly in text.\n"
+    "- If the conversation does not contain enough information to answer, say so plainly instead of guessing.\n"
     "- Be concise and direct."
 )
 
 _ONESHOT_INSTRUCTIONS = (
     "You are the same AI assistant that is currently working inside the "
     "conversation transcribed below. The user has asked a quick SIDE question "
-    "with /btw while the main work continues.\n"
-    "Rules:\n"
-    "- Answer ONLY the side question. Do not continue, redo, or critique the "
-    "main task.\n"
-    "- Use the transcript as your primary context; it is a snapshot and may "
-    "not include the very latest activity.\n"
-    "- If the transcript does not contain enough information to answer, say "
-    "so plainly instead of guessing.\n"
+    "with /btw while the main work continues.\nRules:\n"
+    "- Answer ONLY the side question. Do not continue, redo, or critique the main task.\n"
+    "- Use the transcript as your primary context; it is a snapshot and may not include the very latest activity.\n"
+    "- If the transcript does not contain enough information to answer, say so plainly instead of guessing.\n"
     "- Be concise and direct."
 )
 
@@ -138,8 +130,7 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
             set(),
             deny_msg_fmt=(
                 "Side question (/btw) denied tool call: {tool_name}. "
-                "Tools are disabled here — answer directly from the "
-                "conversation context."
+                "Tools are disabled here — answer directly from the conversation context."
             ),
         )
         snapshot = trim_snapshot_for_fork(history)

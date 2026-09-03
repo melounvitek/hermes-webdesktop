@@ -17,8 +17,7 @@ _CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"
 _REPAIR_HINT = (
     "Repair: run `hermes doctor --fix` (auto-reinstalls certifi), or "
     "manually: python -m pip install --force-reinstall certifi openai httpx\n"
-    "If you configured a custom corporate CA bundle, fix or unset the "
-    "broken CA bundle environment variable."
+    "If you configured a custom corporate CA bundle, fix or unset the broken CA bundle environment variable."
 )
 
 
