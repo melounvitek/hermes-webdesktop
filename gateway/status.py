@@ -499,22 +499,16 @@ def _build_runtime_status_record() -> dict[str, Any]:
     }
 
 
-def _read_text_file(path: Path) -> Optional[str]:
-    """Stripped file text, or None when absent/empty/unreadable (vanished, EACCES, non-UTF-8)."""
-    if not path.exists():
-        return None
-    try:
-        return path.read_text(encoding="utf-8").strip() or None
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
 def _read_json_file(path: Path, *, bare_pid_ok: bool = False) -> Optional[dict[str, Any]]:
-    """JSON object at ``path`` or None; ``bare_pid_ok``
-    also reads legacy bare-integer PID files as ``{"pid": N}``.
+    """JSON object at ``path``, or None when absent/empty/unreadable/invalid.
+
+    ``bare_pid_ok`` also accepts legacy bare-integer PID files as ``{"pid": N}``.
     """
-    raw = _read_text_file(path)
-    if raw is None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    except (OSError, UnicodeDecodeError):  # vanished, EACCES, non-UTF-8 garbage
+        return None
+    if not raw:
         return None
     try:
         payload = json.loads(raw)
@@ -556,9 +550,7 @@ def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
 
 def _start_times_conflict(recorded_start: Any, current_start: Any) -> bool:
     """PID-reuse guard: True only when BOTH start times are known and differ."""
-    if recorded_start is None or current_start is None:
-        return False
-    return current_start != recorded_start
+    return None not in (recorded_start, current_start) and current_start != recorded_start
 
 
 def _live_pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
