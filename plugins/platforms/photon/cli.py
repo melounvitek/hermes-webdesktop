@@ -47,8 +47,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p_telemetry = subs.add_parser("telemetry", help="Show or toggle Spectrum SDK telemetry (on/off)")
     p_telemetry.add_argument(
         "state", nargs="?", choices=("on", "off"),
-        help="Turn telemetry on or off (omit to show the current state)",
-    )
+        help="Turn telemetry on or off (omit to show the current state)")
     parser.set_defaults(func=dispatch)
 
 
@@ -169,8 +168,7 @@ def _setup_credentials(token: str, dashboard_id: str, name: str) -> Optional[str
             print(
                 "  ⚠ Project secret was regenerated. If the gateway is running, "
                 "restart it so the sidecar picks up the new secret:\n"
-                "      hermes gateway restart"
-            )
+                "      hermes gateway restart")
     except Exception as e:
         print(f"spectrum provisioning failed: {e}", file=sys.stderr)
         return None
@@ -190,8 +188,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         return 1
     # 4. Register the operator's phone number as a Spectrum user (idempotent).
     phone = args.phone or _prompt(
-        color("[4/5] Your iMessage phone number (E.164, e.g. +15551234567): ", Colors.CYAN)
-    )
+        color("[4/5] Your iMessage phone number (E.164, e.g. +15551234567): ", Colors.CYAN))
     agent_number = registered_phone = registered_user_id = None
     if not phone:
         print("      Skipped user registration (no phone given). Re-run with --phone later.")
@@ -200,8 +197,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         try:
             user, created = photon_auth.register_user_if_absent(
                 dashboard_id, secret, phone_number=phone, first_name=args.first_name,
-                last_name=args.last_name, email=args.email,
-            )
+                last_name=args.last_name, email=args.email)
         except ValueError as e:
             print(f"      invalid phone number: {e}", file=sys.stderr)
             return 1
@@ -271,8 +267,7 @@ def _autoconfigure_access(phone: str) -> None:
         return
     for key, label in (
         ("PHOTON_ALLOWED_USERS", "allowlisted your number"),
-        ("PHOTON_HOME_CHANNEL", "set your DM as the cron home channel"),
-    ):
+        ("PHOTON_HOME_CHANNEL", "set your DM as the cron home channel")):
         try:
             if get_env_value(key):
                 print(f"      {key} already set — leaving it as-is.")
@@ -351,8 +346,7 @@ def _install_sidecar() -> int:
         # stdout streams to the terminal; stderr is captured so the failure reason
         # can be persisted for check_requirements() to surface later.
         proc = subprocess.run(  # noqa: S603
-            [npm, verb], cwd=str(_sidecar_dir()), check=False, stderr=subprocess.PIPE, text=True,
-        )
+            [npm, verb], cwd=str(_sidecar_dir()), check=False, stderr=subprocess.PIPE, text=True)
         if proc.stderr:
             print(proc.stderr, end="", file=sys.stderr)
         return proc
@@ -377,8 +371,7 @@ _COMMANDS = {
     "setup": _cmd_setup,
     "status": _cmd_status,
     "install-sidecar": lambda _args: _install_sidecar(),
-    "telemetry": _cmd_telemetry,
-}
+    "telemetry": _cmd_telemetry}
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +382,7 @@ def gateway_setup() -> None:
     (same flow as ``hermes photon setup``; phone is prompted when stdin is a TTY)."""
     _cmd_setup(argparse.Namespace(
         photon_command="setup", project_name=None, phone=None, first_name=None, last_name=None,
-        email=None, no_browser=False, skip_sidecar_install=False,
-    ))
+        email=None, no_browser=False, skip_sidecar_install=False))
 
 
 # ---------------------------------------------------------------------------
