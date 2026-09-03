@@ -52,7 +52,7 @@ def _get_platform_default_hermes_home() -> Path:
 
 
 def _warn_profile_fallback_once() -> None:
-    """Warn once when HERMES_HOME is unset but a non-default profile is sticky-active: the fallback is wrong."""
+    """Warn once when HERMES_HOME is unset but a non-default profile is sticky-active (wrong fallback)."""
     global _profile_fallback_warned
     if _profile_fallback_warned:
         return
@@ -257,7 +257,8 @@ def iter_hermes_node_dirs(home: Path | None = None) -> list[Path]:
 
 
 _WINDOWS_NODE_SHIMS = {
-    "npm": ["npm.cmd", "npm.exe", "npm"], "npx": ["npx.cmd", "npx.exe", "npx"], "node": ["node.exe", "node"]}
+    "npm": ["npm.cmd", "npm.exe", "npm"], "npx": ["npx.cmd", "npx.exe", "npx"], "node": ["node.exe", "node"],
+}
 
 
 def _candidate_node_command_names(command: str) -> list[str]:
@@ -611,9 +612,8 @@ def find_node_executable_on_path(command: str) -> str | None:
     directories = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     for name in _candidate_node_command_names(command_str):
         for directory in directories:
-            candidate = Path(directory) / name
-            if candidate.is_file():
-                return str(candidate)
+            if (Path(directory) / name).is_file():
+                return str(Path(directory) / name)
     return None
 
 
@@ -633,10 +633,8 @@ def find_node_executable(command: str) -> str | None:
 def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
     """Return *env* with Hermes-managed Node directories prepended to PATH."""
     merged = dict(os.environ if env is None else env)
-    existing = merged.get("PATH", "")
-    parts = [p for p in existing.split(os.pathsep) if p]
-    managed = [str(path) for path in iter_hermes_node_dirs() if path.is_dir()]
-    for entry in reversed(managed):
+    parts = [p for p in merged.get("PATH", "").split(os.pathsep) if p]
+    for entry in reversed([str(path) for path in iter_hermes_node_dirs() if path.is_dir()]):
         if entry not in parts:
             parts.insert(0, entry)
     merged["PATH"] = os.pathsep.join(parts)
@@ -684,8 +682,7 @@ def _legacy_path_has_content(path: Path) -> bool:
 def display_hermes_home() -> str:
     """User-facing ``~/`` display string for HERMES_HOME (``~/.hermes/profiles/coder``)."""
     home = get_hermes_home()
-    try:
-        # as_posix(): str() on Windows yields chimeras like ~/AppData\Local\hermes/skills/.
+    try:  # as_posix(): str() on Windows yields chimeras like ~/AppData\Local\hermes/skills/
         return "~/" + home.relative_to(Path.home()).as_posix()
     except ValueError:
         return str(home)
@@ -924,33 +921,26 @@ _wsl_detected: bool | None = None
 def is_wsl() -> bool:
     """True inside WSL1/WSL2 (``microsoft`` marker in ``/proc/version``); cached per process."""
     global _wsl_detected
-    if _wsl_detected is not None:
-        return _wsl_detected
-    try:
-        with open("/proc/version", "r", encoding="utf-8") as f:
-            _wsl_detected = "microsoft" in f.read().lower()
-    except Exception:
-        _wsl_detected = False
+    if _wsl_detected is None:
+        try:
+            with open("/proc/version", "r", encoding="utf-8") as f:
+                _wsl_detected = "microsoft" in f.read().lower()
+        except Exception:
+            _wsl_detected = False
     return _wsl_detected
 
 
 def windows_path_to_wsl(path: str) -> str | None:
     """Convert a Windows drive path (``C:\\...``) to its ``/mnt/<drive>/...`` form."""
     match = re.match(r"^([A-Za-z]):[\\/](.*)$", str(path or "").strip())
-    if not match:
-        return None
-    drive, tail = match.group(1).lower(), match.group(2).replace("\\", "/")
-    return f"/mnt/{drive}/{tail}"
+    return f"/mnt/{match.group(1).lower()}/{match.group(2).replace(chr(92), '/')}" if match else None
 
 
 def wsl_unc_path_to_posix(path: str) -> str | None:
     """Convert a ``\\\\wsl.localhost\\<distro>\\...`` (or legacy ``\\\\wsl$``) UNC path to POSIX."""
     normalized = str(path or "").strip().replace("/", "\\")
     match = re.match(r"^\\\\wsl(?:\.localhost|\$)\\[^\\]+\\(.*)$", normalized, re.IGNORECASE)
-    if not match:
-        return None
-    tail = match.group(1).replace("\\", "/")
-    return f"/{tail}" if tail else "/"
+    return "/" + match.group(1).replace("\\", "/") if match else None
 
 
 def translate_cwd_for_wsl_backend(cwd: str) -> str:
@@ -1052,18 +1042,14 @@ def venv_bin_dir(venv_dir, *, windows: bool | None = None) -> Path:
 
     Returned unconditionally — callers differ on whether a missing venv is an error.
     """
-    if windows is None:
-        windows = sys.platform == "win32"
+    windows = sys.platform == "win32" if windows is None else windows
     return Path(venv_dir) / ("Scripts" if windows else "bin")
 
 
 def project_venv_dir(project_root) -> Path | None:
     """The project's ``venv`` or ``.venv`` dir when one exists (``uv venv`` defaults to ``.venv``)."""
-    for name in ("venv", ".venv"):
-        candidate = Path(project_root) / name
-        if candidate.is_dir():
-            return candidate
-    return None
+    root = Path(project_root)
+    return next((root / n for n in ("venv", ".venv") if (root / n).is_dir()), None)
 
 
 def venv_python_path(venv_dir, *, windows: bool | None = None) -> Path:
@@ -1107,7 +1093,6 @@ def emit_partial_update_hint(exc: BaseException, *, file=None) -> bool:
     lines = partial_update_hint(exc)
     if not lines:
         return False
-    out = sys.stderr if file is None else file
     for line in (f"Error: {exc}", *lines):
-        print(line, file=out)
+        print(line, file=sys.stderr if file is None else file)
     return True
