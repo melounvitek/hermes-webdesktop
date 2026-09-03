@@ -1887,9 +1887,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         _base = getattr(self, "_base_threshold_percent", None)
         if _base is not None:
             self.threshold_percent = self._effective_threshold_percent(value, _base)
-        self._threshold_tokens = None
-        self._tail_token_budget = None
-        self._max_summary_tokens = None
+        self._threshold_tokens = self._tail_token_budget = self._max_summary_tokens = None
         self._emit_init_summary_once()
 
     @property
@@ -2458,12 +2456,12 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.abort_on_summary_failure = abort_on_summary_failure
 
         # Micro-compaction is OFF by default: each pass breaks the prompt-cache prefix every turn.
-        self._micro_compact_enabled: bool = False
-        self._micro_compact_cursor: int = 0
-        self._micro_compact_rolling_summary: str = ""
-        self._micro_compact_consecutive_failures: int = 0
-        self._micro_compact_last_failure_cursor: int = -1
-        self._micro_compact_defrag_threshold_tokens: int = 2000
+        self._micro_compact_enabled = False
+        self._micro_compact_cursor = 0
+        self._micro_compact_rolling_summary = ""
+        self._micro_compact_consecutive_failures = 0
+        self._micro_compact_last_failure_cursor = -1
+        self._micro_compact_defrag_threshold_tokens = 2000
         # Set when _defrag_rolling_summary pops _DB_PERSISTED_MARKER in place; finalize_turn resets the flush cursor.
         self._flush_scan_cursor_invalidated: bool = False
         self._micro_compact_passes: int = 0
@@ -2477,9 +2475,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._config_context_length = config_context_length
         self._configured_threshold_percent = self.threshold_percent
         self._resolved_context_length: int | None = None
-        self._threshold_tokens: int | None = None
-        self._tail_token_budget: int | None = None
-        self._max_summary_tokens: int | None = None
+        self._threshold_tokens = self._tail_token_budget = self._max_summary_tokens = None
         self.compression_count = 0
 
         # The init log reports resolved budgets; emit it on first resolution to keep construction non-blocking.
