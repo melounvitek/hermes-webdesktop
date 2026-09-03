@@ -32,17 +32,8 @@ from starlette.concurrency import run_in_threadpool
 
 from hermes_cli import config as config_mod, web_deps
 from hermes_cli.local_runtime import (
-    binaries,
-    bootstrap,
-    catalog,
-    context_policy,
-    estimator,
-    growth,
-    hardware,
-    hf_browse,
-    load_progress,
-    presets,
-    supervisor,
+    binaries, bootstrap, catalog, context_policy, estimator, growth, hardware, hf_browse,
+    load_progress, presets, supervisor,
 )
 from hermes_cli.local_runtime.endpoint import _state_endpoint
 
@@ -106,8 +97,7 @@ def _finish(job: Dict[str, Any], detail: str) -> None:
 
 
 def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *,
-               fail_msg: str | None = None,
-               on_exit: Callable[[], None] | None = None) -> None:
+               fail_msg: str | None = None, on_exit: Callable[[], None] | None = None) -> None:
     """Run ``body`` on a daemon thread; an exception marks the job errored
     (warning ``fail_msg`` when given). ``on_exit`` always runs last."""
     def _run():
@@ -171,9 +161,8 @@ def _probe_range_support(url: str) -> int:
                     return int(content_range.rsplit("/", 1)[1])
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            raise RuntimeError(
-                "The model host refused the download (gated or moved). "
-                "This is a catalog problem, not yours — please report it.") from exc
+            raise RuntimeError("The model host refused the download (gated or moved). "
+                               "This is a catalog problem, not yours — please report it.") from exc
         raise
     except Exception:  # noqa: BLE001
         pass
@@ -197,8 +186,7 @@ def _variant_files_on_disk(model_id: str) -> "list[Path]":
     return files
 
 
-def download_file(url: str, dest: Path, job: Dict[str, Any],
-                  *,
+def download_file(url: str, dest: Path, job: Dict[str, Any], *,
                   base_done: int = 0, keep_totals: bool = False) -> None:
     """Download url -> dest with byte progress on ``job``; ranged-parallel when
     the server supports it, single-stream otherwise. Never leaves a .part.
@@ -243,10 +231,8 @@ def download_file(url: str, dest: Path, job: Dict[str, Any],
 
             def fetch_range(start: int, end: int) -> None:
                 try:
-                    req = urllib.request.Request(
-                        url, headers={"Range": f"bytes={start}-{end}"})
-                    with urllib.request.urlopen(req, timeout=120) as r, \
-                            open(tmp, "r+b") as f:
+                    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+                    with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "r+b") as f:
                         f.seek(start)
                         pump(r, f)
                 except Exception as exc:  # noqa: BLE001
@@ -262,8 +248,7 @@ def download_file(url: str, dest: Path, job: Dict[str, Any],
             if errors:
                 raise errors[0]
             if file_done[0] != total:
-                raise RuntimeError(
-                    f"download incomplete ({file_done[0]} of {total} bytes)")
+                raise RuntimeError(f"download incomplete ({file_done[0]} of {total} bytes)")
         else:
             # No range support: single stream. Completeness is judged by the
             # server's own Content-Length when it sent one — never the catalog.
@@ -273,9 +258,8 @@ def download_file(url: str, dest: Path, job: Dict[str, Any],
                     job["total_bytes"] = length
                 pump(r, f)
             if length and file_done[0] != length:
-                raise RuntimeError(
-                    f"Download ended at {file_done[0]:,} bytes but the server "
-                    f"said {length:,} — connection dropped? Removed; try again")
+                raise RuntimeError(f"Download ended at {file_done[0]:,} bytes but the server "
+                                   f"said {length:,} — connection dropped? Removed; try again")
 
         shutil.move(str(tmp), str(dest))
     except Exception:
@@ -465,9 +449,9 @@ def _active_llamacpp_model_id() -> str | None:
 
 @router.get("/api/local-models/status")
 def local_models_status():
-    """Cheap, immediate, never blocks on probes: config state + installed
-    runtime + staged models + supervisor state (GPU facts live in /hardware).
-    Sync def on purpose: blocking urlopen/scans run in the threadpool."""
+    """Cheap, immediate: config state + installed runtime + staged models + supervisor
+    state (GPU facts live in /hardware). Sync def on purpose: blocking urlopen/scans
+    run in the threadpool."""
     section = _runtime_section()
     configured_tag = section.get("tag") or binaries.default_tag()
     have = binaries.installed_tags()
@@ -553,8 +537,7 @@ def local_models_hardware():
     try:
         smi_exe = hardware._nvidia_smi_path()
         smi = subprocess.run(
-            [smi_exe, "--query-gpu=name,utilization.gpu,memory.used",
-             "--format=csv,noheader,nounits"],
+            [smi_exe, "--query-gpu=name,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5) if smi_exe else None
         if smi and smi.returncode == 0 and smi.stdout.strip():
             name, util, used_mib = (x.strip() for x in smi.stdout.strip().splitlines()[0].split(","))
@@ -569,14 +552,12 @@ def local_models_hardware():
 # ── catalog: priced for THIS machine before download ─────────
 
 _QUANT_REASONS = {
-    "best-large-window": ("Recommended build ({quant}) — the quant class this "
-                          "engine is optimized for; runs fully on your GPU with a "
-                          "large context window"),
-    "best-fits": ("Recommended build ({quant}) — the quant class this "
-                  "engine is optimized for; runs fully on your GPU"),
+    "best-large-window": ("Recommended build ({quant}) — the quant class this engine is optimized for; "
+                          "runs fully on your GPU with a large context window"),
+    "best-fits": ("Recommended build ({quant}) — the quant class this engine is optimized for; "
+                  "runs fully on your GPU"),
 }
-_QUANT_REASON_COMPACT = ("Compact build sized for this machine ({quant}) — "
-                         "larger than GPU memory, runs slower")
+_QUANT_REASON_COMPACT = "Compact build sized for this machine ({quant}) — larger than GPU memory, runs slower"
 
 
 def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> Dict[str, Any]:
@@ -605,8 +586,8 @@ def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> 
         row.update({
             "fits": False, "size_bytes": smallest_total, "size_label": _human_gb(smallest_total),
             "fit_summary": "Needs more memory than this machine has",
-            "fit_detail": (f"even the most compact build ({smallest.quant}, "
-                           f"{_human_gb(smallest_total)}) exceeds GPU + system memory"),
+            "fit_detail": (f"even the most compact build ({smallest.quant}, {_human_gb(smallest_total)}) "
+                           "exceeds GPU + system memory"),
         })
         return row
 
@@ -623,8 +604,7 @@ def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> 
         "fits": True, "model_id": variant.model_id, "quant": variant.quant,
         "quant_validated": variant.validated, "size_bytes": download_total,
         "size_label": _human_gb(download_total), "variant_count": len(entry.variants),
-        "quant_reason": _QUANT_REASONS.get(
-            choice.reason_key, _QUANT_REASON_COMPACT).format(quant=variant.quant),
+        "quant_reason": _QUANT_REASONS.get(choice.reason_key, _QUANT_REASON_COMPACT).format(quant=variant.quant),
     })
     if isinstance(decision, estimator.PhysicsRefusal):
         row["fit_summary"] = row["quant_reason"]
@@ -635,8 +615,7 @@ def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> 
     if decision.window >= entry.n_ctx_train:
         shape = f"runs at its full {row['native_context_label']} context"
     else:
-        shape = (f"starts at {row['start_window_label']} and grows toward "
-                 f"{row['native_context_label']} as you use it")
+        shape = f"starts at {row['start_window_label']} and grows toward {row['native_context_label']} as you use it"
     if decision.spilled:
         shape += " (larger than your GPU memory — runs slower)"
     row["fit_summary"] = shape
@@ -664,8 +643,7 @@ def local_models_catalog():
     # Completeness-checked staging (split parts all present) — same answer the
     # picker and router see, so a mid-download model never reads as downloaded.
     staged_ids = set(bootstrap.staged_model_ids())
-    return {"models": [_catalog_row(e, budget, recommended, recommended_reason, staged_ids)
-                       for e in catalog.CATALOG]}
+    return {"models": [_catalog_row(e, budget, recommended, recommended_reason, staged_ids) for e in catalog.CATALOG]}
 
 
 # ── runtime install (job) ────────────────────────────────────
@@ -747,8 +725,7 @@ async def local_models_runtime_install(body: RuntimeInstallBody):
         except Exception as exc:  # noqa: BLE001
             logger.warning("runtime prune skipped: %s", exc)
 
-        _finish(job, f"llama.cpp {tag} ready ({backend})"
-                + (" — server restarted on the new build" if restarted else ""))
+        _finish(job, f"llama.cpp {tag} ready ({backend})" + (" — server restarted on the new build" if restarted else ""))
 
     _spawn_job(job, "lr-runtime-install", _run, fail_msg="runtime install failed: %s")
     return {"job_id": job["job_id"], "backend": backend, "tag": tag}
@@ -761,8 +738,7 @@ class ModelDownloadBody(BaseModel):
     model_id: str
 
 
-def _download_job(job: Dict[str, Any], body: Callable[[], None], name: str, label: str,
-                  fail_msg: str | None = None) -> None:
+def _download_job(job: Dict[str, Any], body: Callable[[], None], name: str, label: str, fail_msg: str | None = None) -> None:
     """Spawn a download job: ``body`` fetches, then the job finishes as
     "<label> ready" and the router is bounced to pick the file up."""
     def _run():
@@ -781,16 +757,13 @@ async def local_models_download(body: ModelDownloadBody):
     variant = None
     if entry is not None:
         if _engine_too_old(entry.min_engine):
-            raise HTTPException(
-                status_code=409,
-                detail=(f"{entry.display_name} needs llama.cpp {entry.min_engine} "
-                        f"or newer — update the engine first"))
+            raise HTTPException(status_code=409, detail=(
+                f"{entry.display_name} needs llama.cpp {entry.min_engine} or newer — update the engine first"))
         # Same planning budget as the catalog — the user downloads exactly
         # the build the row advertised.
         choice = catalog.select_variant(entry, hardware.probe_budget(planning=True))
         if choice is None:
-            raise HTTPException(status_code=409,
-                                detail=f"no variant of {entry.id} fits this machine")
+            raise HTTPException(status_code=409, detail=f"no variant of {entry.id} fits this machine")
         variant = choice.variant
     else:
         hit = catalog.find_entry_for_model(body.model_id)
@@ -803,8 +776,7 @@ async def local_models_download(body: ModelDownloadBody):
         return {"job_id": None, "already_downloaded": True, "model_id": variant.model_id}
 
     plan = _download_plan(entry, variant)
-    job = _job("model-download", f"{entry.display_name} ({variant.quant})",
-               model_id=entry.id)
+    job = _job("model-download", f"{entry.display_name} ({variant.quant})", model_id=entry.id)
     job["total_bytes"] = sum(p[2] for p in plan)
     _download_job(job, lambda: _run_download_plan(job, plan, entry.display_name),
                   "lr-model-download", entry.display_name, fail_msg="model download failed: %s")
@@ -828,8 +800,8 @@ async def local_models_delete(model_id: str):
     except Exception:  # noqa: BLE001
         logger.debug("window-override clear skipped", exc_info=True)
 
-    threading.Thread(target=_refresh_runtime, args=("post-delete runtime refresh skipped",),
-                     daemon=True, name="lr-post-delete").start()
+    threading.Thread(target=_refresh_runtime, args=("post-delete runtime refresh skipped",), daemon=True,
+                     name="lr-post-delete").start()
     return {"ok": True}
 
 
@@ -852,8 +824,7 @@ def _quickstart_target(body: QuickstartBody, budget):
     if body.model_id:
         entry = catalog.catalog_by_id().get(body.model_id)
         if entry is None:
-            raise HTTPException(status_code=404,
-                                detail=f"unknown model {body.model_id}")
+            raise HTTPException(status_code=404, detail=f"unknown model {body.model_id}")
         candidates = [entry]
     else:
         picked = catalog.recommended_entry(budget, _eligible_entries())
@@ -864,10 +835,8 @@ def _quickstart_target(body: QuickstartBody, budget):
         choice = catalog.select_variant(candidate, budget)
         if choice is not None and not _engine_too_old(candidate.min_engine):
             return candidate, choice.variant
-    raise HTTPException(
-        status_code=409,
-        detail="no catalog model fits this machine — open Local Models "
-               "to browse for a smaller build")
+    raise HTTPException(status_code=409, detail=(
+        "no catalog model fits this machine — open Local Models to browse for a smaller build"))
 
 
 @router.post("/api/local-models/quickstart")
@@ -892,8 +861,7 @@ async def local_models_quickstart(body: QuickstartBody):
     download_bytes = sum(p[2] for p in download_plan)
 
     if not _QUICKSTART_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409,
-                            detail="Setup is already running")
+        raise HTTPException(status_code=409, detail="Setup is already running")
 
     job = _job("quickstart", entry.display_name, model_id=entry.id)
     job["total_bytes"] = download_bytes or None
@@ -918,8 +886,7 @@ async def local_models_quickstart(body: QuickstartBody):
         _assign_default(job, variant.model_id)
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
-    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
-               on_exit=_QUICKSTART_LOCK.release)
+    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s", on_exit=_QUICKSTART_LOCK.release)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download,
             "download_bytes": download_bytes}
@@ -952,8 +919,7 @@ def _stop_server() -> None:
 
 
 def _start_server() -> None:
-    _start_local_server(_set_runtime_enabled(True),
-                        "The local server could not start — check the runtime is installed")
+    _start_local_server(_set_runtime_enabled(True), "The local server could not start — check the runtime is installed")
 
 
 _SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
@@ -996,8 +962,7 @@ def local_models_eject(body: ModelEjectBody):
     if endpoint is None:
         raise HTTPException(status_code=409, detail="local server is not running")
     with _http_error(502):
-        _router_request(endpoint, "/models/unload", timeout=120,
-                        payload={"model": body.model_id})
+        _router_request(endpoint, "/models/unload", timeout=120, payload={"model": body.model_id})
     return {"ok": True}
 
 
@@ -1039,8 +1004,7 @@ async def local_models_jobs():
     """All recent jobs, running first — the pane and the app-level poller
     rediscover in-flight work here after a remount or app restart."""
     with _JOBS_LOCK:
-        jobs = sorted(_JOBS.values(),
-                      key=lambda j: (j["status"] != "running", -j["started_at"]))
+        jobs = sorted(_JOBS.values(), key=lambda j: (j["status"] != "running", -j["started_at"]))
     return {"jobs": [_job_view(job) for job in jobs[:20]]}
 
 
@@ -1063,8 +1027,7 @@ async def local_models_search(q: str, limit: int = 20):
     if not q.strip():
         return {"hits": []}
     with _http_error(502, "Hugging Face search unavailable: "):
-        hits = await run_in_threadpool(hf_browse.search_models, q, limit)
-    return {"hits": [h.__dict__ for h in hits]}
+        return {"hits": [h.__dict__ for h in await run_in_threadpool(hf_browse.search_models, q, limit)]}
 
 
 @router.get("/api/local-models/search/files")
@@ -1072,8 +1035,7 @@ async def local_models_search_files(repo: str):
     """Servable GGUFs in one HF repo with a rough pre-download fit verdict per
     quant (file size + conservative fill-ins; the GGUF header refines it)."""
     with _http_error(502, f"Could not list {repo}: "):
-        groups = await run_in_threadpool(
-            hf_browse.priced_repo_files, repo, hardware.probe_budget(planning=True))
+        groups = await run_in_threadpool(hf_browse.priced_repo_files, repo, hardware.probe_budget(planning=True))
     return {"files": [dict(g.__dict__, paths=list(g.paths)) for g in groups]}
 
 
@@ -1097,8 +1059,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
     if model_id in bootstrap.staged_model_ids():
         return {"job_id": None, "already_downloaded": True, "model_id": model_id}
 
-    job = _job("model-download", f"{model_id} (from {body.repo})",
-               model_id=model_id)
+    job = _job("model-download", f"{model_id} (from {body.repo})", model_id=model_id)
 
     def _fetch():
         job["phase"] = "downloading"
@@ -1107,8 +1068,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
             if dest.exists():
                 continue
             download_file(_hf_url(body.repo, urllib.parse.quote(p)), dest, job,
-                          base_done=int(job.get("done_bytes") or 0),
-                          keep_totals=bool(job.get("total_bytes")))
+                          base_done=int(job.get("done_bytes") or 0), keep_totals=bool(job.get("total_bytes")))
             job["phase"] = "downloading"
 
     _download_job(job, _fetch, "lm-download-browsed", model_id)
