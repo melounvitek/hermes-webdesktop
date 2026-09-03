@@ -206,12 +206,8 @@ class GatewayTurnMixin:
         model = getattr(agent, "model", None)
         if not model:
             return
-        runtime = {
-            "provider": getattr(agent, "provider", None),
-            "base_url": getattr(agent, "base_url", None),
-            "api_mode": getattr(agent, "api_mode", None),
-            "fallback_active": bool(getattr(agent, "_fallback_activated", False)),
-        }
+        runtime = {k: getattr(agent, k, None) for k in ("provider", "base_url", "api_mode")}
+        runtime["fallback_active"] = bool(getattr(agent, "_fallback_activated", False))
         runtime = {k: v for k, v in runtime.items() if v not in (None, "")}
         try:
             db = self._session_db._db
@@ -1283,14 +1279,11 @@ class GatewayTurnMixin:
         # Multiplex: the home channel may live only in the profile secret scope / PlatformConfig,
         # not process os.environ.
         home_env = ""
-        try:
-            from agent.secret_scope import get_secret
-
-            home_env = (get_secret(env_key) or "").strip() if env_key else ""
-        except Exception:
-            home_env = ""
-        if not home_env:
-            home_env = (os.getenv(env_key) or "").strip() if env_key else ""
+        if env_key:
+            with suppress(Exception):
+                from agent.secret_scope import get_secret
+                home_env = (get_secret(env_key) or "").strip()
+            home_env = home_env or (os.getenv(env_key) or "").strip()
         # Also honor in-memory / yaml home_channel on this platform.
         with suppress(Exception):
             if not home_env and self.config.get_home_channel(source.platform):
@@ -1349,13 +1342,10 @@ class GatewayTurnMixin:
         workspace, so preserve the routing metadata used by the response delivery path."""
         try:
             _typing_adapter = self._adapter_for_source(source)
-            _stop_with_metadata = getattr(type(_typing_adapter), "_stop_typing_with_metadata", None)
-            _stop_typing = getattr(type(_typing_adapter), "stop_typing", None)
-            if _typing_adapter and callable(_stop_with_metadata):
-                await _typing_adapter._stop_typing_with_metadata(
-                    source.chat_id, self._event_thread_metadata(event, source),
-                )
-            elif _typing_adapter and callable(_stop_typing):
+            _kind = type(_typing_adapter)
+            if _typing_adapter and callable(getattr(_kind, "_stop_typing_with_metadata", None)):
+                await _typing_adapter._stop_typing_with_metadata(source.chat_id, self._event_thread_metadata(event, source))
+            elif _typing_adapter and callable(getattr(_kind, "stop_typing", None)):
                 await _typing_adapter.stop_typing(source.chat_id)
         except Exception:
             pass
@@ -1794,23 +1784,19 @@ class GatewayTurnMixin:
         status_hint = self._STATUS_HINTS.get(status_code, "")
         if status_code == 429:
             # Plan usage limit (resets on a schedule) vs a transient rate limit
-            _err_body = getattr(e, "response", None)
             _err_json = {}
             with suppress(Exception):
-                if _err_body is not None:
-                    _err_json = _err_body.json().get("error", {})
-                    if not isinstance(_err_json, dict):
-                        _err_json = {}
-            if _err_json.get("type") == "usage_limit_reached":
-                _resets_in = _err_json.get("resets_in_seconds")
-                if _resets_in and _resets_in > 0:
-                    import math
-                    _hours = math.ceil(_resets_in / 3600)
-                    status_hint = f" Your plan's usage limit has been reached. It resets in ~{_hours}h."
-                else:
-                    status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
-            else:
+                _err_json = e.response.json().get("error", {})
+            if not isinstance(_err_json, dict):
+                _err_json = {}
+            _resets_in = _err_json.get("resets_in_seconds")
+            if _err_json.get("type") != "usage_limit_reached":
                 status_hint = " You are being rate-limited. Please wait a moment and try again."
+            elif _resets_in and _resets_in > 0:
+                import math
+                status_hint = f" Your plan's usage limit has been reached. It resets in ~{math.ceil(_resets_in / 3600)}h."
+            else:
+                status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
         elif status_code in {400, 500}:
             # 400 on a large session is context overflow; 500 on a large session often means the
             # payload is too large for the API — treat it the same way.
@@ -1969,7 +1955,7 @@ class GatewayTurnMixin:
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
                 "chat_id": source.chat_id or "",
-                "thread_id": str(getattr(source, "thread_id", None)) if getattr(source, "thread_id", None) else "",
+                "thread_id": str(source.thread_id) if getattr(source, "thread_id", None) else "",
                 "chat_type": getattr(source, "chat_type", "") or "",
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
@@ -2064,12 +2050,10 @@ class GatewayTurnMixin:
             "config": "config",
             "default": "default — set model.context_length in config to override",
         }.get(resolved.context_source, "detected")
-        if context_length >= 1_000_000:
-            ctx_display = f"{context_length / 1_000_000:.1f}M"
-        elif context_length >= 1_000:
-            ctx_display = f"{context_length // 1_000}K"
-        else:
-            ctx_display = str(context_length)
+        ctx_display = (
+            f"{context_length / 1_000_000:.1f}M" if context_length >= 1_000_000
+            else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
+        )
         lines = [
             f"◆ Model: `{resolved.model}`",
             f"◆ Provider: {resolved.provider or 'openrouter'}",
@@ -2245,18 +2229,13 @@ class GatewayTurnMixin:
                             chat_id=source.chat_id, audio_path=media_path, metadata=_thread_metadata,
                             is_voice=_is_voice,
                         )
-                    elif _ext in _VIDEO_EXTS:
-                        await adapter.send_video(
-                            chat_id=source.chat_id, video_path=media_path, metadata=_thread_metadata,
-                        )
-                    elif _ext in _IMAGE_EXTS:
-                        await adapter.send_image_file(
-                            chat_id=source.chat_id, image_path=media_path, metadata=_thread_metadata,
-                        )
                     else:
-                        await adapter.send_document(
-                            chat_id=source.chat_id, file_path=media_path, metadata=_thread_metadata,
+                        sender, key = (
+                            (adapter.send_video, "video_path") if _ext in _VIDEO_EXTS
+                            else (adapter.send_image_file, "image_path") if _ext in _IMAGE_EXTS
+                            else (adapter.send_document, "file_path")
                         )
+                        await sender(chat_id=source.chat_id, metadata=_thread_metadata, **{key: media_path})
 
         except Exception as e:
             logger.exception("Background task %s failed", task_id)
@@ -2479,14 +2458,10 @@ class GatewayTurnMixin:
 
         # Scope-aware read: the proxy key is a per-profile credential; under multiplex honor the
         # installed scope's verdict (Slack pattern for the unscoped default-profile loop).
-        try:
-            from agent.secret_scope import UnscopedSecretError, get_secret
-            try:
-                proxy_key = (get_secret("GATEWAY_PROXY_KEY") or "").strip()
-            except UnscopedSecretError:
-                proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
-        except Exception:
-            proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
+        proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
+        with suppress(Exception):  # UnscopedSecretError and import failures fall back to the env
+            from agent.secret_scope import get_secret
+            proxy_key = (get_secret("GATEWAY_PROXY_KEY") or "").strip()
 
         _run_still_current = self._run_still_current_fn(session_key, run_generation)
 
@@ -2629,14 +2604,14 @@ class GatewayTurnMixin:
             _display_cfg = {}
 
         # Tool preview length (0 = no limit) and friendly tool labels (default on), per-platform.
-        with suppress(Exception):
-            from agent.display import set_tool_preview_max_len
-            _tpl = resolve_display_setting(user_config, platform_key, "tool_preview_length", 0)
-            set_tool_preview_max_len(int(_tpl) if _tpl else 0)
-        with suppress(Exception):
-            from agent.display import set_friendly_tool_labels
-            _ftl = resolve_display_setting(user_config, platform_key, "friendly_tool_labels", True)
-            set_friendly_tool_labels(bool(_ftl))
+        for _setter, _setting, _default, _cast in (
+            ("set_tool_preview_max_len", "tool_preview_length", 0, lambda v: int(v) if v else 0),
+            ("set_friendly_tool_labels", "friendly_tool_labels", True, bool),
+        ):
+            with suppress(Exception):
+                from agent import display as _agent_display
+                _val = resolve_display_setting(user_config, platform_key, _setting, _default)
+                getattr(_agent_display, _setter)(_cast(_val))
 
         # Tool progress mode — per-platform, with HERMES_TOOL_PROGRESS_MODE winning only when the
         # config never set it.
@@ -2690,9 +2665,9 @@ class GatewayTurnMixin:
         # Live working-state status for text-rendering typing indicators (Slack's assistant status
         # line). Independent of tool_progress; rides the existing _keep_typing refresh.
         _live_status_mode = resolve_display_setting(user_config, platform_key, "live_status", "full")
-        _live_status_adapter = adapter
-        if not getattr(_live_status_adapter, "supports_status_text", False) or _live_status_mode == "off":
-            _live_status_adapter = None
+        _live_status_adapter = (
+            adapter if getattr(adapter, "supports_status_text", False) and _live_status_mode != "off" else None
+        )
         # "log" mode: tool calls go to ~/.hermes/logs/tool_calls.log instead of the chat. Gateway-only.
         log_mode_enabled = progress_mode == "log" and not is_webhook
         # Natural assistant status messages are independent from tool progress and token streaming.
@@ -3495,14 +3470,9 @@ class GatewayTurnMixin:
             await self._run_agent_deliver_first_response(turn_ctx, adapter, response, result, stream_task)
 
         updated_history = result.get("messages", history)
-        next_source = source
-        next_message = pending
-        next_message_id = None
-        next_channel_prompt = None
-        next_session_key = session_key
-        # Carry the pending event's message_type into the recursive call so queued voice turns can
-        # stream TTS and re-mark the generation for the final delivered turn.
-        next_message_type = None
+        next_source, next_message, next_session_key = source, pending, session_key
+        # message_type is carried into the recursive call so queued voice turns can stream TTS.
+        next_message_id = next_channel_prompt = next_message_type = None
         if pending_event is not None:
             next_source = getattr(pending_event, "source", None) or source
             if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
