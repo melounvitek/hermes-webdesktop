@@ -315,18 +315,17 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
         return False
 
     summary = report.get("summary", {})
-    migrated, skipped = summary.get("migrated", 0), summary.get("skipped", 0)
-    conflicts, errors = summary.get("conflict", 0), summary.get("error", 0)
     print()
-    for count, printer, text in (
-        (migrated, print_success, f"Imported {migrated} item(s) from OpenClaw."),
-        (conflicts, print_info,
-         f"Skipped {conflicts} item(s) that already exist in Hermes (use hermes claw migrate --overwrite to force)."),
-        (skipped, print_info, f"Skipped {skipped} item(s) (not found or unchanged)."),
-        (errors, print_warning, f"{errors} item(s) had errors — check the migration report."),
+    for key, printer, text in (
+        ("migrated", print_success, "Imported {n} item(s) from OpenClaw."),
+        ("conflict", print_info,
+         "Skipped {n} item(s) that already exist in Hermes (use hermes claw migrate --overwrite to force)."),
+        ("skipped", print_info, "Skipped {n} item(s) (not found or unchanged)."),
+        ("error", print_warning, "{n} item(s) had errors — check the migration report."),
     ):
+        count = summary.get(key, 0)
         if count:
-            printer(text)
+            printer(text.format(n=count))
 
     output_dir = report.get("output_dir")
     if output_dir:
