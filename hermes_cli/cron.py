@@ -164,6 +164,9 @@ def _unverified_targets(unverified) -> str:
     return ", ".join(str(t) for t in unverified) if isinstance(unverified, list) else str(unverified)
 
 
+_STATE_BADGES = {"paused": ("[paused]", Colors.YELLOW), "completed": ("[completed]", Colors.BLUE)}
+
+
 def cron_list(show_all: bool = False):
     """List all scheduled jobs."""
     from cron.jobs import effective_job_state, list_jobs
@@ -179,61 +182,47 @@ def cron_list(show_all: bool = False):
 
     for job in jobs:
         job_id = job.get("id", "?")
-        name = job.get("name", "(unnamed)")
-        schedule = job.get("schedule_display", job.get("schedule", {}).get("value", "?"))
         # Scheduler-honoured flag — never show [paused] when enabled=true.
         state = effective_job_state(job)
-        next_run = job.get("next_run_at", "?")
+        badge = _STATE_BADGES.get(state) or (
+            ("[active]", Colors.GREEN) if job.get("enabled", True) else ("[disabled]", Colors.RED)
+        )
 
         # `repeat` / `deliver` may be present-but-null in the record (a one-shot persisted
         # with "repeat": null), so coalesce rather than rely on the dict-default, which only
         # applies to a missing key — a null deliver would crash `", ".join(None)`.
         repeat_info = job.get("repeat") or {}
         repeat_times = repeat_info.get("times")
-        repeat_completed = repeat_info.get("completed", 0)
-        repeat_str = f"{repeat_completed}/{repeat_times}" if repeat_times else "∞"
-
+        repeat_str = f"{repeat_info.get('completed', 0)}/{repeat_times}" if repeat_times else "∞"
         deliver = job.get("deliver") or ["local"]
         if isinstance(deliver, str):
             deliver = [deliver]
-        deliver_str = ", ".join(deliver)
 
+        rows = [
+            ("Name", job.get("name", "(unnamed)")),
+            ("Schedule", job.get("schedule_display", job.get("schedule", {}).get("value", "?"))),
+            ("Repeat", repeat_str),
+            ("Next run", job.get("next_run_at", "?")),
+            ("Deliver", ", ".join(deliver)),
+        ]
         skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
-        if state == "paused":
-            status = color("[paused]", Colors.YELLOW)
-        elif state == "completed":
-            status = color("[completed]", Colors.BLUE)
-        elif job.get("enabled", True):
-            status = color("[active]", Colors.GREEN)
-        else:
-            status = color("[disabled]", Colors.RED)
-
-        print(f"  {color(job_id, Colors.YELLOW)} {status}")
-        print(f"    Name:      {name}")
-        print(f"    Schedule:  {schedule}")
-        print(f"    Repeat:    {repeat_str}")
-        print(f"    Next run:  {next_run}")
-        print(f"    Deliver:   {deliver_str}")
         if skills:
-            print(f"    Skills:    {', '.join(skills)}")
-        script = job.get("script")
-        if script:
-            print(f"    Script:    {script}")
+            rows.append(("Skills", ", ".join(skills)))
+        if job.get("script"):
+            rows.append(("Script", job["script"]))
         monitor_source = job.get("monitor_script") or job.get("monitor_url")
         if monitor_source:
-            print(f"    Monitor:   {monitor_source} (agent runs only on output change)")
+            rows.append(("Monitor", f"{monitor_source} (agent runs only on output change)"))
             mon_state = job.get("monitor_state") or {}
             if mon_state.get("last_changed_at"):
-                print(f"    Changed:   {mon_state['last_changed_at']}")
+                rows.append(("Changed", mon_state["last_changed_at"]))
         if job.get("no_agent"):
-            print(f"    Mode:      {color('no-agent', Colors.DIM)} (script stdout delivered directly)")
-        workdir = job.get("workdir")
-        if workdir:
-            print(f"    Workdir:   {workdir}")
+            rows.append(("Mode", f"{color('no-agent', Colors.DIM)} (script stdout delivered directly)"))
+        if job.get("workdir"):
+            rows.append(("Workdir", job["workdir"]))
 
         last_status = job.get("last_status")
         if last_status:
-            last_run = job.get("last_run_at", "?")
             if last_status == "ok":
                 status_display = color("ok", Colors.GREEN)
             elif last_status == "delivery_failed":
@@ -246,16 +235,21 @@ def cron_list(show_all: bool = False):
                 streak = int(job.get("failure_streak") or 0)
                 if streak >= 2:
                     status_display += color(f"  ({streak} failures in a row)", Colors.RED)
-            print(f"    Last run:  {last_run}  {status_display}")
+            rows.append(("Last run", f"{job.get('last_run_at', '?')}  {status_display}"))
 
         dispatch_line = _dispatch_display(job.get("last_dispatch"))
         if dispatch_line:
-            print(f"    Dispatch:  {dispatch_line}")
-
+            rows.append(("Dispatch", dispatch_line))
         latest_execution = job.get("latest_execution")
         if latest_execution:
-            print(f"    Execution: {latest_execution.get('status', '?')}  "
-                  f"{latest_execution.get('id', '?')}")
+            rows.append((
+                "Execution",
+                f"{latest_execution.get('status', '?')}  {latest_execution.get('id', '?')}",
+            ))
+
+        print(f"  {color(job_id, Colors.YELLOW)} {color(*badge)}")
+        for label, value in rows:
+            print(f"    {label + ':':<11}{value}")
 
         delivery_err = job.get("last_delivery_error")
         if delivery_err:
@@ -665,20 +659,21 @@ def _job_api_kwargs(args) -> Dict[str, Any]:
     return {api_key: getattr(args, attr, None) for api_key, attr in _JOB_ARG_FIELDS}
 
 
+_JOB_DETAIL_LINES = (
+    ("script", "  Script: {}"),
+    ("monitor_script", "  Monitor: {} (agent runs only on output change)"),
+    ("monitor_url", "  Monitor: {} (agent runs only on output change)"),
+    ("no_agent", "  Mode: no-agent (script stdout delivered directly)"),
+    ("continuity", "  Continuity: on (each run sees the previous run's output)"),
+    ("workdir", "  Workdir: {}"),
+)
+
+
 def _print_job_details(job_data: Dict[str, Any]) -> None:
     """Print the optional Script/Monitor/Mode/Continuity/Workdir lines of a job record."""
-    if job_data.get("script"):
-        print(f"  Script: {job_data['script']}")
-    if job_data.get("monitor_script"):
-        print(f"  Monitor: {job_data['monitor_script']} (agent runs only on output change)")
-    if job_data.get("monitor_url"):
-        print(f"  Monitor: {job_data['monitor_url']} (agent runs only on output change)")
-    if job_data.get("no_agent"):
-        print("  Mode: no-agent (script stdout delivered directly)")
-    if job_data.get("continuity"):
-        print("  Continuity: on (each run sees the previous run's output)")
-    if job_data.get("workdir"):
-        print(f"  Workdir: {job_data['workdir']}")
+    for key, template in _JOB_DETAIL_LINES:
+        if job_data.get(key):
+            print(template.format(job_data[key]))
 
 
 def cron_create(args):
