@@ -85,7 +85,6 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
             return None
         # Legacy gate (no initialize_result): the ClientSession method shares the handler key.
         return None if hasattr(server.session, handler_key) else f"session lacks {handler_key}"
-
     selected: List[dict] = []
     for entry in _build_utility_schemas(server_name):
         reason = _skip_reason(entry["handler_key"])
@@ -205,20 +204,6 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
     return [c for c in unique if c.registry_name not in ambiguous and (c.registry_name, c.origin) not in shadowed]
 
 
-def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bool) -> None:
-    """Diagnostics for a name already owned by another toolset (skipped to preserve the owner)."""
-    if lazy:
-        if not c.is_utility:
-            logger.warning("MCP server '%s' (lazy): cached tool '%s' collides with toolset '%s' — skipping",
-                           name, c.registry_name, existing_toolset)
-    elif existing_toolset.startswith("mcp-"):
-        logger.error("MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to "
-                     "preserve the existing owner", name, c.origin, c.registry_name, existing_toolset)
-    else:
-        logger.warning("MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to "
-                       "preserve built-in", name, c.origin, c.registry_name, existing_toolset)
-
-
 def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: Callable,
                          scope: Callable[[], Optional[str]], lazy: bool) -> List[str]:
     """Register candidates under toolset ``mcp-{name}``; returns the names that landed. The
@@ -229,8 +214,17 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
     registered: List[str] = []
     for c in candidates:
         existing_toolset = registry.get_toolset_for_tool(c.registry_name)
-        if existing_toolset and existing_toolset != toolset_name:
-            _log_foreign_owner(name, c, existing_toolset, lazy)
+        if existing_toolset and existing_toolset != toolset_name:  # foreign owner: skip, preserve it
+            if lazy:
+                if not c.is_utility:
+                    logger.warning("MCP server '%s' (lazy): cached tool '%s' collides with toolset '%s' — skipping",
+                                   name, c.registry_name, existing_toolset)
+            elif existing_toolset.startswith("mcp-"):
+                logger.error("MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to "
+                             "preserve the existing owner", name, c.origin, c.registry_name, existing_toolset)
+            else:
+                logger.warning("MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to "
+                               "preserve built-in", name, c.origin, c.registry_name, existing_toolset)
             continue
         registry.register(
             name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,

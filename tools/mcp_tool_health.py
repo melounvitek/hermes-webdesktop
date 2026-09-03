@@ -66,7 +66,6 @@ class MCPServerHealthMixin:
                 await self._refresh_tools()
             except Exception:
                 logger.exception("MCP server '%s': dynamic tool refresh failed", self.name)
-
         task = asyncio.create_task(_run())
         self._pending_refresh_tasks.add(task)
         task.add_done_callback(self._pending_refresh_tasks.discard)
@@ -160,7 +159,6 @@ class MCPServerHealthMixin:
         back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
         async def list_tools():
             await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
-
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)

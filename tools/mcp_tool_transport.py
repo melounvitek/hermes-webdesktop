@@ -97,7 +97,6 @@ class MCPServerTransportMixin:
                     raise
                 logger.info(log_fmt, self.name, exc, *log_extra)
                 return await call(fallback)
-
         mode = str((self._config or {}).get("protocol", "auto")).lower().strip()
         if mode in ("stateless", "modern", "2026-07-28"):
             return await attempt("discover", "initialize", lambda exc: True,
@@ -242,7 +241,6 @@ class MCPServerTransportMixin:
             # Only judge 2xx (4xx/5xx may be an auth challenge); no content type advertised → trust the SDK.
             ct = _content_type_base(resp)
             return _is_2xx(resp) and bool(ct) and ct not in self._MCP_CONTENT_TYPES
-
         probe_headers = dict(headers) if headers else {}
         try:
             async with _httpx.AsyncClient(verify=ssl_verify, follow_redirects=True, timeout=_httpx.Timeout(timeout),
@@ -346,7 +344,6 @@ class MCPServerTransportMixin:
             async with httpx.AsyncClient(**client_kwargs) as http_client:
                 async with _core.streamable_http_client(url, http_client=http_client) as streams:
                     yield streams
-
         return _owned_client_streams()
 
     async def _run_http(self, config: dict):

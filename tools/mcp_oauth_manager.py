@@ -111,7 +111,6 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
             except httpx.HTTPError as exc:
                 logger.debug("MCP OAuth '%s': %s discovery to %s failed: %s", self._hermes_server_name, label, url, exc)
                 return None
-
         async with httpx.AsyncClient(timeout=10.0) as client:
             # PRM discovery to learn the authorization_server URL.
             for url in build_protected_resource_metadata_discovery_urls(None, server_url):
@@ -240,7 +239,6 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
                 import anyio
                 with anyio.CancelScope(shield=True):
                     await self.context.lock.acquire()
-
         if retry_after_concurrent_auth:
             yield request
             self._persist_oauth_metadata_if_changed()

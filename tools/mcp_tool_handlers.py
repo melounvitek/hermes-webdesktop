@@ -33,8 +33,6 @@ _STDIO_DIED_AGAIN_MSG = (
     "cleanly — do NOT retry this tool; ask the user to check the server's command and its stderr log.")
 
 
-# --------------------------------------------------------------- pre-call gates
-
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
     else a ``tool_error``. Fail-closed: approval-system errors block."""
@@ -89,8 +87,6 @@ def _acquire_call_server(server_name: str, tool_timeout: float):
     return None, not_connected
 
 
-# ------------------------------------------------------------ breaker bookkeeping
-
 def _result_is_error(result) -> bool:
     """True only for a JSON payload carrying an ``error`` key (non-JSON = success)."""
     try:
@@ -137,8 +133,6 @@ def _retry_once(server_name: str, retry_call, op_description: str, what: str):
     _core._reset_server_error(server_name)
     return result
 
-
-# --------------------------------------------------------------- recovery ladder
 
 def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
     """OAuth recovery + one retry; None when *exc* is not an auth error. ``handle_401`` decides
@@ -247,8 +241,6 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
                                  recoverers, on_final_failure, record_outcome=record_outcome)
 
 
-# ------------------------------------------------------------- the RPC itself
-
 @asynccontextmanager
 async def _track_inflight_rpc(server: Any, server_name: str, op: str):
     """Register the running RPC so teardown can fail it fast. A deliberate teardown
@@ -298,14 +290,6 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         await asyncio.gather(rpc_task, watch_task, return_exceptions=True)
 
 
-# ---------------------------------------------------------- result rendering
-
-def _error_result_text(result) -> str:
-    """Concatenated text of an ``isError`` result's blocks (EmbeddedResource payloads: ``.resource.text``)."""
-    texts = (getattr(b, "text", None) or getattr(getattr(b, "resource", None), "text", None) for b in (result.content or []))
-    return "".join(str(t) for t in texts if t)
-
-
 def _render_content_blocks(result, server_name: str) -> str:
     """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are materialized."""
     parts: List[str] = []
@@ -325,23 +309,22 @@ def _render_content_blocks(result, server_name: str) -> str:
     return _truncate_mcp_text_result("\n".join(parts))  # hard-cap pathological payloads; spillover handles the rest
 
 
-def _capped_structured_content(result):
-    """``structuredContent`` (or None); over the hard cap it degrades to the truncated JSON string (flood guard)."""
+def _render_call_tool_result(result, server_name: str) -> str:
+    """Pure: ``CallToolResult`` -> handler JSON. ``content`` is primary; ``structuredContent`` supplements it (or
+    becomes ``result`` without text) and over the hard cap degrades to the truncated JSON string (flood guard);
+    ``_meta`` minus reserved keys. Error text also reads EmbeddedResource payloads (``.resource.text``)."""
+    if mcp_field(result, "is_error", "isError", False):
+        texts = (getattr(b, "text", None) or getattr(getattr(b, "resource", None), "text", None) for b in (result.content or []))
+        error_text = "".join(str(t) for t in texts if t) or "MCP tool returned an error"
+        return tool_error(_sanitize_error(_truncate_mcp_text_result(error_text)))
+    text_result = _render_content_blocks(result, server_name)
     structured = mcp_field(result, "structured_content", "structuredContent")
     try:
         as_json = json.dumps(structured, ensure_ascii=False, default=str) if structured is not None else ""
+        if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS:
+            structured = _truncate_mcp_text_result(as_json)
     except (TypeError, ValueError):
-        return structured
-    return _truncate_mcp_text_result(as_json) if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS else structured
-
-
-def _render_call_tool_result(result, server_name: str) -> str:
-    """Pure: ``CallToolResult`` -> handler JSON. ``content`` is primary; ``structuredContent`` supplements it (or
-    becomes ``result`` without text); ``_meta`` minus reserved keys."""
-    if mcp_field(result, "is_error", "isError", False):
-        return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
-    text_result = _render_content_blocks(result, server_name)
-    structured = _capped_structured_content(result)
+        pass
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
     if structured is None and meta is None:
         return json.dumps({"result": text_result}, ensure_ascii=False)
@@ -357,8 +340,6 @@ def _render_call_tool_result(result, server_name: str) -> str:
     except (TypeError, ValueError):  # Non-serializable metadata: drop the extras, keep the call.
         return json.dumps({"result": text_result}, ensure_ascii=False)
 
-
-# ------------------------------------------------------------------- handlers
 
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Sync registry handler (``handler(args_dict, **kwargs) -> str``) calling an MCP tool via the background loop."""
@@ -387,12 +368,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         def _on_failure(exc):
             _core._bump_server_error(server_name)
             logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
-
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
             (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
             _on_failure, record_outcome=True)
-
     return _handler
 
 
@@ -412,14 +391,11 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
                 async with server._rpc_lock:
                     result = await rpc(server.session, args, server_name)
                 return json.dumps(render(result, server_name), ensure_ascii=False)
-
             return _dispatch(
                 server_name, server, op, _call, tool_timeout,
                 (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
                 lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc))
-
         return _handler
-
     return _factory
 
 
@@ -501,5 +477,4 @@ def _make_check_fn(server_name: str):
             server = _core._servers.get(server_name)
             return ((server is not None and (server.session is not None or server._is_recycled_stdio()))
                     or server_name in _core._lazy_server_configs)
-
     return _check

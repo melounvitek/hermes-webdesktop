@@ -90,7 +90,6 @@ def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
     stdio servers use ``command`` — or empty host)."""
     def _bad(detail: str) -> InvalidMcpUrlError:
         return InvalidMcpUrlError(f"Invalid MCP URL for '{server_name}': {detail}")
-
     if not isinstance(url, str):
         raise _bad(f"expected a string, got {type(url).__name__}")
     stripped = url.strip()
@@ -126,7 +125,6 @@ def _resolve_client_cert(server_name: str, config: dict):
         if not os.path.isfile(expanded):
             raise FileNotFoundError(f"{prefix}{label} not found at {expanded!r}")
         return expanded
-
     if not isinstance(raw_cert, (list, tuple)):
         cert_path = _expand(raw_cert, "client_cert")
         return (cert_path, _expand(raw_key, "client_key")) if raw_key is not None else cert_path  # combined PEM
@@ -153,7 +151,6 @@ def _resolve_identity_header(server_name: str, config: dict):
     def _ignore(detail: str, *args):
         logger.warning("MCP server '%s': identity_header " + detail + " — ignoring", server_name, *args)
         return None
-
     if not isinstance(raw, dict):
         return _ignore("must be a mapping with 'name' and 'value'/'value_from' keys (got %s)", type(raw).__name__)
     name = raw.get("name")
@@ -202,7 +199,6 @@ def _make_redirect_header_stripper(original_url, *, strict: bool = False,
         for _name in configured_header_names if strict else ():
             while _name in headers:
                 del headers[_name]
-
     return _strip_on_cross_origin_redirect
 
 
@@ -228,7 +224,6 @@ def _format_connect_error(exc: BaseException) -> str:
         text = "" if getattr(current, "exceptions", None) else str(current).strip()
         messages = ([text] if text else []) + [m for child in _exc_children(current) for m in _flatten_messages(child)]
         return messages or [current.__class__.__name__]
-
     missing = _find_missing(exc)
     if not missing:
         return _sanitize_error("; ".join(list(dict.fromkeys(_flatten_messages(exc)))[:3]))

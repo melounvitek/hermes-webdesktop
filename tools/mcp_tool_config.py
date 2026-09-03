@@ -147,7 +147,6 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
             resolved_command = which_hit
         elif resolved_command in {"npx", "npm", "node"}:
             resolved_command = _node_fallback(resolved_command)
-
     command_dir = os.path.dirname(resolved_command)
     if command_dir:
         resolved_env = _prepend_path(resolved_env, command_dir)
@@ -204,7 +203,6 @@ def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
         elif isinstance(value, list):
             for i, v in enumerate(value):
                 _walk(v, f"{path}[{i}]")
-
     _walk(config, "")
     for key_path in flagged:
         if (server_name, key_path) not in _whitespace_warned:
