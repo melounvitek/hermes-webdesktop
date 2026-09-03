@@ -56,6 +56,7 @@ _FINAL_TEXT = object()
 _FLUSH = object()
 _APPROVAL_BOUNDARY = object()
 _REOPEN_SEED = object()
+_FUTURE_TYPES = (asyncio.Future, concurrent.futures.Future)
 
 # Boundary finalize text when nothing has accumulated yet (overridable per boundary).
 _DEFAULT_BOUNDARY_PLACEHOLDER = "⏸ 等待审批中..."
@@ -97,11 +98,7 @@ class _Tick:
         return not self.got_done and not self.got_segment_break and self.commentary_text is None
 
 
-class GatewayStreamConsumer(
-    StreamTransportMixin,
-    StreamFallbackMixin,
-    StreamThinkFilterMixin,
-):
+class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThinkFilterMixin):
     """Async consumer that progressively edits a platform message with streamed tokens.
     Usage: ``agent.stream_delta_callback = consumer.on_delta``; ``create_task(consumer.run())``;
     after the agent finishes ``consumer.finish()`` then ``await task`` for the final edit."""
@@ -139,9 +136,7 @@ class GatewayStreamConsumer(
         self._run_still_current = run_still_current or (lambda: True)
         # Only platforms needing an explicit finalize call (DingTalk AI Cards) force a
         # redundant final edit; ``is True`` keeps MagicMock adapters out.
-        self._adapter_requires_finalize: bool = (
-            getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
-        )
+        self._adapter_requires_finalize = getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
         # Telegram bounds edit retries at 5s; a fallback must not wait longer.
         self._max_fallback_flood_retry_seconds = 5.0
 
@@ -320,9 +315,8 @@ class GatewayStreamConsumer(
             return None
         if self._delivered_final_text is not None:
             # A segment break / commentary may have delivered it under another record.
-            return (
-                self._delivered_final_text.strip() == target or self.has_delivered_text(final_text)
-            )
+            return (self._delivered_final_text.strip() == target
+                    or self.has_delivered_text(final_text))
         if self._turn_split_delivery:
             return False
         # No recorded payload: judge against the FINAL content, not the flag.
@@ -336,11 +330,8 @@ class GatewayStreamConsumer(
     def has_delivered_text(self, text: str) -> bool:
         """Return True if *text* was already delivered as visible chat content."""
         target = self._clean_for_display(text or "").strip()
-        seen = (
-            self._visible_prefix(),
-            *self._delivered_commentary_texts,
-            *self._delivered_segment_texts,
-        )
+        seen = (self._visible_prefix(), *self._delivered_commentary_texts,
+                *self._delivered_segment_texts)
         return bool(target) and any(sent.strip() == target for sent in seen)
 
     def on_segment_break(self) -> None:
@@ -348,10 +339,7 @@ class GatewayStreamConsumer(
         self._queue.put(_NEW_SEGMENT)
 
     def close_for_approval_prompt(
-        self,
-        placeholder: str | None = None,
-        reason: str = "Approval",
-        reopen: bool = False,
+        self, placeholder: str | None = None, reason: str = "Approval", reopen: bool = False,
     ) -> asyncio.Future:
         """Queue an interaction boundary (approval / clarify prompt) from sync context.
         run() finalizes the current native stream (``placeholder`` when empty), then per
@@ -393,11 +381,8 @@ class GatewayStreamConsumer(
 
     def _reopen_seed_pending(self) -> bool:
         """Native stream, reopen requested after a boundary, nothing open yet."""
-        return (
-            self._use_native_streaming
-            and self._awaiting_reopen_after_boundary
-            and not self._native_stream_opened
-        )
+        return (self._use_native_streaming and self._awaiting_reopen_after_boundary
+                and not self._native_stream_opened)
 
     def request_reopen_seed(self) -> None:
         """Thread-safe: request an EAGER native re-seed after a clarify answer.  No-op unless
@@ -462,20 +447,15 @@ class GatewayStreamConsumer(
                 self._degrade_native_to_buffered_send()
             self._reset_segment_state()
             if self._boundary_reopen:
-                logger.info(
-                    "[latency] Clarify boundary finalized, awaiting first "
-                    "post-answer delta to re-seed (chat=%s, turn=%s)",
-                    self.chat_id, self._turn_id,
-                )
+                logger.info("[latency] Clarify boundary finalized, awaiting first "
+                            "post-answer delta to re-seed (chat=%s, turn=%s)",
+                            self.chat_id, self._turn_id)
         except Exception as e:
             logger.warning("%s boundary processing failed: %s", _reason, e)
             boundary_ok = False
         finally:
             with contextlib.suppress(Exception):
-                if (
-                    isinstance(boundary_future, (asyncio.Future, concurrent.futures.Future))
-                    and not boundary_future.done()
-                ):
+                if isinstance(boundary_future, _FUTURE_TYPES) and not boundary_future.done():
                     boundary_future.set_result(boundary_ok)
 
     async def _finalize_boundary_stream(self, _reason: str) -> bool:
@@ -484,30 +464,23 @@ class GatewayStreamConsumer(
         finalize_text = self._accumulated or self._boundary_placeholder
         try:
             if await self._send_frame(finalize_text, finalize=True):
-                logger.debug(
-                    "%s boundary: finalized stream (chat=%s, turn=%s)",
-                    _reason, self.chat_id, self._turn_id,
-                )
+                logger.debug("%s boundary: finalized stream (chat=%s, turn=%s)",
+                             _reason, self.chat_id, self._turn_id)
                 return True
         except Exception as e:
             logger.warning("%s boundary: finalize failed: %s", _reason, e)
         # Typing bubble may still show partial content; deliver via send().
-        logger.warning(
-            "%s boundary: finalize not confirmed, "
-            "falling back to send() for pre-prompt text (chat=%s)",
-            _reason, self.chat_id,
-        )
+        logger.warning("%s boundary: finalize not confirmed, "
+                       "falling back to send() for pre-prompt text (chat=%s)",
+                       _reason, self.chat_id)
         try:
-            send_result = await self.adapter.send(self.chat_id, finalize_text)
-            if getattr(send_result, "success", False):
+            if getattr(await self.adapter.send(self.chat_id, finalize_text), "success", False):
                 return True
         except Exception as send_err:
             logger.warning("%s boundary: fallback send also failed: %s", _reason, send_err)
-        logger.error(
-            "%s boundary: both finalize and fallback send failed "
-            "(chat=%s) — pre-prompt text may not have been delivered",
-            _reason, self.chat_id,
-        )
+        logger.error("%s boundary: both finalize and fallback send failed "
+                     "(chat=%s) — pre-prompt text may not have been delivered",
+                     _reason, self.chat_id)
         return False
 
     def on_delta(self, text: str) -> None:
@@ -558,13 +531,12 @@ class GatewayStreamConsumer(
                         return
 
                 if self._should_edit(tick) and (
-                    self._accumulated
-                    or (self._use_native_streaming and self._tool_progress_active)
+                    self._accumulated or (self._use_native_streaming and self._tool_progress_active)
                 ):
                     # Overflow split.  Native streaming bypasses this: the adapter
                     # truncates against the stream protocol's own limit.
                     if not self._use_native_streaming and self._first_send_overflows():
-                        if await self._split_first_send(tick) == "return":
+                        if await self._split_first_send(tick):
                             return
                         continue
                     await self._seal_overflow_heads()
@@ -598,11 +570,8 @@ class GatewayStreamConsumer(
     def _resolve_length_budget(self) -> "tuple[Callable[[str], int], int]":
         """Per-chat length function (relay adapters differ per chat, e.g. utf16) + budget.
         isinstance gate: MagicMock auto-attributes aren't callables; test doubles use len."""
-        len_fn: "Callable[[str], int]" = (
-            self.adapter.message_len_fn_for_chat(self.chat_id)
-            if isinstance(self.adapter, _BasePlatformAdapter)
-            else len
-        )
+        len_fn = (self.adapter.message_len_fn_for_chat(self.chat_id)
+                  if isinstance(self.adapter, _BasePlatformAdapter) else len)
         return len_fn, max(500, self._raw_message_limit() - len_fn(self.cfg.cursor) - 100)
 
     async def _start_transports(self) -> None:
@@ -611,9 +580,8 @@ class GatewayStreamConsumer(
         self._use_native_streaming = self._resolve_native_streaming()
         if self._use_native_streaming:
             logger.debug("Stream consumer using native-stream transport (chat=%s)", self.chat_id)
-            if await self._try_seed_frame(
-                "Native streaming seed frame raised; disabling native", exc_info=True,
-            ):
+            if await self._try_seed_frame("Native streaming seed frame raised; disabling native",
+                                          exc_info=True):
                 self._native_stream_opened = True
                 self._use_draft_streaming = False
                 return
@@ -621,10 +589,8 @@ class GatewayStreamConsumer(
         self._use_draft_streaming = self._resolve_draft_streaming()
         if self._use_draft_streaming:
             self._bump_draft_id()
-            logger.debug(
-                "Stream consumer using native-draft transport (chat=%s draft_id=%s)",
-                self.chat_id, self._draft_id,
-            )
+            logger.debug("Stream consumer using native-draft transport (chat=%s draft_id=%s)",
+                         self.chat_id, self._draft_id)
 
     def _drain_queue(self) -> "_Tick":
         """Drain everything queued so far into one tick.  Control sentinels stop the drain
@@ -636,43 +602,35 @@ class GatewayStreamConsumer(
                 item = self._queue.get_nowait()
             except queue.Empty:
                 return tick
-            for sentinel, flag in self._QUEUE_SENTINEL_FLAGS:
-                if item is sentinel:
-                    setattr(tick, flag, True)
-                    return tick
-            handler = None
-            if isinstance(item, tuple):
-                with contextlib.suppress(TypeError):  # unhashable head: not one of ours
-                    handler = self._QUEUE_TUPLE_HANDLERS.get((item[0], len(item)))
-            if handler is None:
-                self._filter_and_accumulate(item)
-            elif handler(self, tick, item):
+            if item is _DONE:
+                tick.got_done = True
                 return tick
-
-    def _on_final_text(self, tick: "_Tick", item: tuple) -> bool:
-        self._adopt_final_text(item[1])
-        return False
-
-    def _on_approval_boundary(self, tick: "_Tick", item: tuple) -> bool:
-        tick.approval_boundary = (item[1], item[2])
-        return True
-
-    def _on_commentary(self, tick: "_Tick", item: tuple) -> bool:
-        tick.commentary_text = item[1]
-        return True
-
-    def _on_flush(self, tick: "_Tick", item: tuple) -> bool:
-        # Barrier: finalize like a tool boundary, signal at the end of the tick.
-        tick.got_flush = True
-        tick.got_segment_break = True
-        tick.flush_event = item[1]
-        return True
-
-    def _on_tool_progress(self, tick: "_Tick", item: tuple) -> bool:
-        if self._use_native_streaming:
-            self._tool_progress_lines.append(item[1])
-            self._tool_progress_active = True
-        return False  # keep draining to batch simultaneous progress lines
+            if item is _NEW_SEGMENT:
+                tick.got_segment_break = True
+                return tick
+            if item is _REOPEN_SEED:
+                tick.got_reopen_seed = True
+                return tick
+            kind = item[0] if isinstance(item, tuple) and item else None
+            if kind is _FINAL_TEXT:
+                self._adopt_final_text(item[1])
+            elif kind is _TOOL_PROGRESS:  # keep draining to batch simultaneous lines
+                if self._use_native_streaming:
+                    self._tool_progress_lines.append(item[1])
+                    self._tool_progress_active = True
+            elif kind is _APPROVAL_BOUNDARY:
+                tick.approval_boundary = (item[1], item[2])
+                return tick
+            elif kind is _COMMENTARY:
+                tick.commentary_text = item[1]
+                return tick
+            elif kind is _FLUSH:
+                # Barrier: finalize like a tool boundary, signal at the end of the tick.
+                tick.got_flush = tick.got_segment_break = True
+                tick.flush_event = item[1]
+                return tick
+            else:
+                self._filter_and_accumulate(item)
 
     def _adopt_final_text(self, final_raw: str) -> None:
         """Adopt the authoritative final (see finish()) as the finalize content — only if this
@@ -704,11 +662,8 @@ class GatewayStreamConsumer(
             self._native_last_pushed_len = 0
             self._awaiting_reopen_after_boundary = False
             self._reopen_seeded_eagerly = True
-            logger.info(
-                "[latency] Eager re-seed after clarify answer "
-                "(typing bubble reopened immediately, turn=%s)",
-                self._turn_id,
-            )
+            logger.info("[latency] Eager re-seed after clarify answer "
+                        "(typing bubble reopened immediately, turn=%s)", self._turn_id)
         else:
             # Degrade to a single buffered send(), like the approval path.
             self._degrade_native_to_buffered_send()
@@ -726,20 +681,17 @@ class GatewayStreamConsumer(
             elapsed = time.monotonic() - self._last_edit_time
             # buffer_threshold is a codepoint debounce heuristic, not a
             # platform-limit check (_len_fn is for overflow).
-            should_edit = bool(
-                (elapsed >= self._current_edit_interval and self._accumulated)
-                or len(self._accumulated) >= self.cfg.buffer_threshold
-            )
+            should_edit = bool((elapsed >= self._current_edit_interval and self._accumulated)
+                               or len(self._accumulated) >= self.cfg.buffer_threshold)
         # Defer mid-stream edits while the buffer could still resolve to a silence
         # marker ("NO"→"NO_REPLY"); got_done always resolves the buffer.
         return should_edit and not _is_partial_silence_marker(
-            self._clean_for_display(self._accumulated)
-        )
+            self._clean_for_display(self._accumulated))
 
-    async def _split_first_send(self, tick: "_Tick") -> str:
+    async def _split_first_send(self, tick: "_Tick") -> bool:
         """No message to edit yet and the buffer overflows: seal only the head chunks; the
         tail stays in _accumulated as the active preview later deltas edit in place.
-        Returns "return" (turn finished) or "continue"."""
+        True when the turn finished here (the run loop returns)."""
         chunks = self._truncate_for_stream(self._accumulated, self._safe_limit, self._len_fn)
         if len(chunks) <= 1:
             # Malformed/legacy adapter result must still be splittable.
@@ -766,24 +718,23 @@ class GatewayStreamConsumer(
         self._last_sent_text = ""
         self._last_edit_time = time.monotonic()
         if tick.got_done:
-            tail_delivered = not self._accumulated or await self._send_or_edit(
-                self._accumulated, finalize=True,
-            )
+            tail_delivered = (not self._accumulated
+                              or await self._send_or_edit(self._accumulated, finalize=True))
             # ``_already_sent`` may be True from prior state — only heads + tail count.
             self._final_response_sent = heads_delivered and tail_delivered
             if self._final_response_sent:
                 self._turn_split_delivery = True
                 self._mark_final_delivered(record=self._accumulated)
-            return "return"
+            return True
         if tick.got_segment_break:
             self._fallback_final_send = False
             self._fallback_prefix = ""
             if not self._accumulated:
-                return "continue"
+                return False
         # Early `continue` skips the bottom-of-loop flush signal.
         if tick.got_flush:
             self._signal_flush(tick.flush_event)
-        return "continue"
+        return False
 
     def _overflows(self) -> bool:
         return self._len_fn(self._accumulated) > self._safe_limit
@@ -823,15 +774,13 @@ class GatewayStreamConsumer(
 
         # A got_done FRESH send via the draft transport already carries finalize=True,
         # unlike an EDIT, which REQUIRES_EDIT_FINALIZE adapters still need a pass for.
-        tick.draft_final_fresh_send = (
-            tick.got_done and self._use_draft_streaming and self._message_id is None
-        )
+        tick.draft_final_fresh_send = (tick.got_done and self._use_draft_streaming
+                                       and self._message_id is None)
         # Segment break finalizes so platforms needing explicit closure (DingTalk AI
         # Cards) don't leave the segment stuck loading; it closes a preamble, not the
         # answer.
         tick.update_visible = await self._send_or_edit(
-            display_text,
-            finalize=(tick.got_done or tick.got_segment_break),
+            display_text, finalize=tick.got_done or tick.got_segment_break,
             is_turn_final=tick.got_done,
         )
         self._last_edit_time = time.monotonic()
@@ -845,25 +794,15 @@ class GatewayStreamConsumer(
         if self._reopen_seed_pending() and not self._accumulated:
             # Lazy reopen, no post-prompt content: nothing is open on screen, so
             # don't re-seed just to emit a lone "✅".
-            logger.debug(
-                "Clarify reopen boundary with no post-prompt content "
-                "— skipping lone-placeholder finalize (turn=%s)",
-                self._turn_id,
-            )
-        elif (
-            self._reopen_seeded_eagerly
-            and self._native_stream_opened
-            and not self._accumulated
-            and not tick.update_visible
-        ):
+            logger.debug("Clarify reopen boundary with no post-prompt content "
+                         "— skipping lone-placeholder finalize (turn=%s)", self._turn_id)
+        elif (self._reopen_seeded_eagerly and self._native_stream_opened
+              and not self._accumulated and not tick.update_visible):
             # Eager seed, no content: the typing bubble IS on screen and would hang
             # forever — close it with an empty finalize.  Delivery flags untouched.
             await self._close_empty_native_bubble("Eager-seed empty finalize failed: %s")
-            logger.debug(
-                "Eager reopen seed but no post-answer content — "
-                "closed empty typing bubble (turn=%s)",
-                self._turn_id,
-            )
+            logger.debug("Eager reopen seed but no post-answer content — "
+                         "closed empty typing bubble (turn=%s)", self._turn_id)
         elif self._use_native_streaming:
             # Native streams MUST close with finish=true even when empty (tool-only
             # turns) — placeholder if needed.
@@ -881,11 +820,8 @@ class GatewayStreamConsumer(
         elif self._final_response_sent:
             # Fresh-final already delivered; a second finalize would duplicate.
             self._mark_final_delivered(record=self._accumulated)
-        elif tick.update_visible and (
-            not self._adapter_requires_finalize
-            or self._last_edit_overflowed
-            or tick.draft_final_fresh_send
-        ):
+        elif tick.update_visible and (not self._adapter_requires_finalize
+                                      or self._last_edit_overflowed or tick.draft_final_fresh_send):
             # The update already delivered the final.  A second finalize would re-edit
             # it (Telegram: editMessageText after sendRichMessage falls back to the
             # legacy formatter) or overflow-split again, duplicating chunks.
@@ -910,9 +846,8 @@ class GatewayStreamConsumer(
 
     def _cumulative_transport(self) -> bool:
         """Stream-is-the-message drafts and WeCom native: one append-only stream per turn."""
-        return (
-            self._stream_is_message() and self._use_draft_streaming
-        ) or self._use_native_streaming
+        stream_draft = self._stream_is_message() and self._use_draft_streaming
+        return stream_draft or self._use_native_streaming
 
     async def _deliver_commentary(self, commentary_text: str) -> None:
         """Post commentary as its own message.  Cumulative transports keep the stream going —
@@ -936,12 +871,8 @@ class GatewayStreamConsumer(
             return
         # If the segment-break edit didn't land (flood control / fallback mode),
         # _accumulated holds unseen pre-boundary text — flush it before the reset.
-        if (
-            self._accumulated
-            and not tick.update_visible
-            and self._message_id
-            and self._message_id != "__no_edit__"
-        ):
+        if (self._accumulated and not tick.update_visible and self._message_id
+                and self._message_id != "__no_edit__"):
             await self._flush_segment_tail_on_edit_failure()
         self._reset_segment_state(preserve_no_edit=True)
 
@@ -953,11 +884,9 @@ class GatewayStreamConsumer(
         best_effort_ok = False
         if self._accumulated and self._message_id:
             with contextlib.suppress(Exception):
-                best_effort_ok = bool(
-                    await self._send_or_edit(
-                        self._accumulated, finalize=True, is_turn_final=False,
-                    )
-                )
+                best_effort_ok = bool(await self._send_or_edit(
+                    self._accumulated, finalize=True, is_turn_final=False,
+                ))
         elif self._message_id is None:
             # Draft path keeps _message_id=None; seal in place (else the stream stays
             # visibly live and the adapter keeps armed interception state).
@@ -973,22 +902,6 @@ class GatewayStreamConsumer(
                 item = self._queue.get_nowait()
                 if isinstance(item, tuple) and len(item) == 2 and item[0] is _FLUSH:
                     self._signal_flush(item[1])
-
-    # Tuple-shaped queue items keyed on (sentinel, arity); handler returns True
-    # to stop draining.  Order-insensitive: each sentinel is a distinct object.
-    _QUEUE_TUPLE_HANDLERS = {
-        (_FINAL_TEXT, 2): _on_final_text,
-        (_APPROVAL_BOUNDARY, 3): _on_approval_boundary,
-        (_COMMENTARY, 2): _on_commentary,
-        (_FLUSH, 2): _on_flush,
-        (_TOOL_PROGRESS, 2): _on_tool_progress,
-    }
-    # Bare control sentinels -> the _Tick flag they set (each ends the drain).
-    _QUEUE_SENTINEL_FLAGS = (
-        (_DONE, "got_done"),
-        (_NEW_SEGMENT, "got_segment_break"),
-        (_REOPEN_SEED, "got_reopen_seed"),
-    )
 
     @staticmethod
     def _clean_for_display(text: str) -> str:
