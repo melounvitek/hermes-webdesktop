@@ -64,11 +64,9 @@ class CodexEventProjector:
         Streaming deltas are display-only, mirroring how Hermes writes the
         assistant message only after the streaming completion event.
         """
-        method = notification.get("method", "")
-        params = notification.get("params", {}) or {}
-        if method != "item/completed":
+        if notification.get("method", "") != "item/completed":
             return ProjectionResult()
-        item = params.get("item") or {}
+        item = (notification.get("params", {}) or {}).get("item") or {}
         item_type = item.get("type") or ""
         item_id = item.get("id") or ""
         if item_type == "agentMessage":
@@ -98,16 +96,15 @@ class CodexEventProjector:
         text = item.get("text") or ""
         return ProjectionResult(messages=[self._assistant_message(text)], final_text=text)
 
-    def _project_user_message(self, item: dict) -> ProjectionResult:
+    @staticmethod
+    def _project_user_message(item: dict) -> ProjectionResult:
         # userMessage content is a list of UserInput variants; flatten text
         # fragments and drop non-text parts (Hermes' messages store text only).
-        text_parts: list[str] = []
-        for fragment in item.get("content") or []:
-            if isinstance(fragment, dict):
-                if fragment.get("type") == "text":
-                    text_parts.append(fragment.get("text") or "")
-                elif "text" in fragment:
-                    text_parts.append(str(fragment["text"]))
+        text_parts = [
+            (fragment.get("text") or "") if fragment.get("type") == "text" else str(fragment["text"])
+            for fragment in item.get("content") or []
+            if isinstance(fragment, dict) and (fragment.get("type") == "text" or "text" in fragment)
+        ]
         return ProjectionResult(messages=[{"role": "user", "content": "\n".join(text_parts)}])
 
     def _project_tool_item(
@@ -139,10 +136,7 @@ class CodexEventProjector:
     def _file_change_spec(item: dict) -> tuple[str, str, dict, str]:
         # Per-file change kinds only — full file contents can be huge.
         changes_summary = [
-            {
-                "kind": (change.get("kind") or {}).get("type") or "update",
-                "path": change.get("path") or "",
-            }
+            {"kind": (change.get("kind") or {}).get("type") or "update", "path": change.get("path") or ""}
             for change in item.get("changes") or []
         ]
         status = item.get("status") or "unknown"
@@ -153,14 +147,11 @@ class CodexEventProjector:
     def _mcp_tool_call_spec(item: dict) -> tuple[str, str, dict, str]:
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        result = item.get("result")
-        error = item.get("error")
+        result, error = item.get("result"), item.get("error")
         if error:
             content = f"[error] {json.dumps(error, ensure_ascii=False)[:1000]}"
-        elif result is not None:
-            content = json.dumps(result, ensure_ascii=False)[:4000]
         else:
-            content = ""
+            content = json.dumps(result, ensure_ascii=False)[:4000] if result is not None else ""
         # Mirror the native MCP name convention (mcp__server__tool) in the call id
         # so it stays consistent with registration names.
         return f"mcp__{server}__{tool}", f"mcp.{server}.{tool}", _dict_args(item.get("arguments")), content
@@ -169,10 +160,10 @@ class CodexEventProjector:
     def _dynamic_tool_call_spec(item: dict) -> tuple[str, str, dict, str]:
         tool = item.get("tool") or "unknown"
         content_items = item.get("contentItems") or []
-        if isinstance(content_items, list) and content_items:
-            content = json.dumps(content_items, ensure_ascii=False)[:4000]
-        else:
-            content = f"success={item.get('success')}"
+        content = (
+            json.dumps(content_items, ensure_ascii=False)[:4000] if isinstance(content_items, list) and content_items
+            else f"success={item.get('success')}"
+        )
         return f"dyn_{tool}", tool, _dict_args(item.get("arguments")), content
 
     _TOOL_PROJECTIONS: dict[str, Callable[[dict], tuple[str, str, dict, str]]] = {
@@ -182,7 +173,8 @@ class CodexEventProjector:
         "dynamicToolCall": _dynamic_tool_call_spec,
     }
 
-    def _project_opaque(self, item: dict, item_type: str) -> ProjectionResult:
+    @staticmethod
+    def _project_opaque(item: dict, item_type: str) -> ProjectionResult:
         try:
             payload = json.dumps(item, ensure_ascii=False)[:1500]
         except (TypeError, ValueError):

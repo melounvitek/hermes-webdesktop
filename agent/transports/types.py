@@ -30,13 +30,8 @@ class ToolCall:
 
     # Back-compat: run_agent reads tc.function.name / tc.function.arguments (45+
     # sites) and getattr()s the provider fields, so expose them as properties.
-    @property
-    def type(self) -> str:
-        return "function"
-
-    @property
-    def function(self) -> ToolCall:
-        return self
+    type = property(lambda self: "function")
+    function = property(lambda self: self)
 
     def _pd(self, key: str) -> Any:
         return (self.provider_data or {}).get(key)

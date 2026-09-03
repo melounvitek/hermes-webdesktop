@@ -15,8 +15,7 @@ import queue
 import re
 import subprocess
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from tools.environments.local import hermes_subprocess_env
@@ -34,13 +33,6 @@ class CodexAppServerError(RuntimeError):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"codex app-server error {self.code}: {self.message}"
-
-
-@dataclass
-class _Pending:
-    queue: queue.Queue
-    method: str
-    sent_at: float = field(default_factory=time.time)
 
 
 class CodexAppServerClient:
@@ -90,7 +82,7 @@ class CodexAppServerClient:
             bufsize=0, env=spawn_env, creationflags=windows_hide_flags(),
         )
         self._next_id = 1
-        self._pending: dict[int, _Pending] = {}
+        self._pending: dict[int, queue.Queue] = {}  # request id -> single-slot reply queue
         self._pending_lock = threading.Lock()
         self._notifications: queue.Queue = queue.Queue()
         self._server_requests: queue.Queue = queue.Queue()
@@ -148,10 +140,10 @@ class CodexAppServerClient:
 
     def request(self, method: str, params: Optional[dict] = None, timeout: float = 30.0) -> dict:
         """Send a request and block for ``result``; raise CodexAppServerError on ``error``."""
-        rid = self._take_id()
+        rid, self._next_id = self._next_id, self._next_id + 1
         q: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
-            self._pending[rid] = _Pending(queue=q, method=method)
+            self._pending[rid] = q
         self._send({"id": rid, "method": method, "params": params or {}})
         try:
             msg = q.get(timeout=timeout)
@@ -182,9 +174,7 @@ class CodexAppServerClient:
     @staticmethod
     def _take(q: queue.Queue, timeout: float) -> Optional[dict]:
         try:
-            if timeout <= 0:
-                return q.get_nowait()
-            return q.get(timeout=timeout)
+            return q.get_nowait() if timeout <= 0 else q.get(timeout=timeout)
         except queue.Empty:
             return None
 
@@ -203,11 +193,6 @@ class CodexAppServerClient:
 
     def is_alive(self) -> bool:
         return self._proc.poll() is None
-
-    def _take_id(self) -> int:
-        rid = self._next_id
-        self._next_id += 1
-        return rid
 
     def _send(self, obj: dict) -> None:
         if self._closed:
@@ -250,7 +235,7 @@ class CodexAppServerClient:
                 pending = self._pending.pop(msg["id"], None)
             if pending is not None:
                 try:
-                    pending.queue.put_nowait(msg)
+                    pending.put_nowait(msg)
                 except queue.Full:  # pragma: no cover - defensive
                     pass
         elif "method" in msg:  # server-initiated request (has id) or notification

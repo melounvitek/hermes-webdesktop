@@ -19,9 +19,7 @@ from typing import Any, Callable, Optional
 
 from agent.codex_responses_adapter import _format_responses_error
 from agent.redact import redact_sensitive_text
-from agent.transports.codex_app_server import (
-    CodexAppServerClient, CodexAppServerError
-)
+from agent.transports.codex_app_server import CodexAppServerClient, CodexAppServerError
 from agent.transports.codex_event_projector import CodexEventProjector, ProjectionResult
 
 logger = logging.getLogger(__name__)
@@ -63,25 +61,25 @@ class TurnResult:
 _TURN_ABORTED_MARKERS = ("<turn_aborted>", "<turn_aborted/>")
 
 
+def _first_scope_id(*lookups: tuple[Any, str, str]) -> Any:
+    """``src.get(a) or src.get(b)`` over successive dict sources until one is not None."""
+    for src, primary, fallback in lookups:
+        if isinstance(src, dict):
+            observed = src.get(primary) or src.get(fallback)
+            if observed is not None:
+                return observed
+    return None
+
+
 def _notification_scope_ids(note: dict) -> tuple[Optional[str], Optional[str]]:
     """Extract the thread/turn identity carried by a notification (top-level, then turn/item)."""
     params = (note.get("params") or {}) if isinstance(note, dict) else None
     if not isinstance(params, dict):
         return None, None
     turn, item = params.get("turn") or {}, params.get("item") or {}
-
-    def first(*lookups: tuple[Any, str, str]) -> Any:
-        """``src.get(a) or src.get(b)`` over successive dict sources until one is not None."""
-        for src, primary, fallback in lookups:
-            if isinstance(src, dict):
-                observed = src.get(primary) or src.get(fallback)
-                if observed is not None:
-                    return observed
-        return None
-
     return (
-        first((params, "threadId", "thread_id"), (turn, "threadId", "thread_id"), (item, "threadId", "thread_id")),
-        first((params, "turnId", "turn_id"), (turn, "id", "turnId"), (item, "turnId", "turn_id")),
+        _first_scope_id((params, "threadId", "thread_id"), (turn, "threadId", "thread_id"), (item, "threadId", "thread_id")),
+        _first_scope_id((params, "turnId", "turn_id"), (turn, "id", "turnId"), (item, "turnId", "turn_id")),
     )
 
 
@@ -95,9 +93,11 @@ def _notification_belongs_to_turn(note: dict, *, thread_id: Optional[str], turn_
     if not isinstance(note, dict):
         return False
     observed_thread_id, observed_turn_id = _notification_scope_ids(note)
-    if thread_id is not None and observed_thread_id is not None and str(observed_thread_id) != str(thread_id):
-        return False
-    return not (turn_id is not None and observed_turn_id is not None and str(observed_turn_id) != str(turn_id))
+
+    def foreign(expected: Optional[str], observed: Optional[str]) -> bool:
+        return expected is not None and observed is not None and str(observed) != str(expected)
+
+    return not (foreign(thread_id, observed_thread_id) or foreign(turn_id, observed_turn_id))
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -113,8 +113,7 @@ def _coerce_turn_input_text(user_input: Any) -> str:
     parts: list[str] = []
     for item in user_input:
         if not isinstance(item, dict):
-            keep = item.strip() if isinstance(item, str) else item is not None
-            if keep:
+            if item.strip() if isinstance(item, str) else item is not None:
                 parts.append(str(item))
             continue
         item_type = item.get("type")
@@ -149,9 +148,7 @@ _OAUTH_REAUTH_HINT = (
 def _classify_oauth_failure(*parts: str) -> Optional[str]:
     """Re-auth hint if any part looks like a codex OAuth/token-refresh failure, else None."""
     haystack = " ".join(p for p in parts if p).lower()
-    if haystack and any(needle in haystack for needle in _OAUTH_REFRESH_FAILURE_HINTS):
-        return _OAUTH_REAUTH_HINT
-    return None
+    return _OAUTH_REAUTH_HINT if any(needle in haystack for needle in _OAUTH_REFRESH_FAILURE_HINTS) else None
 
 
 @dataclass
@@ -216,9 +213,7 @@ class CodexAppServerSession:
         result = self._client.request("thread/start", {"cwd": self._cwd}, timeout=15)
         # Different codex versions serialize the id under thread.id / sessionId / threadId.
         thread_obj = result.get("thread") or {}
-        thread_id = (
-            thread_obj.get("id") or thread_obj.get("sessionId") or result.get("sessionId") or result.get("threadId")
-        )
+        thread_id = thread_obj.get("id") or thread_obj.get("sessionId") or result.get("sessionId") or result.get("threadId")
         if not thread_id:
             raise CodexAppServerError(
                 code=-32603,
@@ -243,12 +238,6 @@ class CodexAppServerSession:
                 pass
         self._client = None
         self._thread_id = None
-
-    def __enter__(self) -> "CodexAppServerSession":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self.close()
 
     def request_interrupt(self) -> None:
         """Idempotent: signal the active turn loop to issue turn/interrupt and unwind."""
@@ -285,7 +274,7 @@ class CodexAppServerSession:
         becomes diagnosable. Specific classifications (OAuth, wedge watchdog)
         produce their own clean hint instead.
         """
-        exc_str = str(exc) if exc != "" and exc is not None else ""
+        exc_str = "" if exc is None else str(exc)
         base = f"{prefix}: {exc_str}" if exc_str else prefix
         try:
             tail = self._client.stderr_tail(tail_lines) if self._client is not None else []
@@ -344,10 +333,7 @@ class CodexAppServerSession:
         if self._client.is_alive():
             return False
         hint = _classify_oauth_failure(self._stderr_blob(60))
-        self._retire(
-            result,
-            hint or self._format_error_with_stderr("codex app-server subprocess exited unexpectedly", tail_lines=20),
-        )
+        self._retire(result, hint or self._format_error_with_stderr("codex app-server subprocess exited unexpectedly", tail_lines=20))
         return True
 
     def _absorb_notification(
@@ -373,8 +359,8 @@ class CodexAppServerSession:
         if projection.final_text is not None:
             # Multiple agentMessage items per turn: the last one is canonical.
             result.final_text = projection.final_text
-            if _has_turn_aborted_marker(projection.final_text):
-                aborted = True
+            aborted = _has_turn_aborted_marker(projection.final_text)
+            if aborted:
                 result.interrupted = True
                 result.error = result.error or "codex reported turn_aborted"
         return projection, aborted
@@ -418,19 +404,15 @@ class CodexAppServerSession:
         last_tool_completion_at: Optional[float] = None
 
         def watchdog_tripped() -> bool:
-            if (
-                last_tool_completion_at is not None
-                and (time.monotonic() - last_tool_completion_at) > post_tool_quiet_timeout
-            ):
-                self._issue_interrupt(result.turn_id)
-                result.interrupted = True
-                self._retire(
-                    result,
-                    f"codex went silent for {post_tool_quiet_timeout:.0f}s after a tool result; "
-                    f"retiring app-server session.",
-                )
-                return True
-            return False
+            if last_tool_completion_at is None or (time.monotonic() - last_tool_completion_at) <= post_tool_quiet_timeout:
+                return False
+            self._issue_interrupt(result.turn_id)
+            result.interrupted = True
+            self._retire(
+                result,
+                f"codex went silent for {post_tool_quiet_timeout:.0f}s after a tool result; retiring app-server session.",
+            )
+            return True
 
         def on_server_request(sreq: dict) -> bool:
             nonlocal last_tool_completion_at
@@ -442,12 +424,9 @@ class CodexAppServerSession:
                 pending = self._client.take_notification(timeout=0)
                 if pending is None:
                     break
-                if not _notification_belongs_to_turn(
-                    pending, thread_id=self._thread_id, turn_id=result.turn_id
-                ):
+                if not _notification_belongs_to_turn(pending, thread_id=self._thread_id, turn_id=result.turn_id):
                     logger.debug(
-                        "ignoring foreign codex notification while draining "
-                        "server request: method=%s",
+                        "ignoring foreign codex notification while draining server request: method=%s",
                         pending.get("method"),
                     )
                     continue
@@ -472,13 +451,9 @@ class CodexAppServerSession:
                 return aborted
             turn_obj = (note.get("params") or {}).get("turn") or {}
             turn_status = turn_obj.get("status")
-            if turn_status and turn_status not in {"completed", "interrupted"}:
-                err_obj = turn_obj.get("error")
-                if err_obj:
-                    err_msg = _format_responses_error(err_obj, str(turn_status))
-                    self._set_classified_error(
-                        result, f"turn ended status={turn_status}", err_msg, err_msg
-                    )
+            if turn_status and turn_status not in {"completed", "interrupted"} and turn_obj.get("error"):
+                err_msg = _format_responses_error(turn_obj["error"], str(turn_status))
+                self._set_classified_error(result, f"turn ended status={turn_status}", err_msg, err_msg)
             return True
 
         self._drive_turn(
@@ -529,25 +504,16 @@ class CodexAppServerSession:
             method = note.get("method", "")
             if pre_scope_filter is not None and not pre_scope_filter(note, method):
                 continue
-            if not _notification_belongs_to_turn(
-                note, thread_id=self._thread_id, turn_id=result.turn_id
-            ):
+            if not _notification_belongs_to_turn(note, thread_id=self._thread_id, turn_id=result.turn_id):
                 logger.debug("ignoring foreign codex notification: method=%s", method)
                 continue
             if on_note(note, method):
                 turn_complete = True
 
-        if (
-            accept_final_text_at_deadline
-            and not turn_complete
-            and not result.interrupted
-            and result.final_text
-            and result.error is None
-        ):
+        if accept_final_text_at_deadline and not turn_complete and not result.interrupted and result.final_text and result.error is None:
             logger.warning(
-                "codex app-server turn reached deadline after a completed "
-                "assistant message but before turn/completed; accepting "
-                "the assistant text as the terminal response"
+                "codex app-server turn reached deadline after a completed assistant message but before "
+                "turn/completed; accepting the assistant text as the terminal response"
             )
             turn_complete = True
 
@@ -573,9 +539,7 @@ class CodexAppServerSession:
         self._interrupt_event.clear()
         projector = CodexEventProjector()
 
-        if self._request_for(
-            result, "thread/compact/start", {"threadId": self._thread_id}, "thread/compact/start"
-        ) is None:
+        if self._request_for(result, "thread/compact/start", {"threadId": self._thread_id}, "thread/compact/start") is None:
             return result
 
         def pre_scope_filter(note: dict, method: str) -> bool:
@@ -611,9 +575,7 @@ class CodexAppServerSession:
                 result.error = result.error or "compact turn interrupted"
             elif turn_status and turn_status != "completed":
                 err_msg = _format_responses_error(turn_obj.get("error"), str(turn_status))
-                self._set_classified_error(
-                    result, f"compact turn ended status={turn_status}", err_msg, err_msg
-                )
+                self._set_classified_error(result, f"compact turn ended status={turn_status}", err_msg, err_msg)
             return True
 
         def on_server_request(sreq: dict) -> bool:
@@ -730,21 +692,24 @@ class CodexAppServerSession:
         if method == "item/completed":
             self._pending_file_changes.pop(item_id, None)
         elif method == "item/started":
-            raw_changes = item.get("changes") or []
-            if not raw_changes:
-                self._pending_file_changes[item_id] = "1 change pending"
-                return
-            changes = [ch for ch in raw_changes if isinstance(ch, dict)]
-            kinds: dict[str, int] = {}
-            for ch in changes:
-                kind = (ch.get("kind") or {}).get("type") or "update"
-                kinds[kind] = kinds.get(kind, 0) + 1
-            paths: list[str] = [ch["path"] for ch in changes if ch.get("path")]
-            counts = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
-            preview = ", ".join(paths[:3])
-            if len(paths) > 3:
-                preview += f", +{len(paths) - 3} more"
-            self._pending_file_changes[item_id] = f"{counts}: {preview}" if preview else counts
+            self._pending_file_changes[item_id] = _summarize_file_changes(item.get("changes") or [])
+
+
+def _summarize_file_changes(raw_changes: list) -> str:
+    """One-line ``"<n> add, <m> update: a.py, b.py, +k more"`` summary of a fileChange item's changes."""
+    if not raw_changes:
+        return "1 change pending"
+    changes = [ch for ch in raw_changes if isinstance(ch, dict)]
+    kinds: dict[str, int] = {}
+    for ch in changes:
+        kind = (ch.get("kind") or {}).get("type") or "update"
+        kinds[kind] = kinds.get(kind, 0) + 1
+    paths: list[str] = [ch["path"] for ch in changes if ch.get("path")]
+    counts = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
+    preview = ", ".join(paths[:3])
+    if len(paths) > 3:
+        preview += f", +{len(paths) - 3} more"
+    return f"{counts}: {preview}" if preview else counts
 
 
 def _apply_token_usage_notification(result: TurnResult, note: dict) -> None:

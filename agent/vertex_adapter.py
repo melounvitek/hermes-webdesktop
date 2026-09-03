@@ -58,10 +58,7 @@ def _vertex_config() -> dict:
 
 def _env_or_config(env_var: str, config_key: str) -> str:
     """Setting precedence: env/secret > config.yaml; "" when neither is set."""
-    env_value = (_get_secret(env_var) or "").strip()
-    if env_value:
-        return env_value
-    return str(_vertex_config().get(config_key) or "").strip()
+    return (_get_secret(env_var) or "").strip() or str(_vertex_config().get(config_key) or "").strip()
 
 
 def _resolve_region(explicit: Optional[str] = None) -> str:
@@ -95,12 +92,10 @@ def _sa_snapshot(resolved_path: Optional[str]) -> Tuple[Optional[bytes], Tuple[A
     - Readable file: (bytes, (path, sha256)).
     - Unreadable file: (None, (path,)) — the caller falls back to the SDK's own file read.
 
-    The key fingerprints file CONTENT, not stat metadata: a metadata-preserving
-    atomic replacement (equal-length JSON, restored mtime) yields a different
-    private key under an identical stat signature, and this cache guards an
-    identity. Returning the bytes lets the caller build credentials from the SAME
-    snapshot the key was computed from (no stat->read TOCTOU); one read + sha256
-    per probe is noise next to the OAuth token mint the cache avoids.
+    The key fingerprints file CONTENT, not stat metadata (a metadata-preserving
+    atomic replacement can swap the private key under an identical stat signature,
+    and this cache guards an identity). Returning the bytes lets the caller build
+    credentials from the SAME snapshot the key was computed from (no stat->read TOCTOU).
     """
     if not resolved_path:
         return None, ("__adc__",)
@@ -140,10 +135,7 @@ def _needs_refresh(creds) -> bool:
     return (
         not getattr(creds, "token", None)
         or getattr(creds, "expired", False)
-        or (
-            getattr(creds, "expiry", None) is not None
-            and (creds.expiry.timestamp() - time.time()) < 300
-        )
+        or (getattr(creds, "expiry", None) is not None and (creds.expiry.timestamp() - time.time()) < 300)
     )
 
 

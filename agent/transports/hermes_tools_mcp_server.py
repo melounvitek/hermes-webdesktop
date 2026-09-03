@@ -45,37 +45,16 @@ def _signature_from_schema(schema: dict | None) -> tuple[inspect.Signature, dict
 # approval UI; delegate_task/memory/session_search/todo — ``_AGENT_LOOP_TOOLS``
 # need the running AIAgent context, which a stateless MCP callback lacks.
 EXPOSED_TOOLS: tuple[str, ...] = (
-    "web_search",
-    "web_extract",
-    "browser_navigate",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_snapshot",
-    "browser_scroll",
-    "browser_back",
-    "browser_get_images",
-    "browser_console",
-    "browser_vision",
-    "vision_analyze",
-    "image_generate",
-    "skill_view",
-    "skills_list",
-    "text_to_speech",
+    "web_search", "web_extract",
+    "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_snapshot", "browser_scroll",
+    "browser_back", "browser_get_images", "browser_console", "browser_vision",
+    "vision_analyze", "image_generate", "skill_view", "skills_list", "text_to_speech",
     # Kanban handoff tools: stateless (read HERMES_KANBAN_TASK, write kanban.db).
     # Without them a codex-runtime worker can't report completion and hangs.
-    "kanban_complete",
-    "kanban_block",
-    "kanban_request_review",
-    "kanban_request_changes",
-    "kanban_comment",
-    "kanban_heartbeat",
-    "kanban_show",
-    "kanban_list",
+    "kanban_complete", "kanban_block", "kanban_request_review", "kanban_request_changes", "kanban_comment",
+    "kanban_heartbeat", "kanban_show", "kanban_list",
     # Orchestrator-only (the kanban tool gates them on HERMES_KANBAN_TASK unset).
-    "kanban_create",
-    "kanban_unblock",
-    "kanban_link",
+    "kanban_create", "kanban_unblock", "kanban_link",
 )
 
 
@@ -135,9 +114,8 @@ def _build_server() -> Any:
             continue
         description = spec.get("description") or f"Hermes {name} tool"
         params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
-        handler = _make_handler(name, params_schema, description)
         try:
-            mcp.add_tool(handler, name=name, description=description)
+            mcp.add_tool(_make_handler(name, params_schema, description), name=name, description=description)
         except TypeError:
             # Older mcp SDK: decorator-style registration; __signature__ still drives schema.
             mcp.tool(name=name, description=description)(_make_handler(name, params_schema, description))
