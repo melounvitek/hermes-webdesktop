@@ -72,13 +72,17 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
         raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
 
+def _rows(db, sql: str, cutoff: float) -> List[Dict[str, Any]]:
+    return [dict(r) for r in db._conn.execute(sql, (cutoff,)).fetchall()]
+
+
 def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     from agent.insights import InsightsEngine
 
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
         cutoff = time.time() - (days * 86400)
-        cur = db._conn.execute("""
+        daily = _rows(db, """
             SELECT date(started_at, 'unixepoch') as day,
                    SUM(input_tokens) as input_tokens,
                    SUM(output_tokens) as output_tokens,
@@ -90,10 +94,9 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
                    SUM(COALESCE(api_call_count, 0)) as api_calls
             FROM sessions WHERE started_at > ?
             GROUP BY day ORDER BY day
-        """, (cutoff,))
-        daily = [dict(r) for r in cur.fetchall()]
+        """, cutoff)
 
-        cur2 = db._conn.execute("""
+        by_model = _rows(db, """
             SELECT model,
                    SUM(input_tokens) as input_tokens,
                    SUM(output_tokens) as output_tokens,
@@ -102,15 +105,14 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
                    SUM(COALESCE(api_call_count, 0)) as api_calls
             FROM sessions WHERE started_at > ? AND model IS NOT NULL
             GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        by_model = [dict(r) for r in cur2.fetchall()]
+        """, cutoff)
 
         # Fold in auxiliary usage (vision, compression, ...) from session_model_usage.
         # Aux calls never touch the sessions counters, so this is add-only — no double count.
         aux_rows = _aux_usage_rows(db, cutoff)
         by_model = _merge_aux_into_by_model(by_model, aux_rows)
 
-        cur3 = db._conn.execute("""
+        totals = _rows(db, """
             SELECT SUM(input_tokens) as total_input,
                    SUM(output_tokens) as total_output,
                    SUM(cache_read_tokens) as total_cache_read,
@@ -120,8 +122,7 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
                    COUNT(*) as total_sessions,
                    SUM(COALESCE(api_call_count, 0)) as total_api_calls
             FROM sessions WHERE started_at > ?
-        """, (cutoff,))
-        totals = dict(cur3.fetchone())
+        """, cutoff)[0]
         usage = InsightsEngine(db).get_usage_breakdown(days=days)
 
         return {
@@ -214,6 +215,9 @@ def _model_capabilities(provider: str, model_name: str) -> dict:
     }
 
 
+_AUX_SUMMED_KEYS = (
+    "input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens", "estimated_cost", "sessions", "api_calls",
+)
 _MODEL_CARD_KEYS = (
     "input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens",
     "estimated_cost", "actual_cost", "sessions", "api_calls", "tool_calls",
@@ -227,7 +231,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     try:
         cutoff = time.time() - (days * 86400)
 
-        cur = db._conn.execute("""
+        raw_rows = _rows(db, """
             SELECT model,
                    billing_provider,
                    SUM(input_tokens) as input_tokens,
@@ -244,8 +248,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
             FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
             GROUP BY model, billing_provider
             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        raw_rows = [dict(r) for r in cur.fetchall()]
+        """, cutoff)
 
         # Aux-only models (dedicated vision/compression) as (model, provider) rows,
         # keyed like the GROUP BY above, so they appear on the Models page.
@@ -253,14 +256,8 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
             raw_rows.append({
                 "model": aux.get("model") or "unknown",
                 "billing_provider": aux.get("billing_provider") or "",
-                "input_tokens": aux.get("input_tokens") or 0,
-                "output_tokens": aux.get("output_tokens") or 0,
-                "cache_read_tokens": aux.get("cache_read_tokens") or 0,
-                "reasoning_tokens": aux.get("reasoning_tokens") or 0,
-                "estimated_cost": aux.get("estimated_cost") or 0,
+                **{key: aux.get(key) or 0 for key in _AUX_SUMMED_KEYS},
                 "actual_cost": 0,
-                "sessions": aux.get("sessions") or 0,
-                "api_calls": aux.get("api_calls") or 0,
                 "tool_calls": 0,
                 "last_used_at": aux.get("last_used_at"),
                 "avg_tokens_per_session": 0,
@@ -273,17 +270,17 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
             reverse=True,
         )
 
-        models = []
-        for row in rows:
-            provider = row.get("billing_provider") or ""
-            models.append({
+        models = [
+            {
                 "model": row["model"],
-                "provider": provider,
+                "provider": row.get("billing_provider") or "",
                 **{key: row[key] for key in _MODEL_CARD_KEYS},
-                "capabilities": _model_capabilities(provider, row["model"]),
-            })
+                "capabilities": _model_capabilities(row.get("billing_provider") or "", row["model"]),
+            }
+            for row in rows
+        ]
 
-        totals_cur = db._conn.execute("""
+        totals = _rows(db, """
             SELECT COUNT(DISTINCT model) as distinct_models,
                    SUM(input_tokens) as total_input,
                    SUM(output_tokens) as total_output,
@@ -294,8 +291,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
                    COUNT(*) as total_sessions,
                    SUM(COALESCE(api_call_count, 0)) as total_api_calls
             FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-        """, (cutoff,))
-        totals = dict(totals_cur.fetchone())
+        """, cutoff)[0]
 
         return {"models": models, "totals": totals, "period_days": days}
     finally:
