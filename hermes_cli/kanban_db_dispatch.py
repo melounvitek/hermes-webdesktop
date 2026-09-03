@@ -625,27 +625,15 @@ def detect_stale_running(
     stale_timeout_seconds: int = 0,
     signal_fn=None,
 ) -> list[str]:
-    """Reclaim ``running`` tasks that show no progress (heartbeat) within the
-    staleness window.
+    """Reclaim ``running`` tasks with no heartbeat progress; returns their ids.
 
-    A task is considered stale when BOTH of these hold:
-
-    1. It has been running for longer than ``stale_timeout_seconds``
-       (measured from the active run's ``started_at``, falling back to
-       ``tasks.started_at`` on older runs).
-    2. Its ``last_heartbeat_at`` is older than
-       ``_STALE_HEARTBEAT_GAP_SECONDS`` (or NULL — never sent a heartbeat).
-
-    On reclaim the task is restored to its source phase, the run is closed with
-    ``outcome='stale'``, and the host-local worker (if still running) is
-    terminated.
-
-    Only considers ``status='running'`` tasks. Blocked tasks are never
-    candidates.  Returns the list of reclaimed task IDs.
-
-    ``stale_timeout_seconds=0`` disables the check entirely (returns ``[]``
-    immediately).  ``signal_fn`` is a test hook; defaults to ``os.kill``
-    on POSIX.
+    Stale = running longer than ``stale_timeout_seconds`` (from the active
+    run's ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at``
+    older than ``_STALE_HEARTBEAT_GAP_SECONDS`` or NULL. The task returns to
+    its source phase, the run closes ``outcome='stale'`` and a live host-local
+    worker is terminated. Blocked tasks are never candidates;
+    ``stale_timeout_seconds=0`` disables the check. ``signal_fn`` is a test
+    hook (default ``os.kill`` on POSIX).
     """
     if stale_timeout_seconds <= 0:
         return []
@@ -748,25 +736,17 @@ def detect_stale_running(
 def reconcile_orphaned_running(
     conn: sqlite3.Connection,
 ) -> list[str]:
-    """Reconcile ``running`` cards whose claim bookkeeping is broken.
+    """Requeue ``running`` cards with broken claim bookkeeping; returns their ids.
 
-    Tracked-state vs. reality divergence: a task can sit in
-    ``status='running'`` with ``claim_lock IS NULL`` or ``claim_expires IS
-    NULL`` (crash mid-claim, manual SQL, DB restore). None of the other
-    recovery paths ever touch such a card — ``release_stale_claims``
-    requires a non-NULL ``claim_expires``, ``detect_crashed_workers``
-    requires a host-local claim_lock + worker_pid, and
-    ``detect_stale_running`` is disabled by default — so the card shows
-    Running forever (a zombie).
-
-    This pass finds those orphans, requeues them to ``ready`` with an
-    explanatory comment, closes any leaked run, and appends a
-    ``reconciled`` event. If the orphan row still records a live PID on
-    this host, requeueing is deferred to a later tick so we never spawn a
-    duplicate beside a possibly-alive worker.
-
-    Returns the list of reconciled task ids. Safe to call every tick.
-
+    A task can sit ``running`` with ``claim_lock``/``claim_expires`` NULL
+    (crash mid-claim, manual SQL, DB restore) and no other recovery path
+    touches it — ``release_stale_claims`` needs ``claim_expires``,
+    ``detect_crashed_workers`` needs a host-local lock + pid,
+    ``detect_stale_running`` is off by default — so it is a zombie forever.
+    Orphans go back to ``ready`` with an explanatory comment, a leaked run is
+    closed and a ``reconciled`` event appended; a row still recording a live
+    host-local PID is deferred to a later tick so no duplicate is spawned
+    beside a possibly-alive worker. Safe to call every tick.
     """
     now = int(time.time())
     reconciled: list[str] = []
@@ -1519,30 +1499,19 @@ def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
 
 
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
-    """Return True iff there is at least one ready+assigned+unclaimed task
-    whose assignee maps to a real Hermes profile.
+    """True iff a ready+assigned+unclaimed task maps to a real Hermes profile.
 
-    Used by the gateway- and CLI-embedded dispatchers' health telemetry to
-    decide whether ``0 spawned`` is a "stuck" condition (real spawnable
-    work waiting) or a "correctly idle" condition (only control-plane
-    lanes like ``orion-cc`` / ``orion-research`` waiting on terminals
-    that pull tasks via ``claim_task`` directly).
-
-    Falls back to "any ready+assigned" if ``profile_exists`` is not
-    importable (e.g. partial install) — preserves the old behavior so
-    the warning still fires in degraded environments.
+    Health telemetry uses it to tell "stuck" (``0 spawned`` with spawnable
+    work) from "correctly idle" (only control-plane lanes waiting on terminals
+    that pull via ``claim_task``). Falls back to "any assigned" when
+    ``profile_exists`` is unimportable (partial install) so the warning still
+    fires when degraded.
     """
     return _has_spawnable(conn, "ready")
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
-    """Return True iff there is at least one review+assigned+unclaimed task
-    whose assignee maps to a real Hermes profile.
-
-    Mirror of :func:`has_spawnable_ready` for the review column —
-    used by the health telemetry to decide whether the dispatcher
-    should have spawned a review agent.
-    """
+    """:func:`has_spawnable_ready` for the review column."""
     return _has_spawnable(conn, "review")
 
 
@@ -1766,18 +1735,12 @@ def dispatch_once(
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
-    Thin wrapper around :func:`_dispatch_once_locked`. It acquires a
-    non-blocking, board-scoped dispatch lock (issue #35240) so that two
-    dispatchers pointed at the same ``kanban.db`` — e.g. the service-
-    managed gateway and a shell-spawned orphan that escaped the service
-    cgroup — can never run a reclaim/spawn/write tick concurrently and
-    race on WAL frames. The losing dispatcher returns an empty
-    ``DispatchResult`` with ``skipped_locked=True`` and does no DB writes;
-    the holder is already making progress on the same board.
-
-    The lock is keyed off the board's resolved DB path, so unrelated
-    boards tick in parallel. See :func:`_dispatch_tick_lock` for the
-    cross-process / cross-platform mechanics.
+    Wraps :func:`_dispatch_once_locked` in the non-blocking board-scoped
+    :func:`_dispatch_tick_lock` so two dispatchers on one ``kanban.db`` (the
+    service-managed gateway plus an orphan that escaped its cgroup) never
+    race a write tick on WAL frames. The loser returns an empty
+    ``DispatchResult`` with ``skipped_locked=True`` and writes nothing; the
+    lock is keyed on the resolved DB path so unrelated boards tick in parallel.
     """
     try:
         db_path = _kb.kanban_db_path(board=board)

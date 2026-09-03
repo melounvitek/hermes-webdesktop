@@ -541,20 +541,13 @@ def _normalize_board_slug(slug: Optional[str]) -> Optional[str]:
 
 
 def kanban_home() -> Path:
-    """Return the shared Hermes root that anchors the kanban board.
+    """Shared Hermes root anchoring the board: ``HERMES_KANBAN_HOME`` if set,
+    else ``get_default_hermes_root()`` (``<root>`` for a
+    ``<root>/profiles/<name>`` HERMES_HOME, HERMES_HOME itself otherwise).
 
-    Resolution order:
-
-    1. ``HERMES_KANBAN_HOME`` env var when set and non-empty (explicit
-       override for tests and unusual deployments).
-    2. ``get_default_hermes_root()``, which already returns ``<root>``
-       when ``HERMES_HOME`` is ``<root>/profiles/<name>``, and returns
-       ``HERMES_HOME`` directly for Docker / custom deployments.
-
-    The kanban board is shared across profiles **by design** (see the
-    module docstring). Resolving the kanban paths through the active
-    profile's ``HERMES_HOME`` would silently fork the board per profile,
-    which breaks the dispatcher / worker handoff.
+    The board is shared across profiles BY DESIGN; resolving through the
+    active profile's HERMES_HOME would silently fork it per profile and break
+    the dispatcher / worker handoff.
     """
     override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     if override:
@@ -728,23 +721,13 @@ def workspaces_root(board: Optional[str] = None) -> Path:
 
 
 def attachments_root(board: Optional[str] = None) -> Path:
-    """Return the directory under which task file attachments are stored.
+    """Per-board attachments root (``HERMES_KANBAN_ATTACHMENTS_ROOT`` wins).
 
-    Mirrors :func:`worker_logs_dir` / :func:`workspaces_root`: anchored
-    per-board so attachments don't leak between projects. Each task gets
-    its own ``<root>/.../attachments/<task_id>/`` subdirectory.
-
-    ``HERMES_KANBAN_ATTACHMENTS_ROOT`` pins the path directly (highest
-    precedence) for tests and unusual deployments.
-
-    ``default`` uses ``<root>/kanban/attachments/``; other boards use
-    ``<root>/kanban/boards/<slug>/attachments/``.
-
-    Workers (which run with full file-tool access) read attached files
-    by the absolute path surfaced in :func:`build_worker_context`. On the
-    local terminal backend — the default for kanban — that path resolves
-    directly. Remote backends (Docker/Modal) need this directory mounted;
-    see the kanban docs.
+    ``default`` -> ``<root>/kanban/attachments/``, other boards ->
+    ``<root>/kanban/boards/<slug>/attachments/``; each task gets its own
+    ``<task_id>/`` subdir. Workers read attachments by the absolute path
+    surfaced in :func:`build_worker_context`, so remote terminal backends
+    (Docker/Modal) need this directory mounted.
     """
     return _board_path("HERMES_KANBAN_ATTACHMENTS_ROOT", board, ("kanban", "attachments"), "attachments")
 
@@ -3986,30 +3969,15 @@ def block_task(
 ) -> bool:
     """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
 
-    ``kind`` (one of :data:`VALID_BLOCK_KINDS`, or ``None`` for a legacy
-    un-typed block) drives routing instead of every block landing in one
-    undifferentiated ``blocked`` bucket:
-
-    * ``dependency`` — the task is only waiting on another task. It does NOT
-      sit in ``blocked`` (where a cron would keep "unblocking" it); it goes to
-      ``todo`` so the existing parent-gating / ``recompute_ready`` machinery
-      promotes it automatically once its parents finish. No human, no cron, no
-      retry storm. This is Dale's "Type 2 — dependency blocked".
-
-    * ``needs_input`` / ``capability`` / ``None`` — "truly blocked" (Dale's
-      "Type 1"). Lands in ``blocked`` for a human. BUT: each time such a task
-      is re-blocked for the SAME kind after having been unblocked, the
-      unblock-loop counter (``block_recurrences``) increments. When it reaches
-      :data:`BLOCK_RECURRENCE_LIMIT`, the task is routed to ``triage`` instead
-      of ``blocked`` — breaking the cron-unblock ↔ worker-re-block loop and
-      forcing a human-in-the-loop triage decision.
-
-    * ``transient`` — treated like a generic block for routing, but a worker
-      can use it to signal "this might clear on its own"; it still participates
-      in the loop breaker so a forever-flaky task eventually escalates.
-
-    Returns True on any successful transition (to ``blocked``, ``todo``, or
-    ``triage``), False when the task wasn't in a blockable state.
+    ``kind`` (:data:`VALID_BLOCK_KINDS` or ``None`` = legacy un-typed) routes:
+    ``dependency`` -> ``todo`` (parent gating / ``recompute_ready`` promotes
+    it; never parked where a cron would keep "unblocking" it); everything
+    else -> ``blocked`` for a human, EXCEPT that a re-block for the SAME kind
+    after an unblock bumps ``block_recurrences`` and at
+    :data:`BLOCK_RECURRENCE_LIMIT` routes to ``triage`` instead, breaking the
+    cron-unblock ↔ worker-re-block loop. ``transient`` signals "may clear on
+    its own" but still counts toward the loop breaker so a forever-flaky task
+    escalates. Returns True on any transition, False when not blockable.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(
@@ -4826,24 +4794,12 @@ def decompose_triage_task(
     its assignee (typically the orchestrator profile) wakes back up to
     judge completion or spawn more work.
 
-    ``children`` is a list of dicts, each shaped like::
-
-        {
-            "title": "...",
-            "body": "...",                     # optional
-            "assignee": "profile-name",        # optional, None -> default fallback
-            "parents": [0, 2],                 # indices into this same children list
-        }
-
-    Returns the list of created child task ids (in input order) on
-    success. Returns ``None`` when:
-      - The root task does not exist
-      - The root task is not in ``triage``
-      - A cycle would result (caller built a bad graph)
-
-    Validation of titles/assignees happens inside the same write_txn as
-    the inserts so a malformed entry aborts the whole decomposition
-    cleanly (no orphan children).
+    ``children``: dicts of ``title`` (required), ``body``, ``assignee`` (None
+    -> default fallback) and ``parents`` (indices into this same list).
+    Returns the created child ids in input order, or ``None`` when the root
+    is missing / not in ``triage`` / the graph has a cycle. Title/assignee
+    validation runs inside the same write_txn as the inserts so a malformed
+    entry aborts the whole decomposition (no orphan children).
     """
     if not children:
         return None
@@ -5158,25 +5114,13 @@ def schedule_task(
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     """Return the full text a worker should read to understand its task.
 
-    Order:
-      1. Task title (mandatory).
-      2. Task body (optional opening post, capped at 8 KB).
-      3. Prior attempts on THIS task (most recent ``_CTX_MAX_PRIOR_ATTEMPTS``
-         shown; older attempts collapsed into a one-line summary).
-         Each attempt's ``summary`` / ``error`` / ``metadata`` capped at
-         ``_CTX_MAX_FIELD_BYTES`` each.
-      4. Structured handoff results of every done parent task. Prefers
-         ``run.summary`` / ``run.metadata`` when the parent was executed
-         via a run; falls back to ``task.result`` for older data. Same
-         per-field cap.
-      5. Cross-task role history for the assignee (most recent 5
-         completed runs on other tasks).
-      6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
-         collapsed).
-
-    All caps exist so worker prompts stay bounded even on pathological
-    boards (retry-heavy tasks, comment storms). The per-field char cap
-    prevents a single 1 MB summary from dominating context.
+    Sections in order: header, body, attachments, prior attempts on this task,
+    done-parent handoffs (``run.summary``/``metadata``, falling back to
+    ``task.result`` for pre-runs data), the assignee's recent completed runs
+    on other tasks, comment thread. Every list is tail-capped (``_CTX_MAX_*``)
+    with the omitted head summarised, and every field is char-capped, so the
+    prompt stays bounded on pathological boards (retry storms, comment
+    storms, a single 1 MB summary).
     """
     task = get_task(conn, task_id)
     if not task:

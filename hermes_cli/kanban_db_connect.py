@@ -837,21 +837,12 @@ def connect(
 ) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB.
 
-    WAL mode is enabled on every connection; it's a no-op after the first
-    time but keeps the code robust if the DB file is ever re-created.
-
-    The first connection to a given path auto-runs :func:`init_db` so
-    fresh installs and test harnesses that construct `connect()`
-    directly don't have to remember a separate init step. Subsequent
-    connections skip the schema check via a module-level path cache.
-
-    Path resolution:
-
-    * ``db_path`` explicit → used as-is (legacy callers, tests).
-    * ``board`` explicit → resolves to that board's DB.
-    * Neither → :func:`kanban_db_path` resolves via
-      ``HERMES_KANBAN_DB`` env → ``HERMES_KANBAN_BOARD`` env →
-      ``<root>/kanban/current`` → ``default``.
+    WAL is (re)enabled on every connection so a re-created file stays robust.
+    The first connection per path auto-runs :func:`init_db` (fresh installs
+    and tests need no separate init step); later ones skip the schema check
+    via ``_INITIALIZED_PATHS``. Path: explicit ``db_path`` as-is, else
+    ``board``, else :func:`kanban_db_path` (``HERMES_KANBAN_DB`` ->
+    ``HERMES_KANBAN_BOARD`` -> ``<root>/kanban/current`` -> ``default``).
     """
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
