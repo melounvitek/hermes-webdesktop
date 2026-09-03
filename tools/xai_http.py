@@ -93,17 +93,16 @@ def _coerce_expires_after(value: Any) -> Optional[int]:
     if value is None:
         return None
     if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"", "default", "none", "null", "never", "permanent", "forever", "0"}:
+        value = value.strip().lower()
+        if value in {"", "default", "none", "null", "never", "permanent", "forever", "0"}:
             return None
         try:
-            value = int(normalized)
+            value = int(value)
         except ValueError:
             return SAFE_XAI_STORAGE_EXPIRES_AFTER_SECONDS
-    if isinstance(value, (int, float)):
-        seconds = int(value)
-        return None if seconds <= 0 else min(seconds, MAX_XAI_STORAGE_EXPIRES_AFTER_SECONDS)
-    return SAFE_XAI_STORAGE_EXPIRES_AFTER_SECONDS
+    if not isinstance(value, (int, float)):
+        return SAFE_XAI_STORAGE_EXPIRES_AFTER_SECONDS
+    return None if int(value) <= 0 else min(int(value), MAX_XAI_STORAGE_EXPIRES_AFTER_SECONDS)
 
 
 def read_xai_imagine_storage_config(section_name: str) -> Dict[str, Any]:

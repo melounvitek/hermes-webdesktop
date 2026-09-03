@@ -135,10 +135,8 @@ def _resolve_extract_provider(backend: str):
         return None, _extract_error_json(_strict_selection_error("extract", backend))
     provider = get_active_extract_provider()
     if provider is None:
-        return None, _extract_error_json(_no_provider_error(
-            "extract",
-            "No web extract provider configured. Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT,
-        ))
+        fallback = "No web extract provider configured. Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT
+        return None, _extract_error_json(_no_provider_error("extract", fallback))
     return provider, None
 
 
