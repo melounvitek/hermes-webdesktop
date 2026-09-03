@@ -19,10 +19,7 @@ import threading
 import time
 from cron.jobs import _ensure_cron_dir
 from pathlib import Path
-from typing import Any
-from typing import Callable
-from typing import Optional
-from typing import TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cron.scheduler import _CancelEventLike
@@ -190,37 +187,26 @@ def _terminate_cron_script_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         # Already reaped: kill_process_tree would log a spurious "no signal" warning.
         return
+    def fallback(reason: str, *args, exc_info: bool = False) -> None:
+        logger.warning(
+            reason + "; falling back to process-group termination", *args, exc_info=exc_info)
+        _sched._terminate_cron_script_process(proc)
+
     pid = getattr(proc, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
-        logger.warning(
-            "Cron script tree-kill received invalid pid %r; "
-            "falling back to process-group termination",
-            pid)
-        _sched._terminate_cron_script_process(proc)
-        return
+        return fallback("Cron script tree-kill received invalid pid %r", pid)
     try:
         # Function-local (monkeypatchable); separate try so an import problem is not
         # misreported as a kill failure.
         from agent.deadline import kill_process_tree
     except Exception:
-        logger.warning(
-            "agent.deadline.kill_process_tree unavailable; "
-            "falling back to process-group termination",
-            exc_info=True)
-        _sched._terminate_cron_script_process(proc)
-        return
+        return fallback("agent.deadline.kill_process_tree unavailable", exc_info=True)
     try:
         if kill_process_tree(pid):
             return
-        logger.warning(
-            "Cron script tree-kill reported no signal for pid %s; "
-            "falling back to process-group termination",
-            pid)
     except Exception:
-        logger.warning(
-            "Cron script tree-kill failed for pid %s; falling back to process-group termination",
-            pid, exc_info=True)
-    _sched._terminate_cron_script_process(proc)
+        return fallback("Cron script tree-kill failed for pid %s", pid, exc_info=True)
+    fallback("Cron script tree-kill reported no signal for pid %s", pid)
 
 
 def _drain_script_pipes(proc: subprocess.Popen) -> None:
@@ -336,7 +322,6 @@ def _run_job_script(
 
     try:
         from tools.environments.local import build_subprocess_env
-
         popen_kwargs: dict[str, Any] = {"start_new_session": True}
         if sys.platform == "win32":
             popen_kwargs = {

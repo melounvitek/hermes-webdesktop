@@ -115,7 +115,6 @@ def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
     from tools.skill_usage import bump_use
     from agent.skill_bundles import build_bundle_invocation_message, resolve_bundle_command_key
     from agent.skill_utils import normalize_skill_lookup_name
-
     job_label = job.get("name", job.get("id"))
     task_id = str(job.get("id") or "") or None
     parts: list[str] = []
@@ -219,7 +218,6 @@ def _build_job_prompt(
 
     # Durable per-job notepad; empty renders as "" so unused → byte-identical prompt.
     from cron import notepad as cron_notepad
-
     notepad_section = cron_notepad.render_notepad_section(str(job.get("id") or ""))
     if notepad_section:
         prompt = f"{notepad_section}{prompt}"
@@ -237,7 +235,6 @@ def _build_job_prompt(
     stable_prefix = None
     if prompt:
         from agent.skill_commands import append_user_instruction
-
         parts.append("")
         # Skill blocks are stable per job config; the appended instruction is volatile per-run.
         # Declare that boundary for the Anthropic cache planner.
@@ -250,7 +247,6 @@ def _build_job_prompt(
     ):
         # Guarded: the scanner may mutate the bytes; mismatch → whole-message caching.
         from agent.prompt_cache_boundary import register_stable_prefix
-
         register_stable_prefix(stable_prefix)
     return assembled
 
@@ -267,7 +263,6 @@ def _scan_assembled_cron_prompt(
     cannot permanently kill a job); injected data without skills also scans ``user_prompt`` STRICT.
     """
     from tools.cronjob_tools import _scan_cron_prompt, _scan_cron_skill_assembled
-
     if has_skills or has_injected_data:
         # The cleaned (sanitized) prompt is what actually runs.
         assembled, scan_error = _scan_cron_skill_assembled(assembled)
@@ -313,7 +308,6 @@ def _block_and_pause_job(
     """Fail a run closed and pause the job: an unrunnable job left enabled re-fires every tick
     forever; ``paused_at``/``paused_reason`` give an auditable record."""
     from cron.jobs import pause_job
-
     logger.error("Job '%s': %s", job_id, reason)
     try:
         pause_job(job_id, f"Auto-paused by scheduler: {reason}")

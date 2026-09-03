@@ -99,10 +99,8 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
     model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
     from hermes_cli.auth import AuthError
-
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-
         kwargs = {"requested": requested, "target_model": model}
         if job.get("base_url"):
             kwargs["explicit_base_url"] = job.get("base_url")
@@ -128,7 +126,6 @@ def _primary_profile_routes_for_current_home() -> list:
     resolution so they cannot drift."""
     try:
         from hermes_constants import get_default_hermes_root, get_hermes_home
-
         primary_home = get_default_hermes_root()
         current_home = _sched.Path(get_hermes_home())
         if (
@@ -141,7 +138,6 @@ def _primary_profile_routes_for_current_home() -> list:
             return []
 
         import yaml
-
         with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         routes_raw = raw.get("profile_routes")
@@ -152,7 +148,6 @@ def _primary_profile_routes_for_current_home() -> list:
 
         from gateway.profile_routing import parse_profile_routes
         from hermes_cli.profiles import profile_matches_home
-
         return [
             route for route in parse_profile_routes(routes_raw)
             if route.enabled and profile_matches_home(route.profile)
@@ -240,7 +235,6 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
         if connected is None:
             try:
                 from gateway.config import load_gateway_config
-
                 gateway_config = load_gateway_config()
                 connected = {p.value for p in gateway_config.get_connected_platforms()}
                 connected |= _sched._relay_fronted_delivery_platforms(connected)
@@ -273,13 +267,10 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
     """Block only on an affirmative ``setup_needed`` verdict from ``skill_view``; skills that fail
     to load fall through to ``_build_job_prompt``'s skipped-skill handling (fail-open)."""
     from cron.scheduler_prompt import _job_skill_names
-
     skill_names = _job_skill_names(job)
     if not skill_names:
         return None
-
     from tools.skills_tool import skill_view
-
     for skill_name in skill_names:
         try:
             payload = json.loads(skill_view(skill_name))

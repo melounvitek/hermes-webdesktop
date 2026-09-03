@@ -17,9 +17,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any
-from typing import List
-from typing import Optional
+from typing import Any, List, Optional
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("cron.scheduler")
@@ -175,7 +173,6 @@ def _maybe_mirror_cron_delivery(
         return
     try:
         from gateway.mirror import mirror_to_session
-
         # USER role + labelled prefix, NOT assistant: an assistant-role mirror lands
         # assistant→assistant and breaks strict alternation; consecutive user turns merge safely.
         ok = mirror_to_session(
@@ -206,7 +203,6 @@ def _open_continuable_cron_thread(job: dict, adapter, chat_id: str, loop) -> Opt
     thread_name = f"Hermes — {job.get('name') or job.get('id', 'cron')}"
     try:
         from agent.async_utils import safe_schedule_threadsafe
-
         coro = create_thread(str(chat_id), thread_name)
         future = safe_schedule_threadsafe(coro, loop)  # type: ignore[arg-type]
         if future is None:
@@ -232,7 +228,6 @@ def _seed_cron_session(
     from gateway.config import Platform
     from gateway.session import SessionSource
     from gateway.mirror import mirror_to_session
-
     seeded_session_id: Optional[str] = None
     session_store = getattr(adapter, "_session_store", None)
     if session_store is not None:
@@ -377,7 +372,6 @@ def _get_config_home_channel(platform_name: str):
     may exist solely in config.yaml, so reading only the env mirror would drop their delivery."""
     try:
         from gateway.config import load_gateway_config, Platform
-
         return load_gateway_config().get_home_channel(Platform(platform_name.lower()))
     except Exception:
         logger.debug(
@@ -392,22 +386,17 @@ def _home_env_lookup(env_var: str, suffix: str = "", *, strip: bool = False) -> 
     value, not the host environ. ``os.getenv`` only if the scope module is missing."""
     try:
         from agent.secret_scope import get_secret
-
-        def read(name: str) -> str:
-            return get_secret(name, "") or ""
     except Exception:
-        def read(name: str) -> str:
-            return os.getenv(name, "")
+        get_secret = None  # type: ignore
 
-    def read_clean(name: str) -> str:
-        value = read(name)
+    def read(name: str) -> str:
+        value = (get_secret(name, "") or "") if get_secret is not None else os.getenv(name, "")
         return value.strip() if strip else value
 
-    value = read_clean(env_var + suffix)
-    if not value:
-        legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
-        if legacy:
-            value = read_clean(legacy + suffix)
+    value = read(env_var + suffix)
+    legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
+    if not value and legacy:
+        value = read(legacy + suffix)
     return value
 
 
@@ -468,7 +457,6 @@ def _relay_fronted_delivery_platforms(connected: set) -> set:
         return set()
     try:
         from gateway.relay import relay_fronted_platforms
-
         return relay_fronted_platforms()
     except Exception:
         logger.debug("relay fronted-platform lookup failed", exc_info=True)
@@ -483,7 +471,6 @@ def cron_delivery_targets() -> list[dict]:
     targets: list[dict] = []
     try:
         from gateway.config import load_gateway_config
-
         connected = {p.value for p in load_gateway_config().get_connected_platforms()}
         connected |= _relay_fronted_delivery_platforms(connected)
     except Exception:
@@ -502,7 +489,6 @@ def cron_delivery_targets() -> list[dict]:
     # Bot Chat targets: one per local profile (machine-local; no gateway config or home channel).
     try:
         from hermes_cli.profiles import list_profile_names
-
         for profile_name in list_profile_names():
             targets.append({
                 "id": f"{BOT_CHAT_PLATFORM}:{profile_name}",
@@ -576,7 +562,6 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         platform_name, rest = deliver_value.split(":", 1)
         platform_key = platform_name.lower()
         from tools.send_message_tool import prepare_send_message_platforms, resolve_send_target
-
         prepare_send_message_platforms()
         # pass_unresolved_references: no model in the loop to react; an unknown-to-directory target
         # must reach the adapter as written or the job's output is silently lost.
@@ -634,7 +619,6 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
     Bot Mode agent-to-agent lane, so canonical-session rules apply and it is alternation-safe.
     ``profile`` is ``""`` for the job's own profile. None on success, else an error string."""
     import tempfile
-
     job_id = job.get("id", "?")
     hermes_bin = shutil.which("hermes")
     if hermes_bin:
@@ -642,7 +626,6 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
     else:
         try:
             import importlib.util as _ilu
-
             found = _ilu.find_spec("hermes_cli") is not None
         except Exception:
             found = False
@@ -746,7 +729,6 @@ def _resolve_bot_chat_target(job: dict, profile_arg: str) -> Optional[dict]:
         return {"platform": BOT_CHAT_PLATFORM, "chat_id": "", "thread_id": None}
     try:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
-
         canon = normalize_profile_name(profile_arg)
         if not profile_exists(canon):
             logger.warning(
@@ -838,7 +820,6 @@ def _send_media_via_adapter(
     from gateway.platforms.base import (
         BasePlatformAdapter, should_send_media_as_audio, validate_media_delivery_path)
     from agent.async_utils import safe_schedule_threadsafe
-
     job_ref = {"id": job.get("id", "?")}
     errors: list = []
     requested = [(str(p), v) for p, v in (media_files or [])]
@@ -858,16 +839,15 @@ def _send_media_via_adapter(
         try:
             ext = _sched.Path(media_path).suffix.lower()
             if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
-                coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
+                method, path_kw = "send_voice", "audio_path"
             elif ext in _VIDEO_EXTS:
-                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
+                method, path_kw = "send_video", "video_path"
             elif ext in _IMAGE_EXTS:
-                coro = adapter.send_image_file(
-                    chat_id=chat_id, image_path=media_path, metadata=metadata)
+                method, path_kw = "send_image_file", "image_path"
             else:
-                coro = adapter.send_document(
-                    chat_id=chat_id, file_path=media_path, metadata=metadata)
-
+                method, path_kw = "send_document", "file_path"
+            coro = getattr(adapter, method)(
+                chat_id=chat_id, metadata=metadata, **{path_kw: media_path})
             future = safe_schedule_threadsafe(coro, loop)
             if future is None:
                 _note_target_error(
@@ -942,7 +922,6 @@ def _is_channel_dm_topic(runtime_adapter: Any, chat_id: Any, loop: Any, job_id: 
         return False
     try:
         from agent.async_utils import safe_schedule_threadsafe
-
         coro = get_chat_info(runtime_adapter, str(chat_id))
         future = safe_schedule_threadsafe(coro, loop)  # type: ignore[arg-type]
         if future is None:
@@ -983,7 +962,6 @@ def _record_delivery_verification(job: dict, unverified_targets: list) -> None:
         return
     try:
         from cron.jobs import update_job
-
         update_job(job["id"], {"last_delivery_unverified": new_value})
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Job '%s': could not record delivery verification: %s", job.get("id"), exc)
@@ -1045,7 +1023,6 @@ def _resolve_target_transport(
     ``(None, error)`` when it cannot be served (relay-fronted with no live transport, or not
     configured/enabled)."""
     from gateway.delivery import resolve_delivery_transport
-
     target_adapters = adapters
     if isinstance(adapters, _sched.SharedRouteAdapters):
         # Credentialless satellite: the primary adapter serves THIS target only when an exact
@@ -1060,7 +1037,6 @@ def _resolve_target_transport(
         # Relay-fronted platforms have NO standalone fallback (the connector owns the credential),
         # so surface that instead of the native configured/enabled gate, which misdiagnoses them.
         from gateway.relay import relay_fronted_platforms
-
         if platform_name in relay_fronted_platforms():
             return None, (
                 f"platform '{platform_name}' is relay-fronted and has no "
@@ -1103,7 +1079,6 @@ def _live_route_metadata(t: _TargetDelivery) -> tuple[Optional[str], dict, dict]
     ``thread_id`` rides in ``route_metadata`` to bypass the router's private-chat anchor rule."""
     from gateway.config import Platform
     from gateway.delivery import _looks_like_int, looks_like_telegram_private_chat_id
-
     job = t.job
     thread_id = t.thread_id
     is_ambiguous_telegram_topic = (
@@ -1148,7 +1123,6 @@ def _live_send_text(
     Re-raises a real send error so the caller falls through to standalone."""
     from agent.async_utils import safe_schedule_threadsafe
     from gateway.delivery import DeliveryRouter, DeliveryTarget
-
     job = t.job
     router = DeliveryRouter(t.config, t.target_adapters)
     route_target = DeliveryTarget(
@@ -1193,16 +1167,14 @@ def _live_send_text(
         unverified_targets.append(t.where)
 
     if not send_success:
-        if isinstance(send_result, dict):
+        if send_result is None:
+            err, shape = "no response from adapter", "None"
+        elif isinstance(send_result, dict):
             # A filtered drop carries no "error" — name the filter instead of reporting "unknown".
             err = send_result.get("error") or send_result.get("filtered") or "unknown"
             shape = "dict"
-        elif send_result is not None:
-            err = getattr(send_result, "error", None)
-            shape = type(send_result).__name__
         else:
-            err = "no response from adapter"
-            shape = "None"
+            err, shape = getattr(send_result, "error", None), type(send_result).__name__
         msg = f"live adapter send to {t.where} returned unconfirmed result ({shape}, error={err})"
         _warn_live_lane_failure(job, msg, t.is_relay)
         target_errors.append(msg)
@@ -1348,7 +1320,6 @@ def _standalone_send(
     """Run the standalone sender for one target: ``(result, None)`` or ``(None, error)`` (already
     logged — WARNING for a shutdown race, ERROR with traceback otherwise)."""
     from tools.send_message_tool import _send_to_platform
-
     job = t.job
     shutdown_msg = f"delivery to {t.where} skipped — interpreter is shutting down"
 
@@ -1388,8 +1359,8 @@ def _standalone_send(
             try:
                 # A fresh thread does NOT inherit the profile ContextVars (home override + secret
                 # scope); run in the active context or the sender reads the default bot token.
-                future = pool.submit(contextvars.copy_context().run, asyncio.run, _send())
-                return future.result(timeout=30), None
+                return pool.submit(contextvars.copy_context().run, asyncio.run, _send()).result(
+                    timeout=30), None
             finally:
                 pool.shutdown(wait=False)
         except Exception as e:
@@ -1420,14 +1391,12 @@ def _deliver_standalone(
         target_errors.append(err)
         delivery_errors.extend(target_errors)
         return
-
     # Standalone senders report per-file attachment failures in ``warnings`` while returning
     # success; surface them so a vanished attachment doesn't mark the run ok.
     for _w in (result.get("warnings") if isinstance(result, dict) else None) or []:
         msg = f"delivery warning: {_w} (target {t.where})"
         logger.error("Job '%s': %s", job["id"], msg)
         delivery_errors.append(msg)
-
     logger.info("Job '%s': delivered to %s:%s", job["id"], t.platform_name, t.chat_id)
     # Thread seeding only happens on the live lane, so no thread_seeded gate applies here.
     _maybe_mirror_cron_delivery(
@@ -1443,7 +1412,6 @@ def _prepare_target_delivery(
     """Per-target prologue of ``_deliver_result``: origin/mirror/in_channel gates, transport
     resolution, continuable-thread open. None (error noted in ``delivery_errors``) if unservable."""
     from gateway.config import Platform
-
     platform_name = target["platform"]
     chat_id = target["chat_id"]
     thread_id = target.get("thread_id")
@@ -1535,15 +1503,12 @@ def _prepare_target_delivery(
             thread_id = opened_thread_id
     return _TargetDelivery(
         job=job, platform=platform, platform_name=platform_name, chat_id=chat_id,
-        thread_id=thread_id,
-        transport=transport, pconfig=pconfig, runtime_adapter=runtime_adapter,
-        target_adapters=target_adapters,
-        config=config, loop=loop, notify_delivery=notify_delivery, origin=origin,
-        origin_target=origin_target,
-        origin_user_id=origin_user_id, is_dm_target=is_dm_target, mirror_text=mirror_text,
-        mirror_this_target=mirror_this_target, in_channel_surface=in_channel_surface,
-        inchannel_continuable=inchannel_continuable, opened_thread_id=opened_thread_id,
-        live_adapter_ready=live_adapter_ready)
+        thread_id=thread_id, transport=transport, pconfig=pconfig, runtime_adapter=runtime_adapter,
+        target_adapters=target_adapters, config=config, loop=loop, notify_delivery=notify_delivery,
+        origin=origin, origin_target=origin_target, origin_user_id=origin_user_id,
+        is_dm_target=is_dm_target, mirror_text=mirror_text, mirror_this_target=mirror_this_target,
+        in_channel_surface=in_channel_surface, inchannel_continuable=inchannel_continuable,
+        opened_thread_id=opened_thread_id, live_adapter_ready=live_adapter_ready)
 
 
 def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
@@ -1574,7 +1539,6 @@ def _deliver_result(
     targets = _sched._resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         return _unresolved_delivery_outcome(job, for_failure)
-
     from gateway.config import load_gateway_config
 
     # Wrap with header/footer unless cron.wrap_response: false.
@@ -1605,7 +1569,6 @@ def _deliver_result(
     # Bridge media-policy config into the env vars the path validator reads. The gateway does this
     # at boot; standalone runs (`hermes cron run`) did not, silently dropping files. Idempotent.
     from gateway.media_policy import apply_media_policy_env
-
     apply_media_policy_env(user_cfg)
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     requested_media = len(media_files)
@@ -1637,7 +1600,6 @@ def _deliver_result(
         return msg
 
     delivery_errors = []
-
     for target in targets:
         # bot-chat targets bypass gateway adapters: output becomes an inbound turn in the target
         # profile's Bot Chat via the chat CLI lane. Must precede the Platform enum, which lacks it.
