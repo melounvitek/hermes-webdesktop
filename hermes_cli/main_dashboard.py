@@ -7,6 +7,7 @@ Names that stay in main are imported lazily inside the functions that use them
 avoids an import cycle).
 """
 
+import contextlib
 import os
 import re
 import shlex
@@ -247,10 +248,8 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
     respawned: list[list[str]] = []
     failed: list[tuple[list[str], str]] = []
     log_path = get_hermes_home() / "logs" / "dashboard-restart.log"
-    try:
+    with contextlib.suppress(OSError):
         log_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
 
     for command in commands:
         try:
@@ -287,10 +286,8 @@ class _UpdateOutputStream:
     def write(self, data):
         # Mirror to the log file first — it's the most reliable destination.
         if self._log is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log.write(data)
-            except Exception:
-                pass
         if not self._original_broken:
             try:
                 return self._original.write(data)
@@ -300,10 +297,8 @@ class _UpdateOutputStream:
 
     def flush(self):
         if self._log is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log.flush()
-            except Exception:
-                pass
         if self._original_broken:
             return
         try:
@@ -340,10 +335,9 @@ def _install_hangup_protection(gateway_mode: bool = False):
     import signal as _signal
 
     if hasattr(_signal, "SIGHUP"):
-        try:
+        # Non-main thread: update still runs, just without hangup protection.
+        with contextlib.suppress(ValueError, OSError):
             _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
-        except (ValueError, OSError):
-            pass  # non-main thread — update still runs, just without hangup protection
 
     # Any failure here is non-fatal; we just skip the wrap.
     try:
@@ -373,14 +367,10 @@ def _finalize_update_output(state):
     if not state:
         return
     if state.get("installed"):
-        try:
+        with contextlib.suppress(Exception):
             sys.stdout = state.get("prev_stdout", sys.stdout)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             sys.stderr = state.get("prev_stderr", sys.stderr)
-        except Exception:
-            pass
     log_file = state.get("log_file")
     if log_file is not None:
         try:
@@ -624,10 +614,8 @@ def _read_ssh_session_token_file(path: str) -> str:
         if file_fd >= 0:
             os.close(file_fd)
         if directory_fd >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(relative.parts[1], dir_fd=directory_fd)
-            except OSError:
-                pass
             os.close(directory_fd)
         if root_fd >= 0:
             os.close(root_fd)

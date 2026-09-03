@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import json
 import os
 import shutil
@@ -767,10 +768,8 @@ def _launch_tui(
         if code in {0, 130}:
             _print_tui_exit_summary(resume_session_id, active_session_file)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(active_session_file)
-        except OSError:
-            pass
         if wt_info:
             try:
                 from cli import _cleanup_worktree

@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import argparse
 import os
 import re
@@ -424,10 +425,8 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
     # Only the exe's OWN output dir is purged (a staging dir), never the live
     # release/ tree that still holds the last working app.
     _purge_electron_build_cache(desktop_dir, release_dir=packaged_executable.parent.parent)
-    try:
+    with contextlib.suppress(OSError):
         _desktop_stamp_path().unlink()
-    except OSError:
-        pass
 
     restored = _rollback_desktop_from_backup(packaged_executable)
     if restored is not None:
@@ -562,10 +561,8 @@ def _redownload_electron_dist(project_root: Path, env: dict, *, mirror: Optional
         return False
 
     shutil.rmtree(electron_dir / "dist", ignore_errors=True)
-    try:
+    with contextlib.suppress(OSError):
         (electron_dir / "path.txt").unlink()
-    except OSError:
-        pass
 
     dl_env = with_hermes_node_path(env)
     if mirror:
