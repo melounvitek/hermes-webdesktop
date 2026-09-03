@@ -1,15 +1,11 @@
 """Dialog capture + response half of the CDP supervisor.
 
-Two capture paths feed the same ``PendingDialog`` queue: native
-``Page.javascriptDialogOpening`` events (answered with
-``Page.handleJavaScriptDialog``), and the injected *dialog bridge* — a page
-script that rewrites alert/confirm/prompt into a sync XHR to a magic host we
-intercept via the CDP ``Fetch`` domain and answer with ``Fetch.fulfillRequest``.
-The bridge works on Browserbase, whose CDP proxy auto-dismisses real native
-dialogs, because the native dialog never fires.
-
-``DialogSupervisionMixin`` relies on state ``CDPSupervisor.__init__`` sets
-(``_state_lock``, ``_pending_dialogs``, ``_recent_dialogs``, ``_dialog_watchdogs``, ``_cdp`` ...).
+Two capture paths feed one ``PendingDialog`` queue: native ``Page.javascriptDialogOpening``
+events (answered with ``Page.handleJavaScriptDialog``), and the injected *dialog bridge* —
+a page script rewriting alert/confirm/prompt into a sync XHR to a magic host we intercept
+via the CDP ``Fetch`` domain and answer with ``Fetch.fulfillRequest``. The bridge works on
+Browserbase (whose CDP proxy auto-dismisses native dialogs) because the native dialog never fires.
+``DialogSupervisionMixin`` relies on state ``CDPSupervisor.__init__`` sets.
 """
 
 from __future__ import annotations
@@ -56,22 +52,19 @@ _VALID_POLICIES = frozenset(
 DEFAULT_DIALOG_POLICY = DIALOG_POLICY_MUST_RESPOND
 DEFAULT_DIALOG_TIMEOUT_S = 300.0
 
-# Last N closed dialogs kept in ``recent_dialogs`` so agents on backends that
-# auto-dismiss server-side (Browserbase) can still observe that a dialog fired.
+# Last N closed dialogs kept so agents on backends that auto-dismiss server-side
+# (Browserbase) can still observe that a dialog fired.
 RECENT_DIALOGS_MAX = 20
 
-# Magic host the injected dialog bridge XHRs to. Intercepted via the CDP Fetch
-# domain before any network resolution, so it never has to exist. Keep ASCII +
-# URL-safe; Fetch patterns are gated on it.
+# Magic host the bridge XHRs to; intercepted via CDP Fetch before any network
+# resolution, so it never has to exist. Keep ASCII + URL-safe (Fetch patterns gate on it).
 DIALOG_BRIDGE_HOST = "hermes-dialog-bridge.invalid"
 DIALOG_BRIDGE_URL_PATTERN = f"http://{DIALOG_BRIDGE_HOST}/*"
 
-# Injected into every frame via Page.addScriptToEvaluateOnNewDocument. Uses a
-# sync GET with query params so the Fetch interceptor never parses a body; if
-# the bridge is unreachable it returns null so the page still sees *some*
-# behavior (the backend auto-dismisses). onbeforeunload is left native — it
-# can't be prompted synchronously without racing navigation; the native-dialog
-# fallback path still surfaces it in recent_dialogs.
+# Injected into every frame via Page.addScriptToEvaluateOnNewDocument. Sync GET with
+# query params so the Fetch interceptor never parses a body; unreachable bridge → null
+# so the page still sees *some* behavior. onbeforeunload is left native (can't be
+# prompted synchronously without racing navigation); the native path still records it.
 _DIALOG_BRIDGE_SCRIPT = r"""
 (() => {
   if (window.__hermesDialogBridgeInstalled) return;
@@ -125,8 +118,7 @@ class PendingDialog:
     opened_at: float
     cdp_session_id: str  # which attached CDP session the dialog fired in
     frame_id: Optional[str] = None
-    # Set when captured via the bridge XHR path: respond via Fetch.fulfillRequest,
-    # NOT Page.handleJavaScriptDialog — the native dialog never fired.
+    # Bridge XHR path: respond via Fetch.fulfillRequest, NOT Page.handleJavaScriptDialog.
     bridge_request_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -161,13 +153,10 @@ class DialogSupervisionMixin:
             logger.debug("%s failed (%s): %s", method, what, e)
 
     async def _install_dialog_bridge(self, session_id: str) -> None:
-        """Install the dialog-bridge init script + Fetch interceptor on a session.
-
-        Idempotent at the CDP level (Chromium de-dupes identical add-script
-        calls; Fetch.enable replaces prior patterns). The final Runtime.evaluate
-        injects into the already-loaded document so existing pages pick up the
-        override on reconnect.
-        """
+        """Install the dialog-bridge init script + Fetch interceptor on a session. Idempotent at
+        the CDP level (Chromium de-dupes identical add-script calls; Fetch.enable replaces prior
+        patterns); the final Runtime.evaluate injects into the already-loaded document so
+        existing pages pick up the override on reconnect."""
         sid = (session_id or "")[:16]
         steps = (
             ("Page.addScriptToEvaluateOnNewDocument", {"source": _DIALOG_BRIDGE_SCRIPT, "runImmediately": True},
@@ -189,12 +178,9 @@ class DialogSupervisionMixin:
         )
 
     async def _on_fetch_paused(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        """Bridge XHR captured mid-flight — materialize as a pending dialog.
-
-        The page's JS thread is blocked on the XHR until we Fetch.fulfillRequest
-        (from ``respond_to_dialog`` or the watchdog). Requests for other hosts
-        are forwarded unchanged so the page sees its own request.
-        """
+        """Bridge XHR captured mid-flight — materialize as a pending dialog. The page's JS
+        thread is blocked on the XHR until we Fetch.fulfillRequest (agent or watchdog);
+        requests for other hosts are forwarded unchanged."""
         url = str(params.get("request", {}).get("url") or "")
         request_id = params.get("requestId")
         if not request_id:
@@ -212,10 +198,8 @@ class DialogSupervisionMixin:
     def _admit_dialog(self, *, type: str, message: str, default_prompt: str, session_id: Optional[str],
                       frame_id: Optional[str], bridge_request_id: Optional[str] = None) -> None:
         """Create the dialog and apply the policy: auto-respond, or queue + arm the watchdog.
-
-        Auto policies archive FIRST (tagged ``auto_policy``) so the ``closed``
-        event that follows our own response isn't re-archived as ``remote``.
-        """
+        Auto policies archive FIRST (tagged ``auto_policy``) so the ``closed`` event that
+        follows our own response isn't re-archived as ``remote``."""
         self._dialog_seq += 1
         dialog = PendingDialog(
             id=f"d-{self._dialog_seq}", type=type, message=message, default_prompt=default_prompt,
@@ -306,10 +290,9 @@ class DialogSupervisionMixin:
         self._recent_dialogs = _trim_ring([*self._recent_dialogs, record], RECENT_DIALOGS_MAX)
 
     async def _on_dialog_closed(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        # ``Page.javascriptDialogClosed`` carries only ``result``/``userInput``, not
-        # the message. Match by session id and clear the oldest native dialog on
-        # it — the JS thread blocks while a dialog is up, so at most one is in
-        # flight per session. Bridge dialogs resolve via Fetch.fulfillRequest.
+        # ``Page.javascriptDialogClosed`` carries only ``result``/``userInput``: match by
+        # session id and clear the oldest native dialog on it (the JS thread blocks while
+        # a dialog is up, so at most one is in flight). Bridge dialogs resolve via Fetch.
         with self._state_lock:
             candidate = next((d.id for d in self._pending_dialogs.values()
                               if d.cdp_session_id == session_id and d.bridge_request_id is None), None)

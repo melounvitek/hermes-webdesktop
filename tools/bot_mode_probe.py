@@ -1,14 +1,12 @@
 """Bot Mode roster probe — canonical Bot Chat system prompt section.
 
-When any profile on this install carries ``ui_meta['hermes-bots']`` in its
-profile.yaml (Bot-Mode-managed), a bot's canonical "Bot Chat" session — and ONLY
-that session (agent/system_prompt.py enforces the ``BOT_CHAT_TITLE`` gate) — gets
-a "Messaging other agents" section. Silent (``""``) when no profile is managed,
-when the profile's SOUL.md already carries the heading (legacy plugin-appended
-text must never double up), or on any error — a prompt build must never crash.
-Cached per (process, home) so compression-triggered rebuilds produce identical
-bytes. Toggle: ``agent.bot_mode_protocol`` (default True). Also hosts the
-path/roster helpers shared by ``bot_mode_dm`` and ``bot_relay``.
+When any profile carries ``ui_meta['hermes-bots']`` in profile.yaml (Bot-Mode-managed),
+a bot's canonical "Bot Chat" session — ONLY that session (agent/system_prompt.py enforces
+the ``BOT_CHAT_TITLE`` gate) — gets a "Messaging other agents" section. Silent (``""``)
+when no profile is managed, when SOUL.md already carries the heading (legacy plugin text
+must never double up), or on any error. Cached per (process, home) so compression rebuilds
+produce identical bytes. Toggle: ``agent.bot_mode_protocol``. Also hosts path/roster
+helpers shared by ``bot_mode_dm`` and ``bot_relay``.
 """
 
 from __future__ import annotations
@@ -69,11 +67,8 @@ def _roster(root: Path) -> list[tuple[str, Path]]:
 
 
 def _read_yaml_dict(path: Path, needle: str | None = None) -> dict | None:
-    """YAML mapping at ``path``, or None when missing / not a mapping / unreadable.
-
-    ``needle``: cheap substring precheck that skips the YAML parse on the
-    dominant (unmanaged) path — the key is absent from most installs.
-    """
+    """YAML mapping at ``path``, or None when missing / not a mapping / unreadable. ``needle``:
+    cheap substring precheck that skips the YAML parse on the dominant (unmanaged) path."""
     def _load():
         if not path.is_file():
             return None
@@ -104,12 +99,9 @@ def _any_managed(root: Path) -> bool:
 
 
 def is_bot_mode_managed(home: str | os.PathLike | None = None) -> bool:
-    """True when ANY profile on this install is Bot-Mode-managed. Never raises.
-
-    The tool-injection gate for ``message_agent`` — deliberately independent of
-    the protocol section's emptiness: a SOUL.md carrying the legacy protocol
-    gets an empty section but must still get the tool.
-    """
+    """True when ANY profile on this install is Bot-Mode-managed. Never raises. The
+    ``message_agent`` injection gate — deliberately independent of the protocol section's
+    emptiness: a SOUL.md carrying the legacy protocol gets an empty section but still gets the tool."""
     return _swallow(lambda: _any_managed(_hermes_root(_resolve_home(home))), False)
 
 
@@ -236,12 +228,9 @@ def _build_section(home: Path) -> str:
 
 
 def get_bot_mode_protocol_section(home: str | os.PathLike | None = None, *, force_refresh: bool = False) -> str:
-    """Cached probe entry point — one filesystem pass per (process, home).
-
-    ``home`` should be the AGENT'S OWN resolved home (session-db derived), not
-    the ambient HERMES_HOME — build threads can lose the ContextVar override
-    and the env var would then name the wrong profile.
-    """
+    """Cached probe entry point — one filesystem pass per (process, home). ``home`` should be
+    the AGENT'S OWN resolved home (session-db derived), not ambient HERMES_HOME — build threads
+    can lose the ContextVar override and the env var would then name the wrong profile."""
     resolved = str(_resolve_home(home))
     with _lock:
         if force_refresh or resolved not in _cached:
@@ -250,26 +239,20 @@ def get_bot_mode_protocol_section(home: str | os.PathLike | None = None, *, forc
 
 
 # ── capability epoch ─────────────────────────────────────────────────────────
-#
-# Bot Chat sessions are effectively eternal, so "build the prompt once" would
-# strand capability changes (skills, toolsets, MCP, SOUL, roster, peers) forever.
-# The fingerprint hashes exactly that surface; the built Bot Chat prompt embeds
-# it and agent/conversation_loop.py rebuilds only when the stored epoch differs
-# from disk — a loud, once-per-change cache break, never per-turn drift.
+# Bot Chat sessions are effectively eternal, so "build the prompt once" would strand
+# capability changes (skills, toolsets, MCP, SOUL, roster, peers) forever. The fingerprint
+# hashes exactly that surface; the built prompt embeds it and agent/conversation_loop.py
+# rebuilds only when the stored epoch differs from disk — once per change, never per-turn drift.
 
 _EPOCH_PREFIX = "Capability epoch: "
 _EPOCH_RE_TEXT = r"Capability epoch: ([0-9a-f]{12})"
 
 
 def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
-    """12-hex digest of the capability surface for ``home``'s profile.
-
-    Sources: disabled skills + enabled toolsets + MCP config (config.yaml),
-    SOUL.md bytes, installed skill names, the Bot-Mode roster (+ roles), peers
-    and the relay roster. Deliberately NOT cached — the point is detecting
-    on-disk drift against the epoch embedded in a stored prompt. Never raises
-    ("unavailable" on failure).
-    """
+    """12-hex digest of the capability surface for ``home``'s profile: disabled skills +
+    enabled toolsets + MCP config, SOUL.md bytes, installed skill names, the Bot-Mode roster
+    (+ roles), peers and the relay roster. Deliberately NOT cached — the point is detecting
+    on-disk drift against a stored prompt's epoch. Never raises ("unavailable" on failure)."""
     import hashlib
     import json
 
@@ -350,15 +333,11 @@ def stored_prompt_capability_stale(stored_prompt: str, home: str | os.PathLike |
 
 
 def stored_bot_chat_prompt_needs_upgrade(stored_prompt: str, home: str | os.PathLike | None = None) -> bool:
-    """True when a Bot Chat session's stored prompt PREDATES the epoch mechanism.
-
-    Legacy prompts carry neither protocol section nor epoch stamp, so the
-    staleness check (stamped prompts only) would strand them forever. One-time
-    migration: the caller must only ask for sessions titled "Bot Chat", and we
-    rebuild only when the probe would actually emit a section — a SOUL.md that
-    already carries the legacy protocol yields an empty section, and rebuilding
-    would produce another unstamped prompt and loop. Fails closed to "no upgrade".
-    """
+    """True when a Bot Chat session's stored prompt PREDATES the epoch mechanism. Legacy
+    prompts carry neither section nor stamp, so the staleness check (stamped only) would strand
+    them forever. The caller must only ask for sessions titled "Bot Chat"; we rebuild only when
+    the probe would actually emit a section — a SOUL.md carrying the legacy protocol yields an
+    empty section, and rebuilding would mint another unstamped prompt and loop. Fails closed."""
     text = stored_prompt or ""
     if _EPOCH_PREFIX in text or _PROTOCOL_HEADING in text:
         return False

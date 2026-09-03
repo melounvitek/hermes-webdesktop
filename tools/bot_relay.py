@@ -130,13 +130,11 @@ def write_remote_roster(root: Path | str, rows: Any) -> int:
     """Atomically persist the Desktop-pushed remote roster. Returns count."""
     base = _ensure_dirs(root)
     by_key: dict[tuple[str, str], dict] = {}
-    for row in rows if isinstance(rows, list) else []:
-        norm = _normalize_roster_row(row)
-        if norm:
-            by_key.setdefault((norm["connection_id"], norm["profile"]), norm)
+    for norm in filter(None, map(_normalize_roster_row, rows if isinstance(rows, list) else [])):
+        by_key.setdefault((norm["connection_id"], norm["profile"]), norm)
     cleaned = [by_key[k] for k in sorted(by_key)]
-    payload = {"updated_at": int(time.time()), "agents": cleaned}
-    _atomic_write_json(base / ROSTER_FILE, payload, prefix=".roster-", sort_keys=True)
+    _atomic_write_json(base / ROSTER_FILE, {"updated_at": int(time.time()), "agents": cleaned},
+                       prefix=".roster-", sort_keys=True)
     return len(cleaned)
 
 
@@ -145,9 +143,7 @@ def read_remote_roster(root: Path | str) -> list[dict]:
     try:
         data = json.loads((relay_root(root) / ROSTER_FILE).read_text(encoding="utf-8"))
         agents = data.get("agents") if isinstance(data, dict) else None
-        if not isinstance(agents, list):
-            return []
-        return [r for r in (_normalize_roster_row(a) for a in agents) if r]
+        return [r for r in map(_normalize_roster_row, agents) if r] if isinstance(agents, list) else []
     except FileNotFoundError:
         return []
     except Exception:
@@ -158,15 +154,9 @@ def read_remote_roster(root: Path | str) -> list[dict]:
 def resolve_remote_target(raw_target: str, roster: list[dict]) -> Any:
     """Matched row for a bare handle/profile (unique across connections) or
     ``<handle|profile>@<connection-id>``; ``"ambiguous"`` for a bare form on several connections; None otherwise."""
-    want = str(raw_target or "").strip().lstrip("@")
-    if not want:
+    want, at, conn = (p.strip() for p in str(raw_target or "").strip().lstrip("@").partition("@"))
+    if not want or (at and not conn):
         return None
-    conn: Optional[str] = None
-    if "@" in want:
-        want, _, conn = want.partition("@")
-        want, conn = want.strip(), conn.strip()
-        if not want or not conn:
-            return None
     matches = [row for row in roster if want.lower() in (row["handle"].lower(), row["profile"].lower())
                and (not conn or row["connection_id"].lower() == conn.lower())]
     if not matches:
@@ -198,17 +188,14 @@ def _target_liveness(root: Path | str, target: dict) -> Optional[bool]:
             age = time.time() - (relay_root(root) / ROSTER_FILE).stat().st_mtime
         except OSError:
             return None
-        if age > ROSTER_FRESH_SECONDS:
-            return None
-        roster = read_remote_roster(root)
+        roster = read_remote_roster(root) if age <= ROSTER_FRESH_SECONDS else []
         if not roster:
             return None
         key = (str(target.get("connection_id") or ""), str(target.get("profile") or ""))
-        for row in roster:
-            if (row["connection_id"], row["profile"]) == key:
-                online = row.get("online")
-                return online if isinstance(online, bool) else None
-        return False  # fresh roster no longer lists the target — offline
+        row = next((r for r in roster if (r["connection_id"], r["profile"]) == key), None)
+        if row is None:
+            return False  # fresh roster no longer lists the target — offline
+        return row["online"] if isinstance(row.get("online"), bool) else None
     except Exception:
         logger.debug("bot_relay liveness check failed", exc_info=True)
         return None
