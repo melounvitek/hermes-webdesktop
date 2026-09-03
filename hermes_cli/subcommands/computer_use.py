@@ -18,7 +18,7 @@ def _cu_status(args) -> int:
     import os as _os
     import subprocess
     from hermes_cli.tools_config import _cua_driver_contract_status
-    from tools.computer_use.cua_backend import cua_driver_update_check, resolve_cua_driver_cmd
+    from tools.computer_use.cua_backend_driver import cua_driver_update_check, resolve_cua_driver_cmd
     # Must match the runtime resolver: Desktop/TUI processes can omit
     # ~/.local/bin even though the official installer put the driver there.
     path = resolve_cua_driver_cmd()

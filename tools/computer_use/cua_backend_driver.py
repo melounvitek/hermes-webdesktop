@@ -1,6 +1,5 @@
 """cua-driver binary resolution, MCP-invocation discovery, the 0.20 runtime contract gate, and the update check.
-Config-derived policy (``_cua_no_overlay``, ``_run_driver`` ...) is looked up lazily through
-``tools.computer_use.cua_backend`` so tests that patch it there keep working; logger name parity likewise."""
+Config-derived policy (``_cua_no_overlay``, ``_run_driver`` ...) is looked up lazily through the facade."""
 
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ _SEMVER_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
 _UPSTREAM_SCRIPTS = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts"
 
 def _cb():
-    """Origin module, looked up lazily so ``patch("tools.computer_use.cua_backend.X")`` applies."""
+    """Facade module (config/policy helpers), looked up lazily to avoid the import cycle."""
     from tools.computer_use import cua_backend
     return cua_backend
 
@@ -100,7 +99,7 @@ def resolve_cua_driver_cmd(override: Optional[str] = None) -> Optional[str]:
 
 def cua_driver_binary_available() -> bool:
     """True if `cua-driver` resolves via env, PATH, or known install paths."""
-    return _cb().resolve_cua_driver_cmd() is not None
+    return resolve_cua_driver_cmd() is not None
 
 def cua_driver_install_hint() -> str:
     installer = (f"  irm {_UPSTREAM_SCRIPTS}/install.ps1 | iex" if sys.platform == "win32"
@@ -111,7 +110,7 @@ def cua_driver_install_hint() -> str:
 
 def _mcp_args_with_overlay_flag(args: List[str], driver_cmd: str = _CUA_DRIVER_DEFAULT_CMD) -> List[str]:
     """Return *args* with ``--no-overlay`` appended when configured and supported."""
-    on = _cb()._cua_no_overlay() and _cb()._cua_driver_supports_no_overlay(driver_cmd)
+    on = _cb()._cua_no_overlay() and _cua_driver_supports_no_overlay(driver_cmd)
     return [*args, "--no-overlay"] if on else list(args)
 
 @functools.lru_cache(maxsize=1)
@@ -176,7 +175,7 @@ def _manifest_contract_reason(manifest: Optional[Dict[str, Any]]) -> str:
 
 def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str, Any]:
     """Report whether a local driver can host Hermes' 0.20 integration."""
-    resolved = binary or _cb().resolve_cua_driver_cmd()
+    resolved = binary or resolve_cua_driver_cmd()
     version: Optional[str] = None
     reason = "cua-driver is not installed"
     if resolved:
@@ -203,13 +202,13 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
     See #1734.
     """
     timeout = (25.0 if sys.platform == "win32" else 8.0) if timeout is None else timeout
-    driver_cmd = _cb().resolve_cua_driver_cmd()
+    driver_cmd = resolve_cua_driver_cmd()
     data = _driver_json(driver_cmd, "check-update", "--json", timeout=timeout, require_ok=False) if driver_cmd else None
     return None if data is None or data.get("error") else data
 
 def cua_driver_update_nudge() -> Optional[str]:
     """One-line "an update is available" message, or ``None`` when up to date, indeterminate, or driver too old."""
-    state = _cb().cua_driver_update_check()
+    state = cua_driver_update_check()
     if not state or not state.get("update_available"):
         return None
     return (f"cua-driver {state.get('latest_version') or '?'} is available "

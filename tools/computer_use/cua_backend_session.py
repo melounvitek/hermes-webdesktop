@@ -1,7 +1,6 @@
 """cua-driver MCP session plumbing: the asyncio bridge thread and the lazily-started, self-healing
-``_CuaDriverSession`` (MCP transport with a ``cua-driver call`` CLI fallback). Driver resolution /
-policy helpers are looked up lazily through ``tools.computer_use.cua_backend`` so tests that patch
-them there keep working."""
+``_CuaDriverSession`` (MCP transport with a ``cua-driver call`` CLI fallback). Config/policy
+helpers are looked up lazily through the facade."""
 
 from __future__ import annotations
 
@@ -15,6 +14,8 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
+from hermes_cli._subprocess_compat import windows_hide_flags
+from tools.computer_use import cua_backend_driver as _driver
 from tools.computer_use.cua_backend_parse import _extract_tool_result, _mcp_field, _tool_envelope
 
 logger = logging.getLogger("tools.computer_use.cua_backend")
@@ -97,13 +98,12 @@ def _cli_run_json(cmd: List[str], env: Dict[str, str], name: str, timeout: float
     never start) -> fail fast, no ~3.5s backoff."""
     import subprocess as _subprocess
     import time as _time
-    from tools.computer_use import cua_backend as _cb
 
     backoff, last_err = 0.5, ""
     for attempt in range(_CLI_ATTEMPTS):
         try:
             proc = _subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                   timeout=max(15.0, timeout), creationflags=_cb.windows_hide_flags(), env=env,
+                                   timeout=max(15.0, timeout), creationflags=windows_hide_flags(), env=env,
                                    stdin=_subprocess.DEVNULL)
         except Exception as e:  # pragma: no cover - subprocess spawn failure
             raise RuntimeError(f"cua-driver CLI fallback for {name} failed to spawn: {e}") from e
@@ -222,14 +222,14 @@ class _CuaDriverSession:
         # reports HOW FAR it got instead of an opaque "never reached ready".
         self._startup_phase = "binary-check"
         try:
-            driver_cmd = _cb.resolve_cua_driver_cmd()
+            driver_cmd = _driver.resolve_cua_driver_cmd()
             if not driver_cmd:
-                raise RuntimeError(_cb.cua_driver_install_hint())
+                raise RuntimeError(_driver.cua_driver_install_hint())
             self._startup_phase = "manifest-discovery"
             daemon = self._embedded_daemon
             (command, args), child_env = (
                 (daemon.proxy_invocation(), daemon.child_env()) if daemon is not None
-                else (_cb._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
+                else (_driver._resolve_mcp_invocation(driver_cmd), _cb.cua_driver_child_env()))
             _t_manifest = _time.monotonic()
             # Telemetry policy first (default: disabled), then strip Hermes secrets.
             params = StdioServerParameters(command=command, args=args, env=_sanitize_subprocess_env(child_env))
@@ -449,9 +449,9 @@ class _CuaDriverSession:
             fd, shot_file = _tempfile.mkstemp(prefix="cua_shot_", suffix=".png")
             os.close(fd)
             call_args["screenshot_out_file"] = shot_file
-        driver_command = _cb.resolve_cua_driver_cmd()
+        driver_command = _driver.resolve_cua_driver_cmd()
         if not driver_command:
-            raise RuntimeError(_cb.cua_driver_install_hint())
+            raise RuntimeError(_driver.cua_driver_install_hint())
         child_env, socket_args = _cb.cua_driver_child_env(), []
         daemon = getattr(self, "_embedded_daemon", None)
         if daemon is not None:

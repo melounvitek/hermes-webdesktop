@@ -1,6 +1,5 @@
 """Private embedded cua-driver daemon for non-standard permission modes, plus the macOS CuaDriver.app identity
-checks its launch path depends on. Driver resolution / policy helpers are looked up lazily through
-``tools.computer_use.cua_backend`` so tests that patch them there keep working."""
+checks its launch path depends on. Config/policy helpers are looked up lazily through the facade."""
 
 from __future__ import annotations
 
@@ -17,6 +16,8 @@ import uuid
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
+from tools.computer_use import cua_backend_driver as _driver
+
 logger = logging.getLogger("tools.computer_use.cua_backend")
 
 # The only bundle identity the private daemon may launch through, and the teams that sign official
@@ -26,7 +27,7 @@ _CUA_DRIVER_TEAM_IDS = ("4YEC26S9KF", "YCK386LBJ7")
 _QUIET_ERRORS = (OSError, subprocess.SubprocessError)
 
 def _cb():
-    """Origin module, looked up lazily so ``patch("tools.computer_use.cua_backend.X")`` applies."""
+    """Facade module (config/policy helpers), looked up lazily to avoid the import cycle."""
     from tools.computer_use import cua_backend
     return cua_backend
 
@@ -119,7 +120,7 @@ class _EmbeddedCuaDaemon:
                            "bounded mode — it will NOT bound this %s session. Migrate the manifest to version 3 to keep a "
                            "ceiling on approval-bypassed runs.", permission_mode)
         self.permission_mode, self._driver_cmd, self._command = permission_mode, driver_cmd, driver_cmd
-        self._mcp_args: List[str] = list(_cb()._CUA_DRIVER_ARGS)
+        self._mcp_args: List[str] = list(_driver._CUA_DRIVER_ARGS)
         self._process: Any = None
         self._owns_runtime = self._running = False
         self._stderr_tail: deque[str] = deque(maxlen=20)
@@ -153,15 +154,15 @@ class _EmbeddedCuaDaemon:
         # The private daemon owns the cursor overlay, so the overlay policy must apply to this long-lived serve
         # process, not only its MCP proxy. Appended BEFORE the macOS app-launch wrapping so the flag travels inside
         # `open ... --args` with the rest of the serve args.
-        return _cb()._mcp_args_with_overlay_flag(serve_args, driver_cmd=self._command)
+        return _driver._mcp_args_with_overlay_flag(serve_args, driver_cmd=self._command)
 
     def start(self) -> None:
         if self._running:
             return
-        self._driver_cmd = self._driver_cmd or _cb().resolve_cua_driver_cmd() or ""
+        self._driver_cmd = self._driver_cmd or _driver.resolve_cua_driver_cmd() or ""
         if not self._driver_cmd:
-            raise RuntimeError(_cb().cua_driver_install_hint())
-        self._command, self._mcp_args = _cb()._resolve_mcp_invocation(self._driver_cmd)
+            raise RuntimeError(_driver.cua_driver_install_hint())
+        self._command, self._mcp_args = _driver._resolve_mcp_invocation(self._driver_cmd)
         env = self._sanitized_env()
         command = _embedded_daemon_spawn_command(self._command, self._serve_args(), platform=sys.platform)
         self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

@@ -515,7 +515,7 @@ class TestRequireConfirmedUpdate:
                      "reason": "",
                  },
              ), \
-             patch("tools.computer_use.cua_backend.cua_driver_update_check",
+             patch("tools.computer_use.cua_backend_driver.cua_driver_update_check",
                    return_value=check_state), \
              patch.object(tools_config, "_run_cua_driver_installer",
                           return_value=True) as runner, \
@@ -657,7 +657,7 @@ class TestRequireConfirmedUpdate:
                  side_effect=[incompatible,
                               {"ready": True, "version": "0.20.0", "reason": ""}],
              ), \
-             patch("tools.computer_use.cua_backend.cua_driver_update_check",
+             patch("tools.computer_use.cua_backend_driver.cua_driver_update_check",
                    return_value=None) as check, \
              patch.object(tools_config, "_run_cua_driver_installer",
                           return_value=True) as runner, \
@@ -689,7 +689,7 @@ class TestUpdateCheckTimeoutDefaults:
 
     def _captured_timeout(self):
         from unittest.mock import MagicMock
-        from tools.computer_use import cua_backend
+        from tools.computer_use import cua_backend_driver
 
         captured = {}
 
@@ -699,11 +699,11 @@ class TestUpdateCheckTimeoutDefaults:
             m.stdout = '{"update_available": false, "current_version": "1.0"}'
             return m
 
-        with patch("tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+        with patch("tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
                    return_value="/x/cua-driver"), \
              patch("tools.computer_use.cua_backend.subprocess.run",
                    side_effect=fake_run):
-            cua_backend.cua_driver_update_check()
+            cua_backend_driver.cua_driver_update_check()
         return captured.get("timeout")
 
     @pytest.mark.windows_only
@@ -721,7 +721,7 @@ class TestUpdateCheckTimeoutDefaults:
 
     def test_explicit_timeout_wins(self):
         from unittest.mock import MagicMock
-        from tools.computer_use import cua_backend
+        from tools.computer_use import cua_backend_driver
 
         captured = {}
 
@@ -731,11 +731,11 @@ class TestUpdateCheckTimeoutDefaults:
             m.stdout = "{}"
             return m
 
-        with patch("tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+        with patch("tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
                    return_value="/x/cua-driver"), \
              patch("tools.computer_use.cua_backend.subprocess.run",
                    side_effect=fake_run):
-            cua_backend.cua_driver_update_check(timeout=3.0)
+            cua_backend_driver.cua_driver_update_check(timeout=3.0)
         assert captured.get("timeout") == 3.0
 
 
@@ -1421,7 +1421,7 @@ class TestConfirmedVersionPinning:
                  "_cua_driver_contract_status",
                  return_value={"ready": True, "version": "0.20.0", "reason": ""},
              ), \
-             patch("tools.computer_use.cua_backend.cua_driver_update_check",
+             patch("tools.computer_use.cua_backend_driver.cua_driver_update_check",
                    return_value=check_state), \
              patch.object(tools_config, "_run_cua_driver_installer",
                           return_value=True) as runner, \

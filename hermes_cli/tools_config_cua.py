@@ -98,7 +98,7 @@ def _cua_version_summary(raw: str, *, limit: int = 120) -> str:
 
 def _resolved_cua_driver_cmd() -> Optional[str]:
     """Resolve cua-driver exactly as the runtime and Desktop status do."""
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
+    from tools.computer_use.cua_backend_driver import resolve_cua_driver_cmd
     return resolve_cua_driver_cmd()
 
 
@@ -118,7 +118,7 @@ _CUA_DRIVER_CONTRACT_CACHE: dict = {}
 def _cua_driver_contract_status(binary: Optional[str] = None) -> dict:
     """Inspect whether an installed driver supports Hermes' runtime contract (30s cache keyed on the
     binary's path/mtime/size fingerprint)."""
-    from tools.computer_use.cua_backend import cua_driver_runtime_contract_status
+    from tools.computer_use.cua_backend_driver import cua_driver_runtime_contract_status
     resolved = binary or _resolved_cua_driver_cmd()
     if not resolved:
         return cua_driver_runtime_contract_status(None)
@@ -214,7 +214,7 @@ def _confirmed_update_check(driver_cmd: str, require_confirmed_update: bool) -> 
     cost a multi-minute silent reinstall on every update — while explicit `install --upgrade`
     falls through."""
     try:
-        from tools.computer_use.cua_backend import cua_driver_update_check
+        from tools.computer_use.cua_backend_driver import cua_driver_update_check
         _state = cua_driver_update_check()
     except Exception:
         _state = None

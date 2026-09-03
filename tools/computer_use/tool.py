@@ -102,7 +102,8 @@ def _cua_permission_mode(session_id: str) -> str:
         from tools.computer_use.cua_backend import _cua_configured_permission_mode
         configured = _cua_configured_permission_mode()
     with contextlib.suppress(Exception):
-        from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
+        from tools.approval import is_approval_bypass_active_for_session
+        from tools.approval_context import get_current_session_key
         if is_approval_bypass_active_for_session(session_id) or (
                 bool(key := get_current_session_key(default="")) and is_approval_bypass_active_for_session(key)):
             with _approval_lock:
@@ -750,7 +751,7 @@ def check_computer_use_requirements() -> bool:
     """macOS/Windows/Linux + cua-driver binary (or env override). `hermes computer-use doctor` names blocked checks."""
     if sys.platform not in ("darwin", "win32", "linux"):
         return False
-    from tools.computer_use.cua_backend import cua_driver_binary_available
+    from tools.computer_use.cua_backend_driver import cua_driver_binary_available
     return cua_driver_binary_available()
 
 def get_computer_use_schema() -> Dict[str, Any]:

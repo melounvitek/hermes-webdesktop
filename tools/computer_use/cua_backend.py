@@ -4,8 +4,7 @@ background loop (``cua_backend_session``); the same tool surface works on all th
 with `hermes computer-use install`. The macOS path uses private SkyLight SPIs that can break on OS updates.
 Siblings: ``cua_backend_driver`` (binary/contract/update), ``cua_backend_capture`` + ``cua_backend_input``
 (mixins), ``cua_backend_parse``, ``cua_backend_session`` (bridge + session + CLI fallback), ``cua_backend_daemon``
-(private daemon + macOS app identity). Moved names are re-imported here so ``patch("tools.computer_use.cua_backend.X")``
-keeps working; siblings look policy helpers up lazily through this module."""
+(private daemon + macOS app identity). Siblings look this module's config/policy helpers up lazily."""
 
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ import contextlib
 import importlib
 import logging
 import os
-import shutil  # noqa: F401  (tests patch cua_backend.shutil / .subprocess / .threading)
 import subprocess
 import sys
 import threading
@@ -22,18 +20,14 @@ from typing import Any, Dict, List, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.computer_use.backend import ActionResult, ComputerUseBackend
-from tools.computer_use.cua_backend_capture import _CaptureMixin, _select_capture_target  # noqa: F401
-from tools.computer_use.cua_backend_daemon import (  # noqa: F401
-    _EmbeddedCuaDaemon, _embedded_daemon_spawn_command, _resolve_cua_driver_app_path, _validate_cua_driver_app_signature)
-from tools.computer_use.cua_backend_driver import (  # noqa: F401
-    _CUA_DRIVER_ARGS, _CUA_DRIVER_CMD_ENV, _cua_driver_supports_no_overlay, _mcp_args_with_overlay_flag,
-    _resolve_mcp_invocation, _wsl_windows_path_to_posix, cua_driver_binary_available, cua_driver_install_hint,
-    cua_driver_runtime_contract_status, cua_driver_update_check, cua_driver_update_nudge, resolve_cua_driver_cmd)
+from tools.computer_use.cua_backend_capture import _CaptureMixin
+from tools.computer_use.cua_backend_daemon import _EmbeddedCuaDaemon
+from tools.computer_use.cua_backend_driver import (
+    _CUA_DRIVER_CMD_ENV, cua_driver_binary_available, cua_driver_runtime_contract_status, cua_driver_update_nudge,
+    resolve_cua_driver_cmd)
 from tools.computer_use.cua_backend_input import _InputMixin
-from tools.computer_use.cua_backend_parse import (  # noqa: F401
-    _action_result_from, _extract_tool_result, _image_dimensions_from_bytes, _ingest_windows, _is_placeholder_id,
-    _parse_elements_from_structured, _parse_elements_from_tree, _parse_xprop_net_active_window, _windows_from_tool_result)
-from tools.computer_use.cua_backend_session import _AsyncBridge, _CuaDriverSession  # noqa: F401
+from tools.computer_use.cua_backend_parse import _action_result_from
+from tools.computer_use.cua_backend_session import _AsyncBridge, _CuaDriverSession
 
 logger = logging.getLogger(__name__)
 # cua-driver's anonymous PostHog telemetry gate ("0" disables; absent => ON upstream).

@@ -72,6 +72,7 @@ class TestRegistration:
 
     def test_cua_driver_cmd_env_override_is_resolved_dynamically(self, tmp_path, monkeypatch):
         from tools.computer_use import cua_backend
+        from tools.computer_use import cua_backend_driver
 
         driver = tmp_path / "custom-cua-driver"
         driver.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -80,7 +81,7 @@ class TestRegistration:
         monkeypatch.setenv("HERMES_CUA_DRIVER_CMD", str(driver))
         monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-        assert cua_backend.resolve_cua_driver_cmd() == str(driver)
+        assert cua_backend_driver.resolve_cua_driver_cmd() == str(driver)
         assert cua_backend.cua_driver_binary_available() is True
 
 
@@ -391,7 +392,7 @@ class TestCaptureResponse:
 
 class TestCuaCaptureImageDimensions:
     def test_png_dimensions_are_sniffed_from_image_bytes(self):
-        from tools.computer_use.cua_backend import _image_dimensions_from_bytes
+        from tools.computer_use.cua_backend_parse import _image_dimensions_from_bytes
 
         raw_png = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m"
@@ -602,7 +603,7 @@ class TestImageAwareTokenEstimator:
 class TestRunAgentMultimodalHelpers:
 
     def test_append_subdir_hint_to_multimodal_appends_to_text_part(self):
-        from run_agent import _append_subdir_hint_to_multimodal
+        from agent.tool_dispatch_helpers import _append_subdir_hint_to_multimodal
         env = {
             "_multimodal": True,
             "content": [
@@ -667,7 +668,7 @@ class TestElementLabelParsing:
     """
 
     def test_classic_quoted_label_format(self):
-        from tools.computer_use.cua_backend import _parse_elements_from_tree
+        from tools.computer_use.cua_backend_parse import _parse_elements_from_tree
         tree = (
             '  - [14] AXButton "One"\n'
             '  - [15] AXButton "Two"\n'
@@ -683,7 +684,7 @@ class TestElementLabelParsing:
 
     def test_new_id_eq_format(self):
         """cua-driver v0.1.6 format: [N] AXRole (order) id=Label"""
-        from tools.computer_use.cua_backend import _parse_elements_from_tree
+        from tools.computer_use.cua_backend_parse import _parse_elements_from_tree
         tree = (
             "[14] AXButton (1) id=One\n"
             "[15] AXButton (2) id=Two\n"
@@ -705,7 +706,7 @@ class TestElementLabelParsing:
         the regex only matched the quoted and id= forms. A pure-digit (N) is an
         order number, not a label, and must be skipped in favour of id=.
         """
-        from tools.computer_use.cua_backend import _parse_elements_from_tree
+        from tools.computer_use.cua_backend_parse import _parse_elements_from_tree
         tree = (
             '- [77] AXButton (Auto) [help="..." actions=[press]]\n'
             '- [78] AXButton (Light) [help="..." actions=[press]]\n'
@@ -741,7 +742,7 @@ class TestUpdateCheck:
         # The update check now short-circuits to None when no driver
         # resolves; CI has none installed, so pin a resolved path.
         with patch(
-            "tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+            "tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
             return_value="/usr/local/bin/cua-driver",
         ):
             yield
@@ -754,9 +755,10 @@ class TestUpdateCheck:
 
     def test_update_available(self):
         from tools.computer_use import cua_backend
+        from tools.computer_use import cua_backend_driver
         payload = '{"current_version":"0.3.1","latest_version":"0.3.2","update_available":true}'
         with self._run_returning(payload):
-            st = cua_backend.cua_driver_update_check()
+            st = cua_backend_driver.cua_driver_update_check()
             assert st is not None and st["update_available"] is True
             msg = cua_backend.cua_driver_update_nudge()
         assert msg is not None
@@ -764,9 +766,10 @@ class TestUpdateCheck:
 
     def test_error_payload_is_indeterminate(self):
         from tools.computer_use import cua_backend
+        from tools.computer_use import cua_backend_driver
         payload = '{"current_version":"0.3.2","update_available":false,"error":"github 503"}'
         with self._run_returning(payload):
-            assert cua_backend.cua_driver_update_check() is None
+            assert cua_backend_driver.cua_driver_update_check() is None
             assert cua_backend.cua_driver_update_nudge() is None
 
 class TestLazyMcpInstall:
@@ -1154,7 +1157,7 @@ def _make_cua_backend_with_tool_result(result: Dict[str, Any]):
 
 class TestCuaDriverWindowResultShapes:
     def test_extracts_windows_from_structured_content(self):
-        from tools.computer_use.cua_backend import _windows_from_tool_result
+        from tools.computer_use.cua_backend_parse import _windows_from_tool_result
 
         windows = [{"app_name": "Terminal", "pid": 1, "window_id": 2}]
 
@@ -1195,7 +1198,7 @@ class TestCuaDriverSessionReconnect:
     def _make_session(self, bridge):
         import threading
         from typing import Any, cast
-        from tools.computer_use.cua_backend import _CuaDriverSession
+        from tools.computer_use.cua_backend_session import _CuaDriverSession
         session = cast(Any, _CuaDriverSession.__new__(_CuaDriverSession))
         session._bridge = bridge
         session._session = object()
@@ -1402,10 +1405,10 @@ class TestCuaDriverSessionReconnect:
         (screenshot_out_file path) when no inline base64 is present."""
         import base64 as _b64
         from typing import Any, cast
-        from tools.computer_use.cua_backend import _CuaDriverSession
+        from tools.computer_use.cua_backend_session import _CuaDriverSession
 
         monkeypatch.setattr(
-            "tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+            "tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
             lambda: "/resolved/cua-driver",
         )
 
@@ -1657,7 +1660,7 @@ class TestCuaEnvironmentScrubbing:
         to StdioServerParameters, and asserts the scrub contract.
         """
         from unittest.mock import MagicMock, patch, AsyncMock
-        from tools.computer_use.cua_backend import _CuaDriverSession, _AsyncBridge
+        from tools.computer_use.cua_backend_session import _CuaDriverSession, _AsyncBridge
         import asyncio
 
         bridge = _AsyncBridge()
@@ -1681,9 +1684,9 @@ class TestCuaEnvironmentScrubbing:
                 return MagicMock()
 
             with patch.dict(os.environ, test_env, clear=True), \
-                 patch("tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+                 patch("tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
                        return_value="cua-driver"), \
-                 patch("tools.computer_use.cua_backend._resolve_mcp_invocation",
+                 patch("tools.computer_use.cua_backend_driver._resolve_mcp_invocation",
                        return_value=("cua-driver", ["mcp"])), \
                  patch("mcp.StdioServerParameters", side_effect=capture_env), \
                  patch("mcp.client.stdio.stdio_client") as mock_stdio, \
@@ -1749,12 +1752,12 @@ class TestCuaCliFallbackResolution:
         ``~/.local/bin``. Falling back to the bare ``cua-driver`` command
         would reintroduce the original bug at runtime.
         """
-        from tools.computer_use.cua_backend import _AsyncBridge, _CuaDriverSession
+        from tools.computer_use.cua_backend_session import _AsyncBridge, _CuaDriverSession
 
         proc = MagicMock(stdout="{}", stderr="", returncode=0)
         session = _CuaDriverSession(_AsyncBridge())
         with patch(
-            "tools.computer_use.cua_backend.resolve_cua_driver_cmd",
+            "tools.computer_use.cua_backend_driver.resolve_cua_driver_cmd",
             return_value="/Users/example/.local/bin/cua-driver",
         ), patch("subprocess.run", return_value=proc) as run:
             session._call_tool_via_cli("click", {"x": 1, "y": 2}, timeout=0.1)
@@ -1925,7 +1928,7 @@ class TestZIndexSorting:
         """Wayland may return z_index: null. _ingest_windows must coerce
         it to 0 (backmost) so it doesn't crash the sort or get selected
         over real foreground windows."""
-        from tools.computer_use.cua_backend import _ingest_windows
+        from tools.computer_use.cua_backend_parse import _ingest_windows
 
         raw = [
             {"app_name": "Desktop", "pid": 300, "window_id": 3,
@@ -1950,7 +1953,7 @@ class TestImageMimeTypePropagation:
 
     def test_extract_tool_result_captures_mime_alongside_image(self):
         from unittest.mock import MagicMock
-        from tools.computer_use.cua_backend import _extract_tool_result
+        from tools.computer_use.cua_backend_parse import _extract_tool_result
 
         image_part = MagicMock()
         image_part.type = "image"
@@ -2019,7 +2022,7 @@ class TestMcpInvocationResolution:
 
     def test_manifest_with_invocation_block_drives_subcommand(self):
         from unittest.mock import patch
-        from tools.computer_use.cua_backend import _resolve_mcp_invocation
+        from tools.computer_use.cua_backend_driver import _resolve_mcp_invocation
 
         manifest = (
             '{"schema_version":"1",'
@@ -2034,7 +2037,7 @@ class TestMcpInvocationResolution:
         """If the manifest knows the args but not the command, keep our
         resolved driver path (so HERMES_CUA_DRIVER_CMD still wins)."""
         from unittest.mock import patch
-        from tools.computer_use.cua_backend import _resolve_mcp_invocation
+        from tools.computer_use.cua_backend_driver import _resolve_mcp_invocation
 
         manifest = '{"mcp_invocation":{"args":["mcp"]}}'
         with patch("subprocess.run", new=self._fake_run(stdout=manifest)):
@@ -2047,7 +2050,7 @@ class TestMcpInvocationResolution:
         a string instead of a list, etc.), we still fall back rather than
         passing junk to subprocess.Popen."""
         from unittest.mock import patch
-        from tools.computer_use.cua_backend import _resolve_mcp_invocation
+        from tools.computer_use.cua_backend_driver import _resolve_mcp_invocation
 
         manifest = (
             '{"mcp_invocation":'
@@ -2068,7 +2071,7 @@ class TestStructuredElementsConsumption:
     """
 
     def test_structured_parser_reads_frames(self):
-        from tools.computer_use.cua_backend import _parse_elements_from_structured
+        from tools.computer_use.cua_backend_parse import _parse_elements_from_structured
 
         raw = [
             {"element_index": 1, "role": "AXButton", "label": "OK",
@@ -2144,7 +2147,7 @@ class TestCapabilityDiscovery:
     """
 
     def test_supports_capability_global_match_any_tool(self):
-        from tools.computer_use.cua_backend import _CuaDriverSession, _AsyncBridge
+        from tools.computer_use.cua_backend_session import _CuaDriverSession, _AsyncBridge
 
         session = _CuaDriverSession(_AsyncBridge())
         session._capabilities = {
@@ -2158,7 +2161,7 @@ class TestCapabilityDiscovery:
         assert session.supports_capability("never.heard.of.it") is False
 
     def test_supports_capability_scoped_to_specific_tool(self):
-        from tools.computer_use.cua_backend import _CuaDriverSession, _AsyncBridge
+        from tools.computer_use.cua_backend_session import _CuaDriverSession, _AsyncBridge
 
         session = _CuaDriverSession(_AsyncBridge())
         session._capabilities = {
@@ -2403,7 +2406,7 @@ class TestStartupTimeoutPhaseDetail:
         import threading
         from typing import Any, cast
         from unittest.mock import MagicMock, patch as _patch
-        from tools.computer_use.cua_backend import _CuaDriverSession
+        from tools.computer_use.cua_backend_session import _CuaDriverSession
 
         session = cast(Any, _CuaDriverSession.__new__(_CuaDriverSession))
         session._lock = threading.Lock()

@@ -73,13 +73,13 @@ LINUX_LIST_WINDOWS = [
 
 
 def _normalized_windows(raw=ISSUE_58026_WINDOWS):
-    from tools.computer_use.cua_backend import _ingest_windows
+    from tools.computer_use.cua_backend_parse import _ingest_windows
 
     return _ingest_windows(raw)
 
 
 def test_parse_xprop_net_active_window_standard_output():
-    from tools.computer_use.cua_backend import _parse_xprop_net_active_window
+    from tools.computer_use.cua_backend_parse import _parse_xprop_net_active_window
 
     raw = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x503000b\n"
     assert _parse_xprop_net_active_window(raw) == 0x503000b
@@ -90,7 +90,7 @@ def test_default_capture_prefers_x11_active_window_when_z_index_tied():
     """The ``_NET_ACTIVE_WINDOW`` tie-break is a Linux/X11-only branch of
     ``_select_capture_target``; run it where ``sys.platform`` really is
     linux instead of patching the branch selector."""
-    from tools.computer_use.cua_backend import _select_capture_target
+    from tools.computer_use.cua_backend_capture import _select_capture_target
 
     windows = _normalized_windows()
 
@@ -110,7 +110,7 @@ def test_default_capture_skips_desktop_helper_when_active_window_unknown():
 
     Linux-only: the helper-skipping pool filter is inside the
     ``sys.platform == "linux"`` branch."""
-    from tools.computer_use.cua_backend import _select_capture_target
+    from tools.computer_use.cua_backend_capture import _select_capture_target
 
     windows = _normalized_windows()
 
@@ -137,7 +137,7 @@ def test_linux_null_is_on_screen_is_treated_as_unknown_not_offscreen():
 
 def test_explicit_app_capture_preserves_filtered_target_order():
     """When the caller filters first, target selection should not skip the match."""
-    from tools.computer_use.cua_backend import _select_capture_target
+    from tools.computer_use.cua_backend_capture import _select_capture_target
 
     chrome = _normalized_windows(LINUX_LIST_WINDOWS)[1]
 

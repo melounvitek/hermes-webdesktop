@@ -69,7 +69,7 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     """OS-aware readiness for the desktop card; key order is an API payload contract. ``ready`` is the single signal the
     UI keys off: macOS = both TCC grants, elsewhere = driver health (no TCC model); ``None`` = unknown (binary missing /
     probe failed). ``can_grant`` is macOS-only."""
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd  # same resolver as the tool itself
+    from tools.computer_use.cua_backend_driver import resolve_cua_driver_cmd  # same resolver as the tool itself
     plat, binary = sys.platform, resolve_cua_driver_cmd(driver_cmd)
     out: Dict[str, Any] = {"platform": plat, "platform_supported": plat in _RUNTIME_PLATFORMS,
                            "installed": bool(binary), "version": None, "ready": None, "can_grant": plat == "darwin",
@@ -95,7 +95,7 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     if sys.platform != "darwin":
         print("Computer Use permissions are a macOS concept; nothing to grant here.")
         return 64
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
+    from tools.computer_use.cua_backend_driver import resolve_cua_driver_cmd
     binary = resolve_cua_driver_cmd(driver_cmd)
     if not binary:
         print("cua-driver: not installed. Run: hermes computer-use install")
