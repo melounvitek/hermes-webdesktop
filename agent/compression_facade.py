@@ -135,6 +135,94 @@ def _sync_persisted_markers(target_messages, source_messages) -> None:
             _stamp_scoped_twins(target_messages, source_message)
 
 
+def _run_under_progress_timeout(
+    agent, run, messages, system_message, *, active_fence, fence_registration_lock, idle_timeout, total_ceiling
+):
+    """Run ``run(fence, target_messages=snapshot)`` on the pool under the progress-aware timeout.
+
+    The pooled worker must NEVER share the caller's live transcript — a late engine after a
+    host timeout could rewrite it. It deep-snapshots on the worker and publishes only via an
+    ADMITTED commit; a no-op/abort returns the snapshot unchanged, so the ORIGINAL list is
+    handed back to keep identity semantics.
+    """
+    from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
+
+    def _snapshot_worker(fence=None):
+        snapshot = copy.deepcopy(messages)
+        result_msgs, result_prompt = run(fence, target_messages=snapshot)
+        if result_msgs is snapshot:
+            return messages, result_prompt
+        return result_msgs, result_prompt
+
+    timeout_cause = {"total_exhausted": False, "progress_observed": False}
+
+    def _on_timeout_cause(total_exhausted, progress_observed):
+        timeout_cause["total_exhausted"] = total_exhausted
+        timeout_cause["progress_observed"] = progress_observed
+
+    def _on_timeout(idle, waited, since_progress):
+        _report_compression_timeout(
+            agent, idle=idle, waited=waited, since_progress=since_progress, total_ceiling=total_ceiling, **timeout_cause
+        )
+
+    def _publish_new_fence():
+        # The stall-fallback retry needs a fence the aborted attempt cannot veto; publish
+        # it on the slot hard_interrupt() reads. The caller's finally restores its fence.
+        retry_fence = CompressionCommitFence()
+        with fence_registration_lock:
+            agent._active_compression_commit_fence = retry_fence
+        return retry_fence
+
+    return run_compress_context_with_progress_timeout(
+        worker=_snapshot_worker,
+        messages=messages,
+        system_prompt_fallback=lambda: _timeout_fallback_prompt(agent, system_message),
+        idle_timeout_seconds=idle_timeout,
+        total_ceiling_seconds=total_ceiling,
+        on_timeout=_on_timeout,
+        on_timeout_cause=_on_timeout_cause,
+        on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(agent, waited, ceiling),
+        fence=active_fence,
+        telemetry_agent=agent,
+        new_fence=_publish_new_fence,
+    )
+
+
+def _mirror_result_onto_live_lists(agent, result, messages, *, direct_path: bool) -> None:
+    """Mirror persisted-marker stamps from the result list onto the live list(s)."""
+    if not (isinstance(result, tuple) and result and isinstance(result[0], list)):
+        return
+    result_messages = result[0]
+    # Direct-path callers bypass the snapshot worker but still need the post-publish mirror.
+    if direct_path or result_messages is not messages:
+        _sync_persisted_markers(messages, result_messages)
+    session_messages = getattr(agent, "_session_messages", None)
+    if isinstance(session_messages, list) and session_messages is not messages:
+        # Durable-parent adoption can leave `_session_messages` on the pre-adoption list.
+        _sync_persisted_markers(session_messages, result_messages)
+
+
+def _rebind_caller_session_context(agent) -> None:
+    """Propagate a rotated session id to the CALLER's thread/ContextVar (idempotent otherwise).
+
+    The worker thread rotated hermes_logging's thread-local id; post-compression tools must
+    resolve HERMES_SESSION_ID to the child id.
+    """
+    try:
+        from hermes_logging import set_session_context
+
+        set_session_context(agent.session_id)
+    except Exception:
+        pass
+    try:
+        from gateway.session_context import set_current_session_id
+
+        if agent.session_id:
+            set_current_session_id(agent.session_id)
+    except Exception:
+        logger.debug("post-compression session ContextVar rebind failed", exc_info=True)
+
+
 class CompressionFacadeMixin:
     """``_compress_context`` (see module docstring)."""
 
@@ -163,7 +251,6 @@ class CompressionFacadeMixin:
             compress_context,
             reset_context_compression_timeout_outcome,
             resolve_context_compression_timeouts,
-            run_compress_context_with_progress_timeout,
         )
 
         reset_context_compression_timeout_outcome(self)
@@ -227,81 +314,13 @@ class CompressionFacadeMixin:
             if direct_path:
                 result = _run(active_fence)
             else:
-
-                def _snapshot_worker(fence=None):
-                    # The pooled worker must NEVER share the caller's live transcript — a late
-                    # engine after a host timeout could rewrite it. Deep-snapshot on the worker;
-                    # results publish only via an ADMITTED commit. A no-op/abort returns the
-                    # snapshot unchanged: hand back the ORIGINAL list so identity semantics hold.
-                    snapshot = copy.deepcopy(messages)
-                    result_msgs, result_prompt = _run(fence, target_messages=snapshot)
-                    if result_msgs is snapshot:
-                        return messages, result_prompt
-                    return result_msgs, result_prompt
-
-                timeout_cause = {"total_exhausted": False, "progress_observed": False}
-
-                def _on_timeout_cause(total_exhausted, progress_observed):
-                    timeout_cause["total_exhausted"] = total_exhausted
-                    timeout_cause["progress_observed"] = progress_observed
-
-                def _on_timeout(idle, waited, since_progress):
-                    _report_compression_timeout(
-                        self,
-                        idle=idle,
-                        waited=waited,
-                        since_progress=since_progress,
-                        total_ceiling=total_ceiling,
-                        **timeout_cause,
-                    )
-
-                def _publish_new_fence():
-                    # The stall-fallback retry needs a fence the aborted attempt cannot veto; publish
-                    # it on the slot hard_interrupt() reads. The finally restores the caller's fence.
-                    retry_fence = CompressionCommitFence()
-                    with fence_registration_lock:
-                        self._active_compression_commit_fence = retry_fence
-                    return retry_fence
-
-                result = run_compress_context_with_progress_timeout(
-                    worker=_snapshot_worker,
-                    messages=messages,
-                    system_prompt_fallback=lambda: _timeout_fallback_prompt(self, system_message),
-                    idle_timeout_seconds=idle_timeout,
-                    total_ceiling_seconds=total_ceiling,
-                    on_timeout=_on_timeout,
-                    on_timeout_cause=_on_timeout_cause,
-                    on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(self, waited, ceiling),
-                    fence=active_fence,
-                    telemetry_agent=self,
-                    new_fence=_publish_new_fence,
+                result = _run_under_progress_timeout(
+                    self, _run, messages, system_message,
+                    active_fence=active_fence, fence_registration_lock=fence_registration_lock,
+                    idle_timeout=idle_timeout, total_ceiling=total_ceiling,
                 )
-            if isinstance(result, tuple) and result:
-                result_messages = result[0]
-                if isinstance(result_messages, list):
-                    # Direct-path callers bypass the snapshot worker but still need the post-publish mirror.
-                    if direct_path or result_messages is not messages:
-                        _sync_persisted_markers(messages, result_messages)
-                    session_messages = getattr(self, "_session_messages", None)
-                    if isinstance(session_messages, list) and session_messages is not messages:
-                        # Durable-parent adoption can leave `_session_messages` on the pre-adoption list.
-                        _sync_persisted_markers(session_messages, result_messages)
-            # The worker thread rotated hermes_logging's thread-local session id; propagate to this thread.
-            try:
-                from hermes_logging import set_session_context
-
-                set_session_context(self.session_id)
-            except Exception:
-                pass
-            # Rebind the session ContextVar in the CALLER's context so post-compression tools
-            # resolve HERMES_SESSION_ID to the child id (idempotent when no rotation happened).
-            try:
-                from gateway.session_context import set_current_session_id
-
-                if self.session_id:
-                    set_current_session_id(self.session_id)
-            except Exception:
-                logger.debug("post-compression session ContextVar rebind failed", exc_info=True)
+            _mirror_result_onto_live_lists(self, result, messages, direct_path=direct_path)
+            _rebind_caller_session_context(self)
             return result
         finally:
             with fence_registration_lock:
