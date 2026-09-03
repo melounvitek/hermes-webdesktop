@@ -3,45 +3,29 @@
 from typing import Dict, List, Any, Set, Optional, Tuple
 
 
-# Shared tool list for CLI and all messaging platform toolsets.
-# Edit this once to update all platforms simultaneously.
+# Shared tool list for CLI and all messaging platform toolsets (edit once, all
+# platforms follow). Desktop GUI affordances are deliberately NOT here: they live
+# in `desktop_ui`/`project`, enabled per desktop-sourced session by the GUI gateway
+# (tui_gateway/server.py::_load_enabled_toolsets). HA, kanban and computer_use
+# entries are further gated by their tools' check_fns.
 _HERMES_CORE_TOOLS = [
-    # Web
     "web_search", "web_extract",
-    # Terminal + process management
     "terminal", "process_manage",
-    # Desktop GUI affordances (read_terminal, open_preview, project_*) are NOT
-    # here: they live in `desktop_ui`/`project`, enabled only by the GUI gateway
-    # per desktop-sourced session (tui_gateway/server.py::_load_enabled_toolsets).
-    # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
     "vision_analyze", "image_generate",
-    # Skills
     "skills_list", "skill_view", "skill_manage",
-    # Browser automation
     "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-    # replaces other tools when browser.backend is "browser-use"
-    "browser_exec",
-    # Text-to-speech
+    "browser_exec",  # replaces the other browser tools when browser.backend is "browser-use"
     "text_to_speech",
-    # Planning & memory
     "todo_list", "memory",
-    # Session history search
     "session_search",
-    # Clarifying questions
     "clarify",
-    # Code execution + delegation
     "execute_code", "delegate_task",
-    # Cronjob management
     "cronjob_manage",
-    # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-    # Kanban coordination — check_fn in tools/kanban_tools.py admits these only
-    # for kanban workers (HERMES_KANBAN_TASK) or profiles enabling `kanban`.
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_request_review",
     "kanban_request_changes",
@@ -49,17 +33,11 @@ _HERMES_CORE_TOOLS = [
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
     "kanban_attach", "kanban_attach_url", "kanban_attachments",
-    # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
 
 # Webhook payloads are untrusted third-party content: no file/system execution.
-_HERMES_WEBHOOK_SAFE_TOOLS = [
-    "web_search",
-    "web_extract",
-    "vision_analyze",
-    "clarify",
-]
+_HERMES_WEBHOOK_SAFE_TOOLS = ["web_search", "web_extract", "vision_analyze", "clarify"]
 
 
 def _ts(description, tools=(), includes=(), **extra):
@@ -303,8 +281,7 @@ TOOLSETS = {
     "hermes-yuanbao": {
         "description": "Yuanbao Bot 元宝消息平台工具集 - 群信息、成员查询、私聊、贴纸表情",
         "tools": _HERMES_CORE_TOOLS + [
-            "yb_query_group_info", "yb_query_group_members", "yb_send_dm",
-            "yb_search_sticker", "yb_send_sticker",
+            "yb_query_group_info", "yb_query_group_members", "yb_send_dm", "yb_search_sticker", "yb_send_sticker",
         ],
         "module": "tools.yuanbao_tools",
         "includes": [],
@@ -337,17 +314,20 @@ def _registry():
         return None
 
 
+def _registry_call(method: str, default):
+    """registry.<method>() or *default* when the registry is unavailable or the call fails."""
+    registry = _registry()
+    if registry is None:
+        return default
+    try:
+        return getattr(registry, method)()
+    except Exception:
+        return default
+
+
 def _registry_generation() -> Tuple[int, int]:
     reg = _registry()
     return (id(reg), getattr(reg, "_generation", 0)) if reg is not None else (0, 0)
-
-
-def _static_copy(toolset: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        **toolset,
-        "tools": list(toolset.get("tools", [])),
-        "includes": list(toolset.get("includes", [])),
-    }
 
 
 def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[str, Any]]:
@@ -360,7 +340,7 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
     """
     toolset = TOOLSETS.get(name)
     if not include_registry:
-        return _static_copy(toolset) if toolset else None
+        return {**toolset, "tools": list(toolset["tools"]), "includes": list(toolset["includes"])} if toolset else None
 
     registry = _registry()
     if registry is None:
@@ -399,12 +379,12 @@ def bundle_non_core_tools(toolset_name: str) -> Set[str]:
     ts_def = get_toolset(toolset_name)
     if not (ts_def and "tools" in ts_def):
         return set(resolve_toolset(toolset_name)) - core
-    to_remove = set(ts_def["tools"]) - core
+    to_remove = set(ts_def["tools"])
     for inc in ts_def.get("includes", []):
         inc_def = get_toolset(inc)
         if inc_def and "tools" in inc_def:
-            to_remove.update(set(inc_def["tools"]) - core)
-    return to_remove
+            to_remove.update(inc_def["tools"])
+    return to_remove - core
 
 
 # Memo keyed on (name, include_registry, id(registry), registry generation).
@@ -479,23 +459,11 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
 
 def _get_plugin_toolset_names() -> Set[str]:
     """Registry toolset names absent from the static TOOLSETS dict."""
-    registry = _registry()
-    if registry is None:
-        return set()
-    try:
-        return {n for n in registry.get_registered_toolset_names() if n not in TOOLSETS}
-    except Exception:
-        return set()
+    return {n for n in _registry_call("get_registered_toolset_names", ()) if n not in TOOLSETS}
 
 
 def _get_registry_toolset_aliases() -> Dict[str, str]:
-    registry = _registry()
-    if registry is None:
-        return {}
-    try:
-        return registry.get_registered_toolset_aliases()
-    except Exception:
-        return {}
+    return _registry_call("get_registered_toolset_aliases", {})
 
 
 def _display_alias(ts_name: str, aliases: Dict[str, str]) -> Optional[str]:
@@ -539,11 +507,7 @@ def create_custom_toolset(
     includes: List[str] = None
 ) -> None:
     """Register a runtime toolset in TOOLSETS."""
-    TOOLSETS[name] = {
-        "description": description,
-        "tools": tools or [],
-        "includes": includes or []
-    }
+    TOOLSETS[name] = _ts(description, tools or [], includes or [])
 
 
 def get_toolset_info(name: str) -> Dict[str, Any]:
