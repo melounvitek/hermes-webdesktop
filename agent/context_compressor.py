@@ -96,13 +96,8 @@ def _pinned_summary_call_kwargs() -> Dict[str, Any]:
 
 
 _SUMMARY_PERMANENT_QUOTA_MARKERS: tuple[str, ...] = (
-    "insufficient_quota",
-    "quota exceeded",
-    "quota_exceeded",
-    "out of funds",
-    "out of credits",
-    "out of credit",
-    "out of extra usage",
+    "insufficient_quota", "quota exceeded", "quota_exceeded", "out of funds", "out of credits",
+    "out of credit", "out of extra usage",
 )
 
 _SUMMARY_MISSING_CREDENTIAL_MARKERS: tuple[str, ...] = ("no api key was found", "no api key found")
@@ -752,10 +747,8 @@ _PRUNE_MIN_CHARS = 200
 # Sentinel ``user_response`` values from timeout / no-user clarify callbacks;
 # must never be quoted as a user answer.
 _CLARIFY_NON_RESPONSE_PREFIXES = (
-    "The user did not provide a response",
-    "[user did not respond",
-    "[clarify prompt could not be delivered",
-    "[oneshot mode:",
+    "The user did not provide a response", "[user did not respond",
+    "[clarify prompt could not be delivered", "[oneshot mode:",
 )
 
 
@@ -905,10 +898,8 @@ def _synthetic_user_row(content: str) -> bool:
         return True
     stripped = content.lstrip()
     _synthetic_prefixes = (
-        "[System:", "[CONTEXT", "[PRIOR CONTEXT", "[IMPORTANT: Background",
-        "[Your active task list", "[Planning state preserved",
-        "[ASYNC DELEGATION", "[OUT-OF-BAND",
-        "Cronjob Response:",
+        "[System:", "[CONTEXT", "[PRIOR CONTEXT", "[IMPORTANT: Background", "[Your active task list",
+        "[Planning state preserved", "[ASYNC DELEGATION", "[OUT-OF-BAND", "Cronjob Response:",
     )
     return stripped.startswith(_synthetic_prefixes)
 
@@ -1831,38 +1822,19 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             session_id = session_id or seed.get("session_id")
             trigger_source = trigger_source or seed.get("trigger_source")
         telemetry: Dict[str, Any] = {
-            "event": "compression_attempt",
-            "attempt_id": attempt_id or uuid.uuid4().hex,
-            "session_id": session_id or "",
-            "trigger_source": trigger_source or "unknown",
-            "main_provider": self.provider or "",
-            "main_model": self.model or "",
+            "event": "compression_attempt", "attempt_id": attempt_id or uuid.uuid4().hex,
+            "session_id": session_id or "", "trigger_source": trigger_source or "unknown",
+            "main_provider": self.provider or "", "main_model": self.model or "",
             "main_context_limit": _safe_int(self.context_length),
             "current_estimated_tokens": _safe_int(current_tokens),
-            "effective_threshold": _safe_int(self.threshold_tokens),
-            "protected_head_tokens": None,
-            "protected_tail_tokens": None,
-            "middle_window_tokens": None,
-            "prellm_skip_count": 0,
-            "aux_prompt_tokens": None,
-            "aux_output_reservation": None,
-            "aux_provider": "",
-            "aux_model": "",
-            "effective_aux_context": None,
-            "fit_margin": None,
-            "chunking": False,
-            "chunk_count": 0,
-            "total_duration_ms": None,
-            "aux_call_duration_ms": None,
-            "queue_wait_ms": None,
-            "prompt_build_ms": None,
-            "time_to_first_progress_ms": None,
-            "summary_generation_ms": None,
-            "commit_ms": None,
-            "fallback_used": False,
-            "commit_status": "unknown",
-            "split_status": "unknown",
-            "failure_class": None,
+            "effective_threshold": _safe_int(self.threshold_tokens), "protected_head_tokens": None,
+            "protected_tail_tokens": None, "middle_window_tokens": None, "prellm_skip_count": 0,
+            "aux_prompt_tokens": None, "aux_output_reservation": None, "aux_provider": "", "aux_model": "",
+            "effective_aux_context": None, "fit_margin": None, "chunking": False, "chunk_count": 0,
+            "total_duration_ms": None, "aux_call_duration_ms": None, "queue_wait_ms": None,
+            "prompt_build_ms": None, "time_to_first_progress_ms": None, "summary_generation_ms": None,
+            "commit_ms": None, "fallback_used": False, "commit_status": "unknown",
+            "split_status": "unknown", "failure_class": None,
         }
         self._active_compression_telemetry = telemetry
         self._last_compression_telemetry = telemetry
@@ -1945,11 +1917,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Resolve and cache the model's context length on first access."""
         if self._resolved_context_length is None:
             self._resolved_context_length = get_model_context_length(
-                self.model,
-                base_url=self.base_url,
-                api_key=self.api_key,
-                config_context_length=self._config_context_length,
-                provider=self.provider,
+                self.model, base_url=self.base_url, api_key=self.api_key,
+                config_context_length=self._config_context_length, provider=self.provider,
             )
             # Raise-only small-context floor; must run after context_length resolves and before threshold_tokens derives.
             self.threshold_percent = self._effective_threshold_percent(
@@ -2180,9 +2149,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     def _load_proactive_prune_rearm_tokens(self) -> None:
         """Restore the cache-boundary runway for a resumed durable session."""
         self._load_durable(
-            "_proactive_prune_rearm_tokens",
-            "get_session_model_config_value", "proactive prune runway", int, 0,
-            PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, 0,
+            "_proactive_prune_rearm_tokens", "get_session_model_config_value", "proactive prune runway",
+            int, 0, PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, 0,
         )
 
     def _clear_durable_proactive_prune_rearm(self) -> None:
@@ -2241,9 +2209,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._structural_no_op_backoff_until = time.monotonic() + self._STRUCTURAL_NO_OP_BACKOFF_SECONDS
         if not self.quiet_mode:
             logger.warning(
-                "Compression skipped (%s): retrying in %.0fs "
-                "(structural no-op backoff)",
-                reason,
+                "Compression skipped (%s): retrying in %.0fs (structural no-op backoff)", reason,
                 self._STRUCTURAL_NO_OP_BACKOFF_SECONDS,
             )
 
@@ -2274,8 +2240,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             # A pre-LLM feasibility skip is not a summary-quality verdict: it must neither extend nor reset the streak.
             if not self.quiet_mode:
                 logger.info(
-                    "Compaction completed via pre-LLM feasibility skip; "
-                    "fallback_compression_streak unchanged (%d)",
+                    "Compaction completed via pre-LLM feasibility skip; fallback_compression_streak unchanged (%d)",
                     self._fallback_compression_streak,
                 )
             return
@@ -2283,8 +2248,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._fallback_compression_streak += 1
             if not self.quiet_mode:
                 logger.warning(
-                    "Compaction completed with a deterministic fallback summary. "
-                    "fallback_compression_streak=%d",
+                    "Compaction completed with a deterministic fallback summary. fallback_compression_streak=%d",
                     self._fallback_compression_streak,
                 )
         elif self._fallback_compression_streak:
@@ -2822,9 +2786,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if _structural_remaining > 0:
             if not self.quiet_mode:
                 logger.debug(
-                    "Compression deferred — structural no-op backoff for "
-                    "%.0fs more",
-                    _structural_remaining,
+                    "Compression deferred — structural no-op backoff for %.0fs more", _structural_remaining,
                 )
             return True
         # Anti-thrash back-off must not be permanent: after _ANTI_THRASH_RECOVERY_SECONDS blocked, allow ONE
@@ -3096,9 +3058,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if session_db and session_id and not callable(getattr(session_db, "archive_and_compact", None)):
             return messages, 0
         pruned_msgs, pruned_count = self._prune_old_tool_results(
-            messages,
-            protect_tail_count=self.protect_last_n,
-            protect_tail_tokens=None,
+            messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None,
             min_prune_chars=self.proactive_prune_min_result_chars,
         )
         if not pruned_count:
@@ -3123,8 +3083,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 )
             except Exception as exc:
                 logger.warning(
-                    "Proactive tool-result prune DB commit failed; keeping the "
-                    "original transcript: %s",
+                    "Proactive tool-result prune DB commit failed; keeping the original transcript: %s",
                     exc,
                 )
                 return messages, 0
@@ -3476,8 +3435,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """
         self._summary_model_fallen_back = True
         logger.warning(
-            "Summary model '%s' %s (%s). "
-            "Falling back to main model '%s' for compression.",
+            "Summary model '%s' %s (%s). Falling back to main model '%s' for compression.",
             self.summary_model, reason, e, self.model,
         )
         self._last_aux_model_failure_error = _short_error_text(e)
@@ -3953,9 +3911,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         elif _is_empty_content:
             self._last_summary_empty_content_failure = True
         logger.warning(
-            "Failed to generate context summary: %s. "
-            "Further summary attempts paused for %d seconds.",
-            e,
+            "Failed to generate context summary: %s. Further summary attempts paused for %d seconds.", e,
             _transient_cooldown,
         )
         return None
@@ -4655,10 +4611,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             from agent.message_sanitization import stale_thinking_reaches_wire
 
             return stale_thinking_reaches_wire(
-                getattr(self, "api_mode", "") or "",
-                getattr(self, "provider", "") or "",
-                getattr(self, "model", "") or "",
-                getattr(self, "base_url", "") or "",
+                getattr(self, "api_mode", "") or "", getattr(self, "provider", "") or "",
+                getattr(self, "model", "") or "", getattr(self, "base_url", "") or "",
             )
         except Exception:
             return False
@@ -4834,9 +4788,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         else:
             self._summary_has_user_turn = real_user_present
         return _HandoffScan(
-            turns_to_summarize=turns_to_summarize,
-            summary_indices=summary_indices,
-            tail_start=tail_start,
+            turns_to_summarize=turns_to_summarize, summary_indices=summary_indices, tail_start=tail_start,
             previous_summary_before=_previous_summary_before_scan,
             has_user_turn_before=_summary_has_user_turn_before_scan,
         )
@@ -5105,8 +5057,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             suffix = "\n\n" + _MERGED_SUMMARY_DELIMITER + "\n\n" + summary + "\n\n" + _SUMMARY_END_MARKER
             msg["content"] = _append_text_to_content(
                 _append_text_to_content(old_content, suffix, prepend=False),
-                _MERGED_PRIOR_CONTEXT_HEADER + "\n",
-                prepend=True,
+                _MERGED_PRIOR_CONTEXT_HEADER + "\n", prepend=True,
             )
         # Frontends use this to detect a summary-prefixed message.
         msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
@@ -5210,8 +5161,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         compress_start, compress_end = self._compress_window(messages)
         if compress_start >= compress_end:
             self._record_compression_regions(
-                head_messages=messages[:compress_start],
-                middle_messages=[],
+                head_messages=messages[:compress_start], middle_messages=[],
                 tail_messages=messages[compress_end:],
             )
             self._structural_no_op_result(
@@ -5230,8 +5180,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         turns_to_summarize = scan.turns_to_summarize
 
         self._record_compression_regions(
-            head_messages=messages[:compress_start],
-            middle_messages=turns_to_summarize,
+            head_messages=messages[:compress_start], middle_messages=turns_to_summarize,
             tail_messages=messages[compress_end:],
         )
         telemetry["chunk_count"] = 1 if turns_to_summarize else 0
@@ -5259,10 +5208,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             # Focus-topic derivation scans user turns; only pay when a summary is generated.
             try:
                 summary = self._generate_summary(
-                    turns_to_summarize,
-                    focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
-                    memory_context=memory_context,
-                    bypass_cooldown=bypass_cooldown,
+                    turns_to_summarize, focus_topic=focus_topic or self._derive_auto_focus_topic(messages),
+                    memory_context=memory_context, bypass_cooldown=bypass_cooldown,
                 )
             except AuxiliaryExplicitCancellation:
                 # Cancellation is a true no-op: restore the self-heal scan's mutation before the
@@ -5385,10 +5332,8 @@ def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], 
     handoff: Optional[Dict[str, Any]] = None
     if is_summary:
         handoff = {
-            "role": "user",
-            "content": _handoff_only_content(message.get("content")),
-            COMPRESSED_SUMMARY_METADATA_KEY: True,
-            "display_kind": "hidden",
+            "role": "user", "content": _handoff_only_content(message.get("content")),
+            COMPRESSED_SUMMARY_METADATA_KEY: True, "display_kind": "hidden",
         }
         if COMPRESSED_SUMMARY_HAS_USER_TURN_KEY in message:
             handoff[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = bool(
