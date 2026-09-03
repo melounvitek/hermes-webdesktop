@@ -1075,12 +1075,10 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
 
 def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:
     hint_fn = getattr(agent, "_codex_silent_hang_hint", None)
-    if not callable(hint_fn):
-        return None
-    try:
-        return hint_fn(model=api_kwargs.get("model"))
-    except Exception:
-        return None
+    with contextlib.suppress(Exception):
+        if callable(hint_fn):
+            return hint_fn(model=api_kwargs.get("model"))
+    return None
 
 
 class _NonStreamRequest:
@@ -1818,8 +1816,8 @@ def _fallback_chain_exhausted(agent, reason: "FailoverReason | None") -> bool:
     short cooldown so next turn's restore_primary_runtime stays gated instead of replaying the whole
     context across every provider again."""
     if agent._fallback_chain and reason not in _RATE_LIMIT_FAILOVER_REASONS:
-        existing = getattr(agent, "_rate_limited_until", 0) or 0
-        agent._rate_limited_until = max(existing, time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S)
+        agent._rate_limited_until = max(
+            getattr(agent, "_rate_limited_until", 0) or 0, time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S)
     return False
 
 
