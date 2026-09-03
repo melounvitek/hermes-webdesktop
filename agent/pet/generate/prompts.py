@@ -10,9 +10,8 @@ hatched pet is a valid ``petdex submit`` spritesheet.
 
 from __future__ import annotations
 
-# What each petdex/Codex state should depict. Phrased to avoid the common
-# sprite-gen failure modes (detached effects, motion lines, shadows). ``running``
-# is the *working* state (in place); ``running-right``/``-left`` are the walk cycles.
+# What each state depicts, phrased to avoid sprite-gen failure modes (detached
+# effects, motion lines, shadows). ``running`` = working in place; ``-right/-left`` = walk.
 STATE_ACTIONS: dict[str, str] = {
     "idle": "a calm idle loop: subtle breathing, a tiny blink or gentle bob, no big gestures",
     "running-right": (
@@ -73,27 +72,23 @@ def style_hint(style: str | None) -> str:
     return _STYLE_HINTS.get((style or "auto").strip().lower(), "")
 
 
-# Row strips are generated on the wider landscape canvas (imagegen.generate /
-# orchestrate); used here only to cite concrete pixel numbers.
-_ASSUMED_STRIP_WIDTH = 1536
+_ASSUMED_STRIP_WIDTH = 1536  # landscape row canvas; used only to cite concrete pixel numbers
 
 
 def _spacing_spec(frame_count: int) -> tuple[int, int]:
     """(per-pose width px, gap px) for a row of *frame_count* poses.
 
-    Pixel counts alone don't hold — the model fills each slot edge-to-edge with
-    the full wingspan. The lever that works is proportional containment on a wide
-    canvas: each pose gets an equal cell and the ENTIRE silhouette stays inside it.
-    ~70% occupancy on the 1536px strip still leaves a generous gutter, no shrinking.
+    Pixel counts alone don't hold — the model fills each slot edge-to-edge. The lever
+    that works is proportional containment: equal cells, whole silhouette inside,
+    ~70% occupancy (still a generous gutter on 1536px, no shrinking).
     """
     slots = max(1, frame_count)
     slot_w = _ASSUMED_STRIP_WIDTH / slots
     return round(slot_w * 0.7), max(48, round(slot_w * 0.3))
 
 
-# Per-draft nudges so the 4 base options are actually distinct — gpt-image returns
-# near-duplicates for a single prompt. Vary the *look* (palette, build, expression,
-# accents), NOT the pose, so the chosen base still grounds consistent rows.
+# Per-draft nudges so base options are distinct (gpt-image near-duplicates one
+# prompt). Vary the *look*, NOT the pose, so the base still grounds consistent rows.
 BASE_VARIATIONS: tuple[str, ...] = (
     "",
     "a distinctly different colour palette and markings",
@@ -105,10 +100,7 @@ BASE_VARIATIONS: tuple[str, ...] = (
 
 
 def build_base_prompt(concept: str, *, style: str | None = "auto", variation: str = "") -> str:
-    """The base look: a single, clean, centered full-body mascot.
-
-    *variation* differentiates one draft from the next (see :data:`BASE_VARIATIONS`).
-    """
+    """The base look: a single, clean, centered full-body mascot; *variation* differentiates drafts."""
     concept = (concept or "a distinctive mascot creature").strip()
     nudge = f" Make this design distinct: {variation}." if variation else ""
     return (
@@ -127,11 +119,7 @@ def build_base_prompt(concept: str, *, style: str | None = "auto", variation: st
 
 
 def build_row_prompt(state: str, frame_count: int, concept: str, *, style: str | None = "auto") -> str:
-    """A row strip: *frame_count* poses of the SAME character, left→right.
-
-    The attached base image is the identity source of truth; the prompt locks
-    species, palette, face, and props to it.
-    """
+    """A row strip: *frame_count* poses of the SAME character, left→right, identity locked to the attached base image."""
     action = STATE_ACTIONS.get(state, "a simple idle pose")
     concept = (concept or "the mascot").strip()
     pose_px, gap_px = _spacing_spec(frame_count)

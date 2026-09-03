@@ -1,10 +1,9 @@
 """On-disk pet store — install / list / resolve pets.
 
-Pets live under ``get_hermes_home()/pets/<slug>/`` (profile-scoped; we do NOT
-reuse petdex's ``~/.codex/pets``, which the petdex CLI owns). Each pet dir holds
-``pet.json`` ({id, displayName, description, spritesheetPath}) plus
-``spritesheet.webp`` (or .png). The active pet is resolved from the
-caller-supplied ``display.pet.slug`` so this module stays free of the config loader.
+Pets live under ``get_hermes_home()/pets/<slug>/`` (profile-scoped; NOT petdex's
+``~/.codex/pets``, which its CLI owns): ``pet.json`` ({id, displayName,
+description, spritesheetPath}) plus ``spritesheet.webp`` (or .png). The active
+pet comes from the caller-supplied ``display.pet.slug`` (no config loader here).
 """
 
 from __future__ import annotations
@@ -91,11 +90,7 @@ def _resolve_spritesheet(directory: Path, meta: dict) -> Path:
 
 
 def _safe_slug(slug: str) -> str:
-    """Normalize a slug to a single bare path segment.
-
-    Slugs index ``pets_dir()/<slug>/`` for load/remove, so separators (``../``,
-    absolute paths) must not escape the pets directory; ``.``/``..`` are rejected.
-    """
+    """Normalize a slug to one bare path segment so ``pets_dir()/<slug>`` can never escape the pets directory."""
     segment = Path(str(slug).strip()).name
     return "" if segment in ("", ".", "..") else segment
 
@@ -142,18 +137,13 @@ def resolve_active_pet(configured_slug: str | None = None) -> InstalledPet | Non
 
 
 def install_pet(slug: str, *, force: bool = False, timeout: float = _DOWNLOAD_TIMEOUT) -> InstalledPet:
-    """Download *slug* from the manifest into the pets directory.
-
-    Idempotent: a fully-installed pet is returned as-is unless *force*. Raises
-    :class:`PetStoreError` / :class:`~agent.pet.manifest.ManifestError` on failure.
-    """
+    """Download *slug* from the manifest; idempotent unless *force*. Raises :class:`PetStoreError` / ``ManifestError``."""
     from agent.pet.manifest import find_entry
 
     slug = _safe_slug(slug)
     if not slug:
         raise PetStoreError("invalid pet slug")
-    existing = _usable_pet(slug)
-    if existing and not force:
+    if not force and (existing := _usable_pet(slug)):
         return existing
     entry = find_entry(slug, timeout=timeout)
     if entry is None:
@@ -178,7 +168,7 @@ def install_pet(slug: str, *, force: bool = False, timeout: float = _DOWNLOAD_TI
         except Exception as exc:  # noqa: BLE001 - non-fatal, fall back below
             logger.debug("pet.json fetch failed for %s: %s", slug, exc)
     meta = meta or {"id": slug, "displayName": entry.display_name, "description": ""}
-    meta["spritesheetPath"] = sprite_path.name
+    meta["spritesheetPath"] = sprite_path.name  # key order matters: pet.json is written verbatim
     meta.setdefault("id", slug)
     meta.setdefault("displayName", entry.display_name)
     _write_pet_json(directory, meta)
@@ -211,9 +201,8 @@ def _write_spritesheet(source, dest: Path) -> None:
 def register_local_pet(spritesheet, *, slug: str, display_name: str = "", description: str = "") -> InstalledPet:
     """Write a locally-generated pet (PIL image, WebP/PNG bytes, or path) into the store.
 
-    It appears in :func:`installed_pets` immediately and, because :func:`install_pet`
-    returns an on-disk pet before consulting the manifest, can be adopted without
-    a manifest entry.
+    Appears in :func:`installed_pets` immediately; :func:`install_pet` returns on-disk
+    pets before consulting the manifest, so no manifest entry is needed.
     """
     slug = slugify(slug)
     directory = pets_dir() / slug
@@ -223,7 +212,6 @@ def register_local_pet(spritesheet, *, slug: str, display_name: str = "", descri
         _write_spritesheet(spritesheet, sprite_path)
     except Exception as exc:  # noqa: BLE001 - normalize to one error type
         raise PetStoreError(f"could not write spritesheet for '{slug}': {exc}") from exc
-
     meta = {"id": slug, "displayName": display_name or slug, "description": description or "", "spritesheetPath": sprite_path.name}
     _write_pet_json(directory, {**meta, "createdBy": "generator"})
     return _usable_pet(slug, f"register of generated pet '{slug}' did not produce a spritesheet")
@@ -236,7 +224,6 @@ def export_pet(slug: str) -> tuple[str, bytes]:
     # Traversal guard: the target must be a direct child of pets_dir.
     if directory.resolve().parent != root.resolve() or not directory.is_dir():
         raise PetStoreError(f"pet '{slug}' is not installed")
-
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(directory.iterdir()):
@@ -269,12 +256,11 @@ def _thumb_source_bytes(slug: str, source_url: str, timeout: float) -> bytes | N
 
 
 def thumbnail_png(slug: str, *, source_url: str = "", timeout: float = 30.0) -> bytes | None:
-    """Small idle-frame (top-left cell) PNG for *slug*, cached on disk.
+    """Small idle-frame (top-left cell) PNG for *slug*, cached on disk; ``None`` on any failure.
 
-    Source: the installed spritesheet, else *source_url* only when it points at
-    petdex (the gateway never fetches an arbitrary client URL). ``None`` when no
-    usable source or Pillow/network fails. Server-side so the result rides the
-    authenticated gateway as a same-origin data URL, sidestepping CSP/hotlink limits.
+    Source: the installed sheet, else *source_url* only when petdex-hosted (the gateway
+    never fetches arbitrary client URLs). Server-side so it rides the authenticated
+    gateway as a same-origin data URL, sidestepping CSP/hotlink limits.
     """
     slug = slug.strip()
     if not slug:
@@ -320,10 +306,9 @@ def remove_pet(slug: str) -> bool:
 def rename_pet(slug: str, display_name: str) -> str | None:
     """Rename a pet's ``displayName`` AND realign its slug/dir to match.
 
-    Generated pets hatch under a provisional prompt-derived slug; naming on the
-    reveal screen makes that name the real identity. The dir (and cached thumb)
-    moves to ``slugify(name)`` when that's a free, different slug; otherwise the
-    slug stays. Returns the resulting slug, or ``None`` on failure.
+    Generated pets hatch under a provisional slug; naming makes that the identity.
+    The dir (and thumb) moves to ``slugify(name)`` when that's a free, different
+    slug. Returns the resulting slug, or ``None`` on failure.
     """
     slug = _safe_slug(slug)
     display_name = (display_name or "").strip()

@@ -38,12 +38,8 @@ ATLAS_HEIGHT = len(ROW_SPECS) * CELL_HEIGHT
 
 _ALPHA_FLOOR = 16  # alpha at/below which a pixel is "background"
 _CELL_PAD = 10  # padding kept around a fitted sprite
-# Normalized cells fill like real petdex pets (~5px from the edges); the width
-# clamp, not the pad, prevents clipping.
-_NORMALIZE_PAD = 14
-# Adjacent-pose bleed shows as a small separated lobe; keep sizeable lobes so a
-# legitimate wide pose isn't punished.
-_SIDE_LOBE_RATIO = 0.18
+_NORMALIZE_PAD = 14  # normalized cells fill like real petdex pets (~5px from the edges)
+_SIDE_LOBE_RATIO = 0.18  # adjacent-pose bleed is a small lobe; sizeable lobes (wide poses) survive
 _NEIGHBOURS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _NEAREST = Image.Resampling.NEAREST  # interpolating resamples blur hard pixel-art edges
 
@@ -97,7 +93,7 @@ def _border_flood(w: int, h: int, visited: bytearray, accept) -> list[tuple[int,
     """Flood from every border pixel passing *accept* (edge-connected region only)."""
     border = [(x, y) for x in range(w) for y in (0, h - 1)] + [(x, y) for y in range(h) for x in (0, w - 1)]
     seeds: list[tuple[int, int]] = []
-    for x, y in border:
+    for x, y in border:  # corners appear twice in ``border``; the visited mark dedupes them
         if not visited[y * w + x] and accept(x, y):
             visited[y * w + x] = 1
             seeds.append((x, y))
@@ -341,6 +337,13 @@ def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[i
     Merges when vertical spans overlap and the horizontal gap is tiny relative to
     the component size; never bridges the larger gaps between separate poses.
     """
+
+    def related(a, b) -> bool:
+        (al, at, ar, ab), (bl, bt, br, bb) = a, b
+        v_overlap, min_h = max(0, min(ab, bb) - max(at, bt)), max(1, min(ab - at, bb - bt))
+        gap, min_w = max(0, max(al, bl) - min(ar, br)), max(1, min(ar - al, br - bl))
+        return v_overlap >= min_h * 0.45 and gap <= max(14, min_w * 0.22)
+
     boxes = list(boxes)
     changed = True
     while changed:
@@ -350,19 +353,13 @@ def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[i
         for i, a in enumerate(boxes):
             if used[i]:
                 continue
-            al, at, ar, ab = a
             used[i] = True
             for j in range(i + 1, len(boxes)):
-                if used[j]:
-                    continue
-                bl, bt, br, bb = boxes[j]
-                v_overlap, min_h = max(0, min(ab, bb) - max(at, bt)), max(1, min(ab - at, bb - bt))
-                gap, min_w = max(0, max(al, bl) - min(ar, br)), max(1, min(ar - al, br - bl))
-                if v_overlap >= min_h * 0.45 and gap <= max(14, min_w * 0.22):
-                    al, at, ar, ab = min(al, bl), min(at, bt), max(ar, br), max(ab, bb)
-                    used[j] = True
-                    changed = True
-            merged.append((al, at, ar, ab))
+                if not used[j] and related(a, boxes[j]):
+                    b = boxes[j]
+                    a = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                    used[j] = changed = True
+            merged.append(a)
         boxes = merged
     return boxes
 

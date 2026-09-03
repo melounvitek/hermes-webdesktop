@@ -1,11 +1,11 @@
 """Decode a pet spritesheet and encode frames for a terminal.
 
-Shared by the base CLI (writes escape bytes to stdout) and the TUI (ships the
-encoded bytes to Ink) so decode + capability detection + protocol encoding
-exist once. Output modes, in fidelity order: ``kitty`` (kitty, Ghostty,
-WezTerm), ``iterm`` (iTerm2, WezTerm), ``sixel`` (xterm -ti vt340, foot,
-mlterm, …), ``unicode`` (24-bit half-blocks; any truecolor terminal). Missing
-Pillow or spritesheet degrades to an empty string rather than raising.
+Shared by the base CLI (escape bytes to stdout) and the TUI (bytes shipped to
+Ink) so decode + capability detection + protocol encoding exist once. Modes in
+fidelity order: ``kitty`` (kitty, Ghostty, WezTerm), ``iterm`` (iTerm2, WezTerm),
+``sixel`` (xterm -ti vt340, foot, mlterm, …), ``unicode`` (24-bit half-blocks).
+Missing Pillow or spritesheet degrades to an empty string rather than raising
+(PIL is imported lazily on purpose).
 """
 
 from __future__ import annotations
@@ -34,14 +34,9 @@ def _is_wezterm() -> bool:
 
 
 def detect_terminal_graphics() -> str:
-    """Best-effort richest protocol from env vars only (never a DA1 query that could hang a pipe).
-
-    Returns ``kitty`` / ``iterm`` / ``sixel`` / ``unicode``; unknown terminals get
-    ``unicode``, which works anywhere with truecolor.
-    """
+    """Richest protocol (``kitty``/``iterm``/``sixel``/``unicode``) from env vars only — never a DA1 query that could hang a pipe."""
     term = os.environ.get("TERM", "").lower()
     term_program = os.environ.get("TERM_PROGRAM", "").lower()
-
     # VS Code/Cursor set TERM_PROGRAM=vscode but don't scrub inherited
     # ITERM_SESSION_ID/KITTY_WINDOW_ID; trusting those emits a protocol xterm.js
     # can't show (blank frame). Inline images there are opt-in, so default to
@@ -60,35 +55,27 @@ def detect_terminal_graphics() -> str:
 
 
 def supports_kitty_placeholders() -> bool:
-    """True when the terminal paints kitty Unicode placeholders (U+10EEEE).
-
-    Narrower than ``detect_terminal_graphics() == "kitty"``: WezTerm accepts
-    kitty APC transmits but lacks the placeholder grid (cells render as tofu).
-    """
+    """True when the terminal paints kitty Unicode placeholders; WezTerm speaks kitty APC but renders placeholders as tofu."""
     return detect_terminal_graphics() == "kitty" and not _is_wezterm()
 
 
 def resolve_mode(configured: str | None, *, stream=None) -> str:
     """Effective render mode from ``display.pet.render_mode`` + env; ``off`` when not a TTY."""
     mode = (configured or "auto").strip().lower()
-    if mode not in RENDER_MODES:
-        mode = "auto"
+    mode = mode if mode in RENDER_MODES else "auto"
     if mode == "off":
         return "off"
-
     stream = stream or sys.stdout
     try:
         if not (hasattr(stream, "isatty") and stream.isatty()):
             return "off"
     except (ValueError, OSError):
         return "off"
-
     return detect_terminal_graphics() if mode == "auto" else mode
 
 
-# Max alpha at/below which a frame is blank padding. petdex sheets are
-# left-packed, so a state with fewer real frames than FRAMES_PER_STATE has
-# fully transparent trailing cells; animating into one flashes the pet blank.
+# Max alpha at/below which a frame is blank padding: petdex sheets are left-packed,
+# so short states have transparent trailing cells; animating into one flashes blank.
 _BLANK_ALPHA = 8
 
 
@@ -98,21 +85,14 @@ def _frame_is_blank(frame) -> bool:
 
 @lru_cache(maxsize=16)
 def _raw_frames(sheet_path: str, state_value: str, frame_w: int, frame_h: int, frames_per_state: int) -> tuple:
-    """Cropped RGBA frames for one state row, stopping at the first blank column.
-
-    Cached; returns ``()`` on any decode failure.
-    """
+    """Cropped RGBA frames for one state row, stopping at the first blank column; ``()`` on any decode failure."""
     try:
         from PIL import Image
 
         sheet = Image.open(Path(sheet_path)).convert("RGBA")
-        cols = max(1, sheet.width // frame_w)
-        rows = max(1, sheet.height // frame_h)
-        top = state_row_index(state_value, rows) * frame_h
+        cols, rows = max(1, sheet.width // frame_w), max(1, sheet.height // frame_h)
         # Clamp to the sheet: some pets ship fewer rows than the taxonomy reserves.
-        if top + frame_h > sheet.height:
-            top = max(0, sheet.height - frame_h)
-
+        top = min(state_row_index(state_value, rows) * frame_h, max(0, sheet.height - frame_h))
         frames = []
         for i in range(min(frames_per_state, cols)):
             frame = sheet.crop((i * frame_w, top, (i + 1) * frame_w, top + frame_h))
@@ -140,10 +120,7 @@ def state_frame_counts(
     sheet_path: str | Path, *, frame_w: int = FRAME_W, frame_h: int = FRAME_H, frames_per_state: int = FRAMES_PER_STATE
 ) -> dict[str, int]:
     """Each driven :class:`PetState` → its real (padding-trimmed) frame count (shipped to the desktop canvas)."""
-    return {
-        state.value: len(_raw_frames(str(sheet_path), state.value, frame_w, frame_h, frames_per_state))
-        for state in PetState
-    }
+    return {s.value: len(_raw_frames(str(sheet_path), s.value, frame_w, frame_h, frames_per_state)) for s in PetState}
 
 
 def _png_b64(frame) -> str:
@@ -153,11 +130,7 @@ def _png_b64(frame) -> str:
 
 
 def _crop_frames_to_alpha_union(frames):
-    """Crop every frame to the union opaque bbox (a stable trim across the animation).
-
-    kitty paints the whole transmitted rectangle, transparent margins included,
-    so an untrimmed pet looks small and adrift inside its cell box.
-    """
+    """Crop every frame to the union opaque bbox: kitty paints transparent margins too, so an untrimmed pet looks small and adrift."""
     boxes = [b for b in (f.getchannel("A").getbbox() for f in frames) if b]
     if not boxes:
         return frames
@@ -165,12 +138,10 @@ def _crop_frames_to_alpha_union(frames):
     return [f.crop(union) for f in frames]
 
 
-# Nominal terminal cell size in pixels. kitty fits an image to its cell
-# rectangle preserving aspect, so a frame that isn't a whole cell multiple
-# rounds up, clipping the bottom row ("clipped feet") and letterboxing a blank
-# row. Snapping to an exact multiple avoids that (cf. ratatui-image #57).
-_CELL_W = 8
-_CELL_H = 16
+# Nominal terminal cell size in pixels. kitty fits an image to its cell rectangle
+# preserving aspect, so a frame that isn't a whole cell multiple rounds up, clipping
+# the bottom row ("clipped feet"); snapping to an exact multiple avoids that.
+_CELL_W, _CELL_H = 8, 16
 
 
 def _snap_frames_to_cell_grid(frames):
@@ -181,18 +152,14 @@ def _snap_frames_to_cell_grid(frames):
 
     w, h = frames[0].size
     target = (max(1, round(w / _CELL_W)) * _CELL_W, max(1, round(h / _CELL_H)) * _CELL_H)
-    if (w, h) == target:
-        return frames
-    return [f.resize(target, Image.LANCZOS) for f in frames]
+    return frames if (w, h) == target else [f.resize(target, Image.LANCZOS) for f in frames]
 
 
 def _kitty_apc(ctrl: str, data: str) -> str:
-    """kitty APC escape for *data*, chunked into ≤4096-byte ``m`` pieces."""
+    """kitty APC escape for *data*, chunked into ≤4096-byte ``m`` pieces (``m=1`` = more chunks follow)."""
     pieces = [data[i : i + 4096] for i in range(0, len(data), 4096)] or [""]
     last = len(pieces) - 1
-    return "".join(
-        f"\x1b_G{ctrl + ',' if i == 0 else ''}m={0 if i == last else 1};{piece}\x1b\\" for i, piece in enumerate(pieces)
-    )
+    return "".join(f"\x1b_G{ctrl + ',' if i == 0 else ''}m={int(i != last)};{piece}\x1b\\" for i, piece in enumerate(pieces))
 
 
 def _encode_kitty(frame, *, cell_cols: int | None = None, cell_rows: int | None = None) -> str:
@@ -201,17 +168,13 @@ def _encode_kitty(frame, *, cell_cols: int | None = None, cell_rows: int | None 
     return _kitty_apc(ctrl, _png_b64(frame))
 
 
-# kitty Unicode placeholders. Ink owns the screen and measures every cell's width, so it can't host raw
-# kitty image escapes. The placeholder protocol is the grid-safe path: transmit
-# once as a virtual placement (U=1), then print ordinary-width placeholder cells
-# (U+10EEEE + diacritics) whose foreground color encodes the image id; Ink counts
-# them as width-1 text and the terminal paints the image underneath.
+# kitty Unicode placeholders: Ink owns the screen and measures every cell, so it
+# can't host raw kitty image escapes. Transmit once as a virtual placement (U=1),
+# then print ordinary-width placeholder cells (U+10EEEE + row diacritic) whose
+# foreground color encodes the image id; the terminal paints the image underneath.
 #   https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders
-
 _KITTY_PLACEHOLDER = "\U0010eeee"
-
-# Row/column diacritics, index → diacritic, verbatim from kitty's
-# gen/rowcolumn-diacritics.txt. We only ever need the row index.
+# Row diacritics by index, verbatim from kitty's gen/rowcolumn-diacritics.txt.
 _ROWCOL_DIACRITICS: tuple[int, ...] = (
     0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365,
     0x0366, 0x0367, 0x0368, 0x0369, 0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
@@ -242,10 +205,7 @@ def kitty_color_hex(image_id: int) -> str:
 
 
 def kitty_placeholder_rows(cols: int, rows: int) -> list[str]:
-    """Placeholder text grid: first cell carries the row diacritic, the rest auto-increment the column.
-
-    The foreground color (image id) is applied by the caller / Ink, not here.
-    """
+    """Placeholder text grid: first cell carries the row diacritic, the rest auto-increment the column (fg color applied by Ink)."""
     cols = max(1, cols)
     return [
         _KITTY_PLACEHOLDER + chr(_ROWCOL_DIACRITICS[min(r, len(_ROWCOL_DIACRITICS) - 1)]) + _KITTY_PLACEHOLDER * (cols - 1)
@@ -254,10 +214,7 @@ def kitty_placeholder_rows(cols: int, rows: int) -> list[str]:
 
 
 def _encode_kitty_virtual(frame, *, image_id: int, cols: int, rows: int) -> str:
-    """Transmit a frame as a kitty virtual placement (``U=1``; ``q=2`` mutes replies that would corrupt Ink's output).
-
-    Re-sending with the same ``i`` replaces the image, so static placeholder cells animate underneath.
-    """
+    """kitty virtual placement (``U=1``; ``q=2`` mutes replies that would corrupt Ink). Re-sending the same ``i`` animates in place."""
     return _kitty_apc(f"a=T,U=1,i={image_id},c={cols},r={rows},f=100,q=2", _png_b64(frame))
 
 
@@ -277,10 +234,7 @@ def _sixel_runs(chars: list[str]) -> str:
 
 
 def _encode_sixel(frame) -> str:
-    """DEC sixel via a compact hand-rolled encoder (Pillow has no sixel writer).
-
-    Quantizes to ≤255 adaptive colors; transparent pixels are skipped (render as background).
-    """
+    """DEC sixel via a compact hand-rolled encoder (Pillow has none); ≤255 adaptive colors, transparent pixels skipped."""
     from PIL import Image
 
     pal = frame.convert("RGB").quantize(colors=255, method=Image.MEDIANCUT)
@@ -288,7 +242,6 @@ def _encode_sixel(frame) -> str:
     px = pal.load()
     alpha = frame.getchannel("A").load()
     w, h = pal.size
-
     out = ["\x1bP0;1;0q", '"1;1;%d;%d' % (w, h)]
     used = sorted({px[x, y] for y in range(h) for x in range(w)})
     for idx in used:  # color registers on a 0..100 scale
@@ -301,27 +254,20 @@ def _encode_sixel(frame) -> str:
             chars = [chr(63 + sum(1 << (y - band) for y in ys if alpha[x, y] > 32 and px[x, y] == color_idx)) for x in range(w)]
             out.append("#%d" % color_idx + _sixel_runs(chars) + "$")  # carriage return within band
         out.append("-")  # next band
-    out.append("\x1b\\")
-    return "".join(out)
+    return "".join(out) + "\x1b\\"
 
 
 _HALF_BLOCK = "▀"
-
 # A single half-block cell: top pixel + bottom pixel as (r, g, b, a) tuples.
 Cell = tuple[tuple[int, int, int, int], tuple[int, int, int, int]]
 
 
 def _downscale_cells(frame, *, target_cols: int) -> list[list[Cell]]:
-    """Downscale a frame to rows of half-block cells (one terminal row = two pixel rows).
-
-    Framework-neutral representation shared by the ANSI encoder (CLI) and the
-    structured ``cells`` API (Ink).
-    """
+    """Downscale to rows of half-block cells (one terminal row = two pixel rows); shared by the ANSI encoder and Ink."""
     from PIL import Image
 
     target_cols = max(4, target_cols)
-    aspect = frame.height / max(1, frame.width)
-    target_rows = max(2, int(round(target_cols * aspect * 0.5)) * 2)
+    target_rows = max(2, int(round(target_cols * (frame.height / max(1, frame.width)) * 0.5)) * 2)
     px = frame.resize((target_cols, target_rows), Image.LANCZOS).convert("RGBA").load()
     return [
         [(px[x, y], px[x, y + 1] if y + 1 < target_rows else (0, 0, 0, 0)) for x in range(target_cols)]
@@ -331,32 +277,26 @@ def _downscale_cells(frame, *, target_cols: int) -> list[list[Cell]]:
 
 def _encode_unicode(frame, *, target_cols: int) -> str:
     """Truecolor ANSI half-blocks (one char = 2 vertical pixels)."""
-    lines: list[str] = []
-    for row in _downscale_cells(frame, target_cols=target_cols):
-        cells = [
-            "\x1b[0m " if ta < 32 and ba < 32 else f"\x1b[38;2;{tr};{tg};{tb}m\x1b[48;2;{br};{bg};{bb}m{_HALF_BLOCK}"
-            for (tr, tg, tb, ta), (br, bg, bb, ba) in row
-        ]
-        lines.append("".join(cells) + "\x1b[0m")
-    return "\n".join(lines)
+
+    def cell(top, bottom) -> str:
+        (tr, tg, tb, ta), (br, bg, bb, ba) = top, bottom
+        return "\x1b[0m " if ta < 32 and ba < 32 else f"\x1b[38;2;{tr};{tg};{tb}m\x1b[48;2;{br};{bg};{bb}m{_HALF_BLOCK}"
+
+    return "\n".join("".join(cell(t, b) for t, b in row) + "\x1b[0m" for row in _downscale_cells(frame, target_cols=target_cols))
 
 
 def _cell_box(frame) -> tuple[int, int]:
     """Terminal cell box (~8×16 px per cell) for a scaled frame.
 
-    kitty stretches the image to fill ``c``×``r`` cells, so this must track
-    the scaled pixel size, not a native-aspect column count (that upscales small pets).
+    kitty stretches the image to fill ``c``×``r`` cells, so this must track the
+    scaled pixel size, not a native-aspect column count (that upscales small pets).
     """
-    return max(1, frame.width // 8), max(1, frame.height // 16)
+    return max(1, frame.width // _CELL_W), max(1, frame.height // _CELL_H)
 
 
 @dataclass(eq=False)
 class PetRenderer:
-    """Holds a pet's spritesheet and yields encoded frames per (state, index).
-
-    Construct once per pet, then call :meth:`frame` on an animation timer;
-    decoded frames are cached so repeated calls are cheap.
-    """
+    """Holds a pet's spritesheet and yields encoded frames per (state, index); decoded frames are cached."""
 
     spritesheet: str | Path
     _: KW_ONLY
@@ -392,11 +332,7 @@ class PetRenderer:
         return _downscale_cells(frames[index % len(frames)], target_cols=cols or self.unicode_cols)
 
     def kitty_payload(self, state: PetState | str, *, image_id: int) -> dict | None:
-        """kitty Unicode-placeholder payload ``{cols, rows, placeholder, frames}`` for one state.
-
-        ``frames`` are transmit escapes (all reusing ``image_id``); ``placeholder``
-        is the static text grid Ink paints. ``None`` when no frame is available.
-        """
+        """kitty placeholder payload ``{cols, rows, placeholder, frames}`` (transmit escapes + static text grid); ``None`` if no frames."""
         frames = self._frames(state)
         if not frames:
             return None

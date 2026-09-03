@@ -1,11 +1,9 @@
 """Thin image-generation layer for pet sprites.
 
-Wraps the active :class:`~agent.image_gen_provider.ImageGenProvider` with the
-two things sprite generation needs that the agent-facing ``image_generate`` tool
-doesn't expose: **N variants** (loop) and **reference-image grounding** (so each
-animation row stays the same character as the chosen base). Grounding only
-works on reference-capable providers; we resolve to one of those and surface an
-actionable error otherwise rather than silently producing a drifting pet.
+Wraps the active ``ImageGenProvider`` with what the ``image_generate`` tool
+doesn't expose: N variants and reference-image grounding (each animation row
+stays the same character as the chosen base). Grounding needs a ref-capable
+provider; we resolve to one or raise an actionable error rather than drift.
 """
 
 from __future__ import annotations
@@ -17,20 +15,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Providers that can ground generation on a reference image, in preference order
-# (Nous Portal → OpenAI → OpenRouter → …). OpenRouter/Nous run a quality-first
-# model chain and may fall back depending on account access and endpoint behavior,
-# so fidelity can vary by configured backend + model availability.
+# Providers that can ground generation on a reference image, in preference order.
+# OpenRouter/Nous run a quality-first model chain and may fall back depending on
+# account access, so fidelity can vary by configured backend.
 _REF_CAPABLE = ("nous", "openai", "openai-codex", "openrouter", "krea")
-
 # Friendly display label per reference-capable provider (desktop pet-gen picker).
-_PROVIDER_LABELS: dict[str, str] = {
-    "nous": "Nous Portal",
-    "openrouter": "OpenRouter",
-    "openai": "OpenAI",
-    "openai-codex": "OpenAI (Codex)",
-    "krea": "Krea",
-}
+_PROVIDER_LABELS = {"nous": "Nous Portal", "openrouter": "OpenRouter", "openai": "OpenAI", "openai-codex": "OpenAI (Codex)", "krea": "Krea"}
 
 
 class GenerationError(RuntimeError):
@@ -64,13 +54,12 @@ def _available(name: str):
 
 
 def resolve_provider(*, require_references: bool = True, prefer: str | None = None) -> SpriteProvider:
-    """Pick the image provider to use for sprite work.
+    """Pick the image provider for sprite work.
 
     Preference: ``HERMES_PET_IMAGE_PROVIDER`` (QA override, unknown values ignored),
-    then an explicit *prefer* choice (the desktop picker) when reference-capable and
-    configured, then the configured/active provider when reference-capable, else the
-    first available reference-capable provider. With *require_references* off we
-    fall back to any available provider (used for prompt-only base drafts).
+    then *prefer* (desktop picker), then the active provider, then the first available
+    — each only if ref-capable and configured. With *require_references* off, any
+    available active provider is accepted (prompt-only base drafts).
     """
     _discover()
     from agent.image_gen_registry import get_active_provider
@@ -99,11 +88,7 @@ def resolve_provider(*, require_references: bool = True, prefer: str | None = No
 
 
 def list_sprite_providers() -> list[dict]:
-    """``[{name, label, default}]`` for every configured ref-capable provider, in preference order.
-
-    ``default`` marks the one :func:`resolve_provider` would choose with no explicit
-    preference. Empty when none is configured (the picker hides itself).
-    """
+    """``[{name, label, default}]`` per configured ref-capable provider, in preference order; empty hides the picker."""
     _discover()
     try:
         default_name = resolve_provider(require_references=True).name
@@ -126,12 +111,7 @@ def _save_local(image_ref: str, *, prefix: str) -> Path:
 
 
 def _rejected_background(error: str) -> bool:
-    """True when a provider error is specifically about the ``background`` param.
-
-    Transparent backgrounds are a per-model capability (some gpt-image tiers reject
-    ``background=transparent`` outright); we retry without the flag instead of
-    failing the pet — the chroma-key pass makes the result transparent regardless.
-    """
+    """True when a provider error is specifically about ``background=transparent`` (a per-model capability; we retry without it)."""
     lowered = (error or "").lower()
     return "background" in lowered and ("not supported" in lowered or "transparent" in lowered)
 
@@ -148,12 +128,10 @@ def generate(
     """Generate *n* sprite images and return their local paths.
 
     *reference_images* grounds the output on a base image (required for rows).
-    *aspect_ratio*: ``"square"`` for single-character base drafts, ``"landscape"``
-    for multi-frame row strips (the wider 1536px canvas gives every frame real
-    horizontal room so winged poses don't have to shrink to avoid touching).
-    We *ask* for a transparent background but fall back to an opaque generation
-    on models that reject the flag. Raises :class:`GenerationError` if nothing
-    usable comes back.
+    *aspect_ratio* ``"landscape"`` (row strips) gives every frame horizontal room so
+    winged poses needn't shrink. We *ask* for a transparent background but fall
+    back to opaque on models that reject the flag. Raises :class:`GenerationError`
+    if nothing usable comes back.
     """
     sprite = provider or resolve_provider(require_references=bool(reference_images))
     if reference_images and not sprite.supports_references:

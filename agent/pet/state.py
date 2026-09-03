@@ -1,9 +1,7 @@
 """Map agent activity → a :class:`PetState`.
 
-The one place the "what is the agent doing?" → "which animation row?" decision
-lives. CLI (spinner state + tool outcomes), TUI (gateway tool/message events)
-and Desktop (nanostores; re-implemented in TS mirroring this priority order)
-all feed it the signals they already track.
+The one place the "what is the agent doing?" → "which row?" decision lives; CLI,
+TUI and Desktop (TS mirror of this priority order) feed it the signals they track.
 """
 
 from __future__ import annotations
@@ -15,11 +13,7 @@ from agent.pet.constants import PetState
 
 
 def todos_all_done(todos: Iterable[Any] | None) -> bool:
-    """True iff there's ≥1 todo and every one is completed/cancelled.
-
-    The "celebrate" beat (``JUMP``) fires when a plan finishes; mirrors the TUI's
-    ``isTodoDone``. Accepts dicts (``{"status": ...}``) or objects with ``status``.
-    """
+    """True iff ≥1 todo and all completed/cancelled (the ``JUMP`` celebrate beat; mirrors the TUI's ``isTodoDone``)."""
     items = list(todos or [])
     return bool(items) and all(
         (t.get("status") if isinstance(t, dict) else getattr(t, "status", None)) in ("completed", "cancelled") for t in items

@@ -42,15 +42,12 @@ def _cache_is_warm() -> bool:
 def prefetch(*, timeout: float = _DEFAULT_TIMEOUT) -> None:
     """Warm the manifest cache in a daemon thread — idempotent, never blocks.
 
-    The desktop picker calls this when it loads the (instant) local-only gallery
-    so the full catalog is usually cached by the time it's requested, without
-    holding up the user's own pets on a network round-trip.
+    The desktop picker calls this when loading the instant local-only gallery so
+    the full catalog is usually cached by the time it's requested.
     """
     global _prefetching
-
     if _cache_is_warm():
         return
-
     with _prefetch_lock:
         if _prefetching:
             return
@@ -98,21 +95,14 @@ class ManifestError(RuntimeError):
 
 
 def fetch_manifest(*, timeout: float = _DEFAULT_TIMEOUT, force: bool = False) -> list[ManifestEntry]:
-    """Return every approved pet from the public manifest.
-
-    Cached in-process for ``_MANIFEST_TTL`` seconds (``force=True`` bypasses).
-    Raises :class:`ManifestError` on any network/parse failure.
-    """
+    """Every approved pet from the public manifest; cached for ``_MANIFEST_TTL`` s unless *force*. Raises :class:`ManifestError`."""
     global _cache
-
     if not force and _cache_is_warm():
         return _cache[1]
-
     try:
         import httpx
     except ImportError as exc:  # pragma: no cover - httpx is a core dep
         raise ManifestError("httpx is required to fetch the petdex manifest") from exc
-
     try:
         resp = httpx.get(MANIFEST_URL, timeout=timeout, follow_redirects=True, headers={"User-Agent": "hermes-agent-petdex"})
         resp.raise_for_status()
@@ -123,7 +113,6 @@ def fetch_manifest(*, timeout: float = _DEFAULT_TIMEOUT, force: bool = False) ->
     pets = payload.get("pets") if isinstance(payload, dict) else None
     if not isinstance(pets, list):
         raise ManifestError("petdex manifest had no 'pets' array")
-
     parsed = (ManifestEntry.from_dict(raw) for raw in pets if isinstance(raw, dict))
     entries = [entry for entry in parsed if entry.slug and entry.spritesheet_url]
     _cache = (time.monotonic(), entries)
