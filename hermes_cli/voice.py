@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -128,12 +129,9 @@ def _debug(msg: str) -> None:
     errors are swallowed: this fires from background threads where a dead stderr must not kill
     the gateway (the stdin/stdout command pipe is what matters).
     """
-    if os.environ.get("HERMES_VOICE_DEBUG", "").strip() != "1":
-        return
-    try:
-        print(f"[voice] {msg}", file=sys.stderr, flush=True)
-    except (BrokenPipeError, OSError):
-        pass
+    if os.environ.get("HERMES_VOICE_DEBUG", "").strip() == "1":
+        with contextlib.suppress(BrokenPipeError, OSError):
+            print(f"[voice] {msg}", file=sys.stderr, flush=True)
 
 
 def _beeps_enabled() -> bool:
@@ -201,11 +199,9 @@ def _transcribe_wav(wav_path: str, fail_msg: str, debug_prefix: Optional[str] = 
         if debug_prefix:
             _debug(f"{debug_prefix}: transcribe raised {type(e).__name__}: {e}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             if os.path.isfile(wav_path):
                 os.unlink(wav_path)
-        except Exception:
-            pass
     return None
 
 
@@ -399,13 +395,8 @@ def start_continuous(
         rec._silence_threshold = silence_threshold
         rec._silence_duration = silence_duration
         # Same numeric-with-bool-excluded guard as cli.py:_voice_start_recording.
-        rec._max_recording_seconds = (
-            max_recording_seconds
-            if isinstance(max_recording_seconds, (int, float))
-            and not isinstance(max_recording_seconds, bool)
-            and max_recording_seconds > 0
-            else 0.0
-        )
+        cap_ok = isinstance(max_recording_seconds, (int, float)) and not isinstance(max_recording_seconds, bool)
+        rec._max_recording_seconds = max_recording_seconds if cap_ok and max_recording_seconds > 0 else 0.0
 
     _debug(f"start_continuous: begin (threshold={silence_threshold}, duration={silence_duration}s)")
 
@@ -465,10 +456,7 @@ def stop_continuous(force_transcribe: bool = False) -> None:
                 wav_path = None
 
             def _transcribe_and_cleanup():
-                global _continuous_stopping
-                transcript: Optional[str] = None
-                if wav_path:
-                    transcript = _transcribe_wav(wav_path, "failed to stop/transcribe recorder: %s")
+                transcript = _transcribe_wav(wav_path, "failed to stop/transcribe recorder: %s") if wav_path else None
 
                 # With auto_restart=False the CLIENT drives the loop, so a stop
                 # phrase must fire the stop signal — discarding the transcript
@@ -489,22 +477,21 @@ def stop_continuous(force_transcribe: bool = False) -> None:
                         )
                     if should_halt:
                         _safe_call(on_silent_limit)
-
-                _play_beep(frequency=660, count=2)
-                with _continuous_lock:
-                    _continuous_stopping = False
-                _safe_call(on_status, "idle")
+                _finish_stop(on_status)
 
             threading.Thread(target=_transcribe_and_cleanup, daemon=True).start()
             return
         # cancel() (not stop()) discards buffered frames — the loop is over, we
         # don't want to transcribe a half-captured turn.
         _safe_call(rec.cancel, warn="failed to cancel recorder: %s")
+    _finish_stop(on_status)
 
+
+def _finish_stop(on_status) -> None:
+    """Clear the stopping flag, play the CLI-parity 660 Hz × 2 "stopped" cue, report idle."""
+    global _continuous_stopping
     with _continuous_lock:
         _continuous_stopping = False
-
-    # CLI parity: same 660 Hz × 2 "recording stopped" cue as the silence path.
     _play_beep(frequency=660, count=2)
     _safe_call(on_status, "idle")
 
@@ -550,9 +537,10 @@ def _continuous_on_silence() -> None:
     # CLI parity: double beep after the stream stops (safe from the CoreAudio conflict).
     _play_beep(frequency=660, count=2)
 
-    transcript: Optional[str] = None
-    if wav_path:
-        transcript = _transcribe_wav(wav_path, "continuous transcription failed: %s", "_continuous_on_silence")
+    transcript = (
+        _transcribe_wav(wav_path, "continuous transcription failed: %s", "_continuous_on_silence")
+        if wav_path else None
+    )
 
     transcript, stop_phrase, stop_text = _detect_stop_phrase(
         transcript, "_continuous_on_silence", "ending loop"
@@ -671,11 +659,7 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
     # The loop re-arms after _tts_playing flips back (see _continuous_on_silence).
     paused_recording = False
     with _continuous_lock:
-        if (
-            _continuous_active
-            and _continuous_recorder is not None
-            and getattr(_continuous_recorder, "is_recording", False)
-        ):
+        if _continuous_active and getattr(_continuous_recorder, "is_recording", False):
             try:
                 _continuous_recorder.cancel()
                 paused_recording = True
@@ -741,10 +725,8 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
                 played_any = True
         for path in set(play_paths + [mp3_path, mp3_path.rsplit(".", 1)[0] + ".ogg"]):
             if os.path.isfile(path):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(path)
-                except OSError:
-                    pass
         if not played_any:
             _debug(f"speak_text: TTS tool produced no audio at {mp3_path}")
     except Exception as e:
