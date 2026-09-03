@@ -89,6 +89,10 @@ def _lower_or_none(value: Any) -> Optional[str]:
     return value.strip().lower() if isinstance(value, str) else None
 
 
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
 def _field(obj: Any, name: str, default: Any = None) -> Any:
     """Read ``name`` from a dict or an attribute-style (SDK/SimpleNamespace) object."""
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, default)
@@ -140,12 +144,11 @@ def _neutralize_harmony_structure(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_neutralize_harmony_structure(item) for item in value]
     if isinstance(value, dict):
-        for key in value:
-            if isinstance(key, str) and _neutralize_harmony_tokens(key) != key:
-                raise ValueError(
-                    "Reserved Harmony tokens in a JSON object key cannot be "
-                    "neutralized without changing its contract."
-                )
+        if any(isinstance(key, str) and _neutralize_harmony_tokens(key) != key for key in value):
+            raise ValueError(
+                "Reserved Harmony tokens in a JSON object key cannot be "
+                "neutralized without changing its contract."
+            )
         return {key: _neutralize_harmony_structure(item) for key, item in value.items()}
     return value
 
@@ -165,15 +168,6 @@ def _iter_content_parts(content: list) -> Iterator[tuple[str, Any]]:
                 yield "image", part
 
 
-def _resolve_image_ref(part: Dict[str, Any]) -> tuple[Any, Any]:
-    """Return ``(url, detail)`` from either ``image_url: str`` or ``{url, detail}``."""
-    image_ref = part.get("image_url")
-    detail = part.get("detail")
-    if isinstance(image_ref, dict):
-        return image_ref.get("url"), image_ref.get("detail", detail)
-    return image_ref, detail
-
-
 def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
     image_part: Dict[str, Any] = {"type": "input_image", "image_url": url}
     if _nonblank(detail):
@@ -186,7 +180,9 @@ def _image_part_for_role(part: Dict[str, Any], role: str, *, keep_empty_url: boo
     ``input_image`` 400s every replay); user → ``input_image`` (None for an empty url unless kept)."""
     if role == "assistant":
         return {"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER}
-    url, detail = _resolve_image_ref(part)
+    url, detail = part.get("image_url"), part.get("detail")  # ``image_url`` may be a str or ``{url, detail}``
+    if isinstance(url, dict):
+        url, detail = url.get("url"), url.get("detail", detail)
     if _nonempty_str(url):
         return _input_image_part(url, detail)
     return _input_image_part(str(url or ""), detail) if keep_empty_url else None
@@ -200,12 +196,10 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
     messages it becomes a text marker (an assistant ``input_image`` 400s every replay)."""
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
-    for kind, payload in _iter_content_parts(content if isinstance(content, list) else []):
-        image_part = None if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
-        if kind == "text":
-            converted.append({"type": text_type, "text": payload})
-        elif image_part is not None:
-            converted.append(image_part)
+    for kind, payload in _iter_content_parts(_as_list(content)):
+        part = {"type": text_type, "text": payload} if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
+        if part is not None:
+            converted.append(part)
     return converted
 
 
@@ -213,13 +207,11 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
     """Flatten message content to plain text: text parts joined with ``sep`` (``" "`` for
     logs; ``"\\n"`` for memory providers feeding regexes), images → ``[N image(s)]``
     marker, ``""`` for None/empty, ``str(content)`` for other scalars."""
-    if content is None:
-        return ""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         try:
-            return str(content)
+            return _str_or_empty(content)
         except Exception:
             return ""
     parts = list(_iter_content_parts(content))
@@ -375,17 +367,12 @@ def _replay_reasoning_items(
     model that cannot decrypt it), and items stamped by another issuer (HTTP 400).
     Unstamped legacy items pass. ``id`` (store=False lookups 404) and ``_issuer_kind`` are stripped."""
     global _CROSS_ISSUER_WARN_EMITTED
-    codex_reasoning = msg.get("codex_reasoning_items")
-    if not isinstance(codex_reasoning, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for ri in codex_reasoning:
+    for ri in _as_list(msg.get("codex_reasoning_items")):
         if not (isinstance(ri, dict) and ri.get("encrypted_content")):
             continue
         item_id = ri.get("id")
-        if item_id and item_id in seen_item_ids:
-            continue
-        if ri.get("type") == "compaction" and not native_compaction_eligible:
+        if (item_id and item_id in seen_item_ids) or (ri.get("type") == "compaction" and not native_compaction_eligible):
             continue
         item_issuer = ri.get("_issuer_kind")
         if current_issuer_kind is not None and item_issuer is not None and item_issuer != current_issuer_kind:
@@ -405,18 +392,13 @@ def _replay_reasoning_items(
 
 def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> List[Dict[str, Any]]:
     """Replay exact assistant message items (id/phase) for prefix-cache hits."""
-    codex_message_items = msg.get("codex_message_items")
-    if not isinstance(codex_message_items, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for raw_item in codex_message_items:
-        is_assistant_message = (
-            isinstance(raw_item, dict) and raw_item.get("type") == "message"
-            and raw_item.get("role") == "assistant" and isinstance(raw_item.get("content"), list)
-        )
+    for raw_item in _as_list(msg.get("codex_message_items")):
+        if not (isinstance(raw_item, dict) and raw_item.get("type") == "message" and raw_item.get("role") == "assistant"):
+            continue
         content = [
             {"type": "output_text", "text": _str_or_empty(part.get("text", ""))}
-            for part in (raw_item["content"] if is_assistant_message else [])
+            for part in _as_list(raw_item.get("content"))
             if isinstance(part, dict) and str(part.get("type") or "").strip() in _OUTPUT_TEXT_TYPES
         ]
         if content:
@@ -426,11 +408,8 @@ def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> 
 
 def _replay_tool_call_items(msg: Dict[str, Any], *, start_index: int) -> List[Dict[str, Any]]:
     """Convert an assistant message's ``tool_calls`` into ``function_call`` items."""
-    tool_calls = msg.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _as_list(msg.get("tool_calls")):
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function", {})
@@ -469,12 +448,8 @@ def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _chat_messages_to_responses_input(
-    messages: List[Dict[str, Any]],
-    *,
-    is_xai_responses: bool = False,
-    is_github_responses: bool = False,
-    replay_encrypted_reasoning: bool = True,
-    current_issuer_kind: Optional[str] = None,
+    messages: List[Dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
+    replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
     native_compaction_eligible: bool = False,
 ) -> List[Dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
@@ -498,7 +473,6 @@ def _chat_messages_to_responses_input(
     def emit(new_items: List[Dict[str, Any]], msg: Dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
-
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -512,11 +486,11 @@ def _chat_messages_to_responses_input(
             continue
         content = msg.get("content", "")
         content_parts = _chat_content_to_responses_parts(content, role=role)  # [] unless a list
-        if isinstance(content, list):
-            text_type = _text_type_for(role)
-            content_text = "".join(p["text"] for p in content_parts if p["type"] == text_type)
-        else:
-            content_text = _str_or_empty(content)
+        text_type = _text_type_for(role)
+        content_text = (
+            "".join(p["text"] for p in content_parts if p["type"] == text_type)
+            if isinstance(content, list) else _str_or_empty(content)
+        )
         if role == "user":
             emit([{"role": role, "content": content_parts or content_text}], msg)
             continue
@@ -563,7 +537,6 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
     def _host_is(domain: str) -> bool:
         return hostname == domain or hostname.endswith("." + domain)
-
     return ResponsesRouteFlags(
         is_codex_backend=provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
         is_xai_responses=provider in {"xai", "xai-oauth"} or hostname == "api.x.ai",
@@ -572,11 +545,7 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
 
 def estimate_native_responses_preflight_tokens(
-    agent: Any,
-    messages: List[Dict[str, Any]],
-    *,
-    system_prompt: str = "",
-    tools: Optional[List[Dict[str, Any]]] = None,
+    agent: Any, messages: List[Dict[str, Any]], *, system_prompt: str = "", tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[int]:
     """Estimate tokens for the checkpoint-pruned Responses payload (the full transcript
     overstates a natively compacted session and fires local compression needlessly).
@@ -596,8 +565,6 @@ def estimate_native_responses_preflight_tokens(
         )
     except Exception:
         logger.debug("native Responses preflight conversion failed; falling back to generic estimate", exc_info=True)
-        return None
-    if not isinstance(items, list):
         return None
     from agent.model_metadata import estimate_request_tokens_rough
     return estimate_request_tokens_rough(items, system_prompt=system_prompt or "", tools=tools)
@@ -648,29 +615,24 @@ def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _Prefli
     return {"type": "function_call_output", "call_id": call_id, "output": output_value}
 
 
-def _preflight_reasoning(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
+def _preflight_encrypted(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
+    """``reasoning`` / ``compaction`` items: opaque, issuer-sealed; forward only API-defined fields."""
     encrypted = item.get("encrypted_content")
     if not _nonempty_str(encrypted):
         return None
+    if item["type"] == "compaction":
+        return {"type": "compaction", "encrypted_content": encrypted}
     # ``id`` is used only for local dedup and NOT forwarded (store=False → server-side 404).
     item_id = item.get("id")
     if _nonempty_str(item_id):
         if item_id in ctx.seen_ids:
             return None
         ctx.seen_ids.add(item_id)
-    summary = item.get("summary")
-    if not isinstance(summary, list):
-        summary = []
+    summary = _as_list(item.get("summary"))
     return {
         "type": "reasoning", "encrypted_content": encrypted,
         "summary": _neutralize_harmony_structure(summary) if ctx.sanitize_harmony_tokens else summary,
     }
-
-
-def _preflight_compaction(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
-    # Opaque, issuer-sealed checkpoint; forward only the fields the API defines.
-    encrypted = item.get("encrypted_content")
-    return {"type": "compaction", "encrypted_content": encrypted} if _nonempty_str(encrypted) else None
 
 
 def _preflight_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
@@ -694,7 +656,13 @@ def _preflight_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Di
     return _assistant_message_item(item, normalized_content, is_github_responses=ctx.is_github_responses)
 
 
-def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _PreflightCtx) -> Dict[str, Any]:
+def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
+    """Untyped ``user``/``assistant`` role message — the only legal shape besides typed items."""
+    role = item.get("role")
+    if role not in {"user", "assistant"}:
+        raise ValueError(
+            f"Codex Responses input[{idx}] has unsupported item shape (type={item.get('type')!r}, role={role!r})."
+        )
     content = item.get("content", "")
     if not isinstance(content, list):
         return {"role": role, "content": ctx.sanitize_text(_str_or_empty(content))}
@@ -723,11 +691,8 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _Pre
 
 
 _PREFLIGHT_ITEM_HANDLERS: Dict[str, Callable[..., Optional[Dict[str, Any]]]] = {
-    "function_call": _preflight_function_call,
-    "function_call_output": _preflight_function_call_output,
-    "reasoning": _preflight_reasoning,
-    "compaction": _preflight_compaction,
-    "message": _preflight_message,
+    "function_call": _preflight_function_call, "function_call_output": _preflight_function_call_output,
+    "reasoning": _preflight_encrypted, "compaction": _preflight_encrypted, "message": _preflight_message,
 }
 
 
@@ -736,28 +701,15 @@ def _preflight_codex_input_items(
 ) -> List[Dict[str, Any]]:
     if not isinstance(raw_items, list):
         raise ValueError("Codex Responses input must be a list of input items.")
-    ctx = _PreflightCtx(
-        sanitize_text=_neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text),
-        sanitize_harmony_tokens=sanitize_harmony_tokens,
-        is_github_responses=is_github_responses,
-        seen_ids=set(),
-    )
+    sanitize_text = _neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text)
+    ctx = _PreflightCtx(sanitize_text, sanitize_harmony_tokens, is_github_responses, set())
     normalized: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_items):
         if not isinstance(item, dict):
             raise ValueError(f"Codex Responses input[{idx}] must be an object.")
         item_type = item.get("type")
         handler = _PREFLIGHT_ITEM_HANDLERS.get(item_type) if isinstance(item_type, str) else None
-        if handler is not None:
-            normalized_item = handler(item, idx, ctx)
-        else:
-            # Untyped role messages (user/assistant) are the only other legal shape.
-            role = item.get("role")
-            if role not in {"user", "assistant"}:
-                raise ValueError(
-                    f"Codex Responses input[{idx}] has unsupported item shape (type={item_type!r}, role={role!r})."
-                )
-            normalized_item = _preflight_role_message(item, idx, role, ctx)
+        normalized_item = (handler or _preflight_role_message)(item, idx, ctx)
         if normalized_item is not None:
             normalized.append(normalized_item)
     return normalized
@@ -771,8 +723,7 @@ def _preflight_tool(tool: Any, idx: int) -> Dict[str, Any]:
         return dict(tool)
     if tool_type != "function":
         raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
-    name = tool.get("name")
-    parameters = tool.get("parameters")
+    name, parameters = tool.get("name"), tool.get("parameters")
     if not _nonblank(name):
         raise ValueError(f"Codex Responses tools[{idx}] is missing a valid name.")
     if not isinstance(parameters, dict):
@@ -815,11 +766,7 @@ def _optional_dict(api_kwargs: Dict[str, Any], key: str) -> Optional[Dict[str, A
 
 
 def _preflight_codex_api_kwargs(
-    api_kwargs: Any,
-    *,
-    allow_stream: bool = False,
-    is_github_responses: bool = False,
-    sanitize_harmony_tokens: bool = False,
+    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False, sanitize_harmony_tokens: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
@@ -832,16 +779,10 @@ def _preflight_codex_api_kwargs(
     instructions = _str_or_empty(api_kwargs.get("instructions")).strip() or DEFAULT_AGENT_IDENTITY
     if sanitize_harmony_tokens:
         instructions = _neutralize_harmony_tokens(instructions)
-    normalized: Dict[str, Any] = {
-        "model": model.strip(),
-        "instructions": instructions,
-        "input": _preflight_codex_input_items(
-            api_kwargs.get("input"),
-            is_github_responses=is_github_responses,
-            sanitize_harmony_tokens=sanitize_harmony_tokens,
-        ),
-        "store": False,
-    }
+    input_items = _preflight_codex_input_items(
+        api_kwargs.get("input"), is_github_responses=is_github_responses, sanitize_harmony_tokens=sanitize_harmony_tokens,
+    )
+    normalized: Dict[str, Any] = {"model": model.strip(), "instructions": instructions, "input": input_items, "store": False}
     tools = api_kwargs.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
@@ -866,13 +807,12 @@ def _preflight_codex_api_kwargs(
     extra_body = _optional_dict(api_kwargs, "extra_body")
     if extra_body:
         normalized["extra_body"] = dict(extra_body)
-    allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
     stream = api_kwargs.get("stream")
     if not allow_stream and "stream" in api_kwargs:
         raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
-    if allow_stream and stream is not None and stream is not True:
-        raise ValueError("Codex Responses 'stream' must be true when set.")
-    if allow_stream and stream is True:
+    if allow_stream and stream is not None:
+        if stream is not True:
+            raise ValueError("Codex Responses 'stream' must be true when set.")
         normalized["stream"] = True
     # Defense-in-depth slash-enum strip for xAI (rejects ``Qwen/Qwen3.5`` enum values);
     # gated on the model name because native Codex accepts slashes.
@@ -883,6 +823,7 @@ def _preflight_codex_api_kwargs(
             normalized["tools"], _ = strip_slash_enum(normalized["tools"])
         except Exception:
             pass  # Best-effort — the caller-level sanitization should have handled it
+    allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
     unexpected = sorted(key for key in api_kwargs if key not in allowed_keys)
     if unexpected:
         raise ValueError(f"Codex Responses request has unsupported field(s): {', '.join(unexpected)}.")
@@ -893,11 +834,9 @@ def _preflight_codex_api_kwargs(
 
 def _text_chunks(parts: Any, types: Optional[set] = None) -> List[str]:
     """Non-empty ``.text`` of each part (optionally filtered by ``.type``); [] if not a list."""
-    if not isinstance(parts, list):
-        return []
     return [
         text for text in (
-            getattr(part, "text", None) for part in parts if types is None or getattr(part, "type", None) in types
+            getattr(part, "text", None) for part in _as_list(parts) if types is None or getattr(part, "type", None) in types
         )
         if _nonempty_str(text)
     ]
@@ -921,7 +860,6 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
     def field(name: str) -> str:
         value = _field(error_obj, name)
         return str(value).strip() if isinstance(value, str) or value else ""
-
     code_str, message_str = field("code"), field("message")
     if code_str and message_str:
         return f"{code_str}: {message_str}"
@@ -929,10 +867,6 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
 
 
 # --- Full response normalization ----------------------------------------------
-
-def _synthetic_message(content: List[Any]) -> SimpleNamespace:
-    return SimpleNamespace(type="message", role="assistant", status="completed", content=content)
-
 
 def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespace:
     """Build a chat-style tool_call from a ``function_call``/``custom_tool_call`` item."""
@@ -951,29 +885,23 @@ def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespac
     )
 
 
-def _stamped_encrypted_item(item: Any, item_type: str, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
-    """``{type, encrypted_content[, _issuer_kind]}`` for replay, or None without a blob."""
+def _capture_encrypted_item(item: Any, item_type: str, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``{type, encrypted_content[, _issuer_kind]}`` for replay, or None without a blob. Reasoning
+    items also carry ``id`` + ``summary`` (required by the API on replay); transient ``rs_tmp_`` skip."""
     encrypted = getattr(item, "encrypted_content", None)
     if not _nonempty_str(encrypted):
         return None
     raw_item: Dict[str, Any] = {"type": item_type, "encrypted_content": encrypted}
     if issuer_kind:
         raw_item["_issuer_kind"] = issuer_kind
-    return raw_item
-
-
-def _capture_reasoning_item(item: Any, issuer_kind: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Capture a reasoning item (blob + summary) for replay; transient ``rs_tmp_`` items are skipped."""
-    raw_item = _stamped_encrypted_item(item, "reasoning", issuer_kind)
-    if raw_item is None:
-        return None
+    if item_type != "reasoning":
+        return raw_item
     item_id = getattr(item, "id", None)
     if isinstance(item_id, str) and item_id.startswith("rs_tmp_"):
         logger.debug("Skipping transient Codex reasoning item during normalization: %s", item_id)
         return None
     if _nonempty_str(item_id):
         raw_item["id"] = item_id
-    # Summary is required by the API when replaying reasoning items.
     summary = getattr(item, "summary", None)
     if isinstance(summary, list):
         raw_item["summary"] = [
@@ -993,9 +921,7 @@ class _OutputScan:
         self.tool_calls: List[Any] = []
         self.has_incomplete_items = response_status in _INCOMPLETE_STATUSES
         self.saw_streaming_or_item_incomplete = response_status in {"queued", "in_progress"}
-        self.saw_commentary_phase = False
-        self.saw_final_answer_phase = False
-        self.saw_reasoning_item = False
+        self.saw_commentary_phase = self.saw_final_answer_phase = self.saw_reasoning_item = False
 
     def scan(self, output: List[Any], issuer_kind: Optional[str]) -> None:
         for item in output:
@@ -1006,27 +932,23 @@ class _OutputScan:
                 self.saw_streaming_or_item_incomplete = True
             if item_type == "message":
                 self._message(item, item_status)
-            elif item_type == "reasoning":
-                self.saw_reasoning_item = True
-                reasoning_text = _extract_responses_reasoning_text(item)
-                if reasoning_text:
-                    self.reasoning_parts.append(reasoning_text)
-                self._capture(_capture_reasoning_item(item, issuer_kind))
-            elif item_type == "compaction":
+            elif item_type in {"reasoning", "compaction"}:
+                if item_type == "reasoning":
+                    self.saw_reasoning_item = True
+                    reasoning_text = _extract_responses_reasoning_text(item)
+                    if reasoning_text:
+                        self.reasoning_parts.append(reasoning_text)
                 # Compaction checkpoints ride the codex_reasoning_items sidecar (persistence,
                 # replay, cross-issuer guard and kill switch for free).
-                raw_item = _stamped_encrypted_item(item, "compaction", issuer_kind)
-                if self._capture(raw_item):
-                    logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
+                raw_item = _capture_encrypted_item(item, item_type, issuer_kind)
+                if raw_item is not None:
+                    self.reasoning_items_raw.append(raw_item)
+                    if item_type == "compaction":
+                        logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
                 self.tool_calls.append(_response_tool_call(item, item_type, len(self.tool_calls)))
-
-    def _capture(self, raw_item: Optional[Dict[str, Any]]) -> bool:
-        if raw_item is not None:
-            self.reasoning_items_raw.append(raw_item)
-        return raw_item is not None
 
     def _message(self, item: Any, item_status: Optional[str]) -> None:
         normalized_phase = _lower_or_none(getattr(item, "phase", None))
@@ -1064,13 +986,13 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
                 "Codex response has empty output but output_text is present (%d chars); synthesizing output item.",
                 len(out_text.strip()),
             )
-            output = [_synthetic_message([SimpleNamespace(type="output_text", text=out_text.strip())])]
+            content: List[Any] = [SimpleNamespace(type="output_text", text=out_text.strip())]
         elif response_incomplete_content_filter:
             # Provider safety block, not a partial answer: finish content_filter, not incomplete.
-            output = [_synthetic_message([])]
+            content = []
         else:
             raise RuntimeError("Responses API returned no output items")
-        response.output = output
+        output = response.output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
     scan = _OutputScan(response_status)
@@ -1108,13 +1030,10 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
                 reasoning_prefix = joined_reasoning[:marker].strip()
                 reasoning_parts = [reasoning_prefix] if reasoning_prefix else []
     assistant_message = SimpleNamespace(
-        content=final_text,
-        tool_calls=tool_calls,
+        content=final_text, tool_calls=tool_calls,
         reasoning="\n\n".join(reasoning_parts).strip() if reasoning_parts else None,
-        reasoning_content=None,
-        reasoning_details=None,
-        codex_reasoning_items=scan.reasoning_items_raw or None,
-        codex_message_items=scan.message_items_raw or None,
+        reasoning_content=None, reasoning_details=None,
+        codex_reasoning_items=scan.reasoning_items_raw or None, codex_message_items=scan.message_items_raw or None,
     )
     if tool_calls:
         finish_reason = "tool_calls"
