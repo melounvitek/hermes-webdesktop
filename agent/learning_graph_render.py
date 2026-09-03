@@ -1,12 +1,11 @@
 """Terminal renderer for the learning timeline (learned skills + memories).
 
-The desktop starmap (``apps/desktop/src/app/starmap``) is a GPU constellation;
-here the same data becomes a timeline bar chart (date rows, skill/memory bars
-colored by dominant category, cumulative trajectory sparkline) plus per-slice
-bucket metadata the TUI walks as a tree. Age gradient and memory ink are ported
-from the desktop source. Grids are style runs ``[text, style, alpha, hex?]``:
-consumers map style + brightness onto their palette; hex overrides the base
-color (category heatmap). Pure, stdlib-only.
+Same data as the desktop starmap (``apps/desktop/src/app/starmap``), drawn as a
+timeline bar chart (date rows, skill/memory bars colored by dominant category,
+cumulative trajectory sparkline) plus per-slice bucket metadata the TUI walks as
+a tree. Age gradient and memory ink are ported from the desktop source. Grids
+are style runs ``[text, style, alpha, hex?]``: consumers map style + brightness
+onto their palette; hex overrides the base color (category heatmap). Pure, stdlib-only.
 """
 
 from __future__ import annotations
@@ -16,25 +15,13 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-# time-axis.ts LEAD_IN: the oldest node sits just off recency 0.
-LEAD_IN = 0.06
-
+LEAD_IN = 0.06  # time-axis.ts LEAD_IN: the oldest node sits just off recency 0.
 # constants.ts AGE_GRADIENT — old quiet, recent bright.
-AGE_OLD_INK = 0.42
-AGE_MID_INK = 0.74
-AGE_NEW_INK = 0.95
-AGE_MID = 0.52
-
+AGE_OLD_INK, AGE_MID_INK, AGE_NEW_INK, AGE_MID = 0.42, 0.74, 0.95, 0.52
 # Style keys consumers map to base colors (brightness = the run alpha).
-STYLE_BG = "bg"
-STYLE_SKILL = "skill"
-STYLE_MEMORY = "memory"
-STYLE_LABEL = "label"
-STYLE_DIM = "dim"
-
+STYLE_BG, STYLE_SKILL, STYLE_MEMORY, STYLE_LABEL, STYLE_DIM = "bg", "skill", "memory", "label", "dim"
 # Legend glyphs mirror NODE_SHAPE (skill = circle, memory = diamond).
-SKILL_GLYPH = "●"
-MEMORY_GLYPH = "◆"
+SKILL_GLYPH, MEMORY_GLYPH = "●", "◆"
 _LABEL_KEYS = tuple("123456789abc")
 
 Run = list  # [text, style, alpha, hex?]
@@ -44,6 +31,10 @@ Grid = list  # list[Row]
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
 
 
 def _smoothstep(p: float) -> float:
@@ -74,40 +65,38 @@ def recency_ink(rec: float) -> float:
     """Port of geometry.ts ``recencyInk`` — smoothstep age → ink alpha."""
     t = _clamp(rec, 0.0, 1.0)
     if t <= AGE_MID:
-        return AGE_OLD_INK + (AGE_MID_INK - AGE_OLD_INK) * _smoothstep(t / AGE_MID)
-    return AGE_MID_INK + (AGE_NEW_INK - AGE_MID_INK) * _smoothstep((t - AGE_MID) / (1 - AGE_MID))
+        return _lerp(AGE_OLD_INK, AGE_MID_INK, _smoothstep(t / AGE_MID))
+    return _lerp(AGE_MID_INK, AGE_NEW_INK, _smoothstep((t - AGE_MID) / (1 - AGE_MID)))
 
 
 def format_date(ts: Optional[float]) -> str:
-    if not ts:
-        return "unknown"
     try:
-        dt = _utc(float(ts))
-        return f"{dt.day} {dt.strftime('%b %Y')}"
+        dt = _utc(float(ts)) if ts else None
     except (ValueError, OSError, OverflowError):
-        return "unknown"
+        dt = None
+    return f"{dt.day} {dt.strftime('%b %Y')}" if dt else "unknown"
+
+
+def _lead_in(ratio: float) -> float:
+    return LEAD_IN + (1 - LEAD_IN) * ratio
 
 
 def compute_recency(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     """Port of time-axis.ts ``computeRecency`` (id → recency ratio, timed flag).
-
     Untimed graphs (no spread of timestamps) fall back to ordinal position so
-    every node still gets a distinct recency.
-    """
+    every node still gets a distinct recency."""
     known = [t for t in (_node_ts(n) for n in nodes) if t is not None]
-    min_ts = min(known) if known else None
-    max_ts = max(known) if known else None
-    timed = min_ts is not None and max_ts is not None and max_ts > min_ts
+    min_ts, max_ts = (min(known), max(known)) if known else (None, None)
+    timed = bool(known) and max_ts > min_ts
 
     ordered = sorted(nodes, key=lambda n: (_node_ts(n) if _node_ts(n) is not None else math.inf, _node_id(n)))
     last = max(len(ordered) - 1, 1)
     ord_ratio = {_node_id(n): (i / last if len(ordered) > 1 else 0.0) for i, n in enumerate(ordered)}
-
     rec: dict[str, float] = {}
     for n in nodes:
         nid, ts = _node_id(n), _node_ts(n)
         ratio = (ts - min_ts) / (max_ts - min_ts) if timed and ts is not None else ord_ratio.get(nid, 0.0)
-        rec[nid] = LEAD_IN + (1 - LEAD_IN) * _clamp(ratio, 0.0, 1.0)
+        rec[nid] = _lead_in(_clamp(ratio, 0.0, 1.0))
     return {"rec": rec, "timed": timed, "minTs": min_ts, "maxTs": max_ts}
 
 
@@ -119,7 +108,6 @@ def _date_at(rec: dict[str, Any], reveal: float) -> Optional[float]:
 
 
 # ── Color: ported from color.ts so memory ink + age fade match the desktop ──
-
 
 def hex_to_rgb(s: str) -> tuple[int, int, int]:
     s = s.strip().lstrip("#")
@@ -137,7 +125,7 @@ def rgb_to_hex(c: tuple) -> str:
 
 def mix_rgb(a: tuple, b: tuple, t: float) -> tuple[int, int, int]:
     p = _clamp(t, 0.0, 1.0)
-    return tuple(round(a[i] + (b[i] - a[i]) * p) for i in range(3))  # type: ignore[return-value]
+    return tuple(round(_lerp(a[i], b[i], p)) for i in range(3))  # type: ignore[return-value]
 
 
 def _rgb_to_hsl(c: tuple) -> tuple[float, float, float]:
@@ -148,12 +136,7 @@ def _rgb_to_hsl(c: tuple) -> tuple[float, float, float]:
     if not d:
         return 0.0, 0.0, light
     s = d / (2 - mx - mn) if light > 0.5 else d / (mx + mn)
-    if mx == r:
-        h = (g - b) / d + (6 if g < b else 0)
-    elif mx == g:
-        h = (b - r) / d + 2
-    else:
-        h = (r - g) / d + 4
+    h = (g - b) / d + (6 if g < b else 0) if mx == r else (b - r) / d + 2 if mx == g else (r - g) / d + 4
     return h * 60, s, light
 
 
@@ -201,8 +184,7 @@ def _node_score(node: dict[str, Any], rec: float) -> float:
     """Pick which visible objects deserve map markers + label rows."""
     if _is_memory(node):
         return 3.5 + rec
-    use = float(node.get("useCount", 0) or 0)
-    return rec * 2 + math.sqrt(max(0.0, use)) + (2.0 if node.get("pinned") else 0.0)
+    return rec * 2 + math.sqrt(max(0.0, float(node.get("useCount", 0) or 0))) + (2.0 if node.get("pinned") else 0.0)
 
 
 def _node_raw_label(node: dict[str, Any]) -> str:
@@ -218,8 +200,7 @@ def _node_card(node: dict[str, Any]) -> dict[str, Any]:
         meta = f"{'profile memory' if node.get('memorySource') == 'profile' else 'memory'} · {date}"
     else:
         count = int(node.get("useCount", 0) or 0)
-        bits = [str(node.get("category") or "skill"), date] + ([f"x{count}"] if count else []) + (["pinned"] if node.get("pinned") else [])
-        meta = " · ".join(bits)
+        meta = " · ".join([str(node.get("category") or "skill"), date] + ([f"x{count}"] if count else []) + (["pinned"] if node.get("pinned") else []))
     return {
         "glyph": MEMORY_GLYPH if mem else SKILL_GLYPH,
         "label": text if len(text) <= 26 else text[:23].rstrip() + "…",
@@ -233,7 +214,6 @@ def _skill_category_counts(nodes: Iterable[dict[str, Any]]) -> Counter:
 
 
 # ── Timeline chart frame ─────────────────────────────────────────────────────
-
 
 class _ChartBucket:
     __slots__ = ("label", "ts", "nodes", "rec")
@@ -254,9 +234,6 @@ class _ChartBucket:
     def total(self) -> int:
         return len(self.nodes)
 
-    def add(self, node: dict[str, Any]) -> None:
-        self.nodes.append(node)
-
     def category(self) -> Optional[str]:
         counts = _skill_category_counts(self.nodes)
         return max(counts, key=lambda k: counts[k]) if counts else None
@@ -272,8 +249,7 @@ _PERIODS: dict[str, tuple] = {
 
 def _period(ts: float, granularity: str) -> tuple[tuple[int, ...], str]:
     key_fn, label_fn = _PERIODS.get(granularity, _PERIODS["year"])
-    dt = _utc(ts)
-    return key_fn(dt), label_fn(dt)
+    return key_fn(_utc(ts)), label_fn(_utc(ts))
 
 
 def _fill_even_bins(buckets: list[_ChartBucket], nodes: Iterable[dict[str, Any]], rec: dict[str, Any]) -> None:
@@ -281,7 +257,7 @@ def _fill_even_bins(buckets: list[_ChartBucket], nodes: Iterable[dict[str, Any]]
     n_bins = len(buckets)
     for node in nodes:
         r = rec["rec"].get(_node_id(node), 0.0)
-        buckets[int(_clamp(math.floor(r * n_bins), 0, n_bins - 1))].add(node)
+        buckets[int(_clamp(math.floor(r * n_bins), 0, n_bins - 1))].nodes.append(node)
 
 
 def _build_chart_buckets(nodes: list[dict[str, Any]], rec: dict[str, Any], max_rows: int) -> list[_ChartBucket]:
@@ -301,7 +277,7 @@ def _build_chart_buckets(nodes: list[dict[str, Any]], rec: dict[str, Any], max_r
             ts = _node_ts(node)
             if ts is not None:
                 key, label = _period(ts, granularity)
-                groups.setdefault(key, _ChartBucket(label, ts)).add(node)
+                groups.setdefault(key, _ChartBucket(label, ts)).nodes.append(node)
         # For short spans, keep the useful day-by-day graph even when the caller
         # asked for fewer rows; scrollback beats collapsing a month into one bar.
         if len(groups) <= max_rows or (granularity == "day" and len(groups) <= 32):
@@ -309,18 +285,15 @@ def _build_chart_buckets(nodes: list[dict[str, Any]], rec: dict[str, Any], max_r
             break
 
     min_ts, max_ts = rec.get("minTs"), rec.get("maxTs")
-    if chosen is None:
-        # Even yearly buckets overflow → fall back to even time bins.
+    if chosen is None:  # even yearly buckets overflow → fall back to even time bins
         n_bins = max(1, max_rows)
-        chosen = [
-            _ChartBucket(format_date(ts), ts)
-            for ts in (min_ts + (i / max(1, n_bins - 1)) * (max_ts - min_ts) if min_ts and max_ts else float(i) for i in range(n_bins))
-        ]
+        stops = (min_ts + (i / max(1, n_bins - 1)) * (max_ts - min_ts) if min_ts and max_ts else float(i) for i in range(n_bins))
+        chosen = [_ChartBucket(format_date(ts), ts) for ts in stops]
         _fill_even_bins(chosen, nodes, rec)
 
     span = (max_ts - min_ts) if min_ts is not None and max_ts is not None and max_ts > min_ts else 0
     for bucket in chosen:
-        bucket.rec = LEAD_IN + (1 - LEAD_IN) * ((bucket.ts - min_ts) / span) if span else 1.0
+        bucket.rec = _lead_in((bucket.ts - min_ts) / span) if span else 1.0
     return chosen
 
 
@@ -337,12 +310,10 @@ def _bucket_rows(buckets: list[_ChartBucket], payload: dict[str, Any]) -> list[d
         nodes = []
         # Chronological within the slice so the TUI tree reads oldest → newest.
         for node in sorted(bucket.nodes, key=lambda n: _node_ts(n) or bucket.ts):
-            card = _node_card(node)
-            memory = memory_lookup.get(_node_id(node))
+            card, memory = _node_card(node), memory_lookup.get(_node_id(node))
             nodes.append({
-                "id": _node_id(node), "glyph": card["glyph"], "label": card["label"],
-                "fullLabel": _node_raw_label(node), "meta": card["meta"],
-                "body": str(memory.get("body", "")) if memory else "", "style": card["style"],
+                "id": _node_id(node), "glyph": card["glyph"], "label": card["label"], "fullLabel": _node_raw_label(node),
+                "meta": card["meta"], "body": str(memory.get("body", "")) if memory else "", "style": card["style"],
             })
         rows.append({
             "index": idx, "label": bucket.label, "date": format_date(bucket.ts),
@@ -359,10 +330,7 @@ def _category_counts(payload: dict[str, Any]) -> list[tuple[str, int]]:
         for c in payload.get("clusters", []) or []
         if c.get("category") and c.get("category") != "memory"
     ]
-    if clusters:
-        return clusters
-    counts = _skill_category_counts(payload.get("nodes", []))
-    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return clusters or sorted(_skill_category_counts(payload.get("nodes", [])).items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def category_color_map(payload: dict[str, Any]) -> dict[str, str]:
@@ -372,12 +340,15 @@ def category_color_map(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def category_legend(payload: dict[str, Any], limit: int = 4) -> list[dict[str, Any]]:
-    cmap = category_color_map(payload)
-    cats = _category_counts(payload)
+    cmap, cats = category_color_map(payload), _category_counts(payload)
     out = [{"glyph": "●", "color": cmap.get(cat, ""), "label": f"{cat} ({count})"} for cat, count in cats[:limit]]
     if len(cats) > limit:
         out.append({"glyph": "·", "color": "", "label": f"+{len(cats) - limit}"})
     return out
+
+
+def _visible_count(reveal: float, n: int) -> int:
+    return int(_clamp(math.ceil(reveal * n), 0, n))
 
 
 def _trajectory_row(buckets: list[_ChartBucket], width: int, reveal: float) -> Row:
@@ -385,10 +356,9 @@ def _trajectory_row(buckets: list[_ChartBucket], width: int, reveal: float) -> R
     if not buckets:
         return []
     total = sum(b.total for b in buckets) or 1
-    visible = int(_clamp(math.ceil(reveal * len(buckets)), 0, len(buckets)))
     cells = [" "] * width
     acc = last = 0
-    for b in buckets[:visible]:
+    for b in buckets[:_visible_count(reveal, len(buckets))]:
         acc += b.total
         p = round((acc / total) * (width - 1))
         for x in range(min(last, p), max(last, p) + 1):
@@ -406,11 +376,9 @@ def _bar_lengths(bucket: _ChartBucket, max_total: int, bar_w: int) -> tuple[int,
     skill_len = round((bucket.skills / bucket.total) * bar_len) if bucket.total else 0
     if bucket.skills and skill_len == 0:
         skill_len = 1
-    memory_len = bar_len - skill_len
-    if bucket.memories and memory_len == 0 and bar_len > 1:
-        memory_len = 1
+    if bucket.memories and skill_len == bar_len > 1:
         skill_len = bar_len - 1
-    return bar_len, skill_len, memory_len
+    return bar_len, skill_len, bar_len - skill_len
 
 
 def render_graph(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, reveal: float = 1.0) -> dict[str, Any]:
@@ -426,8 +394,7 @@ def render_graph(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, rev
     rec = compute_recency(nodes)
     cmap = category_color_map(payload)
     buckets = _build_chart_buckets(nodes, rec, max_rows=max(4, rows - 3))
-    n_buckets = len(buckets)
-    visible_bucket_count = int(_clamp(math.ceil(reveal * n_buckets), 0, n_buckets))
+    visible_bucket_count = _visible_count(reveal, len(buckets))
     max_total = max((b.total for b in buckets), default=1) or 1
     label_w = min(9, max(len(b.label) for b in buckets))
     bar_w = max(14, cols - label_w - 16)
@@ -442,36 +409,26 @@ def render_graph(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, rev
         visible += bucket.total
         ink = recency_ink(bucket.rec)
         bar_len, skill_len, memory_len = _bar_lengths(bucket, max_total, bar_w)
-
-        marker = ""
-        if bucket.nodes and len(labels) < 6:
-            node = max(bucket.nodes, key=lambda n: _node_score(n, _node_ts(n) or bucket.ts))
-            marker = _LABEL_KEYS[len(labels)]
-            labels.append({"key": marker, **_node_card(node), "alpha": round(ink, 3)})
-
         cat = bucket.category()
         cat_hex = cmap.get(cat) if cat else None
 
         row: Row = [[f"{bucket.label:>{label_w}} ", STYLE_LABEL, ink], ["│ ", STYLE_DIM, 0.55]]
-        if marker:
+        if bucket.nodes and len(labels) < 6:
+            node = max(bucket.nodes, key=lambda n: _node_score(n, _node_ts(n) or bucket.ts))
+            marker = _LABEL_KEYS[len(labels)]
+            labels.append({"key": marker, **_node_card(node), "alpha": round(ink, 3)})
             row.append([marker, STYLE_LABEL, 0.95])
         elif bucket.total:
-            head_hex = cat_hex if bucket.skills else None
-            row.append(["✦" if bucket.skills else "◆", STYLE_SKILL if bucket.skills else STYLE_MEMORY, ink, head_hex])
-        if skill_len:
-            # Bar colored by the day's dominant category — a learning heatmap.
+            row.append(["✦" if bucket.skills else "◆", STYLE_SKILL if bucket.skills else STYLE_MEMORY, ink, cat_hex if bucket.skills else None])
+        if skill_len:  # bar colored by the day's dominant category — a learning heatmap
             row.append(["━" * skill_len, STYLE_SKILL, ink, cat_hex])
         if memory_len:
-            mem_trail = "◆" if memory_len == 1 else "◆" + ("━" * (memory_len - 2)) + "◆"
-            row.append([mem_trail, STYLE_MEMORY, max(0.65, ink)])
-        if bar_len < bar_w:
-            # Empty space keeps counts aligned; starmap texture lives in the trajectory row.
+            row.append(["◆" if memory_len == 1 else "◆" + ("━" * (memory_len - 2)) + "◆", STYLE_MEMORY, max(0.65, ink)])
+        if bar_len < bar_w:  # empty space keeps counts aligned; starmap texture lives in the trajectory row
             row.append([" " * (bar_w - bar_len), STYLE_BG, 1.0])
-        row.append(["  ", STYLE_BG, 1.0])
-        row.append([str(bucket.skills), STYLE_SKILL, max(0.72, ink)])
+        row += [["  ", STYLE_BG, 1.0], [str(bucket.skills), STYLE_SKILL, max(0.72, ink)]]
         if bucket.memories:
-            row.append(["+", STYLE_DIM, 0.6])
-            row.append([str(bucket.memories), STYLE_MEMORY, max(0.72, ink)])
+            row += [["+", STYLE_DIM, 0.6], [str(bucket.memories), STYLE_MEMORY, max(0.72, ink)]]
         if i == visible_bucket_count - 1:
             row.append(["  ◀ now", STYLE_LABEL, 0.9])
         elif bucket.total == max_total and max_total > 1:
@@ -484,7 +441,6 @@ def render_graph(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, rev
 
 # ── Trimmings ──────────────────────────────────────────────────────────────
 
-
 def build_legend(payload: dict[str, Any]) -> list[dict[str, Any]]:
     nodes = payload.get("nodes", [])
     memories = sum(1 for n in nodes if _is_memory(n))
@@ -496,16 +452,13 @@ def build_legend(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def axis_labels(payload: dict[str, Any]) -> dict[str, str]:
     rec = compute_recency(list(payload.get("nodes", [])))
-    if not rec["timed"]:
-        return {"start": "oldest", "end": "now"}
-    return {"start": format_date(rec["minTs"]), "end": format_date(rec["maxTs"])}
+    return {"start": format_date(rec["minTs"]), "end": format_date(rec["maxTs"])} if rec["timed"] else {"start": "oldest", "end": "now"}
 
 
 def _peak_day(payload: dict[str, Any]) -> Optional[str]:
     counts: Counter = Counter()
     labels: dict[tuple[int, ...], str] = {}
-    for node in payload.get("nodes", []):
-        ts = _node_ts(node)
+    for ts in (_node_ts(n) for n in payload.get("nodes", [])):
         if ts is not None:
             key, labels[key] = _period(ts, "day")
             counts[key] += 1
@@ -521,9 +474,7 @@ def build_summary(payload: dict[str, Any]) -> list[str]:
     lines = [f"{learned} learned skills · {stats.get('memory_nodes', 0)} memories · {stats.get('related_edges', 0)} skill links"]
     extra = [f"{stats['memory_skill_edges']} memory↔skill links"] if stats.get("memory_skill_edges") else []
     extra += filter(None, [_peak_day(payload)])
-    if extra:
-        lines.append(" · ".join(extra))
-    return lines
+    return lines + ([" · ".join(extra)] if extra else [])
 
 
 def render_frames(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, frames: int = 48) -> dict[str, Any]:
