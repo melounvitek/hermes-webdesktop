@@ -1,7 +1,7 @@
 """Audio dashboard routes: transcription upload, voice config, ElevenLabs voices, TTS speak/lease and the speak-stream WebSocket.
 
 Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+``web_server`` stay there and are late-bound (cycle-safe).
 """
 
 import base64
@@ -34,25 +34,40 @@ _ws_auth_ok = late("_ws_auth_ok")
 _ws_request_is_allowed = late("_ws_request_is_allowed")
 load_env = late("load_env")
 
-
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
-    "audio/aac": ".aac",
-    "audio/flac": ".flac",
-    "audio/m4a": ".m4a",
-    "audio/mp3": ".mp3",
-    "audio/mp4": ".mp4",
-    "audio/mpeg": ".mp3",
-    "audio/ogg": ".ogg",
-    "audio/wav": ".wav",
-    "audio/wave": ".wav",
-    "audio/webm": ".webm",
-    "audio/x-m4a": ".m4a",
-    "audio/x-wav": ".wav",
+    "audio/aac": ".aac", "audio/flac": ".flac", "audio/m4a": ".m4a", "audio/mp3": ".mp3",
+    "audio/mp4": ".mp4", "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/wav": ".wav",
+    "audio/wave": ".wav", "audio/webm": ".webm", "audio/x-m4a": ".m4a", "audio/x-wav": ".wav",
     "video/webm": ".webm",
 }
 
-
 _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
+
+_SPEAK_MIME_BY_EXT = {
+    ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav",
+    ".flac": "audio/flac",
+}
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+async def _run_config_scoped(profile: Optional[str], fn):
+    """Run ``fn()`` on a worker thread under the config-only profile scope.
+
+    Home-only contextvar scope, NOT ``_profile_scope``: these calls block for a
+    provider round-trip and only need config/.env resolution, while
+    ``_profile_scope`` holds a process-global skills lock for its entire body.
+    """
+    def _scoped():
+        with _config_profile_scope(profile):
+            return fn()
+
+    return await asyncio.get_running_loop().run_in_executor(None, _scoped)
 
 
 def _audio_extension_for_mime(mime_type: str) -> str:
@@ -70,21 +85,12 @@ async def transcribe_audio_upload(
 
     header, encoded = data_url.split(",", 1)
     if ";base64" not in header:
-        raise HTTPException(
-            status_code=400, detail="Audio payload must be base64 encoded"
-        )
+        raise HTTPException(status_code=400, detail="Audio payload must be base64 encoded")
 
-    mime_type = (
-        payload.mime_type or header[5:].split(";", 1)[0] or "audio/webm"
-    ).strip()
+    mime_type = (payload.mime_type or header[5:].split(";", 1)[0] or "audio/webm").strip()
     normalized_mime_type = mime_type.split(";", 1)[0].lower()
-    if not (
-        normalized_mime_type.startswith("audio/")
-        or normalized_mime_type == "video/webm"
-    ):
-        raise HTTPException(
-            status_code=400, detail="Payload must be an audio recording"
-        )
+    if not (normalized_mime_type.startswith("audio/") or normalized_mime_type == "video/webm"):
+        raise HTTPException(status_code=400, detail="Payload must be an audio recording")
 
     try:
         audio_bytes = base64.b64decode(encoded, validate=True)
@@ -98,58 +104,36 @@ async def transcribe_audio_upload(
 
     temp_path = ""
     try:
-        suffix = _audio_extension_for_mime(mime_type)
-        with tempfile.NamedTemporaryFile(
-            prefix="hermes-desktop-voice-",
-            suffix=suffix,
-            delete=False,
-        ) as tmp:
-            tmp.write(audio_bytes)
-            temp_path = tmp.name
+        with http_failure("Desktop voice transcription failed", 500, "Transcription failed"):
+            with tempfile.NamedTemporaryFile(
+                prefix="hermes-desktop-voice-", suffix=_audio_extension_for_mime(mime_type),
+                delete=False,
+            ) as tmp:
+                tmp.write(audio_bytes)
+                temp_path = tmp.name
 
-        # transcribe_recording (not raw transcribe_audio): filters Whisper
-        # hallucinations and maps provider "empty transcript" errors to a
-        # successful empty result — the live voice loop treats "" as silence
-        # and re-listens instead of surfacing a 400 on every quiet turn.
-        from tools.voice_mode import transcribe_recording
+            # transcribe_recording (not raw transcribe_audio): filters Whisper
+            # hallucinations and maps provider "empty transcript" errors to a
+            # successful empty result — the live voice loop treats "" as silence
+            # and re-listens instead of surfacing a 400 on every quiet turn.
+            from tools.voice_mode import transcribe_recording
 
-        def _transcribe_scoped():
-            # Home-only scope (contextvar), NOT _profile_scope: transcription
-            # blocks for the provider round-trip and _profile_scope holds a
-            # process-global skills lock for its entire body (see the MCP
-            # probe above). STT only needs config/.env resolution, which the
-            # contextvar override provides inside this worker thread.
-            with _config_profile_scope(profile):
-                return transcribe_recording(temp_path)
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _transcribe_scoped)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("Desktop voice transcription failed")
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
+            result = await _run_config_scoped(profile, lambda: transcribe_recording(temp_path))
     finally:
         if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+            _unlink_quietly(temp_path)
 
     if not result.get("success"):
         err = result.get("error") or "Transcription failed"
-        # An empty transcript means no speech was detected — a normal outcome
-        # for VAD/continuous voice loops (e.g. a wake-word conversation
-        # re-listening on silence), not an error. Return an empty transcript so
-        # the client quietly re-listens instead of surfacing a "transcription
-        # failed" toast on every silent gap.
+        # No speech detected is a normal outcome for VAD/continuous voice loops
+        # (re-listening on silence), not an error: return an empty transcript so
+        # the client quietly re-listens instead of showing a failure toast.
         if "empty transcript" in err.lower():
             return {"ok": True, "transcript": "", "provider": result.get("provider")}
         raise HTTPException(status_code=400, detail=err)
 
     return {
-        "ok": True,
-        "transcript": str(result.get("transcript") or "").strip(),
+        "ok": True, "transcript": str(result.get("transcript") or "").strip(),
         "provider": result.get("provider"),
     }
 
@@ -172,16 +156,8 @@ async def get_client_voice_config(profile: Optional[str] = None):
     """
     from tools.voice_client_config import resolve_client_voice_config
 
-    def _resolve_scoped():
-        # Home-only contextvar scope, same rationale as transcribe above:
-        # resolution reads config/.env only and must not hold the process-
-        # global skills lock across the (cheap, but still I/O) resolution.
-        with _config_profile_scope(profile):
-            return resolve_client_voice_config()
-
-    loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, _resolve_scoped)
+        result = await _run_config_scoped(profile, resolve_client_voice_config)
     except Exception:
         _log.exception("Client voice-config resolution failed")
         fallback = {"mode": "relay", "reason": "resolution error"}
@@ -209,9 +185,9 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
     with _config_profile_scope(profile):
         api_key = (load_env().get("ELEVENLABS_API_KEY") or "").strip()
     if not api_key:
-        # Fallback for env-only deployments — scope-aware (Slack pattern):
-        # under multiplex os.environ may hold another profile's key, so
-        # honor the installed scope's verdict before touching the env.
+        # Fallback for env-only deployments — scope-aware: under multiplex
+        # os.environ may hold another profile's key, so honor the installed
+        # scope's verdict before touching the env.
         try:
             from agent.secret_scope import UnscopedSecretError, get_secret
 
@@ -226,10 +202,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
 
     request = urllib.request.Request(
         "https://api.elevenlabs.io/v1/voices",
-        headers={
-            "Accept": "application/json",
-            "xi-api-key": api_key,
-        },
+        headers={"Accept": "application/json", "xi-api-key": api_key},
     )
 
     try:
@@ -241,17 +214,13 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
 
         payload = await loop.run_in_executor(None, _fetch)
     except urllib.error.HTTPError as exc:
-        # An auth failure (bad/expired/scoped key) is a persistent,
-        # user-fixable state, not a transient blip — the desktop polls this on
-        # every settings open/focus, so a per-poll WARNING floods the log
-        # (#voice-list-401-spam). Treat 401/403 as "integration unavailable":
-        # report it to the UI with a 200 and log at most once until the error
-        # signature changes (see _voice_list_error_logged_once).
+        # An auth failure (bad/expired/scoped key) is a persistent, user-fixable
+        # state and the desktop polls this on every settings open/focus, so
+        # treat 401/403 as "integration unavailable": 200 to the UI and log at
+        # most once until the error signature changes.
         if exc.code in (401, 403):
             if _voice_list_error_logged_once(f"http-{exc.code}"):
-                _log.info(
-                    "ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc
-                )
+                _log.info("ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc)
             return {"available": False, "voices": [], "error": "unauthorized"}
         if _voice_list_error_logged_once(f"http-{exc.code}"):
             _log.warning("ElevenLabs voice list failed: %s", exc)
@@ -272,8 +241,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
             continue
 
         voices.append({
-            "voice_id": voice_id,
-            "name": str(voice.get("name") or voice_id),
+            "voice_id": voice_id, "name": str(voice.get("name") or voice_id),
             "label": _elevenlabs_voice_label(voice),
         })
 
@@ -286,9 +254,8 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     """Synthesize speech and return audio as base64 data URL.
 
     Used by the desktop voice-conversation mode to play back assistant
-    responses without exposing the on-disk file path. Reuses the
-    existing TTS provider chain (Edge / OpenAI / ElevenLabs / etc.)
-    configured in ``~/.hermes/config.yaml`` under ``tts.``.
+    responses without exposing the on-disk file path; reuses the TTS provider
+    chain configured under ``tts.`` in config.yaml.
     """
     text = (payload.text or "").strip()
     if not text:
@@ -299,16 +266,7 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     with http_failure("Desktop voice TTS failed", 500, "Speech synthesis failed"):
         from tools.tts_tool import text_to_speech_tool
 
-        def _speak_scoped():
-            # Home-only scope (contextvar), NOT _profile_scope: synthesis
-            # blocks for the provider round-trip and only needs config/.env
-            # resolution, so the task-local override inside this worker
-            # thread is sufficient (same reasoning as the MCP probe scope).
-            with _config_profile_scope(profile):
-                return text_to_speech_tool(text)
-
-        loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, _speak_scoped)
+        result_json = await _run_config_scoped(profile, lambda: text_to_speech_tool(text))
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
@@ -317,35 +275,24 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 
     if not result.get("success"):
         raise HTTPException(
-            status_code=400,
-            detail=result.get("error") or "Speech synthesis failed",
+            status_code=400, detail=result.get("error") or "Speech synthesis failed",
         )
 
     file_path = result.get("file_path")
     if not file_path or not os.path.isfile(file_path):
         raise HTTPException(status_code=500, detail="Audio file missing")
 
-    ext = os.path.splitext(file_path)[1].lower()
-    mime_type = {
-        ".mp3": "audio/mpeg",
-        ".ogg": "audio/ogg",
-        ".opus": "audio/ogg",
-        ".wav": "audio/wav",
-        ".flac": "audio/flac",
-    }.get(ext, "audio/mpeg")
+    mime_type = _SPEAK_MIME_BY_EXT.get(os.path.splitext(file_path)[1].lower(), "audio/mpeg")
 
     def _read_and_unlink() -> bytes:
         # Off-loop: synthesized audio can be several MB; reading it inline
-        # blocks the uvicorn event loop (Pattern A). Unlink rides the same
-        # thread hop so the temp file cannot outlive an early return.
+        # blocks the uvicorn event loop. Unlink rides the same thread hop so
+        # the temp file cannot outlive an early return.
         try:
             with open(file_path, "rb") as fh:
                 return fh.read()
         finally:
-            try:
-                os.unlink(file_path)
-            except OSError:
-                pass
+            _unlink_quietly(file_path)
 
     try:
         audio_bytes = await asyncio.to_thread(_read_and_unlink)
@@ -354,9 +301,7 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 
     encoded = base64.b64encode(audio_bytes).decode("ascii")
     return {
-        "ok": True,
-        "data_url": f"data:{mime_type};base64,{encoded}",
-        "mime_type": mime_type,
+        "ok": True, "data_url": f"data:{mime_type};base64,{encoded}", "mime_type": mime_type,
         "provider": result.get("provider"),
     }
 
@@ -365,16 +310,12 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 async def tts_lease(payload: TTSLeaseRequest, profile: Optional[str] = None):
     """Desktop TTS-output toggles as warm-up / release signals.
 
-    "Read replies aloud" and voice-conversation mode are explicit "speech is
-    about to be needed" gestures. ``active: true`` registers the toggle as a
-    lease on the TTS engine and pre-loads the configured provider (local
-    piper/kittentts model, lazily-installed SDK) so the first spoken reply
-    doesn't pay the load as dead air; ``active: false`` drops the lease and,
-    once no surface holds one, unloads resident local models.
-
-    Blocking work (model load, voice download) runs off the event loop.
-    Warm-up failures are reported in the body, never as an HTTP error — the
-    toggle must succeed even when the engine can't preload.
+    ``active: true`` registers a lease on the TTS engine and pre-loads the
+    configured provider (local model, lazily-installed SDK) so the first spoken
+    reply doesn't pay the load as dead air; ``active: false`` drops the lease
+    and, once no surface holds one, unloads resident local models. Blocking
+    work runs off the event loop. Warm-up failures are reported in the body,
+    never as an HTTP error — the toggle must succeed even when preload fails.
     """
     lease = (payload.lease or "").strip()
     if not lease:
@@ -405,9 +346,7 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
     The socket is a per-reply speech *session*: the client feeds text
     incrementally as LLM deltas arrive, the server cuts sentences
     (``SentenceChunker`` — same cutter as the CLI/TUI speaker pipeline) and
-    streams each one's PCM the moment it's ready. Speech overlaps generation,
-    exactly like the token→sentence→TTS pipelining the realtime-voice
-    literature converges on.
+    streams each one's PCM the moment it's ready, so speech overlaps generation.
 
     Protocol:
       client → ``{"text": "..."}`` frames (incremental; may combine with done),
@@ -469,14 +408,12 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
 
         chunker = SentenceChunker()
 
-        # The session stays open for a whole agent turn, and the client only
-        # sends `done` when the turn ends. During tool execution no text
-        # arrives, so without an idle flush a narration line with no trailing
-        # whitespace ("Let me check.") sits in the chunker until end-of-turn
-        # and is spoken long after the tool already finished. Mirror the CLI
-        # speaker pipeline: poll with a timeout and flush the buffer when the
-        # producer goes idle — immediately when the buffer ends on sentence
-        # punctuation, after a longer quiet spell otherwise.
+        # The session stays open for a whole agent turn and no text arrives
+        # during tool execution, so without an idle flush a narration line with
+        # no trailing whitespace ("Let me check.") sits in the chunker until
+        # end-of-turn. Mirror the CLI speaker pipeline: poll with a timeout and
+        # flush when the producer goes idle — immediately when the buffer ends
+        # on sentence punctuation, after a longer quiet spell otherwise.
         idle_poll_seconds = 0.5
         idle_polls_before_force_flush = 4  # ~2s of silence
 
