@@ -2189,42 +2189,67 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
     agent.request_overrides = overrides
 
 
-def switch_model(
-    agent,
-    new_model,
-    new_provider,
-    api_key='',
-    base_url='',
-    api_mode='',
-    capabilities=None,
-):
-    """Switch the model/provider in-place for a live agent (rebuild clients, caching flags, compressor).
+_SWITCH_SNAPSHOT_FIELDS = (
+    "model",
+    "provider",
+    "requested_provider",
+    "base_url",
+    "api_mode",
+    "api_key",
+    "client",
+    "_anthropic_client",
+    "_anthropic_api_key",
+    "_anthropic_base_url",
+    "_is_anthropic_oauth",
+    "_config_context_length",
+    "_reasoning_echo_flag",
+    "runtime_capabilities",
+    # Pool reload is part of the switch and must be reversible on rollback.
+    "_credential_pool",
+    "_credential_pool_entry_id",
+)
+_MISSING = object()
 
-    Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so
-    the change persists across turns.
+
+def _snapshot_switch_state(agent) -> Dict[str, Any]:
+    """Snapshot every field the swap+rebuild mutates so a failed rebuild rolls back atomically.
+
+    Otherwise a new model name + OLD client 400s next turn. The sentinel distinguishes
+    unset from None: tests build bare agents via ``__new__`` without all fields.
     """
+    snapshot = {name: getattr(agent, name, _MISSING) for name in _SWITCH_SNAPSHOT_FIELDS}
+    # Shallow-copy the dict so mutating the live one doesn't poison the rollback target.
+    snapshot["_client_kwargs"] = dict(getattr(agent, "_client_kwargs", {}) or {})
+    return snapshot
+
+
+def _restore_switch_snapshot(agent, snapshot: Dict[str, Any]) -> None:
+    for name, value in snapshot.items():
+        if value is _MISSING:
+            continue  # attribute did not exist before the swap; don't fabricate it
+        try:
+            setattr(agent, name, value)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mode, capabilities, old_norm, new_norm):
+    """Resolve ``(api_mode, base_url, destination_capabilities)`` for the switch target."""
     from hermes_cli.providers import determine_api_mode
     from agent.native_compaction import resolve_native_compaction_capabilities
-
-    old_model = agent.model
-    old_provider = agent.provider
-    old_norm = (old_provider or "").strip().lower()
-    new_norm = (new_provider or "").strip().lower()
+    from hermes_cli.models import opencode_provider_family
 
     # Pass model so dual-wire providers (Nous Portal anthropic/* -> Messages) resolve correctly.
     if not api_mode:
         api_mode = determine_api_mode(new_provider, base_url, model=new_model)
-
     if not base_url and new_norm == "openai":
         # An omitted URL means the provider's canonical direct endpoint.
         base_url = "https://api.openai.com/v1"
-
     # Same-provider switches may omit base_url (e.g. credential refresh); resolve
     # capabilities from the endpoint the normalization below retains.
     effective_base_url = base_url
     if not effective_base_url and old_norm == new_norm:
         effective_base_url = getattr(agent, "base_url", "")
-
     destination_capabilities = (
         dict(capabilities)
         if isinstance(capabilities, dict)
@@ -2232,14 +2257,11 @@ def switch_model(
             model=new_model,
             base_url=effective_base_url,
             provider=new_provider,
-            is_codex_backend=new_norm == 'openai-codex',
+            is_codex_backend=new_norm == "openai-codex",
         )
     )
-
     # Guard against a trailing /v1 on OpenCode base_url reaching the anthropic_messages
     # client (double-/v1 404); model_switch already strips it, direct callers may not.
-    from hermes_cli.models import opencode_provider_family
-
     if (
         api_mode == "anthropic_messages"
         and opencode_provider_family(new_provider) is not None
@@ -2247,181 +2269,130 @@ def switch_model(
         and base_url
     ):
         base_url = re.sub(r"/v1/?$", "", base_url)
+    return api_mode, base_url, destination_capabilities
 
-    # Snapshot every field the swap+rebuild mutates so a failed rebuild rolls back atomically
-    # (else new model name + OLD client -> 400s next turn). Sentinel distinguishes unset from
-    # None: tests build bare agents via __new__ without all fields.
-    _MISSING = object()
-    _snapshot = {
-        name: getattr(agent, name, _MISSING)
-        for name in (
-            "model",
-            "provider",
-            "requested_provider",
-            "base_url",
-            "api_mode",
-            "api_key",
-            "client",
-            "_anthropic_client",
-            "_anthropic_api_key",
-            "_anthropic_base_url",
-            "_is_anthropic_oauth",
-            "_config_context_length",
-            "_reasoning_echo_flag",
-            "runtime_capabilities",
-        )
-    }
-    # Shallow-copy the dict so mutating the live one doesn't poison the rollback target.
-    _snapshot["_client_kwargs"] = dict(getattr(agent, "_client_kwargs", {}) or {})
-    # Pool reload is part of this switch and must be reversible on rollback (#52727).
-    _snapshot["_credential_pool"] = getattr(agent, "_credential_pool", _MISSING)
-    _snapshot["_credential_pool_entry_id"] = getattr(
-        agent, "_credential_pool_entry_id", _MISSING
-    )
 
-    def _restore_snapshot() -> None:
-        for _name, _value in _snapshot.items():
-            if _value is _MISSING:
-                # Attribute did not exist before the swap; don't fabricate it.
-                continue
+def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new_norm) -> None:
+    """Build the client for the switched-to destination (MoA facade / native Anthropic / OpenAI wire)."""
+    if new_norm == "moa":
+        from agent.moa_loop import build_moa_facade
+
+        # MoA speaks only chat.completions via the MoAClient facade; the aggregator's real
+        # transport is applied inside the fan-out. Pin api_mode so the loop never dispatches
+        # client.responses.create against the facade (matches agent_init.py).
+        agent.api_mode = "chat_completions"
+        agent.api_key = api_key or "moa-virtual-provider"
+        agent.base_url = "moa://local"
+        agent._client_kwargs = {}
+        agent.client = build_moa_facade(agent, agent.model)
+        return
+    if api_mode == "anthropic_messages":
+        from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+
+        # Only fall back to ANTHROPIC_TOKEN for native Anthropic; other anthropic_messages
+        # providers must never receive Anthropic credentials.
+        is_native_anthropic = new_provider == "anthropic"
+        effective_key = api_key or agent.api_key or (resolve_anthropic_token() if is_native_anthropic else "") or ""
+        # MiniMax OAuth: per-request callable token provider survives 15-min expiry
+        # (rationale in agent_init.py).
+        if new_provider == "minimax-oauth" and isinstance(effective_key, str) and effective_key:
             try:
-                setattr(agent, _name, _value)
-            except Exception:  # noqa: BLE001
-                pass
-
-    try:
-        # Clear the per-config override so the new model's context window is re-resolved.
-        agent._config_context_length = None
-
-        # ── Swap core runtime fields ──
-        agent.model = new_model
-        agent.provider = new_provider
-        agent.requested_provider = new_provider
-        # Re-read reasoning_echo so the flag reflects the new primary model (see _reasoning_echo_opt_in).
-        agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
-        # Empty base_url while the provider changes means upstream resolution failed; falling
-        # back to the old provider's URL pairs the wrong host and persists via _primary_runtime
-        # (#47828). Fail loud. Same-provider re-select (credential refresh) may keep the URL.
-        if base_url:
-            agent.base_url = base_url
-        elif old_norm != new_norm:
-            raise ValueError(
-                f"switch_model: no base_url resolved for provider "
-                f"'{new_provider}' (switching from '{old_provider}'); "
-                "refusing to keep the previous provider's endpoint"
-            )
-        agent.api_mode = api_mode
-        # New api_mode may need a different transport.
-        if hasattr(agent, "_transport_cache"):
-            agent._transport_cache.clear()
-        if api_key:
-            agent.api_key = api_key
-
-        # Reload the credential pool on provider change (#52727): a pool with a mismatched
-        # provider makes recover_with_credential_pool short-circuit. Reload failure is non-fatal.
-        if old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
-            # A pool bound to the old provider is worse than none: the recovery guard rejects it.
-            agent._credential_pool = None
-            agent._credential_pool_entry_id = None
-            try:
-                from agent.credential_pool import load_pool
-                agent._credential_pool = load_pool(new_provider)
-            except Exception as _pool_exc:  # noqa: BLE001
+                from hermes_cli.auth import build_minimax_oauth_token_provider
+                effective_key = build_minimax_oauth_token_provider()
+            except Exception as _mm_exc:  # noqa: BLE001
                 logger.warning(
-                    "switch_model: credential pool reload failed for %s (%s); "
-                    "continuing without pool rotation this turn",
-                    new_provider, _pool_exc,
+                    "MiniMax OAuth: failed to install per-request token provider "
+                    "on switch (%s); using static bearer.",
+                    _mm_exc,
                 )
-        # ── Build new client ──
-        if new_norm == "moa":
-            from agent.moa_loop import build_moa_facade
+        agent.api_key = effective_key
+        agent._anthropic_api_key = effective_key
+        agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
+        agent._anthropic_client = build_anthropic_client(
+            effective_key, agent._anthropic_base_url,
+            timeout=get_provider_request_timeout(agent.provider, agent.model),
+        )
+        agent._is_anthropic_oauth = (
+            _is_oauth_token(effective_key) if (is_native_anthropic and isinstance(effective_key, str)) else False
+        )
+        agent.client = None
+        agent._client_kwargs = {}
+        return
+    effective_base = base_url or agent.base_url
+    agent._client_kwargs = {"api_key": api_key or agent.api_key, "base_url": effective_base}
+    try:
+        from hermes_cli.config import (
+            apply_custom_provider_tls_to_client_kwargs,
+            get_compatible_custom_providers,
+            load_config_readonly,
+        )
 
-            # MoA speaks only chat.completions via the MoAClient facade; the aggregator's real
-            # transport is applied inside the fan-out. Pin api_mode so the loop never dispatches
-            # client.responses.create against the facade (matches agent_init.py).
-            agent.api_mode = "chat_completions"
-            agent.api_key = api_key or "moa-virtual-provider"
-            agent.base_url = "moa://local"
-            agent._client_kwargs = {}
-            agent.client = build_moa_facade(agent, agent.model)
-        elif api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import (
-                build_anthropic_client,
-                resolve_anthropic_token,
-                _is_oauth_token,
-            )
-            # Only fall back to ANTHROPIC_TOKEN for native Anthropic; other anthropic_messages
-            # providers must never receive Anthropic credentials.
-            _is_native_anthropic = new_provider == "anthropic"
-            effective_key = (api_key or agent.api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or agent.api_key or "")
-
-            # MiniMax OAuth: per-request callable token provider survives 15-min expiry
-            # (rationale in agent_init.py).
-            if new_provider == "minimax-oauth" and isinstance(effective_key, str) and effective_key:
-                try:
-                    from hermes_cli.auth import build_minimax_oauth_token_provider
-                    effective_key = build_minimax_oauth_token_provider()
-                except Exception as _mm_exc:  # noqa: BLE001
-                    logger.warning(
-                        "MiniMax OAuth: failed to install per-request token provider "
-                        "on switch (%s); using static bearer.",
-                        _mm_exc,
-                    )
-
-            agent.api_key = effective_key
-            agent._anthropic_api_key = effective_key
-            agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
-            agent._anthropic_client = build_anthropic_client(
-                effective_key, agent._anthropic_base_url,
-                timeout=get_provider_request_timeout(agent.provider, agent.model),
-            )
-            agent._is_anthropic_oauth = _is_oauth_token(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
-            agent.client = None
-            agent._client_kwargs = {}
-        else:
-            effective_key = api_key or agent.api_key
-            effective_base = base_url or agent.base_url
-            agent._client_kwargs = {
-                "api_key": effective_key,
-                "base_url": effective_base,
-            }
-            try:
-                from hermes_cli.config import (
-                    apply_custom_provider_tls_to_client_kwargs,
-                    get_compatible_custom_providers,
-                    load_config_readonly,
-                )
-
-                # Read live config, not agent._custom_providers, so mid-session ssl_ca_cert /
-                # ssl_verify edits are honored (#15779).
-                apply_custom_provider_tls_to_client_kwargs(
-                    agent._client_kwargs,
-                    str(effective_base or ""),
-                    get_compatible_custom_providers(load_config_readonly()),
-                )
-            except Exception:
-                logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
-            _sm_timeout = get_provider_request_timeout(agent.provider, agent.model)
-            if _sm_timeout is not None:
-                agent._client_kwargs["timeout"] = _sm_timeout
-            # Reapply provider headers (OpenRouter HTTP-Referer/X-Title) lost when
-            # _client_kwargs was rebuilt; otherwise attribution shows "Unknown".
-            agent._apply_client_headers_for_base_url(effective_base)
-            agent.client = agent._create_openai_client(
-                dict(agent._client_kwargs),
-                reason="switch_model",
-                shared=True,
-            )
-
-        sync_credential_pool_entry_id(agent)
+        # Read live config, not agent._custom_providers, so mid-session ssl_ca_cert /
+        # ssl_verify edits are honored.
+        apply_custom_provider_tls_to_client_kwargs(
+            agent._client_kwargs,
+            str(effective_base or ""),
+            get_compatible_custom_providers(load_config_readonly()),
+        )
     except Exception:
-        # Roll back to the pre-swap snapshot so the agent stays consistent; callers
-        # (cli.py / gateway/run.py / tui_gateway) catch the re-raised exception.
-        _restore_snapshot()
-        raise
+        logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
+    timeout = get_provider_request_timeout(agent.provider, agent.model)
+    if timeout is not None:
+        agent._client_kwargs["timeout"] = timeout
+    # Reapply provider headers (OpenRouter HTTP-Referer/X-Title) lost when
+    # _client_kwargs was rebuilt; otherwise attribution shows "Unknown".
+    agent._apply_client_headers_for_base_url(effective_base)
+    agent.client = agent._create_openai_client(dict(agent._client_kwargs), reason="switch_model", shared=True)
 
-    # LM Studio: preload before probing context length.
-    _sm_custom_providers = None
+
+def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm) -> None:
+    """Swap identity/transport fields, reload the pool, rebuild the client (rolled back by the caller on error)."""
+    # Clear the per-config override so the new model's context window is re-resolved.
+    agent._config_context_length = None
+    agent.model = new_model
+    agent.provider = new_provider
+    agent.requested_provider = new_provider
+    # Re-read reasoning_echo so the flag reflects the new primary model (see _reasoning_echo_opt_in).
+    agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
+    # Empty base_url while the provider changes means upstream resolution failed; falling
+    # back to the old provider's URL pairs the wrong host and persists via _primary_runtime.
+    # Fail loud. Same-provider re-select (credential refresh) may keep the URL.
+    if base_url:
+        agent.base_url = base_url
+    elif old_norm != new_norm:
+        raise ValueError(
+            f"switch_model: no base_url resolved for provider "
+            f"'{new_provider}' (switching from '{old_provider}'); "
+            "refusing to keep the previous provider's endpoint"
+        )
+    agent.api_mode = api_mode
+    # New api_mode may need a different transport.
+    if hasattr(agent, "_transport_cache"):
+        agent._transport_cache.clear()
+    if api_key:
+        agent.api_key = api_key
+    # Reload the credential pool on provider change: a pool with a mismatched provider
+    # makes recover_with_credential_pool short-circuit. Reload failure is non-fatal.
+    if old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
+        # A pool bound to the old provider is worse than none: the recovery guard rejects it.
+        agent._credential_pool = None
+        agent._credential_pool_entry_id = None
+        try:
+            from agent.credential_pool import load_pool
+            agent._credential_pool = load_pool(new_provider)
+        except Exception as _pool_exc:  # noqa: BLE001
+            logger.warning(
+                "switch_model: credential pool reload failed for %s (%s); "
+                "continuing without pool rotation this turn",
+                new_provider, _pool_exc,
+            )
+    _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new_norm)
+    sync_credential_pool_entry_id(agent)
+
+
+def _resolve_switch_context_length(agent, snapshot):
+    """Resolve the destination context length (LM Studio preload first); returns ``(custom_providers, effective_len)``."""
+    custom_providers = None
     try:
         from hermes_cli.config import (
             get_compatible_custom_providers,
@@ -2429,119 +2400,70 @@ def switch_model(
             load_config,
         )
 
-        _sm_cfg = load_config()
-        _sm_custom_providers = get_compatible_custom_providers(_sm_cfg)
-        _destination_context_intent = get_custom_provider_context_length(
-            model=agent.model,
-            base_url=agent.base_url,
-            custom_providers=_sm_custom_providers,
+        custom_providers = get_compatible_custom_providers(load_config())
+        intent = get_custom_provider_context_length(
+            model=agent.model, base_url=agent.base_url, custom_providers=custom_providers
         )
     except Exception:
-        _destination_context_intent = None
-    agent._config_context_length = _destination_context_intent
+        intent = None
+    agent._config_context_length = intent
+    runtime_len = None
     if hasattr(agent, "_ensure_lmstudio_runtime_loaded"):
         try:
-            _runtime_context_length = agent._ensure_lmstudio_runtime_loaded(
-                _destination_context_intent
-            )
+            runtime_len = agent._ensure_lmstudio_runtime_loaded(intent)
         except Exception:
-            _restore_snapshot()
+            _restore_switch_snapshot(agent, snapshot)
             raise
-    else:
-        _runtime_context_length = None
-    if (
-        hasattr(agent, "_lmstudio_load_was_unverified")
-        and agent._lmstudio_load_was_unverified(_runtime_context_length)
-    ):
+    if hasattr(agent, "_lmstudio_load_was_unverified") and agent._lmstudio_load_was_unverified(runtime_len):
         logger.warning(
             "LM Studio model activation was rejected or completed without a "
             "verifiable active context length during model switch; continuing "
             "with configured context"
         )
+    effective = intent
     if hasattr(agent, "_effective_lmstudio_context_length"):
-        _effective_context_length = agent._effective_lmstudio_context_length(
-            _destination_context_intent,
-            _runtime_context_length,
-        )
-    else:
-        _effective_context_length = _destination_context_intent
+        effective = agent._effective_lmstudio_context_length(intent, runtime_len)
+    return custom_providers, effective
 
-    # Refresh the custom-provider snapshot from the config just loaded so the prompt_caching
-    # lookup sees flags added to config.yaml after session start.
-    if _sm_custom_providers is not None:
-        agent._custom_providers = _sm_custom_providers
-    agent._use_prompt_caching, agent._use_native_cache_layout = (
-        agent._anthropic_prompt_cache_policy(
-            provider=new_provider,
-            base_url=agent.base_url,
-            api_mode=api_mode,
-            model=new_model,
-        )
-    )
 
-    # ── Update context compressor ──
-    if hasattr(agent, "context_compressor") and agent.context_compressor:
-        from agent.model_metadata import get_model_context_length
-        if _sm_custom_providers is None:
-            try:
-                from hermes_cli.config import get_compatible_custom_providers, load_config
-                _sm_custom_providers = get_compatible_custom_providers(load_config())
-            except Exception:
-                _sm_custom_providers = None
-        # agent.api_key may be a callable (Azure Foundry Entra ID); get_model_context_length
-        # expects a string for live probes, so coerce defensively.
-        _ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
+def _update_switch_compressor(agent, custom_providers, effective_context_length, snapshot) -> None:
+    """Point the context compressor at the new model (rolls back the switch on failure)."""
+    from agent.model_metadata import get_model_context_length
+    if custom_providers is None:
         try:
-            new_context_length = get_model_context_length(
-                agent.model,
-                base_url=agent.base_url,
-                api_key=_ctx_api_key,
-                provider=agent.provider,
-                config_context_length=_effective_context_length,
-                custom_providers=_sm_custom_providers,
-            )
-            agent.context_compressor.update_model(
-                model=agent.model,
-                context_length=new_context_length,
-                base_url=agent.base_url,
-                api_key=agent.api_key,  # context_compressor forwards to call_llm; callable preserved
-                provider=agent.provider,
-                api_mode=agent.api_mode,
-            )
+            from hermes_cli.config import get_compatible_custom_providers, load_config
+            custom_providers = get_compatible_custom_providers(load_config())
         except Exception:
-            _restore_snapshot()
-            raise
-
-    # Re-read the per-model reasoning_effort override so it applies immediately
-    # (per-model > global; YAML False = disabled).
+            custom_providers = None
+    # agent.api_key may be a callable (Azure Foundry Entra ID); get_model_context_length
+    # expects a string for live probes, so coerce defensively.
+    ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
     try:
-        from hermes_constants import resolve_reasoning_config
-        from hermes_cli.config import load_config as _sm_load_config
-
-        _reasoning_cfg = _sm_load_config() or {}
-        agent.reasoning_config = resolve_reasoning_config(_reasoning_cfg, agent.model)
-        logger.info(
-            "switch_model: reasoning_config resolved for %s: %s",
-            agent.model, agent.reasoning_config,
+        new_context_length = get_model_context_length(
+            agent.model,
+            base_url=agent.base_url,
+            api_key=ctx_api_key,
+            provider=agent.provider,
+            config_context_length=effective_context_length,
+            custom_providers=custom_providers,
         )
-    except Exception as _reasoning_err:
-        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
+        agent.context_compressor.update_model(
+            model=agent.model,
+            context_length=new_context_length,
+            base_url=agent.base_url,
+            api_key=agent.api_key,  # context_compressor forwards to call_llm; callable preserved
+            provider=agent.provider,
+            api_mode=agent.api_mode,
+        )
+    except Exception:
+        _restore_switch_snapshot(agent, snapshot)
+        raise
 
-    # Invalidate the cached system prompt so it rebuilds next turn.
-    agent._cached_system_prompt = None
 
-    # Publish the destination capability map only after every runtime setup
-    # above has succeeded. Failed switches must leave the old map intact.
-    agent.runtime_capabilities = destination_capabilities
-
-    # Reset the cross-turn stale-call circuit breaker (#58962); otherwise the latched
-    # streak keeps short-circuiting the freshly selected healthy provider.
-    from agent.chat_completion_helpers import _reset_stale_streak
-    _reset_stale_streak(agent)
-
-    # Update _primary_runtime so the change persists across turns.
-    _cc = agent.context_compressor if hasattr(agent, "context_compressor") and agent.context_compressor else None
-    agent._primary_runtime = {
+def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
+    """The ``_primary_runtime`` record that persists a switch across turns."""
+    cc = agent.context_compressor if hasattr(agent, "context_compressor") and agent.context_compressor else None
+    rt = {
         "model": agent.model,
         "provider": agent.provider,
         "requested_provider": agent.requested_provider,
@@ -2554,30 +2476,32 @@ def switch_model(
         "reasoning_config": dict(agent.reasoning_config) if getattr(agent, "reasoning_config", None) else None,
         "reasoning_echo_flag": getattr(agent, "_reasoning_echo_flag", False),
         # Overrides must travel with the switched-to identity or a later recovery/restore
-        # resurrects PRE-switch overrides from the stale init snapshot (#75091).
+        # resurrects PRE-switch overrides from the stale init snapshot.
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "runtime_capabilities": dict(getattr(agent, "runtime_capabilities", {}) or {}),
-        "compressor_model": getattr(_cc, "model", agent.model) if _cc else agent.model,
-        "compressor_base_url": getattr(_cc, "base_url", agent.base_url) if _cc else agent.base_url,
-        "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",
-        "compressor_provider": getattr(_cc, "provider", agent.provider) if _cc else agent.provider,
-        "compressor_context_length": _cc.context_length if _cc else 0,
-        "compressor_api_mode": getattr(_cc, "api_mode", agent.api_mode) if _cc else agent.api_mode,
-        "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
+        "compressor_model": getattr(cc, "model", agent.model) if cc else agent.model,
+        "compressor_base_url": getattr(cc, "base_url", agent.base_url) if cc else agent.base_url,
+        "compressor_api_key": getattr(cc, "api_key", "") if cc else "",
+        "compressor_provider": getattr(cc, "provider", agent.provider) if cc else agent.provider,
+        "compressor_context_length": cc.context_length if cc else 0,
+        "compressor_api_mode": getattr(cc, "api_mode", agent.api_mode) if cc else agent.api_mode,
+        "compressor_threshold_tokens": cc.threshold_tokens if cc else 0,
     }
     if api_mode == "anthropic_messages":
-        agent._primary_runtime.update({
+        rt.update({
             "anthropic_api_key": agent._anthropic_api_key,
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+    return rt
 
-    # ── Reset fallback state ──
+
+def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
+    """Post-switch bookkeeping: fallback reset/prune, request_overrides, billing route."""
     agent._fallback_activated = False
     agent._provider_fallback_active = False
     agent._provider_fallback_route = None
     agent._fallback_index = 0
-
     # On a deliberate provider swap, prune fallback entries targeting the OLD or NEW primary;
     # otherwise a failed turn silently re-activates the provider the user just rejected.
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
@@ -2588,35 +2512,102 @@ def switch_model(
         ]
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None
-
     # Apply the switched-to provider's request_overrides (custom_providers extra_body).
     try:
         _apply_switched_provider_request_overrides(agent, new_provider)
     except Exception:
         logger.debug("switch_model: request_overrides re-derivation failed", exc_info=True)
 
+
+def _persist_switch_billing_route(agent) -> None:
+    """Persist the billing route so dashboard Model cards show the post-switch provider."""
+    # _session_db / session_id may be unset (tests, bare agents).
+    session_db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", None)
+    if session_db is None or not session_id:
+        return
+    try:
+        session_db.update_session_billing_route(
+            session_id,
+            provider=agent.provider,
+            base_url=agent.base_url,
+            billing_mode=getattr(agent, "api_mode", None),
+        )
+    except Exception:
+        logger.warning("Failed to persist billing route after model switch", exc_info=True)
+
+
+def switch_model(
+    agent,
+    new_model,
+    new_provider,
+    api_key='',
+    base_url='',
+    api_mode='',
+    capabilities=None,
+):
+    """Switch the model/provider in-place for a live agent (rebuild clients, caching flags, compressor).
+
+    Mirrors ``_try_activate_fallback()`` but also updates ``_primary_runtime`` so the
+    change persists across turns. Any failure during the swap/rebuild rolls the agent
+    back to its pre-switch snapshot and re-raises (callers catch).
+    """
+    old_model = agent.model
+    old_provider = agent.provider
+    old_norm = (old_provider or "").strip().lower()
+    new_norm = (new_provider or "").strip().lower()
+    api_mode, base_url, destination_capabilities = _resolve_switch_destination(
+        agent, new_model, new_provider, base_url, api_mode, capabilities, old_norm, new_norm
+    )
+    snapshot = _snapshot_switch_state(agent)
+    try:
+        _swap_switch_runtime(
+            agent, new_model, new_provider, api_key, base_url, api_mode, old_provider, old_norm, new_norm
+        )
+    except Exception:
+        _restore_switch_snapshot(agent, snapshot)
+        raise
+
+    custom_providers, effective_context_length = _resolve_switch_context_length(agent, snapshot)
+    # Refresh the custom-provider snapshot from the config just loaded so the prompt_caching
+    # lookup sees flags added to config.yaml after session start.
+    if custom_providers is not None:
+        agent._custom_providers = custom_providers
+    agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
+        provider=new_provider, base_url=agent.base_url, api_mode=api_mode, model=new_model
+    )
+    if hasattr(agent, "context_compressor") and agent.context_compressor:
+        _update_switch_compressor(agent, custom_providers, effective_context_length, snapshot)
+
+    # Re-read the per-model reasoning_effort override so it applies immediately
+    # (per-model > global; YAML False = disabled).
+    try:
+        from hermes_constants import resolve_reasoning_config
+        from hermes_cli.config import load_config as _sm_load_config
+
+        agent.reasoning_config = resolve_reasoning_config(_sm_load_config() or {}, agent.model)
+        logger.info(
+            "switch_model: reasoning_config resolved for %s: %s", agent.model, agent.reasoning_config
+        )
+    except Exception as _reasoning_err:
+        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
+
+    # Invalidate the cached system prompt so it rebuilds next turn.
+    agent._cached_system_prompt = None
+    # Publish the destination capability map only after every runtime setup above has
+    # succeeded. Failed switches must leave the old map intact.
+    agent.runtime_capabilities = destination_capabilities
+    # Reset the cross-turn stale-call circuit breaker; otherwise the latched streak keeps
+    # short-circuiting the freshly selected healthy provider.
+    from agent.chat_completion_helpers import _reset_stale_streak
+    _reset_stale_streak(agent)
+    agent._primary_runtime = _build_primary_runtime_snapshot(agent, api_mode)
+    _finish_switch(agent, new_provider, old_norm, new_norm)
     logger.info(
         "Model switched in-place: %s (%s) -> %s (%s)",
         old_model, old_provider, new_model, new_provider,
     )
-
-    # Persist billing route so dashboard Model cards show the post-switch provider (#48248).
-    # _session_db / session_id may be unset (tests, bare agents).
-    _session_db = getattr(agent, "_session_db", None)
-    _session_id = getattr(agent, "session_id", None)
-    if _session_db is not None and _session_id:
-        try:
-            _session_db.update_session_billing_route(
-                _session_id,
-                provider=agent.provider,
-                base_url=agent.base_url,
-                billing_mode=getattr(agent, "api_mode", None),
-            )
-        except Exception:
-            logger.warning(
-                "Failed to persist billing route after model switch",
-                exc_info=True,
-            )
+    _persist_switch_billing_route(agent)
 
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
