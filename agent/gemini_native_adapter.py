@@ -99,13 +99,11 @@ def probe_gemini_tier(
         return "unknown"
     base = str(base_url or DEFAULT_GEMINI_BASE_URL).strip().rstrip("/") or DEFAULT_GEMINI_BASE_URL
     base = re.sub(r"/openai\Z", "", base, flags=re.IGNORECASE)
+    payload = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 1}}
+    headers = {"Content-Type": "application/json", "X-Goog-Api-Client": _API_CLIENT}
     try:
         with httpx.Client(timeout=timeout) as client:
-            resp = client.post(
-                f"{base}/models/{model}:generateContent", params={"key": key},
-                json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 1}},
-                headers={"Content-Type": "application/json", "X-Goog-Api-Client": _API_CLIENT},
-            )
+            resp = client.post(f"{base}/models/{model}:generateContent", params={"key": key}, json=payload, headers=headers)
     except Exception as exc:
         logger.debug("probe_gemini_tier: network error: %s", exc)
         return "unknown"
@@ -235,8 +233,7 @@ def _looks_like_json_schema(node: Any) -> bool:
 
 
 def _translate_tool_result_to_gemini(
-    message: Dict[str, Any], tool_name_by_call_id: Optional[Dict[str, str]] = None, include_ids: bool = False,
-    *, is_gemini3: bool = False,
+    message: Dict[str, Any], tool_name_by_call_id: Optional[Dict[str, str]] = None, include_ids: bool = False, *, is_gemini3: bool = False,
 ) -> Dict[str, Any]:
     tool_call_id = str(message.get("tool_call_id") or "")
     # functionResponse.name must echo the matching functionCall.name, so the call-id
@@ -314,18 +311,20 @@ def _build_gemini_contents(
     return _merge_alternating(contents), ({"role": "system", "parts": [{"text": joined_system}]} if joined_system else None)
 
 
+def _function_declaration(tool: Any) -> Optional[Dict[str, Any]]:
+    fn = (tool.get("function") or {}) if isinstance(tool, dict) else None
+    if not isinstance(fn, dict) or not (isinstance(fn.get("name"), str) and fn["name"]):
+        return None
+    decl: Dict[str, Any] = {"name": fn["name"]}
+    if isinstance(fn.get("description"), str) and fn["description"]:
+        decl["description"] = fn["description"]
+    if isinstance(fn.get("parameters"), dict):
+        decl["parameters"] = sanitize_gemini_tool_parameters(fn["parameters"])
+    return decl
+
+
 def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
-    declarations: List[Dict[str, Any]] = []
-    for tool in tools if isinstance(tools, list) else []:
-        fn = (tool.get("function") or {}) if isinstance(tool, dict) else None
-        if not isinstance(fn, dict) or not (isinstance(fn.get("name"), str) and fn["name"]):
-            continue
-        decl: Dict[str, Any] = {"name": fn["name"]}
-        if isinstance(fn.get("description"), str) and fn["description"]:
-            decl["description"] = fn["description"]
-        if isinstance(fn.get("parameters"), dict):
-            decl["parameters"] = sanitize_gemini_tool_parameters(fn["parameters"])
-        declarations.append(decl)
+    declarations = [d for d in map(_function_declaration, tools if isinstance(tools, list) else []) if d]
     return [{"functionDeclarations": declarations}] if declarations else []
 
 
@@ -487,8 +486,7 @@ class _GeminiStreamChunk(SimpleNamespace): ...
 
 
 def _make_stream_chunk(
-    *, model: str, content: str = "", tool_call_delta: Optional[Dict[str, Any]] = None,
-    finish_reason: Optional[str] = None, reasoning: str = "",
+    *, model: str, content: str = "", tool_call_delta: Optional[Dict[str, Any]] = None, finish_reason: Optional[str] = None, reasoning: str = "",
 ) -> _GeminiStreamChunk:
     d = tool_call_delta
     tool_calls = None if d is None else [
@@ -646,10 +644,9 @@ class GeminiNativeClient:
             return True, None
 
     def _create_chat_completion(
-        self, *, model: str = "gemini-3.7-flash", messages: Optional[List[Dict[str, Any]]] = None,
-        stream: bool = False, tools: Any = None, tool_choice: Any = None, temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None, top_p: Optional[float] = None, stop: Any = None,
-        extra_body: Optional[Dict[str, Any]] = None, timeout: Any = None, **_: Any,
+        self, *, model: str = "gemini-3.7-flash", messages: Optional[List[Dict[str, Any]]] = None, stream: bool = False,
+        tools: Any = None, tool_choice: Any = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None, stop: Any = None, extra_body: Optional[Dict[str, Any]] = None, timeout: Any = None, **_: Any,
     ) -> Any:
         extra = extra_body if isinstance(extra_body, dict) else {}
         request = build_gemini_request(
@@ -688,11 +685,10 @@ class AsyncGeminiNativeClient:
     """Async wrapper used by auxiliary_client for native Gemini calls."""
 
     def __init__(self, sync_client: GeminiNativeClient):
-        self._sync = sync_client
+        # ``_real_client``: the auxiliary cache evicts entries by leaf client; GeminiNativeClient is itself the leaf.
+        self._sync = self._real_client = sync_client
         self.api_key, self.base_url = sync_client.api_key, sync_client.base_url
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
-        # The auxiliary cache evicts entries by leaf client; GeminiNativeClient is itself the leaf.
-        self._real_client = sync_client
 
     async def _create_chat_completion(self, **kwargs: Any) -> Any:
         result = await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)

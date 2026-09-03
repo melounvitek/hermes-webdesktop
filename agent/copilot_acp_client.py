@@ -155,9 +155,8 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
     if model_option is not None:
         if requested_model not in _enabled_ids(model_option.get("options"), "value"):
             return None
-        return "session/set_config_option", {
-            "sessionId": session_id, "configId": str(model_option.get("id") or "model"), "value": requested_model,
-        }
+        params = {"sessionId": session_id, "configId": str(model_option.get("id") or "model"), "value": requested_model}
+        return "session/set_config_option", params
     available = _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
     if available and requested_model not in available:
         return None
@@ -165,8 +164,7 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
 
 
 def _format_messages_as_prompt(
-    messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None,
-    tool_choice: Any = None,
+    messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None, tool_choice: Any = None,
 ) -> str:
     # Deliberately no "requested model" line: the model is applied for real via ACP session/set_model;
     # a prompt-text mention makes a substituted backend model FALSELY self-identify as the requested
@@ -405,8 +403,7 @@ class CopilotACPClient:
             self.close()
 
     def _handle_server_message(
-        self, msg: dict[str, Any], *, process: subprocess.Popen[str], cwd: str,
-        text_parts: list[str] | None, reasoning_parts: list[str] | None,
+        self, msg: dict[str, Any], *, process: subprocess.Popen[str], cwd: str, text_parts: list[str] | None, reasoning_parts: list[str] | None,
     ) -> bool:
         """Consume a server->client message; True when handled (notification or request answered)."""
         method = msg.get("method")

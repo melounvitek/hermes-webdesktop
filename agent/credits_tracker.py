@@ -142,9 +142,7 @@ def is_free_tier_model(model: str, base_url: str = "") -> bool:
         return False
 
 
-def evaluate_credits_notices(
-    state: CreditsState, latch: dict, *, model_is_free: bool = False,
-) -> tuple[list[AgentNotice], list[str]]:
+def evaluate_credits_notices(state: CreditsState, latch: dict, *, model_is_free: bool = False) -> tuple[list[AgentNotice], list[str]]:
     """Reconcile credits notices against the latch (see :func:`new_credits_latch`);
     mutates ``latch`` IN PLACE. Pure — no I/O, no agent/run_agent imports.
     ``model_is_free`` suppresses ``credits.depleted`` (a depleted account on a free
@@ -306,8 +304,7 @@ def _fixture(remaining: str, subscription: str, limit: Optional[str] = None, pur
              *, paid: bool = True, reason: Optional[str] = None) -> dict:
     """Fixture spec from *_usd strings; micros derived exactly (Decimal)."""
     d: dict = {}
-    for field, usd in (("remaining", remaining), ("subscription", subscription),
-                       ("subscription_limit", limit), ("purchased", purchased)):
+    for field, usd in (("remaining", remaining), ("subscription", subscription), ("subscription_limit", limit), ("purchased", purchased)):
         if usd is not None:
             d[f"{field}_micros"], d[f"{field}_usd"] = int(Decimal(usd) * 1_000_000), usd
     if limit is not None:
