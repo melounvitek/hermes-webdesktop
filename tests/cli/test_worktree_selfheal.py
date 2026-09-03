@@ -111,6 +111,7 @@ class TestMaintainPackHealth:
 
     def test_repacks_at_threshold(self, repo, monkeypatch):
         import cli
+        from hermes_cli import worktree_ops
 
         made = self._make_packs(repo, 6)
         # Behavior contract, not a snapshot: different git builds consolidate
@@ -119,7 +120,7 @@ class TestMaintainPackHealth:
         # strictly more packs than the threshold we set — so the maintenance
         # pass has something real to consolidate.
         threshold = 2
-        monkeypatch.setattr(cli, "_PACK_SPRAWL_THRESHOLD", threshold)
+        monkeypatch.setattr(worktree_ops, "_PACK_SPRAWL_THRESHOLD", threshold)
         assert made > threshold, f"fixture failed to produce sprawl (made={made})"
 
         cli._maintain_pack_health(str(repo))
@@ -130,9 +131,10 @@ class TestMaintainPackHealth:
 
     def test_noop_below_threshold(self, repo, monkeypatch):
         import cli
+        from hermes_cli import worktree_ops
 
         made = self._make_packs(repo, 2)
-        monkeypatch.setattr(cli, "_PACK_SPRAWL_THRESHOLD", 50)
+        monkeypatch.setattr(worktree_ops, "_PACK_SPRAWL_THRESHOLD", 50)
 
         cli._maintain_pack_health(str(repo))
 

@@ -93,8 +93,8 @@ class TestFinallyBlockWiring:
     """
 
     def test_recovery_is_invoked_behind_interrupt_guard(self):
-        # process_loop is the REPL worker thread body (HermesCLI._tui_process_loop).
-        src = inspect.getsource(HermesCLI._tui_process_loop)
+        # process_loop's post-turn finally block is HermesCLI._tui_after_turn.
+        src = inspect.getsource(HermesCLI._tui_after_turn)
         # The recovery call must be gated on _last_turn_interrupted so it only
         # fires after an actual interrupt, not on every normal turn.
         guard = re.search(

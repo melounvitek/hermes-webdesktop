@@ -1,7 +1,6 @@
 """Shared constants for Hermes Agent.
 
-Import-safe module with no dependencies — can be imported from anywhere without risk of circular
-imports.
+Import-safe, stdlib-only — importable from anywhere without circular-import risk.
 """
 
 import os
@@ -29,8 +28,8 @@ DEFAULT_INDICATOR_STYLE: str = "kaomoji"
 def set_hermes_home_override(path: str | Path | None) -> Token:
     """Set a context-local Hermes home override and return its reset token.
 
-    This is for in-process, per-task scoping. It deliberately does not mutate ``os.environ`` because
-    that is shared by every thread in the process.
+    In-process, per-task scoping; deliberately does not mutate ``os.environ`` (shared by every
+    thread in the process).
     """
     value: str | object = _UNSET if path is None else str(path)
     return _HERMES_HOME_OVERRIDE.set(value)
@@ -57,10 +56,9 @@ def _get_platform_default_hermes_home() -> Path:
 
 
 def _warn_profile_fallback_once() -> None:
-    """Warn once when falling back to the default home while a profile is active.
+    """Warn once when HERMES_HOME is unset but a non-default profile is sticky-active.
 
-    Guard: if a non-default profile is sticky-active but ``HERMES_HOME`` is unset, the fallback to
-    the default profile is almost certainly wrong.
+    The fallback to the default profile is almost certainly wrong in that case.
     """
     global _profile_fallback_warned
     if _profile_fallback_warned:
@@ -73,11 +71,9 @@ def _warn_profile_fallback_once() -> None:
         active = ""
     if active and active != "default":
         _profile_fallback_warned = True
-        # Write directly to stderr.  We intentionally do NOT route this
-        # through ``logging`` because (a) this function is called at
-        # module-import time from 30+ sites, often before logging is
-        # configured, and (b) root-logger propagation would double-emit
-        # on consoles where a StreamHandler is already attached.
+        # Direct stderr, not ``logging``: this runs at module-import time from
+        # 30+ sites (often before logging is configured) and root-logger
+        # propagation would double-emit where a StreamHandler is attached.
         msg = (
             f"[HERMES_HOME fallback] HERMES_HOME is unset but active "
             f"profile is {active!r}. Falling back to {fallback_home}, which "
@@ -94,11 +90,10 @@ def _warn_profile_fallback_once() -> None:
 
 
 def get_hermes_home() -> Path:
-    """Return the Hermes home directory (default: platform-native path).
+    """Return the Hermes home directory — the single source of truth.
 
-    Resolution order: context-local override (see :func:`set_hermes_home_override`) →
-    ``HERMES_HOME`` env var → the platform-native default. This is the single source of truth — all
-    other copies should import this.
+    Resolution order: context-local override (:func:`set_hermes_home_override`) → ``HERMES_HOME``
+    env var → platform-native default.
     """
     override = get_hermes_home_override()
     if override:
@@ -111,9 +106,8 @@ def get_hermes_home() -> Path:
 def hermes_home_key(path: str | Path | None = None) -> str:
     """Return a stable key for a Hermes home/profile directory.
 
-    Runtime registries use this key to isolate plugin-owned entries while keeping built-in
-    registrations process-global. ``strict=False`` preserves useful behavior for profiles whose
-    directories have not been created yet.
+    Runtime registries use it to isolate plugin-owned entries while keeping built-in registrations
+    process-global. ``strict=False`` keeps working for profiles whose directories don't exist yet.
     """
     candidate = Path(path) if path is not None else get_hermes_home()
     resolved = candidate.expanduser().resolve(strict=False)
@@ -123,36 +117,26 @@ def hermes_home_key(path: str | Path | None = None) -> str:
 def get_process_hermes_home() -> Path:
     """Return the Hermes home for the running process, ignoring task overrides.
 
-    Unlike :func:`get_hermes_home`, this never follows the context-local override set by
-    :func:`set_hermes_home_override`.
-
-    Use this for machine/process-level dashboard-owned assets — theme YAML, dashboard plugin
-    manifests — that live under the server's launch home and must stay visible even while a request
-    is scoped to another profile (e.g. the embedded ``/chat`` running under ``--open-profile``).
-    Shared by :func:`get_hermes_home` so the two never drift.
+    For machine/process-level dashboard-owned assets (theme YAML, dashboard plugin manifests) that
+    live under the server's launch home and must stay visible while a request is scoped to another
+    profile (e.g. embedded ``/chat`` under ``--open-profile``). Shared by :func:`get_hermes_home`.
     """
     val = os.environ.get("HERMES_HOME", "").strip()
     return Path(val) if val else _get_platform_default_hermes_home()
 
 
-# Process-level memo for get_default_hermes_root(). The function resolves
-# HERMES_HOME against the native home on every call (~80us of path
-# resolution), and it is called at 31+ sites — every _load_global_auth_store()
-# (per provider row in the /model picker), kanban, backup, gateway, update.
-# Its result depends only on (HERMES_HOME, platform native home), which are
-# compared for free on each call, so the memo is freshness-correct even if a
-# test or plugin mutates HERMES_HOME mid-process.
+# Memo for get_default_hermes_root(): ~80us of path resolution per call at 31+
+# sites (every _load_global_auth_store(), kanban, backup, gateway, update). The
+# result depends only on (HERMES_HOME, native home), compared for free on each
+# call, so it stays fresh even if a test or plugin mutates HERMES_HOME.
 _default_hermes_root_memo: "tuple[str, str, Path] | None" = None
 
 
 def get_default_hermes_root() -> Path:
     """Return the root Hermes directory for profile-level operations.
 
-    In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``, returns ``<root>`` so that
-    ``profile list`` can see all profiles. Works both for standard (``~/.hermes/profiles/coder``)
-    and Docker (``/opt/data/profiles/coder``) layouts.
-
-    Import-safe — no dependencies beyond stdlib.
+    In profile mode (``HERMES_HOME=<root>/profiles/<name>``) returns ``<root>`` so ``profile list``
+    sees all profiles; handles both ``~/.hermes/profiles/x`` and Docker ``/opt/data/profiles/x``.
     """
     global _default_hermes_root_memo
     native_home = _get_platform_default_hermes_home()
@@ -161,7 +145,6 @@ def get_default_hermes_root() -> Path:
         memo_native, memo_env, memo_result = _default_hermes_root_memo
         if memo_native == str(native_home) and memo_env == env_home:
             return memo_result
-
     result = native_home
     if env_home:
         env_path = Path(env_home)
@@ -175,25 +158,21 @@ def get_default_hermes_root() -> Path:
     return result
 
 
-# Named-profile deletion must survive stale mkdir from live serve/logging.
-# The marker lives beside the profile dir, not inside it, so rmtree cannot
-# erase the fact that the profile was deleted.
+# Deletion marker lives beside the profile dir (not inside) so a stale mkdir
+# from live serve/logging or an rmtree cannot erase the fact of deletion.
 _DELETED_PROFILES_DIR = ".deleted"
 
-# Files whose presence marks a directory as a real Hermes home. A fresh home
-# always gains at least one of these on first use (config save, env backfill,
-# session DB), while arbitrary directories that merely contain a ``profiles``
-# path segment (e.g. ``/srv/profiles/buildcache``) do not.
+# Files marking a real Hermes home (a fresh home gains one on first use);
+# arbitrary dirs with a ``profiles`` segment (``/srv/profiles/buildcache``) do not.
 _HERMES_HOME_MARKERS = ("config.yaml", ".env", "state.db")
 
 
 def _is_hermes_profiles_root(profiles_dir: Path) -> bool:
     """Return True when *profiles_dir* is a canonical ``<hermes-home>/profiles``.
 
-    Anchors named-profile recognition so it only fires for directories that provably live under a
-    Hermes home: the classic ``~/.hermes`` layout, a root carrying Hermes-home marker files
-    (Docker/custom ``HERMES_HOME`` like ``/opt/data``), a ``profiles/.deleted`` tombstone directory
-    (only ever created by ``hermes profile delete``), or the process's resolved default Hermes root.
+    Fires only for directories provably under a Hermes home: the classic ``~/.hermes`` layout, a
+    root carrying Hermes-home marker files (Docker/custom ``HERMES_HOME``), a ``profiles/.deleted``
+    tombstone dir (only ``hermes profile delete`` creates it), or the resolved default Hermes root.
     """
     root = profiles_dir.parent
     if root.name == ".hermes":
@@ -214,10 +193,9 @@ def _is_hermes_profiles_root(profiles_dir: Path) -> bool:
 def named_profile_home(path: str | Path) -> Path | None:
     """Return ``<root>/profiles/<name>`` when *path* is that home or under it.
 
-    A named profile home is only ``.../profiles/<id>`` where ``<id>`` does not start with ``.`` AND
-    the ``profiles`` directory's parent is a real Hermes home (see
-    :func:`_is_hermes_profiles_root`). A default Hermes home whose path merely contains a
-    ``profiles`` segment (e.g.
+    Only ``.../profiles/<id>`` where ``<id>`` does not start with ``.`` AND the ``profiles`` parent is
+    a real Hermes home (:func:`_is_hermes_profiles_root`); a default home whose path merely contains
+    a ``profiles`` segment is not a named profile.
     """
     current = Path(path)
     for candidate in (current, *current.parents):
@@ -227,8 +205,7 @@ def named_profile_home(path: str | Path) -> Path | None:
             and _is_hermes_profiles_root(candidate.parent)
         ):
             return candidate
-        # Stop at a default Hermes home so a coincidental ``profiles/``
-        # ancestor is not treated as a named-profile root.
+        # Stop at a default Hermes home: a coincidental ``profiles/`` ancestor is not a root.
         if candidate.name == ".hermes":
             return None
     return None
@@ -275,8 +252,8 @@ def mkdir_under_hermes_home(path: str | Path) -> Path:
 def _packaged_dir(env_var: str, default: Path | None, subdir: str) -> Path:
     """Resolve a package-manager-relocatable directory.
 
-    Resolution order: 1. *env_var* (Nix wrapper / explicit override) 2. caller-supplied ``default``
-    (typically the source-checkout path) 3. ``<HERMES_HOME>/<subdir>`` last-resort.
+    Order: *env_var* (Nix wrapper / explicit override) → caller ``default`` (source checkout) →
+    ``<HERMES_HOME>/<subdir>``.
     """
     override = os.getenv(env_var, "").strip()
     if override:
@@ -290,21 +267,12 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
 
 
 def get_optional_mcps_dir(default: Path | None = None) -> Path:
-    """Return the optional-mcps directory, honoring package-manager wrappers.
-
-    Mirrors :func:`get_optional_skills_dir`: packaged installs may ship ``optional-mcps`` outside
-    the Python package tree and expose it via ``HERMES_OPTIONAL_MCPS``.
-    """
+    """Return the optional-mcps directory, honoring package-manager wrappers (``HERMES_OPTIONAL_MCPS``)."""
     return _packaged_dir("HERMES_OPTIONAL_MCPS", default, "optional-mcps")
 
 
 def get_bundled_skills_dir(default: Path | None = None) -> Path:
-    """Return the bundled skills directory for source and packaged installs.
-
-    Resolution order: 1. ``HERMES_BUNDLED_SKILLS`` env var (Nix wrapper / explicit override) 2.
-    Caller-supplied ``default`` (typically the source-checkout path) 3. ``<HERMES_HOME>/skills``
-    last-resort
-    """
+    """Return the bundled skills directory, honoring package-manager wrappers (``HERMES_BUNDLED_SKILLS``)."""
     return _packaged_dir("HERMES_BUNDLED_SKILLS", default, "skills")
 
 
@@ -316,12 +284,9 @@ def get_hermes_dir(
 ) -> Path:
     """Resolve a Hermes subdirectory with backward compatibility.
 
-    New installs get the consolidated layout (e.g. ``cache/images``). ``image_cache``) keep using it
-    — no migration required.
-
-    A bare empty ``<old_name>/`` directory does **not** count as "the legacy install is in use" —
-    install scaffolds, manual ``mkdir`` work, and cleared-then-abandoned locations all create empty
-    stubs that would otherwise silently shadow real data populated at ``<new_subpath>/``.
+    New installs get the consolidated layout (e.g. ``cache/images``); a populated legacy
+    ``<old_name>/`` keeps being used — no migration. A bare empty ``<old_name>/`` does NOT count
+    (install scaffolds, manual mkdir, cleared locations) so it cannot shadow real data at the new path.
     """
     home = home or get_hermes_home()
     old_path = home / old_name
@@ -331,15 +296,12 @@ def get_hermes_dir(
 def iter_hermes_node_dirs(home: Path | None = None) -> list[Path]:
     """Return Hermes-managed Node.js directories in preferred lookup order.
 
-    Windows installs unpack portable Node into ``%LOCALAPPDATA%\\hermes\\node``; POSIX installs use
-    ``$HERMES_HOME/node/bin``. Both shapes are included on every platform so mixed or migrated
-    installs still work.
+    Windows unpacks portable Node into ``%LOCALAPPDATA%\\hermes\\node``; POSIX uses
+    ``$HERMES_HOME/node/bin``. Both shapes are included everywhere so migrated installs work.
     """
     node_dir = (home or get_hermes_home()) / "node"
-    # NOTE: keep this ordering in sync with hermesManagedNodePathEntries() in
-    # apps/desktop/electron/backend-env.ts — the Electron main process is Node
-    # and cannot import this module, so the platform-ordering rule is mirrored
-    # there (once; main.ts imports it rather than keeping its own copy).
+    # Keep in sync with hermesManagedNodePathEntries() in
+    # apps/desktop/electron/backend-env.ts (Electron cannot import this module).
     return [node_dir, node_dir / "bin"] if sys.platform == "win32" else [node_dir / "bin", node_dir]
 
 
@@ -354,8 +316,8 @@ def _candidate_node_command_names(command: str) -> list[str]:
     base = Path(command).name
     if sys.platform != "win32" or "." in base:
         return [base]
-    # Prefer npm.cmd. PowerShell may block npm.ps1 by execution policy, and
-    # CreateProcess cannot launch a bare .ps1 the way it can launch .cmd.
+    # Prefer npm.cmd: PowerShell may block npm.ps1 by policy and CreateProcess
+    # cannot launch a bare .ps1.
     return _WINDOWS_NODE_SHIMS.get(base.lower(), [f"{base}.cmd", f"{base}.exe", base])
 
 
@@ -409,24 +371,23 @@ _HERMES_NODE_TARGET_MAJOR = int(os.environ.get("HERMES_NODE_TARGET_MAJOR", "22")
 _managed_node_heal_attempted = False
 _NODE_BOOTSTRAP_SCRIPT = Path(__file__).resolve().parent / "scripts" / "lib" / "node-bootstrap.sh"
 
-# Install tree root (this file lives at <install_root>/hermes_constants.py).
-# Used by secure_parent_dir() to skip chmod on the install dir — chmodding it
-# 0700 breaks hermes-user traversal in Docker (UID 10000). See #25821, #93050.
+# Install tree root; secure_parent_dir() refuses to chmod inside it.
 _INSTALL_ROOT = Path(__file__).resolve().parent
 
 
-def node_tool_runnable(path: str | None) -> bool:
-    """Return True only when *path* is a Node/npm/npx binary that actually runs.
+def _is_executable_file(path: str) -> bool:
+    """``exists()`` follows symlinks — a dangling link never spawns a probe."""
+    return os.path.exists(path) and os.access(path, os.X_OK)
 
-    Probe with ``--version`` (same pattern as :func:`agent_browser_runnable`) so broken managed
-    wrappers are detected before use.
-    """
+
+def node_tool_runnable(path: str | None) -> bool:
+    """True only when *path* is a Node/npm/npx binary that actually runs (``--version`` probe)."""
     if not path:
         return False
     if sys.platform == "win32":
         if not Path(path).is_file():
             return False
-    elif not os.path.exists(path) or not os.access(path, os.X_OK):
+    elif not _is_executable_file(path):
         return False
     return _version_probe_ok(path)
 
@@ -440,8 +401,8 @@ def hermes_managed_node_tree_present(home: Path | None = None) -> bool:
 def _path_under_any(path: str, roots: list[str]) -> bool:
     """Return True when *path* sits inside one of *roots* (same drive).
 
-    Windows paths are case-insensitive and psutil / env vars can disagree on drive-letter casing,
-    so compare through ``normcase`` (a no-op on POSIX). Roots are evaluated individually.
+    Compared through ``normcase`` (no-op on POSIX): Windows paths are case-insensitive and psutil /
+    env vars can disagree on drive-letter casing.
     """
     path_norm = os.path.normcase(os.path.normpath(path))
     for root in roots:
@@ -449,8 +410,7 @@ def _path_under_any(path: str, roots: list[str]) -> bool:
         try:
             if os.path.commonpath([path_norm, root_norm]) == root_norm:
                 return True
-        except ValueError:
-            # Different drives on Windows — commonpath raises.
+        except ValueError:  # different drives on Windows
             continue
     return False
 
@@ -458,10 +418,9 @@ def _path_under_any(path: str, roots: list[str]) -> bool:
 def managed_node_tree_in_use(home: Path | None = None) -> bool:
     """Return True when any running process executes from the managed Node tree.
 
-    Windows locks executables and loaded scripts against deletion or overwrite while a process runs
-    them, so the updater must not rewrite ``%HERMES_HOME%\node`` while the desktop app's Node
-    processes hold it — ``PermissionError: [WinError 5]`` on ``npm.cmd`` is the classic symptom
-    (#80926).
+    Windows locks running executables and loaded scripts against delete/overwrite, so the updater
+    must not rewrite ``%HERMES_HOME%\\node`` while the desktop app's Node processes hold it —
+    ``PermissionError: [WinError 5]`` on ``npm.cmd`` is the classic symptom (#80926).
     """
     if sys.platform != "win32":
         return False
@@ -513,86 +472,40 @@ def _print_managed_node_in_use_notice() -> None:
     )
 
 
-def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
-    """Redownload the portable Node zip into ``%HERMES_HOME%\\node`` on Windows.
+def _fetch_url(url: str, timeout: int) -> bytes | None:
+    import urllib.request
 
-    Returns ``True`` on success, ``False`` on a genuine failure (offline,
-    download error, bad archive), and ``None`` when the tree is in use and the
-    heal is deferred — callers must not record the once-per-process attempt
-    for ``None`` so a later call can retry once the tree is free.
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read()
+    except OSError:
+        return None
 
-    The replacement is staging-first: the new tree is fully downloaded and
-    extracted to a sibling ``node.new-*`` directory, then the live tree is
-    renamed aside (``node.old-*``) and the staged tree renamed into place.
-    The live tree is never deleted before its replacement is ready, so an
-    interrupted heal cannot gut the running installation. Windows allows
-    renaming a tree whose executables are running (images are mapped with
-    ``FILE_SHARE_DELETE`` — the same mechanism as the hermes.exe quarantine);
-    when the OS refuses the rename, that refusal *is* the in-use signal and
-    the heal defers instead of forcing the write and crashing with
-    ``PermissionError: [WinError 5]`` on ``npm.cmd`` (#80926).
+
+def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
+    """Download and extract the target-major portable Node zip into a sibling ``node.new-*`` dir.
+
+    A sibling staging dir makes the later swap a same-volume rename. ``None`` on any failure.
     """
     import tempfile
-    import time
-    import urllib.request
     import uuid
     import zipfile
 
-    arch = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")).lower()
-    node_arch = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "x86": "x86"}.get(arch)
-    if node_arch is None:
-        return False
-
-    home = home or get_hermes_home()
-    target = home / "node"
-
-    # Cheap pre-check: skip the download and staging work when the tree is
-    # already visibly in use.  The rename-based swap below is the
-    # authoritative guard — this scan only avoids pointless re-downloads for
-    # long-lived processes whose npm resolution retries.
-    if managed_node_tree_in_use(home):
-        _print_managed_node_in_use_notice()
-        return None
-
-    # Best-effort sweep of staging/backup litter from interrupted runs; a
-    # locked file simply stays for the next attempt.  Only dirs older than
-    # 10 minutes are removed so a concurrent heal's in-flight swap (whose
-    # staged/backup dirs are seconds old) is never disturbed.
-    cutoff = time.time() - 600
-    for stale in (*home.glob("node.old-*"), *home.glob("node.new-*")):
-        try:
-            if stale.stat().st_mtime < cutoff:
-                shutil.rmtree(stale, ignore_errors=True)
-        except OSError:
-            continue
-
-    def _fetch(url: str, timeout: int) -> bytes | None:
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
-                return response.read()
-        except OSError:
-            return None
-
     index_url = f"https://nodejs.org/dist/latest-v{_HERMES_NODE_TARGET_MAJOR}.x/"
-    index_bytes = _fetch(index_url, 60)
+    index_bytes = _fetch_url(index_url, 60)
     if index_bytes is None:
-        return False
-
+        return None
     match = re.search(
         rf"node-v{_HERMES_NODE_TARGET_MAJOR}\.\d+\.\d+-win-{node_arch}\.zip",
         index_bytes.decode("utf-8", errors="replace"),
     )
     if not match:
-        return False
-
+        return None
     zip_name = match.group(0)
-    zip_bytes = _fetch(f"{index_url}{zip_name}", 300)
+    zip_bytes = _fetch_url(f"{index_url}{zip_name}", 300)
     if zip_bytes is None:
-        return False
-
-    token = uuid.uuid4().hex[:8]
-    staged = home / f"node.new-{token}"
-    backup = home / f"node.old-{token}"
+        return None
+    staged = home / f"node.new-{uuid.uuid4().hex[:8]}"
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -604,29 +517,32 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
                 archive.extractall(extract_dir)
             extracted = next(extract_dir.glob("node-v*"), None)
             if extracted is None or not extracted.is_dir():
-                return False
-            # Move the fully-extracted tree to a sibling staging dir so the
-            # swap below is a same-volume rename.
+                return None
             shutil.move(str(extracted), str(staged))
     except OSError:
-        return False
+        return None
+    return staged
 
+
+def _swap_node_tree(target: Path, staged: Path) -> bool | None:
+    """Rename the live tree aside (``node.old-*``) and *staged* into place.
+
+    ``None`` when the OS refuses to move the live tree (a running process holds it): the old tree
+    is untouched and the next resolution retries. ``False`` when the staged tree cannot be moved in
+    (live tree rolled back).
+    """
+    backup = target.parent / f"node.old-{staged.name.removeprefix('node.new-')}"
     had_live = target.exists()
     if had_live:
         try:
             os.replace(str(target), str(backup))
         except OSError:
-            # The OS refuses to move the live tree — a running process holds
-            # it.  Defer; the old tree is untouched and the next resolution
-            # (e.g. the next update after the app is closed) retries.
             _print_managed_node_in_use_notice()
             shutil.rmtree(staged, ignore_errors=True)
             return None
-        # A rename preserves the directory's mtime, so a backup renamed from
-        # a long-lived tree would instantly look older than the litter-sweep
-        # cutoff to a concurrent heal.  Touch it (best-effort — a failure
-        # must not abort the swap, which already succeeded) so the in-flight
-        # backup is never swept mid-swap.
+        # A rename preserves mtime, so a backup of a long-lived tree would look
+        # older than the litter-sweep cutoff to a concurrent heal. Touch it
+        # (best-effort — the swap already succeeded) so it is never swept mid-swap.
         try:
             os.utime(backup, None)
         except OSError:
@@ -634,8 +550,7 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     try:
         os.replace(str(staged), str(target))
     except OSError:
-        if had_live:
-            # Roll the live tree back and report the failure.
+        if had_live:  # roll the live tree back
             try:
                 os.replace(str(backup), str(target))
             except OSError:
@@ -643,9 +558,52 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
         shutil.rmtree(staged, ignore_errors=True)
         return False
     if had_live:
-        # The old tree is no longer canonical; locked files may keep it on
-        # disk until the next heal attempt, which is safe.
+        # Locked files may keep the old tree on disk until the next heal; safe.
         shutil.rmtree(backup, ignore_errors=True)
+    return True
+
+
+def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
+    """Redownload the portable Node zip into ``%HERMES_HOME%\\node`` on Windows.
+
+    Returns ``True`` on success, ``False`` on a genuine failure (offline, download error, bad
+    archive), ``None`` when the tree is in use and the heal is deferred — callers must not record
+    the once-per-process attempt for ``None`` so a later call can retry.
+
+    Staging-first: the new tree is fully extracted to a sibling ``node.new-*`` dir, the live tree
+    renamed aside (``node.old-*``), the staged tree renamed into place — so an interrupted heal
+    cannot gut the running install. Windows allows renaming a tree whose executables are running
+    (``FILE_SHARE_DELETE``); when the OS refuses the rename, that refusal *is* the in-use signal
+    and the heal defers instead of crashing with ``[WinError 5]`` on ``npm.cmd`` (#80926).
+    """
+    import time
+
+    arch = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")).lower()
+    node_arch = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "x86": "x86"}.get(arch)
+    if node_arch is None:
+        return False
+    home = home or get_hermes_home()
+    target = home / "node"
+    # Cheap pre-check; the rename-based swap below is the authoritative guard.
+    if managed_node_tree_in_use(home):
+        _print_managed_node_in_use_notice()
+        return None
+    # Sweep staging/backup litter from interrupted runs (locked files stay for
+    # next time). Only dirs older than 10 minutes, so a concurrent heal's
+    # in-flight swap (seconds old) is never disturbed.
+    cutoff = time.time() - 600
+    for stale in (*home.glob("node.old-*"), *home.glob("node.new-*")):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            continue
+    staged = _stage_windows_node_zip(home, node_arch)
+    if staged is None:
+        return False
+    swapped = _swap_node_tree(target, staged)
+    if not swapped:
+        return swapped
     return node_tool_runnable(str(target / "node.exe"))
 
 
@@ -672,10 +630,9 @@ def _run_node_bootstrap(func: str, *, timeout: int, **extra_env: str) -> bool:
 def bootstrap_hermes_managed_node() -> str | None:
     """Install a Hermes-managed Node tree and return its npm path.
 
-    Used when the only Node/npm on the machine belongs to the user (system, nvm, brew, Nix) and
-    cannot satisfy the repo's ``engines`` requirements — Hermes never modifies a toolchain it does
-    not own, so instead it provisions its own tree under ``$HERMES_HOME/node`` (the same tree a
-    fresh install creates) and works with that.
+    For when the only Node/npm on the machine belongs to the user (system, nvm, brew, Nix) and
+    cannot satisfy the repo's ``engines`` — Hermes never modifies a toolchain it does not own, so it
+    provisions its own tree under ``$HERMES_HOME/node`` (same tree a fresh install creates).
     """
     existing = find_hermes_node_executable("npm")
     if existing:
@@ -683,8 +640,7 @@ def bootstrap_hermes_managed_node() -> str | None:
     if sys.platform == "win32":
         ok = _heal_managed_node_windows()
     else:
-        # POSIX: ``_nb_install_bundled_node`` in node-bootstrap.sh builds the same tree a fresh
-        # install creates. HERMES_NODE_SKIP_LINKS=1 keeps node/npm/npx out of ~/.local/bin so the
+        # HERMES_NODE_SKIP_LINKS=1 keeps node/npm/npx out of ~/.local/bin so the
         # user's own toolchain on PATH is never shadowed.
         ok = _run_node_bootstrap("_nb_install_bundled_node", timeout=600, HERMES_NODE_SKIP_LINKS="1")
     if not ok:
@@ -695,31 +651,28 @@ def bootstrap_hermes_managed_node() -> str | None:
 def heal_hermes_managed_node() -> bool:
     """Redownload Hermes-managed Node when the tree exists but is broken.
 
-    Runs at most once per process. POSIX shells out to ``heal_managed_node`` in node-bootstrap.sh;
-    Windows downloads the portable zip directly. A Windows deferral (tree in use by a running app)
-    does NOT record the attempt, so a later call or process can heal once the tree is free.
+    At most once per process. POSIX shells out to ``heal_managed_node`` in node-bootstrap.sh;
+    Windows downloads the portable zip directly. A Windows in-use deferral does NOT record the
+    attempt so a later call can heal once the tree is free.
     """
     global _managed_node_heal_attempted
     if _managed_node_heal_attempted or not hermes_managed_node_tree_present():
         return False
     if sys.platform == "win32":
         result = _heal_managed_node_windows()
-        if result is None:
-            # In-use deferral: leave the attempt flag clear so a later call
-            # in this process can heal after the app releases the tree.
-            return False
-        _managed_node_heal_attempted = True
-        return bool(result)
+    else:
+        result = _run_node_bootstrap("heal_managed_node", timeout=300)
+    if result is None:  # in-use deferral: leave the attempt flag clear
+        return False
     _managed_node_heal_attempted = True
-    return _run_node_bootstrap("heal_managed_node", timeout=300)
+    return bool(result)
 
 
 def _managed_node_tree_outdated(home: Path | None = None) -> bool:
-    """Return True when the managed tree's node runs but is below the target major.
+    """True when the managed tree's node runs but is below the target major.
 
-    An outdated tree heals like a broken one: :func:`find_hermes_node_executable` triggers the
-    once-per-process heal, which redownloads the target major, so existing users are upgraded on
-    next launch rather than on the next installer run.
+    An outdated tree heals like a broken one (:func:`find_hermes_node_executable` triggers the
+    once-per-process heal), so existing users are upgraded on next launch.
     """
     for candidate in _iter_managed_node_candidates(_candidate_node_command_names("node"), home):
         result = _run_version_probe([str(candidate), "--version"])
@@ -730,11 +683,9 @@ def _managed_node_tree_outdated(home: Path | None = None) -> bool:
             major = int(version.split(".")[0])
         except (ValueError, IndexError):
             return False
-        # A pre-release tree counts as outdated however high its major:
-        # nodejs.org publishes a headers tarball only for final releases, so
-        # node-gyp cannot build node-pty against one. Without this, an
-        # install that adopted such a tree stays broken forever — the heal
-        # only fires below the target major, and a pre-release is above it.
+        # A pre-release counts as outdated however high its major: nodejs.org
+        # publishes headers only for final releases, so node-gyp cannot build
+        # node-pty against one and the install would stay broken forever.
         # Mirrors node_satisfies_build() in scripts/install.sh.
         if "-" in version:
             return True
@@ -743,9 +694,8 @@ def _managed_node_tree_outdated(home: Path | None = None) -> bool:
 
 
 def find_hermes_node_executable(command: str) -> str | None:
-    """Return a Hermes-managed Node/npm executable path, healing broken trees.
+    """Return a Hermes-managed Node/npm executable path, healing broken/outdated trees.
 
-    Outdated trees (major below ``_HERMES_NODE_TARGET_MAJOR``) heal the same way broken ones do.
     When the heal fails (offline, download error) an outdated-but-runnable tree is still returned:
     old Node beats no Node.
     """
@@ -762,21 +712,17 @@ def find_hermes_node_executable(command: str) -> str | None:
 def find_node_executable_on_path(command: str) -> str | None:
     """Return a Node/npm executable from PATH with Windows shim ordering.
 
-    ``shutil.which("npm")`` can resolve an extensionless npm shim before the ``.cmd`` shim on
-    Windows. Python's CreateProcess cannot execute that shim directly, so prefer the launchable
-    variants explicitly for Hermes-owned subprocesses.
+    ``shutil.which("npm")`` can pick the extensionless npm shim before ``.cmd`` on Windows; Python's
+    CreateProcess cannot execute that shim, so prefer the launchable variants explicitly.
     """
     if sys.platform != "win32":
         return shutil.which(command)
-
     command_str = str(command)
     if any(sep and sep in command_str for sep in (os.sep, os.altsep, "/", "\\")):
         return command_str if Path(command_str).is_file() else None
-
+    directories = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     for name in _candidate_node_command_names(command_str):
-        for directory in os.environ.get("PATH", "").split(os.pathsep):
-            if not directory:
-                continue
+        for directory in directories:
             candidate = Path(directory) / name
             if candidate.is_file():
                 return str(candidate)
@@ -786,9 +732,9 @@ def find_node_executable_on_path(command: str) -> str | None:
 def find_node_executable(command: str) -> str | None:
     """Resolve a Node.js command, preferring healthy Hermes-managed installs.
 
-    This is for Hermes-owned subprocesses that should not be broken by a bad, missing, or elevation-
-    triggering system Node/npm on PATH. When a managed tree exists but cannot be healed, returns
-    ``None`` instead of falling back to system npm on PATH.
+    For Hermes-owned subprocesses that must not break on a bad/missing/elevation-triggering system
+    Node on PATH. When a managed tree exists but cannot be healed, returns ``None`` rather than
+    falling back to system npm.
     """
     managed = find_hermes_node_executable(command)
     if managed:
@@ -812,35 +758,26 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def agent_browser_runnable(path: str | None) -> bool:
-    """Return True only when *path* is an agent-browser CLI that actually runs.
+    """True only when *path* is an agent-browser CLI that actually runs (``--version`` exits 0).
 
-    This validates the candidate by resolving it to a real, executable file and running
-    ``--version`` with a short timeout. Returns True only on a clean (exit 0) run, so a dead/wrong-
-    arch/hung binary is rejected and the caller can fall through to the next resolution candidate.
-
-    Special cases: * ``None`` / empty → False. * The ``"npx agent-browser"`` fallback form (contains
-    a space, not a real file) → True; npx resolves and validates the package at run time, so there
-    is nothing to stat here.
+    A dead/wrong-arch/hung binary is rejected so callers fall through to the next candidate. The
+    ``"npx agent-browser"`` fallback (two tokens, not a file) → True; npx validates at run time.
     """
     if not path:
         return False
     # The npx fallback is a two-token command string, not a filesystem path.
     if " " in path and path.split()[0].endswith("npx"):
         return True
-    # exists() follows symlinks — a dangling link returns False here, so we
-    # never even spawn a subprocess for the broken-link case.
-    if not os.path.exists(path) or not os.access(path, os.X_OK):
-        return False
-    return _version_probe_ok(path)
+    return _is_executable_file(path) and _version_probe_ok(path)
 
 
 def _legacy_path_has_content(path: Path) -> bool:
-    """Return ``True`` iff ``path`` exists and has content worth honouring.
+    """True iff *path* exists and has content worth honouring.
 
-    A populated directory or any non-directory file counts; an empty directory does not, so a
-    stale empty stub falls through to the new layout. Any ``OSError`` other than not-found means
-    "assume occupied" to avoid orphaning legacy data. Symlinks are resolved first; a dangling
-    symlink does NOT count and must not shadow populated new-layout data.
+    A populated directory or any non-directory file counts; an empty directory does not, so a stale
+    stub falls through to the new layout. Any ``OSError`` other than not-found means "assume
+    occupied" to avoid orphaning legacy data. Symlinks are judged on their target; a dangling one
+    does NOT count and must not shadow populated new-layout data.
     """
     try:
         st = path.lstat()
@@ -848,9 +785,7 @@ def _legacy_path_has_content(path: Path) -> bool:
             st = path.stat()  # judge a symlink on its target; dangling → FileNotFoundError
     except FileNotFoundError:
         return False
-    except OSError:
-        # PermissionError on a parent, or any other inspection failure:
-        # treat as occupied rather than silently orphaning legacy data.
+    except OSError:  # e.g. PermissionError on a parent: assume occupied
         return True
     if not stat.S_ISDIR(st.st_mode):
         return True
@@ -864,20 +799,15 @@ def _legacy_path_has_content(path: Path) -> bool:
 
 
 def display_hermes_home() -> str:
-    """Return a user-friendly display string for the current HERMES_HOME.
+    """User-friendly ``~/`` display string for HERMES_HOME (``~/.hermes/profiles/coder``).
 
-    Uses ``~/`` shorthand (``~/.hermes``, ``~/.hermes/profiles/coder``). Use this in user-facing
-    messages instead of hardcoding ``~/.hermes``; code needing a real ``Path`` should use
+    Use in user-facing messages instead of hardcoding ``~/.hermes``; for a real ``Path`` use
     :func:`get_hermes_home`.
     """
     home = get_hermes_home()
     try:
-        # as_posix(): on Windows, str() of a relative Path renders
-        # backslashes, producing mixed-separator chimeras like
-        # ``~/AppData\Local\hermes/skills/`` once callers append
-        # sub-paths. ``~/`` shorthand implies POSIX rendering; keep the
-        # whole string consistent (forward slashes work everywhere,
-        # including Windows shells and Python APIs).
+        # as_posix(): on Windows str() renders backslashes, giving mixed
+        # chimeras like ``~/AppData\Local\hermes/skills/`` once callers append.
         return "~/" + home.relative_to(Path.home()).as_posix()
     except ValueError:
         return str(home)
@@ -886,22 +816,17 @@ def display_hermes_home() -> str:
 def secure_parent_dir(path: Path) -> None:
     """Chmod ``0o700`` on the parent directory of *path*, but only if safe.
 
-    Refuses to chmod ``/`` or any top-level directory (resolved parent with fewer than 3 parts, i.e.
-    ``/`` or any direct child like ``/usr``) to prevent catastrophic host bricking when
-    ``HERMES_HOME`` or other path env vars resolve to an unexpected location.
+    Refuses ``/`` and any top-level directory (resolved parent with fewer than 3 parts) so a
+    misresolved ``HERMES_HOME`` can never brick the host.
     """
     parent = path.parent.resolve()
     # Refuse root and its direct children (/usr, /home, /var, /tmp, …).
     if parent == Path("/") or len(parent.parts) < 3:
         return
-    # Refuse the install tree root. chmodding it 0700 breaks hermes-user
-    # traversal in Docker (UID 10000) and any other install where the
-    # runtime user doesn't own the install dir. See #25821, #93050.
+    # Refuse the install tree: chmod 0700 breaks hermes-user traversal in Docker
+    # (UID 10000) — #25821, #93050. A credential file here usually means
+    # HERMES_HOME misresolved; surface it (this caused production lockouts).
     if parent == _INSTALL_ROOT or _INSTALL_ROOT in parent.parents:
-        # A credential file inside the install tree usually means HERMES_HOME
-        # resolved somewhere unexpected — surface it instead of skipping
-        # silently, since this same misconfiguration previously caused
-        # production lockouts.
         import logging
 
         logging.getLogger(__name__).warning(
@@ -970,9 +895,9 @@ def _iter_real_home_candidates(env: dict[str, str] | None = None) -> list[str]:
 def get_real_home(env: dict[str, str] | None = None) -> str:
     """Return the OS user's real home directory, avoiding Hermes profile HOME.
 
-    ``HERMES_HOME`` scopes Hermes state; ``HOME`` belongs to the OS account and the external CLIs
-    that keep credentials under ``~``. If a parent already runs with ``HOME={HERMES_HOME}/home``,
-    this repairs back to the account home when possible.
+    ``HERMES_HOME`` scopes Hermes state; ``HOME`` belongs to the OS account and external CLIs that
+    keep credentials under ``~``. If a parent already runs with ``HOME={HERMES_HOME}/home``, repair
+    back to the account home when possible.
     """
     profile_home = _profile_home_path(env)
     seen: set[str] = set()
@@ -995,10 +920,9 @@ _HOME_MODE_ALIASES = {
 def get_subprocess_home(env: dict[str, str] | None = None) -> str | None:
     """Return a subprocess ``HOME`` override, if one should be applied.
 
-    * ``auto`` (default): host installs keep the real user HOME; containers use
-    ``{HERMES_HOME}/home`` for persistent state. If a host parent already has HOME pointed at the
-    profile home, repair subprocesses back to real HOME. * ``real``: always prefer the real OS-user
-    HOME.
+    ``auto`` (default): hosts keep the real user HOME, containers use ``{HERMES_HOME}/home``; a
+    host parent whose HOME is the profile home is repaired back to real HOME. ``real``: always
+    prefer the real OS-user HOME. ``profile``: always the profile home.
     """
     env = env or {}
     profile_home = _profile_home_path(env)
@@ -1007,7 +931,6 @@ def get_subprocess_home(env: dict[str, str] | None = None) -> str | None:
 
     if mode == "profile":
         return profile_home
-
     real_home = get_real_home(env)
     current_home = _env_get(env, "HOME")
     repaired = real_home if _norm_home_path(real_home) != _norm_home_path(current_home) else None
@@ -1037,10 +960,9 @@ VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "
 def parse_reasoning_effort(effort) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Returns None for empty/unrecognized input (caller uses the default) and ``{"enabled": False}``
-    for "none" and its aliases ("false", "disabled", YAML boolean False): users write
-    ``reasoning_effort: false``/``off``/``no`` and that must mean disabled, not "keep thinking".
-    Valid levels: none, minimal, low, medium, high, xhigh, max, ultra.
+    None for empty/unrecognized input (caller uses the default); ``{"enabled": False}`` for
+    "none" and its aliases ("false", "disabled", YAML boolean False) — ``reasoning_effort:
+    false``/``off``/``no`` must mean disabled, not "keep thinking".
     """
     if effort is False:
         return {"enabled": False}
@@ -1057,15 +979,11 @@ def parse_reasoning_effort(effort) -> dict | None:
 
 
 def _canonical_model_variants(model: str) -> list[str]:
-    """Generate bounded spelling variants for tolerant override matching.
+    """Bounded spelling variants for tolerant override matching, exact first, deduped in order.
 
-    Strategy: generate a small set of base forms, then apply version-dot recovery to EACH of them.
-    This ensures symmetry: ``claude-opus-4.5``, ``claude-opus-4-5``, and ``claude-opus.4.5`` all
-    produce the same variant set.
-
-    Duplicates removed in insertion order (exact always wins).
+    Version-dot recovery is applied to EACH base form so ``claude-opus-4.5``, ``claude-opus-4-5``
+    and ``claude-opus.4.5`` all yield the same variant set.
     """
-    # Version-dot regexes — digit-separator-digit interconversion
     _dash_to_dot = lambda s: re.sub(r'(\d)-(\d)', r'\1.\2', s)
     _dot_to_dash = lambda s: re.sub(r'(\d)\.(\d)', r'\1-\2', s)
     seen: set[str] = set()
@@ -1081,7 +999,6 @@ def _canonical_model_variants(model: str) -> list[str]:
         """Add s plus its dots↔dashes and version-dot derivatives."""
         dashed, dotted = s.replace('.', '-'), s.replace('-', '.')
         _add(s, dashed, dotted, _dash_to_dot(s), _dot_to_dash(s), _dash_to_dot(dashed), _dot_to_dash(dotted))
-
     _add_with_derivatives(model)
     parts = model.split('/')
     if len(parts) >= 2:  # bare model (strip provider/aggregator prefix)
@@ -1101,13 +1018,10 @@ def _canonical_model_variants(model: str) -> list[str]:
 
 
 def resolve_per_model_reasoning_effort(model: str, overrides: dict | None) -> dict | None:
-    """Lookup a per-model reasoning_effort override with spelling-tolerance.
+    """Lookup a per-model reasoning_effort override with spelling tolerance.
 
-    Resolution order: 1. Exact match 2. Dots ↔ dashes variants 3. Strip provider prefix (bare model
-    name only) 4. Strip aggregator prefix (middle segment only) 5. Prepend known aggregator prefixes
-    to bare/single-slash variants
-
-    First non-None parse_reasoning_effort result wins.
+    Order: exact → dots↔dashes → bare model (provider stripped) → aggregator stripped → known
+    provider/aggregator prefixes prepended. First non-None parse_reasoning_effort result wins.
     """
     if not overrides or not isinstance(overrides, dict) or not model:
         return None
@@ -1122,8 +1036,8 @@ def resolve_per_model_reasoning_effort(model: str, overrides: dict | None) -> di
 def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
     """Resolve the effective reasoning config for *model* from a config dict.
 
-    Single chokepoint for reasoning-effort resolution, shared by every surface (CLI startup,
-    messaging gateway, Desktop/TUI, cron, ``/model`` switch, fallback activation). Priority:
+    Single chokepoint shared by every surface (CLI startup, gateway, Desktop/TUI, cron, ``/model``,
+    fallback activation): per-model override first, then the global ``agent.reasoning_effort``.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
     agent_cfg = cfg.get("agent")
@@ -1135,31 +1049,23 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
         if isinstance(model_cfg, dict):
             model_cfg = model_cfg.get("default") or model_cfg.get("model") or ""
         model = model_cfg.strip() if isinstance(model_cfg, str) else ""
-
     overrides = agent_cfg.get("reasoning_overrides") or {}
     per_model = resolve_per_model_reasoning_effort(model, overrides)
     if per_model is not None:
         return per_model
 
-    # Global fallback — keep the raw value; coercing with ``or ""`` turns a
-    # YAML boolean False into "", silently re-enabling thinking for users
-    # who explicitly disabled it.
+    # Global fallback — keep the raw value: ``or ""`` would turn a YAML False
+    # into "" and silently re-enable thinking.
     effort = agent_cfg.get("reasoning_effort", "")
     result = parse_reasoning_effort(effort)
     if effort and str(effort).strip() and result is None:
         import logging
-        logging.getLogger(__name__).warning(
-            "Unknown reasoning_effort '%s', using default (medium)", effort
-        )
+        logging.getLogger(__name__).warning("Unknown reasoning_effort '%s', using default (medium)", effort)
     return result
 
 
 def is_termux() -> bool:
-    """Return True when running inside a Termux (Android) environment.
-
-    Checks ``TERMUX_VERSION`` (set by Termux) or the Termux-specific ``PREFIX`` path. Import-safe —
-    no heavy deps.
-    """
+    """True inside Termux (Android): ``TERMUX_VERSION`` or the Termux-specific ``PREFIX`` path."""
     prefix = os.getenv("PREFIX", "")
     return bool(os.getenv("TERMUX_VERSION") or "com.termux/files/usr" in prefix)
 
@@ -1168,11 +1074,7 @@ _wsl_detected: bool | None = None
 
 
 def is_wsl() -> bool:
-    """Return True when running inside WSL (Windows Subsystem for Linux).
-
-    Checks ``/proc/version`` for the ``microsoft`` marker that both WSL1 and WSL2 inject. Result is
-    cached for the process lifetime. Import-safe — no heavy deps.
-    """
+    """True inside WSL1/WSL2 (``microsoft`` marker in ``/proc/version``); cached per process."""
     global _wsl_detected
     if _wsl_detected is not None:
         return _wsl_detected
@@ -1205,11 +1107,11 @@ def wsl_unc_path_to_posix(path: str) -> str | None:
 
 
 def translate_cwd_for_wsl_backend(cwd: str) -> str:
-    r"""Normalize a cross-boundary cwd when Hermes itself runs inside WSL.
+    """Normalize a cross-boundary cwd when Hermes itself runs inside WSL.
 
-    A Windows-host UI (native picker / drive path / ``\\wsl.localhost\`` UNC) can hand the WSL
-    backend a path it can't ``chdir`` into. Map it to the POSIX equivalent so the picker, sidebar,
-    and sessions all agree on the workspace. No-op off WSL and for paths that are already POSIX.
+    A Windows-host UI (native picker / drive path / ``\\\\wsl.localhost\\`` UNC) can hand the WSL
+    backend a path it can't ``chdir`` into; map it to POSIX so picker, sidebar and sessions agree.
+    No-op off WSL and for paths already POSIX.
     """
     if not is_wsl():
         return cwd
@@ -1224,13 +1126,8 @@ _container_detected: bool | None = None
 
 
 def is_container() -> bool:
-    """Return True when running inside a container.
-
-    To cover those, also check: * ``KUBERNETES_SERVICE_HOST`` env var — set in every Kubernetes pod.
-    * ``kubepods`` / ``containerd`` / ``crio`` markers in ``/proc/1/cgroup``. * the same markers in
-    ``/proc/self/mountinfo`` (cgroup-v2 fallback).
-
-    Result is cached for the process lifetime. Import-safe — no heavy deps.
+    """True inside a container (Docker/Podman/LXC markers, Kubernetes env, cgroup/mountinfo
+    markers); cached per process.
     """
     global _container_detected
     if _container_detected is None:
@@ -1248,7 +1145,6 @@ def _proc_file_has_marker(path: str, markers: tuple[str, ...]) -> bool:
 
 
 def _detect_container() -> bool:
-    # Kubernetes always injects KUBERNETES_SERVICE_HOST into pod containers; absent on hosts.
     if (
         os.path.exists("/.dockerenv")
         or os.path.exists("/run/.containerenv")
@@ -1256,9 +1152,7 @@ def _detect_container() -> bool:
         or _proc_file_has_marker("/proc/1/cgroup", ("docker", "podman", "/lxc/", "kubepods", "containerd", "crio"))
     ):
         return True
-    # cgroup v2: /proc/1/cgroup is just "0::/" with no marker. The container
-    # runtime still shows up in the mount table (overlay rootfs, runtime mount
-    # paths), so scan mountinfo as a last resort.
+    # cgroup v2: /proc/1/cgroup is just "0::/"; the runtime still shows in mountinfo.
     return _proc_file_has_marker("/proc/self/mountinfo", ("kubepods", "containerd", "crio"))
 
 
@@ -1284,45 +1178,35 @@ def get_env_path() -> Path:
 
 
 def apply_ipv4_preference(force: bool = False) -> None:
-    """Monkey-patch ``socket.getaddrinfo`` to prefer IPv4 connections.
+    """Monkey-patch ``socket.getaddrinfo`` to prefer IPv4 connections when *force* is True.
 
-    On servers with broken or unreachable IPv6, Python tries AAAA records first and hangs for the
-    full TCP timeout before falling back to IPv4. This affects httpx, requests, urllib, the OpenAI
-    SDK — everything that uses ``socket.getaddrinfo``.
-
-    When *force* is True, patches ``getaddrinfo`` so that calls with ``family=AF_UNSPEC`` (the
-    default) resolve as ``AF_INET`` instead, skipping IPv6 entirely. If no A record exists, falls
-    back to the original unfiltered resolution so pure-IPv6 hosts still work.
+    On hosts with broken IPv6, Python tries AAAA first and hangs for the full TCP timeout before
+    falling back — this hits httpx, requests, urllib, the OpenAI SDK. ``family=AF_UNSPEC`` calls
+    resolve as ``AF_INET``; if no A record exists, fall back to full resolution so pure-IPv6 hosts
+    still work.
     """
     if not force:
         return
 
     import socket
 
-    # Guard against double-patching
     if getattr(socket.getaddrinfo, "_hermes_ipv4_patched", False):
         return
-
     _original_getaddrinfo = socket.getaddrinfo
 
     def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         if family == 0:  # AF_UNSPEC — caller didn't request a specific family
             try:
-                return _original_getaddrinfo(
-                    host, port, socket.AF_INET, type, proto, flags
-                )
-            except socket.gaierror:
-                # No A record — fall back to full resolution (pure-IPv6 hosts)
+                return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+            except socket.gaierror:  # no A record — pure-IPv6 host
                 return _original_getaddrinfo(host, port, family, type, proto, flags)
         return _original_getaddrinfo(host, port, family, type, proto, flags)
-
     _ipv4_getaddrinfo._hermes_ipv4_patched = True  # type: ignore[attr-defined]
     socket.getaddrinfo = _ipv4_getaddrinfo  # type: ignore[assignment]
 
 
 # ─── Streaming Response Constants ────────────────────────────────────────────
 
-# Response ID for partial stream stubs used during error recovery
 PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
 
 FINISH_REASON_LENGTH = "length"
@@ -1339,11 +1223,9 @@ AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 def venv_bin_dir(venv_dir, *, windows: bool | None = None) -> Path:
     """Directory holding a venv's executables (``Scripts`` / ``bin``).
 
-    Canonical helper; this was open-coded in many places with three different Windows predicates.
-    *windows* lets callers pass their own platform verdict because tests patch predicates such as
-    ``hermes_cli.main._is_windows`` to exercise Windows paths on Linux CI; reading ``sys.platform``
-    here would drop those paths from coverage. The path is returned unconditionally: callers differ
-    on whether a missing venv is an error, so existence checking stays with them.
+    *windows* lets callers pass their own platform verdict: tests patch predicates such as
+    ``hermes_cli.main._is_windows`` to exercise Windows paths on Linux CI. Returned
+    unconditionally — callers differ on whether a missing venv is an error.
     """
     if windows is None:
         windows = sys.platform == "win32"
@@ -1353,9 +1235,8 @@ def venv_bin_dir(venv_dir, *, windows: bool | None = None) -> Path:
 def project_venv_dir(project_root) -> Path | None:
     """The project's venv directory, ``venv`` or ``.venv``, when one exists.
 
-    ``uv venv`` defaults to ``.venv`` while our installers create ``venv``, so both layouts are in
-    the wild. Call sites that only knew about ``venv`` silently no-oped on a ``.venv`` install —
-    that is how the Windows shim-lock preflight skipped itself entirely (#79542).
+    ``uv venv`` defaults to ``.venv`` while our installers create ``venv``; call sites that only
+    knew ``venv`` silently no-oped on ``.venv`` installs (#79542).
     """
     for name in ("venv", ".venv"):
         candidate = Path(project_root) / name
@@ -1366,17 +1247,16 @@ def project_venv_dir(project_root) -> Path | None:
 
 def venv_python_path(venv_dir, *, windows: bool | None = None) -> Path:
     """Path to the Python interpreter inside *venv_dir* (may not exist)."""
-    windows = sys.platform == "win32" if windows is None else windows
+    if windows is None:
+        windows = sys.platform == "win32"
     return venv_bin_dir(venv_dir, windows=windows) / ("python.exe" if windows else "python")
 
 
 # ─── Partial-update diagnostics ──────────────────────────────────────────────
 
-# Top-level packages/modules that ship as part of Hermes itself. An ImportError
-# naming one of these means our own tree is inconsistent; anything else is a
-# third-party problem with different remediation. Single source of truth —
-# `hermes_cli.update_cmd`'s post-update probe consumes this same set so the
-# guard that BLOCKS and the hint that EXPLAINS can never disagree.
+# First-party roots: an ImportError naming one means our own tree is
+# inconsistent. `hermes_cli.update_cmd`'s post-update probe consumes this same
+# set so the guard that BLOCKS and the hint that EXPLAINS never disagree.
 FIRST_PARTY_MODULE_ROOTS = frozenset({
     "agent", "acp_adapter", "cli", "cron", "gateway", "model_tools", "plugins",
     "providers", "tools", "toolsets", "run_agent", "tui_gateway", "utils",
@@ -1386,23 +1266,20 @@ FIRST_PARTY_MODULE_ROOTS = frozenset({
 def is_first_party_module(name: str | None) -> bool:
     """True when *name* is a module that ships with Hermes.
 
-    Matches the first dotted segment against an exact set; a substring or ``startswith`` test would
-    also claim third-party ``agents``, ``agentops``, and ``toolsets_x``.
+    Exact match on the first dotted segment; ``startswith`` would also claim third-party
+    ``agents``, ``agentops``, ``toolsets_x``.
     """
     root = str(name).split(".")[0] if name else ""
     return bool(root) and (root in FIRST_PARTY_MODULE_ROOTS or root.startswith("hermes_"))
 
 
 def partial_update_hint(exc: BaseException) -> list[str]:
-    """Return recovery guidance lines when *exc* looks like a half-updated tree.
+    """Recovery guidance lines when *exc* looks like a half-updated tree, else ``[]``.
 
-    Users hit this as an opaque crash with no indication that the *install*, rather than their
-    config, is the problem — and `hermes update` is exactly the command they need but are least
-    likely to trust after a failed update. Return the guidance so callers can print it alongside the
-    raw error.
+    Users see an opaque crash with no hint that the *install* (not their config) is broken, and
+    ``hermes update`` is exactly what they need but least trust after a failed update.
     """
-    # A missing third-party dependency is a different problem (bad venv, missing
-    # extra) with different remediation, so don't claim a partial update.
+    # A missing third-party dep (bad venv, missing extra) is a different problem.
     if not isinstance(exc, ImportError) or isinstance(exc, ModuleNotFoundError):
         return []
     if not is_first_party_module(getattr(exc, "name", None)):
