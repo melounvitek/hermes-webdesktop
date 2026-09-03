@@ -266,6 +266,11 @@ class SignalAdapter(BasePlatformAdapter):
                 if lock_acquired:
                     self._release_platform_lock()
 
+    def _spawn_background(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def _close_client(self) -> None:
         if self.client:
             await self.client.aclose()
@@ -370,9 +375,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Force SSE reconnection by closing the current response."""
         if self._sse_response and not self._sse_response.is_stream_consumed:
             with suppress(Exception):
-                task = asyncio.create_task(self._sse_response.aclose())
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
+                self._spawn_background(self._sse_response.aclose())
             self._sse_response = None
 
     def _unwrap_sync_message(self, envelope_data: dict) -> Optional[dict]:
@@ -782,25 +785,19 @@ class SignalAdapter(BasePlatformAdapter):
             return
         self._remember_sent_message_timestamp(ts)
         now = time.monotonic()
-        # Re-insert to mark as most-recently-used.
-        self._recent_sent_timestamps.pop(ts, None)
-        self._recent_sent_timestamps[ts] = now
+        recent = self._recent_sent_timestamps
+        recent.pop(ts, None)  # re-insert to mark as most-recently-used
+        recent[ts] = now
         # Drop entries older than TTL first, then enforce the hard cap.
         cutoff = now - self._recent_sent_ttl_seconds
-        while self._recent_sent_timestamps:
-            _, oldest_at = next(iter(self._recent_sent_timestamps.items()))
-            if oldest_at >= cutoff:
-                break
-            self._recent_sent_timestamps.popitem(last=False)
-        while len(self._recent_sent_timestamps) > self._max_recent_timestamps:
-            self._recent_sent_timestamps.popitem(last=False)
+        while recent and next(iter(recent.values())) < cutoff:
+            recent.popitem(last=False)
+        while len(recent) > self._max_recent_timestamps:
+            recent.popitem(last=False)
 
     def _consume_sent_timestamp(self, ts) -> bool:
         """Pop a timestamp if it matches one we sent. Returns True on echo."""
-        if ts and ts in self._recent_sent_timestamps:
-            self._recent_sent_timestamps.pop(ts, None)
-            return True
-        return False
+        return bool(ts) and self._recent_sent_timestamps.pop(ts, None) is not None
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Typing indicator (called every ~2s by base.py's ``_keep_typing``). Only the first consecutive
@@ -811,15 +808,14 @@ class SignalAdapter(BasePlatformAdapter):
         params = await self._with_target({"account": self.account}, chat_id)
         fails = self._typing_failures.get(chat_id, 0)
         result = await self._rpc("sendTyping", params, rpc_id="typing", log_failures=(fails == 0))
-        if result is None:
-            fails += 1
-            self._typing_failures[chat_id] = fails
-            # After 3 consecutive failures back off exponentially (16s, 32s, 60s cap).
-            if fails >= 3:
-                self._typing_skip_until[chat_id] = now + min(60.0, 16.0 * (2 ** (fails - 3)))
-        else:
+        if result is not None:
             self._typing_failures.pop(chat_id, None)
             self._typing_skip_until.pop(chat_id, None)
+            return
+        fails = self._typing_failures[chat_id] = fails + 1
+        # After 3 consecutive failures back off exponentially (16s, 32s, 60s cap).
+        if fails >= 3:
+            self._typing_skip_until[chat_id] = now + min(60.0, 16.0 * (2 ** (fails - 3)))
 
     async def _resolve_image_path(self, image_url: str) -> Tuple[Optional[str], Optional[str], Any]:
         """``(path, None, None)`` or ``(None, reason, detail)``: reason download (exc) / missing / oversize (size)."""
@@ -888,46 +884,40 @@ class SignalAdapter(BasePlatformAdapter):
         max_attempts = SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
         for attempt in range(1, max_attempts + 1):
             await scheduler.acquire(n)
+            t0 = time.monotonic()
             try:
-                _rpc_t0 = time.monotonic()
                 result = await self._rpc("send", params, raise_on_rate_limit=True, timeout=send_timeout)
-                _rpc_duration = time.monotonic() - _rpc_t0
-                success, err_msg = self._validate_send_result(result) if result is not None else (False, None)
-                if success:
-                    self._track_sent_timestamp(result)
-                    await scheduler.report_rpc_duration(_rpc_duration, n)
-                    logger.info("Signal batch %s: %d attachments sent in %.1fs (attempt %d/%d)",
-                                label, n, _rpc_duration, attempt, max_attempts)
-                    return
-                logger.error(
-                    "Signal: RPC send failed for batch %s (%d attachments, attempt %d/%d, rpc_duration=%.1fs)%s",
-                    label, n, attempt, max_attempts, _rpc_duration, f": {err_msg}" if result is not None else "",
-                )
-                if attempt >= max_attempts:
-                    return
-                backoff = 2.0 ** attempt
-                logger.info("Signal: retrying batch %s after %.1fs backoff", label, backoff)
-                await asyncio.sleep(backoff)
             except SignalRateLimitError as e:
                 scheduler.feedback(e.retry_after, n)
                 retry_after = f"{e.retry_after:.0f}s" if e.retry_after else "unknown"
                 if attempt >= max_attempts:
-                    logger.error(
-                        "Signal: rate-limit retries exhausted on batch %s (%d attachments lost, server retry_after=%s)",
-                        label, n, retry_after)
+                    logger.error("Signal: rate-limit retries exhausted on batch %s (%d attachments lost, "
+                                 "server retry_after=%s)", label, n, retry_after)
                     return
-                logger.warning(
-                    "Signal: rate-limited on batch %s (attempt %d/%d, server retry_after=%s); "
-                    "scheduler will pace the retry",
-                    label, attempt, max_attempts, retry_after)
+                logger.warning("Signal: rate-limited on batch %s (attempt %d/%d, server retry_after=%s); "
+                               "scheduler will pace the retry", label, attempt, max_attempts, retry_after)
+                continue
+            duration = time.monotonic() - t0
+            success, err_msg = self._validate_send_result(result) if result is not None else (False, None)
+            if success:
+                self._track_sent_timestamp(result)
+                await scheduler.report_rpc_duration(duration, n)
+                logger.info("Signal batch %s: %d attachments sent in %.1fs (attempt %d/%d)",
+                            label, n, duration, attempt, max_attempts)
+                return
+            logger.error("Signal: RPC send failed for batch %s (%d attachments, attempt %d/%d, rpc_duration=%.1fs)%s",
+                         label, n, attempt, max_attempts, duration, f": {err_msg}" if result is not None else "")
+            if attempt >= max_attempts:
+                return
+            backoff = 2.0 ** attempt
+            logger.info("Signal: retrying batch %s after %.1fs backoff", label, backoff)
+            await asyncio.sleep(backoff)
 
     async def _notify_batch_pacing(self, chat_id: str, next_batch_idx: int, total_batches: int, wait_s: float) -> None:
         """Tell the user about an inter-batch pacing wait over the notice threshold (best-effort)."""
         try:
-            await self.send(
-                chat_id,
-                f"(More images coming — pausing ~{_format_wait(wait_s)} "
-                f"for Signal rate limit, batch {next_batch_idx}/{total_batches}.)")
+            await self.send(chat_id, f"(More images coming — pausing ~{_format_wait(wait_s)} "
+                                     f"for Signal rate limit, batch {next_batch_idx}/{total_batches}.)")
         except Exception as e:
             logger.warning("Signal: failed to send pacing notice: %s", e)
 
@@ -945,9 +935,8 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str) -> SendResult:
         """Send one local file as a Signal attachment via the ``send`` RPC."""
-        params = await self._with_target(
-            {"account": self.account, "message": caption or "", "attachments": [file_path]}, chat_id
-        )
+        params = {"account": self.account, "message": caption or "", "attachments": [file_path]}
+        await self._with_target(params, chat_id)
         _, err = await self._rpc_send(params, fail_error)
         return err or SendResult(success=True)
 
