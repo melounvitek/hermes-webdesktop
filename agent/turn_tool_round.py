@@ -62,7 +62,6 @@ def run_tool_round(
     Hermes; a failed canonical append ends the turn rather than running tools from
     process-only state."""
     from agent.conversation_loop import (
-        _STALE_MARKER_RE,
         _invalid_tool_name_error_content,
     )
 
@@ -122,94 +121,14 @@ def run_tool_round(
             if tc.function.name not in agent.valid_tool_names
         ]
 
-    assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
-
-    turn_content = assistant_message.content or ""
-
-    # A bare bracketed token (e.g. ``[memory]``) beside a function call is
-    # protocol scaffolding; persisting it lets the post-tool fallback replay
-    # it forever (#78148).
-    if (
-        assistant_message.tool_calls
-        and _STALE_MARKER_RE.fullmatch(turn_content.strip())
-    ):
-        logger.warning(
-            "Discarding bare tool-call marker from assistant content: %s",
-            turn_content,
-        )
-        turn_content = ""
-        assistant_msg["content"] = ""
-
-    # Classify tools regardless of visible content: a substantive tool-only
-    # turn must invalidate any older housekeeping fallback.
-    _HOUSEKEEPING_TOOLS = frozenset({
-        "memory", "todo_list", "skill_manage", "session_search",
-    })
-    _all_housekeeping = all(
-        tc.function.name in _HOUSEKEEPING_TOOLS
-        for tc in assistant_message.tool_calls
+    _st = stage_tool_call_message(
+        agent,
+        assistant_message=assistant_message,
+        finish_reason=finish_reason,
+        messages=messages,
     )
-
-    # Substantive tools clear any older fallback so a two-turn-old
-    # housekeeping narration isn't attributed to the preceding tool turn.
-    if assistant_message.tool_calls and not _all_housekeeping:
-        agent._last_content_with_tools = None
-        agent._last_content_tools_all_housekeeping = False
-        # Also clear the mute flag a prior housekeeping turn may have set,
-        # else _vprint suppresses this turn's tool progress until the
-        # no-tool-call branch clears it.
-        agent._mute_post_response = False
-
-    # Content + tool_calls in one turn: keep the content as a fallback final
-    # response in case the follow-up turn after tools is empty.
-    if turn_content and agent._has_content_after_think_block(turn_content):
-        agent._last_content_with_tools = turn_content
-        # Mute only when EVERY tool call is post-response housekeeping
-        # (memory, todo, skill_manage); substantive tools keep output on.
-        agent._last_content_tools_all_housekeeping = _all_housekeeping
-        if _all_housekeeping and agent._has_stream_consumers():
-            agent._mute_post_response = True
-        elif agent._should_emit_quiet_tool_messages():
-            clean = agent._strip_think_blocks(turn_content).strip()
-            if clean:
-                agent._vprint(f"  ┊ 💬 {clean}")
-
-    # Pop thinking-only prefill message(s) before appending
-    # (tool-call path — same rationale as the final-response path).
-    _had_prefill = False
-    while (
-        messages
-        and isinstance(messages[-1], dict)
-        and messages[-1].get("_thinking_prefill")
-    ):
-        messages.pop()
-        _had_prefill = True
-
-    # Tool calls after a prefill recovery reset the prefill counter, so
-    # each tool-call success is a fresh start, not a cumulative burn.
-    if _had_prefill:
-        agent._thinking_prefill_retries = 0
-        agent._empty_content_retries = 0
-    # Re-arm the post-tool nudge so it can fire on a LATER tool round.
-    agent._post_tool_empty_retried = False
-    # A landed tool call recovers any dropped-tool-call stall; refresh that
-    # budget so it guards each stall independently, not the whole run.
-    agent._dropped_toolcall_retries = 0
-
-    previous_msg = messages[-1] if messages else None
-    current_interim_visible = agent._interim_assistant_visible_text(assistant_msg)
-    previous_interim_visible = (
-        agent._interim_assistant_visible_text(previous_msg)
-        if isinstance(previous_msg, dict)
-        else ""
-    )
-    duplicate_previous_interim = (
-        bool(current_interim_visible)
-        and isinstance(previous_msg, dict)
-        and previous_msg.get("role") == "assistant"
-        and previous_msg.get("finish_reason") == "incomplete"
-        and previous_interim_visible == current_interim_visible
-    )
+    assistant_msg = _st.assistant_msg
+    duplicate_previous_interim = _st.duplicate_previous_interim
     append_message(messages, assistant_msg)
 
     # Mixed batch: error-result invalid calls and drop them from execution.
@@ -347,4 +266,129 @@ def run_tool_round(
     agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
     # Continue loop for next response
     return _verdict("continue")
+    return _verdict("fallthrough")
+
+
+@dataclass
+class StagedToolCallMessage:
+    """Always ``action == "fallthrough"``. ``assistant_msg`` is the transcript row to append;
+    ``duplicate_previous_interim`` suppresses re-emitting interim commentary the previous
+    ``incomplete`` row already showed."""
+
+    action: str
+    assistant_msg: Any
+    duplicate_previous_interim: Any
+
+
+def stage_tool_call_message(
+    agent: Any,
+    *,
+    assistant_message: Any,
+    finish_reason: Any,
+    messages: Any,
+) -> StagedToolCallMessage:
+    """Build the assistant tool-call row and update the per-turn fallback/mute state: drop a bare
+    bracketed marker beside a call (#78148), classify housekeeping-only rounds, keep visible
+    content as the empty-follow-up fallback, pop thinking-only prefills (resetting their
+    counters), re-arm the post-tool nudge and the dropped-tool-call stall budget."""
+    from agent.conversation_loop import (
+        _STALE_MARKER_RE,
+    )
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> StagedToolCallMessage:
+        return StagedToolCallMessage(
+            action=action,
+            assistant_msg=assistant_msg,
+            duplicate_previous_interim=duplicate_previous_interim,
+
+        )
+
+    assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
+
+    turn_content = assistant_message.content or ""
+
+    # A bare bracketed token (e.g. ``[memory]``) beside a function call is
+    # protocol scaffolding; persisting it lets the post-tool fallback replay
+    # it forever (#78148).
+    if (
+        assistant_message.tool_calls
+        and _STALE_MARKER_RE.fullmatch(turn_content.strip())
+    ):
+        logger.warning(
+            "Discarding bare tool-call marker from assistant content: %s",
+            turn_content,
+        )
+        turn_content = ""
+        assistant_msg["content"] = ""
+
+    # Classify tools regardless of visible content: a substantive tool-only
+    # turn must invalidate any older housekeeping fallback.
+    _HOUSEKEEPING_TOOLS = frozenset({
+        "memory", "todo_list", "skill_manage", "session_search",
+    })
+    _all_housekeeping = all(
+        tc.function.name in _HOUSEKEEPING_TOOLS
+        for tc in assistant_message.tool_calls
+    )
+
+    # Substantive tools clear any older fallback so a two-turn-old
+    # housekeeping narration isn't attributed to the preceding tool turn.
+    if assistant_message.tool_calls and not _all_housekeeping:
+        agent._last_content_with_tools = None
+        agent._last_content_tools_all_housekeeping = False
+        # Also clear the mute flag a prior housekeeping turn may have set,
+        # else _vprint suppresses this turn's tool progress until the
+        # no-tool-call branch clears it.
+        agent._mute_post_response = False
+
+    # Content + tool_calls in one turn: keep the content as a fallback final
+    # response in case the follow-up turn after tools is empty.
+    if turn_content and agent._has_content_after_think_block(turn_content):
+        agent._last_content_with_tools = turn_content
+        # Mute only when EVERY tool call is post-response housekeeping
+        # (memory, todo, skill_manage); substantive tools keep output on.
+        agent._last_content_tools_all_housekeeping = _all_housekeeping
+        if _all_housekeeping and agent._has_stream_consumers():
+            agent._mute_post_response = True
+        elif agent._should_emit_quiet_tool_messages():
+            clean = agent._strip_think_blocks(turn_content).strip()
+            if clean:
+                agent._vprint(f"  ┊ 💬 {clean}")
+
+    # Pop thinking-only prefill message(s) before appending
+    # (tool-call path — same rationale as the final-response path).
+    _had_prefill = False
+    while (
+        messages
+        and isinstance(messages[-1], dict)
+        and messages[-1].get("_thinking_prefill")
+    ):
+        messages.pop()
+        _had_prefill = True
+
+    # Tool calls after a prefill recovery reset the prefill counter, so
+    # each tool-call success is a fresh start, not a cumulative burn.
+    if _had_prefill:
+        agent._thinking_prefill_retries = 0
+        agent._empty_content_retries = 0
+    # Re-arm the post-tool nudge so it can fire on a LATER tool round.
+    agent._post_tool_empty_retried = False
+    # A landed tool call recovers any dropped-tool-call stall; refresh that
+    # budget so it guards each stall independently, not the whole run.
+    agent._dropped_toolcall_retries = 0
+
+    previous_msg = messages[-1] if messages else None
+    current_interim_visible = agent._interim_assistant_visible_text(assistant_msg)
+    previous_interim_visible = (
+        agent._interim_assistant_visible_text(previous_msg)
+        if isinstance(previous_msg, dict)
+        else ""
+    )
+    duplicate_previous_interim = (
+        bool(current_interim_visible)
+        and isinstance(previous_msg, dict)
+        and previous_msg.get("role") == "assistant"
+        and previous_msg.get("finish_reason") == "incomplete"
+        and previous_interim_visible == current_interim_visible
+    )
     return _verdict("fallthrough")

@@ -80,11 +80,6 @@ def handle_api_error(
     """Recover from ``api_error`` in the original order. Every fallback activation must leave
     the retry loop with ``restart_with_rebuilt_messages`` armed (``"break"``) so the pre-API
     preflight re-runs against the fallback's context window (#84733)."""
-    from agent.conversation_loop import (
-        _arm_fallback_restart,
-        _is_copilot_provider,
-        _is_stale_copilot_credential_error,
-    )
     _provider_overflow_recovery_pending = False
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ApiErrorVerdict:
@@ -312,6 +307,96 @@ def handle_api_error(
         return _verdict("break")
     if _ov.action == "continue":
         return _verdict("continue")
+
+    _ue = settle_unrecovered_error(
+        agent,
+        api_error=api_error,
+        classified=classified,
+        _retry=_retry,
+        status_code=status_code,
+        error_msg=error_msg,
+        is_context_length_error=is_context_length_error,
+        is_rate_limited=is_rate_limited,
+        _is_zai_coding_overload=_is_zai_coding_overload,
+        _provider=_provider,
+        _base=_base,
+        _model=_model,
+        messages=messages,
+        api_messages=api_messages,
+        api_kwargs=api_kwargs,
+        active_system_prompt=active_system_prompt,
+        conversation_history=conversation_history,
+        approx_tokens=approx_tokens,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        compression_attempts=compression_attempts,
+        api_call_count=api_call_count,
+    )
+    active_system_prompt = _ue.active_system_prompt
+    retry_count = _ue.retry_count
+    compression_attempts = _ue.compression_attempts
+    if _ue.action != "fallthrough":
+        return _verdict(_ue.action, _ue.result)
+    return _verdict("fallthrough")
+
+
+@dataclass
+class UnrecoveredErrorVerdict:
+    """``action``: ``"continue"`` (retry), ``"break"`` (fallback armed / redirect pending) or
+    ``"return"`` (``result`` is the terminal result dict). Rebinds ``active_system_prompt``,
+    ``retry_count`` and ``compression_attempts``."""
+
+    action: str
+    active_system_prompt: Any
+    retry_count: Any
+    compression_attempts: Any
+    result: Optional[Dict[str, Any]] = None
+
+
+def settle_unrecovered_error(
+    agent: Any,
+    *,
+    api_error: Any,
+    classified: Any,
+    _retry: Any,
+    status_code: Any,
+    error_msg: Any,
+    is_context_length_error: Any,
+    is_rate_limited: Any,
+    _is_zai_coding_overload: Any,
+    _provider: Any,
+    _base: Any,
+    _model: Any,
+    messages: Any,
+    api_messages: Any,
+    api_kwargs: Any,
+    active_system_prompt: Any,
+    conversation_history: Any,
+    approx_tokens: Any,
+    retry_count: Any,
+    max_retries: Any,
+    compression_attempts: Any,
+    api_call_count: Any,
+) -> UnrecoveredErrorVerdict:
+    """Decide the fate of an API error that every recovery chain declined: local validation /
+    non-retryable client errors (Copilot stale-credential self-heal first, then fallback, then a
+    terminal result), max-retries exhaustion (primary transport recovery -> fallback -> terminal
+    result), else the interruptible error backoff. ``FailoverReason.billing`` (402) is deliberately
+    treated as non-retryable (#31273)."""
+    from agent.conversation_loop import (
+        _arm_fallback_restart,
+        _is_copilot_provider,
+        _is_stale_copilot_credential_error,
+    )
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> UnrecoveredErrorVerdict:
+        return UnrecoveredErrorVerdict(
+            action=action,
+            active_system_prompt=active_system_prompt,
+            retry_count=retry_count,
+            compression_attempts=compression_attempts,
+            result=result,
+        )
 
     # Non-retryable: ValueError/TypeError are local bugs, except
     # UnicodeEncodeError (surrogate path above) and json.JSONDecodeError, a
