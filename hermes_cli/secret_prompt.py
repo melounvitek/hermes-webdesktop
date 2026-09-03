@@ -19,7 +19,6 @@ def _collect_masked_input(
     """Read one secret line while writing a mask character per typed char."""
     value: list[str] = []
     write(prompt)
-
     while True:
         ch = read_char()
         if ch in _ENTER_CHARS:
@@ -53,7 +52,6 @@ def masked_secret_prompt(prompt: str, *, mask: str = "*") -> str:
     """
     if not _stream_is_tty(sys.stdin) or not _stream_is_tty(sys.stdout):
         return getpass.getpass(prompt)
-
     masked = _masked_secret_prompt_windows if os.name == "nt" else _masked_secret_prompt_posix
     try:
         return masked(prompt, mask=mask)

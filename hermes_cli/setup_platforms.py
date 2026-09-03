@@ -28,7 +28,6 @@ def _setup_telegram_auto_result():
         from hermes_cli.telegram_managed_bot import auto_setup_telegram_bot_result
     except ImportError:
         return None
-
     profile_name: str | None = None
     try:
         profile_name = _profile_name_from_hermes_home(Path(get_hermes_home()))
@@ -126,7 +125,6 @@ def _obtain_telegram_token():
           "      No token copy-paste needed.", None,
           "  [2] Manual",
           "      Create a bot via @BotFather yourself and paste the token.", None)
-
     token = setup_result = None
     if prompt("Choice [1/2]", default="1").strip() == "1":
         setup_result = _setup_telegram_auto_result()
@@ -137,7 +135,6 @@ def _obtain_telegram_token():
                 token = setup_result = None
         if not token:
             _info(None, "Falling back to manual setup...", None)
-
     if not token:
         token = _prompt_telegram_bot_token()
     return token, setup_result
@@ -150,19 +147,15 @@ def _setup_telegram():
     if _declines_reconfigure("TELEGRAM_BOT_TOKEN", "Telegram", "Reconfigure Telegram?"):
         _telegram_allowlist_nudge()
         return
-
     token, setup_result = _obtain_telegram_token()
     if not token:
         return
-
     save_env_value("TELEGRAM_BOT_TOKEN", token)
     print_success("Telegram token saved")
-
     _info(None, "🔒 Security: Restrict who can use your bot",
           "   To find your Telegram user ID:",
           "   1. Message @userinfobot on Telegram",
           "   2. It will reply with your numeric ID (e.g., 123456789)", None)
-
     allowed_users = None
     detected_id = str(getattr(setup_result, "owner_user_id", None) or "")
     if detected_id:
@@ -174,11 +167,9 @@ def _setup_telegram():
         "TELEGRAM_ALLOWED_USERS", "Allowed user IDs (comma-separated, leave empty for open access)",
         "Telegram allowlist configured - only listed users can use the bot",
         "⚠️  No allowlist set - anyone who finds your bot can use it!", preset=allowed_users)
-
     _info(None, "📬 Home Channel: where Hermes delivers cron job results,",
           "   cross-platform messages, and notifications.",
           "   For Telegram DMs, this is your user ID (same as above).")
-
     first_user_id = allowed_users.split(",")[0].strip() if allowed_users else ""
     if not first_user_id:
         print_info("   You can also set this later by typing /set-home in your Telegram chat.")
@@ -196,13 +187,11 @@ def _setup_bluebubbles():
     print_header("BlueBubbles (iMessage)")
     if _declines_reconfigure("BLUEBUBBLES_SERVER_URL", "BlueBubbles", "Reconfigure BlueBubbles?"):
         return
-
     _info("Connects Hermes to iMessage via BlueBubbles — a free, open-source",
           "macOS server that bridges iMessage to any device.",
           "   Requires a Mac running BlueBubbles Server v1.0.0+",
           "   Download: https://bluebubbles.app/", None,
           "In BlueBubbles Server → Settings → API, note your Server URL and Password.", None)
-
     for label, env_var, secret, what, transform in (
         ("BlueBubbles server URL (e.g. http://192.168.1.10:1234)", "BLUEBUBBLES_SERVER_URL", False, "Server URL",
          lambda v: v.rstrip("/")),
@@ -212,20 +201,16 @@ def _setup_bluebubbles():
                               skip_msg=f"{what} is required — skipping BlueBubbles setup"):
             return
     print_success("BlueBubbles credentials saved")
-
     _info(None, "🔒 Security: Restrict who can message your bot",
           "   Use iMessage addresses: email (user@icloud.com) or phone (+15551234567)", None)
     _prompt_allowlist("BLUEBUBBLES_ALLOWED_USERS", "Allowed iMessage addresses (comma-separated, leave empty for open access)",
                       "BlueBubbles allowlist configured", "⚠️  No allowlist set — anyone who can iMessage you can use the bot!")
-
     _info(None, "📬 Home Channel: phone or email for cron job delivery and notifications.",
           "   You can also set this later with /set-home in your iMessage chat.")
     _save_prompted("BLUEBUBBLES_HOME_CHANNEL", "Home channel address (leave empty to set later)")
-
     _info(None, "Advanced settings (defaults are fine for most setups):")
     if prompt_yes_no("Configure webhook listener settings?", False):
         _save_port("BLUEBUBBLES_WEBHOOK_PORT", prompt("Webhook listener port (default: 8645)"), "8645")
-
     _info(None, "Requires the BlueBubbles Private API helper for typing indicators,",
           "read receipts, and tapback reactions. Basic messaging works without it.",
           "   Install: https://docs.bluebubbles.app/helper-bundle/installation")
@@ -237,19 +222,16 @@ def _setup_webhooks():
     print_header("Webhooks")
     if _declines_reconfigure("WEBHOOK_ENABLED", "Webhooks", "Reconfigure webhooks?"):
         return
-
     print()
     print_warning("⚠  Webhook and SMS platforms require exposing gateway ports to the")
     print_warning("   internet. For security, run the gateway in a sandboxed environment")
     print_warning("   (Docker, VM, etc.) to limit blast radius from prompt injection.")
     print()
     _info("   Full guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/", None)
-
     _save_port("WEBHOOK_PORT", prompt("Webhook port (default 8644)"), "8644")
     _save_prompted("WEBHOOK_SECRET", "Global HMAC secret (shared across all routes)", password=True,
                    success_msg="Webhook secret saved",
                    skip_msg="No secret set — you must configure per-route secrets in config.yaml")
-
     save_env_value("WEBHOOK_ENABLED", "true")
     print()
     print_success("Webhooks enabled! Next steps:")
@@ -339,7 +321,6 @@ def setup_gateway(config: dict):
     print_header("Messaging Platforms")
     _info("Connect to messaging platforms to chat with Hermes from anywhere.",
           "Toggle with Space, confirm with Enter.", None)
-
     platforms = _all_platforms()
 
     # Build checklist, pre-selecting already-configured platforms.
@@ -347,7 +328,6 @@ def setup_gateway(config: dict):
     items = [f"{plat['emoji']} {plat['label']}  ({status})" for plat, status in zip(platforms, statuses)]
     pre_selected = [i for i, status in enumerate(statuses) if status == "configured"]
     selected = prompt_checklist("Select platforms to configure:", items, pre_selected)
-
     if not selected:
         print_info("No platforms selected. Run 'hermes setup gateway' later to configure.")
     for idx in selected or ():
@@ -368,12 +348,10 @@ def setup_gateway(config: dict):
     # with cron jobs and bot tokens but no process to serve them.
     from hermes_cli.gateway import _is_service_running, supports_systemd_services, ensure_gateway_service
     supports_systemd = supports_systemd_services()
-
     print()
     if _is_service_running():
         _restart_running_gateway(any_messaging, supports_systemd)
     else:
         # Not running: install (if needed) and start, no questions asked.
         ensure_gateway_service(context="setup")
-
     print_info(_RULE)
