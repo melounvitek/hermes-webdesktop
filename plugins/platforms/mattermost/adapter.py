@@ -212,8 +212,8 @@ class MattermostAdapter(BasePlatformAdapter):
     async def _post_with_file(
         self, chat_id: str, file_id: str, caption: Optional[str], reply_to: Optional[str],
         metadata: _Metadata) -> SendResult:
-        data = await self._post_message(chat_id, caption or "", reply_to, metadata, [file_id])
-        return _post_result(data, _POST_WITH_FILE_ERROR)
+        return _post_result(await self._post_message(chat_id, caption or "", reply_to, metadata, [file_id]),
+                            _POST_WITH_FILE_ERROR)
 
     async def _upload_file(
         self, channel_id: str, file_data: bytes, filename: str, content_type: str = "application/octet-stream"
@@ -314,9 +314,8 @@ class MattermostAdapter(BasePlatformAdapter):
         await self._api_post(f"users/{self._bot_user_id}/typing", {"channel_id": chat_id})
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
-        formatted = self.format_message(content)
-        data = await self._api("PUT", f"posts/{message_id}/patch", _with_mentions_disabled({"message": formatted}))
-        return _post_result(data, "Failed to edit post")
+        payload = _with_mentions_disabled({"message": self.format_message(content)})
+        return _post_result(await self._api("PUT", f"posts/{message_id}/patch", payload), "Failed to edit post")
 
     async def send_image(
         self, chat_id: str, image_url: str, caption: Optional[str] = None,
@@ -597,50 +596,36 @@ class MattermostAdapter(BasePlatformAdapter):
             post = json.loads(data.get("post") or "")
         except (json.JSONDecodeError, TypeError):
             return
-        # Ignore own messages and system posts.
-        if post.get("user_id") == self._bot_user_id or post.get("type"):
+        # Ignore own messages, system posts and redeliveries.
+        sender_id, post_id = post.get("user_id", ""), post.get("id", "")
+        if sender_id == self._bot_user_id or post.get("type") or self._dedup.is_duplicate(post_id):
             return
-        post_id = post.get("id", "")
-        if self._dedup.is_duplicate(post_id):
-            return
-
-        channel_id = post.get("channel_id", "")
-        channel_type_raw = data.get("channel_type", "O")
+        channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
-
-        # DMs need no gating; channels are mention-gated.
-        if channel_type_raw != "D":
+        if not is_dm:  # DMs need no gating; channels are mention-gated.
             message_text = self._apply_channel_gating(channel_id, message_text)
             if message_text is None:
                 return
-
-        sender_id = post.get("user_id", "")
-        sender_name = data.get("sender_name", "").lstrip("@") or sender_id
-
-        # Thread support: replies use root_id; in thread mode a top-level channel
-        # post is itself a valid root for progress.
+        # Thread support: replies use root_id; in thread mode a top-level channel post is itself a valid root.
         thread_id = post.get("root_id") or None
-        if not thread_id and self._reply_mode == "thread" and channel_type_raw != "D" and post_id:
+        if not thread_id and self._reply_mode == "thread" and not is_dm and post_id:
             thread_id = post_id
-
         if message_text[:1].isspace() and message_text.lstrip().startswith("/"):
             message_text = message_text.lstrip()
         msg_type = MessageType.COMMAND if message_text.startswith("/") else MessageType.TEXT
-
         media_urls, media_types = await self._download_attachments(post.get("file_ids") or [])
         if media_types and msg_type == MessageType.TEXT:
             msg_type = next((mt for prefix, mt in _MEDIA_MSG_TYPES if any(m.startswith(prefix) for m in media_types)),
                             MessageType.DOCUMENT)
-
         source = self.build_source(
-            chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(channel_type_raw, "channel"),
-            user_id=sender_id, user_name=sender_name, thread_id=thread_id, message_id=post_id)
+            chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
+            user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
+            thread_id=thread_id, message_id=post_id)
         from gateway.platforms.base import resolve_channel_prompt
-        msg_event = MessageEvent(
+        await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
             media_urls=media_urls or None, media_types=media_types or None,
-            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None))
-        await self.handle_message(msg_event)
+            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---

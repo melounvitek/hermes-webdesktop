@@ -332,8 +332,8 @@ class IRCAdapter(BasePlatformAdapter):
         """Build a MessageEvent and hand it to the base class handler."""
         if not self._message_handler:
             return
-        source = self.build_source(chat_id=chat_id, chat_name=chat_id, chat_type=chat_type,
-                                   user_id=user_id, user_name=user_name)
+        source = self.build_source(chat_id=chat_id, chat_name=chat_id, chat_type=chat_type, user_id=user_id,
+                                   user_name=user_name)
         await self.handle_message(MessageEvent(text=text, message_type=MessageType.TEXT, source=source,
                                                message_id=_ms_id(), timestamp=datetime.datetime.now()))
 
@@ -474,6 +474,87 @@ def _sa_error(detail: str) -> Dict[str, Any]:
     return {"error": f"IRC standalone send: {detail}"}
 
 
+class _StandaloneConn:
+    """Raw line I/O for ``_standalone_send``; ``pump`` answers PINGs while waiting for a numeric."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.reader, self.writer = reader, writer
+        self._loop = asyncio.get_running_loop()
+
+    async def raw(self, line: str) -> None:
+        self.writer.write(_encode_line(line))
+        await self.writer.drain()
+
+    async def pump(self, timeout: float, on_msg):
+        """Feed commands to ``on_msg`` until it returns non-None; None on timeout, ``_EOF`` on close."""
+        deadline = self._loop.time() + timeout
+        while True:
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                raw_line = await asyncio.wait_for(self.reader.readuntil(b"\r\n"), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            except asyncio.IncompleteReadError:
+                return _EOF
+            msg = _parse_irc_message(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+            if msg["command"] == "PING":
+                await self.raw(f"PONG :{msg['params'][0] if msg['params'] else ''}")
+                continue
+            result = await on_msg(msg["command"])
+            if result is not None:
+                return result
+
+    async def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.writer.close()
+            await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+
+
+async def _sa_register(conn: _StandaloneConn, nick_base: str, server_password: str) -> Optional[Dict[str, Any]]:
+    """PASS/NICK/USER and wait for 001, retrying nick collisions; returns an error dict or None on success."""
+    nick_attempts = 0
+    standalone_nick = f"{nick_base}-cron"[:30]
+
+    async def _on_registration(cmd: str):
+        nonlocal nick_attempts, standalone_nick
+        if cmd in {"432", "433"}:
+            nick_attempts += 1
+            if nick_attempts > 5:
+                return _sa_error("too many nick collisions")
+            # Build from the stable base, not the mutated nick, so the suffix stays bounded.
+            standalone_nick = f"{nick_base}-cron-{nick_attempts}"[:30]
+            await conn.raw(f"NICK {standalone_nick}")
+        elif cmd in {"464", "465"}:
+            return _sa_error(f"server rejected client ({cmd})")
+        return True if cmd == "001" else None
+
+    if server_password:
+        await conn.raw(f"PASS {_strip_irc_control_chars(server_password)}")
+    await conn.raw(f"NICK {standalone_nick}")
+    await conn.raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
+    registered = await conn.pump(15.0, _on_registration)
+    if registered is True:
+        return None
+    if registered is None:
+        return _sa_error("registration timeout (no RPL_WELCOME)")
+    return _sa_error("server closed connection during registration") if registered is _EOF else registered
+
+
+async def _sa_join(conn: _StandaloneConn, target: str) -> Optional[Dict[str, Any]]:
+    """JOIN a channel target (+n channels drop PRIVMSG from non-members); error dict only on explicit rejection."""
+    async def _on_join(cmd: str):
+        if cmd in {"403", "405", "471", "473", "474", "475"}:
+            return _sa_error(f"JOIN {target} rejected ({cmd})")
+        return True if cmd in {"366", "JOIN"} else None
+
+    await conn.raw(f"JOIN {target}")
+    # No JOIN ack within 5s (or EOF): proceed anyway, the server may still deliver.
+    joined = await conn.pump(5.0, _on_join)
+    return joined if isinstance(joined, dict) else None
+
+
 async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
                            media_files: Optional[List[str]] = None, force_document: bool = False) -> Dict[str, Any]:
     """Open an ephemeral IRC connection, send a PRIVMSG, and quit (out-of-process cron delivery via
@@ -499,7 +580,6 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         return _sa_error("chat_id contains illegal IRC characters")
     # Cap the base to 24 chars so collision retries stay within the 30-char NICKLEN most networks enforce.
     nick_base = nickname.rstrip("_0123456789-")[:24] or "hermes-bot"
-    standalone_nick = f"{nick_base}-cron"[:30]
     plain = IRCAdapter._strip_markdown(message)
     ssl_ctx = ssl.create_default_context() if use_tls else None
     try:
@@ -508,84 +588,26 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         raise
     except Exception as e:
         return {"error": f"IRC standalone connect failed: {e}"}
-
-    async def _raw(line: str) -> None:
-        writer.write(_encode_line(line))
-        await writer.drain()
-
-    loop = asyncio.get_running_loop()
-
-    async def _pump(deadline: float, on_msg):
-        """Feed lines to ``on_msg`` until it returns non-None; answers PINGs. None on timeout/EOF."""
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            try:
-                raw_line = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=remaining)
-            except asyncio.TimeoutError:
-                return None
-            except asyncio.IncompleteReadError:
-                return _EOF
-            msg = _parse_irc_message(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
-            if msg["command"] == "PING":
-                await _raw(f"PONG :{msg['params'][0] if msg['params'] else ''}")
-                continue
-            result = await on_msg(msg["command"])
-            if result is not None:
-                return result
-
-    nick_attempts = 0
-
-    async def _on_registration(cmd: str):
-        nonlocal nick_attempts, standalone_nick
-        if cmd in {"432", "433"}:
-            nick_attempts += 1
-            if nick_attempts > 5:
-                return _sa_error("too many nick collisions")
-            # Build from the stable base, not the mutated nick, so the suffix stays bounded.
-            standalone_nick = f"{nick_base}-cron-{nick_attempts}"[:30]
-            await _raw(f"NICK {standalone_nick}")
-        elif cmd in {"464", "465"}:
-            return _sa_error(f"server rejected client ({cmd})")
-        return True if cmd == "001" else None
-
-    async def _on_join(cmd: str):
-        if cmd in {"403", "405", "471", "473", "474", "475"}:
-            return _sa_error(f"JOIN {target} rejected ({cmd})")
-        return True if cmd in {"366", "JOIN"} else None
-
+    conn = _StandaloneConn(reader, writer)
     try:
-        if server_password:
-            await _raw(f"PASS {_strip_irc_control_chars(server_password)}")
-        await _raw(f"NICK {standalone_nick}")
-        await _raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
-        registered = await _pump(loop.time() + 15.0, _on_registration)
-        if registered is not True:
-            if registered is None:
-                return _sa_error("registration timeout (no RPL_WELCOME)")
-            return _sa_error("server closed connection during registration") if registered is _EOF else registered
+        if error := await _sa_register(conn, nick_base, server_password):
+            return error
         if nickserv_password:
-            await _raw(f"PRIVMSG NickServ :IDENTIFY {_strip_irc_control_chars(nickserv_password)}")
+            await conn.raw(f"PRIVMSG NickServ :IDENTIFY {_strip_irc_control_chars(nickserv_password)}")
             await asyncio.sleep(2)
-        # JOIN before PRIVMSG: ``+n`` channels silently drop PRIVMSG from non-members.
-        # Do not JOIN bare nicks (DM target) or server queries.
-        if _is_irc_channel(target):
-            await _raw(f"JOIN {target}")
-            # No JOIN ack within 5s (or EOF): proceed anyway, the server may still deliver.
-            joined = await _pump(loop.time() + 5.0, _on_join)
-            if isinstance(joined, dict):
-                return joined
+        # JOIN before PRIVMSG; never JOIN bare nicks (DM target) or server queries.
+        if _is_irc_channel(target) and (error := await _sa_join(conn, target)):
+            return error
         # Bytes-aware per-line splitting (same algorithm as IRCAdapter._split_message),
         # with control-character stripping per line to block CRLF injection from content.
         paragraphs = [q for q in (_strip_irc_control_chars(p).rstrip() for p in plain.split("\n")) if q]
         lines = _split_lines(paragraphs, _privmsg_budget(target))
         for line in lines:
-            await _raw(f"PRIVMSG {target} :{line}")
+            await conn.raw(f"PRIVMSG {target} :{line}")
             await asyncio.sleep(0.3)
         if not lines:
             return _sa_error("empty message after stripping")
-        await _raw("QUIT :delivered")
+        await conn.raw("QUIT :delivered")
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(reader.read(1024), timeout=2.0)
         return {"success": True, "message_id": _ms_id()}
@@ -595,9 +617,7 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         logger.debug("IRC standalone send raised", exc_info=True)
         return {"error": f"IRC standalone send failed: {e}"}
     finally:
-        with contextlib.suppress(Exception):
-            writer.close()
-            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+        await conn.close()
 
 
 def register(ctx):
