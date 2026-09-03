@@ -8,7 +8,14 @@ at import time (cycle).
 
 import re
 from typing import Any, Optional
-from tools.browser_tool_origin import origin_module as _origin
+from tools.browser_tool_origin import origin as _bt
+
+
+_SCREENSHOT_PATH_PATTERNS = (
+    r"Screenshot saved to ['\"](?P<path>/[^'\"]+?\.png)['\"]",
+    r"Screenshot saved to (?P<path>/\S+?\.png)(?:\s|$)",
+    r"(?P<path>/\S+?\.png)(?:\s|$)",
+)
 
 
 def _extract_screenshot_path_from_text(text: str) -> Optional[str]:
@@ -16,19 +23,12 @@ def _extract_screenshot_path_from_text(text: str) -> Optional[str]:
     if not text:
         return None
 
-    patterns = [
-        r"Screenshot saved to ['\"](?P<path>/[^'\"]+?\.png)['\"]",
-        r"Screenshot saved to (?P<path>/\S+?\.png)(?:\s|$)",
-        r"(?P<path>/\S+?\.png)(?:\s|$)",
-    ]
-
-    for pattern in patterns:
+    for pattern in _SCREENSHOT_PATH_PATTERNS:
         match = re.search(pattern, text)
         if match:
             path = match.group("path").strip().strip("'\"")
             if path:
                 return path
-
     return None
 
 
@@ -40,7 +40,6 @@ def _store_full_snapshot(snapshot_text: str) -> Optional[str]:
     backend. The stored copy is force-redacted (page-rendered secrets must not
     hit disk unmasked) and named by content hash so identical snapshots dedupe.
     """
-    _bt = _origin()
     try:
         import hashlib
         from hermes_constants import get_hermes_dir
@@ -59,11 +58,9 @@ def _store_full_snapshot(snapshot_text: str) -> Optional[str]:
         ensure_spill_dir(cache_dir, private=False)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
         path = cache_dir / f"browser-snapshot-{digest}.txt"
-        # Deterministic filename in a well-known dir: refuse symlinks via
-        # lstat-unlink + exclusive create. Re-snapshotting the same page
-        # state legitimately overwrites (same content-hash name). Not
-        # private: cache/web is bind-mounted into remote backends whose
-        # container UID must be able to read it.
+        # Deterministic filename in a well-known dir: refuse symlinks (lstat-unlink +
+        # exclusive create); same-content re-snapshots legitimately overwrite. Not
+        # private: cache/web is bind-mounted into remote backends' container UID.
         write_text_exclusive(path, content, private=False, overwrite=True)
         return str(path)
     except Exception as exc:  # noqa: BLE001
@@ -78,7 +75,6 @@ def _truncate_snapshot(snapshot_text: str, max_chars: Optional[int] = None) -> s
     cache/web and the appended note tells the agent how to page through it
     with read_file — element refs beyond the cut are in the file, not lost.
     """
-    _bt = _origin()
     if max_chars is None:
         max_chars = _bt.get_browser_snapshot_threshold()
     if len(snapshot_text) <= max_chars:
@@ -111,13 +107,9 @@ def _truncate_snapshot(snapshot_text: str, max_chars: Optional[int] = None) -> s
 
 
 def _redact_browser_output(value: Any) -> Any:
-    """Redact secrets from browser-originated data before returning to the model.
-
-    Browser snapshots, console messages, JS exceptions, and eval results can
-    contain page-rendered API keys, cookies, bearer tokens, or pasted secrets.
-    Tool output is a model boundary, so force redaction here even if global log
-    redaction is disabled for debugging.
-    """
+    """Force-redact secrets in browser-originated data (snapshots, console, eval
+    results can carry page-rendered keys/cookies/tokens). Tool output is a model
+    boundary, so this applies even when global log redaction is disabled."""
     from agent.redact import redact_sensitive_text
 
     if isinstance(value, str):
