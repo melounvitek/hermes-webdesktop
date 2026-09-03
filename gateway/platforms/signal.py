@@ -109,10 +109,8 @@ def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
             src_path = src.name
         dst_path = src_path[:-4] + ".m4a"
         try:
-            proc = subprocess.run(
-                [ffmpeg, "-y", "-loglevel", "error", "-i", src_path,
-                 "-c:a", "copy", "-movflags", "+faststart", dst_path],
-                capture_output=True, timeout=10)
+            proc = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", src_path, "-c:a", "copy", "-movflags",
+                                   "+faststart", dst_path], capture_output=True, timeout=10)
             if proc.returncode != 0:
                 logger.warning("Signal: AAC→M4A remux failed (ffmpeg exit %d): %s",
                                proc.returncode, proc.stderr.decode("utf-8", "replace")[:300])
@@ -289,10 +287,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Dispatch one SSE line; keepalive comments (":") count as activity so the health monitor stays quiet."""
         if line.startswith(":"):
             self._last_sse_activity = time.time()
-        elif line.startswith("data:"):
-            data_str = line[5:].strip()
-            if not data_str:
-                return
+        elif line.startswith("data:") and (data_str := line[5:].strip()):
             self._last_sse_activity = time.time()
             try:
                 await self._handle_envelope(json.loads(data_str))
@@ -458,8 +453,7 @@ class SignalAdapter(BasePlatformAdapter):
             return
         chat_id = f"group:{group_id}" if is_group else sender
         text = data_message.get("message", "")
-        mentions = data_message.get("mentions", [])
-        if text and mentions:
+        if text and (mentions := data_message.get("mentions", [])):
             text = _render_mentions(text, mentions)
         if is_group:
             mentioned, text = self._apply_group_mention_rules(text, data_message)
@@ -474,19 +468,19 @@ class SignalAdapter(BasePlatformAdapter):
         media_urls, media_types = [], []
         if attachments_data and not getattr(self, "ignore_attachments", False):
             media_urls, media_types = await self._collect_attachments(attachments_data)
-        # Skip contentless envelopes (profile key updates, empty messages) that still
-        # carry a dataMessage wrapper — otherwise msg='' triggers a full agent turn.
+        # Skip contentless envelopes (profile key updates, empty messages) that still carry a
+        # dataMessage wrapper — otherwise msg='' triggers a full agent turn.
         if (not text or not text.strip()) and not media_urls:
-            logger.debug("Signal: skipping contentless envelope from %s (%d attachments)",
-                         redact_phone(sender), len(media_urls) if media_urls else 0)
+            logger.debug("Signal: skipping contentless envelope from %s (%d attachments)", redact_phone(sender),
+                         len(media_urls) if media_urls else 0)
             return
         source = self.build_source(
             chat_id=chat_id, chat_name=group_info.get("groupName") if group_info else sender_name,
             chat_type="group" if is_group else "dm", user_id=sender,
             user_name=sender_name or sender, user_id_alt=sender_uuid if sender_uuid else None,
             chat_id_alt=group_id if is_group else None)
-        # First matching MIME prefix wins; everything else (application/*, text/*, unknown)
-        # is a DOCUMENT so run.py's document-context injection surfaces the cached path.
+        # First matching MIME prefix wins; everything else (application/*, text/*, unknown) is a DOCUMENT
+        # so run.py's document-context injection surfaces the cached path.
         msg_type = MessageType.TEXT if not media_types else next(
             (mt for prefix, mt in _MEDIA_TYPE_BY_MIME_PREFIX if any(m.startswith(prefix) for m in media_types)),
             MessageType.DOCUMENT)
@@ -901,8 +895,8 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str) -> SendResult:
         """Send one local file as a Signal attachment via the ``send`` RPC."""
-        params = {"account": self.account, "message": caption or "", "attachments": [file_path]}
-        await self._with_target(params, chat_id)
+        params = await self._with_target(
+            {"account": self.account, "message": caption or "", "attachments": [file_path]}, chat_id)
         _, err = await self._rpc_send(params, fail_error)
         return err or SendResult(success=True)
 
@@ -971,9 +965,8 @@ class SignalAdapter(BasePlatformAdapter):
     def _extract_reaction_target(self, event: MessageEvent) -> Optional[tuple]:
         """Extract (target_author, target_timestamp) from a MessageEvent, or None."""
         raw = event.raw_message
-        if isinstance(raw, dict) and raw.get("sender") and raw.get("timestamp_ms"):
-            return (raw["sender"], raw["timestamp_ms"])
-        return None
+        ok = isinstance(raw, dict) and raw.get("sender") and raw.get("timestamp_ms")
+        return (raw["sender"], raw["timestamp_ms"]) if ok else None
 
     def _reactions_enabled(self, event: "MessageEvent" = None) -> bool:
         """SIGNAL_REACTIONS env gate, then the DM allowlist: reactions fire before run.py's auth gate,
