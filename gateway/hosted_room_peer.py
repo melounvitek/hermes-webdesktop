@@ -19,7 +19,7 @@ import stat
 import time
 import urllib.parse
 from dataclasses import asdict, dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
 
@@ -146,13 +146,10 @@ def _digest(value: Any, *, field: str) -> str:
     return value
 
 
-def _exact_fields(
-    value: Mapping[str, Any], *, required: set[str], optional: set[str] = frozenset(), label: str
-) -> None:
-    exact_fields(
-        value, label=label, required=required, optional=optional, error=HostedRoomPeerError,
-        missing_fmt="{label} missing fields: {fields}", unknown_fmt="{label} unknown fields: {fields}",
-    )
+_exact_fields = partial(
+    exact_fields, error=HostedRoomPeerError, missing_fmt="{label} missing fields: {fields}",
+    unknown_fmt="{label} unknown fields: {fields}",
+)
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:

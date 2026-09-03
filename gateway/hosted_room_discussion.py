@@ -432,13 +432,13 @@ def _validate_member_message(
         raise DiscussionValidationError("message.member text must be a non-pass string")
     member = _member_by_id(room, payload.get("member_id"))
     peer = _peer_target(member)
-    expected_connection = peer.get("peer_id") if peer else None
-    if (
-        actor.get("kind") != "member"
-        or actor.get("id") != member.member_id
-        or actor.get("profile") != member.profile
-        or actor.get("connection_id") != expected_connection
-    ):
+    expected = {
+        "kind": "member",
+        "id": member.member_id,
+        "profile": member.profile,
+        "connection_id": peer.get("peer_id") if peer else None,
+    }
+    if any(actor.get(key) != value for key, value in expected.items()):
         raise DiscussionValidationError("message.member actor does not match roster")
     return payload
 
@@ -510,15 +510,14 @@ def _validate_event(raw: Any, *, room: DiscussionRoom, previous_seq: int) -> _Va
     if seq <= previous_seq:
         raise DiscussionValidationError("room events must be in strict sequence order")
     event_id = _identifier(raw.get("event_id"), label="event_id")
-    kind = raw.get("kind")
-    if not isinstance(kind, str):
-        raise DiscussionValidationError("event kind must be a string")
-    actor = raw.get("actor")
-    if not isinstance(actor, Mapping):
-        raise DiscussionValidationError("event actor must be an object")
-    payload = raw.get("payload")
-    if not isinstance(payload, Mapping):
-        raise DiscussionValidationError("event payload must be an object")
+    kind, actor, payload = raw.get("kind"), raw.get("actor"), raw.get("payload")
+    for value, expected, message in (
+        (kind, str, "event kind must be a string"),
+        (actor, Mapping, "event actor must be an object"),
+        (payload, Mapping, "event payload must be an object"),
+    ):
+        if not isinstance(value, expected):
+            raise DiscussionValidationError(message)
     if kind in _EPOCH_STAMPED_KINDS and raw.get("authority_epoch") != room.authority_epoch:
         raise DiscussionValidationError(f"{kind} authority epoch does not match the room")
     validator = _EVENT_VALIDATORS.get(kind)
@@ -576,11 +575,9 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
         watermark = int(event.payload["seen_through_seq"])
         if event.kind == "turn.settled" and not event.payload["passed"]:
             message = messages_by_id.get(str(event.payload["message_event_id"]))
-            if (
-                message is None
-                or message.payload.get("task_id") != task_id
-                or message.payload.get("member_id") != event.payload.get("member_id")
-                or message.payload.get("thread_id") != event.payload.get("thread_id")
+            if message is None or any(
+                message.payload.get(field) != event.payload.get(field)
+                for field in ("task_id", "member_id", "thread_id")
             ):
                 raise DiscussionValidationError("turn.settled references no matching member message")
             watermark = max(watermark, message.seq)
@@ -1021,12 +1018,9 @@ def plan_publication(
         raise DiscussionValidationError("task member is not in the frozen roster")
     if status not in _TERMINAL_EFFECTS:
         raise DiscussionValidationError("invalid terminal publication status")
-    if status == "deferred" and (
-        isinstance(execution_generation, bool)
-        or not isinstance(execution_generation, int)
-        or execution_generation < 1
-    ):
-        raise DiscussionValidationError("deferred publication requires an execution generation")
+    if status == "deferred":
+        message = "deferred publication requires an execution generation"
+        common.positive_int(execution_generation, error=DiscussionValidationError, message=message)
 
     newer_same_thread = any(
         event.kind == "message.user"

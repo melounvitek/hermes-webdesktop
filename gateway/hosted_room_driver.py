@@ -69,27 +69,13 @@ def _task_update(set_clause: str, fence: str) -> str:
     return f"UPDATE hosted_room_driver_tasks SET {set_clause} WHERE room_id=? AND task_id=? AND {fence}"
 
 
-def _settle_sql(status: str) -> str:
-    """Terminal settlement of a task fenced on status + both generations."""
-    return _task_update(_SETTLE_SET, f"status='{status}' AND {_GENERATION_FENCE}")
+def _generation_update(set_clause: str, status: str) -> str:
+    """Transition fenced on ``status`` + both generations (terminal settlements and the recovery family)."""
+    return _task_update(set_clause, f"status='{status}' AND {_GENERATION_FENCE}")
 
 
-_SETTLE_RUNNING_SQL = _settle_sql("running") + f" AND {_RUN_FENCE}"
-_SETTLE_STOPPING_SQL = _settle_sql("stopping")
-_SETTLE_INDETERMINATE_SQL = _settle_sql("indeterminate")
-_CANCEL_INDETERMINATE_SQL = _task_update(_CANCEL_SET, f"status='indeterminate' AND {_GENERATION_FENCE}")
-_REQUEUE_INDETERMINATE_SQL = _task_update(
-    f"{_REQUEUE_SET}, started_at=NULL, indeterminate_at=NULL, updated_at=?",
-    f"status='indeterminate' AND {_GENERATION_FENCE}",
-)
-_DEFER_SQL = _task_update(
-    "status='deferred', result_json=?, terminal_at=?, updated_at=?",
-    f"status='indeterminate' AND {_GENERATION_FENCE}",
-)
-_REQUEUE_DEFERRED_SQL = _task_update(
-    f"{_REQUEUE_SET}, result_json=NULL, started_at=NULL, terminal_at=NULL, indeterminate_at=NULL, updated_at=?",
-    f"status='deferred' AND {_GENERATION_FENCE}",
-)
+_SETTLE_RUNNING_SQL = _generation_update(_SETTLE_SET, "running") + f" AND {_RUN_FENCE}"
+_SETTLE_STOPPING_SQL = _generation_update(_SETTLE_SET, "stopping")
 _REQUEUE_RUNNING_SQL = _task_update(
     f"{_REQUEUE_SET}, started_at=NULL, updated_at=?",
     f"status='running' AND {_GENERATION_FENCE} AND {_RUN_FENCE}",
@@ -103,6 +89,32 @@ _COMPLETE_STOP_SQL = _task_update(
     "status='cancelled', terminal_at=?, updated_at=?",
     "status='stopping' AND cancel_id=? AND cancel_generation=?",
 )
+
+# Lease-first recovery transitions: name -> (fenced status, SET clause, generation-guard stale message,
+# row stale message); the UPDATE is _generation_update(set_clause, status).
+_INDETERMINATE_STALE = "indeterminate task generation changed"
+_GENERATION_TRANSITIONS = {
+    "resolve": (
+        "indeterminate", _SETTLE_SET, _INDETERMINATE_STALE, "indeterminate task changed during reconciliation",
+    ),
+    "resolve_cancel": (
+        "indeterminate", _CANCEL_SET, "indeterminate cancellation proof is stale",
+        "indeterminate cancellation proof lost its fence",
+    ),
+    "requeue": (
+        "indeterminate", f"{_REQUEUE_SET}, started_at=NULL, indeterminate_at=NULL, updated_at=?",
+        _INDETERMINATE_STALE, "indeterminate task changed during requeue",
+    ),
+    "defer": (
+        "indeterminate", "status='deferred', result_json=?, terminal_at=?, updated_at=?",
+        _INDETERMINATE_STALE, "indeterminate task changed during deferral",
+    ),
+    "requeue_deferred": (
+        "deferred",
+        f"{_REQUEUE_SET}, result_json=NULL, started_at=NULL, terminal_at=NULL, indeterminate_at=NULL, updated_at=?",
+        "deferred task generation changed", "deferred task changed during requeue",
+    ),
+}
 
 
 class DriverStateError(ValueError):
@@ -141,26 +153,24 @@ def _identifier(value: Any, *, label: str) -> str:
     return identifier(value, label=label, error=DriverValidationError, max_chars=MAX_IDENTIFIER_CHARS)
 
 
-def _timestamp(clock: Clock) -> float:
-    if not callable(clock):
-        raise DriverValidationError("clock must be callable")
+def _finite(compute: Callable[[], Any], message: str, *, positive: bool = False) -> float:
     try:
-        value = float(clock())
+        value = float(compute())
     except (TypeError, ValueError, OverflowError) as exc:
-        raise DriverValidationError("clock must return a finite number") from exc
-    if not math.isfinite(value):
-        raise DriverValidationError("clock must return a finite number")
+        raise DriverValidationError(message) from exc
+    if not math.isfinite(value) or (positive and value <= 0):
+        raise DriverValidationError(message)
     return value
 
 
+def _timestamp(clock: Clock) -> float:
+    if not callable(clock):
+        raise DriverValidationError("clock must be callable")
+    return _finite(clock, "clock must return a finite number")
+
+
 def _ttl(value: Any) -> float:
-    try:
-        ttl = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise DriverValidationError("ttl_seconds must be a finite positive number") from exc
-    if not math.isfinite(ttl) or ttl <= 0:
-        raise DriverValidationError("ttl_seconds must be a finite positive number")
-    return ttl
+    return _finite(lambda: value, "ttl_seconds must be a finite positive number", positive=True)
 
 
 def _expiry(now: float, ttl: float) -> float:
@@ -515,14 +525,6 @@ def _generations_match(row: sqlite3.Row, status: str, execution_generation: int,
     )
 
 
-def _generation_guard(status: str, execution_generation: int, cancel_generation: int, stale: str):
-    def guard(row: sqlite3.Row) -> None:
-        if not _generations_match(row, status, execution_generation, cancel_generation):
-            raise StaleTaskError(stale)
-
-    return guard
-
-
 def _require_cancel_generation(row: sqlite3.Row, expected_cancel_generation: int) -> None:
     if int(row["cancel_generation"]) != expected_cancel_generation:
         raise StaleTaskError("task cancellation generation changed")
@@ -560,15 +562,51 @@ def _transition(
 
 
 def _generation_transition(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, status: str,
-    execution_generation: int, cancel_generation: int, generation_stale: str, sql: str, set_params: tuple[Any, ...],
-    stale: str, now: float, replay: Callable[[sqlite3.Row], Any] | None = None,
+    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, name: str, execution_generation: int,
+    cancel_generation: int, *, now: float, set_params: tuple[Any, ...],
+    replay: Callable[[sqlite3.Row], Any] | None = None,
 ) -> dict[str, Any]:
-    """Lease-first transition fenced on ``status`` + both generations (the recovery family)."""
+    """Lease-first transition from ``_GENERATION_TRANSITIONS`` fenced on status + both generations."""
+    status, set_clause, generation_stale, stale = _GENERATION_TRANSITIONS[name]
+
+    def guard(row: sqlite3.Row) -> None:
+        if not _generations_match(row, status, execution_generation, cancel_generation):
+            raise StaleTaskError(generation_stale)
+
     return _transition(
-        db_path, identity, lease=lease, now=now, replay=replay,
-        guard=_generation_guard(status, execution_generation, cancel_generation, generation_stale),
-        sql=sql, set_params=set_params, fence_params=(execution_generation, cancel_generation), stale=stale,
+        db_path, identity, lease=lease, now=now, replay=replay, guard=guard,
+        sql=_generation_update(set_clause, status), set_params=set_params,
+        fence_params=(execution_generation, cancel_generation), stale=stale,
+    )
+
+
+def _run_fence_transition(
+    db_path: Path | str, attempt: TaskAttempt, *, guard_stale: str,
+    lease_generation: Callable[[Any], int] = int, **transition: Any,
+) -> dict[str, Any]:
+    """Transition fenced on this attempt's running generation under its exact lease (row guard + SQL fence).
+
+    ``lease_generation`` casts the stored run_lease_generation: ``int`` raises on NULL,
+    ``int(v or 0)`` reads it as generation 0.
+    """
+    lease = attempt.lease
+
+    def guard(row: sqlite3.Row) -> None:
+        if not (
+            _generations_match(row, "running", attempt.execution_generation, attempt.cancel_generation)
+            and row["run_gateway_id"] == lease.gateway_id
+            and row["run_process_generation"] == lease.process_generation
+            and lease_generation(row["run_lease_generation"]) == lease.lease_generation
+        ):
+            raise StaleTaskError(guard_stale)
+
+    return _transition(
+        db_path, attempt.identity, lease=lease, guard=guard,
+        fence_params=(
+            attempt.execution_generation, attempt.cancel_generation,
+            lease.gateway_id, lease.process_generation, lease.lease_generation,
+        ),
+        **transition,
     )
 
 
@@ -756,25 +794,10 @@ def settle_task(
     settlement_id = _terminal_settlement_id(settlement_id, status)
     result_json = _canonical_json(result)
     now = _timestamp(clock)
-    lease, identity = attempt.lease, attempt.identity
-
-    def guard(row: sqlite3.Row) -> None:
-        if not (
-            _generations_match(row, "running", attempt.execution_generation, attempt.cancel_generation)
-            and row["run_gateway_id"] == lease.gateway_id
-            and row["run_process_generation"] == lease.process_generation
-            and int(row["run_lease_generation"]) == lease.lease_generation
-        ):
-            raise StaleTaskError("task attempt is stale or cancelled")
-
-    return _transition(
-        db_path, identity, lease=lease, lease_first=False, now=now,
-        replay=_settlement_replay(settlement_id, status, result_json), guard=guard,
+    return _run_fence_transition(
+        db_path, attempt, guard_stale="task attempt is stale or cancelled", lease_first=False, now=now,
+        replay=_settlement_replay(settlement_id, status, result_json),
         sql=_SETTLE_RUNNING_SQL, set_params=(status, settlement_id, status, result_json, now, now),
-        fence_params=(
-            attempt.execution_generation, attempt.cancel_generation,
-            lease.gateway_id, lease.process_generation, lease.lease_generation,
-        ),
         stale="task changed during settlement",
     )
 
@@ -808,11 +831,9 @@ def resolve_indeterminate_task(
     result_json = _canonical_json(result)
     now = _timestamp(clock)
     return _generation_transition(
-        db_path, identity, lease, status="indeterminate", execution_generation=expected_execution_generation,
-        cancel_generation=expected_cancel_generation, generation_stale="indeterminate task generation changed",
-        replay=_settlement_replay(settlement_id, status, result_json), now=now,
-        sql=_SETTLE_INDETERMINATE_SQL, set_params=(status, settlement_id, status, result_json, now, now),
-        stale="indeterminate task changed during reconciliation",
+        db_path, identity, lease, "resolve", expected_execution_generation, expected_cancel_generation, now=now,
+        replay=_settlement_replay(settlement_id, status, result_json),
+        set_params=(status, settlement_id, status, result_json, now, now),
     )
 
 
@@ -825,11 +846,8 @@ def resolve_indeterminate_cancellation(
     cancel_id = _identifier(cancel_id, label="cancel_id")
     now = _timestamp(clock)
     return _generation_transition(
-        db_path, identity, lease, status="indeterminate", execution_generation=expected_execution_generation,
-        cancel_generation=expected_cancel_generation, generation_stale="indeterminate cancellation proof is stale",
-        replay=_cancel_replay(cancel_id), now=now,
-        sql=_CANCEL_INDETERMINATE_SQL, set_params=(expected_cancel_generation + 1, cancel_id, now, now),
-        stale="indeterminate cancellation proof lost its fence",
+        db_path, identity, lease, "resolve_cancel", expected_execution_generation, expected_cancel_generation,
+        now=now, replay=_cancel_replay(cancel_id), set_params=(expected_cancel_generation + 1, cancel_id, now, now),
     )
 
 
@@ -841,10 +859,8 @@ def requeue_indeterminate_task(
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
     now = _timestamp(clock)
     return _generation_transition(
-        db_path, identity, lease, status="indeterminate", execution_generation=expected_execution_generation,
-        cancel_generation=expected_cancel_generation, generation_stale="indeterminate task generation changed",
-        now=now, sql=_REQUEUE_INDETERMINATE_SQL, set_params=(now,),
-        stale="indeterminate task changed during requeue",
+        db_path, identity, lease, "requeue", expected_execution_generation, expected_cancel_generation, now=now,
+        set_params=(now,),
     )
 
 
@@ -863,10 +879,8 @@ def defer_indeterminate_task(
         return _task_from_row(row, idempotent=True) if deferred and row["result_json"] == result_json else None
 
     return _generation_transition(
-        db_path, identity, lease, status="indeterminate", execution_generation=expected_execution_generation,
-        cancel_generation=expected_cancel_generation, generation_stale="indeterminate task generation changed",
-        replay=replay, now=now, sql=_DEFER_SQL, set_params=(result_json, now, now),
-        stale="indeterminate task changed during deferral",
+        db_path, identity, lease, "defer", expected_execution_generation, expected_cancel_generation, now=now,
+        replay=replay, set_params=(result_json, now, now),
     )
 
 
@@ -878,18 +892,15 @@ def requeue_deferred_task(
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
     now = _timestamp(clock)
     return _generation_transition(
-        db_path, identity, lease, status="deferred", execution_generation=expected_execution_generation,
-        cancel_generation=expected_cancel_generation, generation_stale="deferred task generation changed",
-        now=now, sql=_REQUEUE_DEFERRED_SQL, set_params=(now,),
-        stale="deferred task changed during requeue",
+        db_path, identity, lease, "requeue_deferred", expected_execution_generation, expected_cancel_generation,
+        now=now, set_params=(now,),
     )
 
 
 def requeue_not_admitted_task(db_path: Path | str, attempt: TaskAttempt, *, clock: Clock) -> dict[str, Any]:
     """Return a running task to its durable queue after proven non-admission."""
     now = _timestamp(clock)
-    lease, identity = attempt.lease, attempt.identity
-    _check_same_room(lease, identity)
+    _check_same_room(attempt.lease, attempt.identity)
 
     def replay(row: sqlite3.Row) -> dict[str, Any] | None:
         requeued = (
@@ -900,23 +911,10 @@ def requeue_not_admitted_task(db_path: Path | str, attempt: TaskAttempt, *, cloc
         )
         return _task_from_row(row, idempotent=True) if requeued else None
 
-    def guard(row: sqlite3.Row) -> None:
-        if not (
-            _generations_match(row, "running", attempt.execution_generation, attempt.cancel_generation)
-            and row["run_gateway_id"] == lease.gateway_id
-            and row["run_process_generation"] == lease.process_generation
-            and int(row["run_lease_generation"] or 0) == lease.lease_generation
-        ):
-            raise StaleTaskError("not-admitted task attempt lost its fence")
-
-    return _transition(
-        db_path, identity, lease=lease, now=now, replay=replay, guard=guard, sql=_REQUEUE_RUNNING_SQL,
-        set_params=(now,),
-        fence_params=(
-            attempt.execution_generation, attempt.cancel_generation,
-            lease.gateway_id, lease.process_generation, lease.lease_generation,
-        ),
-        stale="not-admitted task changed during requeue",
+    return _run_fence_transition(
+        db_path, attempt, guard_stale="not-admitted task attempt lost its fence",
+        lease_generation=lambda value: int(value or 0), now=now, replay=replay,
+        sql=_REQUEUE_RUNNING_SQL, set_params=(now,), stale="not-admitted task changed during requeue",
     )
 
 
@@ -1004,13 +1002,17 @@ def recover_room(db_path: Path | str, lease: DriverLease, *, clock: Clock) -> di
         }
 
 
-def get_task(db_path: Path | str, identity: TaskIdentity) -> dict[str, Any]:
-    """Read one task without mutating its state."""
+def _read(db_path: Path | str, query: Callable[[sqlite3.Connection], Any]) -> Any:
     conn = _connect(db_path)
     try:
-        return _task_from_row(_load_task(conn, identity))
+        return query(conn)
     finally:
         conn.close()
+
+
+def get_task(db_path: Path | str, identity: TaskIdentity) -> dict[str, Any]:
+    """Read one task without mutating its state."""
+    return _read(db_path, lambda conn: _task_from_row(_load_task(conn, identity)))
 
 
 def list_tasks(db_path: Path | str, *, room_id: Any, status: TaskStatus | None = None) -> list[dict[str, Any]]:
@@ -1018,11 +1020,7 @@ def list_tasks(db_path: Path | str, *, room_id: Any, status: TaskStatus | None =
     room_id = _identifier(room_id, label="room_id")
     if status is not None and status not in TASK_STATUSES:
         raise DriverValidationError("invalid task status")
-    conn = _connect(db_path)
-    try:
-        return [_task_from_row(row) for row in _tasks_in_order(conn, room_id, status)]
-    finally:
-        conn.close()
+    return _read(db_path, lambda conn: [_task_from_row(row) for row in _tasks_in_order(conn, room_id, status)])
 
 
 def prune_published_terminal_tasks(

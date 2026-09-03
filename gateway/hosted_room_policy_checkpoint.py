@@ -92,6 +92,20 @@ def _require_room(conn: sqlite3.Connection, room_id: str) -> None:
         raise hosted_rooms.RoomNotFoundError("hosted room not found")
 
 
+def _settled_message(
+    conn: sqlite3.Connection, room_id: str, discussion_event_id: str, message_event_id: Any
+) -> dict[str, Any] | None:
+    """Return the indexed member message a ``turn.settled`` event committed, if it is in the projection."""
+    rows = conn.execute(
+        "SELECT seq, event_json FROM hosted_room_policy_events WHERE room_id=? AND discussion_event_id=?",
+        (room_id, discussion_event_id),
+    ).fetchall()
+    return next(
+        (m for m in (json.loads(row["event_json"]) for row in rows) if m.get("event_id") == message_event_id),
+        None,
+    )
+
+
 class HostedRoomPolicyCheckpoint:
     """Incrementally index room policy without compacting visible history."""
 
@@ -256,22 +270,10 @@ class HostedRoomPolicyCheckpoint:
         member_id = str(payload.get("member_id") or "")
         seen_through_seq = int(payload.get("seen_through_seq") or 0)
         if kind == "turn.settled" and payload.get("message_event_id"):
-            messages = conn.execute(
-                "SELECT seq, event_json FROM hosted_room_policy_events WHERE room_id=? AND discussion_event_id=?",
-                (room_id, discussion_event_id),
-            ).fetchall()
-            committed = next(
-                (
-                    message for message in (json.loads(row["event_json"]) for row in messages)
-                    if message.get("event_id") == payload["message_event_id"]
-                ),
-                None,
-            )
+            committed = _settled_message(conn, room_id, discussion_event_id, payload["message_event_id"])
             if committed is not None:
                 seen_through_seq = max(seen_through_seq, int(committed["seq"]))
-                self._store_transcript_event(
-                    conn, event=committed, thread_id=thread_id, settled_seq=int(event["seq"])
-                )
+                self._store_transcript_event(conn, event=committed, thread_id=thread_id, settled_seq=seq)
         if member_id and seen_through_seq > 0:
             conn.execute(
                 """INSERT INTO hosted_room_policy_watermarks(
