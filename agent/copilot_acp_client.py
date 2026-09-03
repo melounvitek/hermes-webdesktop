@@ -89,19 +89,16 @@ def _resolve_args() -> list[str]:
 
 
 def _acp_supported(command: str, args: list[str]) -> bool | None:
-    """Tri-state probe: does ``command`` accept ``--acp``?
-
-    A CLI without the flag (older releases, Claude Code v2.x) exits 1 with
-    ``error: unknown option '--acp'`` and the parent then waits the full child
-    timeout for stdout that never arrives. True = help advertises --acp; False =
-    help ran cleanly without it (caller fast-fails); None = inconclusive (binary
-    missing / --help failed), caller falls through to the normal spawn error.
-    Only probes when ``--acp`` is among ``args`` — a custom transport is the operator's business.
-    """
+    """Tri-state probe: does ``command`` accept ``--acp``? A CLI without the flag
+    (older releases, Claude Code v2.x) exits 1 with ``unknown option '--acp'`` and the
+    parent would wait the full child timeout for stdout that never arrives.
+    True = help advertises --acp; False = help ran cleanly without it (caller
+    fast-fails); None = inconclusive (binary missing / --help failed → normal spawn
+    error). Only probes when ``--acp`` is among ``args`` — a custom transport is the
+    operator's business."""
     if "--acp" not in args:
         return True
-    cached = _ACP_PROBE_CACHE.get(command)
-    if cached is not None:
+    if (cached := _ACP_PROBE_CACHE.get(command)) is not None:
         return cached
     try:
         probe = subprocess.run(
@@ -120,8 +117,7 @@ def _acp_supported(command: str, args: list[str]) -> bool | None:
 
 def _resolve_home_dir() -> str:
     """Stable HOME for child ACP processes; /tmp as a last resort so the child never starts HOME-less."""
-    home = os.environ.get("HOME", "").strip()
-    if home:
+    if home := os.environ.get("HOME", "").strip():
         return home
     expanded = os.path.expanduser("~")
     if expanded and expanded != "~":
@@ -129,12 +125,9 @@ def _resolve_home_dir() -> str:
     try:
         import pwd
 
-        resolved = pwd.getpwuid(os.getuid()).pw_dir.strip()  # windows-footgun: ok — POSIX fallback inside try/except (pwd import fails on Windows)
-        if resolved:
-            return resolved
+        return pwd.getpwuid(os.getuid()).pw_dir.strip() or "/tmp"  # windows-footgun: ok — POSIX fallback inside try/except (pwd import fails on Windows)
     except Exception:
-        pass
-    return "/tmp"
+        return "/tmp"
 
 
 def _build_subprocess_env() -> dict[str, str]:
@@ -169,13 +162,10 @@ def _enabled_ids(entries: Any, key: str) -> set[str]:
 
 
 def _model_selection_request(session: dict[str, Any], requested_model: str) -> tuple[str, dict[str, str]] | None:
-    """Return the ACP request that selects ``requested_model`` for ``session``.
-
-    Prefer stable v1 ``session/set_config_option``; fall back to Copilot's
-    pre-stabilization ``session/set_model`` extension only when no model config
-    option is advertised. A reported model list is authoritative: unknown and
-    policy-disabled ids return None instead of being sent.
-    """
+    """ACP request selecting ``requested_model`` for ``session``: stable v1
+    ``session/set_config_option``, else Copilot's pre-stabilization ``session/set_model``
+    when no model config option is advertised. A reported model list is authoritative:
+    unknown and policy-disabled ids return None instead of being sent."""
     session_id = str(session.get("sessionId") or "").strip()
     requested_model = str(requested_model or "").strip()
     if not session_id or not requested_model or requested_model == "copilot-acp":
@@ -265,8 +255,7 @@ def _effective_timeout(timeout: Any) -> float:
 
 def _fs_read_text_file(params: dict[str, Any], cwd: str) -> Any:
     path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
-    block_error = get_read_block_error(str(path))
-    if block_error:
+    if block_error := get_read_block_error(str(path)):
         raise PermissionError(block_error)
     try:
         content = path.read_text(encoding="utf-8")
@@ -274,18 +263,14 @@ def _fs_read_text_file(params: dict[str, Any], cwd: str) -> Any:
         content = ""
     line, limit = params.get("line"), params.get("limit")
     if isinstance(line, int) and line > 1:
-        lines = content.splitlines(keepends=True)
         end = line - 1 + limit if isinstance(limit, int) and limit > 0 else None
-        content = "".join(lines[line - 1:end])
-    if content:
-        content = redact_sensitive_text(content, force=True)
-    return {"content": content}
+        content = "".join(content.splitlines(keepends=True)[line - 1:end])
+    return {"content": redact_sensitive_text(content, force=True) if content else content}
 
 
 def _fs_write_text_file(params: dict[str, Any], cwd: str) -> Any:
     path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
-    denied = get_write_denied_error(str(path))
-    if denied:
+    if denied := get_write_denied_error(str(path)):
         raise PermissionError(denied)
     # Approval-gated paths (e.g. ~/.ssh/config) are only soft-gated for interactive
     # tools, but the ACP shim has no human channel to confirm — fail closed.
@@ -329,8 +314,7 @@ class CopilotACPClient:
 
     def close(self) -> None:
         with self._active_process_lock:
-            proc = self._active_process
-            self._active_process = None
+            proc, self._active_process = self._active_process, None
         self.is_closed = True
         if proc is None:
             return
@@ -348,17 +332,15 @@ class CopilotACPClient:
         tools: list[dict[str, Any]] | None = None, tool_choice: Any = None, stream: bool = False, **_: Any,
     ) -> Any:
         prompt_text = _format_messages_as_prompt(messages or [], model=model, tools=tools, tool_choice=tool_choice)
-        response_text, reasoning_text = self._run_prompt(prompt_text, timeout_seconds=_effective_timeout(timeout), model=model)
+        response_text, reasoning = self._run_prompt(prompt_text, timeout_seconds=_effective_timeout(timeout), model=model)
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
-        assistant_message = SimpleNamespace(
-            content=cleaned_text, tool_calls=tool_calls, reasoning=reasoning_text or None,
-            reasoning_content=reasoning_text or None, reasoning_details=None,
+        message = SimpleNamespace(
+            content=cleaned_text, tool_calls=tool_calls, reasoning=reasoning or None,
+            reasoning_content=reasoning or None, reasoning_details=None,
         )
         completion = SimpleNamespace(
-            choices=[SimpleNamespace(message=assistant_message, finish_reason="tool_calls" if tool_calls else "stop")],
-            usage=SimpleNamespace(
-                prompt_tokens=0, completion_tokens=0, total_tokens=0, prompt_tokens_details=SimpleNamespace(cached_tokens=0)
-            ),
+            choices=[SimpleNamespace(message=message, finish_reason="tool_calls" if tool_calls else "stop")],
+            usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0, prompt_tokens_details=SimpleNamespace(cached_tokens=0)),
             model=model or "copilot-acp",
         )
         return _completion_to_stream_chunks(completion) if stream else completion
@@ -424,12 +406,10 @@ class CopilotACPClient:
 
         threading.Thread(target=_stdout_reader, daemon=True).start()
         threading.Thread(target=_stderr_reader, daemon=True).start()
-        next_id = 0
+        request_ids = iter(range(1, 1 << 62))
 
         def _request(method: str, params: dict[str, Any], *, text_parts: list[str] | None = None, reasoning_parts: list[str] | None = None) -> Any:
-            nonlocal next_id
-            next_id += 1
-            request_id = next_id
+            request_id = next(request_ids)
             proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
             proc.stdin.flush()
             deadline = time.monotonic() + timeout_seconds
@@ -494,13 +474,13 @@ class CopilotACPClient:
             return False
         if method == "session/update":
             update = (msg.get("params") or {}).get("update") or {}
-            kind = str(update.get("sessionUpdate") or "").strip()
             content = update.get("content") or {}
             chunk_text = str(content.get("text") or "") if isinstance(content, dict) else ""
-            if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
-                text_parts.append(chunk_text)
-            elif kind == "agent_thought_chunk" and chunk_text and reasoning_parts is not None:
-                reasoning_parts.append(chunk_text)
+            sink = {"agent_message_chunk": text_parts, "agent_thought_chunk": reasoning_parts}.get(
+                str(update.get("sessionUpdate") or "").strip()
+            )
+            if chunk_text and sink is not None:
+                sink.append(chunk_text)
             return True
         if process.stdin is None:
             return True

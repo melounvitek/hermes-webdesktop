@@ -272,10 +272,9 @@ def _translate_tool_result_to_gemini(
     if include_ids and tool_call_id:
         function_response["id"] = tool_call_id
     # Gemini 3.x accepts images inside functionResponse.parts; 2.x rejects the field.
-    if is_gemini3:
-        image_parts = [p for p in _extract_multimodal_parts(raw_content) if "inlineData" in p]
-        if image_parts:
-            function_response["parts"] = image_parts
+    image_parts = [p for p in _extract_multimodal_parts(raw_content) if "inlineData" in p] if is_gemini3 else []
+    if image_parts:
+        function_response["parts"] = image_parts
     return {"functionResponse": function_response}
 
 
@@ -308,10 +307,9 @@ def _build_gemini_contents(
         for tool_call in tool_calls if isinstance(tool_calls, list) else []:
             if not isinstance(tool_call, dict):
                 continue
-            tool_call_id = _tool_call_id(tool_call)
             tool_name = str((tool_call.get("function") or {}).get("name") or "")
-            if tool_call_id and tool_name:
-                tool_name_by_call_id[tool_call_id] = tool_name
+            if _tool_call_id(tool_call) and tool_name:
+                tool_name_by_call_id[_tool_call_id(tool_call)] = tool_name
             parts.append(_translate_tool_call_to_gemini(tool_call, include_ids=include_tool_call_ids))
         if parts:
             contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
@@ -485,12 +483,10 @@ def _envelope(model: str, object_: str, choice: SimpleNamespace, usage: Any, cls
     )
 
 
-def _tool_call_ns(fc: Dict[str, Any], part: Dict[str, Any], index: int) -> SimpleNamespace:
-    tool_call = SimpleNamespace(
-        id=_new_call_id(fc), type="function", index=index,
-        function=SimpleNamespace(name=str(fc["name"]), arguments=_dump_call_args(fc)),
-    )
-    if extra_content := _tool_call_extra_from_part(part):
+def _tool_call_ns(name: str, arguments: str, index: int, call_id: str, extra_content: Any) -> SimpleNamespace:
+    """OpenAI-shaped tool call; ``extra_content`` attached only when it is a dict."""
+    tool_call = SimpleNamespace(id=call_id, type="function", index=index, function=SimpleNamespace(name=name, arguments=arguments))
+    if isinstance(extra_content, dict):
         tool_call.extra_content = extra_content
     return tool_call
 
@@ -513,7 +509,7 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
         elif isinstance(part.get("text"), str):
             text_pieces.append(part["text"])
         elif isinstance(fc := part.get("functionCall"), dict) and fc.get("name"):
-            tool_calls.append(_tool_call_ns(fc, part, index))
+            tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
 
     if cand is None:
         finish_reason, usage = "stop", _usage_from_metadata({})
@@ -538,13 +534,8 @@ def _make_stream_chunk(
 ) -> _GeminiStreamChunk:
     tool_calls = None
     if tool_call_delta is not None:
-        tool_delta = SimpleNamespace(
-            index=tool_call_delta.get("index", 0), id=_new_call_id(tool_call_delta), type="function",
-            function=SimpleNamespace(name=tool_call_delta.get("name") or "", arguments=tool_call_delta.get("arguments") or ""),
-        )
-        if isinstance(tool_call_delta.get("extra_content"), dict):
-            tool_delta.extra_content = tool_call_delta["extra_content"]
-        tool_calls = [tool_delta]
+        d = tool_call_delta
+        tool_calls = [_tool_call_ns(d.get("name") or "", d.get("arguments") or "", d.get("index", 0), _new_call_id(d), d.get("extra_content"))]
     delta = SimpleNamespace(
         role="assistant", content=content or None, tool_calls=tool_calls,
         reasoning=reasoning or None, reasoning_content=reasoning or None,
@@ -556,9 +547,7 @@ def _make_stream_chunk(
 def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
     buffer = ""
     for chunk in response.iter_text():
-        if not chunk:
-            continue
-        buffer += chunk
+        buffer += chunk or ""
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             line = line.rstrip("\r")
@@ -604,11 +593,11 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
                 slot = tool_call_indices[call_key] = {"index": len(tool_call_indices), "id": _new_call_id(fc), "last_arguments": ""}
             # Gemini re-sends the full args each event; emit only the new suffix.
             last_arguments = str(slot.get("last_arguments") or "")
-            emitted = args_str[len(last_arguments):] if args_str.startswith(last_arguments) else args_str
             slot["last_arguments"] = args_str
             chunks.append(_make_stream_chunk(model=model, tool_call_delta={
                 "index": slot["index"], "id": slot["id"], "name": name,
-                "arguments": emitted, "extra_content": _tool_call_extra_from_part(part),
+                "arguments": args_str[len(last_arguments):] if args_str.startswith(last_arguments) else args_str,
+                "extra_content": _tool_call_extra_from_part(part),
             }))
 
     finish_reason_raw = str(cand.get("finishReason") or "")
@@ -628,12 +617,11 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     status = response.status_code
     body_text = (_response_text(response) if body_text is None else body_text) or ""
     err_obj: Any = None
-    if body_text:
-        try:
-            parsed = json.loads(body_text)
-            err_obj = parsed.get("error") if isinstance(parsed, dict) else None
-        except (ValueError, TypeError):
-            pass
+    try:
+        parsed = json.loads(body_text) if body_text else None
+        err_obj = parsed.get("error") if isinstance(parsed, dict) else None
+    except (ValueError, TypeError):
+        pass
     if not isinstance(err_obj, dict):
         err_obj = {}
     err_status = str(err_obj.get("status") or "").strip()
@@ -645,10 +633,8 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     for detail in details_list if isinstance(details_list, list) else []:
         if isinstance(detail, dict) and not reason and str(detail.get("@type") or "").endswith("/google.rpc.ErrorInfo"):
             reason_value, md = detail.get("reason"), detail.get("metadata")
-            if isinstance(reason_value, str):
-                reason = reason_value
-            if isinstance(md, dict):
-                metadata = md
+            reason = reason_value if isinstance(reason_value, str) else reason
+            metadata = md if isinstance(md, dict) else metadata
 
     retry_after: Optional[float] = None
     try:
@@ -744,8 +730,9 @@ class GeminiNativeClient:
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
-        url = f"{self.base_url}/models/{model}:generateContent"
-        response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        response = self._http.post(
+            f"{self.base_url}/models/{model}:generateContent", json=request, headers=self._headers(), timeout=timeout
+        )
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:
@@ -759,9 +746,9 @@ class GeminiNativeClient:
 
     def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
         url = f"{self.base_url}/models/{model}:streamGenerateContent?alt=sse"
-        stream_headers = {**self._headers(), "Accept": "text/event-stream"}
+        headers = {**self._headers(), "Accept": "text/event-stream"}
         try:
-            with self._http.stream("POST", url, json=request, headers=stream_headers, timeout=timeout) as response:
+            with self._http.stream("POST", url, json=request, headers=headers, timeout=timeout) as response:
                 if response.status_code != 200:
                     raise gemini_http_error(response, body_text=read_streaming_error_body(response))
                 tool_call_indices: Dict[str, Dict[str, Any]] = {}
@@ -776,8 +763,7 @@ class AsyncGeminiNativeClient:
 
     def __init__(self, sync_client: GeminiNativeClient):
         self._sync = sync_client
-        self.api_key = sync_client.api_key
-        self.base_url = sync_client.base_url
+        self.api_key, self.base_url = sync_client.api_key, sync_client.base_url
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
         # The auxiliary cache evicts entries by leaf client; GeminiNativeClient
         # is itself the leaf (no OpenAI client beneath it).
