@@ -7,6 +7,7 @@ so ``patch("gateway.run.X")`` keeps intercepting them at call time.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import logging
 import threading
@@ -43,7 +44,6 @@ class GatewayAgentCacheMixin:
         """Extract Honcho identity keys, memoized by honcho.json mtime; all-None when unavailable."""
         try:
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
-
             path = resolve_config_path()
             try:
                 mtime_ns = path.stat().st_mtime_ns
@@ -89,7 +89,6 @@ class GatewayAgentCacheMixin:
                 out[f"{section}.{key}"] = None
         try:
             from tools.registry import registry
-
             out["tools.registry_generation"] = getattr(registry, "_generation", None)
         except Exception:
             out["tools.registry_generation"] = None
@@ -119,7 +118,6 @@ class GatewayAgentCacheMixin:
         (``thread_sessions_per_user=False``) would attribute one user's messages to another's peer.
         """
         import hashlib, json as _j
-
         # Fingerprint the FULL credential, not a short prefix: OAuth/JWT-style tokens often share a
         # common prefix (e.g. "eyJhbGci"), so a prefix would give false cache hits across auth switches.
         _api_key = str(runtime.get("api_key", "") or "")
@@ -375,22 +373,17 @@ class GatewayAgentCacheMixin:
             _sec_state.persistent.approvals = None
             _sec_state.persistent.update_prompt_pending = False
 
-        with suppress(Exception):
-            from tools import slash_confirm as _slash_confirm_mod
+        for mod, attr, what in (
+            ("tools.slash_confirm", "clear", "slash-confirm"), ("tools.approval", "clear_session", "approval"),
+        ):
             try:
-                _slash_confirm_mod.clear(session_key)
+                clear = getattr(importlib.import_module(mod), attr)
+            except Exception:
+                continue
+            try:
+                clear(session_key)
             except Exception as e:
-                logger.debug("Failed to clear slash-confirm state for session boundary %s: %s", session_key, e)
-
-        try:
-            from tools.approval import clear_session as _clear_approval_session
-        except Exception:
-            return
-
-        try:
-            _clear_approval_session(session_key)
-        except Exception as e:
-            logger.debug("Failed to clear approval state for session boundary %s: %s", session_key, e)
+                logger.debug("Failed to clear %s state for session boundary %s: %s", what, session_key, e)
 
     def _begin_session_run_generation(self, session_key: str) -> int:
         """Claim a fresh, monotonically increasing run generation token for ``session_key``.
@@ -600,23 +593,22 @@ class GatewayAgentCacheMixin:
         rendered bytes MUST appear here — omission means a stale pinned prompt; extras only re-render.
         """
         import hashlib
-
         src = context.source
+
+        def _s(v) -> str:
+            return str(v or "")
+
         platform = src.platform.value if src.platform else ""
 
         discord_ids: tuple = ()
         discord_tools = ""
         if src.platform == Platform.DISCORD:
             from gateway.session import _discord_tools_loaded
-
             discord_tools = "1" if _discord_tools_loaded() else "0"
+            # message_id: only PRESENCE is rendered (the id itself arrives per-turn in the user
+            # message) — keying on the value would re-render every message for zero byte change.
             discord_ids = (
-                str(src.guild_id or ""),
-                str(src.parent_chat_id or ""),
-                str(src.thread_id or ""),
-                str(src.chat_id or ""),
-                # Only PRESENCE is rendered (the id itself arrives per-turn in the user message) —
-                # keying on the value would re-render every message for zero byte change.
+                _s(src.guild_id), _s(src.parent_chat_id), _s(src.thread_id), _s(src.chat_id),
                 "1" if src.message_id else "0",
             )
 
@@ -626,37 +618,24 @@ class GatewayAgentCacheMixin:
         slack_tools = ""
         if src.platform == Platform.SLACK:
             from gateway.session import _slack_tools_loaded
-
             slack_tools = "1" if _slack_tools_loaded() else "0"
 
         try:
             from hermes_constants import display_hermes_home
-
             home_display = str(display_hermes_home())
         except Exception:
             home_display = ""
 
         key_tuple = (
-            platform,
-            str(src.chat_id or ""),
-            str(src.thread_id or ""),
-            str(src.chat_type or ""),
-            str(src.chat_name or ""),
-            str(src.chat_topic or ""),
-            str(src.user_name or ""),
-            str(src.user_id or ""),
-            str(getattr(src, "profile", None) or ""),
-            bool(context.shared_multi_user_session),
-            discord_ids,
-            discord_tools,
-            slack_tools,
+            platform, _s(src.chat_id), _s(src.thread_id), _s(src.chat_type), _s(src.chat_name), _s(src.chat_topic),
+            _s(src.user_name), _s(src.user_id), _s(getattr(src, "profile", None)),
+            bool(context.shared_multi_user_session), discord_ids, discord_tools, slack_tools,
             tuple(p.value for p in context.connected_platforms),
             tuple(
-                (p.value, str(getattr(hc, "name", "") or ""), str(getattr(hc, "chat_id", "") or ""))
+                (p.value, _s(getattr(hc, "name", "")), _s(getattr(hc, "chat_id", "")))
                 for p, hc in context.home_channels.items()
             ),
-            bool(redact_pii),
-            home_display,
+            bool(redact_pii), home_display,
         )
         return hashlib.sha256(repr(key_tuple).encode("utf-8")).hexdigest()
 
@@ -695,15 +674,18 @@ class GatewayAgentCacheMixin:
         if id(agent) in self._running_agent_ids():
             return
 
+        self._spawn_release_thread(
+            self._release_evicted_agent_soft, (agent,), f"agent-evict-{str(session_key)[:24]}", inline_fallback=True,
+        )
+
+    def _spawn_release_thread(self, target, args: tuple, name: str, *, inline_fallback: bool) -> None:
+        """Run a release on a daemon thread; ``inline_fallback`` runs it inline when no thread can start (interpreter shutdown)."""
         try:
-            threading.Thread(
-                target=self._release_evicted_agent_soft, args=(agent,), daemon=True,
-                name=f"agent-evict-{str(session_key)[:24]}",
-            ).start()
+            threading.Thread(target=target, args=args, daemon=True, name=name).start()
         except Exception:
-            # Can't spawn a thread (interpreter shutdown) — release inline as a best-effort fallback.
-            with suppress(Exception):
-                self._release_evicted_agent_soft(agent)
+            if inline_fallback:
+                with suppress(Exception):
+                    target(*args)
 
     def _finalizable_unexpired_session_entry(self, key: str):
         """Return the session-store entry for ``key`` when the expiry watcher will still finalize it.
@@ -795,7 +777,6 @@ class GatewayAgentCacheMixin:
         bounds = getattr(self, "_agent_cache_bounds_cache", None)
         if bounds is None:
             from gateway.agent_cache_pressure import resolve_agent_cache_bounds
-
             try:
                 bounds = resolve_agent_cache_bounds(_load_gateway_config())
             except Exception as _e:
@@ -882,16 +863,10 @@ class GatewayAgentCacheMixin:
 
         evicted_count = len(plan)
         logger.warning(
-            "Agent cache pressure: anon RSS %dMB over budget %dMB — evicting "
-            "%d LRU session(s): %s",
+            "Agent cache pressure: anon RSS %dMB over budget %dMB — evicting %d LRU session(s): %s",
             rss_mb, bounds.memory_high_mb, evicted_count, ", ".join(key for key, _ in plan),
         )
-        try:
-            threading.Thread(
-                target=self._release_pressure_batch, args=(plan,), daemon=True, name="agent-cache-pressure",
-            ).start()
-        except Exception:
-            self._release_pressure_batch(plan)
+        self._spawn_release_thread(self._release_pressure_batch, (plan,), "agent-cache-pressure", inline_fallback=True)
         # _release_pressure_batch drains `plan` in place (so the trim runs with no lingering agent
         # refs) — len(plan) is 0 once the daemon thread finishes, hence the pre-captured count.
         return evicted_count
@@ -913,7 +888,6 @@ class GatewayAgentCacheMixin:
             del agent
         try:
             from hermes_cli.mem_trim import trim_memory
-
             trim_memory(force=True, reason="agent_cache_pressure")
         except Exception:
             pass
@@ -966,10 +940,9 @@ class GatewayAgentCacheMixin:
             if agent is not None:
                 # Commit end-of-session memory, then soft-release, both on the daemon thread so the
                 # (possibly network-bound) provider call never blocks the held cache lock.
-                threading.Thread(
-                    target=self._commit_then_release_soft, args=(agent, key), daemon=True,
-                    name=f"agent-cache-evict-{key[:24]}",
-                ).start()
+                self._spawn_release_thread(
+                    self._commit_then_release_soft, (agent, key), f"agent-cache-evict-{key[:24]}", inline_fallback=False,
+                )
 
     def _sweep_idle_cached_agents(self) -> int:
         """Evict cached agents idle past the idle TTL; returns the number evicted.
@@ -1010,8 +983,7 @@ class GatewayAgentCacheMixin:
                 "Agent cache idle-TTL evict: session=%s (idle=%.0fs)",
                 key, now - getattr(agent, "_last_activity_ts", now),
             )
-            threading.Thread(
-                target=self._release_evicted_agent_soft, args=(agent,), daemon=True,
-                name=f"agent-cache-idle-{key[:24]}",
-            ).start()
+            self._spawn_release_thread(
+                self._release_evicted_agent_soft, (agent,), f"agent-cache-idle-{key[:24]}", inline_fallback=False,
+            )
         return len(to_evict)

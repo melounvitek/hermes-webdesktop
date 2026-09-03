@@ -27,6 +27,8 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
+# Routing fields copied verbatim from a process watcher onto its synthetic completion event.
+_WATCHER_ROUTE_FIELDS = ("session_key", "platform", "chat_type", "chat_id", "thread_id", "user_id", "user_name")
 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
 # Durable async-delegation claim transitions: kind -> (tools.async_delegation function, failure log).
@@ -264,29 +266,23 @@ class GatewayNotificationsMixin:
     ) -> None:
         """Extract explicit MEDIA: tags from an already-streamed response and deliver them.
 
-        The text is already delivered; this only handles file attachments the normal
-        _process_message_background path would have caught. Unlike the non-streaming path in
-        ``gateway/platforms/base.py`` this rescan is EXPLICIT-ONLY: a bare local path in a
-        streamed reply was either shown as text or is stale inspected content, and promoting it
-        sent files the model never asked to deliver.
+        The text is already delivered; this only handles file attachments. Unlike the non-streaming
+        path in ``gateway/platforms/base.py`` this rescan is EXPLICIT-ONLY: a bare local path in a
+        streamed reply was either shown as text or is stale inspected content, and promoting it sent
+        files the model never asked to deliver. MEDIA tags are NOT deduped against prior turns: a
+        MEDIA: directive in the final reply is a deliberate attach (incl. user-requested resends);
+        stale auto-appended tags are deduped upstream (_collect_auto_append_media_tags).
         """
         from urllib.parse import quote as _quote
-
         try:
-            # Capture [[as_document]] before extract_media strips it: image-extension files then route
-            # through send_document (preserving bytes) instead of send_multiple_images (Telegram
-            # sendPhoto recompresses to ~1280px).
+            # Capture [[as_document]] before extract_media strips it: image files then go through
+            # send_document (preserving bytes), not send_multiple_images (Telegram recompresses).
             force_document_attachments = "[[as_document]]" in response
 
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
-
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-            # Do NOT deduplicate explicit MEDIA tags against prior turns here: a MEDIA: directive in
-            # the final streamed reply is the model deliberately attaching a file (including a
-            # user-requested resend). Stale auto-appended tags are deduped upstream
-            # (_collect_auto_append_media_tags). Strip image URLs for parity with the non-streaming
-            # chain, but do NOT run extract_local_files here.
+            # Strip image URLs for parity with the non-streaming chain; no extract_local_files here.
             adapter.extract_images(cleaned)
 
             _thread_meta = (
@@ -296,16 +292,13 @@ class GatewayNotificationsMixin:
             )
             chat_id = event.source.chat_id
 
-            # Partition out images so they can be sent as a single batch (e.g. Signal's multi-
-            # attachment RPC); with [[as_document]] set they fall through to send_document.
-            image_paths: list = []
-            non_image_media: list = []
-            for media_path, is_voice in media_files:
+            # Images go out as one batch (e.g. Signal's multi-attachment RPC) unless [[as_document]].
+            def _is_photo(media_path: str, is_voice: bool) -> bool:
                 ext = Path(media_path).suffix.lower()
-                if ext in _IMAGE_EXTS and not is_voice and not force_document_attachments:
-                    image_paths.append(media_path)
-                else:
-                    non_image_media.append((media_path, is_voice))
+                return ext in _IMAGE_EXTS and not is_voice and not force_document_attachments
+
+            image_paths = [p for p, v in media_files if _is_photo(p, v)]
+            non_image_media = [(p, v) for p, v in media_files if not _is_photo(p, v)]
 
             if image_paths:
                 try:
@@ -341,9 +334,9 @@ class GatewayNotificationsMixin:
         if not text_already_delivered:
             text_content = _strip_response_attachments_for_direct_send(response, adapter)
             if text_content:
-                # Reconcile-by-edit first: when the stream consumer delivered/sealed a message whose
-                # recorded payload didn't confirm the final (post-stream mutation), a plain send here
-                # would duplicate it — the sealed message already carries most of the answer.
+                # Reconcile-by-edit first: a stream-sealed message whose recorded payload didn't confirm
+                # the final (post-stream mutation) already carries most of the answer; a plain send here
+                # would duplicate it.
                 _reconciled = False
                 _sc_msg_id = getattr(stream_consumer, "message_id", None)
                 if (
@@ -366,9 +359,8 @@ class GatewayNotificationsMixin:
                 if not _reconciled:
                     await adapter.send(source.chat_id, text_content, metadata=metadata)
 
-        # Failed turns still deliver their (normalized failure) text above, but must not upload
-        # attachments as if the turn succeeded — mirrors the ``not agent_result.get("failed")``
-        # guard on the completed-turn delivery path.
+        # Failed turns deliver their (normalized failure) text but must not upload attachments as if
+        # they succeeded — mirrors the ``not agent_result.get("failed")`` completed-turn guard.
         if not deliver_media:
             return
 
@@ -483,10 +475,8 @@ class GatewayNotificationsMixin:
             _p = getattr(adapter, "typed_command_prefix", "/")
             await adapter.send(
                 target.chat_id,
-                f"⚕ **Update needs your input:**\n\n"
-                f"{prompt_text}{default_hint}\n\n"
-                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), "
-                f"or type your answer directly.",
+                f"⚕ **Update needs your input:**\n\n{prompt_text}{default_hint}\n\n"
+                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), or type your answer directly.",
                 metadata=target.send_metadata(),
             )
         # Keep the prompt marker on disk until the user answers so a watcher after a mid-prompt
@@ -807,22 +797,18 @@ class GatewayNotificationsMixin:
             return
 
         from hermes_state import classify_persistence_error, format_session_db_unavailable
-
         if classify_persistence_error(error) == "corrupt":
             message = (
                 "⚠️ Session database corruption detected. Messages may not be "
-                "persisted. Recovery options:\n"
-                "1. Run `hermes doctor --fix`\n"
-                "2. Salvage with: sqlite3 ~/.hermes/state.db \".recover\" "
-                "(then replace state.db)\n"
+                "persisted. Recovery options:\n1. Run `hermes doctor --fix`\n"
+                "2. Salvage with: sqlite3 ~/.hermes/state.db \".recover\" (then replace state.db)\n"
                 "3. Restore from a backup in ~/.hermes/backups/\n"
                 "Run `hermes doctor` for sanitized diagnostics."
             )
         else:
             message = (
                 f"⚠️ Session database unavailable — messages may not be persisted. "
-                f"{format_session_db_unavailable()}\n"
-                f"Run `hermes doctor` for diagnostics."
+                f"{format_session_db_unavailable()}\nRun `hermes doctor` for diagnostics."
             )
 
         logger.warning("Broadcasting state.db failure warning to home channels: %s", error)
@@ -838,7 +824,6 @@ class GatewayNotificationsMixin:
         Prefer the persisted session-store origin; the active foreground event causes cross-topic bleed.
         """
         from gateway.run import _parse_session_key
-
         session_key = str(evt.get("session_key") or "").strip()
         derived = {}
 
@@ -863,8 +848,7 @@ class GatewayNotificationsMixin:
         if not platform_name or not chat_type or not chat_id:
             logger.warning(
                 "Synthetic event source unresolvable: "
-                "session_key=%r platform=%r chat_type=%r chat_id=%r "
-                "evt_type=%s",
+                "session_key=%r platform=%r chat_type=%r chat_id=%r evt_type=%s",
                 session_key, platform_name, chat_type, chat_id, evt.get("type", "?"),
             )
             return None
@@ -958,6 +942,25 @@ class GatewayNotificationsMixin:
             logger.warning("Watch notification self-post wake failed for session %s: %s", raw_sid, e)
             return False
 
+    def _resolve_injection_adapter(self, platform_name: str):
+        """Adapter for a synthetic-event platform: transport resolver first, literal scan as fallback.
+
+        Alias-aware resolution (relay-plane): one adapter under Platform.RELAY fronts N logical
+        platforms, so a literal ``p.value == platform_name`` scan misses "slack" and drops the
+        completion as "no gateway route". Native adapter wins; relay is eligible only when it
+        advertises fronting the logical platform. The legacy literal scan is still correct for
+        native adapters and keeps minimal runner stubs (tests) / exotic platform strings working
+        when the resolver can't run.
+        """
+        from gateway.run import resolve_delivery_transport
+        try:
+            _transport = resolve_delivery_transport(Platform(platform_name), self.config, self.adapters)
+        except Exception:
+            _transport = None
+        if _transport is not None:
+            return _transport.adapter
+        return self._adapter_by_platform_value(platform_name)
+
     async def _inject_watch_notification(self, synth_text: str, evt: dict) -> Optional[bool]:
         """Inject a watch/completion notification as a synthetic message event.
 
@@ -965,7 +968,7 @@ class GatewayNotificationsMixin:
         ``True`` on adapter acceptance, ``False`` on retryable adapter failure, ``None`` with no
         gateway route. Not transactional: a crash after acceptance can replay (at-least-once).
         """
-        from gateway.run import _parse_session_key, resolve_delivery_transport
+        from gateway.run import _parse_session_key
         from gateway.wake import adapter_supports_push
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
@@ -991,26 +994,7 @@ class GatewayNotificationsMixin:
             )
             return None
         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        # Alias-aware resolution (relay-plane): one adapter under Platform.RELAY fronts N logical
-        # platforms, so a literal ``p.value == platform_name`` scan misses "slack" and drops the
-        # completion as "no gateway route". Native adapter wins; relay is eligible only when it
-        # advertises fronting the logical platform.
-        adapter = None
-        try:
-            _platform_enum = Platform(platform_name)
-        except (ValueError, KeyError):
-            _platform_enum = None
-        if _platform_enum is not None:
-            try:
-                _transport = resolve_delivery_transport(_platform_enum, self.config, self.adapters)
-            except Exception:
-                _transport = None
-            if _transport is not None:
-                adapter = _transport.adapter
-        if adapter is None:
-            # Legacy literal scan — still correct for native adapters; keeps minimal runner stubs (tests)
-            # and exotic platform strings working when the resolver can't run.
-            adapter = self._adapter_by_platform_value(platform_name)
+        adapter = self._resolve_injection_adapter(platform_name)
         if not adapter:
             return None
         if not adapter_supports_push(adapter):
@@ -1071,13 +1055,19 @@ class GatewayNotificationsMixin:
         while len(self._completion_deliveries_delivered) > self._completion_delivery_retention:
             self._completion_deliveries_delivered.popitem(last=False)
 
-    def _completion_identity_seen(self, identity) -> bool:
-        """True when ``identity`` is inflight or already delivered in this gateway lifecycle."""
+    def _completion_identity_seen(self, identity, *, claim: bool = False) -> bool:
+        """True when ``identity`` is inflight or already delivered this gateway lifecycle.
+
+        With ``claim`` an unseen identity is atomically marked inflight (same lock hold).
+        """
         with self._completion_delivery_lock:
-            return (
+            seen = (
                 identity in self._completion_deliveries_inflight
                 or identity in self._completion_deliveries_delivered
             )
+            if claim and not seen:
+                self._completion_deliveries_inflight.add(identity)
+            return seen
 
     async def _classify_completion_target(self, parent_session_id: str) -> str:
         """Classify an async-completion delivery target before adapter acceptance.
@@ -1104,10 +1094,9 @@ class GatewayNotificationsMixin:
             return "deliver"
         end_reason = str(parent.get("end_reason") or "")
         if end_reason != "compression":
-            # An ended parent is unreachable only when the USER closed the thread of work (/new ->
-            # session_reset / new_session, user_exit, session_switch). Idle/timeout ends are normal on
-            # scale-to-zero relays — the chat stays routable and the resolver retargets, so dropping loses
-            # finished work. Boundary set shared with the resolver (_USER_BOUNDARY_END_REASONS): no drift.
+            # Only a USER-closed thread of work (/new, user_exit, session_switch) is unreachable;
+            # idle/timeout ends are normal on scale-to-zero relays — the chat stays routable and the
+            # resolver retargets. Boundary set shared with the resolver: no drift.
             return "terminal" if end_reason in _USER_BOUNDARY_END_REASONS else "deliver"
         try:
             tip_session_id = await session_db.get_compression_tip(parent_session_id)
@@ -1129,7 +1118,6 @@ class GatewayNotificationsMixin:
         fn_name, fail_msg = _DURABLE_CLAIM_OPS[kind]
         try:
             import tools.async_delegation as _ad
-
             getattr(_ad, fn_name)(delegation_id, claim_id)
         except Exception:
             logger.debug(fail_msg, exc_info=True)
@@ -1148,7 +1136,6 @@ class GatewayNotificationsMixin:
             if claim.delegation_id:
                 try:
                     from tools.async_delegation import claim_completion_delivery
-
                     claim.claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
                     if not claim_completion_delivery(claim.delegation_id, claim.claim_id):
                         claim.proceed = False
@@ -1171,8 +1158,7 @@ class GatewayNotificationsMixin:
             if evt_type == "async_delegation":
                 logger.warning(
                     "Async delegation %s targets permanently-gone session %s; "
-                    "terminally dropping delivery (result remains in the "
-                    "delegation records).",
+                    "terminally dropping delivery (result remains in the delegation records).",
                     claim.delegation_id or "<legacy>", parent_session_id,
                 )
                 if claim.claim_id:
@@ -1204,14 +1190,8 @@ class GatewayNotificationsMixin:
         claim = await self._preflight_completion_delivery(evt)
         if not claim.proceed:
             return claim.early_result
-        if identity is not None:
-            with self._completion_delivery_lock:
-                if (
-                    identity in self._completion_deliveries_inflight
-                    or identity in self._completion_deliveries_delivered
-                ):
-                    return None
-                self._completion_deliveries_inflight.add(identity)
+        if identity is not None and self._completion_identity_seen(identity, claim=True):
+            return None
 
         accepted = False
         try:
@@ -1229,7 +1209,6 @@ class GatewayNotificationsMixin:
             if claim.claim_id:
                 try:
                     from tools.async_delegation import complete_completion_delivery
-
                     complete_completion_delivery(claim.delegation_id, claim.claim_id)
                 except Exception as exc:
                     logger.warning("Could not acknowledge durable async completion %s: %s", claim.delegation_id, exc)
@@ -1419,7 +1398,6 @@ class GatewayNotificationsMixin:
         """
         from gateway.run import _format_gateway_process_notification
         from tools.process_registry import process_registry as _pr
-
         deliverable: list[tuple[dict, str]] = []
         for evt in group:
             synth_text = _format_gateway_process_notification(evt)
@@ -1437,7 +1415,6 @@ class GatewayNotificationsMixin:
             return await self._deliver_completion_notification(synth_text, evt)
 
         from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
-
         primary_evt, primary_text = deliverable[0]
         blocks = [primary_text]
         siblings: list[tuple[dict, str]] = []
@@ -1457,8 +1434,7 @@ class GatewayNotificationsMixin:
             f"[IMPORTANT: {len(blocks)} background subagent delegations "
             "completed for this session. Treat these results as one "
             "completion batch and send at most one consolidated user-facing "
-            "response. If a result does not change the current conclusion, "
-            "absorb it silently.]"
+            "response. If a result does not change the current conclusion, absorb it silently.]"
         )
         consolidated = "\n\n".join([header, *blocks])
         delivered: Optional[bool] = False
@@ -1572,13 +1548,7 @@ class GatewayNotificationsMixin:
         return {
             "type": "completion",
             "session_id": session_id,
-            "session_key": watcher.get("session_key", ""),
-            "platform": watcher.get("platform", ""),
-            "chat_type": watcher.get("chat_type", ""),
-            "chat_id": watcher.get("chat_id", ""),
-            "thread_id": watcher.get("thread_id", ""),
-            "user_id": watcher.get("user_id", ""),
-            "user_name": watcher.get("user_name", ""),
+            **{k: watcher.get(k, "") for k in _WATCHER_ROUTE_FIELDS},
             "message_id": str(watcher.get("message_id") or "").strip() or None,
             "started_at": getattr(session, "started_at", None),
             "command": _redact_gateway_user_facing_secrets(_command),
@@ -1617,7 +1587,6 @@ class GatewayNotificationsMixin:
         raw output) / result (final raw only) / error (final raw only if exit != 0) / off.
         """
         from tools.process_registry import format_process_notification, process_registry
-
         session_id = watcher["session_id"]
         interval = watcher["check_interval"]
         platform_name = watcher.get("platform", "")
@@ -1691,8 +1660,7 @@ class GatewayNotificationsMixin:
                 # only care about completion).
                 new_output = self._redacted_output_tail(session, 500)
                 message_text = (
-                    f"[Background process {session_id} is still running~ "
-                    f"New output:\n{new_output}]"
+                    f"[Background process {session_id} is still running~ New output:\n{new_output}]"
                 )
                 await self._send_watcher_message(platform_name, chat_id, thread_id, message_text)
 
