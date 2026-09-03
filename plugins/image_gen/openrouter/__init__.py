@@ -1,11 +1,11 @@
 """OpenRouter-compatible image generation backend (OpenRouter + Nous Portal).
 
-Both endpoints speak the OpenAI-style ``/chat/completions`` image protocol
-(``modalities: ["image","text"]``, references as ``image_url`` parts, output in
-``choices[0].message.images[].image_url.url``); only ``(base_url, api_key)``
-differs, via :func:`hermes_cli.runtime_provider.resolve_runtime_provider`.
-OpenRouter alone also has the Dedicated Image API (``POST /images/generations``,
-own catalog, exact ratios, up to 16 references) — see :func:`_select_surface`.
+Both speak the OpenAI-style ``/chat/completions`` image protocol (``modalities:
+["image","text"]``, references as ``image_url`` parts, output in
+``choices[0].message.images[].image_url.url``); only ``(base_url, api_key)`` differs,
+via :func:`hermes_cli.runtime_provider.resolve_runtime_provider`. OpenRouter alone also
+has the Dedicated Image API (``POST /images/generations``, own catalog, exact ratios,
+up to 16 references) — see :func:`_select_surface`.
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ from plugins.image_gen._common import error_factory, load_image_gen_config, post
 
 logger = logging.getLogger(__name__)
 
-# Quality-first default chain: highest-fidelity OpenAI model, then Gemini 3 Pro
-# Image if it is gated / unavailable / times out. Any explicit override means
-# "use exactly that model" — no auto fallback.
+# Quality-first default chain: OpenAI first, Gemini 3 Pro Image when it is gated /
+# unavailable / times out. Any explicit override is exact — no auto fallback.
 DEFAULT_MODEL = "openai/gpt-5.4-image-2"
 _FALLBACK_MODEL = "google/gemini-3-pro-image"
 _DEFAULT_MODEL_CHAIN = (DEFAULT_MODEL, _FALLBACK_MODEL)
@@ -36,10 +35,8 @@ _MODEL_PRIORITY = {DEFAULT_MODEL: 0, _FALLBACK_MODEL: 1}
 
 # Semantic aspect ratio → OpenRouter ``image_config.aspect_ratio``.
 _ASPECT_RATIOS = {"square": "1:1", "landscape": "16:9", "portrait": "9:16"}
-# Gemini Flash Image accepts up to 3 input images per prompt.
-_MAX_REFERENCE_IMAGES = 3
-# Per image call; a cold quality-first row can run past 3 minutes.
-_REQUEST_TIMEOUT = 300.0
+_MAX_REFERENCE_IMAGES = 3  # Gemini Flash Image accepts up to 3 input images per prompt.
+_REQUEST_TIMEOUT = 300.0  # per image call; a cold quality-first row can run past 3 minutes.
 
 # Curated metadata for well-known chat-completions image models.
 _KNOWN_MODEL_META = {
@@ -52,8 +49,7 @@ _KNOWN_MODEL_META = {
         "strengths": "Fast, reliable fallback with good layout adherence",
     },
 }
-# Router pseudo-models advertise image output but are not image models.
-_EXCLUDED_MODEL_PREFIXES = ("openrouter/auto",)
+_EXCLUDED_MODEL_PREFIXES = ("openrouter/auto",)  # router pseudo-models advertise image output
 _LIVE_CACHE_TTL = 300.0
 _LIVE_TIMEOUT = 10.0
 _load_image_gen_config = load_image_gen_config
@@ -62,14 +58,11 @@ _load_image_gen_config = load_image_gen_config
 # OpenRouter Dedicated Image API (POST /images/generations)
 # ---------------------------------------------------------------------------
 
-# Env prefix for Image API knobs (``OPENROUTER_IMAGE_API_QUALITY`` …); distinct
-# from ``OPENROUTER_IMAGE_MODEL`` which selects the model on either surface.
+# Knob env prefix (``OPENROUTER_IMAGE_API_QUALITY`` …); ``OPENROUTER_IMAGE_MODEL`` picks the model.
 _IMAGE_API_ENV_PREFIX = "OPENROUTER_IMAGE_API_"
-# Connect budget separate from the read budget: no TLS in 20s means the endpoint
-# is down, and waiting out the generation timeout only delays the error.
+# Separate connect budget: no TLS in 20s means the endpoint is down — don't wait out the read budget.
 _IMAGE_API_CONNECT_TIMEOUT = 20.0
-# ``/images/models`` probes keyed by base URL: ``(fetched_at, ids)``. Empty sets
-# are cached too, so a failing endpoint is probed once per TTL.
+# ``/images/models`` probes keyed by base URL: ``(fetched_at, ids)``; empty sets cached too.
 _CATALOG_TTL_SECONDS = 900.0
 _CATALOG_CACHE: Dict[str, Tuple[float, frozenset]] = {}
 
@@ -87,10 +80,9 @@ def _image_api_model(display: str, strengths: str, **spec: Any) -> Dict[str, Any
     return {"display": display, "strengths": strengths, **_NO_KNOBS, "resolutions": (), **spec}
 
 
-# Curated Image API models and the parameters each declares in ``GET /images/models``.
-# An id missing here still works — it just gets no per-model parameter filtering
-# and costs one cached catalog probe to recognise. Keys mirror the payload field
-# they gate; an empty tuple means "no such knob".
+# Curated Image API models + the parameters each declares in ``GET /images/models``. An
+# id missing here still works (no per-model knob filtering; one cached catalog probe).
+# Keys mirror the payload field they gate; an empty tuple means "no such knob".
 _IMAGE_API_MODELS: Dict[str, Dict[str, Any]] = {
     "google/gemini-3.1-flash-lite-image": _image_api_model(
         "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
@@ -137,19 +129,16 @@ _IMAGE_API_MODELS: Dict[str, Dict[str, Any]] = {
         resolutions=("1K", "2K"), seed=True, max_n=6, max_refs=4),
 }
 
-# Applied to a catalog model the table doesn't describe. Empty ``aspect_ratios``
-# means "enum unknown" and the field is omitted rather than guessed.
+# For catalog models the table doesn't describe; empty ``aspect_ratios`` = unknown enum → omitted.
 _UNKNOWN_IMAGE_API_MODEL = _image_api_model("", "", aspect_ratios=(), max_n=1, max_refs=16)
 
-# Union of exact ratios the endpoint accepts across all models; sanity-checks an
-# override aimed at a model whose own enum we don't know.
+# Union of exact ratios across all models; sanity-checks an override for a model with unknown enum.
 _ENDPOINT_ASPECT_RATIOS = frozenset({
     "1:1", "1:2", "1:4", "1:8", "2:1", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16",
     "16:9", "9:19.5", "19.5:9", "9:20", "20:9", "9:21", "21:9", "auto",
 })
 
-# Semantic ratio → exact ratios, best first (``landscape`` degrades to 3:2 on
-# ``gpt-image-1-mini``, which has no 16:9).
+# Semantic ratio → exact ratios, best first (``landscape`` degrades to 3:2 where 16:9 is missing).
 _ASPECT_PREFERENCES: Dict[str, Tuple[str, ...]] = {
     "landscape": ("16:9", "3:2", "4:3", "5:4", "21:9", "2:1", "19.5:9", "20:9", "4:1", "8:1"),
     "portrait": ("9:16", "2:3", "3:4", "4:5", "9:21", "1:2", "9:19.5", "9:20", "1:4", "1:8"),
@@ -161,17 +150,13 @@ _MEDIA_TYPE_EXTENSIONS = {
     "image/svg+xml": "svg",
 }
 
-# HTTP statuses worth retrying on the next model of the chain. 400 is our own
-# payload and would repeat; 401/403 are account-level and answered before this
-# set is consulted. 502 is how the all-or-nothing-billed Image API reports a
-# failed (unbilled) generation.
+# Statuses worth retrying on the next chain model. 400 is our own payload (would repeat);
+# 401/403 are account-level and answered first; 502 is how the Image API reports an unbilled failure.
 _IMAGE_API_FALLBACK_STATUSES = frozenset({402, 404, 408, 409, 425, 429, 500, 502, 503, 504})
 
-# Ids that stay on ``/chat/completions`` whatever the image catalog says — they
-# are this backend's tested defaults.
+# Stay on ``/chat/completions`` whatever the image catalog says — the tested defaults.
 _CHAT_ONLY_MODELS = frozenset({DEFAULT_MODEL, _FALLBACK_MODEL})
 
-# Image API payload knobs copied into the success ``extra``.
 _IMAGE_API_EXTRA_KEYS = ("resolution", "quality", "background", "output_format", "seed", "n")
 
 # Enum knobs: payload field → catalog key holding the allowed values.
@@ -191,16 +176,14 @@ _ATTRIBUTION_HEADERS = {
 
 
 def _to_image_url_part(ref: str) -> Optional[str]:
-    """``image_url`` value for a reference: URLs pass through, local files are
-    inlined as base64 data URIs. ``None`` when the file can't be read."""
+    """URLs pass through; local files inline as base64 data URIs (``None`` when unreadable)."""
     ref = str(ref or "").strip()
     if not ref:
         return None
     if ref.startswith(("http://", "https://", "data:")):
         return ref
     path = Path(ref)
-    # Enforce the shared credential-read guard before inlining local bytes.
-    from agent.file_safety import raise_if_read_blocked
+    from agent.file_safety import raise_if_read_blocked  # credential-read guard before inlining
 
     raise_if_read_blocked(ref)
     try:
@@ -234,9 +217,8 @@ def _extract_images(payload: Dict[str, Any]) -> List[str]:
 
 
 def _access_error_hint(display: str, model_id: str, env_var: str, status: int, err_msg: str) -> Optional[str]:
-    """Actionable line when an access-gated OpenAI image model is unreachable
-    (the key is valid but the *model* needs account enablement / BYOK, so
-    "check your key" would mislead). ``None`` when this isn't that case."""
+    """Hint for an access-gated OpenAI image model (valid key, but the *model* needs account
+    enablement / BYOK, so "check your key" would mislead). ``None`` otherwise."""
     if not model_id.startswith("openai/"):
         return None
     low = (err_msg or "").lower()
@@ -269,12 +251,8 @@ def _fetch_catalog(
     base_url: str, api_key: str, *, path: str, meta: Dict[str, Dict[str, Any]], generic: str,
     image_output_only: bool,
 ) -> List[Dict[str, Any]]:
-    """Picker rows from ``GET {base_url}{path}``; raises on failure.
-
-    ``image_output_only`` keeps entries whose ``architecture.output_modalities``
-    includes ``image`` and drops router pseudo-models. Curated ``meta`` wins
-    for known ids; unknown ones get the API name and ``generic`` strengths.
-    """
+    """Picker rows from ``GET {base_url}{path}``; raises on failure. ``image_output_only`` keeps
+    image-output models minus router pseudo-models; curated ``meta`` wins for known ids."""
     out: List[Dict[str, Any]] = []
     for model_id, entry in _get_catalog(base_url, path, api_key, _LIVE_TIMEOUT):
         arch = _dict_at(entry, "architecture")
@@ -293,12 +271,8 @@ def _fetch_catalog(
 
 
 def _fetch_image_api_catalog(base_url: str, api_key: str) -> frozenset:
-    """Model ids served by ``GET {base_url}/images/models``, cached per base URL.
-
-    Best-effort: any failure caches and returns an empty set, which routes the
-    call to chat-completions — guessing the other way would send a
-    chat-completions id to ``/images/generations`` and 404 a working setup.
-    """
+    """Model ids from ``GET {base_url}/images/models``, cached per base URL. Any failure caches an
+    empty set (→ chat-completions): guessing "images" would 404 a working chat setup."""
     cached = _CATALOG_CACHE.get(base_url)
     if cached and (time.monotonic() - cached[0]) < _CATALOG_TTL_SECONDS:
         return cached[1]
@@ -319,14 +293,9 @@ def _image_api_model_meta(model_id: str) -> Dict[str, Any]:
 
 
 def _select_surface(model_id: str, base_url: str, api_key: str, config_key: str) -> str:
-    """``"images"`` or ``"chat"`` for *model_id*.
-
-    ``image_gen.<key>.surface`` / ``OPENROUTER_IMAGE_API_SURFACE`` force it;
-    otherwise curated ids are deterministic and offline, and an id in neither
-    table is checked against the cached live catalog (a positive probe must
-    route there — staying on chat would 404 a model the live picker offered;
-    offline the probe is empty and unknown ids stay on chat).
-    """
+    """``"images"`` or ``"chat"``: config/env ``surface`` forces it; curated ids are offline and
+    deterministic; unknown ids consult the cached live catalog (a positive probe must route there
+    or a model the live picker offered would 404; offline they stay on chat)."""
     if not model_id:
         return "chat"
     forced = _image_api_setting("surface", None, config_key)
@@ -340,8 +309,7 @@ def _select_surface(model_id: str, base_url: str, api_key: str, config_key: str)
 
 
 def _image_api_setting(name: str, explicit: Any, config_key: str) -> Any:
-    """One Image API knob: call kwarg → ``OPENROUTER_IMAGE_API_<NAME>`` env →
-    scoped config. Blank strings count as unset."""
+    """Knob: call kwarg → ``OPENROUTER_IMAGE_API_<NAME>`` env → scoped config; blanks are unset."""
     if explicit is not None and not (isinstance(explicit, str) and not explicit.strip()):
         return explicit
     env_value = os.environ.get(f"{_IMAGE_API_ENV_PREFIX}{name.upper()}", "").strip()
@@ -366,9 +334,8 @@ def _coerce_int(value: Any) -> Optional[int]:
 def _pick_exact_aspect_ratio(
     semantic: str, meta: Dict[str, Any], forced: Optional[str], notes: List[str]
 ) -> Optional[str]:
-    """Exact ``aspect_ratio`` to send, or ``None`` to omit it. *forced* wins when
-    the model supports it; otherwise the downgrade is noted and the per-model
-    mapping of *semantic* applies."""
+    """Exact ``aspect_ratio`` or ``None`` to omit. *forced* wins when supported; otherwise the
+    downgrade is noted and the per-model mapping of *semantic* applies."""
     supported: Tuple[str, ...] = tuple(meta.get("aspect_ratios") or ())
     if isinstance(forced, str) and forced.strip():
         value = forced.strip()
@@ -378,8 +345,7 @@ def _pick_exact_aspect_ratio(
             f"requested aspect_ratio '{value}' is unsupported by this model; "
             f"used the '{semantic}' mapping instead")
     if not supported:
-        # Unknown enum: an out-of-enum aspect_ratio is a hard 400 (unlike an
-        # unknown *parameter*, which the endpoint ignores), so omit the field.
+        # Out-of-enum aspect_ratio is a hard 400 (unknown *parameters* are ignored) — omit it.
         notes.append(
             "model is not in this backend's catalog, so its aspect_ratio enum is "
             f"unknown; the field was omitted and '{semantic}' was not applied")
@@ -413,12 +379,9 @@ def _build_image_api_payload(
     *, model_id: str, prompt: str, semantic_aspect: str, references: List[str], config_key: str,
     kwargs: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[str]]:
-    """Assemble the ``/images/generations`` body: ``(payload, notes)``.
-
-    Every optional knob is filtered against what the model declares, because
-    the endpoint silently *ignores* unknown parameters — which would let a
-    caller believe ``background=transparent`` took effect on a model without it.
-    """
+    """``/images/generations`` body: ``(payload, notes)``. Every knob is filtered against what the
+    model declares: the endpoint silently *ignores* unknown parameters, which would let a caller
+    believe ``background=transparent`` took effect on a model without it."""
     meta = _image_api_model_meta(model_id)
     notes: List[str] = []
     payload: Dict[str, Any] = {"model": model_id, "prompt": prompt}
@@ -458,9 +421,8 @@ def _build_image_api_payload(
 
 
 def _extract_image_api_error(response: Any, fallback: str) -> str:
-    """Flatten either error shape into one line: ``{"error": {"message", "code"}}``
-    (routing / auth / unknown model) or ``{"success": false, "error": {"name":
-    "ZodError", "message": "<json issue array>"}}`` (request validation)."""
+    """One-line error from ``{"error": {"message"}}`` (routing/auth) or the ZodError shape
+    ``{"error": {"name": "ZodError", "message": "<json issue array>"}}`` (validation)."""
     if response is None:
         return fallback
     try:
@@ -502,8 +464,7 @@ def _model_slug(model_id: str) -> str:
 
 
 def _save_image_api_entry(entry: Dict[str, Any], prefix: str) -> Optional[str]:
-    """Persist one ``data[]`` entry to the image cache; ``None`` when it carries
-    neither base64 nor a URL. Raises on write failure (caller reports ``io_error``)."""
+    """Cache one ``data[]`` entry; ``None`` without b64/URL. Raises on write failure."""
     b64 = entry.get("b64_json")
     if isinstance(b64, str) and b64.strip():
         return str(save_b64_image(b64, prefix=prefix, extension=_extension_for(entry.get("media_type"))))
@@ -534,12 +495,8 @@ def _image_api_extra(
 
 
 class OpenRouterCompatImageProvider(ImageGenProvider):
-    """Image generation over an OpenRouter-compatible chat-completions endpoint.
-
-    One instance per backend (OpenRouter, Nous Portal); they differ only in the
-    runtime provider supplying ``(base_url, api_key)``, the config namespace for
-    the model override, and Image API support (OpenRouter only).
-    """
+    """One instance per backend (OpenRouter, Nous Portal); they differ only in the runtime
+    provider supplying ``(base_url, api_key)``, the config namespace, and Image API support."""
 
     def __init__(
         self, *, provider_name: str, display_name: str, runtime_name: str, config_key: str,
@@ -580,8 +537,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             return False
 
     def capabilities(self) -> Dict[str, Any]:
-        # Image API models take far more references than chat-completions, so
-        # report the cap of the model that would service the next call.
+        # Report the reference cap of the model that would service the next call.
         max_refs = _MAX_REFERENCE_IMAGES
         if self._supports_image_api:
             resolved = self._resolve_model_chain()[0]
@@ -590,13 +546,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         return {"modalities": ["text", "image"], "max_reference_images": max_refs}
 
     def list_models(self) -> List[Dict[str, Any]]:
-        """Picker catalog: the endpoint's full live image-model surface.
-
-        OpenRouter: ``GET /images/models`` ∪ chat-completions image models, so
-        models released after this code shipped are selectable. Nous Portal
-        lists the chat-completions catalog only. Offline fallback: the static
-        default chain plus the curated Image API snapshot.
-        """
+        """Live catalog: OpenRouter = ``GET /images/models`` ∪ chat-completions image models (new
+        releases selectable); Nous Portal = chat-completions only. Offline: default chain + snapshot."""
         merged: Dict[str, Dict[str, Any]] = {}
         if self._supports_image_api:
             merged = {entry["id"]: entry for entry in self._image_api_live_models()}
@@ -648,10 +599,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         return self._resolve_model_chain(explicit)[0]
 
     def _resolve_model_chain(self, explicit: Optional[str] = None) -> list[str]:
-        """Ordered model attempts: explicit ``model`` kwarg → ``*_IMAGE_MODEL`` env
-        → ``image_gen.<provider>.model`` → ``image_gen.model`` → the default
-        chain. Any explicit selection is exact, so only the bare default chain
-        carries a fallback."""
+        """``model`` kwarg → ``*_IMAGE_MODEL`` env → ``image_gen.<provider>.model`` →
+        ``image_gen.model`` → default chain. Only the bare default chain carries a fallback."""
         for candidate in (explicit, os.environ.get(self._model_env_var)):
             if isinstance(candidate, str) and candidate.strip():
                 return [candidate.strip()]
@@ -665,11 +614,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         self, *, model_id: str, prompt: str, semantic_aspect: str, references: List[str],
         base_url: str, headers: Dict[str, str], kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Serve one model through ``POST {base_url}/images/generations``.
-
-        A failure the caller may retry on the next model of the chain carries a
-        private ``_retryable`` flag, which :meth:`generate` strips.
-        """
+        """One ``POST {base_url}/images/generations`` attempt; a chain-retryable failure carries a
+        private ``_retryable`` flag that :meth:`generate` strips."""
         base_fail = error_factory(self._name, semantic_aspect, model=model_id, prompt=prompt)
 
         def _fail(error: str, error_type: str, retryable: bool = False) -> Dict[str, Any]:
@@ -678,8 +624,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 response["_retryable"] = True
             return response
 
-        # References become data URIs here rather than reusing the chat path's
-        # `content`, because that one is clamped to 3 and these models take up to 16.
+        # Not the chat path's `content`: that is clamped to 3 refs, these models take up to 16.
         usable_refs: List[str] = []
         unreadable: List[str] = []
         try:
@@ -688,8 +633,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 (usable_refs if part else unreadable).append(part or str(ref))
         except Exception as exc:  # noqa: BLE001 - blocked by the file-safety guard
             return _fail(f"Could not load reference image: {exc}", "io_error")
-        # An edit whose every source image failed to load must not quietly become
-        # a text-to-image generation: that bills an unrelated picture.
+        # An edit with no readable source must not silently bill a text-to-image picture.
         if unreadable and not usable_refs:
             return _fail(
                 "Could not read the reference image(s) requested for editing: "
@@ -720,8 +664,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 return _fail(failure.error, failure.error_type, retryable=failure.kind == "timeout")
             status, message = failure.status, failure.message
             logger.error("%s image API generation failed (%s) on %s: %s", self._name, status, model_id, message)
-            # 401/403 first so one account-level rejection does not get two
-            # different error_types depending on where in the chain it landed.
+            # 401/403 first so an account-level rejection gets one error_type anywhere in the chain.
             if status in (401, 403):
                 return _fail(f"{self._display} rejected the API key ({status}): {message}", "auth_error")
             if status == 404:
@@ -753,8 +696,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         self, *, model_id: str, prompt: str, aspect: str, content: List[Dict[str, Any]],
         base_url: str, headers: Dict[str, str],
     ) -> Tuple[Dict[str, Any], Optional[str]]:
-        """One ``/chat/completions`` attempt: ``(result, retry_reason)``; the reason
-        is set when the chain may continue with the fallback model."""
+        """One ``/chat/completions`` attempt: ``(result, retry_reason)``; reason set when the
+        chain may continue with the fallback model."""
         fail = error_factory(self._name, aspect, model=model_id, prompt=prompt)
         payload: Dict[str, Any] = {
             "model": model_id,
@@ -814,8 +757,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
 
         model_chain = self._resolve_model_chain(kwargs.get("model"))
         aspect = resolve_aspect_ratio(aspect_ratio)
-        # The pet generator passes local paths via ``reference_images``; the
-        # generic tool surface uses ``image_url`` / ``reference_image_urls``.
+        # ``reference_images`` (pet generator, local paths) + the generic ``image_url`` surface.
         references = [str(ref) for ref in kwargs.get("reference_images") or []]
         if image_url:
             references.append(str(image_url))
@@ -829,8 +771,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
 
         last_error: Optional[Dict[str, Any]] = None
         for i, model_id in enumerate(model_chain):
-            # An Image API model cannot be served by /chat/completions (and vice
-            # versa), so this is a routing decision, not a preference.
+            # Image API and chat models are not interchangeable: this is routing, not preference.
             surface = "chat"
             if self._supports_image_api:
                 surface = _select_surface(model_id, base_url, api_key, self._config_key)
