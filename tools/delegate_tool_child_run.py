@@ -654,12 +654,13 @@ class _ChildRun:
         is_timeout = isinstance(exc, (FuturesTimeoutError, TimeoutError))
         duration = self.elapsed()
         logger.warning("Subagent %d %s after %.1fs", task_index, "timed out" if is_timeout else f"raised {type(exc).__name__}", duration)
-
         child_api_calls = 0
         with _quiet(None):
             child_api_calls = int(child.get_activity_summary().get("api_call_count", 0) or 0)
+        # A timeout BEFORE any API call is a black box without a diagnostic dump.
+        before_first_call = is_timeout and child_api_calls == 0
         diagnostic_path: Optional[str] = None
-        if is_timeout and child_api_calls == 0:
+        if before_first_call:
             diagnostic_path = _dump_subagent_timeout_diagnostic(
                 child=child, task_index=task_index,
                 # is_timeout implies a cap was configured (result(timeout=None)
@@ -669,11 +670,9 @@ class _ChildRun:
             )
             if diagnostic_path:
                 logger.warning("Subagent %d 0-API-call timeout — diagnostic written to %s", task_index, diagnostic_path)
-
-        status = "timeout" if is_timeout else "error"
         if not is_timeout:
             _err = str(exc)
-        elif child_api_calls == 0:
+        elif before_first_call:
             _err = (
                 f"Subagent timed out after {child_timeout}s without making any API call — the child never reached its "
                 f"first LLM request (prompt construction, credential resolution, or transport may be stuck)."
@@ -683,21 +682,15 @@ class _ChildRun:
                 f"Subagent timed out after {child_timeout}s with {child_api_calls} API call(s) completed — likely "
                 f"stuck on a slow API call, tool call, or unresponsive network request."
             )
-        if is_timeout and diagnostic_path:
+        if diagnostic_path:
             _err += f" Diagnostic: {diagnostic_path}"
+        status = "timeout" if is_timeout else "error"
         _error_entry = {
-            "task_index": task_index,
-            "status": status,
-            "summary": None,
-            "error": _err,
-            "exit_reason": status,
-            "api_calls": child_api_calls,
-            "duration_seconds": duration,
+            "task_index": task_index, "status": status, "summary": None, "error": _err, "exit_reason": status,
+            "api_calls": child_api_calls, "duration_seconds": duration,
             "timeout_seconds": child_timeout if is_timeout else None,
             "timed_out_after_seconds": duration if is_timeout else None,
-            "timeout_phase": (
-                "before_first_llm_call" if is_timeout and child_api_calls == 0 else "after_llm_calls" if is_timeout else None
-            ),
+            "timeout_phase": "before_first_llm_call" if before_first_call else "after_llm_calls" if is_timeout else None,
             "_child_role": getattr(child, "_delegate_role", None),
             "diagnostic_path": diagnostic_path,
         }
@@ -734,18 +727,16 @@ class _ChildRun:
         if not self.child_progress_cb:
             return
         child = self.child
-        summary, status = entry["summary"], entry["status"]
+        summary = entry["summary"]
         _files_read: list = []
         with _quiet(None):
             _files_read = list(file_state.known_reads(self.child_task_id))[:40]
         _files_written_map: dict = {}
         with _quiet(None):
             _files_written_map = file_state.writes_since("", self.wall_start, [])  # all writes since wall_start
-        _files_written = sorted({p for tid, paths in _files_written_map.items() if tid == self.child_task_id for p in paths})[:40]
-
         complete_kwargs: Dict[str, Any] = {
             "preview": summary[:160] if summary else entry.get("error", ""),
-            "status": status,
+            "status": entry["status"],
             "duration_seconds": duration,
             "summary": summary[:500] if summary else entry.get("error", ""),
             "input_tokens": _num(getattr(child, "session_prompt_tokens", 0)),
@@ -753,15 +744,13 @@ class _ChildRun:
             "reasoning_tokens": _num(getattr(child, "session_reasoning_tokens", 0)),
             "api_calls": _num(entry["api_calls"]),
             "files_read": _files_read,
-            "files_written": _files_written,
+            "files_written": sorted({p for tid, paths in _files_written_map.items() if tid == self.child_task_id for p in paths})[:40],
             "output_tail": _extract_output_tail(result, max_entries=8, max_chars=600),
         }
         _cost_usd = getattr(child, "session_estimated_cost_usd", None)
         if _cost_usd is not None:
-            try:
+            with _quiet(None):
                 complete_kwargs["cost_usd"] = float(_cost_usd)
-            except (TypeError, ValueError):
-                pass
         _safe_progress(self.child_progress_cb, "subagent.complete", **complete_kwargs)
 
     def cleanup(self, *, heartbeat: tuple, child_pool: Any, leased_cred_id: Any, close_deferred: bool) -> None:
