@@ -488,25 +488,6 @@ def _user_approved(session_key: str, description: str) -> dict:
             "user_approved": True, "description": description}
 
 
-def _gateway_refusal(decision: dict):
-    """``(reason, reason_addendum, timeout_addendum, outcome, deny_reason)`` when
-    the gateway decision is not an approval, else None.
-
-    Consent contract: silence is NOT consent, and an explicit deny is a hard
-    halt — both produce a BLOCKED outcome. ``/deny <reason>`` free text is
-    relayed verbatim so the agent can adapt rather than only hearing "denied".
-    """
-    resolved, choice = decision["resolved"], decision["choice"]
-    deny_reason = decision.get("reason")
-    if resolved and choice is not None and choice != "deny":
-        return None
-    if not resolved:
-        return ("timed out without user response", "", " Silence is not consent.",
-                "timeout", deny_reason)
-    reason_addendum = f' Reason given by the user: "{deny_reason}".' if deny_reason else ""
-    return ("denied by user", reason_addendum, "", "denied", deny_reason)
-
-
 def _gateway_notify_cb(session_key: str):
     with _lock:
         return _gateway_notify_cbs.get(session_key)
@@ -550,20 +531,6 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
     if smart_denied:
         result.update(smart_denied=True, allow_permanent=False)
     return result
-
-
-def _prompt_cli_with_hooks(command: str, description: str, pattern_key: str,
-                           pattern_keys: list[str], session_key: str,
-                           **prompt_kwargs) -> str:
-    """CLI prompt wrapped in the pre/post approval plugin hooks."""
-    hook_kwargs = dict(
-        command=command, description=description, pattern_key=pattern_key,
-        pattern_keys=list(pattern_keys), session_key=session_key, surface="cli",
-    )
-    _fire_approval_hook("pre_approval_request", **hook_kwargs)
-    choice = prompt_dangerous_approval(command, description, **prompt_kwargs)
-    _fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
-    return choice
 
 
 # =========================================================================
@@ -812,17 +779,26 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str], warnings: list[tuple],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
-                    is_ask: bool, smart_denied: bool = False,
-                    permanent_capable: bool = True, pending_body: str | None = None) -> dict:
-    """Ask a human and turn the answer into the gate result.
+                    is_ask: bool, smart: bool = False,
+                    permanent_capable: bool = True, pending_body=None) -> dict:
+    """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``warnings`` are the ``(key, _, is_tirith)`` tuples :func:`_persist_choice`
     stores on session/always. ``permanent_capable`` hides [a]lways when no key
     could be permanently allowlisted (pure-tirith prompts); a smart-DENY owner
     override reduces every surface to once/deny and persists nothing.
+    ``pending_body`` is a thunk (built only once a human is actually asked, so a
+    smart APPROVE never pays for redacting a large script).
     """
     from agent.redact import redact_sensitive_text
 
+    smart_denied = False
+    if smart:
+        result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
+                                           session_key, human_present=is_cli or is_gateway or is_ask)
+        if result is not None:
+            return result
+    pending_body = pending_body() if pending_body else None
     allow_permanent = permanent_capable and not smart_denied
 
     def deny(template: str, outcome: str, **fmt) -> dict:
@@ -887,13 +863,20 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             if decision.get("notify_failed"):
                 return _denied(spec.notify_failed, pattern_key=pattern_key,
                                description=description, outcome="notify_failed")
-            refusal = _gateway_refusal(decision)
-            if refusal is not None:
-                reason, reason_addendum, timeout_addendum, outcome, deny_reason = refusal
-                return deny(spec.gateway_refused, outcome, reason=reason,
-                            reason_addendum=reason_addendum,
-                            timeout_addendum=timeout_addendum, deny_reason=deny_reason)
-            return grant(decision["choice"])
+            # Consent contract: silence is NOT consent, and an explicit deny is a hard
+            # halt — both produce a BLOCKED outcome. ``/deny <reason>`` free text is
+            # relayed verbatim so the agent can adapt rather than only hearing "denied".
+            choice, deny_reason = decision["choice"], decision.get("reason")
+            if not decision["resolved"]:
+                return deny(spec.gateway_refused, "timeout", reason="timed out without user response",
+                            reason_addendum="", timeout_addendum=" Silence is not consent.",
+                            deny_reason=deny_reason)
+            if choice is None or choice == "deny":
+                return deny(spec.gateway_refused, "denied", reason="denied by user",
+                            reason_addendum=(f' Reason given by the user: "{deny_reason}".'
+                                             if deny_reason else ""),
+                            timeout_addendum="", deny_reason=deny_reason)
+            return grant(choice)
 
         # No gateway callback (cron, batch, or ask-mode leaked into an
         # interactive CLI, historically via `import gateway.run`): paint the
@@ -910,16 +893,17 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                 smart_denied=smart_denied,
             )
 
-    # CLI interactive: single combined prompt.
+    # CLI interactive: single combined prompt, wrapped in the pre/post plugin hooks.
     prompt_command, prompt_description = command, description
     if spec.redact_cli:
         prompt_command = redact_sensitive_text(command)
         prompt_description = redact_sensitive_text(description)
-    choice = _prompt_cli_with_hooks(
-        prompt_command, prompt_description, pattern_key, pattern_keys, session_key,
-        allow_permanent=allow_permanent, smart_denied=smart_denied,
-        approval_callback=approval_callback,
-    )
+    hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
+                       pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
+    _fire_approval_hook("pre_approval_request", **hook_kwargs)
+    choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
+                                       smart_denied=smart_denied, approval_callback=approval_callback)
+    _fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
     if choice == "timeout":
         return deny(spec.cli_timeout, "timeout")
     if choice == "deny":
@@ -1254,15 +1238,6 @@ def check_all_command_guards(command: str, env_type: str,
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
 
-    smart_denied_for_owner = False
-    if approval_mode == "smart":
-        result, smart_denied_for_owner = _smart_gate(
-            _COMMAND_GATE, command, combined_desc, primary_key, all_keys, session_key,
-            human_present=is_cli or is_gateway or is_ask,
-        )
-        if result is not None:
-            return result
-
     # "Always" is offered when at least one warning is a dangerous-pattern key
     # the persistence layer would actually allowlist permanently. Pure-tirith
     # findings are session-max by design, so a tirith-only prompt hides Always;
@@ -1272,8 +1247,7 @@ def check_all_command_guards(command: str, env_type: str,
         _COMMAND_GATE, command=command, description=combined_desc,
         pattern_key=primary_key, pattern_keys=all_keys, warnings=warnings,
         session_key=session_key, approval_callback=approval_callback,
-        is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
-        smart_denied=smart_denied_for_owner,
+        is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, smart=approval_mode == "smart",
         permanent_capable=any(not is_t for _, _, is_t in warnings),
     )
 
@@ -1348,26 +1322,17 @@ def check_execute_code_guard(code: str, env_type: str,
         return _approved()
 
     # Smart mode: an APPROVE only suppresses the redundant whole-script prompt;
-    # the per-call terminal() guards still run independently.
-    smart_denied_for_owner = False
-    if approval_mode == "smart":
-        result, smart_denied_for_owner = _smart_gate(
-            _EXECUTE_CODE_GATE, command, description, pattern_key, [pattern_key],
-            session_key, human_present=True,
-        )
-        if result is not None:
-            return result
-
-    # The gateway renders the pending payload to Discord/Slack, so the script
-    # body is redacted for display; the raw code is what gets assessed and run.
+    # the per-call terminal() guards still run independently. The gateway
+    # renders the pending payload to Discord/Slack, so the script body is
+    # redacted for display; the raw code is what gets assessed and run.
     from agent.redact import redact_sensitive_text
     return _human_decision(
         _EXECUTE_CODE_GATE, command=command, description=description,
         pattern_key=pattern_key, pattern_keys=[pattern_key],
         warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway,
-        is_ask=is_ask, smart_denied=smart_denied_for_owner,
-        pending_body=f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
+        is_ask=is_ask, smart=approval_mode == "smart",
+        pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
     )
 
 
