@@ -1,19 +1,12 @@
 """Builder-declared stable prefixes for Anthropic prompt caching.
 
-Skill/webhook/cron builders concatenate a large static scaffold with a small
-volatile invocation tail into one user-message string. Only the builder knows
-where the tail begins, so it registers the stable prefix here and the cache
-planner places a breakpoint at that boundary instead of caching the whole
-message. Re-parsing marker strings out of the message at request time is
-deliberately avoided: markers can legitimately appear inside skill bodies or
-event payloads, and any delimiter heuristic then shrinks the cached prefix or
-silently absorbs volatile bytes into it.
-
-Process-local by design: a webhook/cron fire is built and sent by the same
-process, and any miss (restart, eviction, historic message) falls back to the
-whole-message policy. The split only applies while the message is one of the
-plan's marked endpoints; once it rotates out it ships as one block again
-(one-time re-ingest in long interactive sessions, never for webhook/cron).
+Skill/webhook/cron builders concatenate a large static scaffold with a small volatile
+tail into one user-message string. Only the builder knows where the tail begins, so it
+registers the stable prefix here and the cache planner places a breakpoint at that
+boundary. Re-parsing marker strings at request time is deliberately avoided: markers
+can legitimately appear inside skill bodies, and any delimiter heuristic then shrinks
+the cached prefix or absorbs volatile bytes. Process-local by design: any miss falls
+back to the whole-message policy.
 """
 
 import threading
@@ -22,9 +15,8 @@ from typing import Optional
 
 # A couple dozen active scaffolds is generous for one gateway process.
 _MAX_ENTRIES = 32
-# Entries hold whole expanded skill bodies, so also bound total retained chars
-# (1-4x bytes). The newest entry is always kept so one oversized scaffold still
-# gets a boundary instead of silently disabling the split.
+# Entries hold whole expanded skill bodies, so also bound total retained chars.
+# The newest entry is always kept so one oversized scaffold still gets a boundary.
 _MAX_CHARS = 4 * 1024 * 1024
 
 _lock = threading.Lock()

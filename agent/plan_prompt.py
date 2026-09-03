@@ -1,16 +1,13 @@
-#!/usr/bin/env python3
 """``/plan`` — build the plan-mode prompt: a saved markdown implementation plan, no execution.
 
-A first-class built-in (the former bundled skill fell off capped Telegram/Discord
-command menus). No engine, no model-tool footprint: every surface feeds
-:func:`build_plan_prompt` to the agent as a normal turn, like ``/learn`` and
-``/init``, so system prompt and history stay untouched (prompt-cache safe).
+A first-class built-in with no engine and no model-tool footprint: every surface
+feeds :func:`build_plan_prompt` to the agent as a normal turn (like ``/learn``),
+so system prompt and history stay untouched (prompt-cache safe).
 """
 
 from __future__ import annotations
 
-# Plan-mode ground rules + authoring craft, distilled from the retired bundled
-# skill (writing-craft adapted from obra/superpowers).
+# Ground rules + authoring craft (writing-craft adapted from obra/superpowers).
 _PLAN_MODE_RULES = """\
 For this turn, you are in PLAN MODE — planning only.
 
@@ -63,20 +60,9 @@ Interaction style:
 def build_plan_prompt(task: str = "") -> str:
     """Build the plan-mode prompt; empty *task* asks the agent to infer it from conversation context."""
     task = (task or "").strip()
-    if task:
-        task_block = f"Task to plan:\n{task}\n"
-    else:
-        task_block = (
-            "No explicit task was given with /plan — infer the task from the "
-            "current conversation context (the thing we have been discussing "
-            "or working toward). If the conversation does not imply a task, "
-            "ask a brief clarifying question.\n"
-        )
-    return (
-        "[/plan — plan mode]\n\n"
-        + _PLAN_MODE_RULES
-        + "\n"
-        + task_block
-        + "\n"
-        + _PLAN_CRAFT
+    task_block = f"Task to plan:\n{task}\n" if task else (
+        "No explicit task was given with /plan — infer the task from the "
+        "current conversation context (the thing we have been discussing "
+        "or working toward). If the conversation does not imply a task, ask a brief clarifying question.\n"
     )
+    return "[/plan — plan mode]\n\n" + _PLAN_MODE_RULES + "\n" + task_block + "\n" + _PLAN_CRAFT

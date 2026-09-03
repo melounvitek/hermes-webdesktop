@@ -1,16 +1,11 @@
-"""Helpers for translating OpenAI-style tool schemas to Moonshot's schema subset.
+"""Translate OpenAI-style tool schemas to Moonshot's (Kimi) stricter JSON Schema subset.
 
-Moonshot (Kimi) accepts a stricter subset of JSON Schema than OpenAI tool
-calling; violations fail with HTTP 400 "tools.function.parameters is not a
-valid moonshot flavored json schema". Rules applied here:
-
-1. Every property schema must carry a ``type`` (JSON Schema allows omitting it).
-2. With ``anyOf``, ``type`` belongs on the children, never the parent.
-3. Enum arrays under scalar types may not contain null / empty string.
-4. Every object schema must carry a ``required`` array, even an empty one.
-
-The ``#/definitions/...`` → ``#/$defs/...`` rewrite for draft-07 refs lives in
-``tools/mcp_tool._normalize_mcp_input_schema`` so it applies to all providers.
+Violations fail with HTTP 400 "tools.function.parameters is not a valid moonshot
+flavored json schema". Rules: (1) every property schema carries a ``type``;
+(2) with ``anyOf``, ``type`` belongs on the children, never the parent; (3) enum
+arrays under scalar types may not contain null / empty string; (4) every object
+schema carries a ``required`` array, even an empty one. The ``#/definitions/`` →
+``#/$defs/`` rewrite lives in ``tools/mcp_tool`` so it applies to all providers.
 """
 
 from __future__ import annotations
@@ -25,6 +20,10 @@ _SCHEMA_MAP_KEYS = frozenset({"properties", "patternProperties", "$defs", "defin
 _SCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems"})
 # Values are a single nested schema (additionalProperties may also be a bool).
 _SCHEMA_NODE_KEYS = frozenset({"items", "contains", "not", "additionalProperties", "propertyNames"})
+
+_SCALAR_TYPES = frozenset({"string", "integer", "number", "boolean"})
+# bool before int: bool is an int subclass.
+_ENUM_SAMPLE_TYPES = ((bool, "boolean"), (int, "integer"), (float, "number"))
 
 
 def _empty_object_schema() -> Dict[str, Any]:
@@ -42,9 +41,9 @@ def _repair_schema(node: Any) -> Any:
     for key, value in node.items():
         if key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
             repaired[key] = {sub_key: _repair_schema(sub_val) for sub_key, sub_val in value.items()}
-        elif key in _SCHEMA_LIST_KEYS and isinstance(value, list):
-            repaired[key] = [_repair_schema(v) for v in value]
-        elif key in _SCHEMA_NODE_KEYS and isinstance(value, dict):
+        elif (key in _SCHEMA_LIST_KEYS and isinstance(value, list)) or (
+            key in _SCHEMA_NODE_KEYS and isinstance(value, dict)
+        ):
             repaired[key] = _repair_schema(value)
         else:
             repaired[key] = value
@@ -60,9 +59,7 @@ def _repair_schema(node: Any) -> Any:
         if len(non_null) > 1:
             repaired["anyOf"] = non_null
             return repaired
-        merge = {k: v for k, v in repaired.items() if k != "anyOf"}
-        merge.update(non_null[0])
-        repaired = merge
+        repaired = {**{k: v for k, v in repaired.items() if k != "anyOf"}, **non_null[0]}
 
     # Moonshot also rejects the non-standard ``nullable`` keyword.
     repaired.pop("nullable", None)
@@ -73,7 +70,7 @@ def _repair_schema(node: Any) -> Any:
         repaired = _fill_missing_type(repaired)
 
     # Rule 3: drop null/"" enum values under scalar types; drop an emptied enum.
-    if isinstance(repaired.get("enum"), list) and repaired.get("type") in {"string", "integer", "number", "boolean"}:
+    if isinstance(repaired.get("enum"), list) and repaired.get("type") in _SCALAR_TYPES:
         cleaned = [v for v in repaired["enum"] if v is not None and v != ""]
         if cleaned:
             repaired["enum"] = cleaned
@@ -88,9 +85,8 @@ def _repair_schema(node: Any) -> Any:
 
 
 def _ensure_required_array(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Guarantee an object schema carries a ``required`` list (Moonshot 400s
-    otherwise), pruning names that don't exist in ``properties`` — Moonshot
-    also rejects dangling names. Mutates and returns ``node``."""
+    """Guarantee an object schema carries a ``required`` list, pruning names not in
+    ``properties`` (Moonshot also rejects dangling names). Mutates and returns ``node``."""
     props = node.get("properties")
     req = node.get("required")
     if isinstance(req, list):
@@ -102,7 +98,7 @@ def _ensure_required_array(node: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Infer a reasonable ``type`` if this schema node has none.
+    """Infer a ``type`` if this schema node has none.
 
     A type list collapses to its first concrete member; otherwise
     ``properties``/``required``/``additionalProperties`` → object,
@@ -111,10 +107,7 @@ def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
     """
     node_type = node.get("type")
     if isinstance(node_type, list):
-        concrete = next(
-            (t for t in node_type if isinstance(t, str) and t not in {"", "null"}),
-            "string",
-        )
+        concrete = next((t for t in node_type if isinstance(t, str) and t not in {"", "null"}), "string")
         return {**node, "type": concrete}
     if "type" in node and node_type not in {None, ""}:
         return node
@@ -124,24 +117,20 @@ def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
     elif "items" in node or "prefixItems" in node:
         inferred = "array"
     elif isinstance(node.get("enum"), list) and node["enum"]:
-        sample = node["enum"][0]  # bool before int: bool is an int subclass
-        scalar_types = ((bool, "boolean"), (int, "integer"), (float, "number"))
-        inferred = next((t for cls, t in scalar_types if isinstance(sample, cls)), "string")
+        sample = node["enum"][0]
+        inferred = next((t for cls, t in _ENUM_SAMPLE_TYPES if isinstance(sample, cls)), "string")
     else:
         inferred = "string"
-
     return {**node, "type": inferred}
 
 
 def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
-    """Return a deep-copied, Moonshot-compatible object schema; input is not mutated."""
+    """Deep-copied, Moonshot-compatible object schema; input is not mutated."""
     if not isinstance(parameters, dict):
         return _empty_object_schema()
-
     repaired = _repair_schema(copy.deepcopy(parameters))
     if not isinstance(repaired, dict):
         return _empty_object_schema()
-
     # Top-level must be an object schema.
     repaired["type"] = "object"
     repaired.setdefault("properties", {})
@@ -155,22 +144,17 @@ def sanitize_moonshot_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     """
     if not tools:
         return tools
-
     sanitized: List[Dict[str, Any]] = []
     any_change = False
     for tool in tools:
         fn = tool.get("function") if isinstance(tool, dict) else None
-        if not isinstance(fn, dict):
-            sanitized.append(tool)
-            continue
-        params = fn.get("parameters")
-        repaired = sanitize_moonshot_tool_parameters(params)
-        if repaired is not params:
-            any_change = True
-            sanitized.append({**tool, "function": {**fn, "parameters": repaired}})
-        else:
-            sanitized.append(tool)
-
+        if isinstance(fn, dict):
+            params = fn.get("parameters")
+            repaired = sanitize_moonshot_tool_parameters(params)
+            if repaired is not params:
+                any_change = True
+                tool = {**tool, "function": {**fn, "parameters": repaired}}
+        sanitized.append(tool)
     return sanitized if any_change else tools
 
 

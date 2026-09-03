@@ -1,12 +1,10 @@
 """Shared base classes for the pluggable-backend provider ABCs.
 
-Every tool-provider ABC (browser, TTS, image/video gen, transcription, web
-search, terminal env) shares the same identity + ``hermes tools`` picker
-surface; the previous per-ABC copies of these defaults were byte-identical.
-Concrete ABCs subclass :class:`ProviderBase` (or :class:`CatalogProviderBase`
-when the backend also exposes a model catalog and is available by default) and
-add only their domain methods. Plugins keep subclassing the concrete ABC, so
-``isinstance`` checks and abstract-method sets are unchanged.
+Every tool-provider ABC shares the same identity + ``hermes tools`` picker surface.
+Concrete ABCs subclass :class:`ProviderBase` (or :class:`CatalogProviderBase` when
+the backend also exposes a model catalog and is available by default) and add only
+their domain methods. Plugins keep subclassing the concrete ABC, so ``isinstance``
+checks and abstract-method sets are unchanged.
 """
 
 from __future__ import annotations
@@ -36,16 +34,10 @@ class ProviderBase(abc.ABC):
         """Provider row for the ``hermes tools`` picker.
 
         Shape: ``{"name", "badge", "tag", "env_vars": [{"key", "prompt", "url"}, ...]}``
-        (browser providers may add ``"post_setup"``). Default: a minimal entry
-        derived from ``display_name`` with no env vars — override to expose API
-        key prompts and badges.
+        (browser providers may add ``"post_setup"``). Override to expose API key
+        prompts and badges.
         """
-        return {
-            "name": self.display_name,
-            "badge": "",
-            "tag": "",
-            "env_vars": [],
-        }
+        return {"name": self.display_name, "badge": "", "tag": "", "env_vars": []}
 
 
 class CatalogProviderBase(ProviderBase):
@@ -59,19 +51,16 @@ class CatalogProviderBase(ProviderBase):
     def is_available(self) -> bool:
         """True when this provider can service calls (API key present, SDK importable).
 
-        Default True. Must NOT raise and must NOT make network calls — the picker
-        and ``hermes setup`` call it on every paint.
+        Must NOT raise and must NOT make network calls — the picker and
+        ``hermes setup`` call it on every paint.
         """
         return True
 
     def list_models(self) -> List[Dict[str, Any]]:
-        """Model catalog entries (``{"id": ..., "display": ...}`` plus optional
-        provider-specific keys). Default: empty (no user-selectable models)."""
+        """Model catalog entries (``{"id": ..., "display": ...}`` + provider-specific keys)."""
         return []
 
     def default_model(self) -> Optional[str]:
         """Id of the first catalog entry, or None when the catalog is empty."""
         models = self.list_models()
-        if models:
-            return models[0].get("id")
-        return None
+        return models[0].get("id") if models else None

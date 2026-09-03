@@ -1,9 +1,8 @@
 """Contextual first-touch onboarding hints.
 
 Each hint is shown once per install the *first* time a user hits a behavior
-fork (message-while-running, first long tool, ...), tracked in ``config.yaml``
-under ``onboarding.seen.<flag>``. Kept tiny and dependency-free so both the CLI
-and gateway can import it.
+fork, tracked in ``config.yaml`` under ``onboarding.seen.<flag>``. Kept tiny and
+dependency-free so both the CLI and gateway can import it.
 """
 
 from __future__ import annotations
@@ -22,57 +21,47 @@ OPENCLAW_RESIDUE_FLAG = "openclaw_residue_cleanup"
 PROFILE_BUILD_FLAG = "profile_build_offered"
 
 
-# ── Hint content ──────────────────────────────────────────────────────────
 # Busy-input hints are keyed by the effective busy_input_mode that was just
 # applied so the message matches reality; "interrupt" is the default branch.
-
 _BUSY_INPUT_HINTS_GATEWAY = {
     "queue": (
-        "💡 First-time tip — I queued your message instead of interrupting. "
-        "Send `/busy interrupt` to make new messages stop the current task "
-        "immediately, or `/busy status` to check. This notice won't appear again."
+        "💡 First-time tip — I queued your message instead of interrupting. Send `/busy interrupt` to make new messages "
+        "stop the current task immediately, or `/busy status` to check. This notice won't appear again."
     ),
     "steer": (
-        "💡 First-time tip — I steered your message into the current run; "
-        "it will arrive after the next tool call instead of interrupting. "
-        "Send `/busy interrupt` or `/busy queue` to change this, or "
-        "`/busy status` to check. This notice won't appear again."
+        "💡 First-time tip — I steered your message into the current run; it will arrive after the next tool "
+        "call instead of interrupting. Send `/busy interrupt` or `/busy queue` to change this, or `/busy "
+        "status` to check. This notice won't appear again."
     ),
     "redirect": (
-        "💡 First-time tip — I redirected the current run using your message. "
-        "Completed work stays in context, and `/stop` still cancels the task. "
-        "Send `/busy queue` to wait for a separate turn, or `/busy status` "
-        "to check. This notice won't appear again."
+        "💡 First-time tip — I redirected the current run using your message. Completed work stays in "
+        "context, and `/stop` still cancels the task. Send `/busy queue` to wait for a separate turn, or "
+        "`/busy status` to check. This notice won't appear again."
     ),
 }
 _BUSY_INPUT_HINT_GATEWAY_DEFAULT = (
-    "💡 First-time tip — I just interrupted my current task to answer you. "
-    "Send `/busy queue` to queue follow-ups for after the current task instead, "
-    "`/busy steer` to inject them mid-run without interrupting, or "
-    "`/busy status` to check. This notice won't appear again."
+    "💡 First-time tip — I just interrupted my current task to answer you. Send `/busy queue` to queue "
+    "follow-ups for after the current task instead, `/busy steer` to inject them mid-run without "
+    "interrupting, or `/busy status` to check. This notice won't appear again."
 )
 
 _BUSY_INPUT_HINTS_CLI = {
     "queue": (
-        "(tip) Your message was queued for the next turn. "
-        "Use /busy interrupt to make Enter stop the current run instead, "
-        "or /busy steer to inject mid-run. This tip only shows once."
+        "(tip) Your message was queued for the next turn. Use /busy interrupt to make Enter stop the current "
+        "run instead, or /busy steer to inject mid-run. This tip only shows once."
     ),
     "steer": (
-        "(tip) Your message was steered into the current run; it arrives "
-        "after the next tool call. Use /busy interrupt or /busy queue to "
-        "change this. This tip only shows once."
+        "(tip) Your message was steered into the current run; it arrives after the next tool call. Use /busy "
+        "interrupt or /busy queue to change this. This tip only shows once."
     ),
     "redirect": (
-        "(tip) Your correction redirected the current run without discarding "
-        "completed work. Use /stop to cancel or /busy queue to wait for a "
-        "separate turn. This tip only shows once."
+        "(tip) Your correction redirected the current run without discarding completed work. Use /stop to "
+        "cancel or /busy queue to wait for a separate turn. This tip only shows once."
     ),
 }
 _BUSY_INPUT_HINT_CLI_DEFAULT = (
-    "(tip) Your message interrupted the current run. "
-    "Use /busy queue to queue messages for the next turn instead, "
-    "or /busy steer to inject mid-run. This tip only shows once."
+    "(tip) Your message interrupted the current run. Use /busy queue to queue messages for the next turn "
+    "instead, or /busy steer to inject mid-run. This tip only shows once."
 )
 
 
@@ -88,9 +77,8 @@ def busy_input_hint_cli(mode: str) -> str:
 
 def tool_progress_hint_gateway() -> str:
     return (
-        "💡 First-time tip — that tool took a while and I'm streaming every step. "
-        "If the progress messages feel noisy, send `/verbose` to cycle modes "
-        "(all → new → off). This notice won't appear again."
+        "💡 First-time tip — that tool took a while and I'm streaming every step. If the progress messages "
+        "feel noisy, send `/verbose` to cycle modes (all → new → off). This notice won't appear again."
     )
 
 
@@ -105,81 +93,65 @@ def openclaw_residue_hint_cli() -> str:
     """Banner shown the first time Hermes finds ``~/.openclaw/``: migrate first, cleanup (which breaks OpenClaw) after."""
     return (
         "A legacy OpenClaw directory was detected at ~/.openclaw/.\n"
-        "To port your config, memory, and skills over to Hermes, run "
-        "`hermes claw migrate`.\n"
-        "If you've already migrated and want to archive the old directory, "
-        "run `hermes claw cleanup` (renames it to ~/.openclaw.pre-migration — "
-        "OpenClaw will stop working after this).\n"
+        "To port your config, memory, and skills over to Hermes, run `hermes claw migrate`.\n"
+        "If you've already migrated and want to archive the old directory, run `hermes claw cleanup` "
+        "(renames it to ~/.openclaw.pre-migration — OpenClaw will stop working after this).\n"
         "This tip only shows once."
     )
 
 
 def detect_openclaw_residue(home: Optional[Path] = None) -> bool:
-    """True if ``$HOME/.openclaw`` is a directory (pure check; ``home`` override for tests)."""
-    base = home or Path.home()
+    """True if ``$HOME/.openclaw`` is a directory (``home`` override for tests)."""
     try:
-        return (base / ".openclaw").is_dir()
+        return ((home or Path.home()) / ".openclaw").is_dir()
     except OSError:
         return False
 
 
-# ── Onboarding profile-build path (opt-in, consent-gated) ─────────────────
+def _onboarding_section(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
+    return onboarding if isinstance(onboarding, Mapping) else {}
+
 
 def profile_build_mode(config: Mapping[str, Any]) -> str:
-    """``config.onboarding.profile_build``: ``"off"`` never offers; anything else -> ``"ask"`` (offer on first contact).
+    """``config.onboarding.profile_build``: ``"off"`` never offers; anything else -> ``"ask"``.
 
-    This only governs whether the offer is made; lookups inside the flow are
+    Only governs whether the offer is made; lookups inside the flow are
     consented to separately in conversation.
     """
-    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
-    if not isinstance(onboarding, Mapping):
-        return "ask"
-    mode = onboarding.get("profile_build")
-    if isinstance(mode, str) and mode.strip().lower() == "off":
-        return "off"
-    return "ask"
+    mode = _onboarding_section(config).get("profile_build")
+    return "off" if isinstance(mode, str) and mode.strip().lower() == "off" else "ask"
 
 
 def profile_build_directive() -> str:
     """System-note directive appended to the very first message ever.
 
-    Runs a short opt-in profile-build flow persisting to the user-profile memory
-    store; phrased so the agent ASKS before any lookup and never silently reads
+    Short opt-in profile-build flow persisting to the user-profile memory store;
+    phrased so the agent ASKS before any lookup and never silently reads
     connected accounts.
     """
     return (
-        "\n\n[System note: This is the user's very first message ever. "
-        "After a one-sentence introduction (mention /help shows commands), "
-        "OFFER — do not assume — to build a short profile of them so you can "
-        "be more useful, and explain they can decline or do it later. If and "
-        "ONLY IF they accept:\n"
-        "  1. Ask for whatever they're comfortable sharing (name, what they "
-        "do, how they like you to work). Volunteered facts come first.\n"
-        "  2. Before ANY external lookup, say what you intend to look up and "
-        "get explicit consent for that step. Never read their connected "
-        "accounts (email, calendar, etc.) silently — ask each time.\n"
-        "  3. With consent, you may use web_search to confirm public details "
-        "(e.g. employer, public profiles) from the data points they gave.\n"
-        "  4. Save each confirmed, durable fact with the memory tool using "
-        "target=\"user\" — keep entries compact and high-signal.\n"
-        "If they decline at any point, stop immediately and continue normally. "
-        "Keep the whole exchange light and conversational, not an interrogation.]"
+        "\n\n"
+        "[System note: This is the user's very first message ever. After a one-sentence introduction (mention /help "
+        "shows commands), OFFER — do not assume — to build a short profile of them so you can be more useful, and "
+        "explain they can decline or do it later. If and ONLY IF they accept:\n"
+        "  1. Ask for whatever they're comfortable sharing (name, what they do, how they like you to work). "
+        "Volunteered facts come first.\n"
+        "  2. Before ANY external lookup, say what you intend to look up and get explicit consent for that step. Never "
+        "read their connected accounts (email, calendar, etc.) silently — ask each time.\n"
+        "  3. With consent, you may use web_search to confirm public details (e.g. employer, public profiles) from the "
+        "data points they gave.\n"
+        "  4. Save each confirmed, durable fact with the memory tool using target=\"user\" — keep entries compact and "
+        "high-signal.\n"
+        "If they decline at any point, stop immediately and continue normally. Keep the whole exchange light and "
+        "conversational, not an interrogation.]"
     )
 
 
-# ── State read / write ────────────────────────────────────────────────────
-
-def _get_seen_dict(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
-    if not isinstance(onboarding, Mapping):
-        return {}
-    seen = onboarding.get("seen")
-    return seen if isinstance(seen, Mapping) else {}
-
-
 def is_seen(config: Mapping[str, Any], flag: str) -> bool:
-    """Return True if the user has already been shown this first-touch hint."""
-    return bool(_get_seen_dict(config).get(flag))
+    """True if the user has already been shown this first-touch hint."""
+    seen = _onboarding_section(config).get("seen")
+    return bool(seen.get(flag)) if isinstance(seen, Mapping) else False
 
 
 def mark_seen(config_path: Path, flag: str) -> bool:
@@ -200,12 +172,10 @@ def mark_seen(config_path: Path, flag: str) -> bool:
             cfg["onboarding"] = {}
         seen = cfg["onboarding"].get("seen")
         if not isinstance(seen, dict):
-            seen = {}
-            cfg["onboarding"]["seen"] = seen
-        if seen.get(flag) is True:
-            return True
-        seen[flag] = True
-        atomic_config_write(config_path, cfg)
+            seen = cfg["onboarding"]["seen"] = {}
+        if seen.get(flag) is not True:
+            seen[flag] = True
+            atomic_config_write(config_path, cfg)
         return True
     except Exception as e:
         logger.debug("onboarding: failed to mark flag %s: %s", flag, e)
@@ -213,18 +183,8 @@ def mark_seen(config_path: Path, flag: str) -> bool:
 
 
 __all__ = [
-    "BUSY_INPUT_FLAG",
-    "TOOL_PROGRESS_FLAG",
-    "OPENCLAW_RESIDUE_FLAG",
-    "PROFILE_BUILD_FLAG",
-    "busy_input_hint_gateway",
-    "busy_input_hint_cli",
-    "tool_progress_hint_gateway",
-    "tool_progress_hint_cli",
-    "openclaw_residue_hint_cli",
-    "detect_openclaw_residue",
-    "profile_build_mode",
-    "profile_build_directive",
-    "is_seen",
-    "mark_seen",
+    "BUSY_INPUT_FLAG", "TOOL_PROGRESS_FLAG", "OPENCLAW_RESIDUE_FLAG", "PROFILE_BUILD_FLAG",
+    "busy_input_hint_gateway", "busy_input_hint_cli", "tool_progress_hint_gateway", "tool_progress_hint_cli",
+    "openclaw_residue_hint_cli", "detect_openclaw_residue", "profile_build_mode", "profile_build_directive",
+    "is_seen", "mark_seen",
 ]
