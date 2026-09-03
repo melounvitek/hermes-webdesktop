@@ -247,6 +247,13 @@ class _ToolCallRef:
     call_id: str
     trace: list
 
+    def middleware_kwargs(self) -> dict[str, Any]:
+        """Keyword form ``_run_agent_tool_execution_middleware`` (and tests patching it) expect."""
+        return {
+            "function_name": self.name, "function_args": self.args, "effective_task_id": self.task_id,
+            "tool_call_id": self.call_id, "middleware_trace": self.trace,
+        }
+
     def emit_post(self, agent, result, *, trace=None, **outcome) -> None:
         """Emit the one terminal ``post_tool_call`` for this call (``outcome`` = status /
         error_type / error_message / duration_ms). Resolved through the module attribute so
@@ -685,14 +692,7 @@ def _dispatch_authorized_once(
     elif ref.name == "skill_manage":
         agent._iters_since_skill = 0
 
-    _advance_start_order(lambda: _begin_tool_execution(
-        agent,
-        function_name=ref.name,
-        function_args=ref.args,
-        effective_task_id=ref.task_id,
-        tool_call_id=ref.call_id,
-        display_index=display_index,
-    ))
+    _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
     return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
 
 
@@ -843,16 +843,8 @@ def _run_sequential_tool_execution_middleware(
     generic deadline would report ``tool_timeout`` while the prompt is still live.
     """
     timeout_s = _resolve_sequential_tool_timeout()
-    kwargs = {
-        "function_name": function_name,
-        "function_args": function_args,
-        "effective_task_id": effective_task_id,
-        "tool_call_id": tool_call_id,
-        "execute": execute,
-        "scope_block": scope_block,
-        "display_index": display_index,
-        "middleware_trace": middleware_trace,
-    }
+    ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace)
+    kwargs = dict(ref.middleware_kwargs(), execute=execute, scope_block=scope_block, display_index=display_index)
     if function_name in _NEVER_PARALLEL_TOOLS:
         return _run_agent_tool_execution_middleware(agent, **kwargs)
 
@@ -866,10 +858,8 @@ def _run_sequential_tool_execution_middleware(
             worker_tid.append(tid)
             return _run_agent_tool_execution_middleware(agent, authorization_gate=authorization_gate, **kwargs)
 
-    ref = _ToolCallRef(
-        function_name, function_args, effective_task_id, tool_call_id,
-        middleware_trace if middleware_trace is not None else [],
-    )
+    if ref.trace is None:
+        ref.trace = []
     executor = DaemonThreadPoolExecutor(max_workers=1)
     future = executor.submit(propagate_context_to_thread(_run))
     deadline = time.monotonic() + timeout_s if timeout_s is not None else None
@@ -920,16 +910,9 @@ def _run_sequential_tool_execution_middleware(
         executor.shutdown(wait=not abandoned, cancel_futures=abandoned)
 
 
-def _begin_tool_execution(
-    agent,
-    *,
-    function_name: str,
-    function_args: dict[str, Any],
-    effective_task_id: str,
-    tool_call_id: str,
-    display_index: int | None,
-) -> None:
+def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -> None:
     """Run user-visible and checkpoint preflight on final tool arguments."""
+    function_name, function_args, effective_task_id, tool_call_id = ref.name, ref.args, ref.task_id, ref.call_id
     display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
     if _tool_progress_enabled(agent):
         args_str = json.dumps(display_args, ensure_ascii=False)
@@ -986,10 +969,9 @@ def _emit_tool_completed_progress(agent, function_name: str, *, duration: float,
         logging.debug("Tool progress callback error: %s", cb_err)
 
 
-def _emit_tool_complete_and_risk(
-    agent, *, function_name: str, function_args: dict, tool_call_id: str, result, risk_metadata, blocked: bool
-) -> None:
+def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata, blocked: bool) -> None:
     """Fire ``tool_complete_callback`` (unless blocked) then the ``tool.output_risk`` projection."""
+    function_name, function_args, tool_call_id = ref.name, ref.args, ref.call_id
     if not blocked and agent.tool_complete_callback:
         try:
             display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
@@ -1255,15 +1237,9 @@ class _ConcurrentBatch:
         try:
             managed = _run_agent_tool_execution_middleware(
                 agent,
-                function_name=ref.name,
-                function_args=ref.args,
-                effective_task_id=ref.task_id,
-                tool_call_id=ref.call_id,
+                **ref.middleware_kwargs(),
                 execute=lambda next_args: agent._invoke_tool(
-                    ref.name,
-                    next_args,
-                    ref.task_id,
-                    ref.call_id,
+                    ref.name, next_args, ref.task_id, ref.call_id,
                     messages=self.messages,
                     pre_tool_block_checked=True,
                     skip_tool_request_middleware=True,
@@ -1272,7 +1248,6 @@ class _ConcurrentBatch:
                 ),
                 scope_block=scope_block,
                 display_index=index + 1,
-                middleware_trace=ref.trace,
                 begin_execution=start_gate.advance,
                 authorization_gate=self.authorization_gate,
             )
@@ -1385,7 +1360,8 @@ class _ConcurrentBatch:
             if not not_done:
                 return False
 
-            if deadline is not None and time.monotonic() >= deadline + self.authorization_gate.excluded_seconds():
+            timed_out = deadline is not None and time.monotonic() >= deadline + self.authorization_gate.excluded_seconds()
+            if timed_out:
                 self.timed_out_indices = {future_to_index[f] for f in not_done if f in future_to_index}
                 logger.warning(
                     "concurrent tool batch timed out after %.1fs; %d tool(s) still running: %s",
@@ -1393,40 +1369,36 @@ class _ConcurrentBatch:
                     len(self.timed_out_indices),
                     ", ".join(self._running_names(not_done, future_to_index)[:5]),
                 )
-                for f in not_done:
-                    f.cancel()
-                # Release gate-parked workers before interrupt fan-out so none
-                # later dispatches a tool just reported as timed out.
-                self.gate.abandon()
-                with agent._tool_worker_threads_lock:
-                    worker_tids = list(agent._tool_worker_threads)
-                _interrupt_worker_tids(agent, worker_tids)
-                return True
-
-            # Tools without interrupt checks (web_search, read_file) run to
-            # completion; cancel unstarted futures so we don't block on them.
-            if agent._interrupt_requested:
+            elif agent._interrupt_requested:
+                # Tools without interrupt checks (web_search, read_file) run to
+                # completion; cancel unstarted futures so we don't block on them.
                 agent._vprint(
                     f"{agent.log_prefix}⚡ Interrupt: cancelling {len(not_done)} pending concurrent tool(s)",
                     force=True,
                 )
-                for f in not_done:
-                    f.cancel()
-                # Release gate-parked workers so they abort instead of dispatching after
-                # the turn was already interrupted; then give running tools a moment to
-                # notice the per-thread interrupt signal and exit gracefully.
-                self.gate.abandon()
+            else:
+                _conc_elapsed = int(time.time() - _conc_start)
+                # Heartbeat every ~30s (6 × 5s poll intervals)
+                if _conc_elapsed > 0 and _conc_elapsed % 30 < 6:
+                    _still_running = self._running_names(not_done, future_to_index)
+                    agent._touch_activity(
+                        f"concurrent tools running ({_conc_elapsed}s, "
+                        f"{len(not_done)} remaining: {', '.join(_still_running[:3])})"
+                    )
+                continue
+            for f in not_done:
+                f.cancel()
+            # Release gate-parked workers BEFORE interrupt fan-out so none later
+            # dispatches a tool the turn already reported as timed out / interrupted.
+            self.gate.abandon()
+            if timed_out:
+                with agent._tool_worker_threads_lock:
+                    worker_tids = list(agent._tool_worker_threads)
+                _interrupt_worker_tids(agent, worker_tids)
+            else:
+                # Give running tools a moment to notice the per-thread interrupt and exit gracefully.
                 concurrent.futures.wait(not_done, timeout=3.0)
-                return True
-
-            _conc_elapsed = int(time.time() - _conc_start)
-            # Heartbeat every ~30s (6 × 5s poll intervals)
-            if _conc_elapsed > 0 and _conc_elapsed % 30 < 6:
-                _still_running = self._running_names(not_done, future_to_index)
-                agent._touch_activity(
-                    f"concurrent tools running ({_conc_elapsed}s, "
-                    f"{len(not_done)} remaining: {', '.join(_still_running[:3])})"
-                )
+            return True
 
     def run(self) -> None:
         """Dispatch the runnable calls on a daemon pool and wait for the batch."""
@@ -1518,15 +1490,7 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
         elif _tool_progress_enabled(agent):
             _print_tool_completed(agent, i + 1, tool_duration, _multimodal_text_summary(display_function_result))
 
-        _emit_tool_complete_and_risk(
-            agent,
-            function_name=ref.name,
-            function_args=ref.args,
-            tool_call_id=ref.call_id,
-            result=display_function_result,
-            risk_metadata=risk_metadata,
-            blocked=blocked,
-        )
+        _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, blocked)
     return True
 
 
@@ -1758,14 +1722,10 @@ def _run_sequential_call(
     try:
         managed = _run_sequential_tool_execution_middleware(
             agent,
-            function_name=ref.name,
-            function_args=ref.args,
-            effective_task_id=ref.task_id,
-            tool_call_id=ref.call_id,
+            **dict(ref.middleware_kwargs(), middleware_trace=dispatch.middleware_trace_arg),
             execute=dispatch.execute,
             scope_block=scope_block,
             display_index=display_index,
-            middleware_trace=dispatch.middleware_trace_arg,
         )
         ref.args = managed.args
         _spinner_result = managed.result
@@ -1824,15 +1784,7 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
         return False
     function_result, display_function_result, risk_metadata = committed
 
-    _emit_tool_complete_and_risk(
-        agent,
-        function_name=ref.name,
-        function_args=ref.args,
-        tool_call_id=ref.call_id,
-        result=display_function_result,
-        risk_metadata=risk_metadata,
-        blocked=managed.blocked,
-    )
+    _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, managed.blocked)
     if _tool_progress_enabled(agent):
         _print_tool_completed(agent, index, tool_duration, function_result)
     return True
