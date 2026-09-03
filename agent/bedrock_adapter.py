@@ -824,6 +824,65 @@ def call_converse(
     return normalize_converse_response(response)
 
 
+# Public API kept from main (plugins may import it): the agent loop itself streams through
+# chat_completion_helpers._bedrock_converse_call, which applies the same recovery ladder.
+def call_converse_stream(
+    region: str,
+    model: str,
+    messages: List[Dict],
+    tools: Optional[List[Dict]] = None,
+    max_tokens: Optional[int] = 4096,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    stop_sequences: Optional[List[str]] = None,
+    guardrail_config: Optional[Dict] = None,
+) -> SimpleNamespace:
+    """Call Bedrock ConverseStream API and return an OpenAI-compatible response.
+
+    Consumes the full stream and returns the assembled response. For true
+    streaming with delta callbacks, use ``iter_converse_stream()`` instead.
+    """
+    client = _get_bedrock_runtime_client(region)
+    kwargs = build_converse_kwargs(
+        model=model,
+        messages=messages,
+        tools=tools,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        stop_sequences=stop_sequences,
+        guardrail_config=guardrail_config,
+    )
+
+    try:
+        response = client.converse_stream(**kwargs)
+    except Exception as exc:
+        retry_kwargs = recover_from_cache_point_rejection(exc, kwargs)
+        if retry_kwargs is not None:
+            return normalize_converse_stream_events(
+                client.converse_stream(**retry_kwargs)
+            )
+        if is_streaming_access_denied_error(exc):
+            # IAM allows bedrock:InvokeModel but not
+            # InvokeModelWithResponseStream — permanent for this session.
+            # Fall back to the non-streaming converse() path.
+            logger.info(
+                "bedrock: converse_stream denied by IAM on (region=%s, model=%s) — "
+                "falling back to non-streaming converse().",
+                region, model,
+            )
+            return normalize_converse_response(client.converse(**kwargs))
+        if is_stale_connection_error(exc):
+            logger.warning(
+                "bedrock: stale-connection error on converse_stream(region=%s, "
+                "model=%s): %s — evicting cached client so the next call reconnects.",
+                region, model, type(exc).__name__,
+            )
+            invalidate_runtime_client(region)
+        raise
+    return normalize_converse_stream_events(response)
+
+
 # --- Model discovery ---
 
 _discovery_cache: Dict[str, Any] = {}
@@ -911,6 +970,62 @@ def _extract_provider_from_arn(arn: str) -> str:
     """``arn:aws:bedrock:...:foundation-model/anthropic.claude-v2`` → ``"anthropic"``."""
     match = re.search(r"foundation-model/([^.]+)", arn)
     return match.group(1) if match else ""
+
+
+# ---------------------------------------------------------------------------
+# Error classification — Bedrock-specific exceptions
+# ---------------------------------------------------------------------------
+# Mirrors OpenClaw's classifyFailoverReason() and matchesContextOverflowError()
+# in extensions/amazon-bedrock/register.sync.runtime.ts.
+
+# Patterns that indicate the input context exceeded the model's token limit.
+# Used by run_agent.py to trigger context compression instead of retrying.
+CONTEXT_OVERFLOW_PATTERNS = [
+    re.compile(r"ValidationException.*(?:input is too long|max input token|input token.*exceed)", re.IGNORECASE),
+    re.compile(r"ValidationException.*(?:exceeds? the (?:maximum|max) (?:number of )?(?:input )?tokens)", re.IGNORECASE),
+    re.compile(r"ModelStreamErrorException.*(?:Input is too long|too many input tokens)", re.IGNORECASE),
+]
+
+# Patterns for throttling / rate limit errors — should trigger backoff + retry.
+THROTTLE_PATTERNS = [
+    re.compile(r"ThrottlingException", re.IGNORECASE),
+    re.compile(r"Too many concurrent requests", re.IGNORECASE),
+    re.compile(r"ServiceQuotaExceededException", re.IGNORECASE),
+]
+
+# Patterns for transient overload — model is temporarily unavailable.
+OVERLOAD_PATTERNS = [
+    re.compile(r"ModelNotReadyException", re.IGNORECASE),
+    re.compile(r"ModelTimeoutException", re.IGNORECASE),
+    re.compile(r"InternalServerException", re.IGNORECASE),
+]
+
+
+def is_context_overflow_error(error_message: str) -> bool:
+    """Return True if the error indicates the input context was too large.
+
+    When this returns True, the agent should compress context and retry
+    rather than treating it as a fatal error.
+    """
+    return any(p.search(error_message) for p in CONTEXT_OVERFLOW_PATTERNS)
+
+
+def classify_bedrock_error(error_message: str) -> str:
+    """Classify a Bedrock error for retry/failover decisions.
+
+    Returns:
+      - ``"context_overflow"`` — input too long, compress and retry
+      - ``"rate_limit"`` — throttled, backoff and retry
+      - ``"overloaded"`` — model temporarily unavailable, retry with delay
+      - ``"unknown"`` — unclassified error
+    """
+    if is_context_overflow_error(error_message):
+        return "context_overflow"
+    if any(p.search(error_message) for p in THROTTLE_PATTERNS):
+        return "rate_limit"
+    if any(p.search(error_message) for p in OVERLOAD_PATTERNS):
+        return "overloaded"
+    return "unknown"
 
 
 # --- Bedrock model context lengths ---
