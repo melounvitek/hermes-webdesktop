@@ -18,15 +18,13 @@ from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
-# Paths resolve lazily: a multiplexed gateway serves several profile homes from
-# one process, so an import-time constant would pin every profile to whichever
-# home imported first. These globals are explicit overrides (tests patch them);
-# ``None`` means "resolve from the current home".
+# Paths resolve lazily: a multiplexed gateway serves several profile homes from one
+# process, so an import-time constant would pin every profile to whichever home imported
+# first. These globals are explicit overrides (tests patch them); None = current home.
 DIRECTORY_PATH: Optional[Path] = None
-# User-maintained friendly-name overlay, re-applied on every build AND load
-# (hand-edits to the regenerated channel_directory.json don't survive); also
-# lets a chat be pre-named before its first traffic.
-# Format: {"<platform>": {"<chat_id>": "<friendly name>", ...}, ...}
+# User-maintained friendly-name overlay {"<platform>": {"<chat_id>": "<friendly name>"}},
+# re-applied on every build AND load (hand-edits to the regenerated
+# channel_directory.json don't survive); also lets a chat be pre-named before first traffic.
 CHANNEL_ALIASES_PATH: Optional[Path] = None
 
 # Slack refresh failures recur on every timed rebuild (missing scope, revoked
@@ -47,13 +45,17 @@ def _aliases_path() -> Path:
     return CHANNEL_ALIASES_PATH or get_hermes_home() / "channel_aliases.json"
 
 
+def _read_json(path: Path) -> Any:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _load_json_dict(path: Path) -> Dict[str, Any]:
     """Read a JSON object from *path*; {} when missing, unreadable, or not a dict."""
     if not path.exists():
         return {}
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = _read_json(path)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -62,8 +64,8 @@ def _load_json_dict(path: Path) -> Dict[str, Any]:
 def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
     """Overlay friendly names onto directory entries by chat_id, in place.
 
-    An aliased id not yet discovered gets a placeholder entry so a
-    freshly-created group is addressable by name before its first message.
+    An aliased id not yet discovered gets a placeholder entry so a freshly-created
+    group is addressable by name before its first message.
     """
     for plat_name, id_map in _load_json_dict(_aliases_path()).items():
         if not isinstance(id_map, dict):
@@ -74,16 +76,13 @@ def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
         for chat_id, friendly in id_map.items():
             if not isinstance(friendly, str) or not friendly.strip():
                 continue
-            chat_id = str(chat_id)
-            friendly = friendly.strip()
+            chat_id, friendly = str(chat_id), friendly.strip()
             matches = [e for e in entries if isinstance(e, dict) and e.get("id") == chat_id]
             for e in matches:
                 e["name"] = friendly
             if not matches:
-                entries.append({
-                    "id": chat_id, "name": friendly,
-                    "type": "group" if chat_id.endswith("@g.us") else "dm", "thread_id": None,
-                })
+                entries.append({"id": chat_id, "name": friendly, "thread_id": None,
+                                "type": "group" if chat_id.endswith("@g.us") else "dm"})
 
 
 def _normalize_channel_query(value: str) -> str:
@@ -93,28 +92,23 @@ def _normalize_channel_query(value: str) -> str:
 def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     """Human-facing target label for a channel entry."""
     name = channel["name"]
-    if platform_name == "discord" and channel.get("guild"):
-        return f"#{name}"
-    if platform_name != "discord" and channel.get("type"):
-        return f"{name} ({channel['type']})"
-    return name
+    if platform_name == "discord":
+        return f"#{name}" if channel.get("guild") else name
+    return f"{name} ({channel['type']})" if channel.get("type") else name
 
 
 def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
     chat_id = origin.get("chat_id")
     if not chat_id:
         return None
-    thread_id = origin.get("thread_id")
-    return f"{chat_id}:{thread_id}" if thread_id else str(chat_id)
+    return f"{chat_id}:{thread_id}" if (thread_id := origin.get("thread_id")) else str(chat_id)
 
 
 def _session_entry_name(origin: Dict[str, Any]) -> str:
     base_name = origin.get("chat_name") or origin.get("user_name") or str(origin.get("chat_id"))
-    thread_id = origin.get("thread_id")
-    if not thread_id:
+    if not (thread_id := origin.get("thread_id")):
         return base_name
-    topic_label = origin.get("chat_topic") or f"topic {thread_id}"
-    return f"{base_name} / {topic_label}"
+    return f"{base_name} / {origin.get('chat_topic') or f'topic {thread_id}'}"
 
 
 def _report_slack_failure(team_id: str, error_code: Optional[str], detail: str) -> None:
@@ -137,9 +131,7 @@ def _report_slack_failure(team_id: str, error_code: Optional[str], detail: str) 
 async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     """Build the directory from connected adapters + session data and persist it."""
     from gateway.config import Platform
-
     platforms: Dict[str, List[Dict[str, str]]] = {}
-
     for platform, adapter in adapters.items():
         try:
             list_channels = getattr(adapter, "list_channels", None)
@@ -154,21 +146,14 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
                 platforms["slack"] = await _build_slack(adapter)
         except Exception as e:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
-
-    # Platforms without channel enumeration get session-based discovery, but
-    # only when connected in THIS gateway process: origins for disabled or
-    # decommissioned platforms must not resurface as stale send targets.
+    # Platforms without channel enumeration get session-based discovery, but only when
+    # connected in THIS gateway process: origins for disabled or decommissioned
+    # platforms must not resurface as stale send targets.
     adapter_platform_names = {getattr(p, "value", str(p)) for p in adapters}
-
     async def _discover(plat_name: str) -> None:
-        if (
-            plat_name in _SKIP_SESSION_DISCOVERY
-            or plat_name in platforms
-            or plat_name not in adapter_platform_names
-        ):
+        if plat_name in _SKIP_SESSION_DISCOVERY or plat_name in platforms or plat_name not in adapter_platform_names:
             return
         platforms[plat_name] = await asyncio.to_thread(_build_from_sessions, plat_name)
-
     for plat in Platform:
         await _discover(plat.value)
     # Plugin platforms are dynamic enum members missing from Platform.__members__.
@@ -176,16 +161,12 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             await _discover(entry.name)
-
     _apply_channel_aliases(platforms)
-
     directory = {"updated_at": datetime.now().isoformat(), "platforms": platforms}
-
     try:
         await asyncio.to_thread(atomic_json_write, _directory_path(), directory)
     except Exception as e:
         logger.warning("Channel directory: failed to write: %s", e)
-
     return directory
 
 
@@ -195,19 +176,16 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
     client = getattr(adapter, "_client", None)
     if not client:
         return channels
-
     try:
         import discord as _discord  # noqa: F401 — SDK presence check
     except ImportError:
         return channels
-
     for guild in client.guilds:
         # Forum channels (type 15): creating a message auto-spawns a thread post.
         forums = getattr(guild, "forum_channels", None) or []
         for chs, ch_type in ((guild.text_channels, "channel"), (forums, "forum")):
             for ch in chs:
                 channels.append({"id": str(ch.id), "name": ch.name, "guild": guild.name, "type": ch_type})
-
     # DM-capable users aren't reachable via guild enumeration; they come from sessions.
     channels.extend(_build_from_sessions("discord"))
     return channels
@@ -233,9 +211,7 @@ def _normalize_adapter_channels(raw_channels: Any) -> List[Dict[str, Any]]:
         if not channel_id or not name or channel_id in seen_ids:
             continue
         entry: Dict[str, Any] = {"id": channel_id, "name": name, "type": str(raw.get("type") or "dm")}
-        for key in ("thread_id", "guild"):
-            if raw.get(key):
-                entry[key] = str(raw.get(key))
+        entry.update({key: str(raw[key]) for key in ("thread_id", "guild") if raw.get(key)})
         channels.append(entry)
         seen_ids.add(channel_id)
     return channels
@@ -257,10 +233,7 @@ async def _slack_team_channels(team_id: str, client, seen_ids: set) -> List[Dict
         cursor: Optional[str] = None
         for _page in range(20):  # safety cap on pagination
             response = await client.users_conversations(
-                types="public_channel,private_channel",
-                exclude_archived=True,
-                limit=200,
-                cursor=cursor,
+                types="public_channel,private_channel", exclude_archived=True, limit=200, cursor=cursor,
             )
             if not response.get("ok"):
                 error_code = response.get("error", "unknown")
@@ -289,7 +262,6 @@ async def _slack_resolve_raw_names(client, channels: List[Dict[str, Any]]) -> No
             unresolved_by_base.setdefault(_slack_base_id(entry["id"]), []).append(entry)
     if not unresolved_by_base:
         return
-
     async def _resolve_base(base_id: str, entries: list) -> None:
         try:
             resp = await client.conversations_info(channel=base_id)
@@ -311,7 +283,6 @@ async def _slack_resolve_raw_names(client, channels: List[Dict[str, Any]]) -> No
                     entry["type"] = resolved_type
         except Exception as e:
             logger.debug("Channel directory: failed to resolve %s: %s", base_id, e)
-
     await asyncio.gather(*[_resolve_base(bid, ents) for bid, ents in unresolved_by_base.items()])
 
 
@@ -321,12 +292,10 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     team_clients = getattr(adapter, "_team_clients", None) or {}
     if not team_clients:
         return await asyncio.to_thread(_build_from_sessions, "slack")
-
     channels: List[Dict[str, Any]] = []
     seen_ids: set = set()
     for team_id, client in team_clients.items():
         channels.extend(await _slack_team_channels(team_id, client, seen_ids))
-
     # Merge session-history DM/group entries, naming raw-ID entries from the
     # API-discovered channels where the base conversation ID is known.
     api_name_lookup = {ch["id"]: ch["name"] for ch in channels}
@@ -338,25 +307,18 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
             entry["name"] = api_name_lookup[_slack_base_id(eid)]
         channels.append(entry)
         seen_ids.add(eid)
-
     await _slack_resolve_raw_names(next(iter(team_clients.values())), channels)
     return channels
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
-    """Pull known channels/contacts from gateway session origin data.
-
-    state.db is the primary source; sessions.json is the fallback for
-    pre-migration databases.
-    """
+    """Known channels/contacts from session origins: state.db first, sessions.json fallback (pre-migration)."""
     return _build_from_sessions_db(platform_name) or _build_from_sessions_json(platform_name)
 
 
 def _entries_from_origins(platform_name: str, source: str, origins_fn) -> List[Dict[str, Any]]:
-    """Deduped directory entries for the (origin, chat_type) pairs yielded by ``origins_fn()``.
-
-    Appends incrementally so a mid-iteration failure keeps the entries read so far.
-    """
+    """Deduped entries for the (origin, chat_type) pairs from ``origins_fn()``; a mid-iteration
+    failure keeps entries read so far."""
     entries: List[Dict[str, Any]] = []
     try:
         seen_ids = set()
@@ -393,7 +355,6 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
             if not isinstance(origin, dict) or not origin:
                 origin = {"chat_id": row.get("chat_id"), "thread_id": row.get("thread_id"), "chat_name": row.get("display_name")}
             yield origin, row.get("chat_type") or "dm"
-
     return _entries_from_origins(platform_name, "state.db session read failed", _origins)
 
 
@@ -402,18 +363,14 @@ def _build_from_sessions_json(platform_name: str) -> List[Dict[str, str]]:
     sessions_path = get_hermes_home() / "sessions" / "sessions.json"
     if not sessions_path.exists():
         return []
-
     def _origins() -> Iterable[Tuple[Dict[str, Any], Any]]:
-        with open(sessions_path, encoding="utf-8") as f:
-            data = json.load(f)
-        for _key, session in data.items():
+        for _key, session in _read_json(sessions_path).items():
             # Keys starting with "_" (e.g. the gateway's "_README") are metadata sentinels.
             if str(_key).startswith("_") or not isinstance(session, dict):
                 continue
             origin = session.get("origin") or {}
             if origin.get("platform") == platform_name:
                 yield origin, session.get("chat_type", "dm")
-
     return _entries_from_origins(platform_name, "failed to read sessions", _origins)
 
 
@@ -424,8 +381,7 @@ def load_directory() -> Dict[str, Any]:
     directory_path = _directory_path()
     if directory_path.exists():
         with contextlib.suppress(Exception):
-            with open(directory_path, encoding="utf-8") as f:
-                data = json.load(f)
+            data = _read_json(directory_path)
             # Aliases apply on read too, so new names take effect between timed rebuilds.
             _apply_channel_aliases(data.setdefault("platforms", {}))
             return data
@@ -436,37 +392,27 @@ def load_directory() -> Dict[str, Any]:
 
 def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
     """Channel ``type`` string (e.g. ``"channel"``, ``"forum"``) for *chat_id*, or None if unknown."""
-    for ch in load_directory().get("platforms", {}).get(platform_name, []):
-        if ch.get("id") == chat_id:
-            return ch.get("type")
-    return None
+    channels = load_directory().get("platforms", {}).get(platform_name, [])
+    return next((ch.get("type") for ch in channels if ch.get("id") == chat_id), None)
 
 
 def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
-    """Resolve a human-friendly channel name to a numeric ID (case-insensitive, first match wins).
-
-    Accepts e.g. Discord "bot-home" / "#bot-home" / "GuildName/bot-home", Telegram
-    display or group names, Slack "engineering" / "#engineering".
-    """
+    """Resolve a friendly channel name (e.g. "bot-home", "#bot-home", "GuildName/bot-home",
+    Slack "#engineering") to an ID; case-insensitive, first match wins."""
     channels = load_directory().get("platforms", {}).get(platform_name, [])
     if not channels:
         return None
-
-    # 0. Exact ID match — case-sensitive, no normalization, so raw platform IDs
-    # (e.g. Slack "C0B0QV5434G") work even when _parse_target_ref's format
-    # guard didn't recognize them as explicit.
+    # 0. Exact ID match — case-sensitive, no normalization, so raw platform IDs (e.g. Slack
+    # "C0B0QV5434G") work even when _parse_target_ref's format guard didn't recognize them.
     raw = name.strip()
     for ch in channels:
         if ch.get("id") == raw:
             return ch["id"]
-
     query = _normalize_channel_query(name)
-
     # 1. Exact name match, including the display labels shown by send_message(action="list")
     for ch in channels:
         if query in (_normalize_channel_query(ch["name"]), _normalize_channel_query(_channel_target_name(platform_name, ch))):
             return ch["id"]
-
     # 2. Guild-qualified match for Discord ("GuildName/channel")
     if "/" in query:
         guild_part, ch_part = query.rsplit("/", 1)
@@ -474,30 +420,23 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
             guild = ch.get("guild", "").strip().lower()
             if guild == guild_part and _normalize_channel_query(ch["name"]) == ch_part:
                 return ch["id"]
-
     # 3. Partial prefix match (only if unambiguous)
     matches = [ch for ch in channels if _normalize_channel_query(ch["name"]).startswith(query)]
-    if len(matches) == 1:
-        return matches[0]["id"]
-
-    return None
+    return matches[0]["id"] if len(matches) == 1 else None
 
 
 def format_directory_for_display(platforms: Optional[Dict[str, Any]] = None) -> str:
     """Format the channel directory as a human-readable list for the model.
 
     ``platforms`` overrides the on-disk directory (``hermes send --list`` merges in
-    configured-but-undiscovered platforms). An empty channel list renders a
-    "(no channels discovered yet)" hint: the platform is still a valid send target.
+    configured-but-undiscovered platforms); an empty channel list renders a "(no channels
+    discovered yet)" hint because the platform is still a valid send target.
     """
     if platforms is None:
         platforms = load_directory().get("platforms", {})
-
     if not platforms:
         return "No messaging platforms connected or no channels discovered yet."
-
     lines = ["Available messaging targets:\n"]
-
     for plat_name, channels in sorted(platforms.items()):
         if not channels:
             lines.append(f"{plat_name.title()}:")
@@ -521,8 +460,6 @@ def format_directory_for_display(platforms: Optional[Dict[str, Any]] = None) -> 
             lines.append(f"{plat_name.title()}:")
             lines.extend(f"  {plat_name}:{_channel_target_name(plat_name, ch)}" for ch in channels)
         lines.append("")
-
     lines.append('Use these as the "target" parameter when sending.')
     lines.append('Bare platform name (e.g. "telegram") sends to home channel.')
-
     return "\n".join(lines)
