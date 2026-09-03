@@ -109,10 +109,8 @@ def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
             src_path = src.name
         dst_path = src_path[:-4] + ".m4a"
         try:
-            proc = subprocess.run(
-                [ffmpeg, "-y", "-loglevel", "error", "-i", src_path,
-                 "-c:a", "copy", "-movflags", "+faststart", dst_path],
-                capture_output=True, timeout=10)
+            proc = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", src_path, "-c:a", "copy", "-movflags",
+                                   "+faststart", dst_path], capture_output=True, timeout=10)
             if proc.returncode != 0:
                 logger.warning("Signal: AAC→M4A remux failed (ffmpeg exit %d): %s",
                                proc.returncode, proc.stderr.decode("utf-8", "replace")[:300])
@@ -289,10 +287,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Dispatch one SSE line; keepalive comments (":") count as activity so the health monitor stays quiet."""
         if line.startswith(":"):
             self._last_sse_activity = time.time()
-        elif line.startswith("data:"):
-            data_str = line[5:].strip()
-            if not data_str:
-                return
+        elif line.startswith("data:") and (data_str := line[5:].strip()):
             self._last_sse_activity = time.time()
             try:
                 await self._handle_envelope(json.loads(data_str))
@@ -308,8 +303,8 @@ class SignalAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 logger.debug("Signal SSE: connecting to %s", url)
-                headers = {"Accept": "text/event-stream"}
-                async with self.client.stream("GET", url, headers=headers, timeout=None) as response:
+                async with self.client.stream("GET", url, headers={"Accept": "text/event-stream"},
+                                              timeout=None) as response:
                     self._sse_response = response
                     backoff = SSE_RETRY_DELAY_INITIAL  # Reset on successful connection
                     self._last_sse_activity = time.time()
@@ -332,8 +327,7 @@ class SignalAdapter(BasePlatformAdapter):
                 if self._running:
                     logger.warning("Signal SSE: error: %s (reconnecting in %.0fs)", e, backoff)
             if self._running:
-                # 20% jitter prevents thundering herd on reconnection
-                await asyncio.sleep(backoff + backoff * 0.2 * random.random())
+                await asyncio.sleep(backoff + backoff * 0.2 * random.random())  # 20% jitter vs thundering herd
                 backoff = min(backoff * 2, SSE_RETRY_DELAY_MAX)
         self._sse_response = None
 
@@ -353,8 +347,7 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: health check error: %s, forcing reconnect", e)
                 self._force_reconnect()
                 continue
-            if resp.status_code == 200:
-                # Daemon alive but SSE quiet — reset activity to avoid repeated warnings
+            if resp.status_code == 200:  # daemon alive but SSE quiet — reset activity to avoid repeated warnings
                 self._last_sse_activity = time.time()
                 logger.debug("Signal: daemon healthy, SSE idle")
             else:
@@ -390,19 +383,16 @@ class SignalAdapter(BasePlatformAdapter):
         account_norm = self._account_normalized
         if self.require_mention:
             mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
-            mentioned_in_metadata = any(
-                m.get("number") == account_norm or m.get("uuid") == account_norm
-                for m in (data_message.get("mentions") or []))
+            mentioned_in_metadata = any(account_norm in (m.get("number"), m.get("uuid"))
+                                        for m in (data_message.get("mentions") or []))
             if not mentioned_in_text and not mentioned_in_metadata:
                 logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
                 return False, text
         if text and account_norm:
             text = text.replace(f"@{account_norm}", "")
-            bot_uuid = self._recipient_uuid_by_number.get(account_norm)
-            if bot_uuid:
+            if bot_uuid := self._recipient_uuid_by_number.get(account_norm):
                 text = text.replace(f"@{bot_uuid}", "")
-            # Collapse only the doubled space the removal introduced; newlines are preserved.
-            text = text.replace("  ", " ").strip()
+            text = text.replace("  ", " ").strip()  # collapse only the doubled space; newlines preserved
         return True, text
 
     async def _collect_attachments(self, attachments_data: list) -> Tuple[List[str], List[str]]:
@@ -458,8 +448,7 @@ class SignalAdapter(BasePlatformAdapter):
             return
         chat_id = f"group:{group_id}" if is_group else sender
         text = data_message.get("message", "")
-        mentions = data_message.get("mentions", [])
-        if text and mentions:
+        if text and (mentions := data_message.get("mentions", [])):
             text = _render_mentions(text, mentions)
         if is_group:
             mentioned, text = self._apply_group_mention_rules(text, data_message)
@@ -474,19 +463,19 @@ class SignalAdapter(BasePlatformAdapter):
         media_urls, media_types = [], []
         if attachments_data and not getattr(self, "ignore_attachments", False):
             media_urls, media_types = await self._collect_attachments(attachments_data)
-        # Skip contentless envelopes (profile key updates, empty messages) that still
-        # carry a dataMessage wrapper — otherwise msg='' triggers a full agent turn.
+        # Skip contentless envelopes (profile key updates, empty messages) that still carry a
+        # dataMessage wrapper — otherwise msg='' triggers a full agent turn.
         if (not text or not text.strip()) and not media_urls:
-            logger.debug("Signal: skipping contentless envelope from %s (%d attachments)",
-                         redact_phone(sender), len(media_urls) if media_urls else 0)
+            logger.debug("Signal: skipping contentless envelope from %s (%d attachments)", redact_phone(sender),
+                         len(media_urls) if media_urls else 0)
             return
         source = self.build_source(
             chat_id=chat_id, chat_name=group_info.get("groupName") if group_info else sender_name,
             chat_type="group" if is_group else "dm", user_id=sender,
             user_name=sender_name or sender, user_id_alt=sender_uuid if sender_uuid else None,
             chat_id_alt=group_id if is_group else None)
-        # First matching MIME prefix wins; everything else (application/*, text/*, unknown)
-        # is a DOCUMENT so run.py's document-context injection surfaces the cached path.
+        # First matching MIME prefix wins; everything else (application/*, text/*, unknown) is a DOCUMENT
+        # so run.py's document-context injection surfaces the cached path.
         msg_type = MessageType.TEXT if not media_types else next(
             (mt for prefix, mt in _MEDIA_TYPE_BY_MIME_PREFIX if any(m.startswith(prefix) for m in media_types)),
             MessageType.DOCUMENT)
@@ -572,12 +561,10 @@ class SignalAdapter(BasePlatformAdapter):
         """Return the preferred Signal recipient identifier for a direct chat."""
         if not chat_id or chat_id.startswith("group:") or not _looks_like_e164_number(chat_id):
             return chat_id
-        cached = self._recipient_uuid_by_number.get(chat_id)
-        if cached:
+        if cached := self._recipient_uuid_by_number.get(chat_id):
             return cached
         async with self._recipient_cache_lock:
-            cached = self._recipient_uuid_by_number.get(chat_id)
-            if cached:
+            if cached := self._recipient_uuid_by_number.get(chat_id):
                 return cached
             contacts = await self._rpc("listContacts", {"account": self.account, "allRecipients": True})
             for contact in contacts if isinstance(contacts, list) else ():
@@ -615,18 +602,16 @@ class SignalAdapter(BasePlatformAdapter):
                  else cache_audio_from_bytes if _is_audio_ext(ext) else cache_document_from_bytes)
         return cache(raw_data, ext), ext
 
-    async def _rpc(
-        self, method: str, params: dict, rpc_id: str = None, *,
-        log_failures: bool = True, raise_on_rate_limit: bool = False, timeout: float = 30.0) -> Any:
-        """Send a JSON-RPC 2.0 request to signal-cli. ``log_failures=False`` logs failures at DEBUG
-        (typing path: silence NETWORK_FAILURE spam); ``raise_on_rate_limit=True`` raises
-        ``SignalRateLimitError`` on a 429 / RateLimitException instead of swallowing it."""
+    async def _rpc(self, method: str, params: dict, rpc_id: str = None, *, log_failures: bool = True,
+                   raise_on_rate_limit: bool = False, timeout: float = 30.0) -> Any:
+        """Send a JSON-RPC 2.0 request to signal-cli. ``log_failures=False`` logs failures at DEBUG (typing
+        path: silence NETWORK_FAILURE spam); ``raise_on_rate_limit=True`` raises ``SignalRateLimitError``
+        on a 429 / RateLimitException instead of swallowing it."""
         if not self.client:
             logger.warning("Signal: RPC called but client not connected")
             return None
-        if rpc_id is None:
-            rpc_id = f"{method}_{int(time.time() * 1000)}"
-        payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
+        payload = {"jsonrpc": "2.0", "method": method, "params": params,
+                   "id": rpc_id if rpc_id is not None else f"{method}_{int(time.time() * 1000)}"}
         fail_level = logging.WARNING if log_failures else logging.DEBUG
         try:
             resp = await self.client.post(f"{self.http_url}/api/v1/rpc", json=payload, timeout=timeout)
@@ -643,8 +628,8 @@ class SignalAdapter(BasePlatformAdapter):
             if isinstance(result, dict) and raise_on_rate_limit:
                 for r in result.get("results") if isinstance(result.get("results"), list) else ():
                     if isinstance(r, dict) and r.get("type") == "RATE_LIMIT_FAILURE":
-                        raise SignalRateLimitError(
-                            "Rate limit exceeded for recipient", retry_after=r.get("retryAfterSeconds"))
+                        raise SignalRateLimitError("Rate limit exceeded for recipient",
+                                                   retry_after=r.get("retryAfterSeconds"))
             return result
         except SignalRateLimitError:
             raise
@@ -719,8 +704,7 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _rpc_send(self, params: Dict[str, Any], fail_error: str) -> Tuple[Any, Optional[SendResult]]:
         """Run a ``send`` RPC, validate and track it; ``(result, None)`` or ``(None, failed SendResult)``."""
-        result = await self._rpc("send", params)
-        if result is None:
+        if (result := await self._rpc("send", params)) is None:
             return None, SendResult(success=False, error=fail_error)
         success, err_msg = self._validate_send_result(result)
         if not success:
@@ -735,8 +719,7 @@ class SignalAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
         base_params = await self._with_target({"account": self.account}, chat_id)
-        plain_message, message_styles = self._markdown_to_signal(content)
-        chunks = self._split_signal_formatted_message(plain_message, message_styles, self.MAX_MESSAGE_LENGTH)
+        chunks = self._split_signal_formatted_message(*self._markdown_to_signal(content), self.MAX_MESSAGE_LENGTH)
         last_result = None
         for idx, (plain_text, text_styles) in enumerate(chunks, start=1):
             params: Dict[str, Any] = dict(base_params, message=plain_text)
@@ -758,8 +741,7 @@ class SignalAdapter(BasePlatformAdapter):
         if not ts:
             return
         self._remember_sent_message_timestamp(ts)
-        now = time.monotonic()
-        recent = self._recent_sent_timestamps
+        now, recent = time.monotonic(), self._recent_sent_timestamps
         recent.pop(ts, None)  # re-insert to mark as most-recently-used
         recent[ts] = now
         # Drop entries older than TTL first, then enforce the hard cap.
@@ -781,8 +763,7 @@ class SignalAdapter(BasePlatformAdapter):
             return
         params = await self._with_target({"account": self.account}, chat_id)
         fails = self._typing_failures.get(chat_id, 0)
-        result = await self._rpc("sendTyping", params, rpc_id="typing", log_failures=(fails == 0))
-        if result is not None:
+        if await self._rpc("sendTyping", params, rpc_id="typing", log_failures=(fails == 0)) is not None:
             self._typing_failures.pop(chat_id, None)
             self._typing_skip_until.pop(chat_id, None)
             return
@@ -801,21 +782,19 @@ class SignalAdapter(BasePlatformAdapter):
                 return None, "download", e
         if not file_path or not Path(file_path).exists():
             return None, "missing", None
-        file_size = Path(file_path).stat().st_size
-        if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
+        if (file_size := Path(file_path).stat().st_size) > SIGNAL_MAX_ATTACHMENT_SIZE:
             return None, "oversize", file_size
         return file_path, None, None
 
-    async def send_multiple_images(
-        self, chat_id: str, images: List[Tuple[str, str]], metadata: Optional[Dict[str, Any]] = None,
-        human_delay: float = 0.0) -> None:
+    async def send_multiple_images(self, chat_id: str, images: List[Tuple[str, str]],
+                                   metadata: Optional[Dict[str, Any]] = None, human_delay: float = 0.0) -> None:
         """Send a batch of images via chunked Signal RPC calls. Alt texts are dropped (one shared body
         per send); bad images are skipped with a warning; ``human_delay`` is ignored (scheduler paces)."""
         if not images:
             return
         scheduler = get_scheduler()
-        logger.info("Signal send_multiple_images: received %d image(s) for %s — scheduler state: %s",
-                    len(images), chat_id[:30], scheduler.state())
+        logger.info("Signal send_multiple_images: received %d image(s) for %s — scheduler state: %s", len(images),
+                    chat_id[:30], scheduler.state())
         await self._stop_typing_indicator(chat_id)
         attachments: List[str] = []
         skipped = {"download": 0, "missing": 0, "oversize": 0}
@@ -827,8 +806,8 @@ class SignalAdapter(BasePlatformAdapter):
             skipped[reason] += 1
             logger.warning(*_SKIP_IMAGE_LOG[reason](image_url, detail))
         if not attachments:
-            logger.error("Signal: no valid images in batch of %d (download=%d missing=%d oversize=%d)",
-                         len(images), skipped["download"], skipped["missing"], skipped["oversize"])
+            logger.error("Signal: no valid images in batch of %d (download=%d missing=%d oversize=%d)", len(images),
+                         skipped["download"], skipped["missing"], skipped["oversize"])
             return
         logger.info("Signal send_multiple_images: %d/%d images valid, sending in chunks", len(attachments), len(images))
         base_params = await self._with_target({"account": self.account, "message": ""}, chat_id)
@@ -841,8 +820,8 @@ class SignalAdapter(BasePlatformAdapter):
             logger.debug("Signal batch %d/%d: %d attachments, estimated wait=%.1fs", idx, n_batches, n, estimated)
             if estimated >= SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
                 await self._notify_batch_pacing(chat_id, idx, n_batches, estimated)
-            await self._send_attachment_batch(
-                scheduler, dict(base_params, attachments=att_batch), n, f"{idx}/{n_batches}")
+            await self._send_attachment_batch(scheduler, dict(base_params, attachments=att_batch), n,
+                                              f"{idx}/{n_batches}")
 
     async def _send_attachment_batch(self, scheduler, params: Dict[str, Any], n: int, label: str) -> None:
         """Send one attachment batch with rate-limit pacing and a single transient retry. Tokens are
@@ -868,22 +847,21 @@ class SignalAdapter(BasePlatformAdapter):
             if success:
                 self._track_sent_timestamp(result)
                 await scheduler.report_rpc_duration(duration, n)
-                logger.info("Signal batch %s: %d attachments sent in %.1fs (attempt %d/%d)",
-                            label, n, duration, attempt, max_attempts)
+                logger.info("Signal batch %s: %d attachments sent in %.1fs (attempt %d/%d)", label, n, duration,
+                            attempt, max_attempts)
                 return
             logger.error("Signal: RPC send failed for batch %s (%d attachments, attempt %d/%d, rpc_duration=%.1fs)%s",
                          label, n, attempt, max_attempts, duration, f": {err_msg}" if result is not None else "")
             if attempt >= max_attempts:
                 return
-            backoff = 2.0 ** attempt
-            logger.info("Signal: retrying batch %s after %.1fs backoff", label, backoff)
-            await asyncio.sleep(backoff)
+            logger.info("Signal: retrying batch %s after %.1fs backoff", label, 2.0 ** attempt)
+            await asyncio.sleep(2.0 ** attempt)
 
     async def _notify_batch_pacing(self, chat_id: str, next_batch_idx: int, total_batches: int, wait_s: float) -> None:
         """Tell the user about an inter-batch pacing wait over the notice threshold (best-effort)."""
         try:
-            await self.send(chat_id, f"(More images coming — pausing ~{_format_wait(wait_s)} "
-                                     f"for Signal rate limit, batch {next_batch_idx}/{total_batches}.)")
+            await self.send(chat_id, f"(More images coming — pausing ~{_format_wait(wait_s)} for Signal rate limit, "
+                                     f"batch {next_batch_idx}/{total_batches}.)")
         except Exception as e:
             logger.warning("Signal: failed to send pacing notice: %s", e)
 
@@ -901,8 +879,8 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str) -> SendResult:
         """Send one local file as a Signal attachment via the ``send`` RPC."""
-        params = {"account": self.account, "message": caption or "", "attachments": [file_path]}
-        await self._with_target(params, chat_id)
+        params = await self._with_target(
+            {"account": self.account, "message": caption or "", "attachments": [file_path]}, chat_id)
         _, err = await self._rpc_send(params, fail_error)
         return err or SendResult(success=True)
 
@@ -971,9 +949,8 @@ class SignalAdapter(BasePlatformAdapter):
     def _extract_reaction_target(self, event: MessageEvent) -> Optional[tuple]:
         """Extract (target_author, target_timestamp) from a MessageEvent, or None."""
         raw = event.raw_message
-        if isinstance(raw, dict) and raw.get("sender") and raw.get("timestamp_ms"):
-            return (raw["sender"], raw["timestamp_ms"])
-        return None
+        ok = isinstance(raw, dict) and raw.get("sender") and raw.get("timestamp_ms")
+        return (raw["sender"], raw["timestamp_ms"]) if ok else None
 
     def _reactions_enabled(self, event: "MessageEvent" = None) -> bool:
         """SIGNAL_REACTIONS env gate, then the DM allowlist: reactions fire before run.py's auth gate,
@@ -985,18 +962,14 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """React with 👀 when processing begins."""
-        if not self._reactions_enabled(event):
-            return
-        target = self._extract_reaction_target(event)
-        if target:
+        if self._reactions_enabled(event) and (target := self._extract_reaction_target(event)):
             await self.send_reaction(event.source.chat_id, "👀", *target)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: "ProcessingOutcome") -> None:
         """Swap 👀 for ✅/❌; on CANCELLED the 👀 stays to keep reflecting "in progress" (matches Telegram)."""
         if outcome == ProcessingOutcome.CANCELLED or not self._reactions_enabled(event):
             return
-        target = self._extract_reaction_target(event)
-        if not target:
+        if not (target := self._extract_reaction_target(event)):
             return
         await self.remove_reaction(event.source.chat_id, *target)
         if emoji := _OUTCOME_REACTION.get(outcome):

@@ -187,23 +187,17 @@ class WebhookAdapter(BasePlatformAdapter):
         """Startup validation: secret required; INSECURE_NO_AUTH only on loopback (crash early on a public footgun)."""
         secret = route.get("secret", self._global_secret)
         if not secret:
-            raise ValueError(
-                f"[webhook] Route '{name}' has no HMAC secret. "
-                f"Set 'secret' on the route or globally. "
-                f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'.")
+            raise ValueError(f"[webhook] Route '{name}' has no HMAC secret. Set 'secret' on the route or globally. "
+                             f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'.")
         if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-            raise ValueError(
-                f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
-                f"but is bound to non-loopback host '{self._host}'. "
-                f"INSECURE_NO_AUTH is for local testing only. "
-                f"Refusing to start to prevent accidental exposure.")
+            raise ValueError(f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret but is bound to non-loopback "
+                             f"host '{self._host}'. INSECURE_NO_AUTH is for local testing only. "
+                             f"Refusing to start to prevent accidental exposure.")
         if route.get("deliver_only"):
             deliver = route.get("deliver", "log")
             if not deliver or deliver == "log":
-                raise ValueError(
-                    f"[webhook] Route '{name}' has deliver_only=true but "
-                    f"deliver is '{deliver}'. Direct delivery requires a "
-                    f"real target (telegram, discord, slack, github_comment, etc.).")
+                raise ValueError(f"[webhook] Route '{name}' has deliver_only=true but deliver is '{deliver}'. Direct "
+                                 f"delivery requires a real target (telegram, discord, slack, github_comment, etc.).")
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._reload_dynamic_routes()
@@ -228,15 +222,12 @@ class WebhookAdapter(BasePlatformAdapter):
         except OSError as exc:
             await self._runner.cleanup()
             self._runner = None
-            logger.error(
-                "[webhook] Could not bind %s:%d: %s. "
-                "Set a different host or port in config.yaml under platforms.webhook.extra.",
-                self._host or "all IPv4+IPv6 interfaces", self._port, exc)
+            logger.error("[webhook] Could not bind %s:%d: %s. Set a different host or port in config.yaml under "
+                         "platforms.webhook.extra.", self._host or "all IPv4+IPv6 interfaces", self._port, exc)
             return False
         self._mark_connected()
-        route_names = ", ".join(self._routes.keys()) or "(none configured)"
-        logger.info("[webhook] Listening on %s:%d — routes: %s",
-                    self._host or "* (all interfaces, IPv4+IPv6)", self._port, route_names)
+        logger.info("[webhook] Listening on %s:%d — routes: %s", self._host or "* (all interfaces, IPv4+IPv6)",
+                    self._port, ", ".join(self._routes.keys()) or "(none configured)")
         self._wire_plugin_handlers(None)
         return True
 
@@ -272,12 +263,13 @@ class WebhookAdapter(BasePlatformAdapter):
     def _prune_delivery_info(self, now: float) -> None:
         """Drop delivery_info entries older than the idempotency TTL (bounds the dict by ``rate_limit * TTL``
         even when runs never produce a final response)."""
-        created = self._delivery_info_created
-        if len(self._delivery_info_order) < len(created):
-            self._delivery_info_order = deque((at, key) for key, at in sorted(created.items(), key=lambda kv: kv[1]))
+        created, order = self._delivery_info_created, self._delivery_info_order
+        if len(order) < len(created):
+            order = self._delivery_info_order = deque(
+                (at, key) for key, at in sorted(created.items(), key=lambda kv: kv[1]))
         cutoff = now - self._idempotency_ttl
-        while self._delivery_info_order and self._delivery_info_order[0][0] < cutoff:
-            created_at, key = self._delivery_info_order.popleft()
+        while order and order[0][0] < cutoff:
+            created_at, key = order.popleft()
             if created.get(key) == created_at:
                 self._delivery_info.pop(key, None)
                 created.pop(key, None)
@@ -358,8 +350,7 @@ class WebhookAdapter(BasePlatformAdapter):
         subs_path = get_hermes_home() / _DYNAMIC_ROUTES_FILENAME
         if not subs_path.exists():
             if self._dynamic_routes:
-                self._dynamic_routes = {}
-                self._routes = dict(self._static_routes)
+                self._dynamic_routes, self._routes = {}, dict(self._static_routes)
                 logger.debug("[webhook] Dynamic subscriptions file removed, cleared dynamic routes")
             return
         try:
@@ -373,8 +364,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 k: v for k, v in data.items() if k not in self._static_routes and self._dynamic_route_allowed(k, v)}
             self._routes = {**self._dynamic_routes, **self._static_routes}
             self._dynamic_routes_mtime = mtime
-            logger.info("[webhook] Reloaded %d dynamic route(s): %s",
-                        len(self._dynamic_routes), ", ".join(self._dynamic_routes.keys()) or "(none)")
+            logger.info("[webhook] Reloaded %d dynamic route(s): %s", len(self._dynamic_routes),
+                        ", ".join(self._dynamic_routes.keys()) or "(none)")
         except Exception as e:
             logger.error("[webhook] Failed to reload dynamic routes: %s", e)
 
@@ -405,10 +396,10 @@ class WebhookAdapter(BasePlatformAdapter):
     @staticmethod
     def _route_allows_profile(route_config: dict, request_profile: Optional[str]) -> bool:
         """Omitting ``profile`` binds a route to default; an explicit null/blank/non-string fails closed."""
-        configured_profile = route_config.get("profile") if "profile" in route_config else "default"
-        if not isinstance(configured_profile, str) or not configured_profile.strip():
+        configured = route_config.get("profile") if "profile" in route_config else "default"
+        if not isinstance(configured, str) or not configured.strip():
             return False
-        return configured_profile.strip() == (request_profile or "default")
+        return configured.strip() == (request_profile or "default")
 
     @staticmethod
     def _profile_scope(profile: Optional[str]):
@@ -460,12 +451,10 @@ class WebhookAdapter(BasePlatformAdapter):
                                    event_type: str, delivery_id: str) -> "web.Response":
         """deliver_only: the rendered prompt IS the message — skip the agent, reuse the same
         auth/rate-limit/idempotency/template pipeline."""
-        delivery = {
-            "deliver": route_config.get("deliver", "log"),
-            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
-            "payload": payload}
-        logger.info("[webhook] direct-deliver event=%s route=%s target=%s msg_len=%d delivery=%s",
-                    event_type, route_name, delivery["deliver"], len(prompt), delivery_id)
+        delivery = {"deliver": route_config.get("deliver", "log"), "payload": payload,
+                    "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload)}
+        logger.info("[webhook] direct-deliver event=%s route=%s target=%s msg_len=%d delivery=%s", event_type,
+                    route_name, delivery["deliver"], len(prompt), delivery_id)
         failed = {"status": "error", "error": "Delivery failed", "delivery_id": delivery_id}
         try:
             result = await self._direct_deliver(prompt, delivery)
@@ -582,13 +571,12 @@ class WebhookAdapter(BasePlatformAdapter):
         self._delivery_info_created[session_chat_id] = now
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)
-        source = self.build_source(
-            chat_id=session_chat_id, chat_name=f"webhook/{route_name}", chat_type="webhook",
-            user_id=f"webhook:{route_name}", user_name=route_name)
+        source = self.build_source(chat_id=session_chat_id, chat_name=f"webhook/{route_name}", chat_type="webhook",
+                                   user_id=f"webhook:{route_name}", user_name=route_name)
         if profile and isinstance(profile, str):
             source.profile = profile
-        event = MessageEvent(
-            text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload, message_id=delivery_id)
+        event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
+                             message_id=delivery_id)
         logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
                     len(prompt), delivery_id)
         # The per-delivery session is closed by ``on_processing_complete`` once the run finishes
@@ -596,13 +584,13 @@ class WebhookAdapter(BasePlatformAdapter):
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
-        return web.json_response(
-            {"status": "accepted", "route": route_name, "event": event_type, "delivery_id": delivery_id}, status=202)
+        return web.json_response({"status": "accepted", "route": route_name, "event": event_type,
+                                  "delivery_id": delivery_id}, status=202)
 
     async def on_processing_complete(self, event: "MessageEvent", outcome: Any) -> None:
-        """Close the one-shot per-delivery session: ``prune_sessions`` only reaps rows with ``ended_at``
-        set, so unclosed webhook sessions leak unbounded. Fires at the true end of the run (success,
-        failure, cancellation); ``end_session()`` is first-reason-wins."""
+        """Close the one-shot per-delivery session: ``prune_sessions`` only reaps rows with ``ended_at`` set, so
+        unclosed webhook sessions leak unbounded. Fires at the true end of the run; ``end_session()`` is
+        first-reason-wins."""
         await self._end_webhook_session(event, event.source.chat_id)
 
     async def _end_webhook_session(self, event: "MessageEvent", session_chat_id: str) -> None:
@@ -642,10 +630,9 @@ class WebhookAdapter(BasePlatformAdapter):
             return _validate_svix_signature(body, secret, *svix)
         # Linear (any header case): hex HMAC of the body. GitHub: sha256=<hex>. GitLab: plain token.
         for provided, expected in (
-            (_header("linear-signature"), lambda: _hex_hmac(secret, body)),
-            (headers.get("X-Hub-Signature-256", ""), lambda: "sha256=" + _hex_hmac(secret, body)),
-            (headers.get("X-Gitlab-Token", ""), lambda: secret),
-        ):
+                (_header("linear-signature"), lambda: _hex_hmac(secret, body)),
+                (headers.get("X-Hub-Signature-256", ""), lambda: "sha256=" + _hex_hmac(secret, body)),
+                (headers.get("X-Gitlab-Token", ""), lambda: secret)):
             if provided:
                 return _hmac_str_equal(provided, expected())
         route_name = request.match_info.get("route_name", "")
@@ -696,9 +683,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 if not isinstance(value, dict):
                     return f"{{{key}}}"
                 value = value.get(part, f"{{{key}}}")
-            if isinstance(value, (dict, list)):
-                return json.dumps(value, indent=2)[:2000]
-            return str(value)
+            return json.dumps(value, indent=2)[:2000] if isinstance(value, (dict, list)) else str(value)
 
         return _TEMPLATE_KEY_RE.sub(_resolve, template)
 
@@ -756,8 +741,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
     def _find_adapter(self, target_platform: Platform):
         """Default adapters first; multiplex may park a platform only on a secondary profile (_profile_adapters)."""
-        adapter = self.gateway_runner.adapters.get(target_platform)
-        if adapter:
+        if adapter := self.gateway_runner.adapters.get(target_platform):
             return adapter
         for amap in (getattr(self.gateway_runner, "_profile_adapters", None) or {}).values():
             if isinstance(amap, dict) and amap.get(target_platform) is not None:
