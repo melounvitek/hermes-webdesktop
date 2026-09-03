@@ -34,8 +34,8 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     try:
         from tools.approval import request_elicitation_consent
         answer = request_elicitation_consent(
-            f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This "
-            f"tool is write-capable (no readOnlyHint=true annotation) and may modify external state.",
+            f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This tool is write-capable "
+            f"(no readOnlyHint=true annotation) and may modify external state.",
             f"Server '{server_name}' is configured 'trust: untrusted'. "
             f"Approve to run '{tool_name}' once, or deny to block it.",
             surface=f"mcp-trust/{server_name}")
@@ -109,10 +109,6 @@ def _strike(server_name: str, message: str, **extra) -> str:
     return tool_error(message, **extra)
 
 
-def _mcp_loop_running() -> bool:
-    return _core._mcp_loop is not None and _core._mcp_loop.is_running()
-
-
 def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     """The registered server object when it can be signalled to reconnect, else None.
     With *require_loop*, also None unless the MCP loop is running (nothing to wait on)."""
@@ -121,6 +117,10 @@ def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     if srv is None or not hasattr(srv, "_reconnect_event") or (require_loop and not _mcp_loop_running()):
         return None
     return srv
+
+
+def _mcp_loop_running() -> bool:
+    return _core._mcp_loop is not None and _core._mcp_loop.is_running()
 
 
 def _retry_once(server_name: str, retry_call, op_description: str, what: str):
@@ -267,8 +267,7 @@ async def _track_inflight_rpc(server: Any, server_name: str, op: str):
     """Register the running RPC so teardown can fail it fast. A deliberate teardown
     (``_reconnecting`` set first) turns the cancel into a retryable RuntimeError; external
     cancels propagate unchanged. Doubles without ``_inflight_tasks`` skip tracking."""
-    inflight = getattr(server, "_inflight_tasks", None)
-    task = asyncio.current_task()
+    inflight, task = getattr(server, "_inflight_tasks", None), asyncio.current_task()
     tracked = task is not None and inflight is not None
     if tracked:
         inflight.add(task)
@@ -348,10 +347,8 @@ def _capped_structured_content(result):
     """``structuredContent`` (or None); over the hard cap it degrades to the head+tail
     truncated JSON string (multi-MB JSON flood guard)."""
     structured = mcp_field(result, "structured_content", "structuredContent")
-    if structured is None:
-        return None
     try:
-        as_json = json.dumps(structured, ensure_ascii=False, default=str)
+        as_json = json.dumps(structured, ensure_ascii=False, default=str) if structured is not None else ""
     except (TypeError, ValueError):
         return structured
     return _truncate_mcp_text_result(as_json) if len(as_json) > _MCP_HARD_RESULT_CAP_CHARS else structured

@@ -67,18 +67,11 @@ def _jittered(seconds: float) -> float:
     return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER, 1.0 + _BACKOFF_JITTER))
 
 
-# Credential patterns to strip from error messages.
+# Credential patterns to strip from error messages: GitHub PAT, OpenAI-style key, Bearer token,
+# and ``token= / key= / API_KEY= / password= / secret=`` assignments.
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?:ghp_[A-Za-z0-9_]{1,255}"           # GitHub PAT
-    r"|sk-[A-Za-z0-9_]{1,255}"           # OpenAI-style key
-    r"|Bearer\s+\S+"                      # Bearer token
-    r"|token=[^\s&,;\"']{1,255}"         # token=...
-    r"|key=[^\s&,;\"']{1,255}"           # key=...
-    r"|API_KEY=[^\s&,;\"']{1,255}"       # API_KEY=...
-    r"|password=[^\s&,;\"']{1,255}"      # password=...
-    r"|secret=[^\s&,;\"']{1,255}"        # secret=...
-    r")",
-    re.IGNORECASE)
+    r"(?:ghp_[A-Za-z0-9_]{1,255}|sk-[A-Za-z0-9_]{1,255}|Bearer\s+\S+"
+    r"|(?:token|key|API_KEY|password|secret)=[^\s&,;\"']{1,255})", re.IGNORECASE)
 
 
 def _env_ref_name(ref: str) -> str:
@@ -104,12 +97,11 @@ def _exc_str(exc: BaseException) -> str:
 def _prepend_path(env: dict, directory: str) -> dict:
     """Prepend *directory* to env PATH if it is not already present."""
     updated = dict(env or {})
-    if not directory:
-        return updated
-    parts = [part for part in updated.get("PATH", "").split(os.pathsep) if part]
-    if directory not in parts:
-        parts = [directory, *parts]
-    updated["PATH"] = os.pathsep.join(parts) if parts else directory
+    if directory:
+        parts = [part for part in updated.get("PATH", "").split(os.pathsep) if part]
+        if directory not in parts:
+            parts = [directory, *parts]
+        updated["PATH"] = os.pathsep.join(parts) if parts else directory
     return updated
 
 

@@ -99,8 +99,8 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
         reason = _skip_reason(entry["handler_key"])
         if reason:
             logger.debug("MCP server '%s': skipping utility '%s' (%s)", server_name, entry["handler_key"], reason)
-            continue
-        selected.append(entry)
+        else:
+            selected.append(entry)
     return selected
 
 
@@ -108,11 +108,9 @@ def _existing_tool_names() -> List[str]:
     """Tool names for all currently connected servers plus lazy (cache-registered) servers,
     whose tools live only in the registry."""
     names: List[str] = []
-    for _sname, server in _core._servers.items():
-        if hasattr(server, "_registered_tool_names"):
-            names.extend(server._registered_tool_names)
-        else:
-            names.extend(_core._convert_mcp_schema(server.name, t)["name"] for t in server._tools)
+    for server in _core._servers.values():
+        names.extend(server._registered_tool_names if hasattr(server, "_registered_tool_names")
+                     else (_core._convert_mcp_schema(server.name, t)["name"] for t in server._tools))
     with _core._lock:
         names.extend(n for sname, tool_names in _core._lazy_server_tool_names.items()
                      if sname not in _core._servers for n in tool_names)
@@ -126,15 +124,10 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     tools_filter = config.get("tools") or {}
     include_raw = tools_filter.get("include")
     include_set = _normalize_name_filter(include_raw, f"mcp_servers.{name}.tools.include")
-    include_active = isinstance(include_raw, (str, list, tuple, set))
     exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
-
-    def _should_register(tool_name: str) -> bool:
-        if include_active:
-            return matches_name_filter(tool_name, include_set)
-        return not (exclude_set and matches_name_filter(tool_name, exclude_set))
-
-    return _should_register
+    if isinstance(include_raw, (str, list, tuple, set)):
+        return lambda tool_name: matches_name_filter(tool_name, include_set)
+    return lambda tool_name: not (exclude_set and matches_name_filter(tool_name, exclude_set))
 
 
 class _CachedMCPTool:
@@ -192,9 +185,7 @@ def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout) -> List
     """``{schema, handler_key}`` rows (live selection or cache) -> candidates; malformed rows dropped."""
     out: List[_Candidate] = []
     for raw in entries:
-        if not isinstance(raw, dict):
-            continue
-        schema, key = raw.get("schema"), raw.get("handler_key")
+        schema, key = (raw.get("schema"), raw.get("handler_key")) if isinstance(raw, dict) else (None, None)
         if isinstance(schema, dict) and key in _UTILITY_HANDLER_FACTORIES and schema.get("name"):
             handler = _UTILITY_HANDLER_FACTORIES[key](name, tool_timeout)
             out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema, handler))
@@ -285,16 +276,12 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
     lazily without spawning it. Never raises."""
     try:
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
-        tools_payload = []
-        for t in server._tools:
-            if should_register(t.name):
-                schema_obj = getattr(t, "inputSchema", None)
-                tools_payload.append({
-                    "name": t.name,
-                    "description": t.description or "",
-                    "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
-                    # Persisted so the lazy path trust-gates identically next startup.
-                    "annotations": {"readOnlyHint": _annotation_read_only_hint(t)}})
+        tools_payload = [{
+            "name": t.name, "description": t.description or "",
+            "inputSchema": t.inputSchema if isinstance(getattr(t, "inputSchema", None), dict) else {},
+            # Persisted so the lazy path trust-gates identically next startup.
+            "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},
+        } for t in server._tools if should_register(t.name)]
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]
         cache_meta = getattr(server, "_list_cache_meta", None) or {}

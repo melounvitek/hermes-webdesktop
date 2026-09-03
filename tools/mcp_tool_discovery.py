@@ -43,11 +43,10 @@ async def _connect_server(name: str, config: dict) -> _core.MCPServerTask:
     on the same loop). Raises on bad config, missing HTTP support or connect failure."""
     server = _core.MCPServerTask(name)
     claim = _core._connect_server_claim.get()
-    claim_token = None
     if claim is not None:
         claim(server)
-        # The run task copies this context: don't retain the discovery closure for its life.
-        claim_token = _core._connect_server_claim.set(None)
+    # The run task copies this context: don't retain the discovery closure for its life.
+    claim_token = _core._connect_server_claim.set(None) if claim is not None else None
     try:
         await server.start(config)
     except asyncio.CancelledError:
