@@ -101,8 +101,12 @@ def _load_plugin_config() -> dict:
         return {}
 
 
-def _results(results: list) -> str:
-    return json.dumps({"results": results, "count": len(results)})
+def _results(items: list, key: str = "results") -> str:
+    return json.dumps({key: items, "count": len(items)})
+
+
+def _limit(args: dict) -> int:
+    return int(args.get("limit", 10))
 
 
 class HolographicMemoryProvider(MemoryProvider):
@@ -171,19 +175,14 @@ class HolographicMemoryProvider(MemoryProvider):
             total = self._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
         except Exception:
             total = 0
-        if total == 0:
-            return (
-                "# Holographic Memory\n"
-                "Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
-                "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
-                "Use fact_feedback to rate facts after using them (trains trust scores)."
-            )
-        return (
-            f"# Holographic Memory\n"
+        body = (
+            "Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
+            "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
+        ) if total == 0 else (
             f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-            f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
-            f"Use fact_feedback to rate facts after using them (trains trust scores)."
+            "Use fact_store to search, probe entities, reason across entities, or add facts.\n"
         )
+        return "# Holographic Memory\n" + body + "Use fact_feedback to rate facts after using them (trains trust scores)."
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._retriever or not query:
@@ -240,8 +239,8 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
 
-    # -- Tool handlers -------------------------------------------------------
-    # KeyError from args[...] / Exception are turned into tool_error by handle_tool_call.
+    # Tool handlers. KeyError from args[...] / Exception -> tool_error in handle_tool_call.
+    # Argument coercion order (and therefore which error surfaces first) mirrors the call order.
 
     def _handle_fact_store(self, args: dict) -> str:
         action = args["action"]
@@ -250,30 +249,15 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(f"Unknown action: {action}")
         return handler(self, args)
 
-    def _act_add(self, args: dict) -> str:
-        fact_id = self._store.add_fact(args["content"], category=args.get("category", "general"), tags=args.get("tags", ""))
-        return json.dumps({"fact_id": fact_id, "status": "added"})
-
-    def _act_search(self, args: dict) -> str:
-        return _results(self._retriever.search(
-            args["query"], category=args.get("category"),
-            min_trust=float(args.get("min_trust", self._min_trust)), limit=int(args.get("limit", 10)),
-        ))
-
-    def _act_entity(self, args: dict, method: str) -> str:
-        """Shared body of 'probe' and 'related' (single-entity retriever queries)."""
-        return _results(getattr(self._retriever, method)(
-            args["entity"], category=args.get("category"), limit=int(args.get("limit", 10)),
-        ))
+    def _entity_query(self, method: str, args: dict) -> str:
+        """'probe' / 'related': single-entity retriever queries."""
+        return _results(getattr(self._retriever, method)(args["entity"], category=args.get("category"), limit=_limit(args)))
 
     def _act_reason(self, args: dict) -> str:
         entities = args.get("entities", [])
         if not entities:
             return tool_error("reason requires 'entities' list")
-        return _results(self._retriever.reason(entities, category=args.get("category"), limit=int(args.get("limit", 10))))
-
-    def _act_contradict(self, args: dict) -> str:
-        return _results(self._retriever.contradict(category=args.get("category"), limit=int(args.get("limit", 10))))
+        return _results(self._retriever.reason(entities, category=args.get("category"), limit=_limit(args)))
 
     def _act_update(self, args: dict) -> str:
         updated = self._store.update_fact(
@@ -283,59 +267,58 @@ class HolographicMemoryProvider(MemoryProvider):
         )
         return json.dumps({"updated": updated})
 
-    def _act_remove(self, args: dict) -> str:
-        return json.dumps({"removed": self._store.remove_fact(int(args["fact_id"]))})
-
-    def _act_list(self, args: dict) -> str:
-        facts = self._store.list_facts(
-            category=args.get("category"), min_trust=float(args.get("min_trust", 0.0)), limit=int(args.get("limit", 10)),
-        )
-        return json.dumps({"facts": facts, "count": len(facts)})
-
-    def _handle_fact_feedback(self, args: dict) -> str:
-        return json.dumps(self._store.record_feedback(int(args["fact_id"]), helpful=args["action"] == "helpful"))
-
     _FACT_STORE_ACTIONS = {
-        "add": _act_add, "search": _act_search,
-        "probe": lambda self, args: self._act_entity(args, "probe"),
-        "related": lambda self, args: self._act_entity(args, "related"),
-        "reason": _act_reason, "contradict": _act_contradict,
-        "update": _act_update, "remove": _act_remove, "list": _act_list,
+        "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
+            a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
+        "search": lambda self, a: _results(self._retriever.search(
+            a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
+        "probe": lambda self, a: self._entity_query("probe", a),
+        "related": lambda self, a: self._entity_query("related", a),
+        "reason": _act_reason,
+        "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
+        "update": _act_update,
+        "remove": lambda self, a: json.dumps({"removed": self._store.remove_fact(int(a["fact_id"]))}),
+        "list": lambda self, a: _results(self._store.list_facts(
+            category=a.get("category"), min_trust=float(a.get("min_trust", 0.0)), limit=_limit(a)), key="facts"),
     }
-    _TOOL_HANDLERS = {"fact_store": _handle_fact_store, "fact_feedback": _handle_fact_feedback}
+    _TOOL_HANDLERS = {
+        "fact_store": _handle_fact_store,
+        "fact_feedback": lambda self, a: json.dumps(self._store.record_feedback(int(a["fact_id"]), helpful=a["action"] == "helpful")),
+    }
 
     # -- Auto-extraction (on_session_end) ------------------------------------
 
-    def _auto_extract_facts(self, messages: list) -> None:
-        # Local import: the compressor module is heavier than this plugin and only needed here.
-        from agent.context_compressor import (
-            _MERGED_PRIOR_CONTEXT_HEADER,
-            _MERGED_SUMMARY_DELIMITER,
-            is_compaction_summary_message,
-        )
+    @staticmethod
+    def _harvestable_text(msg: dict):
+        """User text eligible for extraction, or None.
 
+        Compaction handoff summaries arrive as role="user" and reliably match the decision
+        patterns; never store the compactor's own output as a durable fact. A merge-into-tail
+        row holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER (prefixed with the
+        header) and the summary AFTER it — harvest only the pre-delimiter segment.
+        """
+        # Local import: the compressor module is heavier than this plugin and only needed here.
+        from agent.context_compressor import _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER, is_compaction_summary_message
+
+        content = msg.get("content", "")
+        if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
+            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+            if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
+            if pre.strip():
+                content = pre.strip()
+            elif is_compaction_summary_message(msg):
+                return None
+        elif is_compaction_summary_message(msg):
+            return None
+        return content if isinstance(content, str) and len(content) >= 10 else None
+
+    def _auto_extract_facts(self, messages: list) -> None:
         extracted = 0
         for msg in messages:
-            if msg.get("role") != "user":
+            content = self._harvestable_text(msg) if msg.get("role") == "user" else None
+            if content is None:
                 continue
-            content = msg.get("content", "")
-            # Compaction handoff summaries arrive as role="user" and reliably match the
-            # decision patterns; never store the compactor's own output as a durable fact.
-            # A merge-into-tail row holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER
-            # (prefixed with the header) and the summary AFTER it — harvest only the pre-delimiter segment.
-            if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
-                pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
-                if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                    pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
-                if pre.strip():
-                    content = pre.strip()
-                elif is_compaction_summary_message(msg):
-                    continue
-            elif is_compaction_summary_message(msg):
-                continue
-            if not isinstance(content, str) or len(content) < 10:
-                continue
-
             for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:
@@ -343,10 +326,8 @@ class HolographicMemoryProvider(MemoryProvider):
                         extracted += 1
                     except Exception:
                         pass
-
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
-
 
 def register(ctx) -> None:
     """Register the holographic memory provider with the plugin system."""

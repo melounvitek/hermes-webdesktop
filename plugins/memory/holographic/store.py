@@ -129,7 +129,6 @@ class MemoryStore:
                 entry = MemoryStore._shared[self._key] = {"conn": conn, "lock": threading.RLock(), "refs": 0, "ready": False}
             entry["refs"] += 1
             self._entry, self._conn, self._lock = entry, entry["conn"], entry["lock"]
-
         with self._lock:  # schema initialised once per shared connection
             if not self._entry["ready"]:
                 self._init_db()
@@ -166,10 +165,8 @@ class MemoryStore:
             if not content:
                 raise ValueError("content must not be empty")
             try:
-                fact_id: int = self._write(
-                    "INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
-                    (content, category, tags, self.default_trust),
-                ).lastrowid  # type: ignore[assignment]
+                fact_id: int = self._write("INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
+                                           (content, category, tags, self.default_trust)).lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 return int(self._one("SELECT fact_id FROM facts WHERE content = ?", (content,))["fact_id"])
             self._link_entities(fact_id, content)
@@ -177,14 +174,8 @@ class MemoryStore:
             self._rebuild_bank(category)
             return fact_id
 
-    def update_fact(
-        self,
-        fact_id: int,
-        content: str | None = None,
-        trust_delta: float | None = None,
-        tags: str | None = None,
-        category: str | None = None,
-    ) -> bool:
+    def update_fact(self, fact_id: int, content: str | None = None, trust_delta: float | None = None,
+                    tags: str | None = None, category: str | None = None) -> bool:
         """Partially update a fact (trust clamped to [0, 1]). Returns True if the row existed."""
         with self._lock:
             row = self._one("SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,))
@@ -222,11 +213,9 @@ class MemoryStore:
         with self._lock:
             category_clause = "AND category = ? " if category is not None else ""
             params = [min_trust] + ([category] if category is not None else []) + [limit]
-            sql = (
-                "SELECT fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, "
-                f"created_at, updated_at FROM facts WHERE trust_score >= ? {category_clause}"
-                "ORDER BY trust_score DESC LIMIT ?"
-            )
+            sql = ("SELECT fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, "
+                   f"created_at, updated_at FROM facts WHERE trust_score >= ? {category_clause}"
+                   "ORDER BY trust_score DESC LIMIT ?")
             return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
@@ -241,11 +230,8 @@ class MemoryStore:
             old_trust: float = row["trust_score"]
             new_trust = _clamp_trust(old_trust + (_HELPFUL_DELTA if helpful else _UNHELPFUL_DELTA))
             helpful_increment = 1 if helpful else 0
-            self._write(
-                "UPDATE facts SET trust_score = ?, helpful_count = helpful_count + ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
-                (new_trust, helpful_increment, fact_id),
-            )
+            self._write("UPDATE facts SET trust_score = ?, helpful_count = helpful_count + ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?", (new_trust, helpful_increment, fact_id))
             return {"fact_id": fact_id, "old_trust": old_trust, "new_trust": new_trust,
                     "helpful_count": row["helpful_count"] + helpful_increment}
 
@@ -265,20 +251,17 @@ class MemoryStore:
     def _link_entities(self, fact_id: int, content: str) -> None:
         """Extract entities from content, resolve/create them, and link each to the fact."""
         for name in self._extract_entities(content):
-            self._write(
-                "INSERT OR IGNORE INTO fact_entities (fact_id, entity_id) VALUES (?, ?)",
-                (fact_id, self._resolve_entity(name)),
-            )
+            self._write("INSERT OR IGNORE INTO fact_entities (fact_id, entity_id) VALUES (?, ?)",
+                        (fact_id, self._resolve_entity(name)))
 
     def _resolve_entity(self, name: str) -> int:
         """Return the entity_id for a case-insensitive name or alias match, creating the entity if absent."""
-        row = self._one("SELECT entity_id FROM entities WHERE name LIKE ?", (name,))
-        if row is not None:
-            return int(row["entity_id"])
-        # Aliases are comma-separated; wrap both sides in commas for whole-alias matching.
-        alias_row = self._one("SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'", (name,))
-        if alias_row is not None:
-            return int(alias_row["entity_id"])
+        # Name first, then aliases (comma-separated; wrapped in commas for whole-alias matching).
+        for sql in ("SELECT entity_id FROM entities WHERE name LIKE ?",
+                    "SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'"):
+            row = self._one(sql, (name,))
+            if row is not None:
+                return int(row["entity_id"])
         return int(self._write("INSERT INTO entities (name) VALUES (?)", (name,)).lastrowid)  # type: ignore[arg-type]
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
@@ -294,9 +277,7 @@ class MemoryStore:
         if not self._hrr_available:
             return
         bank_name = f"cat:{category}"
-        rows = self._conn.execute(
-            "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL", (category,),
-        ).fetchall()
+        rows = self._conn.execute("SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL", (category,)).fetchall()
         if not rows:
             self._write("DELETE FROM memory_banks WHERE bank_name = ?", (bank_name,))
             return
@@ -314,12 +295,11 @@ class MemoryStore:
 
     @classmethod
     def release_all_under(cls, directory: "str | Path") -> int:
-        """Force-close every shared connection whose database lives under ``directory``.
+        """Force-close every shared connection whose database lives under ``directory``; returns the count.
 
-        close() is refcount-driven, so a live holder (e.g. an agent's provider) keeps a
-        profile's SQLite handle open, which on Windows makes rmtree of the profile fail.
-        The directory is going away, so later use by a stale holder is expected to fail.
-        Returns how many connections were closed.
+        close() is refcount-driven, so a live holder (e.g. an agent's provider) keeps a profile's SQLite
+        handle open, which on Windows makes rmtree of the profile fail. The directory is going away, so
+        later use by a stale holder is expected to fail.
         """
         root = os.path.normcase(str(Path(directory).expanduser().resolve())) + os.sep
         with cls._shared_guard:
