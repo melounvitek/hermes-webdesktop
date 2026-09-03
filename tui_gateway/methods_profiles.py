@@ -106,9 +106,7 @@ def _latest_message_preview(db, session_id):
                 (session_id,)).fetchone()
     except Exception:
         return ""
-    if not row:
-        return ""
-    text = " ".join(str(row[0] or "").split()).strip()
+    text = " ".join(str(row[0] or "").split()).strip() if row else ""
     return text[:80] + "..." if len(text) > 80 else text
 
 
@@ -498,10 +496,9 @@ def _save_mcp_toggles(cfg, enabled, launch_mcp, save_config) -> None:
     wanted = _clean_names(enabled)
     mcp_cfg = cfg.get("mcp_servers") if isinstance(cfg.get("mcp_servers"), dict) else {}
     for srv in wanted:
-        if srv in mcp_cfg and isinstance(mcp_cfg[srv], dict):
-            mcp_cfg[srv].pop("disabled", None)
-        elif srv in launch_mcp and isinstance(launch_mcp[srv], dict):
+        if not isinstance(mcp_cfg.get(srv), dict) and isinstance(launch_mcp.get(srv), dict):
             mcp_cfg[srv] = dict(launch_mcp[srv])
+        if isinstance(mcp_cfg.get(srv), dict):
             mcp_cfg[srv].pop("disabled", None)
     for srv, entry in mcp_cfg.items():
         if srv not in wanted and isinstance(entry, dict):
@@ -516,9 +513,8 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
     semantics; empty toolsets clears the pin). An undefined MCP server is copied from the LAUNCH
     catalog (unknown names skipped); credentials stay in .env/auth."""
     want_mcp = isinstance(params.get("enabled_mcp_servers"), list)
-    # Launch catalog read BEFORE the home override flips config resolution.
     launch_mcp = {}
-    if want_mcp:
+    if want_mcp:  # launch catalog read BEFORE the home override flips config resolution
         load_launch = _lazy("hermes_cli.config", "load_config_readonly")
         launch_mcp = _try(lambda: (load_launch() or {}).get("mcp_servers"), {})
         launch_mcp = launch_mcp if isinstance(launch_mcp, dict) else {}
