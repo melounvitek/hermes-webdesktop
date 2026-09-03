@@ -213,25 +213,6 @@ def load_background_review_settings() -> tuple[bool, Dict[str, Any]]:
         return True, {}
 
 
-def is_background_review_enabled(task_cfg: Optional[Dict[str, Any]] = None) -> bool:
-    """Whether automatic post-turn review may spawn (``enabled``, default true). Explicit
-    ``/refine`` (``focus`` set) bypasses this gate; prefer :func:`load_background_review_settings`
-    at the spawn site so the block is not re-read on the same turn."""
-    if task_cfg is None:
-        return load_background_review_settings()[0]
-    try:
-        from utils import is_truthy_value
-
-        return is_truthy_value(task_cfg.get("enabled"), default=True)
-    except Exception:
-        logger.warning(
-            "Failed to interpret background_review.enabled; leaving "
-            "automatic review enabled (fail-open)",
-            exc_info=True,
-        )
-        return True
-
-
 def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Resolve provider/model/credentials for the review fork.
 
@@ -666,6 +647,13 @@ def _verbose_memory_lines(label: str, detail: Dict) -> List[str]:
     return [line or f"{label} updated"]
 
 
+# Tool-call argument fields surfaced in action summaries, with their defaults.
+_CALL_DETAIL_DEFAULTS = (
+    ("action", "?"), ("target", "memory"), ("content", ""), ("old_text", ""), ("name", ""),
+    ("old_string", ""), ("new_string", ""),
+)
+
+
 def _collect_review_call_details(review_messages: List[Dict]) -> Tuple[set, dict]:
     """Map review-agent tool_call ids -> parsed call arguments for notify tools.
 
@@ -695,15 +683,8 @@ def _collect_review_call_details(review_messages: List[Dict]) -> Tuple[set, dict
                 args = {}
             if tcid:
                 call_details[tcid] = {
-                    "tool": fn_name,
-                    "action": args.get("action", "?"),
-                    "target": args.get("target", "memory"),
-                    "content": args.get("content", ""),
-                    "old_text": args.get("old_text", ""),
-                    "operations": args.get("operations") or [],
-                    "name": args.get("name", ""),
-                    "old_string": args.get("old_string", ""),
-                    "new_string": args.get("new_string", ""),
+                    "tool": fn_name, "operations": args.get("operations") or [],
+                    **{k: args.get(k, default) for k, default in _CALL_DETAIL_DEFAULTS},
                 }
     return all_tool_call_ids, call_details
 
@@ -1332,7 +1313,6 @@ __all__ = [
     "_MEMORY_REVIEW_PROMPT",
     "_SKILL_REVIEW_PROMPT",
     "_COMBINED_REVIEW_PROMPT",
-    "is_background_review_enabled",
     "load_background_review_settings",
     "spawn_background_review_thread",
     "summarize_background_review_actions",

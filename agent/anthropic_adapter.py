@@ -39,12 +39,7 @@ from agent.anthropic_credentials import (  # noqa: F401
     run_hermes_oauth_login_pure, run_oauth_setup_token,
 )
 
-try:
-    import hermes_cli as _hermes_cli
-
-    _HERMES_VERSION = str(_hermes_cli.__version__)
-except Exception:
-    _HERMES_VERSION = "0.0.0"
+from hermes_cli import __version__ as _HERMES_VERSION
 
 
 # ``import anthropic`` is deliberately NOT at module top: the SDK costs ~220 ms of imports and
@@ -287,7 +282,7 @@ def _detect_claude_code_version() -> str:
 
 
 def _get_claude_code_version() -> str:
-    """Lazily detect the installed Claude Code version when OAuth headers need it."""
+    """Detect lazily (only OAuth headers need it) and cache for the process."""
     global _claude_code_version_cache
     if _claude_code_version_cache is None:
         _claude_code_version_cache = _detect_claude_code_version()
@@ -406,13 +401,19 @@ def _build_anthropic_client_with_bearer_hook(
     kwargs["http_client"] = build_bearer_http_client(token_provider, timeout=kwargs["timeout"])
     kwargs["auth_token"] = "entra-id-bearer-via-http-hook"
     headers = _beta_header(_common_betas_for_base_url(normalized_base_url, drop_context_1m_beta=drop_context_1m_beta))
+    return _new_sdk_client(sdk, kwargs, headers)
+
+
+def _new_sdk_client(sdk, kwargs: Dict[str, Any], headers: Dict[str, str]):
+    """``sdk.Anthropic(**kwargs)`` with ``headers`` attached. Bearer-only construction leaves
+    ``api_key`` unset, so the SDK fills it from ANTHROPIC_API_KEY (loaded from ~/.hermes/.env) and
+    sends dual auth — X-Api-Key *and* Authorization: Bearer — on every Portal/MiniMax/OAuth/Entra
+    request; clear it whenever we intentionally authenticated via auth_token."""
     if headers:
         kwargs["default_headers"] = headers
-
     client = sdk.Anthropic(**kwargs)
-    # Same env-inference trap as build_anthropic_client: auth_token-only construction would
-    # otherwise also send ANTHROPIC_API_KEY as X-Api-Key.
-    client.api_key = None
+    if "auth_token" in kwargs and "api_key" not in kwargs:
+        client.api_key = None
     return client
 
 
@@ -475,16 +476,7 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
         # get these from profile.default_headers, but this route never sees the profile.
         for k, v in _attribution_headers().items():
             headers.setdefault(k, v)
-    if headers:
-        kwargs["default_headers"] = headers
-
-    client = sdk.Anthropic(**kwargs)
-    # Bearer-only construction leaves ``api_key`` unset, so the SDK fills it from ANTHROPIC_API_KEY
-    # (loaded from ~/.hermes/.env) and sends dual auth — X-Api-Key *and* Authorization: Bearer —
-    # on every Portal/MiniMax/OAuth request. Clear it whenever we authenticated via auth_token.
-    if "auth_token" in kwargs and "api_key" not in kwargs:
-        client.api_key = None
-    return client
+    return _new_sdk_client(sdk, kwargs, headers)
 
 
 def build_anthropic_bedrock_client(region: str):
