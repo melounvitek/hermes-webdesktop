@@ -4601,13 +4601,11 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
         return False
 
     try:
-        from gateway.status import _read_pid_record
+        from gateway.status import _pid_exists, _pid_from_record, _read_pid_record
 
-        default_pid_path = default_root / "gateway.pid"
-        rec = _read_pid_record(default_pid_path)
+        rec = _read_pid_record(default_root / "gateway.pid")
         if not rec:
             return False
-        from gateway.status import _pid_exists, _pid_from_record
         pid = _pid_from_record(rec)
         if not pid or not _pid_exists(pid):
             return False
@@ -4624,17 +4622,11 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
         env_multiplex = _env_multiplex_profiles_override()
         if env_multiplex is False:
             return False
-        if env_multiplex is True:
-            multiplex = True
-        else:
+        if env_multiplex is not True:
             if not cfg_path.exists():
                 return False
-            multiplex = bool(
-                cfg.get("multiplex_profiles")
-                or (cfg.get("gateway", {}) or {}).get("multiplex_profiles")
-            )
-        if not multiplex:
-            return False
+            if not (cfg.get("multiplex_profiles") or (cfg.get("gateway", {}) or {}).get("multiplex_profiles")):
+                return False
 
         gateway_cfg = cfg.get("gateway", {}) or {}
         if "multiplex_profile_allowlist" in cfg:
@@ -4682,11 +4674,10 @@ def _guard_named_profile_under_multiplexer(force: bool = False) -> None:
     print()
     print("  Pass --force to start a separate profile gateway anyway (not")
     print("  recommended while the multiplexer is running).")
-    # EX_CONFIG, not 1: this refusal is decided purely by config, so it is permanent. The generated
-    # systemd unit pairs Restart=always with StartLimitIntervalSec=0 and relies on
-    # RestartPreventExitStatus=GATEWAY_FATAL_CONFIG_EXIT_CODE as its only backstop; exiting 1 left
-    # it unarmed and turned a correct refusal into an unbounded restart loop. 78 also hits the s6
-    # finish script's 125 "permanent failure" translation like the other fatal-config exits.
+    # EX_CONFIG, not 1: the refusal is decided purely by config, so it is permanent. The systemd unit
+    # (Restart=always, StartLimitIntervalSec=0) relies on RestartPreventExitStatus=78 as its only
+    # backstop — exit 1 turned a correct refusal into an unbounded restart loop; s6 maps 78 to
+    # "permanent failure" too.
     sys.exit(GATEWAY_FATAL_CONFIG_EXIT_CODE)
 
 
@@ -4747,11 +4738,10 @@ def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
 
             stale = _read_pid_record()
             if stale is not None and not _pid_record_belongs_to_current_profile(stale):
-                stale_home = stale.get("hermes_home", "<unknown>")
                 logger.warning(
                     "PID file belongs to another profile (hermes_home=%s). "
                     "The old gateway may still be running under that profile.",
-                    stale_home,
+                    stale.get("hermes_home", "<unknown>"),
                 )
         except Exception:
             pass
@@ -4833,8 +4823,7 @@ def _absorb_windows_console_controls() -> None:
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        kernel32.SetConsoleCtrlHandler(None, 1)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, 1)  # type: ignore[attr-defined]
     except (OSError, AttributeError):
         pass
 
@@ -4972,8 +4961,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     _respawn_storm_backoff()
 
     def _hard_exit_after_gateway_teardown(code: int) -> None:
-        # Mirror gateway.run.main()'s wedge-proof exit: after graceful teardown, bypass Python
-        # finalization so non-daemon threads (in-flight cron jobs) can't delay a /restart by minutes.
+        # Mirror gateway.run.main()'s wedge-proof exit: bypass Python finalization so non-daemon
+        # threads (in-flight cron jobs) can't delay a /restart by minutes.
         from gateway.run import _exit_after_graceful_shutdown
 
         _exit_after_graceful_shutdown(code)
