@@ -75,9 +75,8 @@ def _reject_unsafe(action: str, args: Dict[str, Any]) -> Optional[str]:
     return None
 
 def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
-    """Current sticky-target app when it provably differs from *requested_app*: both known and neither a
-    substring of the other (names are localized/variant — 'Google-chrome' vs 'chrome'). Unknown current
-    target -> None (fail open; the verify ladder catches wrong-window delivery)."""
+    """Current sticky-target app when it provably differs from *requested_app*: both known and neither a substring
+    of the other ('Google-chrome' vs 'chrome'). Unknown target -> None (fail open; the verify ladder catches it)."""
     last_app = getattr(backend, "_last_app", None)
     current, wanted = (last_app or "").strip().lower(), requested_app.strip().lower()
     return None if not current or not wanted or wanted in current or current in wanted else last_app
@@ -179,8 +178,7 @@ def _get_backend(session_id: str = "") -> ComputerUseBackend:
     sid = str(session_id or "")
     while True:
         with _backend_lock:
-            # Mode resolved under the cache lock; YOLO mutation never holds the approval lock while releasing
-            # this cache, so no lock cycle.
+            # Mode resolved under the cache lock; YOLO mutation never holds the approval lock while releasing it.
             permission_mode = _cua_permission_mode(sid)
             if sid == "" and _backend is not None and sid not in _backends:
                 _install_backend(sid, _backend, permission_mode)  # fold the injection hook into the cache
@@ -194,9 +192,8 @@ def _get_backend(session_id: str = "") -> ComputerUseBackend:
                 return backend
             if _backend_permission_modes.get(sid, "standard") == permission_mode:
                 return cached
-            # Cua's permission mode cannot change after daemon startup: a /yolo toggle replaces only this
-            # session's backend. Stop it outside the cache lock; the loop re-reads the authoritative mode first.
-            _, stale_lock = _detach_locked(sid)
+            # Cua's mode is immutable after daemon startup: a /yolo toggle replaces only this session's backend.
+            _, stale_lock = _detach_locked(sid)  # stopped outside the cache lock; the loop re-reads the mode first
         with contextlib.suppress(Exception):
             _stop_backend(cached, stale_lock)
 
@@ -250,10 +247,9 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
 
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
-        self._started = False
 
-    def start(self) -> None: self._started = True
-    def stop(self) -> None: self._started = False
+    def start(self) -> None: pass
+    def stop(self) -> None: pass
     def is_available(self) -> bool: return True
 
     def _record(self, name: str, kw: Dict[str, Any], result: Any = None) -> Any:
@@ -288,8 +284,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     session_id = str(kwargs.get("session_id") or "")  # approval-state / daemon-mode isolation key
     if (err := _reject_unsafe(action, args)) is not None:
         return err
-    # Approval gate (destructive actions only). Persistent focus is a separate, visible side effect with its
-    # own scope even when the input rung is approved.
+    # Approval gate (destructive only). Persistent focus is a separate visible side effect with its own scope.
     scopes = [action] if action in _DESTRUCTIVE_ACTIONS else []
     if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")):
         scopes.append("bring_to_front")
@@ -363,8 +358,7 @@ _ACTION_SUMMARIES: Dict[str, Callable[[str, Dict[str, Any], str], str]] = {
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
     fg = " [FOREGROUND — briefly raises the window / changes focus]" if args.get("delivery_mode") == "foreground" else ""
-    summarize = _ACTION_SUMMARIES.get(action)
-    return summarize(action, args, fg) if summarize else action + fg
+    return _ACTION_SUMMARIES.get(action, lambda a, args, fg: a + fg)(action, args, fg)
 
 # --- read-only / focus actions: (backend, args) -> final tool result ---------
 
@@ -372,10 +366,10 @@ def _do_capture(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
     mode = str(args.get("mode", "som"))
     if mode not in {"som", "vision", "ax"}:
         return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
-    kwargs: Dict[str, Any] = {"mode": mode, "app": args.get("app")}
-    if args.get("pid") is not None or args.get("window_id") is not None:  # forwarded only when given (older backends)
-        kwargs.update(pid=args.get("pid"), window_id=args.get("window_id"))
-    return _capture_response(backend.capture(**kwargs))
+    # pid/window_id forwarded only when given so older backends keep their defaults.
+    given = args.get("pid") is not None or args.get("window_id") is not None
+    target = {"pid": args.get("pid"), "window_id": args.get("window_id")} if given else {}
+    return _capture_response(backend.capture(mode=mode, app=args.get("app"), **target))
 
 def _do_focus_app(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
     if not args.get("app"):
@@ -454,8 +448,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         hint = _ACTION_SUGGESTIONS.get(str(action))
         return json.dumps({"error": f"unknown action {action!r}"
                            + (f" — did you mean {hint!r}? See the action enum in the tool schema." if hint else "")})
-    # app= guard: input goes to the sticky target from the last capture/focus_app and the backend drops
-    # app= silently — refuse a clear mismatch rather than type into the wrong window while reporting ok:true.
+    # app= guard: input goes to the sticky target from the last capture/focus_app and the backend drops app=
+    # silently — refuse a clear mismatch rather than type into the wrong window while reporting ok:true.
     requested_app = args.get("app")
     if (isinstance(requested_app, str) and requested_app.strip()
             and (mismatch := _input_target_mismatch(backend, requested_app)) is not None):
@@ -464,8 +458,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             "error": (f"{action} would go to the current target {mismatch!r}, not {requested_app.strip()!r} "
                       "— input actions always hit the sticky target from the last capture/focus_app. "
                       f"Call capture(app={requested_app.strip()!r}) or focus_app first, then retry.")})
-    # delivery_mode / bring_to_front thread through every input action so the model can escalate
-    # background → foreground per cua-driver's ladder.
+    # delivery_mode / bring_to_front thread through every input action (background → foreground ladder).
     res = handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
                   bring_to_front=bool(args.get("bring_to_front")))
     return res if isinstance(res, str) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
@@ -483,14 +476,12 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
             "Input was delivered but not confirmed. Re-capture and check the result BEFORE any "
             "retry — do not repeat the input on an escalation recommendation alone.")}
     if res.effect == "suspected_noop" or not res.ok or res.code is not None:
-        decision: Dict[str, Any] = {"decision": "escalate"}
-        if isinstance(res.escalation, dict):
-            decision["recommended"] = res.escalation.get("recommended")
-        decision["hint"] = ("The input likely did not land. Climb one rung following `recommended`: 'px' → "
-                            "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
-                            "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
-                            "app being Electron/Chromium — react to this signal.")
-        return decision
+        recommended = {"recommended": res.escalation.get("recommended")} if isinstance(res.escalation, dict) else {}
+        return {"decision": "escalate", **recommended, "hint": (
+            "The input likely did not land. Climb one rung following `recommended`: 'px' → "
+            "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
+            "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
+            "app being Electron/Chromium — react to this signal.")}
     # Transport success without semantic proof is not proof of effect.
     return {"decision": "verify_fresh_state",
             "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
@@ -501,13 +492,11 @@ def _present(**fields: Any) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v}  # only the truthy optional fields, in the given order
 
 def _action_payload(res: ActionResult) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"ok": res.ok, "action": res.action, **_present(message=res.message)}
-    # cua-driver's structured verdict, only for fields it returned (None = old driver). ok is transport
-    # success; effect/escalation are the semantic verdict.
-    payload.update({k: v for k in _VERDICT_FIELDS if (v := getattr(res, k)) is not None})
-    payload.update(_present(meta=res.meta))
-    payload["verdict"] = _classify_action_result(res)
-    return payload
+    # cua-driver's structured verdict fields only when returned (None = old driver). ok is transport success;
+    # effect/escalation are the semantic verdict.
+    return {"ok": res.ok, "action": res.action, **_present(message=res.message),
+            **{k: v for k in _VERDICT_FIELDS if (v := getattr(res, k)) is not None}, **_present(meta=res.meta),
+            "verdict": _classify_action_result(res)}
 
 def _text_response(res: ActionResult) -> str:
     return json.dumps(_action_payload(res))
@@ -708,11 +697,9 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         # app-only recapture can switch targets.
         target = getattr(backend, "_last_target", None) or {}
         pid, window_id = target.get("pid"), target.get("window_id")
-        mode = _capture_after_mode()
-        if pid is not None and window_id is not None:
-            cap = backend.capture(mode=mode, pid=pid, window_id=window_id)
-        else:
-            cap = backend.capture(mode=mode, app=getattr(backend, "_last_app", None))
+        exact = pid is not None and window_id is not None
+        cap = backend.capture(mode=_capture_after_mode(), **({"pid": pid, "window_id": window_id} if exact
+                                                            else {"app": getattr(backend, "_last_app", None)}))
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
@@ -794,10 +781,9 @@ def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_
         img = Image.open(BytesIO(raw))
         if max(img.size) <= max_dim:
             return raw, None
-        orig_w, orig_h = img.size
+        (orig_w, orig_h), out = img.size, BytesIO()
         img.thumbnail((max_dim, max_dim))
         new_w, new_h = img.size
-        out = BytesIO()
         img.save(out, format="JPEG" if ext == ".jpg" else "PNG")
         fx, fy = (orig_w / new_w if new_w else 1.0), (orig_h / new_h if new_h else 1.0)
         factor_clause = (f"multiply any coordinates you report by {fx:.2f} to map back to the real screen."
