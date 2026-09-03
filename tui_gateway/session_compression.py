@@ -82,8 +82,7 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     agent.codex_responses_native_compaction = is_truthy_value(compression.get("codex_responses_native", False))
     native_threshold_raw = compression.get("codex_responses_compact_threshold", 200_000)
     try:
-        native_threshold = int(native_threshold_raw)
-        if isinstance(native_threshold_raw, bool) or native_threshold <= 0:
+        if isinstance(native_threshold_raw, bool) or (native_threshold := int(native_threshold_raw)) <= 0:
             raise ValueError
     except (TypeError, ValueError):
         logger.warning("Invalid compression.codex_responses_compact_threshold=%r; using 200000.", native_threshold_raw)

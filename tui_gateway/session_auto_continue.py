@@ -5,6 +5,8 @@ busy-submit handling. Bodies are rebound onto server.py's globals at install tim
 from __future__ import annotations
 
 
+import contextlib
+
 from .method_ctx import bind_module
 
 # A concluded turn (success, handled error, interrupt) clears its durable marker (turn_marker.py) in
@@ -371,19 +373,16 @@ def _emit_terminal_turn_error(
     code, retryable}) is classified here from an exception when the caller doesn't know the layer."""
     agent = session.get("agent")
     if error_surface is None and isinstance(error, BaseException):
-        try:
+        with contextlib.suppress(Exception):
             from agent.error_surface import build_error_surface_from_exception
 
             error_surface = build_error_surface_from_exception(
                 error, provider=str(getattr(agent, "provider", "") or ""), model=str(getattr(agent, "model", "") or "")
             )
-        except Exception:
-            error_surface = None
     with session["history_lock"]:
         _fail_inflight_turn(session, error, error_surface=error_surface)
         turn = session.get("inflight_turn") or {}
-        message = str(turn.get("error") or "turn failed")
-        partial = str(turn.get("assistant") or "")
+        message, partial = str(turn.get("error") or "turn failed"), str(turn.get("assistant") or "")
         cols = int(session.get("cols", 80))
     text = partial or f"Error: {message}"
     try:
