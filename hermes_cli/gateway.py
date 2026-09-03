@@ -203,9 +203,7 @@ def _get_parent_pid(pid: int) -> int | None:
     except Exception:
         return None
     # ps fallback, POSIX only: Git Bash's ps.exe would flash a console from the windowless backend.
-    if is_windows():
-        return None
-    if not shutil.which("ps"):
+    if is_windows() or not shutil.which("ps"):
         return None
     try:
         result = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, **_CAPTURE_TEXT)
@@ -238,9 +236,7 @@ def _is_pid_ancestor_of_current_process(target_pid: int) -> bool:
 
 def _request_gateway_self_restart(pid: int) -> bool:
     """Ask a running gateway ancestor to restart itself asynchronously."""
-    if not hasattr(signal, "SIGUSR1"):
-        return False
-    if not _is_pid_ancestor_of_current_process(pid):
+    if not hasattr(signal, "SIGUSR1") or not _is_pid_ancestor_of_current_process(pid):
         return False
     try:
         os.kill(pid, signal.SIGUSR1)  # windows-footgun: ok — POSIX signal, guarded by hasattr(signal, 'SIGUSR1') above
@@ -257,9 +253,7 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
     cover the after-turn wait plus the drain — pass ``resolve_restart_exit_wait_budget(...)``.
     Returns False if the signal couldn't be sent or the process outlived the timeout.
     """
-    if not hasattr(signal, "SIGUSR1"):
-        return False
-    if pid <= 0:
+    if not hasattr(signal, "SIGUSR1") or pid <= 0:
         return False
     try:
         os.kill(pid, signal.SIGUSR1)  # windows-footgun: ok — POSIX signal, guarded by hasattr(signal, 'SIGUSR1') above
@@ -279,39 +273,30 @@ def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
     """
     if pid <= 0:
         return True
-
-    import time as _time
-
     # ``os.kill(pid, 0)`` hard-kills on Windows (TerminateProcess); use _pid_exists instead.
     from gateway.status import _pid_exists
 
-    deadline = _time.monotonic() + max(timeout, 0.0)
+    deadline = time.monotonic() + max(timeout, 0.0)
     while True:
         if not _pid_exists(pid):
             return True
-        if _time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             return False
-        _time.sleep(0.5)
+        time.sleep(0.5)
 
 
 # --- Wedged-gateway detection + bounded escalation ---------------------------
-#
 # A gateway whose asyncio loop is stalled cannot handle SIGTERM/SIGUSR1, so the drain wait burns
 # its full budget and `hermes update` can deadlock. Two witnesses classify the loop BEFORE any
-# drain wait: the heartbeat file ``state/gateway.heartbeat`` (rewritten every 30s, but on a thread
-# — so freshness/staleness alone is not proof) and the loop-tick socket
-# ``state/gateway.loop-tick.<pid>.sock``, answered by the loop itself; the payload records whether
-# the socket is armed (``loop_tick_socket``).
-#
-# - ``alive``   — socket answered, or file fresh and not contradicted. Normal graceful drain,
-#                 which honours the in-flight cron drain floor.
-# - ``wedged``  — heartbeat is this PID's, stale past several beats, AND the armed socket stays
-#                 silent across ``tick_strikes`` consecutive misses. Only then may callers
-#                 escalate via ``_escalate_wedged_gateway``; one silent probe is never authority.
-# - ``unknown`` — no/unreadable heartbeat, PID mismatch, or witness conflict. Treated as alive:
-#                 never escalate on ambiguity.
-#
-# Legacy payloads (no ``loop_tick_socket`` flag) wrote on-loop, so staleness alone remains proof.
+# drain wait: the heartbeat file ``state/gateway.heartbeat`` (rewritten every 30s on a thread, so
+# staleness alone is not proof) and the loop-tick socket ``state/gateway.loop-tick.<pid>.sock``
+# answered by the loop itself; the payload records whether the socket is armed (``loop_tick_socket``).
+# ``alive``: socket answered, or fresh file not contradicted -> normal graceful drain. ``wedged``:
+# heartbeat is this PID's, stale past several beats, AND the armed socket stays silent across
+# ``tick_strikes`` consecutive misses -> callers may ``_escalate_wedged_gateway``; one silent probe
+# is never authority. ``unknown``: no/unreadable heartbeat, PID mismatch, or witness conflict ->
+# treated as alive; never escalate on ambiguity. Legacy payloads (no ``loop_tick_socket`` flag)
+# wrote on-loop, so staleness alone remains proof.
 
 GATEWAY_LOOP_ALIVE = "alive"
 GATEWAY_LOOP_WEDGED = "wedged"
@@ -366,12 +351,7 @@ def _probe_loop_tick_tcp(port: int, timeout: float = 1.0) -> bool | None:
 
 
 def _probe_loop_tick_socket_sustained(
-    pid: int,
-    home: Path | None,
-    *,
-    timeout: float = 1.0,
-    strikes: int = 3,
-    gap_s: float = 0.2,
+    pid: int, home: Path | None, *, timeout: float = 1.0, strikes: int = 3, gap_s: float = 0.2,
     tcp_port: int | None = None,
 ) -> bool | None:
     """Probe the tick socket up to ``strikes`` times, ``gap_s`` apart, until a reply.
@@ -396,15 +376,9 @@ def _probe_loop_tick_socket_sustained(
     return False
 
 
-
 def probe_gateway_loop_liveness(
-    pid: int,
-    *,
-    stale_after: float = DEFAULT_LOOP_LIVENESS_STALE_AFTER_S,
-    home: Path | None = None,
-    tick_timeout: float = 1.0,
-    tick_strikes: int = 3,
-    tick_gap_s: float = 0.2,
+    pid: int, *, stale_after: float = DEFAULT_LOOP_LIVENESS_STALE_AFTER_S, home: Path | None = None,
+    tick_timeout: float = 1.0, tick_strikes: int = 3, tick_gap_s: float = 0.2,
 ) -> str:
     """Classify a gateway PID's event loop as alive / wedged / unknown (see block comment above).
 
@@ -462,22 +436,14 @@ def probe_gateway_loop_liveness(
     if witness is False:
         # First miss. The probe above is miss #1, so ``tick_strikes - 1`` more attempts follow.
         sustained = _probe_loop_tick_socket_sustained(
-            pid,
-            home,
-            timeout=tick_timeout,
-            strikes=tick_strikes - 1,
-            gap_s=tick_gap_s,
-            tcp_port=tcp_port_int,
+            pid, home, timeout=tick_timeout, strikes=tick_strikes - 1, gap_s=tick_gap_s, tcp_port=tcp_port_int
         )
         if sustained is False:
             return GATEWAY_LOOP_WEDGED
         if sustained is True:
-            # Transient stall, not a wedge.
-            return GATEWAY_LOOP_ALIVE
-        # Witness vanished mid-window: ambiguity — never kill on it.
-        return GATEWAY_LOOP_UNKNOWN
-    # Armed but unreachable socket: ambiguity — never kill on it.
-    return GATEWAY_LOOP_UNKNOWN
+            return GATEWAY_LOOP_ALIVE  # Transient stall, not a wedge.
+        return GATEWAY_LOOP_UNKNOWN  # Witness vanished mid-window: ambiguity — never kill on it.
+    return GATEWAY_LOOP_UNKNOWN  # Armed but unreachable socket: ambiguity — never kill on it.
 
 
 def _escalate_wedged_gateway(pid: int, *, term_grace: float = 5.0, kill_wait: float = 5.0) -> bool:
@@ -517,17 +483,29 @@ def _get_ancestor_pids() -> set[int]:
 
 
 def _append_unique_pid(pids: list[int], pid: int | None, exclude_pids: set[int]) -> None:
-    if pid is None or pid <= 0:
-        return
-    if pid == os.getpid() or pid in exclude_pids or pid in pids:
-        return
-    pids.append(pid)
+    if pid and pid > 0 and pid != os.getpid() and pid not in exclude_pids and pid not in pids:
+        pids.append(pid)
+
+
+def _iter_proc_cmdlines(exclude_pids: set[int]):
+    """Yield ``(pid, cmdline)`` from ``/proc`` (Docker without procps); raises if /proc is unusable."""
+    my_pid = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == my_pid or pid in exclude_pids:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as _f:
+                cmdline = _f.read().decode("utf-8", errors="replace")
+        except (OSError, PermissionError):
+            continue
+        yield pid, cmdline.replace("\x00", " ")
 
 
 def _scan_gateway_pids(
-    exclude_pids: set[int],
-    all_profiles: bool = False,
-    include_restart_managers: bool = False,
+    exclude_pids: set[int], all_profiles: bool = False, include_restart_managers: bool = False
 ) -> list[int]:
     """Best-effort process-table scan for gateway PIDs (backs up a stale/missing PID file; ``--all`` sweeps)."""
     exclude_pids = exclude_pids | _get_ancestor_pids()
@@ -539,7 +517,7 @@ def _scan_gateway_pids(
     # Forward slashes on both sides of the HERMES_HOME= match (mirrors gateway.status).
     current_home_lc = current_home.lower().replace("\\", "/")
     current_profile_arg = _profile_arg(current_home)
-    current_profile_name = (current_profile_arg.split()[-1] if current_profile_arg else "")
+    current_profile_name = current_profile_arg.split()[-1] if current_profile_arg else ""
     current_profile_name_lc = current_profile_name.lower()
 
     def _matches_current_profile(command: str) -> bool:
@@ -557,13 +535,11 @@ def _scan_gateway_pids(
             return False
         return not ("hermes_home=" in command_lc and f"hermes_home={current_home_lc}" not in command_lc)
 
-    def _matches_gateway_runtime(command: str) -> bool:
-        if looks_like_gateway_command_line(command):
-            return True
-        return include_restart_managers and looks_like_gateway_runtime_command_line(command)
-
     def _consider(pid: int, command: str) -> None:
-        if _matches_gateway_runtime(command) and (all_profiles or _matches_current_profile(command)):
+        matches_runtime = looks_like_gateway_command_line(command) or (
+            include_restart_managers and looks_like_gateway_runtime_command_line(command)
+        )
+        if matches_runtime and (all_profiles or _matches_current_profile(command)):
             _append_unique_pid(pids, pid, exclude_pids)
 
     try:
@@ -578,19 +554,8 @@ def _scan_gateway_pids(
             _found_via_proc = False
             if os.path.isdir("/proc"):
                 try:
-                    my_pid = os.getpid()
-                    for entry in os.listdir("/proc"):
-                        if not entry.isdigit():
-                            continue
-                        pid = int(entry)
-                        if pid == my_pid or pid in exclude_pids:
-                            continue
-                        try:
-                            with open(f"/proc/{pid}/cmdline", "rb") as _f:
-                                cmdline = _f.read().decode("utf-8", errors="replace")
-                            _consider(pid, cmdline.replace("\x00", " "))
-                        except (OSError, PermissionError):
-                            continue
+                    for pid, command in _iter_proc_cmdlines(exclude_pids):
+                        _consider(pid, command)
                     _found_via_proc = True
                 except Exception:
                     pass
@@ -657,9 +622,7 @@ def _windows_process_listing() -> str | None:
     result = None
     if wmic_path is not None:
         result = bounded_probe_run(
-            [wmic_path, "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
-            timeout=10,
-            errors="ignore",
+            [wmic_path, "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"], timeout=10, errors="ignore"
         )
     if result is None or result.returncode != 0 or not (result.stdout or ""):
         powershell = shutil.which("powershell") or shutil.which("pwsh")
@@ -673,16 +636,10 @@ def _windows_process_listing() -> str | None:
             "  '' "
             "}"
         )
-        result = bounded_probe_run(
-            [powershell, "-NoProfile", "-Command", ps_cmd],
-            timeout=15,
-            errors="ignore",
-        )
+        result = bounded_probe_run([powershell, "-NoProfile", "-Command", ps_cmd], timeout=15, errors="ignore")
         if result is None:
             return None
-    if result.returncode != 0 or result.stdout is None:
-        return None
-    return result.stdout
+    return None if result.returncode != 0 or result.stdout is None else result.stdout
 
 
 def _filter_venv_launcher_stubs(pids: list[int]) -> list[int]:
@@ -693,18 +650,14 @@ def _filter_venv_launcher_stubs(pids: list[int]) -> list[int]:
         return pids
 
     pid_set = set(pids)
-    parent_of: dict[int, int | None] = {}
+    drop: set[int] = set()
     for pid in pids:
         try:
-            parent_of[pid] = psutil.Process(pid).ppid()
+            ppid = psutil.Process(pid).ppid()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            parent_of[pid] = None
-
-    drop: set[int] = set()
-    for pid, ppid in parent_of.items():
+            continue
         if ppid is not None and ppid in pid_set:
             drop.add(ppid)
-
     return [p for p in pids if p not in drop]
 
 
@@ -725,20 +678,12 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
         include_restart_managers = not supports_systemd_services()
     except Exception:
         include_restart_managers = False
-    for pid in _scan_gateway_pids(
-        _exclude,
-        all_profiles=all_profiles,
-        include_restart_managers=include_restart_managers,
-    ):
+    for pid in _scan_gateway_pids(_exclude, all_profiles=all_profiles, include_restart_managers=include_restart_managers):
         _append_unique_pid(pids, pid, _exclude)
     return pids
 
 
-def find_profile_gateway_processes(
-    exclude_pids: set | None = None,
-    *,
-    strict: bool = False,
-) -> list[ProfileGatewayProcess]:
+def find_profile_gateway_processes(exclude_pids: set | None = None, *, strict: bool = False) -> list[ProfileGatewayProcess]:
     """Return running gateway PIDs mapped to Hermes profiles via PID files."""
     _exclude = set(exclude_pids or set())
     processes: list[ProfileGatewayProcess] = []
@@ -773,16 +718,12 @@ def find_profile_gateway_processes(
         if pid is None or pid <= 0 or pid in _exclude or pid in seen:
             continue
         seen.add(pid)
-        processes.append(
-            ProfileGatewayProcess(profile=profile.name, path=profile.path, pid=pid, create_time=create_time)
-        )
+        processes.append(ProfileGatewayProcess(profile=profile.name, path=profile.path, pid=pid, create_time=create_time))
     return processes
 
 
 def find_windows_gateway_services(
-    *,
-    psutil_module=None,
-    profile_processes: list[ProfileGatewayProcess] | None = None,
+    *, psutil_module=None, profile_processes: list[ProfileGatewayProcess] | None = None
 ) -> list[WindowsGatewayService]:
     """Find profile gateways supervised by real Windows services.
 
@@ -821,9 +762,7 @@ def find_windows_gateway_services(
                 continue
             if service_status != "running":
                 if service_pid > 0:
-                    indeterminate_services_by_pid.setdefault(service_pid, []).append(
-                        (service_name, service_status)
-                    )
+                    indeterminate_services_by_pid.setdefault(service_pid, []).append((service_name, service_status))
                 continue
             if service_pid <= 0:
                 raise RuntimeError(f"Running SCM service {service_name} has no valid process ID")
@@ -836,33 +775,21 @@ def find_windows_gateway_services(
         try:
             gateway_process = psutil_module.Process(int(profile_process.pid))
             gateway_create_time = float(gateway_process.create_time())
-            if profile_process.create_time <= 0 or abs(
-                gateway_create_time - profile_process.create_time
-            ) > 0.001:
+            if profile_process.create_time <= 0 or abs(gateway_create_time - profile_process.create_time) > 0.001:
                 raise RuntimeError("Gateway process identity changed during SCM discovery")
             ancestor_pids = [int(parent.pid) for parent in gateway_process.parents()]
             for pid in ancestor_pids:
                 indeterminate_services = indeterminate_services_by_pid.get(pid, [])
                 if indeterminate_services:
                     service_name, service_status = indeterminate_services[0]
-                    raise RuntimeError(
-                        f"SCM service {service_name} has indeterminate status: "
-                        f"{service_status}"
-                    )
-            shared_service_pids = [
-                pid
-                for pid in ancestor_pids
-                if len(service_names_by_pid.get(pid, set())) > 1
-            ]
+                    raise RuntimeError(f"SCM service {service_name} has indeterminate status: {service_status}")
+            shared_service_pids = [pid for pid in ancestor_pids if len(service_names_by_pid.get(pid, set())) > 1]
             if shared_service_pids:
                 raise RuntimeError(
                     "Gateway ownership is ambiguous under shared SCM host PID(s): "
                     + ", ".join(str(pid) for pid in shared_service_pids)
                 )
-            service_pid = next(
-                (pid for pid in ancestor_pids if len(service_names_by_pid.get(pid, set())) == 1),
-                None,
-            )
+            service_pid = next((pid for pid in ancestor_pids if len(service_names_by_pid.get(pid, set())) == 1), None)
             if service_pid is None:
                 continue
             service_name = next(iter(service_names_by_pid[service_pid]))
@@ -888,10 +815,7 @@ def find_windows_gateway_services(
         except RuntimeError:
             raise
         except Exception as exc:
-            raise RuntimeError(
-                "Could not determine SCM ownership for gateway profile "
-                f"{profile_process.profile}"
-            ) from exc
+            raise RuntimeError(f"Could not determine SCM ownership for gateway profile {profile_process.profile}") from exc
     return [found[name] for name in sorted(found)]
 
 
@@ -916,9 +840,7 @@ def _capture_gateway_argv(pid: int) -> list[str] | None:
         return None
     try:
         argv = list(psutil.Process(pid).cmdline() or [])
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return None
-    except Exception:
+    except Exception:  # NoSuchProcess / AccessDenied / ZombieProcess included
         return None
     if not argv:
         return None
@@ -952,30 +874,24 @@ def _prepare_profile_gateway_update_restart(profile: str, pid: int) -> str | Non
 
 def launch_detached_gateway_restart_by_cmdline(old_pid: int, run_argv: list[str]) -> bool:
     """Relaunch a gateway with no profile→PID-file mapping by replaying its captured argv after exit."""
-    if old_pid <= 0 or not run_argv:
-        return False
-    return _spawn_gateway_restart_watcher(old_pid, list(run_argv))
+    return old_pid > 0 and bool(run_argv) and _spawn_gateway_restart_watcher(old_pid, list(run_argv))
 
 
 def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
     """Relaunch a manually-run profile gateway after its current PID exits."""
-    if old_pid <= 0:
-        return False
-    return _spawn_gateway_restart_watcher(old_pid, _gateway_run_args_for_profile(profile))
+    return old_pid > 0 and _spawn_gateway_restart_watcher(old_pid, _gateway_run_args_for_profile(profile))
 
 
 def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
-    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits."""
+    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits.
+
+    Both watcher and respawned gateway need platform-appropriate detach: POSIX ``start_new_session``
+    (setsid); on Windows that flag does NOT detach (the watcher would die with the CLI console), so
+    ``windows_detach_popen_kwargs()`` supplies the creationflags.
+    """
     if old_pid <= 0 or not run_argv:
         return False
-
-    # Both watcher and respawned gateway need platform-appropriate detach: POSIX
-    # ``start_new_session=True`` (setsid); on Windows that flag does NOT detach (the watcher would
-    # die with the CLI console), so ``windows_detach_popen_kwargs()`` supplies the creationflags.
-    from hermes_cli._subprocess_compat import (
-        windows_detach_flags_without_breakaway,
-        windows_detach_popen_kwargs,
-    )
+    from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway, windows_detach_popen_kwargs
 
     # Windows: normalize the interpreter and capture a stable cwd + env overlay (HERMES_HOME,
     # VIRTUAL_ENV, PYTHONPATH) so the respawn doesn't depend on the watcher's cwd. No-op on POSIX.
@@ -983,7 +899,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
     respawn_env_overlay: dict[str, str] = {}
     if sys.platform == "win32":
         try:
-            from hermes_cli.gateway_windows import (windowless_gateway_restart_spec)
+            from hermes_cli.gateway_windows import windowless_gateway_restart_spec
 
             run_argv, respawn_cwd, respawn_env_overlay = windowless_gateway_restart_spec(list(run_argv))
         except Exception:
@@ -991,10 +907,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
             respawn_cwd = ""
             respawn_env_overlay = {}
 
-    # Embedded as JSON literals in the watcher source (no extra argv plumbing).
-    respawn_cwd_literal = json.dumps(respawn_cwd)
-    respawn_env_literal = json.dumps(respawn_env_overlay)
-
+    # cwd/env overlay are embedded as JSON literals in the watcher source (no extra argv plumbing).
     watcher = textwrap.dedent(
         """
         import os
@@ -1013,19 +926,15 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         _respawn_env_overlay = {respawn_env_literal}
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            # ``os.kill(pid, 0)`` is not a no-op on Windows — use the
-            # cross-platform existence check.
+            # ``os.kill(pid, 0)`` is not a no-op on Windows — use the cross-platform existence check.
             from gateway.status import _pid_exists
             if not _pid_exists(pid):
                 break
             time.sleep(0.2)
 
-        # Route stray stdout/stderr from the respawned gateway to the same
-        # sidecar log _spawn_detached uses.  DEVNULL here meant a gateway
-        # killed moments after respawn (e.g. parent Job Object teardown when
-        # breakaway is denied, #48820 4th repro) left ZERO trace anywhere —
-        # no gateway.log line, no exit-diag record, nothing.  Best-effort:
-        # fall back to DEVNULL when the log dir is unavailable.
+        # Route the respawned gateway's stray stdout/stderr to the same sidecar log _spawn_detached
+        # uses: with DEVNULL a gateway killed moments after respawn (parent Job Object teardown when
+        # breakaway is denied) left ZERO trace. Best-effort: DEVNULL when the log dir is unavailable.
         _stdio_target = subprocess.DEVNULL
         _stdio_fh = None
         try:
@@ -1038,21 +947,16 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         except Exception:
             pass
 
-        # Platform-appropriate detach for the respawned gateway.  On POSIX
-        # start_new_session=True maps to os.setsid; on Windows we need
-        # explicit creationflags because start_new_session is a no-op there.
-        # CREATE_BREAKAWAY_FROM_JOB is critical: the watcher itself may have
-        # been spawned inside a job object (Electron/Tauri parent), and
-        # without breakaway the respawned gateway would die when that job
-        # tears down. See _subprocess_compat.windows_detach_flags().
+        # Platform-appropriate detach for the respawned gateway: POSIX start_new_session (setsid);
+        # Windows needs explicit creationflags. CREATE_BREAKAWAY_FROM_JOB is critical: the watcher may
+        # itself sit inside a job object (Electron/Tauri parent) and without breakaway the respawned
+        # gateway dies when that job tears down. See _subprocess_compat.windows_detach_flags().
         _popen_kwargs = {{
             "stdout": _stdio_target,
             "stderr": _stdio_target,
         }}
-        # Anchor the respawned gateway at the stable working dir and overlay
-        # the env (VIRTUAL_ENV / PYTHONPATH / HERMES_HOME) the windowless
-        # base interpreter needs to import hermes_cli.  Empty on POSIX, where
-        # the venv python resolves imports without help.
+        # Anchor at the stable working dir and overlay the env (VIRTUAL_ENV / PYTHONPATH /
+        # HERMES_HOME) the windowless base interpreter needs to import hermes_cli. Empty on POSIX.
         if _respawn_cwd:
             _popen_kwargs["cwd"] = _respawn_cwd
         _base_env = {{**os.environ, **_respawn_env_overlay}}
@@ -1060,22 +964,16 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
             if sys.platform == "win32":
                 try:
                     _popen_kwargs["creationflags"] = windows_detach_flags()
-                    # Stamp the breakaway state exactly like the canonical
-                    # gateway_windows._spawn_detached, so the respawned
-                    # gateway's exit-diag / lifecycle records show whether it
-                    # escaped the parent Job Object (#48820 4th repro:
-                    # without the stamp, a job-teardown kill was
-                    # indistinguishable from any other silent death).
+                    # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
+                    # respawned gateway's exit-diag / lifecycle records show whether it escaped the
+                    # parent Job Object (a job-teardown kill is otherwise indistinguishable).
                     _popen_kwargs["env"] = {{
                         **_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1",
                     }}
                     subprocess.Popen(cmd, **_popen_kwargs)
                 except OSError:
-                    # CREATE_BREAKAWAY_FROM_JOB can be rejected with
-                    # ERROR_ACCESS_DENIED when the parent's job object refuses
-                    # breakaway. Retry without it — DETACHED_PROCESS et al.
-                    # alone are enough in most setups. Mirrors the canonical
-                    # fallback in gateway_windows._spawn_detached.
+                    # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
+                    # job object refuses breakaway; retry without it (mirrors _spawn_detached).
                     _popen_kwargs["creationflags"] = (
                         windows_detach_flags_without_breakaway()
                     )
@@ -1095,36 +993,23 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
                 except OSError:
                     pass
         """
-    ).strip().format(
-        respawn_cwd_literal=respawn_cwd_literal,
-        respawn_env_literal=respawn_env_literal,
-    )
+    ).strip().format(respawn_cwd_literal=json.dumps(respawn_cwd), respawn_env_literal=json.dumps(respawn_env_overlay))
 
     watcher_argv = [sys.executable, "-c", watcher, str(old_pid), *run_argv]
-
+    devnull = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     # Same detach for the watcher itself, so closing the terminal doesn't kill it.
     try:
-        subprocess.Popen(
-            watcher_argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **windows_detach_popen_kwargs(),
-        )
+        subprocess.Popen(watcher_argv, **devnull, **windows_detach_popen_kwargs())
     except OSError:
         # Parent job object rejected CREATE_BREAKAWAY_FROM_JOB; retry without it (Windows only —
         # ``start_new_session=True`` cannot raise OSError on POSIX).
+        fallback_kwargs: dict = (
+            {"creationflags": windows_detach_flags_without_breakaway()}
+            if sys.platform == "win32"
+            else {"start_new_session": True}
+        )
         try:
-            fallback_kwargs: dict = (
-                {"creationflags": windows_detach_flags_without_breakaway()}
-                if sys.platform == "win32"
-                else {"start_new_session": True}
-            )
-            subprocess.Popen(
-                watcher_argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **fallback_kwargs,
-            )
+            subprocess.Popen(watcher_argv, **devnull, **fallback_kwargs)
         except OSError:
             return False
     return True
