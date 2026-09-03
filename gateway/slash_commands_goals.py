@@ -46,7 +46,6 @@ class GatewayGoalCommandsMixin:
         mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
-
         if not args or lower == "status":
             return mgr.status_line()
         if lower == "show":
@@ -222,7 +221,6 @@ class GatewayGoalCommandsMixin:
         mgr, _session_entry = await self._get_heartbeat_manager_for_event(event)
         if mgr is None:
             return "Heartbeats unavailable (no session)."
-
         quick_key = self._session_key_for_source(event.source) if event.source else None
 
         def _watch():
@@ -294,7 +292,6 @@ class GatewayGoalCommandsMixin:
         _quick_key, agent, error = self._idle_cached_agent_or_error(event, "refine")
         if error:
             return error
-
         snapshot = list(getattr(agent, "_session_messages", None) or [])
         if not snapshot:
             return "Nothing to refine yet — the conversation is empty."
@@ -353,7 +350,6 @@ class GatewayGoalCommandsMixin:
             return "No active goal. Set one with /goal <text>."
         if not args:
             return f"{mgr.status_line()}\n{mgr.render_subgoals()}"
-
         tokens = args.split(None, 1)
         verb = tokens[0].lower()
         rest = tokens[1].strip() if len(tokens) > 1 else ""
@@ -369,13 +365,11 @@ class GatewayGoalCommandsMixin:
                 "/subgoal remove", mgr.remove_subgoal, idx, errors=(IndexError, RuntimeError)
             )
             return err or f"✓ Removed subgoal {idx}: {removed}"
-
         if verb == "clear":
             prev, err = _mgr_call("/subgoal clear", mgr.clear_subgoals, errors=(RuntimeError,))
             if err:
                 return err
             return f"✓ Cleared {_plural(prev, 'subgoal')}." if prev else "No subgoals to clear."
-
         text, err = _mgr_call("/subgoal", mgr.add_subgoal, args)
         if err:
             return err

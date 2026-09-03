@@ -375,7 +375,6 @@ class GatewayStatusCommandsMixin:
                     with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                         return _resolve_gateway_model_context(model_name or None)
                 return _resolve_gateway_model_context(model_name or None)
-
             resolved = await _quiet(lambda: asyncio.to_thread(_resolve_nonresident_context))
             if resolved is not None:
                 model_name = model_name or resolved.model
@@ -490,7 +489,6 @@ class GatewayStatusCommandsMixin:
         def _history():
             entry = self.session_store.get_or_create_session(source)
             return self.session_store.load_transcript(entry.session_id) or []
-
         return compute_session_context_breakdown(agent, _quiet_sync(_history, []))
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:
@@ -572,7 +570,6 @@ class GatewayStatusCommandsMixin:
                         lines.append("")
                     lines.extend(block)
             return "\n".join(lines)
-
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
             lines = _usage_agent_stats_lines(agent)
             # Per-category breakdown (chars/4 estimate, same engine as the desktop popover): prompt
@@ -605,7 +602,6 @@ class GatewayStatusCommandsMixin:
             persisted = await self._session_db.get_session(entry.session_id) or {}
             route = await self._session_db.get_dominant_session_model_route(entry.session_id)
             return persisted, route if isinstance(route, dict) else {}
-
         persisted, persisted_route = await _quiet(_rows, ({}, {}))
         row = persisted_route if persisted_route.get("billing_provider") else persisted
         return row.get("billing_provider"), row.get("billing_base_url")

@@ -389,7 +389,6 @@ class GatewaySlashCommandsMixin(
             else:
                 action = tok
                 break
-
         try:
             output = await asyncio.to_thread(run_slash, text)
         except Exception as exc:  # pragma: no cover - defensive
@@ -419,7 +418,6 @@ class GatewaySlashCommandsMixin(
 
         def _field(name: str) -> str:
             return str(getattr(source, name, "") or "")
-
         platform = getattr(source, "platform", None)
         platform_str = (platform.value if hasattr(platform, "value") else str(platform or "")).lower()
         chat_id, chat_type = _field("chat_id"), _field("chat_type")
@@ -527,7 +525,6 @@ class GatewaySlashCommandsMixin(
                 else:
                     lines.append(f"  · {p.value} — retrying (attempt {info.get('attempts', 0)})")
             return "\n".join(lines + ([] if failed else ["Failed/paused: (none)"]))
-
         if action not in {"pause", "resume"}:
             return _PLATFORM_USAGE
         if not target:
@@ -567,7 +564,6 @@ class GatewaySlashCommandsMixin(
                 event.platform_update_id,
             )
             return ""
-
         if self._restart_requested or self._draining:
             count = self._running_agent_count()
             if count:
@@ -632,7 +628,6 @@ class GatewaySlashCommandsMixin(
         chat_name = source.chat_name or chat_id
         if source.platform is None:
             return t("gateway.set_home.save_failed", error="Missing logical platform")
-
         via_relay = getattr(source, "delivered_via_upstream_relay", False) is True
         if via_relay:
             adapter_for_source = getattr(self, "_adapter_for_source", None)
@@ -743,7 +738,6 @@ class GatewaySlashCommandsMixin(
         mgr = self._checkpoint_manager()
         if mgr is None:
             return t("gateway.rollback.not_enabled")
-
         cwd = self._terminal_cwd()
         # --all / --force: classic full restore, overwriting user edits too.
         tokens = event.get_command_args().strip().split()
@@ -850,7 +844,6 @@ class GatewaySlashCommandsMixin(
         prompt = event.get_command_args().strip()
         if not prompt:
             return t("gateway.background.usage")
-
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"
         self._track_background_task(self._run_background_task(
             prompt, event.source, task_id, event_message_id=self._reply_anchor_for_event(event),
@@ -867,13 +860,11 @@ class GatewaySlashCommandsMixin(
         question = event.get_command_args().strip()
         if not question:
             return t("gateway.btw.usage")
-
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
         history = await self.async_session_store.load_transcript(session_entry.session_id)
         if not history:
             return t("gateway.btw.no_history")
-
         try:
             model, rt = self._resolve_session_agent_runtime(source=source)
         except Exception:
@@ -1034,7 +1025,6 @@ class GatewaySlashCommandsMixin(
         from cli import save_config_value
         if not save_config_value("display.busy_input_mode", arg):
             return EphemeralReply("Busy input mode could not be saved to config. Mode unchanged.")
-
         profile_name = self._busy_profile_name_for_source(event.source)
         if profile_name:
             from gateway.run import _load_gateway_runtime_config
@@ -1072,12 +1062,10 @@ class GatewaySlashCommandsMixin(
             user_config: dict = _load_gateway_config()
         except Exception as e:
             return t("gateway.config_read_failed", error=e)
-
         effective = resolve_footer_config(user_config, platform_key)
 
         def _state(enabled: bool) -> str:
             return t("gateway.footer.state_on") if enabled else t("gateway.footer.state_off")
-
         if arg in {"status", "?"}:
             fields = ", ".join(effective.get("fields") or [])
             return t("gateway.footer.status", state=_state(effective["enabled"]), fields=fields,
@@ -1093,7 +1081,6 @@ class GatewaySlashCommandsMixin(
         except Exception as e:
             logger.warning("Failed to save runtime_footer.enabled: %s", e)
             return t("gateway.config_save_failed", error=e)
-
         example = ""
         if new_state:
             # Show a preview using current agent state if available.
@@ -1137,7 +1124,6 @@ class GatewaySlashCommandsMixin(
             if choice == "always":
                 return f"{result}\n\n" + t("gateway.reload_mcp.always_followup")
             return result
-
         return await self._request_slash_confirm(
             event=event, command="reload-mcp", title="/reload-mcp",
             message=t("gateway.reload_mcp.confirm_prompt"), handler=_on_confirm,
@@ -1203,7 +1189,6 @@ class GatewaySlashCommandsMixin(
             if session_key:
                 self._pending_skills_reload_notes[session_key] = "\n".join(sections)
             return "\n".join(lines)
-
         except Exception as e:
             logger.warning("Skills reload failed: %s", e)
             return t("gateway.reload_skills.failed", error=e)
@@ -1215,7 +1200,6 @@ class GatewaySlashCommandsMixin(
         if "error" in reply.data:
             logger.warning("Bundles command unavailable: %s", reply.data["error"])
             return reply.text
-
         bundles = reply.data["bundles"]
         if not bundles:
             return (
@@ -1341,17 +1325,13 @@ class GatewaySlashCommandsMixin(
                     return t("gateway.update.platform_not_messaging")
             except Exception:
                 return t("gateway.update.platform_not_messaging")
-
         if is_managed():
             return f"✗ {format_managed_message('update Hermes Agent')}"
-
         if not (Path(__file__).parent.parent.resolve() / '.git').exists():
             return t("gateway.update.not_git_repo")
-
         hermes_cmd = _resolve_hermes_bin()
         if not hermes_cmd:
             return t("gateway.update.hermes_cmd_not_found")
-
         pending_path = _hermes_home / ".update_pending.json"
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
@@ -1372,6 +1352,5 @@ class GatewaySlashCommandsMixin(
             pending_path.unlink(missing_ok=True)
             exit_code_path.unlink(missing_ok=True)
             return t("gateway.update.start_failed", error=e)
-
         self._schedule_update_notification_watch()
         return t("gateway.update.starting")
