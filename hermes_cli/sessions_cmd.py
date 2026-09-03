@@ -88,8 +88,7 @@ def _write_output(output, text, summary) -> None:
 # -- handlers that must run BEFORE SessionDB() is opened ----------------------
 
 def _cmd_repair(args):
-    from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
-    db_path = DEFAULT_DB_PATH
+    from hermes_state import DEFAULT_DB_PATH as db_path, SessionDB, _db_opens_cleanly, repair_state_db_schema
     if not db_path.exists():
         print(f"No session database at {db_path} (nothing to repair).")
         return
@@ -107,7 +106,6 @@ def _cmd_repair(args):
             print(f"  backup: {report['backup_path']}")
         print(f"  strategy: {report.get('strategy')}")
         try:
-            from hermes_state import SessionDB
             with SessionDB() as _repair_db:
                 n = _repair_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             print(f"✓ Repaired — {n} sessions recovered.")
@@ -117,10 +115,10 @@ def _cmd_repair(args):
     print(f"✗ Repair failed: {report.get('error')}")
     if report.get("backup_path"):
         print(f"  A backup is preserved at: {report['backup_path']}")
-    print("  Keep state.db and the backup; do not delete them.")
     # Without this pointer the user is at a dead end; lead with --inspect-only before writing.
     source_hint = report.get("backup_path") or db_path
     print(
+        "  Keep state.db and the backup; do not delete them.\n"
         "\n  Next step — offline recovery (never modifies the source):\n"
         f"    hermes sessions recover --source {source_hint} \\\n"
         "        --inspect-only\n"
