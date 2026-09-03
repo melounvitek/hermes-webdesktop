@@ -20,16 +20,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from agent.secret_scope import get_secret
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-    save_url_image,
-    success_response,
-)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_url_image, success_response
 from plugins.image_gen._common import (
-    api_key_setup_schema,
-    catalog_rows,
+    StaticImageGenProvider,
     collect_source_images,
     error_factory,
     load_image_gen_config,
@@ -382,34 +375,23 @@ def _build_payload(
     return payload
 
 
-class KreaImageGenProvider(ImageGenProvider):
+class KreaImageGenProvider(StaticImageGenProvider):
     """Krea ``Krea 2`` foundation image model backend (Medium + Large)."""
 
-    @property
-    def name(self) -> str:
-        return "krea"
-
-    @property
-    def display_name(self) -> str:
-        return "Krea"
+    provider_id = "krea"
+    label = "Krea"
+    models = _MODELS
+    default_model_id = DEFAULT_MODEL
+    setup = dict(
+        name="Krea", badge="paid",
+        tag="Krea 2 foundation model — Medium ($0.03), Large ($0.06), Medium Turbo ($0.015). Style transfer, moodboards, reference-guided generation. Direct key or managed Nous Subscription gateway.",
+        key="KREA_API_KEY", prompt="Krea API key", url="https://www.krea.ai/settings/api-tokens",
+    )
 
     def is_available(self) -> bool:
         # Direct key OR the managed Nous gateway, so portal users without a
         # Krea key can still reach Krea 2.
         return bool(get_secret("KREA_API_KEY")) or _managed_krea_gateway_ready()
-
-    def list_models(self) -> List[Dict[str, Any]]:
-        return catalog_rows(_MODELS)
-
-    def default_model(self) -> Optional[str]:
-        return DEFAULT_MODEL
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "Krea", "paid",
-            "Krea 2 foundation model — Medium ($0.03), Large ($0.06), Medium Turbo ($0.015). Style transfer, moodboards, reference-guided generation. Direct key or managed Nous Subscription gateway.",
-            key="KREA_API_KEY", prompt="Krea API key", url="https://www.krea.ai/settings/api-tokens",
-        )
 
     def capabilities(self) -> Dict[str, Any]:
         return {

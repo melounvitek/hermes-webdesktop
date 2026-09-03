@@ -11,18 +11,12 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-    success_response,
-)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, success_response
 from plugins.image_gen._common import (
     GPT_IMAGE_2_API_MODEL as API_MODEL,
     GPT_IMAGE_2_DEFAULT as DEFAULT_MODEL,
     GPT_IMAGE_2_TIERS,
-    api_key_setup_schema,
-    catalog_rows,
+    StaticImageGenProvider,
     collect_source_images,
     error_factory,
     import_openai,
@@ -68,33 +62,22 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     return data, os.path.basename(ref) or "image.png"
 
 
-class OpenAIImageGenProvider(ImageGenProvider):
+class OpenAIImageGenProvider(StaticImageGenProvider):
     """OpenAI ``images.generate`` / ``images.edit`` backend — gpt-image-2."""
 
-    @property
-    def name(self) -> str:
-        return "openai"
-
-    @property
-    def display_name(self) -> str:
-        return "OpenAI"
+    provider_id = "openai"
+    label = "OpenAI"
+    models = _MODELS
+    default_model_id = DEFAULT_MODEL
+    price = "varies"
+    setup = dict(
+        name="OpenAI", badge="paid",
+        tag="gpt-image-2 at low/medium/high quality tiers — text-to-image & image editing",
+        key="OPENAI_API_KEY", prompt="OpenAI API key", url="https://platform.openai.com/api-keys",
+    )
 
     def is_available(self) -> bool:
         return bool(get_secret("OPENAI_API_KEY")) and openai_importable()
-
-    def list_models(self) -> List[Dict[str, Any]]:
-        return catalog_rows(_MODELS, price="varies")
-
-    def default_model(self) -> Optional[str]:
-        return DEFAULT_MODEL
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "OpenAI", "paid",
-            "gpt-image-2 at low/medium/high quality tiers — text-to-image & image editing",
-            key="OPENAI_API_KEY", prompt="OpenAI API key",
-            url="https://platform.openai.com/api-keys",
-        )
 
     def capabilities(self) -> Dict[str, Any]:
         # images.edit() accepts up to 16 source images.

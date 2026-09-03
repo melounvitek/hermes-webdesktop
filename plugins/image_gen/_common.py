@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from agent.image_gen_provider import (
+    ImageGenProvider,
     error_response,
     normalize_reference_images,
     save_b64_image,
@@ -148,6 +149,41 @@ def api_key_setup_schema(
     }
 
 
+class StaticImageGenProvider(ImageGenProvider):
+    """Identity + picker surface driven by class attributes.
+
+    Subclasses set ``provider_id`` / ``label``; a fixed catalog sets ``models``
+    (+ ``default_model_id``, optional ``price`` override and ``catalog_fields``);
+    single-env-var auth sets ``setup`` (kwargs for :func:`api_key_setup_schema`).
+    Dynamic-catalog or custom-setup providers override the relevant method.
+    """
+
+    provider_id: str
+    label: str
+    models: Dict[str, Dict[str, Any]] = {}
+    default_model_id: Optional[str] = None
+    price: Optional[str] = None
+    catalog_fields: Tuple[str, ...] = ("display", "speed", "strengths", "price")
+    setup: Dict[str, Any] = {}
+
+    @property
+    def name(self) -> str:
+        return self.provider_id
+
+    @property
+    def display_name(self) -> str:
+        return self.label
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        return catalog_rows(self.models, self.catalog_fields, price=self.price)
+
+    def default_model(self) -> Optional[str]:
+        return self.default_model_id
+
+    def get_setup_schema(self) -> Dict[str, Any]:
+        return api_key_setup_schema(**self.setup)
+
+
 def error_factory(provider: str, aspect: str, *, model: str = "", prompt: str = "") -> ErrorFn:
     """Return ``fail(error, error_type, **override)`` pre-bound to this call's context."""
 
@@ -226,8 +262,8 @@ def requests_error_message(response: Any, exc: Exception) -> str:
 class HttpFailure:
     """One failed ``post_json`` attempt, pre-shaped as ``(error, error_type)``.
     ``kind`` ∈ http / timeout / connection / request / invalid_json; ``message``
-    is the extracted HTTP error text or ``str(exc)``; ``status`` / ``response``
-    are set for ``http`` only."""
+    carries the HTTP error text (``http``) or the decode error (``invalid_json``);
+    ``status`` / ``response`` are set for ``http`` only."""
 
     kind: str
     error: str
@@ -267,18 +303,16 @@ def post_json(
             "http", f"{label} image generation failed ({status}): {message}", "api_error",
             status=status, message=message, response=resp,
         )
-    except requests.Timeout as exc:
+    except requests.Timeout:
         return None, HttpFailure(
-            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout", message=str(exc),
+            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout"
         )
     except requests.ConnectionError as exc:
-        return None, HttpFailure(
-            "connection", f"{label} connection error: {exc}", "connection_error", message=str(exc),
-        )
+        return None, HttpFailure("connection", f"{label} connection error: {exc}", "connection_error")
     except requests.RequestException as exc:
         if not catch_request_exception:
             raise
-        return None, HttpFailure("request", f"{label} request failed: {exc}", "api_error", message=str(exc))
+        return None, HttpFailure("request", f"{label} request failed: {exc}", "api_error")
     try:
         return response.json(), None
     except Exception as exc:  # noqa: BLE001

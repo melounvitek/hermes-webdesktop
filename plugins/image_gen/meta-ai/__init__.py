@@ -16,15 +16,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
     resolve_aspect_ratio,
     save_b64_image,
     save_url_image,
     success_response,
 )
 from plugins.image_gen._common import (
-    api_key_setup_schema,
-    catalog_rows,
+    StaticImageGenProvider,
     error_factory,
     import_openai,
     openai_importable,
@@ -72,31 +70,20 @@ def _resolve_model(caller_model: Optional[str] = None) -> Tuple[str, Dict[str, A
     )
 
 
-class MetaImageGenProvider(ImageGenProvider):
+class MetaImageGenProvider(StaticImageGenProvider):
     """Meta Model API ``images.generate`` backend (muse-image)."""
 
-    @property
-    def name(self) -> str:
-        return "meta-ai"
-
-    @property
-    def display_name(self) -> str:
-        return "Meta Model API"
+    provider_id = "meta-ai"
+    label = "Meta Model API"
+    models = _MODELS
+    default_model_id = DEFAULT_MODEL
+    setup = dict(
+        name="Meta Model API", badge="paid", tag="Muse Image via Meta Model API (api.meta.ai)",
+        key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai",
+    )
 
     def is_available(self) -> bool:
         return bool(_resolve_api_key()) and openai_importable()
-
-    def list_models(self) -> List[Dict[str, Any]]:
-        return catalog_rows(_MODELS)
-
-    def default_model(self) -> Optional[str]:
-        return DEFAULT_MODEL
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "Meta Model API", "paid", "Muse Image via Meta Model API (api.meta.ai)",
-            key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai",
-        )
 
     def capabilities(self) -> Dict[str, Any]:
         # Text-to-image only until image-to-image is verified against Meta.

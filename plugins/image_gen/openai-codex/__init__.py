@@ -20,18 +20,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-    save_b64_image,
-    success_response,
-)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, success_response
 from plugins.image_gen._common import (
     GPT_IMAGE_2_API_MODEL as API_MODEL,
     GPT_IMAGE_2_DEFAULT as DEFAULT_MODEL,
     GPT_IMAGE_2_TIERS,
-    catalog_rows,
+    StaticImageGenProvider,
     collect_source_images,
     error_factory,
     prompt_required_error,
@@ -336,16 +330,14 @@ def _collect_image_b64(
     return None
 
 
-class OpenAICodexImageGenProvider(ImageGenProvider):
+class OpenAICodexImageGenProvider(StaticImageGenProvider):
     """gpt-image-2 routed through ChatGPT/Codex OAuth instead of an API key."""
 
-    @property
-    def name(self) -> str:
-        return "openai-codex"
-
-    @property
-    def display_name(self) -> str:
-        return "OpenAI (Codex auth)"
+    provider_id = "openai-codex"
+    label = "OpenAI (Codex auth)"
+    models = _MODELS
+    default_model_id = DEFAULT_MODEL
+    price = "varies"
 
     def is_available(self) -> bool:
         if not _read_codex_access_token():
@@ -355,12 +347,6 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         except ImportError:
             return False
         return True
-
-    def list_models(self) -> List[Dict[str, Any]]:
-        return catalog_rows(_MODELS, price="varies")
-
-    def default_model(self) -> Optional[str]:
-        return DEFAULT_MODEL
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {

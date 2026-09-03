@@ -20,14 +20,13 @@ from typing import Any, Dict, List, Optional
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
     resolve_aspect_ratio,
     save_b64_image,
     save_url_image,
     success_response,
 )
 from plugins.image_gen._common import (
-    api_key_setup_schema,
+    StaticImageGenProvider,
     error_factory,
     import_openai,
     load_image_gen_config,
@@ -84,16 +83,15 @@ def _resolve_model(catalog: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Option
     return first if isinstance(first, str) and first else None
 
 
-class DeepInfraImageGenProvider(ImageGenProvider):
+class DeepInfraImageGenProvider(StaticImageGenProvider):
     """DeepInfra ``images.generations`` backend; catalog discovered live by the ``image-gen`` tag."""
 
-    @property
-    def name(self) -> str:
-        return "deepinfra"
-
-    @property
-    def display_name(self) -> str:
-        return "DeepInfra"
+    provider_id = "deepinfra"
+    label = "DeepInfra"
+    setup = dict(
+        name="DeepInfra", badge="paid", tag="FLUX, Qwen-Image, … — live catalog from api.deepinfra.com",
+        key="DEEPINFRA_API_KEY", prompt="DeepInfra API key", url="https://deepinfra.com/dash/api_keys",
+    )
 
     def is_available(self) -> bool:
         return bool((get_secret("DEEPINFRA_API_KEY", "") or "").strip())
@@ -108,13 +106,6 @@ class DeepInfraImageGenProvider(ImageGenProvider):
     def capabilities(self) -> Dict[str, Any]:
         """DeepInfra's OpenAI-compatible generation surface is text-only."""
         return {"modalities": ["text"], "max_reference_images": 0}
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "DeepInfra", "paid", "FLUX, Qwen-Image, … — live catalog from api.deepinfra.com",
-            key="DEEPINFRA_API_KEY", prompt="DeepInfra API key",
-            url="https://deepinfra.com/dash/api_keys",
-        )
 
     def generate(self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, **kwargs: Any) -> Dict[str, Any]:
         prompt = (prompt or "").strip()

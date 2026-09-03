@@ -12,12 +12,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-)
-from plugins.image_gen._common import api_key_setup_schema, catalog_rows
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio
+from plugins.image_gen._common import StaticImageGenProvider, catalog_rows
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +22,16 @@ _PASSTHROUGH_KWARGS = (
 )
 
 
-class FalImageGenProvider(ImageGenProvider):
+class FalImageGenProvider(StaticImageGenProvider):
     """FAL.ai backend delegating to ``tools.image_generation_tool`` at call time."""
 
-    @property
-    def name(self) -> str:
-        return "fal"
-
-    @property
-    def display_name(self) -> str:
-        return "FAL.ai"
+    provider_id = "fal"
+    label = "FAL.ai"
+    setup = dict(
+        name="FAL.ai", badge="paid",
+        tag="Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
+        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
+    )
 
     def is_available(self) -> bool:
         # Direct FAL_KEY or a managed Nous fal-queue origin, per the legacy module.
@@ -53,13 +49,6 @@ class FalImageGenProvider(ImageGenProvider):
     def default_model(self) -> Optional[str]:
         import tools.image_generation_tool as _it
         return _it.DEFAULT_MODEL
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "FAL.ai", "paid",
-            "Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
-            key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
-        )
 
     def capabilities(self) -> Dict[str, Any]:
         # Image-to-image depends on the selected FAL model (``edit_endpoint``);

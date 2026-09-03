@@ -17,13 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-    success_response,
-)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, success_response
 from plugins.image_gen._common import (
+    StaticImageGenProvider,
     catalog_rows,
     collect_source_images,
     error_factory,
@@ -205,22 +201,22 @@ def _xai_image_field(source: str) -> Dict[str, str]:
     return {"url": f"data:image/{ext};base64,{base64.b64encode(raw).decode('utf-8')}", "type": "image_url"}
 
 
-class XAIImageGenProvider(ImageGenProvider):
+class XAIImageGenProvider(StaticImageGenProvider):
     """xAI ``grok-imagine-image`` backend."""
 
-    @property
-    def name(self) -> str:
-        return "xai"
-
-    @property
-    def display_name(self) -> str:
-        return "xAI (Grok)"
+    provider_id = "xai"
+    label = "xAI (Grok)"
 
     def is_available(self) -> bool:
         return bool(resolve_xai_http_credentials().get("api_key"))
 
     def list_models(self) -> List[Dict[str, Any]]:
         return catalog_rows(_catalog(), ("display", "speed", "strengths"))
+
+    def default_model(self) -> Optional[str]:
+        # First live/static catalog row (inherited ImageGenProvider behaviour).
+        models = self.list_models()
+        return models[0].get("id") if models else None
 
     def get_setup_schema(self) -> Dict[str, Any]:
         # Auth resolution is delegated to the shared ``xai_grok`` post_setup hook
