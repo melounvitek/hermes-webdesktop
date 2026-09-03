@@ -51,13 +51,6 @@ def _auto_continue_note(prompt: str) -> str:
             f"finish the task. The interrupted request was:]\n\n{prompt}")
 
 
-def _ac_release_turn(session: dict, *, unschedule: bool = False) -> None:
-    with session["history_lock"]:
-        session["running"] = False
-        if unschedule:
-            session["_auto_continue_scheduled"] = False
-
-
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
@@ -100,7 +93,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         # marker and still be mid-turn. Leave the marker so a later resume retries.
         if _ensure_active_session_slot(sid, session) is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
-            _ac_release_turn(session, unschedule=True)
+            with session["history_lock"]:
+                session["running"] = False
+                session["_auto_continue_scheduled"] = False
             return
         with session["history_lock"]:
             # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
@@ -112,7 +107,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
-            _ac_release_turn(session)
+            _notif_release_turn(session)  # rebound from session_notifications
     threading.Thread(target=kickoff, daemon=True).start()
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)", session_key, attempt, age)
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
@@ -295,7 +290,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             dispatch_failed = True
     except Exception as exc:
         _notif_log_failure("queued prompt dispatch failed", exc)
-        _ac_release_turn(session)
+        _notif_release_turn(session)
         dispatch_failed = True
     if dispatch_failed:
         with session["history_lock"]:
