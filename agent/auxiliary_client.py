@@ -3692,13 +3692,6 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     return AnthropicAuxiliaryClient(real_client, model, token, base_url, is_oauth=is_oauth), model
 
 
-_AUTO_PROVIDER_LABELS = {
-    "_try_openrouter": "openrouter",
-    "_try_nous": "nous",
-    "_try_custom_endpoint": "local/custom",
-    "_resolve_api_key_provider": "api-key",
-}
-
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
 _MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + ("requested_provider",)
 
