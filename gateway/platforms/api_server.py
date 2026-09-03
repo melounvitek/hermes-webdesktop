@@ -175,6 +175,14 @@ def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
     return send
 
 
+async def _call_verifier(verifier, *args, **kwargs):
+    """Await a sync-or-async verifier; sync ones may do blocking network I/O (signing-cert / JWKS
+    fetches), so they run off the loop."""
+    if asyncio.iscoroutinefunction(verifier):
+        return await verifier(*args, **kwargs)
+    return await asyncio.to_thread(verifier, *args, **kwargs)
+
+
 def _hermes_version() -> str:
     """Canonical Hermes version: ``hermes_cli.__version__`` (dist-info can be stale on
     source checkouts), then distribution metadata, then "dev". Never raises."""
@@ -503,11 +511,8 @@ def _normalize_multimodal_content(content: Any) -> Any:
         part_type = str(raw_type or "").strip().lower()
         if part_type in _TEXT_PART_TYPES:
             text = part.get("text")
-            if text is None:
-                continue
-            text = text if isinstance(text, str) else str(text)
-            if text:
-                normalized_parts.append({"type": "text", "text": _cap_text(text)})
+            if text is not None and str(text):
+                normalized_parts.append({"type": "text", "text": _cap_text(str(text))})
         elif part_type in _IMAGE_PART_TYPES:
             normalized_parts.append(_normalize_image_part(part))
         elif part_type in _FILE_PART_TYPES:
@@ -665,11 +670,10 @@ class ResponseStore:
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
         self._max_size = max_size
         if db_path is None:
-            try:
+            db_path = ":memory:"
+            with suppress(Exception):
                 from hermes_cli.config import get_hermes_home
                 db_path = str(get_hermes_home() / "response_store.db")
-            except Exception:
-                db_path = ":memory:"
         self._db_path: Optional[str] = db_path if db_path != ":memory:" else None
         try:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -839,10 +843,8 @@ def _resolve_media_to_data_urls(text: str) -> str:
     def _to_data_url(path_str: str) -> Optional[str]:
         # validate_media_delivery_path() strips wrapping quotes/trailing punctuation itself.
         safe_path = validate_media_delivery_path(path_str)
-        if not safe_path:
-            return None
-        p = Path(safe_path)
-        suffix = p.suffix.lower()
+        p = Path(safe_path) if safe_path else None
+        suffix = p.suffix.lower() if p else ""
         if suffix not in _MEDIA_IMG_EXT:
             return None
         try:
@@ -1397,11 +1399,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "Platform adapter does not support HTTP events", 503, code="platform_http_events_unsupported")
         auth_header = request.headers.get("Authorization", "")
         try:
-            if asyncio.iscoroutinefunction(verifier):
-                ok, code = await verifier(auth_header)
-            else:
-                # Verifiers may do blocking network I/O (signing-cert fetches): off the loop.
-                ok, code = await asyncio.to_thread(verifier, auth_header)
+            ok, code = await _call_verifier(verifier, auth_header)
         except Exception:
             # Fail closed: a crashing verifier must never admit the event.
             logger.exception("Platform HTTP event verifier failed for %s", platform_name)
@@ -2932,10 +2930,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         title = body.get("title")
         if title is None:
             base = source.get("title") or "fork"
-            try:
+            title = f"{base} fork"
+            with suppress(Exception):
                 title = await asyncio.to_thread(db.get_next_title_in_lineage, base)
-            except Exception:
-                title = f"{base} fork"
         try:
             await asyncio.to_thread(db.set_session_title, fork_id, str(title))
         except ValueError as exc:
@@ -3142,8 +3139,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         task = asyncio.create_task(_run_and_signal())
         self._track_background_task(task)
         headers = {
-            "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-            **self._session_headers(session_id, gateway_session_key)}
+            "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no", **self._session_headers(session_id, gateway_session_key)}
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         try:
@@ -3379,11 +3376,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return err
         # Optional transient per-run context (standalone `hermes cron run` /
         # cronjob(action='run', prompt=...)) — same cap + scan as a stored prompt.
-        extra_prompt = None
-        try:
+        extra_prompt = body = None
+        with suppress(Exception):
             body = await request.json()
-        except Exception:
-            body = None
         if isinstance(body, dict):
             raw_prompt = body.get("prompt")
             if raw_prompt is not None:
@@ -3411,11 +3406,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             jwks_or_key=cfg_get(cfg, "cron", "chronos", "nas_jwks_url", default="") or None,
             issuer=cfg_get(cfg, "cron", "chronos", "portal_url", default="") or None)
         try:
-            if asyncio.iscoroutinefunction(verifier):
-                claims = await verifier(**verify_kwargs)
-            else:
-                # JWKS resolution is a blocking HTTP GET on a cache miss: off the loop.
-                claims = await asyncio.to_thread(verifier, **verify_kwargs)
+            claims = await _call_verifier(verifier, **verify_kwargs)
         except Exception:
             # Fail closed: a crashing verifier must never admit a fire.
             logger.exception("cron fire: verifier crashed; rejecting token")
@@ -3427,10 +3418,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if draining is not None:
             return draining
         with _reserve_pending_api_work(self) as reservation:
-            try:
+            body = {}
+            with suppress(Exception):
                 body = await request.json()
-            except Exception:
-                body = {}
             job_id = (body or {}).get("job_id")
             if not job_id:
                 return web.json_response({"error": "missing job_id"}, status=400)
@@ -3790,11 +3780,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Network-accessible + unsandboxed local terminal backend = host-user RCE surface;
             # warn, don't refuse (the operator may have a firewall / strong key).
             if is_network_accessible(self._host):
-                try:
+                _backend = "local"
+                with suppress(Exception):
                     from hermes_cli.config import load_config as _load_cfg
                     _backend = ((_load_cfg() or {}).get("terminal") or {}).get("backend", "local")
-                except Exception:
-                    _backend = "local"
                 if str(_backend).lower() == "local":
                     logger.warning(
                         "[%s] API server is network-accessible (%s) AND the "
