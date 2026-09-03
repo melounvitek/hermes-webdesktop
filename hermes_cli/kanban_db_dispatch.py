@@ -154,16 +154,11 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
 
 
 def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
-    """Return ``(kind, code)`` for a reaped worker PID.
-
-    ``clean_exit`` (status 0 while still ``running`` = protocol violation:
-    no ``kanban_complete``/``kanban_block``, so auto-block — retrying just
-    loops); ``rate_limited`` (``KANBAN_RATE_LIMIT_EXIT_CODE`` — released to
-    ``ready`` WITHOUT counting a failure so a long quota window can't trip the
-    breaker); ``nonzero_exit``; ``signaled`` (OOM/SIGKILL; ``code`` is the
-    signal); ``unknown`` (pid not in the reap registry — fall back to the
-    crashed-counter path; ``code`` is None).
-    """
+    """``(kind, code)`` for a reaped worker PID: ``clean_exit`` (rc 0 while
+    still ``running`` = protocol violation), ``rate_limited``
+    (``KANBAN_RATE_LIMIT_EXIT_CODE``, never counts as a failure),
+    ``nonzero_exit``, ``signaled`` (``code`` is the signal), ``unknown`` (pid
+    not in the reap registry; ``code`` None)."""
     entry = _recent_worker_exits.get(int(pid))
     if entry is None:
         return ("unknown", None)
@@ -387,18 +382,12 @@ def heartbeat_worker(
     """
     now = int(time.time())
     with _kb.write_txn(conn):
-        if expected_run_id is None:
-            cur = conn.execute(
-                "UPDATE tasks SET last_heartbeat_at = ? "
-                "WHERE id = ? AND status = 'running'",
-                (now, task_id),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE tasks SET last_heartbeat_at = ? "
-                "WHERE id = ? AND status = 'running' AND current_run_id = ?",
-                (now, task_id, int(expected_run_id)),
-            )
+        sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
+        params: tuple = (now, task_id)
+        if expected_run_id is not None:
+            sql += " AND current_run_id = ?"
+            params += (int(expected_run_id),)
+        cur = conn.execute(sql, params)
         if cur.rowcount != 1:
             return False
         run_id = (
@@ -517,15 +506,12 @@ def detect_stale_running(
     """Reclaim ``running`` tasks with no heartbeat progress; returns their ids.
 
     Stale = running longer than ``stale_timeout_seconds`` (active run's
-    ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at`` older
-    than ``_STALE_HEARTBEAT_GAP_SECONDS`` or NULL. Task returns to its source
-    phase, run closes ``outcome='stale'``, live host-local worker is terminated.
-    ``stale_timeout_seconds=0`` disables the check. ``signal_fn`` is a test hook.
-
-    Deliberately does NOT call ``_record_task_failure``: stale reclaim is
-    dispatcher-side detection of an absent heartbeat, not a worker failure;
-    counting it would let legitimately long-running tasks (>4h, no explicit
-    heartbeat) trip the breaker. The ``stale`` event is the audit surface.
+    ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at`` NULL or
+    older than ``_STALE_HEARTBEAT_GAP_SECONDS``. Task returns to its source
+    phase, run closes ``outcome='stale'``, a live host-local worker is killed.
+    ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
+    counted via ``_record_task_failure``: an absent heartbeat is not a worker
+    failure, and counting it would let long-running tasks trip the breaker.
     """
     if stale_timeout_seconds <= 0:
         return []
@@ -938,18 +924,12 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
-    Appends ``crashed`` and restores the task's source phase; unlike
-    ``release_stale_claims`` it checks liveness immediately rather than waiting
-    for the claim TTL. Only tasks claimed by *this host* — PIDs from other hosts
-    are meaningless, and ``_default_spawn`` always runs workers locally.
-
-    Clean exit (rc=0) while still ``running`` is a protocol violation (no
-    ``kanban_complete``/``kanban_block``); it gets a bounded violation-only retry
-    budget (``_protocol_violation_streak``). ``KANBAN_RATE_LIMIT_EXIT_CODE`` is a
-    quota wall, NOT a failure: released WITHOUT counting a failure and stamped
-    with a quota-blocker error so ``check_respawn_guard`` defers respawn. Those
-    ids surface via the ``_last_rate_limited`` function attribute; the return
-    stays crashed-only.
+    Restores the source phase immediately (no waiting for the claim TTL), for
+    tasks claimed by *this host* only — other hosts' PIDs are meaningless.
+    Clean exit while ``running`` is a protocol violation with a bounded
+    violation-only retry budget; ``KANBAN_RATE_LIMIT_EXIT_CODE`` is a quota
+    wall, released WITHOUT counting a failure and surfaced via the
+    ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
     sweep = _reclaim_dead_workers(conn)
     # Outside the main txn: account each crash and maybe trip the breaker.
@@ -986,20 +966,17 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
 ) -> bool:
-    """Record a non-success outcome (spawn_failed / crashed / timed_out) and
-    maybe trip the circuit breaker. Every non-success path funnels through
-    here so ``consecutive_failures`` stays consistent. Returns True when the
-    task was auto-blocked.
+    """Record a non-success outcome and maybe trip the circuit breaker; every
+    non-success path funnels through here so ``consecutive_failures`` stays
+    consistent. Returns True when the task was auto-blocked.
 
-    ``release_claim=True, end_run=True`` is the spawn-failure path (task still
-    running with an open run: restore source phase — or ``blocked`` on trip —
-    release the claim, close the run). ``release_claim=False, end_run=False``
-    is the timeout/crash path (caller ALREADY restored the phase and closed the
-    run; only the counter moves, a trip re-transitions to ``blocked`` with
-    ``gave_up``). Threshold: per-task ``max_retries`` (nothing overrides it),
-    then ``failure_limit``, then ``DEFAULT_FAILURE_LIMIT``. ``force_trip=True``
-    trips unconditionally — the caller already applied its own bounded-retry
-    policy; the failure is still counted.
+    ``release_claim=True, end_run=True``: spawn-failure path (task still
+    running with an open run — restore source phase or ``blocked``, release
+    claim, close run). Both False: timeout/crash path (caller already restored
+    the phase and closed the run; only the counter moves, a trip flips to
+    ``blocked`` + ``gave_up``). Threshold: per-task ``max_retries`` >
+    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``. ``force_trip`` trips
+    unconditionally (caller applied its own bounded-retry policy).
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -1138,31 +1115,17 @@ def check_respawn_guard(
 ) -> Optional[str]:
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
 
-    Called per ready/review task in ``dispatch_once`` before any claim attempt;
-    a reason defers the spawn this tick. The review lane skips
-    ``recent_success`` and ``active_pr``: a recent PR comment / completed run
-    is the *precondition* of a review handoff, not a duplicate-work signal.
-
-    Checks in priority order:
-
-    ``"rate_limit_cooldown"`` — latest run ended ``rate_limited`` within
-        ``_resolve_rate_limit_cooldown_seconds()``. Checked BEFORE
-        ``blocker_auth`` because the rate-limit requeue stamps a quota-flavored
-        ``last_failure_error`` that would otherwise match the auth regex and
-        park the task forever (that path never increments
-        ``consecutive_failures``, so the breaker can't free it).
-    ``"blocker_auth"`` — ``last_failure_error`` matches a quota/auth pattern.
-        ``consecutive_failures`` still trips the breaker eventually, so a
-        persistent auth error blocks while a transient 429 gets a few ticks.
-    ``"recent_success"`` — completed run within ``_RESPAWN_GUARD_SUCCESS_WINDOW``.
-        Bypassed when a re-queue event (status, promote, unblock, reclaim)
-        arrives AFTER that completion — a deliberate re-run.
-    ``"active_pr"`` — GitHub PR URL in a comment within
-        ``_RESPAWN_GUARD_PR_WINDOW``; re-spawning risks a duplicate PR.
-
-    Stale / dead claim locks are NOT a guard reason — ``release_stale_claims``
-    and ``detect_crashed_workers`` reset those only after verifying the lock
-    is genuinely dead.
+    Called per ready/review row before any claim attempt. Priority order:
+    ``"rate_limit_cooldown"`` (latest run ``rate_limited`` within the cooldown;
+    checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
+    ``last_failure_error`` that would otherwise park the task forever — that
+    path never increments ``consecutive_failures``), ``"blocker_auth"``
+    (quota/auth pattern; the breaker still trips eventually), then for the
+    ready lane only ``"recent_success"`` (completed run within the window, unless
+    a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
+    (PR URL in a recent comment; re-spawning risks a duplicate PR). The review
+    lane skips the last two: they are the *inputs* to a review handoff. Stale /
+    dead claim locks are NOT a guard reason — the reclaim passes own those.
     """
     row = conn.execute(
         "SELECT last_failure_error FROM tasks WHERE id = ?",
@@ -1292,16 +1255,11 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
-# ---------------------------------------------------------------------------
-# Memory-aware dispatch guard
-#
-# With no ``kanban.max_in_progress`` on a busy board the dispatcher fanned out
-# ~30 workers on a 1 GiB VM and OOM'd the host. Two safeguards: a memory-DERIVED
-# default cap when the operator never set one (``resolve_max_in_progress``), and
-# a live memory-PRESSURE guard inside the tick (``_memory_pressure_level``)
-# because a static cap can't see other tenants. Both fail open: non-Linux or
-# any read error → empty sample → no cap / "unknown".
-# ---------------------------------------------------------------------------
+# Memory-aware dispatch guard: an uncapped board once OOM'd a 1 GiB host. Two
+# safeguards — a memory-DERIVED default cap when none is configured
+# (``resolve_max_in_progress``) and a live memory-PRESSURE guard inside the
+# tick (``_memory_pressure_level``) because a static cap can't see other
+# tenants. Both fail open: non-Linux / read error → no cap / "unknown".
 
 # Assumed per-worker footprint for the derived cap; deliberately conservative
 # so the cap errs toward fewer workers on small VMs.
@@ -1777,14 +1735,11 @@ def _dispatch_once_locked(
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
 ) -> DispatchResult:
-    """Run one dispatcher tick: reclaim stale (TTL / heartbeat) and crashed
-    (dead host-local PID) running tasks, promote todo -> ready where all
-    parents are done, then for each ready task with an assignee atomically
-    claim and call ``spawn_fn(task, workspace_path, board) -> Optional[int]``,
-    recording the PID as ``worker_pid`` so later ticks catch crashes before
-    the TTL expires. After ``failure_limit`` consecutive failures the task is
-    auto-blocked. Cap semantics: :func:`_tick_spawn_budget`.
-    """
+    """One dispatcher tick: reclaim stale/crashed running tasks, promote
+    todo -> ready, then atomically claim each spawnable ready/review row and
+    call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
+    the PID so later ticks catch crashes before the TTL. Cap semantics:
+    :func:`_tick_spawn_budget`."""
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -1985,16 +1940,12 @@ def _hermes_path_argv(path: str) -> list[str]:
 
 
 def _resolve_hermes_argv() -> list[str]:
-    """Resolve the ``hermes`` invocation as argv parts for ``Popen``.
-
-    Tries in order: ``$HERMES_BIN`` (path-like values normalized to absolute;
-    bare names keep PATH semantics, never a same-directory file first);
-    ``shutil.which("hermes")`` normalized to absolute (on Windows ``which`` can
-    return a relative ``.\\hermes.CMD`` when cwd is on PATH, and batch shims are
-    unsafe with task-derived argv, so those fall back to the module form);
-    ``sys.executable -m hermes_cli.main`` for setups where the shim is not on
-    the dispatcher's ``$PATH`` (cron, systemd ``User=`` services, launchd).
-    Mirrors ``gateway.run._resolve_hermes_bin``; kept local because
+    """Resolve the ``hermes`` invocation as argv for ``Popen``: ``$HERMES_BIN``
+    (path-like -> absolute; bare names keep PATH semantics, never a
+    same-directory file), then ``which("hermes")`` (Windows: safe PATH search,
+    batch shims fall back to the module form), then ``sys.executable -m
+    hermes_cli.main`` for shim-less environments (cron, systemd ``User=``,
+    launchd). Mirrors ``gateway.run._resolve_hermes_bin``; local because
     ``hermes_cli`` sits below ``gateway`` in the dependency order.
     """
     import shutil

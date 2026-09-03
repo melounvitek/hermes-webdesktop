@@ -160,20 +160,15 @@ def _cross_process_init_lock(path: Path):
 @contextlib.contextmanager
 def _dispatch_tick_lock(db_path: Path):
     """Non-blocking single-writer guard around one dispatcher tick; yields
-    ``True`` if this process holds the board's dispatch lock, else ``False``
-    (caller skips the tick).
+    ``True`` if this process holds the board's ``.dispatch.lock``, else
+    ``False`` (caller skips the tick).
 
-    An orphan gateway (``gateway run --replace`` / restart escaping a systemd
-    or launchd service cgroup) becomes a second long-lived writer; two
-    dispatchers both pass ``busy_timeout`` and race on WAL frames — the root
-    cause of multi-writer corruption. ``_guard_supervised_gateway_conflict``
-    blocks the common birth of an orphan; this lock is defense-in-depth.
-
-    **Non-blocking** on purpose: the gateway's async watcher must never stall;
-    a loser retries next interval while the winner makes progress. Board-scoped
-    via a ``.dispatch.lock`` sibling of ``kanban.db``. Without
-    ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``) — the orphan
-    scenario is specific to POSIX service managers.
+    Two dispatchers (e.g. an orphan gateway escaping its service cgroup) both
+    pass ``busy_timeout`` and race on WAL frames — the root cause of
+    multi-writer corruption; this is defense-in-depth behind
+    ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
+    gateway's async watcher must never stall; the loser retries next interval.
+    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
     """
     lock_path = db_path.with_name(db_path.name + ".dispatch.lock")
     handle = None
@@ -943,17 +938,11 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
                 )
 
 
-# Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or a nullable
-# ``TEXT last_event_id`` for ``kanban_notify_subs``); the current schema uses
-# ``INTEGER PRIMARY KEY AUTOINCREMENT`` / ``INTEGER NOT NULL DEFAULT 0``.
-# ``CREATE TABLE IF NOT EXISTS`` skips existing tables and
-# ``_add_column_if_missing`` only adds columns, so a drifted column type
-# requires a rebuild.
-#
-# Each entry pairs the canonical CREATE TABLE with the CREATE INDEX statements
-# DROP TABLE would take down with it (incl. ``idx_events_run`` from the additive
-# pass). ``test_rebuilt_schema_matches_fresh`` guards this list against
-# drifting from SCHEMA_SQL.
+# Legacy DBs used a ``TEXT PRIMARY KEY`` id (nullable ``TEXT last_event_id``
+# for ``kanban_notify_subs``); the additive migrations can't change a column
+# type, so drift requires a rebuild. Each entry pairs the canonical CREATE
+# TABLE with the indexes DROP TABLE takes down with it.
+# ``test_rebuilt_schema_matches_fresh`` guards this against SCHEMA_SQL drift.
 _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
@@ -1018,15 +1007,12 @@ def _table_has_drifted(conn: sqlite3.Connection, table: str) -> bool:
 def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
     """Rebuild any kanban table whose column types drifted from SCHEMA_SQL.
 
-    Old boards crash the gateway notifier (``int(None)`` on a NULL id in
-    ``unseen_events_for_sub``) and never match ``id > cursor``, so every
-    notification is silently lost. Rebuild is CREATE new → INSERT shared
-    columns → DROP old → RENAME, recreating indexes (DROP TABLE takes them
-    down). Legacy TEXT ids are dropped; AUTOINCREMENT assigns fresh ones and
-    ``last_event_id`` cursors reset to 0, so the first post-migration tick
-    replays a task's event history once — the safe failure mode for a feature
-    that was already fully broken. One transaction so an interruption can't
-    leave a table half-renamed, under ``connect()``'s init locks. Idempotent.
+    Drifted boards crash the gateway notifier (``int(None)`` on a NULL id) and
+    never match ``id > cursor``, silently losing every notification. Legacy
+    TEXT ids are dropped (AUTOINCREMENT reassigns) and cursors reset to 0, so
+    the first post-migration tick replays history once — safe for a feature
+    that was already fully broken. One transaction under ``connect()``'s init
+    locks so an interruption can't leave a table half-renamed. Idempotent.
     """
     drifted = [t for t in _REBUILD_SPECS if _table_has_drifted(conn, t)]
     if not drifted:
@@ -1093,13 +1079,10 @@ def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
 
 
 # SQLite's busy_timeout backoff is near-deterministic, so stampeding writers
-# re-collide in lockstep; a jittered retry on the transaction boundary breaks
-# the convoy (mirrors state.db's _execute_write: 20-150ms band, the 20ms floor
-# prevents busy-spinning back into the collision). Only BEGIN IMMEDIATE and
-# COMMIT are retried — idempotent re-issues that touch no transaction body, so
-# a CAS inside write_txn is never replayed. Fewer retries than state.db (5 vs
-# 15): the 120s busy_timeout absorbs most waits; this is the backstop for the
-# tail where SQLite returns BUSY immediately.
+# re-collide in lockstep; a jittered 20-150ms retry on the transaction boundary
+# breaks the convoy (mirrors state.db). Only BEGIN IMMEDIATE and COMMIT are
+# retried — idempotent re-issues, so a CAS inside write_txn is never replayed.
+# 5 retries (not state.db's 15): the 120s busy_timeout absorbs most waits.
 _BUSY_MAX_RETRIES = 5
 _BUSY_RETRY_MIN_S = 0.020  # 20ms
 _BUSY_RETRY_MAX_S = 0.150  # 150ms
@@ -1125,18 +1108,14 @@ def _execute_boundary_with_retry(conn: sqlite3.Connection, sql: str) -> None:
 
 @contextlib.contextmanager
 def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
-    """Context manager for an IMMEDIATE write transaction; a claim CAS inside
-    is atomic — at most one concurrent writer succeeds.
+    """IMMEDIATE write transaction; a claim CAS inside is atomic — at most one
+    concurrent writer succeeds.
 
-    Nesting is an explicit opt-in (``allow_nested=True`` → savepoint instead
-    of a second ``BEGIN IMMEDIATE``; otherwise a loud ``RuntimeError``). Only
-    composition primitives graph builders run under one outer commit
-    (``create_task``, ``add_comment``) opt in — helpers with post-commit side
-    effects (``complete_task`` & co.) must never run under an open outer
-    transaction, because those side effects (workspace cleanup, ready
-    recomputation, failure-counter clears) would fire while the outer
-    transaction can still roll back. The ROLLBACK on exception is wrapped so a
-    SQLite auto-rollback doesn't shadow the original exception.
+    Nesting is an explicit opt-in (``allow_nested=True`` → savepoint; otherwise
+    a loud ``RuntimeError``). Only composition primitives (``create_task``,
+    ``add_comment``) opt in — helpers with post-commit side effects
+    (``complete_task`` & co.) must never run under an open outer transaction,
+    since those side effects would fire while the outer txn can still roll back.
     """
     _kb._assert_not_delegated_child_mutation()
     if getattr(conn, "in_transaction", False):

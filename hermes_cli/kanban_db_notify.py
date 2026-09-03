@@ -79,20 +79,15 @@ def add_notify_sub(
     delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Register a gateway source wanting terminal-state notifications for
-    ``task_id``. Idempotent on (task, platform, chat, thread).
+    ``task_id``; idempotent on (task, platform, chat, thread).
 
-    ``user_id_alt`` (Signal UUID, Feishu union_id, ...) must be replayed on
-    active wake: ``build_session_key`` prefers it over ``user_id``, so replaying
-    only ``user_id`` would key the wake into a different session when they
-    diverge. ``chat_type`` is likewise replayed so the woken turn resolves the
-    operator's real channel; ``None`` keeps an existing row's value.
-
-    ``delivery_mode`` (``_NOTIFY_DELIVERY_MODES``): ``None`` leaves an existing
-    row untouched (fresh rows get ``"notify"``); an explicit value is
-    last-write-wins so re-subscribing can change the mode; unknown values fall
-    back to ``"notify"``. New subs start "caught up" (``last_event_id`` =
-    current ``MAX(task_events.id)``, not 0) — otherwise the notifier replays
-    every historical terminal event on its next tick (boot-time bursts).
+    ``user_id_alt`` (Signal UUID, Feishu union_id, ...) and ``chat_type`` are
+    replayed on active wake: ``build_session_key`` prefers the alt id, so
+    omitting it would key the wake into a different session. ``None`` keeps an
+    existing row's value. ``delivery_mode``: ``None`` leaves an existing row
+    untouched, an explicit valid value is last-write-wins, unknown falls back
+    to ``"notify"``. New subs start caught up (``last_event_id`` =
+    ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
     # api_server is stateless: the adapter has no send(), the wake self-post IS
@@ -202,17 +197,13 @@ def count_notify_subs(
     chat_id: Optional[str] = None,
     thread_id: Optional[str] = None,
 ) -> int:
-    """Count ``kanban_notify_subs`` rows via a read-only connection.
-
-    Cheap probe for the notifier's zero-subscription early exit: unlike
-    :func:`connect` it never creates the DB file, runs schema init/migration,
-    or opens writable (a read-only WAL open may still create ``-shm``/``-wal``
-    sidecars but cannot write table content). Rows in a not-yet-checkpointed
-    WAL are visible, so a fresh subscription is never missed. A missing DB or
-    a legacy DB without the table counts as zero. Platform matching is
-    case-insensitive (matching notifier routing); chat/thread are exact.
-    Path resolution matches :func:`connect`. Raises :class:`sqlite3.Error`
-    when the DB exists but cannot be read; callers choose their own fallback.
+    """Count ``kanban_notify_subs`` rows via a read-only connection — the
+    notifier's cheap zero-subscription early exit. Unlike :func:`connect` it
+    never creates the file, runs init/migration or opens writable; WAL rows are
+    still visible so a fresh sub is never missed. Missing DB / missing table
+    counts as zero; platform matches case-insensitively (as notifier routing),
+    chat/thread exactly. Raises :class:`sqlite3.Error` if the DB exists but is
+    unreadable — callers pick their own fallback.
     """
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     if not path.exists():
@@ -266,17 +257,14 @@ def remove_notify_sub(
 
 
 def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
-    """Delete notify subs whose task has sat in ``done``/``blocked`` untouched
-    for longer than ``max_age_days``.
+    """Delete notify subs whose task sat in ``done``/``blocked`` untouched for
+    longer than ``max_age_days`` (``<= 0`` disables); returns rows deleted.
 
-    Subs survive ``done`` because a completed task can be reopened and must
-    still notify its origin; on never-archiving boards that would accumulate
-    rows forever, each scanned every notifier tick. ``blocked`` tasks are
-    reaped on the same clock — they are abandoned, not merely waiting like
-    ``backlog``/``ready``. Age is measured from the most recent event
-    (falling back to ``completed_at`` then ``created_at``), so ANY activity —
-    including a reopen — resets or exempts it. ``max_age_days <= 0`` disables
-    the sweep. Returns the number of rows deleted.
+    Subs survive ``done`` because a reopened task must still notify its origin,
+    which accumulates forever on never-archiving boards. ``blocked`` is
+    abandoned (unlike ``backlog``/``ready``) so it reaps on the same clock. Age
+    = latest event, else ``completed_at``, else ``created_at`` — any activity,
+    including a reopen, exempts the sub.
     """
     try:
         days = int(max_age_days)
