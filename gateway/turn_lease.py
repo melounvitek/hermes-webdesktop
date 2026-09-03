@@ -2,13 +2,11 @@
 
 Busy guards are keyed by ROUTING KEY but the transcript is owned by SESSION_ID, and
 ``switch_session()`` makes key->id many-to-one (/resume from a second chat, CLI-continuity,
-delegation pinning, topic tip-walks): two keys ran concurrent turns on one transcript and
-interleaved flushes (``user;user`` wedge). The lease serializes per RESOLVED session_id: acquired
-post-resolution right before the transcript load, released in the dispatch layer's ``finally``.
-Release is generation-scoped and identity-checked; a timed-out waiter fails CLOSED
-(:class:`TurnLeaseTimeoutError`); eviction only drops idle entries. Known limits: CLI-continuity
-processes are outside this in-process lock; mid-turn compression rotation leaves an alias window
-closed by :meth:`SessionTurnLeaseRegistry.rebind`.
+delegation pinning, topic tip-walks), so two keys could interleave flushes on one transcript
+(``user;user`` wedge). The lease serializes per RESOLVED session_id: acquired right before the
+transcript load, released in the dispatch layer's ``finally``; identity-checked release; a
+timed-out waiter fails CLOSED (:class:`TurnLeaseTimeoutError`); only idle entries evict. Limits:
+CLI-continuity processes are outside this lock; mid-turn rotation alias is closed by ``rebind``.
 """
 
 import asyncio
@@ -32,18 +30,13 @@ def _holder_desc(holder: Optional["TurnLeaseToken"]) -> tuple:
 
 
 class TurnLeaseTimeoutError(TimeoutError):
-    """The lease stayed held for the caller's full wait budget (fail-closed: the
-    caller must not enter the transcript load/run/flush region)."""
+    """Lease held for the full wait budget; fail-closed: caller must not enter the turn region."""
 
-    def __init__(
-        self, session_id: str, *, owner_key: str, generation: int, wait_seconds: float
-    ) -> None:
+    def __init__(self, session_id: str, *, owner_key: str, generation: int, wait_seconds: float):
         self.session_id, self.owner_key = session_id, owner_key
         self.generation, self.wait_seconds = generation, wait_seconds
-        super().__init__(
-            f"turn lease wait timed out after {wait_seconds:.0f}s on session "
-            f"{session_id} for routing key {owner_key} (gen {generation})"
-        )
+        super().__init__(f"turn lease wait timed out after {wait_seconds:.0f}s on session "
+                         f"{session_id} for routing key {owner_key} (gen {generation})")
 
 
 class TurnLeaseToken:
@@ -67,9 +60,7 @@ class _SessionLease:
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self.holder: Optional[TurnLeaseToken] = None
-        self.acquired_at = 0.0
-        self.last_used = time.time()
-        self.pending_acquires = 0
+        self.acquired_at, self.last_used, self.pending_acquires = 0.0, time.time(), 0
 
     @property
     def idle(self) -> bool:
@@ -85,12 +76,8 @@ class SessionTurnLeaseRegistry:
         self._leases: Dict[str, _SessionLease] = {}
         self._max_entries = max(1, int(max_entries))
 
-    def __len__(self) -> int:
-        return len(self._leases)
-
     def _get_or_create(self, session_id: str) -> _SessionLease:
-        lease = self._leases.get(session_id)
-        if lease is None:
+        if (lease := self._leases.get(session_id)) is None:
             self._evict_idle()
             lease = self._leases[session_id] = _SessionLease()
         lease.last_used = time.time()
@@ -122,8 +109,7 @@ class SessionTurnLeaseRegistry:
                 "are mapped to one session_id (#64934); serializing this turn behind the previous "
                 "turn's flush",
                 session_id, owner_key, generation, *_holder_desc(lease.holder),
-                time.time() - lease.acquired_at if lease.acquired_at else -1.0,
-            )
+                time.time() - lease.acquired_at if lease.acquired_at else -1.0)
         # Lock.release() wakes a waiter while leaving the lock momentarily unlocked. Count every
         # in-progress acquire across that handoff (even apparently-uncontended ones — wait_for()
         # may schedule them before the lock coroutine runs) so eviction cannot orphan the old
@@ -136,11 +122,9 @@ class SessionTurnLeaseRegistry:
                 "turn lease wait timed out after %.0fs on session %s (waiter: routing key %s gen "
                 "%s; holder: routing key %s gen %s) — failing closed: refusing to run this turn "
                 "UNSERIALIZED against the still-held lease",
-                wait, session_id, owner_key, generation, *_holder_desc(lease.holder),
-            )
+                wait, session_id, owner_key, generation, *_holder_desc(lease.holder))
             raise TurnLeaseTimeoutError(
-                session_id, owner_key=owner_key, generation=generation, wait_seconds=wait
-            ) from None
+                session_id, owner_key=owner_key, generation=generation, wait_seconds=wait) from None
         finally:
             lease.pending_acquires -= 1
         # Lock held and no await before holder publication, so the lease cannot become
@@ -150,17 +134,14 @@ class SessionTurnLeaseRegistry:
         return token
 
     def rebind(self, token: Optional[TurnLeaseToken], new_session_id: str) -> bool:
-        """Alias a HELD lease onto ``new_session_id`` after mid-turn session_id rotation
-        (compression) so the flush target stays serialized: the SAME ``_SessionLease`` is registered
-        under the new id (old mapping stays until idle-evicted), only the current holder may rebind,
-        the token follows. A live lease on the new id: log loudly, keep the old id (fail-open)."""
-        if (
-            token is None or token.released or not new_session_id
-            or new_session_id == token.session_id
-        ):
+        """Alias a HELD lease onto ``new_session_id`` after mid-turn rotation (compression) so the
+        flush target stays serialized: the SAME ``_SessionLease`` is registered under the new id
+        (old mapping idle-evicts later), only the holder may rebind, the token follows. A live
+        lease on the new id: log loudly, keep the old id (fail-open)."""
+        if (token is None or token.released or not new_session_id
+                or new_session_id == token.session_id):
             return False
-        lease = self._leases.get(token.session_id)
-        if lease is None or lease.holder is not token:
+        if (lease := self._leases.get(token.session_id)) is None or lease.holder is not token:
             return False
         existing = self._leases.get(new_session_id)
         if existing is not None and existing is not lease and not existing.idle:
@@ -170,8 +151,7 @@ class SessionTurnLeaseRegistry:
                 "gen %s) — keeping the lease on the old id; transcript writes on %s may "
                 "interleave (#64934 rotation-alias edge)",
                 token.session_id, new_session_id, token.owner_key, token.generation,
-                *_holder_desc(existing.holder), new_session_id,
-            )
+                *_holder_desc(existing.holder), new_session_id)
             return False
         self._leases[new_session_id] = lease
         lease.last_used = time.time()
@@ -184,15 +164,11 @@ class SessionTurnLeaseRegistry:
         if token is None or token.released:
             return False
         token.released = True
-        lease = self._leases.get(token.session_id)
-        if lease is None:
+        if (lease := self._leases.get(token.session_id)) is None:
             return False
         if lease.holder is not token:
-            logger.debug(
-                "turn lease release skipped on session %s: token (key %s gen %s) is not the "
-                "current holder",
-                token.session_id, token.owner_key, token.generation,
-            )
+            logger.debug("turn lease release skipped on session %s: token (key %s gen %s) is not "
+                         "the current holder", token.session_id, token.owner_key, token.generation)
             return False
         lease.holder, lease.acquired_at, lease.last_used = None, 0.0, time.time()
         if lease.lock.locked():
