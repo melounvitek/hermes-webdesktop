@@ -1,11 +1,8 @@
-"""hermes-memory-store — holographic memory plugin (MemoryProvider): structured fact storage
-with entity resolution, trust scoring, and HRR-based compositional retrieval.
-Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
-
-Config in $HERMES_HOME/config.yaml (profile-scoped) under plugins.hermes-memory-store:
-  db_path ($HERMES_HOME/memory_store.db), auto_extract (false), default_trust (0.5),
-  min_trust_threshold (0.3), temporal_decay_half_life (0), hrr_dim (1024), hrr_weight (0.3).
-"""
+"""hermes-memory-store — holographic memory plugin (MemoryProvider): structured fact storage with entity
+resolution, trust scoring, and HRR-based compositional retrieval. Original plugin by dusterbloom (PR #2351).
+Config in $HERMES_HOME/config.yaml under plugins.hermes-memory-store: db_path ($HERMES_HOME/memory_store.db),
+auto_extract (false), default_trust (0.5), min_trust_threshold (0.3), temporal_decay_half_life (0),
+hrr_dim (1024), hrr_weight (0.3)."""
 
 from __future__ import annotations
 
@@ -139,8 +136,7 @@ class HolographicMemoryProvider(MemoryProvider):
         config_path = Path(hermes_home) / "config.yaml"
         try:
             import yaml
-            # Raw read for the write-back round-trip: merged defaults must not be persisted.
-            from hermes_cli.config import read_user_config_raw
+            from hermes_cli.config import read_user_config_raw  # raw read: merged defaults must not be persisted
             existing = read_user_config_raw(config_path)
             existing.setdefault("plugins", {})["hermes-memory-store"] = values
             with open(config_path, "w", encoding="utf-8") as f:
@@ -277,17 +273,12 @@ class HolographicMemoryProvider(MemoryProvider):
         "fact_feedback": lambda self, a: json.dumps(self._store.record_feedback(int(a["fact_id"]), helpful=a["action"] == "helpful")),
     }
 
-    # -- Auto-extraction (on_session_end) ------------------------------------
-
     @staticmethod
     def _harvestable_text(msg: dict):
-        """User text eligible for extraction, or None.
-
-        Compaction handoff summaries arrive as role="user" and reliably match the decision
-        patterns; never store the compactor's own output as a durable fact. A merge-into-tail
-        row holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER (prefixed with the
-        header) and the summary AFTER it — harvest only the pre-delimiter segment.
-        """
+        """User text eligible for extraction, or None. Compaction handoff summaries arrive as role="user" and
+        reliably match the decision patterns; never store the compactor's own output as a durable fact. A
+        merge-into-tail row holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER (prefixed with the
+        header) and the summary AFTER it — harvest only the pre-delimiter segment."""
         # Local import: the compressor module is heavier than this plugin and only needed here.
         from agent.context_compressor import _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER, is_compaction_summary_message
 
@@ -306,10 +297,8 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def _auto_extract_facts(self, messages: list) -> None:
         extracted = 0
-        for msg in messages:
-            content = self._harvestable_text(msg) if msg.get("role") == "user" else None
-            if content is None:
-                continue
+        texts = filter(None, (self._harvestable_text(m) for m in messages if m.get("role") == "user"))
+        for content in texts:
             for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:

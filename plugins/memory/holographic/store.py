@@ -99,12 +99,10 @@ def _clamp_trust(value: float) -> float:
 class MemoryStore:
     """SQLite-backed fact store with entity resolution and trust scoring.
 
-    Process-wide shared connection registry: SQLite allows one writer at a time and
-    several providers coexist per process (main agent + every delegate_task subagent),
-    so all instances for the same database share ONE connection and ONE re-entrant
-    lock — writes are fully serialized and "database is locked" is impossible.
-    Refcounted: closing one instance never tears the connection out from under a sibling.
-    """
+    Process-wide shared connection registry: SQLite allows one writer at a time and several providers
+    coexist per process (main agent + every delegate_task subagent), so all instances for the same database
+    share ONE connection and ONE re-entrant lock — writes are fully serialized and "database is locked" is
+    impossible. Refcounted: closing one instance never tears the connection out from under a sibling."""
 
     _shared: dict = {}
     _shared_guard = threading.Lock()
@@ -115,9 +113,7 @@ class MemoryStore:
             db_path = str(get_hermes_home() / "memory_store.db")
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.default_trust = _clamp_trust(default_trust)
-        self.hrr_dim = hrr_dim
-        self._hrr_available = hrr._HAS_NUMPY
+        self.default_trust, self.hrr_dim, self._hrr_available = _clamp_trust(default_trust), hrr_dim, hrr._HAS_NUMPY
         try:  # resolve() so symlinked/relative paths to the same file share ONE connection
             self._key = str(self.db_path.resolve())
         except OSError:
@@ -155,8 +151,6 @@ class MemoryStore:
         self._conn.commit()
         return cur
 
-    # -- Public API -----------------------------------------------------------
-
     def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
         """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the
         existing fact_id untouched. Links extracted entities and rebuilds the category bank."""
@@ -181,14 +175,12 @@ class MemoryStore:
             row = self._one("SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,))
             if row is None:
                 return False
-            changes = [(col, val) for col, val in (
-                ("content", content.strip() if content is not None else None),
-                ("tags", tags),
-                ("category", category),
-                ("trust_score", _clamp_trust(row["trust_score"] + trust_delta) if trust_delta is not None else None),
-            ) if val is not None]
-            assignments = ", ".join(["updated_at = CURRENT_TIMESTAMP"] + [f"{col} = ?" for col, _ in changes])
-            self._write(f"UPDATE facts SET {assignments} WHERE fact_id = ?", [val for _, val in changes] + [fact_id])
+            changes = {col: val for col, val in {
+                "content": content.strip() if content is not None else None, "tags": tags, "category": category,
+                "trust_score": _clamp_trust(row["trust_score"] + trust_delta) if trust_delta is not None else None,
+            }.items() if val is not None}
+            assignments = ", ".join(["updated_at = CURRENT_TIMESTAMP"] + [f"{col} = ?" for col in changes])
+            self._write(f"UPDATE facts SET {assignments} WHERE fact_id = ?", [*changes.values(), fact_id])
             if content is not None:  # re-extract entities and recompute the HRR vector
                 self._conn.execute("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
                 self._link_entities(fact_id, content)
@@ -227,13 +219,10 @@ class MemoryStore:
                 raise KeyError(f"fact_id {fact_id} not found")
             old_trust: float = row["trust_score"]
             new_trust = _clamp_trust(old_trust + (_HELPFUL_DELTA if helpful else _UNHELPFUL_DELTA))
-            helpful_increment = 1 if helpful else 0
+            increment = 1 if helpful else 0
             self._write("UPDATE facts SET trust_score = ?, helpful_count = helpful_count + ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?", (new_trust, helpful_increment, fact_id))
-            return {"fact_id": fact_id, "old_trust": old_trust, "new_trust": new_trust,
-                    "helpful_count": row["helpful_count"] + helpful_increment}
-
-    # -- Entity / HRR helpers -------------------------------------------------
+                        "updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?", (new_trust, increment, fact_id))
+            return {"fact_id": fact_id, "old_trust": old_trust, "new_trust": new_trust, "helpful_count": row["helpful_count"] + increment}
 
     def _extract_entities(self, text: str) -> list[str]:
         """Regex entity candidates (see the pattern table), deduplicated case-insensitively in first-seen order."""
@@ -287,16 +276,12 @@ class MemoryStore:
             (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, len(rows)),
         )
 
-    # -- Lifecycle ------------------------------------------------------------
-
     @classmethod
     def release_all_under(cls, directory: "str | Path") -> int:
         """Force-close every shared connection whose database lives under ``directory``; returns the count.
-
-        close() is refcount-driven, so a live holder (e.g. an agent's provider) keeps a profile's SQLite
-        handle open, which on Windows makes rmtree of the profile fail. The directory is going away, so
-        later use by a stale holder is expected to fail.
-        """
+        close() is refcount-driven, so a live holder (e.g. an agent's provider) keeps a profile's SQLite handle
+        open, which on Windows makes rmtree of the profile fail. The directory is going away, so later use by a
+        stale holder is expected to fail."""
         root = os.path.normcase(str(Path(directory).expanduser().resolve())) + os.sep
         with cls._shared_guard:
             doomed = [key for key in cls._shared if os.path.normcase(key).startswith(root)]

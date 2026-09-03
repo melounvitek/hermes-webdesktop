@@ -70,20 +70,16 @@ def encode_text(text: str, dim: int = 1024) -> "np.ndarray":
     """Bag-of-words bundle of token atoms; empty text -> encode_atom("__hrr_empty__")."""
     _require_numpy()
     tokens = [t for t in (tok.strip(".,!?;:\"'()[]{}") for tok in text.lower().split()) if t]
-    if not tokens:
-        return encode_atom("__hrr_empty__", dim)
-    return bundle(*[encode_atom(token, dim) for token in tokens])
+    return bundle(*[encode_atom(token, dim) for token in tokens]) if tokens else encode_atom("__hrr_empty__", dim)
 
 
 def encode_fact(content: str, entities: list[str], dim: int = 1024) -> "np.ndarray":
     """bundle(bind(text, ROLE_CONTENT), bind(entity_i, ROLE_ENTITY)...), so
     unbind(fact, bind(entity, ROLE_ENTITY)) ≈ content_vector."""
     _require_numpy()
-    role_content = encode_atom("__hrr_role_content__", dim)
-    role_entity = encode_atom("__hrr_role_entity__", dim)
-    components = [bind(encode_text(content, dim), role_content)]
-    components += [bind(encode_atom(entity.lower(), dim), role_entity) for entity in entities]
-    return bundle(*components)
+    role_content, role_entity = encode_atom("__hrr_role_content__", dim), encode_atom("__hrr_role_entity__", dim)
+    return bundle(bind(encode_text(content, dim), role_content),
+                  *[bind(encode_atom(entity.lower(), dim), role_entity) for entity in entities])
 
 
 def phases_to_bytes(phases: "np.ndarray", dim: int | None = None) -> bytes:
@@ -111,43 +107,33 @@ def bytes_to_phases(data: bytes, dim: int | None = None) -> "np.ndarray":
     prefixed = data.startswith(_FLOAT32_BLOB_PREFIX)
     f32 = lambda payload: np.frombuffer(payload, dtype=np.float32).astype(np.float64)  # noqa: E731
     f64 = lambda payload: np.frombuffer(payload, dtype=np.float64).copy()  # noqa: E731
-
     if dim is None:
         if prefixed:
-            payload = data[plen:]
-            if len(payload) % _F32 != 0:
-                raise ValueError(f"HRR float32 vector blob has invalid payload byte length: {len(payload)}")
-            return f32(payload)
+            if (len(data) - plen) % _F32 != 0:
+                raise ValueError(f"HRR float32 vector blob has invalid payload byte length: {len(data) - plen}")
+            return f32(data[plen:])
         if len(data) % _F64 != 0:
             raise ValueError(f"HRR legacy vector blob has invalid byte length: {len(data)}")
         return f64(data)
-
     float32_blob_bytes, float64_bytes = plen + dim * _F32, dim * _F64
     collides = float32_blob_bytes == float64_bytes
     if not collides and prefixed and len(data) == float32_blob_bytes:
         return f32(data[plen:])
     if len(data) == float64_bytes:
         return f64(data)
-    if prefixed:
-        expected = (f"{float64_bytes} (legacy float64)" if collides
-                    else f"{float32_blob_bytes} (prefixed float32) or {float64_bytes} (legacy float64)")
-        raise ValueError(
-            f"HRR vector blob has {len(data)} bytes ({len(data) - plen} payload bytes after "
-            f"the float32 prefix); expected {expected} for dim={dim}"
-        )
-    raise ValueError(f"HRR legacy vector blob has {len(data)} bytes; expected {float64_bytes} (float64) for dim={dim}")
+    if not prefixed:
+        raise ValueError(f"HRR legacy vector blob has {len(data)} bytes; expected {float64_bytes} (float64) for dim={dim}")
+    expected = (f"{float64_bytes} (legacy float64)" if collides
+                else f"{float32_blob_bytes} (prefixed float32) or {float64_bytes} (legacy float64)")
+    raise ValueError(f"HRR vector blob has {len(data)} bytes ({len(data) - plen} payload bytes after "
+                     f"the float32 prefix); expected {expected} for dim={dim}")
 
 
 def snr_estimate(dim: int, n_items: int) -> float:
     """SNR = sqrt(dim / n_items) (inf when empty); warns below 2.0 (n_items > dim/4)."""
     _require_numpy()
-    if n_items <= 0:
-        return float("inf")
-    snr = math.sqrt(dim / n_items)
+    snr = math.sqrt(dim / n_items) if n_items > 0 else float("inf")
     if snr < 2.0:
-        logger.warning(
-            "HRR storage near capacity: SNR=%.2f (dim=%d, n_items=%d). "
-            "Retrieval accuracy may degrade. Consider increasing dim or reducing stored items.",
-            snr, dim, n_items,
-        )
+        logger.warning("HRR storage near capacity: SNR=%.2f (dim=%d, n_items=%d). "
+                       "Retrieval accuracy may degrade. Consider increasing dim or reducing stored items.", snr, dim, n_items)
     return snr
