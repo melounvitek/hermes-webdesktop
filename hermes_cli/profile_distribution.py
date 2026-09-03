@@ -1,8 +1,8 @@
 """Profile distributions — shareable, packaged Hermes profiles via git.
 
-* A git URL (``github.com/user/repo``, ``https://github.com/...``, ``git@...``, ``ssh://``,
-``git://``), optionally with ``#<ref>`` to pin a tag / branch / commit SHA. * A local directory that
-already contains ``distribution.yaml`` — used during profile development before the first push.
+Sources: a git URL (``github.com/user/repo``, ``https://...``, ``git@...``, ``ssh://``,
+``git://``) or a local directory that already contains ``distribution.yaml`` (profile
+development before the first push).
 """
 
 from __future__ import annotations
@@ -19,34 +19,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from agent.skill_utils import is_excluded_skill_path
 from hermes_cli._subprocess_compat import noninteractive_git_env
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 MANIFEST_FILENAME = "distribution.yaml"
 ENV_TEMPLATE_FILENAME = ".env.template"
 ENV_EXAMPLE_FILENAME = ".env.EXAMPLE"
 
-# Default distribution-owned paths (relative to profile root).  Authors may
-# override via ``distribution_owned:`` in the manifest.  config.yaml is
-# distribution-owned but treated specially on update (see _is_config_like).
-DEFAULT_DIST_OWNED: Tuple[str, ...] = (
-    "SOUL.md",
-    "config.yaml",
-    "mcp.json",
-    "skills",
-    "cron",
-    MANIFEST_FILENAME,
-)
+# Default distribution-owned paths (relative to profile root). Authors may override via
+# ``distribution_owned:``. config.yaml is dist-owned but preserved on update by default.
+DEFAULT_DIST_OWNED: Tuple[str, ...] = ("SOUL.md", "config.yaml", "mcp.json", "skills", "cron", MANIFEST_FILENAME)
 
-# Paths that are NEVER part of a distribution. These are user-owned and are
-# protected on update. Must stay consistent with
-# ``profiles.py::_DEFAULT_EXPORT_EXCLUDE_ROOT`` plus the ``local/``
-# convention for user customizations.
+# Paths NEVER part of a distribution: user-owned, protected on update. Keep consistent with
+# ``profiles.py`` export exclusions plus the ``local/`` convention for user customizations.
 USER_OWNED_EXCLUDE: frozenset = frozenset({
     # Credentials & runtime secrets
     "auth.json", ".env",
@@ -69,11 +54,6 @@ USER_OWNED_EXCLUDE: frozenset = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-
 class DistributionError(Exception):
     """Raised for distribution install/update failures."""
 
@@ -81,6 +61,9 @@ class DistributionError(Exception):
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
+
+def _str(data: dict, key: str, default: str = "") -> str:
+    return str(data.get(key) or default)
 
 
 @dataclass
@@ -96,12 +79,12 @@ class EnvRequirement:
             raise DistributionError(
                 f"env_requires entry must be a mapping, got {type(data).__name__}"
             )
-        name = str(data.get("name") or "").strip()
+        name = _str(data, "name").strip()
         if not name:
             raise DistributionError("env_requires entry missing 'name'")
         return cls(
             name=name,
-            description=str(data.get("description") or ""),
+            description=_str(data, "description"),
             required=bool(data.get("required", True)),
             default=data.get("default"),
         )
@@ -127,9 +110,7 @@ class DistributionManifest:
     distribution_owned: List[str] = field(default_factory=list)
     # Tracked after install — where we pulled from, so ``update`` can re-pull.
     source: str = ""
-    # ISO-8601 UTC timestamp written on install / update, so ``info`` and
-    # ``list`` can show when a distribution landed on disk.  Empty for
-    # manifests that ship in a repo (authors don't populate this).
+    # ISO-8601 UTC timestamp written on install/update (empty in repo-shipped manifests).
     installed_at: str = ""
 
     @classmethod
@@ -138,28 +119,26 @@ class DistributionManifest:
             raise DistributionError(
                 f"{MANIFEST_FILENAME} must be a mapping, got {type(data).__name__}"
             )
-        name = str(data.get("name") or "").strip()
+        name = _str(data, "name").strip()
         if not name:
             raise DistributionError(f"{MANIFEST_FILENAME} missing 'name'")
         env_raw = data.get("env_requires") or []
         if not isinstance(env_raw, list):
             raise DistributionError("env_requires must be a list")
-        env_requires = [EnvRequirement.from_dict(e) for e in env_raw]
         dist_owned_raw = data.get("distribution_owned") or []
         if dist_owned_raw and not isinstance(dist_owned_raw, list):
             raise DistributionError("distribution_owned must be a list")
-        distribution_owned = [str(p).strip().strip("/") for p in dist_owned_raw if str(p).strip()]
         return cls(
             name=name,
-            version=str(data.get("version") or "0.1.0"),
-            description=str(data.get("description") or ""),
-            hermes_requires=str(data.get("hermes_requires") or ""),
-            author=str(data.get("author") or ""),
-            license=str(data.get("license") or ""),
-            env_requires=env_requires,
-            distribution_owned=distribution_owned,
-            source=str(data.get("source") or ""),
-            installed_at=str(data.get("installed_at") or ""),
+            version=_str(data, "version", "0.1.0"),
+            description=_str(data, "description"),
+            hermes_requires=_str(data, "hermes_requires"),
+            author=_str(data, "author"),
+            license=_str(data, "license"),
+            env_requires=[EnvRequirement.from_dict(e) for e in env_raw],
+            distribution_owned=[str(p).strip().strip("/") for p in dist_owned_raw if str(p).strip()],
+            source=_str(data, "source"),
+            installed_at=_str(data, "installed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -192,22 +171,16 @@ def read_manifest(profile_dir: Path) -> Optional[DistributionManifest]:
 
 
 def write_manifest(profile_dir: Path, manifest: DistributionManifest) -> Path:
+    """Atomically write ``distribution.yaml``. A bare write_text() truncates before the dump
+    lands and read_manifest() treats a missing/unparseable manifest as "not a distribution",
+    so an interrupted install/update would silently demote the profile."""
     mf_path = profile_dir / MANIFEST_FILENAME
-    # Route through the shared atomic YAML writer (temp file + fsync + atomic
-    # replace, preserving mode/owner and symlinks). A bare write_text()
-    # truncates distribution.yaml before the dump lands, and read_manifest()
-    # treats a missing-or-unparseable manifest as "not a distribution" -- so an
-    # interrupted install/update silently demotes the profile, losing update
-    # tracking and env_requires with no error surfaced anywhere.
     from utils import atomic_yaml_write
 
-    # create_mode=0o644: _materialize() reaches this line with no manifest on
-    # disk whenever a distribution declares an explicit `distribution_owned`
-    # allowlist that does not list distribution.yaml itself, so the file is
-    # never copied out of the staged tree. The manifest is a shareable
-    # descriptor rather than a secret and used to land at the umask default,
-    # so don't leave a freshly created one at mkstemp's 0600. An existing
-    # file's mode is preserved as before.
+    # create_mode=0o644: with an explicit `distribution_owned` allowlist that omits
+    # distribution.yaml, _copy_dist_payload reaches here with no manifest on disk. It is a
+    # shareable descriptor, not a secret — don't leave it at mkstemp's 0600. An existing
+    # file's mode is preserved.
     atomic_yaml_write(
         mf_path,
         manifest.to_dict(),
@@ -222,14 +195,12 @@ def write_manifest(profile_dir: Path, manifest: DistributionManifest) -> Path:
 # Version check
 # ---------------------------------------------------------------------------
 
-
 _VERSION_OP_RE = re.compile(r"^\s*(>=|<=|==|!=|>|<)\s*(.+?)\s*$")
 _VERSION_OPS = {">=": operator.ge, "<=": operator.le, "==": operator.eq, "!=": operator.ne, ">": operator.gt, "<": operator.lt}
 
 
 def _parse_semver(v: str) -> Tuple[int, int, int]:
-    """Very small semver parser — major.minor.patch only.  Extra labels stripped."""
-    # Strip any pre-release / build metadata (e.g. "0.12.0-rc1+abc")
+    """major.minor.patch only; pre-release / build metadata ("0.12.0-rc1+abc") stripped."""
     parts = re.split(r"[-+]", str(v).strip().lstrip("v"), 1)[0].split(".")
     parts += ["0"] * (3 - len(parts))
     try:
@@ -239,22 +210,16 @@ def _parse_semver(v: str) -> Tuple[int, int, int]:
 
 
 def check_hermes_requires(spec: str, current_version: str) -> None:
-    """Raise DistributionError if ``current_version`` does not satisfy ``spec``."""
+    """Raise DistributionError if ``current_version`` does not satisfy ``spec`` (bare version = ``>=``)."""
     if not spec or not spec.strip():
         return
     m = _VERSION_OP_RE.match(spec)
-    # Bare version → treat as ``>=``
     op, target = m.groups() if m else (">=", spec.strip())
     if not _VERSION_OPS[op](_parse_semver(current_version), _parse_semver(target)):
         raise DistributionError(
             f"This distribution requires Hermes {op}{target}, "
             f"but you have {current_version}."
         )
-
-
-# ---------------------------------------------------------------------------
-# Env var template helper
-# ---------------------------------------------------------------------------
 
 
 def _env_template_from_manifest(manifest: DistributionManifest) -> str:
@@ -279,14 +244,11 @@ def _env_template_from_manifest(manifest: DistributionManifest) -> str:
 # Source staging — git clone or local directory
 # ---------------------------------------------------------------------------
 
-
-# Bare github.com/user/repo shorthand
 _GITHUB_SHORTHAND_RE = re.compile(r"^github\.com/[\w.-]+/[\w.-]+/?$")
 
 
 def _looks_like_git_url(s: str) -> bool:
-    # Any http(s) URL is treated as a git repo.  We no longer accept
-    # tar.gz URLs — git is the only remote transport.
+    """Any http(s) URL is a git repo — git is the only remote transport (no tar.gz URLs)."""
     s = s.strip()
     return (
         s.endswith(".git")
@@ -296,7 +258,6 @@ def _looks_like_git_url(s: str) -> bool:
 
 
 def _git_clone(url: str, dest: Path) -> None:
-    # Normalize github.com/user/repo shorthand
     if _GITHUB_SHORTHAND_RE.match(url):
         url = f"https://{url.rstrip('/')}"
     try:
@@ -315,19 +276,13 @@ def _git_clone(url: str, dest: Path) -> None:
 
 
 def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
-    """Resolve *source* to a local directory containing distribution.yaml.
-
-    Accepts: * A git URL (https / ssh / git@ / bare github.com shorthand) — cloned into a temp
-    directory; ``.git`` removed after clone. * A local directory already containing
-    ``distribution.yaml``.
-    """
+    """Resolve *source* to ``(staged_dir, provenance)``: git URLs are shallow-cloned into
+    *workdir* (``.git`` removed); a local directory is used in place."""
     src_str = source.strip()
 
-    # Git URL
     if _looks_like_git_url(src_str):
         staged, provenance = workdir / "clone", src_str
         _git_clone(src_str, staged)
-        # Remove .git to keep the staged tree clean
         shutil.rmtree(staged / ".git", ignore_errors=True)
         missing = (
             f"No {MANIFEST_FILENAME} at the root of {src_str!r}. "
@@ -368,7 +323,6 @@ def _reject_distribution_symlinks(staged: Path) -> None:
 # Install
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class InstallPlan:
     """Summary of what an install will do, surfaced for user confirmation."""
@@ -379,7 +333,6 @@ class InstallPlan:
     existing: bool  # True if target profile already exists (update path)
     preserves_config: bool = True
     has_cron: bool = False
-    has_skills: bool = False
 
 
 def _has_cron_jobs(staged: Path) -> bool:
@@ -387,11 +340,6 @@ def _has_cron_jobs(staged: Path) -> bool:
     return cron_dir.is_dir() and (
         any(cron_dir.rglob("*.json")) or any(cron_dir.rglob("*.yaml"))
     )
-
-
-def _has_skills(staged: Path) -> bool:
-    skills_dir = staged / "skills"
-    return skills_dir.is_dir() and any(not is_excluded_skill_path(p) for p in skills_dir.rglob("SKILL.md"))
 
 
 def plan_install(
@@ -416,12 +364,9 @@ def plan_install(
             "this source is not a Hermes distribution."
         )
 
-    # Version check up-front so we fail fast
-    check_hermes_requires(manifest.hermes_requires, hermes_version)
+    check_hermes_requires(manifest.hermes_requires, hermes_version)  # fail fast
 
-    # Resolve target profile name
-    target_name = override_name or manifest.name
-    canon = normalize_profile_name(target_name)
+    canon = normalize_profile_name(override_name or manifest.name)
     validate_profile_name(canon)
     if canon == "default":
         raise DistributionError(
@@ -431,8 +376,7 @@ def plan_install(
         )
     manifest.name = canon
     manifest.source = provenance
-    # Stamped once here so plan_install() callers (both fresh install and
-    # update) propagate a freshly-minted timestamp through _copy_dist_payload.
+    # Stamped once here so both fresh install and update propagate a fresh timestamp.
     manifest.installed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     target_dir = get_profile_dir(canon)
@@ -445,19 +389,16 @@ def plan_install(
         existing=existing,
         preserves_config=existing,
         has_cron=_has_cron_jobs(staged),
-        has_skills=_has_skills(staged),
     )
 
 
 def _owned_entries(staged: Path, manifest: DistributionManifest):
     """Yield ``(src, rel_parts)`` for every staged path the distribution owns."""
-    explicit_owned = [p.strip().strip("/") for p in manifest.distribution_owned]
-    explicit_owned = [p for p in explicit_owned if p]
+    explicit_owned = [p for p in (p.strip().strip("/") for p in manifest.distribution_owned) if p]
     if not explicit_owned:
-        # Legacy behaviour: no explicit allowlist means the whole staged
-        # payload (minus USER_OWNED_EXCLUDE) is distribution-owned.  Do NOT
-        # narrow to DEFAULT_DIST_OWNED here — existing distributions ship
-        # arbitrary extra top-level paths without declaring them.
+        # Legacy: no allowlist means the whole payload (minus USER_OWNED_EXCLUDE) is owned.
+        # Do NOT narrow to DEFAULT_DIST_OWNED — existing distributions ship arbitrary extra
+        # top-level paths without declaring them.
         for entry in staged.iterdir():
             if entry.name not in USER_OWNED_EXCLUDE:
                 yield entry, (entry.name,)
@@ -480,17 +421,11 @@ def _copy_dist_payload(
     manifest: DistributionManifest,
     preserve_config: bool,
 ) -> None:
-    """Copy distribution-owned files from *staged* into *target*.
+    """Copy distribution-owned files (see ``_owned_entries``) from *staged* into *target*.
 
-    User-owned paths are never touched. ``config.yaml`` is replaced only when ``preserve_config`` is
-    False (fresh install or ``--force-config`` update). ``.env.template`` is renamed to
-    ``.env.EXAMPLE`` in the target to avoid shadowing a real ``.env``.
-
-    When the manifest declares an explicit ``distribution_owned`` list, only those paths are copied
-    (path-aware: nested entries such as ``skills/research`` or ``cron/digest.json`` are honoured).
-    When the list is omitted the legacy behaviour is preserved: every staged entry outside
-    ``USER_OWNED_EXCLUDE`` is copied.
-    """
+    User-owned paths are never touched. ``config.yaml`` is replaced only when
+    ``preserve_config`` is False (fresh install / ``--force-config``). ``.env.template`` lands
+    as ``.env.EXAMPLE`` so it never shadows a real ``.env``."""
     target.mkdir(parents=True, exist_ok=True)
     staged_resolved = staged.resolve()
 
@@ -505,7 +440,6 @@ def _copy_dist_payload(
                 shutil.copy2(src, target / ENV_EXAMPLE_FILENAME)
                 continue
             if name == "config.yaml" and preserve_config and (target / "config.yaml").exists():
-                # Leave user's config.yaml alone on update
                 continue
         dest = target.joinpath(*rel_parts)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -527,9 +461,10 @@ def _copy_dist_payload(
 
 
 def _bootstrap_user_dirs(target: Path) -> None:
-    """Create the bootstrap dirs a fresh profile expects."""
-    for d in ("memories", "sessions", "skills", "skins", "logs",
-              "plans", "workspace", "cron", "home"):
+    """Create the bootstrap dirs a fresh profile expects (same set as ``create_profile``)."""
+    from hermes_cli.profiles import _PROFILE_DIRS
+
+    for d in _PROFILE_DIRS:
         (target / d).mkdir(parents=True, exist_ok=True)
 
 
@@ -539,11 +474,8 @@ def install_distribution(
     force: bool = False,
     create_alias: bool = False,
 ) -> InstallPlan:
-    """Install a distribution from *source* into a new profile.
-
-    Returns the resolved :class:`InstallPlan`. Use :func:`plan_install` first if you want to preview
-    + prompt the user before calling this.
-    """
+    """Install a distribution from *source* into a new profile; returns the resolved plan.
+    Use :func:`plan_install` first to preview + prompt."""
     from hermes_cli.profiles import (
         check_alias_collision,
         create_wrapper_script,
@@ -561,12 +493,7 @@ def install_distribution(
 
         # Fresh install: config.yaml comes from the distribution.
         _bootstrap_user_dirs(plan.target_dir)
-        _copy_dist_payload(
-            plan.staged_dir,
-            plan.target_dir,
-            plan.manifest,
-            preserve_config=False,
-        )
+        _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=False)
 
         if create_alias and check_alias_collision(plan.manifest.name) is None:
             create_wrapper_script(plan.manifest.name)
@@ -594,12 +521,8 @@ def update_distribution(
     profile_name: str,
     force_config: bool = False,
 ) -> InstallPlan:
-    """Re-pull the distribution for an existing profile and apply updates.
-
-    The source is read from the installed profile's ``distribution.yaml`` ``source:`` field.
-    Distribution-owned files are overwritten; user-owned data (memories, sessions, auth) is never
-    touched. ``config.yaml`` is preserved unless ``force_config`` is True.
-    """
+    """Re-pull from the installed manifest's ``source:`` and apply: dist-owned files
+    overwritten, user data never touched, ``config.yaml`` preserved unless ``force_config``."""
     canon, target = _existing_profile(profile_name)
     existing_manifest = read_manifest(target)
     if existing_manifest is None:
@@ -614,28 +537,13 @@ def update_distribution(
         )
 
     with tempfile.TemporaryDirectory(prefix="hermes_dist_update_") as tmp:
-        plan = plan_install(
-            existing_manifest.source,
-            Path(tmp),
-            override_name=canon,
-        )
+        plan = plan_install(existing_manifest.source, Path(tmp), override_name=canon)
         plan.preserves_config = not force_config
-
-        _copy_dist_payload(
-            plan.staged_dir,
-            plan.target_dir,
-            plan.manifest,
-            preserve_config=plan.preserves_config,
-        )
+        _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=plan.preserves_config)
         return plan
 
 
-# ---------------------------------------------------------------------------
-# Info — render a manifest summary
-# ---------------------------------------------------------------------------
-
-
 def describe_distribution(profile_name: str) -> Dict[str, Any]:
-    """Return a structured view of a profile's distribution metadata."""
+    """Return a structured view of a profile's distribution metadata ({} if not a distribution)."""
     manifest = read_manifest(_existing_profile(profile_name)[1])
     return {} if manifest is None else manifest.to_dict()
