@@ -240,15 +240,27 @@ def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
         return matches
     _active = _skills_dir()
     active_dir = _active.resolve() if _active.exists() else _active
-    # Every profile's skills dir EXCEPT the active one (already searched).
-    candidates: List[Tuple[str, Path]] = [("default", root / "skills")]
-    with suppress(OSError):
-        if (root / "profiles").is_dir():
-            candidates += [(e.name, e / "skills") for e in (root / "profiles").iterdir() if e.is_dir()]
+    # Every profile's skills dir EXCEPT the active one (already searched). A candidate whose
+    # path cannot be resolved is skipped (not a fatal error); is_dir() checks stay unguarded.
+    candidates: List[Tuple[str, Path]] = []
+    with suppress(OSError, RuntimeError):
+        if (root / "skills").resolve() != active_dir:
+            candidates.append(("default", root / "skills"))
+    if (root / "profiles").is_dir():
+        with suppress(OSError):
+            for entry in (root / "profiles").iterdir():
+                if not entry.is_dir():
+                    continue
+                try:
+                    if (entry / "skills").resolve() == active_dir:
+                        continue
+                except (OSError, RuntimeError):
+                    continue
+                candidates.append((entry.name, entry / "skills"))
     for profile_name, skills_dir in candidates:
-        with suppress(OSError, RuntimeError):
-            if skills_dir.resolve() == active_dir or not skills_dir.is_dir():
-                continue
+        if not skills_dir.is_dir():
+            continue
+        with suppress(OSError):
             hit = next((d for d in _iter_skill_dirs(skills_dir) if d.name == name), None)
             if hit is not None:
                 matches.append((profile_name, hit))  # one match per profile is enough

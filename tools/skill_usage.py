@@ -264,7 +264,11 @@ def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None) -> 
 
 def _is_curator_managed_record(record: Any) -> bool:
     """``created_by`` is a curator-management OPT-IN flag, not proof of authorship (``curator adopt`` flips it);
-    the key name is kept because it lives in every user's ``.usage.json``."""
+    the key name is kept because it lives in every user's ``.usage.json``.
+
+    NAMING (issue #67140): the on-disk field is ``created_by``, which reads like provenance but is consumed
+    as a **curator-management opt-in policy flag**. The two are not the same question:
+    """
     return isinstance(record, dict) and (record.get("created_by") == "agent" or record.get("agent_created") is True)
 
 
@@ -521,7 +525,11 @@ def set_state(skill_name: str, state: str) -> None:
 
 
 def set_pinned(skill_name: str, pinned: bool) -> bool:
-    """False when the write did not land (not curation-eligible)."""
+    """False when the write did not land (not curation-eligible).
+
+    (skill not curation-eligible), True on success — so callers can report failure instead of a false
+    success (issue #92993).
+    """
     return _set_field(skill_name, "pinned", bool(pinned))
 
 

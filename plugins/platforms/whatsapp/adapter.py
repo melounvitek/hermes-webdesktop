@@ -80,12 +80,14 @@ def _kill_port_process(port: int) -> None:
             if pid <= 0 or not _pid_looks_like_node_bridge(pid):
                 logger.warning("[whatsapp] Not killing PID %s on port %d: process is not a node bridge (or identity unverifiable)", pid, port)
                 continue
-            with suppress(subprocess.SubprocessError, OSError):  # ProcessLookupError/PermissionError are OSError subclasses
-                if not _IS_WINDOWS:
-                    os.kill(pid, signal.SIGTERM)
-                    continue
+            if _IS_WINDOWS:
                 from hermes_cli._subprocess_compat import windows_hide_flags
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, stdin=subprocess.DEVNULL, timeout=5, creationflags=windows_hide_flags())
+                # Only SubprocessError is swallowed per-PID; an OSError (e.g. taskkill missing) aborts the scan.
+                with suppress(subprocess.SubprocessError):
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, stdin=subprocess.DEVNULL, timeout=5, creationflags=windows_hide_flags())
+            else:
+                with suppress(OSError):  # ProcessLookupError/PermissionError are OSError subclasses
+                    os.kill(pid, signal.SIGTERM)
 
 
 def _bridge_pid_is_ours(pid: int, session_path: Path, expected_start) -> bool:
