@@ -1,13 +1,10 @@
-"""Browserbase cloud browser provider (plugin form).
+"""Browserbase cloud browser provider.
 
-Direct ``BROWSERBASE_API_KEY`` + ``BROWSERBASE_PROJECT_ID`` credentials only;
-the Nous subscription routes through Browser Use instead.
-
-Config: ``browser.cloud_provider: "browserbase"``. Optional knobs:
-``BROWSERBASE_BASE_URL`` (default https://api.browserbase.com),
-``BROWSERBASE_PROXIES`` (default true), ``BROWSERBASE_ADVANCED_STEALTH``
-(default false), ``BROWSERBASE_KEEP_ALIVE`` (default true),
-``BROWSERBASE_SESSION_TIMEOUT`` (seconds, integer, max 21600 = 6h).
+Direct ``BROWSERBASE_API_KEY`` + ``BROWSERBASE_PROJECT_ID`` only (the Nous
+subscription routes through Browser Use). Config: ``browser.cloud_provider:
+"browserbase"``; knobs ``BROWSERBASE_BASE_URL``, ``BROWSERBASE_PROXIES`` (true),
+``BROWSERBASE_ADVANCED_STEALTH`` (false), ``BROWSERBASE_KEEP_ALIVE`` (true),
+``BROWSERBASE_SESSION_TIMEOUT`` (seconds, max 21600).
 """
 
 from __future__ import annotations
@@ -43,13 +40,13 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
     def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
         api_key = get_secret("BROWSERBASE_API_KEY")
         project_id = get_secret("BROWSERBASE_PROJECT_ID")
-        if api_key and project_id:
-            return {
-                "api_key": api_key,
-                "project_id": project_id,
-                "base_url": os.environ.get("BROWSERBASE_BASE_URL", "https://api.browserbase.com").rstrip("/"),
-            }
-        return None
+        if not (api_key and project_id):
+            return None
+        return {
+            "api_key": api_key,
+            "project_id": project_id,
+            "base_url": os.environ.get("BROWSERBASE_BASE_URL", "https://api.browserbase.com").rstrip("/"),
+        }
 
     def _headers(self, config: Dict[str, Any]) -> Dict[str, str]:
         return {"Content-Type": "application/json", "X-BB-API-Key": config["api_key"]}
@@ -62,7 +59,6 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
 
     def create_session(self, task_id: str) -> Dict[str, object]:
         config = self._get_config()
-
         enable_proxies = os.environ.get("BROWSERBASE_PROXIES", "true").lower() != "false"
         enable_advanced_stealth = os.environ.get("BROWSERBASE_ADVANCED_STEALTH", "false").lower() == "true"
         enable_keep_alive = os.environ.get("BROWSERBASE_KEEP_ALIVE", "true").lower() != "false"
@@ -88,30 +84,26 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
         response = self._post_create(url, headers, session_config)
 
         # 402 — paid features unavailable: drop keepAlive, then proxies, and retry.
-        proxies_fallback = False
-        keepalive_fallback = False
-        if response.status_code == 402:
-            if enable_keep_alive:
-                keepalive_fallback = True
-                logger.warning(
-                    "keepAlive may require paid plan (402), retrying without it. "
-                    "Sessions may timeout during long operations."
-                )
-                session_config.pop("keepAlive", None)
-                response = self._post_create(url, headers, session_config)
-            if response.status_code == 402 and enable_proxies:
-                proxies_fallback = True
-                logger.warning(
-                    "Proxies unavailable (402), retrying without proxies. "
-                    "Bot detection may be less effective."
-                )
-                session_config.pop("proxies", None)
-                response = self._post_create(url, headers, session_config)
+        proxies_fallback = keepalive_fallback = False
+        if response.status_code == 402 and enable_keep_alive:
+            keepalive_fallback = True
+            logger.warning(
+                "keepAlive may require paid plan (402), retrying without it. "
+                "Sessions may timeout during long operations."
+            )
+            session_config.pop("keepAlive", None)
+            response = self._post_create(url, headers, session_config)
+        if response.status_code == 402 and enable_proxies:
+            proxies_fallback = True
+            logger.warning(
+                "Proxies unavailable (402), retrying without proxies. Bot detection may be less effective."
+            )
+            session_config.pop("proxies", None)
+            response = self._post_create(url, headers, session_config)
         self._check_created(response)
 
         session_data = response.json()
         session_name = self._session_name(task_id)
-
         features_enabled = {
             "basic_stealth": True,
             "proxies": enable_proxies and not proxies_fallback,
@@ -121,7 +113,6 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
         }
         feature_str = ", ".join(k for k, v in features_enabled.items() if v)
         logger.info("Created Browserbase session %s with features: %s", session_name, feature_str)
-
         return {
             "session_name": session_name,
             "bb_session_id": session_data["id"],
