@@ -137,8 +137,7 @@ def _resolve_api_key(cfg: dict) -> str:
 
 
 def _prompt(label: str, default: str | None = None, secret: bool = False) -> str:
-    suffix = f" [{default}]" if default else ""
-    sys.stdout.write(f"  {label}{suffix}: ")
+    sys.stdout.write(f"  {label}{f' [{default}]' if default else ''}: ")
     sys.stdout.flush()
     if secret and sys.stdin.isatty():
         from hermes_cli.secret_prompt import masked_secret_prompt
@@ -193,11 +192,9 @@ def _ensure_peer_exists(host_key: str | None = None) -> bool:
 def _inherit_defaults(block: dict, default_block: dict, cfg: dict, keys: tuple[str, ...]) -> None:
     """Copy ``keys`` (and peerName) from the default host block into ``block`` where unset."""
     for key in keys:
-        val = default_block.get(key)
-        if val is not None and key not in block:
+        if (val := default_block.get(key)) is not None and key not in block:
             block[key] = val
-    peer_name = _pref(default_block, cfg, "peerName")
-    if peer_name and "peerName" not in block:
+    if (peer_name := _pref(default_block, cfg, "peerName")) and "peerName" not in block:
         block["peerName"] = peer_name
 
 
@@ -217,12 +214,10 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
     # Carry a legacy default-block pinPeerName forward under the canonical key.
     if "pinUserPeer" not in new_block and default_block.get("pinPeerName") is not None:
         new_block["pinUserPeer"] = default_block["pinPeerName"]
-    # AI peer is profile-specific (bare profile name: Honcho peer IDs allow no
-    # dots); workspace is shared so all profiles see the same context.
-    new_block["aiPeer"] = profile_name
-    new_block["workspace"] = _pref(default_block, cfg, "workspace") or HOST
-    new_block["enabled"] = default_block.get("enabled", True)
-
+    # AI peer is profile-specific (bare profile name: Honcho peer IDs allow no dots);
+    # workspace is shared so all profiles see the same context.
+    new_block.update(aiPeer=profile_name, workspace=_pref(default_block, cfg, "workspace") or HOST,
+                     enabled=default_block.get("enabled", True))
     cfg.setdefault("hosts", {})[new_host] = new_block
     _write_config(cfg)
     _ensure_peer_exists(new_host)  # eager so the peer exists before first message
