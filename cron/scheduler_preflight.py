@@ -1,8 +1,8 @@
 """Cron pre-run preflight: transient provider-resolution error classification, provider-key /
 delivery-target / skills checks, and the shared-route adapter view used by satellite profiles.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident
-helpers are reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
+reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
 """
 
 from __future__ import annotations
@@ -16,42 +16,26 @@ from typing import Optional
 # Log-record parity with the origin module.
 logger = logging.getLogger("cron.scheduler")
 
-
 # Error-string prefixes from ``run_job``; ``run_one_job`` keys off them for last_status and the
 # alert-once dedup. ``:silent`` = already alerted on a previous tick — do not deliver again.
 BLOCKED_CONFIG_MARKER = "[blocked_config]"
-
-
 BLOCKED_CONFIG_SILENT_MARKER = "[blocked_config:silent]"
-
-
 # Drift-guard skip: same contract (drift_alerted bit on the job record).
 DRIFT_SKIP_MARKER = "[drift_skip]"
-
-
 DRIFT_SKIP_SILENT_MARKER = "[drift_skip:silent]"
-
 
 _TRANSIENT_NET_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "NetworkError",
     "TimeoutException", "ClientConnectorError", "ClientConnectorDNSError", "ServerTimeoutError",
     "ClientOSError",
 })
-
-
 _DNS_FAILURE_NEEDLES = ("nodename nor servname", "name or service not known")
-
-
 _TRANSIENT_OSERROR_NEEDLES = _DNS_FAILURE_NEEDLES + (
     "temporary failure in name resolution", "network is unreachable",
 )
-
-
 _TRANSIENT_HTTP_NEEDLES = _TRANSIENT_OSERROR_NEEDLES + (
     "failed to resolve", "connection refused", "timed out", "timeout",
 )
-
-
 _TRANSIENT_ERRNOS = frozenset({
     errno.ECONNREFUSED, errno.ECONNRESET, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN,
     errno.ETIMEDOUT, errno.EAGAIN,
@@ -101,9 +85,7 @@ def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
 def _cron_preflight_enabled(cfg: dict) -> bool:
     """Preflight is ON unless ``cron.preflight`` is literally ``false``."""
     cron_cfg = (cfg or {}).get("cron")
-    if not isinstance(cron_cfg, dict):
-        return True
-    return cron_cfg.get("preflight", True) is not False
+    return not isinstance(cron_cfg, dict) or cron_cfg.get("preflight", True) is not False
 
 
 def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
@@ -118,9 +100,7 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 
     _cron_cfg = cfg.get("cron") if isinstance(cfg.get("cron"), dict) else {}
     requested = (
-        job.get("provider")
-        or str((_cron_cfg or {}).get("model_provider") or "").strip()
-        or None
+        job.get("provider") or str((_cron_cfg or {}).get("model_provider") or "").strip() or None
     )
     model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
@@ -147,13 +127,11 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 
 def _primary_profile_routes_for_current_home() -> list:
     """Primary gateway ``profile_routes`` targeting the profile being served; ``[]`` if this IS the
-    primary home.
-
-    Satellite crons are ticked and delivered by the primary gateway (a satellite holding its own
-    token is a ``duplicate_credential`` fatal). Reads the primary config.yaml directly (top-level or
-    nested ``gateway.``) instead of ``load_gateway_config()`` so no primary platform config leaks
-    into this process. Shared by preflight rescue and delivery-time resolution so they cannot drift.
-    """
+    primary home. Satellite crons are ticked and delivered by the primary gateway (a satellite
+    holding its own token is a ``duplicate_credential`` fatal). Reads the primary config.yaml
+    directly (top-level or nested ``gateway.``) instead of ``load_gateway_config()`` so no primary
+    platform config leaks into this process. Shared by preflight rescue and delivery-time
+    resolution so they cannot drift."""
     try:
         from hermes_constants import get_default_hermes_root, get_hermes_home
 
@@ -182,8 +160,7 @@ def _primary_profile_routes_for_current_home() -> list:
         from hermes_cli.profiles import profile_matches_home
 
         return [
-            route
-            for route in parse_profile_routes(routes_raw)
+            route for route in parse_profile_routes(routes_raw)
             if route.enabled and profile_matches_home(route.profile)
         ]
     except Exception:
@@ -284,10 +261,11 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
                     "delivery credential check", exc_info=True,
                 )
                 return None  # fail-open
-        if platform_name.lower() not in connected:
-            # Multiplex: a satellite served by the primary's adapters reads unconnected — no block.
-            if _delivery_platform_routed_from_primary_gateway(platform_name):
-                continue
+        # Multiplex: a satellite served by the primary's adapters reads unconnected — no block.
+        if (
+            platform_name.lower() not in connected
+            and not _delivery_platform_routed_from_primary_gateway(platform_name)
+        ):
             return (
                 f"delivery platform '{platform_name}' has no gateway "
                 "credentials configured (not connected). Configure it via "
@@ -296,16 +274,20 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     return None
 
 
+# ``skill_view`` payload keys naming missing prerequisites -> label for the preflight verdict.
+_SKILL_MISSING_FIELDS = (
+    ("missing_required_environment_variables", "env ${}"),
+    ("missing_required_commands", "command '{}'"),
+    ("missing_credential_files", "credential file {}"),
+)
+
+
 def _preflight_check_skills(job: dict) -> Optional[str]:
     """Block only on an affirmative ``setup_needed`` verdict from ``skill_view``; skills that fail
     to load fall through to ``_build_job_prompt``'s skipped-skill handling (fail-open)."""
-    skills = job.get("skills")
-    if skills is None:
-        legacy = job.get("skill")
-        skills = [legacy] if legacy else []
-    elif isinstance(skills, str):
-        skills = [skills]
-    skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    from cron.scheduler_prompt import _job_skill_names
+
+    skill_names = _job_skill_names(job)
     if not skill_names:
         return None
 
@@ -318,23 +300,11 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
             continue  # unreadable/missing skill → existing skip handling
         if not isinstance(payload, dict) or not payload.get("success"):
             continue
-        if (
-            payload.get("setup_needed")
-            or payload.get("readiness_status") == "setup_needed"
-        ):
+        if payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
             missing = [
-                f"env ${name}"
-                for name in payload.get(
-                    "missing_required_environment_variables"
-                ) or []
-            ]
-            missing += [
-                f"command '{name}'"
-                for name in payload.get("missing_required_commands") or []
-            ]
-            missing += [
-                f"credential file {name}"
-                for name in payload.get("missing_credential_files") or []
+                fmt.format(name)
+                for key, fmt in _SKILL_MISSING_FIELDS
+                for name in payload.get(key) or []
             ]
             detail = ", ".join(missing) or "required setup incomplete"
             return (
