@@ -70,23 +70,16 @@ CREATE TABLE IF NOT EXISTS memory_banks (
 );
 """
 
-_HELPFUL_DELTA = 0.05
-_UNHELPFUL_DELTA = -0.10
+_HELPFUL_DELTA, _UNHELPFUL_DELTA = 0.05, -0.10
 
-# Entity extraction patterns, applied in order: capitalized multi-word phrases
-# ("John Doe"), double-quoted terms, single-quoted terms, then "X aka Y" (both sides).
-_RE_SINGLE_ENTITY = (
-    re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'),
-    re.compile(r'"([^"]+)"'),
-    re.compile(r"'([^']+)'"),
-)
+# Entity extraction patterns, applied in order: capitalized multi-word phrases ("John Doe"), double-quoted terms,
+# single-quoted terms, then "X aka Y" (both sides).
+_RE_SINGLE_ENTITY = (re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'), re.compile(r'"([^"]+)"'), re.compile(r"'([^']+)'"))
 _RE_AKA = re.compile(r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)', re.IGNORECASE)
 _ENTITY_NAMES_SQL = "SELECT e.name FROM entities e JOIN fact_entities fe ON fe.entity_id = e.entity_id WHERE fe.fact_id = ?"
 # Entity lookup order: exact name, then aliases (comma-separated; wrapped in commas for whole-alias matching).
-_ENTITY_LOOKUPS = (
-    "SELECT entity_id FROM entities WHERE name LIKE ?",
-    "SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'",
-)
+_ENTITY_LOOKUPS = ("SELECT entity_id FROM entities WHERE name LIKE ?",
+                   "SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'")
 
 
 def _clamp_trust(value: float) -> float:
@@ -126,9 +119,9 @@ class MemoryStore:
             entry["refs"] += 1
             self._entry, self._conn, self._lock = entry, entry["conn"], entry["lock"]
         with self._lock:  # schema initialised once per shared connection
-            if not self._entry["ready"]:
+            if not entry["ready"]:
                 self._init_db()
-                self._entry["ready"] = True
+                entry["ready"] = True
 
     def _init_db(self) -> None:
         """Create schema, enable WAL via the shared fallback helper (NFS/SMB/FUSE degrade gracefully), add hrr_vector to pre-HRR DBs."""
@@ -225,9 +218,8 @@ class MemoryStore:
         for m in _RE_AKA.finditer(text):
             raw += [m.group(1), m.group(2)]
         uniq: dict[str, str] = {}  # lower-cased key -> first-seen spelling, insertion-ordered
-        for name in (n.strip() for n in raw):
-            if name:
-                uniq.setdefault(name.lower(), name)
+        for name in filter(None, (n.strip() for n in raw)):
+            uniq.setdefault(name.lower(), name)
         return list(uniq.values())
 
     def _link_entities(self, fact_id: int, content: str) -> None:
@@ -263,13 +255,10 @@ class MemoryStore:
             return
         bank_vector = hrr.bundle(*[hrr.bytes_to_phases(row["hrr_vector"], dim=self.hrr_dim) for row in rows])
         hrr.snr_estimate(self.hrr_dim, len(rows))  # warns when near capacity
-        self._write(
-            "INSERT INTO memory_banks (bank_name, vector, dim, fact_count, updated_at) "
-            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(bank_name) DO UPDATE SET "
-            "vector = excluded.vector, dim = excluded.dim, fact_count = excluded.fact_count, "
-            "updated_at = excluded.updated_at",
-            (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, len(rows)),
-        )
+        self._write("INSERT INTO memory_banks (bank_name, vector, dim, fact_count, updated_at) "
+                    "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(bank_name) DO UPDATE SET "
+                    "vector = excluded.vector, dim = excluded.dim, fact_count = excluded.fact_count, "
+                    "updated_at = excluded.updated_at", (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, len(rows)))
 
     @classmethod
     def release_all_under(cls, directory: "str | Path") -> int:
@@ -279,9 +268,8 @@ class MemoryStore:
         stale holder is expected to fail."""
         root = os.path.normcase(str(Path(directory).expanduser().resolve())) + os.sep
         with cls._shared_guard:
-            doomed = [key for key in cls._shared if os.path.normcase(key).startswith(root)]
-            for key in doomed:
-                entry = cls._shared.pop(key)
+            doomed = [cls._shared.pop(key) for key in list(cls._shared) if os.path.normcase(key).startswith(root)]
+            for entry in doomed:
                 try:
                     with entry["lock"]:
                         entry["conn"].close()

@@ -174,11 +174,10 @@ class HolographicMemoryProvider(MemoryProvider):
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        handler = self._TOOL_HANDLERS.get(tool_name)
-        if handler is None:
+        if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
         try:
-            return handler(self, args)
+            return self._TOOL_HANDLERS[tool_name](self, args)
         except KeyError as exc:
             return tool_error(f"Missing required argument: {exc}")
         except Exception as exc:
