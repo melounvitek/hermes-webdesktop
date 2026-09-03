@@ -2436,49 +2436,33 @@ def _classify_tool_call_orphans(messages: List[Dict[str, Any]]):
     every id variant of a tool_call is registered so a result matching any alias survives, and
     ``orphaned_results`` are the actual dicts (filter by ``id(msg)``). ``sanitize_api_messages``
     pairs positionally instead but shares the ``*_id_variants`` alias policy."""
-    assistant_call_variants: List[tuple[Any, frozenset[str]]] = []
-    surviving_call_ids: set[str] = set()
-    for msg in messages:
-        if msg.get("role") != "assistant":
-            continue
-        for tc in msg.get("tool_calls") or []:
-            variants = tool_call_id_variants(tc)
-            if variants:
-                assistant_call_variants.append((tc, variants))
-                surviving_call_ids.update(variants)
+    assistant_call_variants = [
+        (tc, variants)
+        for msg in messages if msg.get("role") == "assistant"
+        for tc in msg.get("tool_calls") or []
+        if (variants := tool_call_id_variants(tc))
+    ]
+    surviving_call_ids: set[str] = set().union(*(v for _, v in assistant_call_variants))
     result_entries = [
-        (msg, tool_result_id_variants(msg.get("tool_call_id")))
-        for msg in messages
-        if msg.get("role") == "tool"
+        (msg, tool_result_id_variants(msg.get("tool_call_id"))) for msg in messages if msg.get("role") == "tool"
     ]
-    result_call_ids: set[str] = set()
-    for _, variants in result_entries:
-        result_call_ids.update(variants)
-    orphaned_results = [
-        msg for msg, variants in result_entries if variants and not (variants & surviving_call_ids)
-    ]
+    result_call_ids: set[str] = set().union(*(v for _, v in result_entries))
+    orphaned_results = [msg for msg, v in result_entries if v and not (v & surviving_call_ids)]
     orphaned_ids = {id(msg) for msg in orphaned_results}
-    surviving_result_variants = [
-        variants for msg, variants in result_entries if variants and id(msg) not in orphaned_ids
-    ]
+    surviving_result_variants = [v for msg, v in result_entries if v and id(msg) not in orphaned_ids]
     missing_tool_calls = [
-        tc
-        for tc, variants in assistant_call_variants
-        if not any(variants & rv for rv in surviving_result_variants)
+        tc for tc, v in assistant_call_variants if not any(v & rv for rv in surviving_result_variants)
     ]
     return surviving_call_ids, result_call_ids, orphaned_results, missing_tool_calls
 
 
 def _drop_invalid_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Drop messages whose role the API won't accept."""
-    filtered = []
+    valid = _ra().AIAgent._VALID_API_ROLES
     for msg in messages:
-        role = msg.get("role")
-        if role not in _ra().AIAgent._VALID_API_ROLES:
-            _ra().logger.debug("Pre-call sanitizer: dropping message with invalid role %r", role)
-            continue
-        filtered.append(msg)
-    return filtered
+        if msg.get("role") not in valid:
+            _ra().logger.debug("Pre-call sanitizer: dropping message with invalid role %r", msg.get("role"))
+    return [m for m in messages if m.get("role") in valid]
 
 
 def _drop_empty_tool_calls_arrays(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2807,23 +2791,20 @@ def _iter_httpx_pool_objects(http_client: Any):
     keepalive and proxy configs put live connections on ``client._mounts``, which a
     ``_transport``-only walk misses."""
     seen_pools: set[int] = set()
-
-    def _pools_for_transport(transport: Any):
-        if transport is None:
-            return
-        # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a ConnectionPool, so
-        # ``_connections`` may sit on the transport itself.
-        pool = getattr(transport, "_pool", None)
-        if pool is None and getattr(transport, "_connections", None) is not None:
-            pool = transport
-        if pool is not None and id(pool) not in seen_pools:
-            seen_pools.add(id(pool))
-            yield pool
     try:
-        yield from _pools_for_transport(getattr(http_client, "_transport", None))
-        mounts = getattr(http_client, "_mounts", None) or {}
-        for _pattern, mounted in list(mounts.items()):
-            yield from _pools_for_transport(mounted)
+        transports = [getattr(http_client, "_transport", None)]
+        transports += list((getattr(http_client, "_mounts", None) or {}).values())
+        for transport in transports:
+            if transport is None:
+                continue
+            # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a ConnectionPool,
+            # so ``_connections`` may sit on the transport itself.
+            pool = getattr(transport, "_pool", None)
+            if pool is None and getattr(transport, "_connections", None) is not None:
+                pool = transport
+            if pool is not None and id(pool) not in seen_pools:
+                seen_pools.add(id(pool))
+                yield pool
     except Exception:
         return
 
@@ -2949,9 +2930,7 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
     """Extract structured rate-limit details from provider errors."""
     context: Dict[str, Any] = {}
     body = getattr(error, "body", None)
-    payload = None
-    if isinstance(body, dict):
-        payload = body.get("error") if isinstance(body.get("error"), dict) else body
+    payload = (body.get("error") if isinstance(body.get("error"), dict) else body) if isinstance(body, dict) else None
     if isinstance(payload, dict):
         reason = payload.get("code") or payload.get("type") or payload.get("error")
         if isinstance(reason, str) and reason.strip():
@@ -2962,11 +2941,9 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
             message = payload.get("error")
         if isinstance(message, str) and message.strip():
             context["message"] = message.strip()
-        for key in ("resets_at", "reset_at"):
-            value = payload.get(key)
-            if value not in {None, ""}:
-                context["reset_at"] = value
-                break
+        reset = next((payload.get(k) for k in ("resets_at", "reset_at") if payload.get(k) not in {None, ""}), None)
+        if reset is not None:
+            context["reset_at"] = reset
         _set_reset_from_retry_after(context, payload.get("retry_after"))
     headers = getattr(getattr(error, "response", None), "headers", None)
     if headers:
@@ -2974,29 +2951,20 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
         ratelimit_reset = headers.get("x-ratelimit-reset")
         if ratelimit_reset and "reset_at" not in context:
             context["reset_at"] = ratelimit_reset
-    if "message" not in context:
-        raw_message = str(error).strip()
-        if raw_message:
-            context["message"] = raw_message[:500]
-    if "reset_at" not in context:
-        message = context.get("message") or ""
-        if isinstance(message, str):
-            delay = _reset_delay_from_message(message)
-            if delay is not None:
-                context["reset_at"] = time.time() + delay
+    if "message" not in context and str(error).strip():
+        context["message"] = str(error).strip()[:500]
+    if "reset_at" not in context and isinstance(context.get("message") or "", str):
+        delay = _reset_delay_from_message(context.get("message") or "")
+        if delay is not None:
+            context["reset_at"] = time.time() + delay
     return context
 
 
 def _requeue_pending_steer(agent, steer_text: str) -> None:
     """Put drained steer text back so the caller's fallback delivers it as a next-turn user message."""
-    lock = getattr(agent, "_pending_steer_lock", None)
-    if lock is not None:
-        with lock:
-            existing = agent._pending_steer
-            agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
-        return
-    existing = getattr(agent, "_pending_steer", None)
-    agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+    with getattr(agent, "_pending_steer_lock", None) or contextlib.nullcontext():
+        existing = getattr(agent, "_pending_steer", None)
+        agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
 
 
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
@@ -3009,30 +2977,23 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     if not steer_text:
         return
     # Skip non-tool messages in the tail in case something else is appended at the boundary.
-    target_idx = next(
-        (
-            j for j in range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
-            if isinstance(messages[j], dict) and messages[j].get("role") == "tool"
-        ),
-        None,
-    )
-    if target_idx is None:
+    tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
+    target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
+    if target is None:
         # No tool result in this batch (e.g. all skipped by interrupt).
         _requeue_pending_steer(agent, steer_text)
         return
     marker = format_steer_marker(steer_text)
-    existing_content = messages[target_idx].get("content", "")
+    existing_content = target.get("content", "")
     if isinstance(existing_content, str):
-        messages[target_idx]["content"] = existing_content + marker
+        target["content"] = existing_content + marker
     else:
         # Anthropic multimodal content blocks: preserve them and append a text block.
         try:
-            blocks = list(existing_content) if existing_content else []
-            blocks.append({"type": "text", "text": marker.lstrip()})
-            messages[target_idx]["content"] = blocks
+            target["content"] = [*(existing_content or []), {"type": "text", "text": marker.lstrip()}]
         except Exception:
             # Fall back to string replacement if content shape is unexpected.
-            messages[target_idx]["content"] = f"{existing_content}{marker}"
+            target["content"] = f"{existing_content}{marker}"
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars): %s", len(steer_text),
         steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
