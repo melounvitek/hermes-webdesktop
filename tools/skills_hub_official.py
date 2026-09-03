@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from agent.skill_utils import is_excluded_skill_path
 from tools.skills_hub_github import GitHubAuth, GitHubSource, _skip_bundle_file
 from tools.skills_hub_models import (
-    SkillBundle, SkillMeta, SkillSource, _hermes_tags, _matches_query, _parse_frontmatter, hub,
+    SkillBundle, SkillMeta, SkillSource, _hermes_tags, _matches_query, _memo_json, _parse_frontmatter, hub,
 )
 
 logger = logging.getLogger("tools.skills_hub")
@@ -43,6 +43,8 @@ class OptionalSkillSource(SkillSource):
     via the Skills Hub as source "official" with "builtin" trust.
     """
 
+    SOURCE_ID = "official"
+    TRUST_LEVEL = "builtin"
     OFFICIAL_REPO = "NousResearch/hermes-agent"
     OPTIONAL_SKILLS_PREFIX = "optional-skills"
 
@@ -61,27 +63,35 @@ class OptionalSkillSource(SkillSource):
         # "category/skill" -> True from the live repo tree; None = not fetched yet.
         self._remote_dirs: Optional[Dict[str, bool]] = None
 
-    def source_id(self) -> str:
-        return "official"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "builtin"
-
     @staticmethod
     def _rel(identifier: str) -> str:
         return identifier.split("/", 1)[-1] if identifier.startswith("official/") else identifier
 
-    def _remote_meta(self, rel_dir: str) -> SkillMeta:
-        """Placeholder meta for a skill that exists on live main but not locally."""
+    def _meta(self, rel_dir: str, name: str, description: str, tags: list) -> SkillMeta:
         return SkillMeta(
-            name=rel_dir.rsplit("/", 1)[-1],
-            description="Official optional skill (from live repo; run install to fetch)",
+            name=name,
+            description=description,
             source="official",
             identifier=f"official/{rel_dir}",
             trust_level="builtin",
             repo=self.OFFICIAL_REPO,
+            # The centralized skills index consumes repo-root-relative paths.
             path=f"{self.OPTIONAL_SKILLS_PREFIX}/{rel_dir}",
-            tags=[],
+            tags=tags,
+        )
+
+    def _remote_meta(self, rel_dir: str) -> SkillMeta:
+        """Placeholder meta for a skill that exists on live main but not locally."""
+        return self._meta(
+            rel_dir, rel_dir.rsplit("/", 1)[-1],
+            "Official optional skill (from live repo; run install to fetch)", [],
+        )
+
+    @staticmethod
+    def _bundle(rel_id: str, files: Dict[str, Union[str, bytes]], **kwargs) -> SkillBundle:
+        return SkillBundle(
+            name=rel_id.rsplit("/", 1)[-1], files=files, source="official",
+            identifier=f"official/{rel_id}", trust_level="builtin", **kwargs,
         )
 
     # -- search -----------------------------------------------------------
@@ -150,16 +160,7 @@ class OptionalSkillSource(SkillSource):
                 except OSError:
                     continue
 
-        if not files:
-            return None
-
-        return SkillBundle(
-            name=skill_dir.name,
-            files=files,
-            source="official",
-            identifier=f"official/{rel_id}",
-            trust_level="builtin",
-        )
+        return self._bundle(rel_id, files) if files else None
 
     # -- inspect ----------------------------------------------------------
 
@@ -248,13 +249,7 @@ class OptionalSkillSource(SkillSource):
             return self._fetch_from_upstream(upstream, rel)
 
         logger.info("Optional skill '%s' fetched from live repo (not in local checkout)", rel)
-        return SkillBundle(
-            name=rel.rsplit("/", 1)[-1],
-            files=files,
-            source="official",
-            identifier=f"official/{rel}",
-            trust_level="builtin",
-        )
+        return self._bundle(rel, files)
 
     def _list_remote_skill_dirs(self) -> Dict[str, bool]:
         """``category/skill`` dirs under optional-skills/ on live main.
@@ -266,29 +261,25 @@ class OptionalSkillSource(SkillSource):
         if self._remote_dirs is not None:
             return self._remote_dirs
 
-        cache_key = "official_optional_dirs"
-        cached = hub()._read_index_cache(cache_key)
-        if isinstance(cached, dict) and cached:
-            self._remote_dirs = cached
-            return cached
-
-        dirs: Dict[str, bool] = {}
-        tree = self._get_github()._get_repo_tree(self.OFFICIAL_REPO)
-        if tree is not None:
-            _branch, entries = tree
+        def compute():
+            dirs: Dict[str, bool] = {}
+            tree = self._get_github()._get_repo_tree(self.OFFICIAL_REPO)
+            if tree is None:
+                return None
             prefix = f"{self.OPTIONAL_SKILLS_PREFIX}/"
             suffix = "/SKILL.md"
-            for item in entries:
+            for item in tree[1]:
                 path = item.get("path", "")
                 if item.get("type") == "blob" and path.startswith(prefix) and path.endswith(suffix):
                     rel_dir = path[len(prefix):-len(suffix)]
                     if rel_dir and not is_excluded_skill_path(PurePosixPath(rel_dir + suffix)):
                         dirs[rel_dir] = True
-            if dirs:
-                hub()._write_index_cache(cache_key, dirs)
+            return dirs or None
 
-        self._remote_dirs = dirs
-        return dirs
+        self._remote_dirs = _memo_json(
+            "official_optional_dirs", compute, valid=lambda c: isinstance(c, dict) and bool(c),
+        ) or {}
+        return self._remote_dirs
 
     def _upstream_pointer(self, skill_dir: Path) -> Optional[Dict[str, str]]:
         """Upstream pointer for a catalog-stub skill dir, or None for vendored skills.
@@ -378,17 +369,10 @@ class OptionalSkillSource(SkillSource):
 
             fm = _parse_frontmatter(content)
             tags = _hermes_tags(fm)
-            rel_path = parent.relative_to(self._optional_dir).as_posix()
-            results.append(SkillMeta(
-                name=fm.get("name", parent.name),
-                description=fm.get("description", "")[:200],
-                source="official",
-                identifier=f"official/{rel_path}",
-                trust_level="builtin",
-                repo=self.OFFICIAL_REPO,
-                # The centralized skills index consumes repo-root-relative paths.
-                path=f"optional-skills/{rel_path}",
-                tags=tags if isinstance(tags, list) else [],
+            results.append(self._meta(
+                parent.relative_to(self._optional_dir).as_posix(),
+                fm.get("name", parent.name), fm.get("description", "")[:200],
+                tags if isinstance(tags, list) else [],
             ))
 
         return results
@@ -406,6 +390,8 @@ class HermesIndexSource(SkillSource):
     zero GitHub API calls. When unavailable every method returns empty/None
     so downstream sources take over transparently.
     """
+
+    SOURCE_ID = "hermes-index"
 
     def __init__(self, auth: GitHubAuth):
         self._index: Optional[dict] = None
@@ -427,19 +413,14 @@ class HermesIndexSource(SkillSource):
             self._github = GitHubSource(auth=self.auth)
         return self._github
 
-    def source_id(self) -> str:
-        return "hermes-index"
-
     @property
     def is_available(self) -> bool:
         """Whether the index is loaded and has skills."""
         return bool(self._skills())
 
     def trust_level_for(self, identifier: str) -> str:
-        for skill in self._skills():
-            if skill.get("identifier") == identifier:
-                return skill.get("trust_level", "community")
-        return "community"
+        entry = next((s for s in self._skills() if s.get("identifier") == identifier), None)
+        return entry.get("trust_level", "community") if entry else "community"
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         """Search the cached index (zero API calls).
@@ -471,19 +452,15 @@ class HermesIndexSource(SkillSource):
             ])
             if query_lower not in haystack:
                 continue
-            if name == query_lower:
-                score = 0
-            elif name.startswith(query_lower):
-                score = 1
-            elif provider == query_lower:
-                score = 2
-            elif query_lower in name.split() or query_lower in provider.split():
-                score = 3
-            elif query_lower in name:
-                score = 4
-            else:
-                score = 5
-            scored.append((score, i, s))
+            ranks = (
+                name == query_lower,
+                name.startswith(query_lower),
+                provider == query_lower,
+                query_lower in name.split() or query_lower in provider.split(),
+                query_lower in name,
+                True,
+            )
+            scored.append((ranks.index(True), i, s))
 
         scored.sort(key=lambda x: (x[0], x[1]))
         return [self._to_meta(s) for _, _, s in scored[:limit]]
@@ -491,7 +468,7 @@ class HermesIndexSource(SkillSource):
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         """Fetch via the index's ``resolved_github_id`` (skipping the whole
         candidate/discovery chain), falling back to ``repo/path``."""
-        entry = self._find_entry(identifier, self._ensure_loaded())
+        entry = self._find_entry(identifier)
         if not entry:
             return None
 
@@ -499,9 +476,7 @@ class HermesIndexSource(SkillSource):
         repo, path = entry.get("repo", ""), entry.get("path", "")
         if repo and path:
             candidates.append(f"{repo}/{path}")
-        for github_id in candidates:
-            if not github_id:
-                continue
+        for github_id in filter(None, candidates):
             bundle = self._get_github().fetch(github_id)
             if bundle:
                 bundle.source = entry.get("source", "hermes-index")
@@ -511,20 +486,19 @@ class HermesIndexSource(SkillSource):
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         """Return metadata from the index (zero API calls)."""
-        entry = self._find_entry(identifier, self._ensure_loaded())
+        entry = self._find_entry(identifier)
         return self._to_meta(entry) if entry else None
 
-    def _find_entry(self, identifier: str, index: dict) -> Optional[dict]:
+    def _find_entry(self, identifier: str) -> Optional[dict]:
         """Exact identifier match first, then match with source prefixes stripped."""
-        skills = index.get("skills", [])
-        for s in skills:
-            if s.get("identifier") == identifier:
-                return s
+        skills = self._skills()
         normalized = _strip_prefix(identifier, _INDEX_ID_PREFIXES)
-        for s in skills:
-            if _strip_prefix(s.get("identifier", ""), _INDEX_ID_PREFIXES) == normalized:
-                return s
-        return None
+        return next(
+            (s for s in skills if s.get("identifier") == identifier), None,
+        ) or next(
+            (s for s in skills if _strip_prefix(s.get("identifier", ""), _INDEX_ID_PREFIXES) == normalized),
+            None,
+        )
 
     @staticmethod
     def _to_meta(entry: dict) -> SkillMeta:
