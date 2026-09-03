@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable
 
-from acp.schema import ModelInfo
+from acp.schema import ModelInfo, SessionModelState
 
 logger = logging.getLogger("acp_adapter.server")
 
@@ -250,3 +250,56 @@ class _ModelCatalog:
                 if named_slug == normalized_provider and named_model == self.current_model:
                     named_parts.append("current")
                 self.add(named_slug, named_model, named_model, " • ".join(part for part in named_parts if part))
+
+
+def build_model_state(model: str, provider: str, base_url: str) -> SessionModelState | None:
+    """Picker state from the shared inventory + named endpoints; ``None`` when nothing is listable
+    (caller falls back to a single current-model row). Raises on inventory failure."""
+    from hermes_cli.inventory import build_models_payload, load_picker_context
+    from hermes_cli.models import normalize_provider, provider_label
+
+    normalized_provider = normalize_provider(provider)
+    context = load_picker_context().with_overrides(
+        current_provider=normalized_provider, current_model=model, current_base_url=base_url,
+    )
+    payload = build_models_payload(
+        context, explicit_only=True, include_unconfigured=False, picker_hints=False,
+        canonical_order=True, pricing=False, capabilities=False, refresh=False,
+        probe_custom_providers=False, probe_current_custom_provider=False,
+        max_models=ACP_MAX_MODELS_PER_PROVIDER,
+    )
+
+    cat = _ModelCatalog(
+        normalize_provider=normalize_provider, current_model=model,
+        current_choice_provider=str(provider or "").strip().lower(),
+        current_base_url=base_url.strip().rstrip("/").lower(),
+    )
+    cat.add_inventory_rows(payload.get("providers") or [], provider_label)
+    cat.add_named_catalogs(_named_custom_provider_catalogs(), normalized_provider)
+    available_models = cat.models
+
+    def empty_applies(provider_id: str) -> bool:
+        return _empty_catalog_applies(provider_id, cat.empty_authoritative, normalize_provider)
+
+    if cat.empty_authoritative:
+        available_models = [m for m in available_models if not empty_applies(_choice_provider(m.model_id))]
+
+    current_is_empty = empty_applies(cat.current_choice_provider)
+    if current_is_empty:
+        available_models = [m for m in available_models if " • current" not in str(m.description or "")]
+    current_model_id = "" if current_is_empty else encode_model_choice(cat.current_choice_provider, model)
+    if current_model_id and current_model_id not in {item.model_id for item in available_models}:
+        provider_name = provider_label(normalized_provider)
+        available_models.insert(0, ModelInfo(
+            model_id=current_model_id, name=f"{provider_name} · {model}",
+            description=f"Provider: {provider_name} • current",
+        ))
+
+    if not available_models and current_is_empty:
+        return SessionModelState(available_models=[], current_model_id="")
+    if available_models:
+        return SessionModelState(
+            available_models=available_models,
+            current_model_id=current_model_id if current_model_id or current_is_empty else available_models[0].model_id,
+        )
+    return None

@@ -31,9 +31,8 @@ from acp_adapter.events import (
     _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb,
     make_tool_progress_cb,
 )
-from acp_adapter.model_catalog import (
-    ACP_MAX_MODELS_PER_PROVIDER, _ModelCatalog, _choice_provider, _empty_catalog_applies, encode_model_choice,
-    _named_custom_provider_catalogs,
+from acp_adapter.model_catalog import (  # noqa: F401  (ACP_MAX_MODELS_PER_PROVIDER re-exported for tests)
+    ACP_MAX_MODELS_PER_PROVIDER, build_model_state, encode_model_choice,
 )
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
@@ -301,58 +300,10 @@ class HermesACPAgent(acp.Agent):
         as ``hermes model``/TUI/dashboard) so the selector isn't just the current curated list."""
         model = str(state.model or getattr(state.agent, "model", "") or "").strip()
         provider = getattr(state.agent, "provider", None) or detect_provider() or "openrouter"
-
         try:
-            from hermes_cli.inventory import build_models_payload, load_picker_context
-            from hermes_cli.models import normalize_provider, provider_label
-
-            normalized_provider = normalize_provider(provider)
-            context = load_picker_context().with_overrides(
-                current_provider=normalized_provider, current_model=model,
-                current_base_url=str(getattr(state.agent, "base_url", "") or ""),
-            )
-            payload = build_models_payload(
-                context, explicit_only=True, include_unconfigured=False, picker_hints=False,
-                canonical_order=True, pricing=False, capabilities=False, refresh=False,
-                probe_custom_providers=False, probe_current_custom_provider=False,
-                max_models=ACP_MAX_MODELS_PER_PROVIDER,
-            )
-
-            cat = _ModelCatalog(
-                normalize_provider=normalize_provider, current_model=model,
-                current_choice_provider=str(provider or "").strip().lower(),
-                current_base_url=str(getattr(state.agent, "base_url", "") or "").strip().rstrip("/").lower(),
-            )
-            cat.add_inventory_rows(payload.get("providers") or [], provider_label)
-            cat.add_named_catalogs(_named_custom_provider_catalogs(), normalized_provider)
-            available_models = cat.models
-
-            def empty_applies(provider_id: str) -> bool:
-                return _empty_catalog_applies(provider_id, cat.empty_authoritative, normalize_provider)
-
-            if cat.empty_authoritative:
-                available_models = [m for m in available_models if not empty_applies(_choice_provider(m.model_id))]
-
-            current_is_empty = empty_applies(cat.current_choice_provider)
-            if current_is_empty:
-                available_models = [m for m in available_models if " • current" not in str(m.description or "")]
-            current_model_id = "" if current_is_empty else encode_model_choice(cat.current_choice_provider, model)
-            if current_model_id and current_model_id not in {item.model_id for item in available_models}:
-                provider_name = provider_label(normalized_provider)
-                available_models.insert(0, ModelInfo(
-                    model_id=current_model_id, name=f"{provider_name} · {model}",
-                    description=f"Provider: {provider_name} • current",
-                ))
-
-            if not available_models and current_is_empty:
-                return SessionModelState(available_models=[], current_model_id="")
-            if available_models:
-                return SessionModelState(
-                    available_models=available_models,
-                    current_model_id=(
-                        current_model_id if current_model_id or current_is_empty else available_models[0].model_id
-                    ),
-                )
+            picker = build_model_state(model, provider, str(getattr(state.agent, "base_url", "") or ""))
+            if picker is not None:
+                return picker
         except Exception:
             logger.debug("Could not build ACP model state", exc_info=True)
 

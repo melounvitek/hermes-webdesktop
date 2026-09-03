@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from acp_adapter.server import HermesACPAgent, _named_custom_provider_catalogs
+from acp_adapter.model_catalog import _named_custom_provider_catalogs
+from acp_adapter.server import HermesACPAgent
 from acp_adapter.session import SessionManager
 from acp.schema import SessionModelState
 
@@ -193,7 +194,7 @@ class TestModelStateIncludesNamedProviders:
         acp_agent = HermesACPAgent(session_manager=manager)
 
         with patch(
-            "acp_adapter.server._named_custom_provider_catalogs",
+            "acp_adapter.model_catalog._named_custom_provider_catalogs",
             return_value=[("custom:ollama", "Ollama", [])],
         ):
             resp = await acp_agent.new_session(cwd="/tmp")
@@ -215,7 +216,7 @@ class TestModelStateIncludesNamedProviders:
         acp_agent = HermesACPAgent(session_manager=manager)
 
         with patch(
-            "acp_adapter.server._named_custom_provider_catalogs",
+            "acp_adapter.model_catalog._named_custom_provider_catalogs",
             return_value=[
                 (
                     "custom:bedrock-mantle",
