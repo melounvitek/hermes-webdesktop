@@ -52,8 +52,7 @@ _WRAPPER_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
 _MAX_RECURSION = 4
 # git global options that consume the next argument (-C/--work-tree/-c are acted on).
 _GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({
-    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path",
-})
+    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path"})
 
 
 @dataclass
@@ -114,8 +113,7 @@ def _shell_words_at(command: str, start: int) -> list[str]:
 
 
 def _consume_options(
-    words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS,
-) -> int:
+    words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS) -> int:
     """Index of the first positional at/after ``start`` (``--`` ends options)."""
     index = start
     while index < len(words):
@@ -383,8 +381,7 @@ def _stash_mutates(args: list[str]) -> bool:
 def _clean_mutates(args: list[str]) -> bool:
     return not any(
         arg == "--dry-run" or (not arg.startswith("--") and _has_short_flag(arg, "n"))
-        for arg in args
-    )
+        for arg in args)
 
 
 def _restore_mutates(args: list[str]) -> bool:
@@ -430,12 +427,10 @@ def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
 
 
 def _inspect_git(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     target, subcommand, sub_args, inline_aliases = _git_target_and_subcommand(
-        args, current_dir, env,
-    )
+        args, current_dir, env)
     if subcommand is None:
         return None
     # `worktree` names its victim as an argument, so the cwd check does not apply.
@@ -463,8 +458,7 @@ def _inspect_git(
 
 
 def _inspect_github_cli(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     if not _is_within(current_dir, root):
         return None
@@ -475,8 +469,7 @@ def _inspect_github_cli(
 
 
 def _inspect_shell(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     script = _shell_script_arg(args)
     return _find_mutation(script, current_dir, root, depth + 1) if script else None

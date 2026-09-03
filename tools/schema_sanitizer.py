@@ -182,15 +182,13 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
     """
     if isinstance(schema, list):
         return [
-            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema
-        ]
+            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema]
     if not isinstance(schema, dict):
         return schema
 
     stripped = {
         k: strip_nullable_unions(v, keep_nullable_hint=keep_nullable_hint)
-        for k, v in schema.items()
-    }
+        for k, v in schema.items()}
     for key in _UNION_KEYS:
         variants = stripped.get(key)
         if not isinstance(variants, list):
@@ -206,8 +204,7 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
 
 
 _CONST_PRIMITIVE_TYPES: dict[type, str] = {
-    bool: "boolean", int: "integer", float: "number", str: "string",
-}
+    bool: "boolean", int: "integer", float: "number", str: "string"}
 
 
 def _const_branch_type(branch: Any) -> str | None:
@@ -257,9 +254,7 @@ def collapse_const_unions(schema: Any) -> Any:
         if len(branch_types) != 1 or None in branch_types:
             continue
         replacement: dict = {
-            "type": branch_types.pop(),
-            "enum": [item["const"] for item in const_branches],
-        }
+            "type": branch_types.pop(), "enum": [item["const"] for item in const_branches]}
         if null_branches:
             replacement["nullable"] = True
         _carry_union_meta(out, replacement, skip_default_on_ref=False)
@@ -379,8 +374,7 @@ def _dict_nodes(node: Any):
 
 
 def _reactive_strip(
-    tools: list[dict], strip_node: Callable[[dict], int], log_msg: str,
-) -> tuple[list[dict], int]:
+    tools: list[dict], strip_node: Callable[[dict], int], log_msg: str) -> tuple[list[dict], int]:
     """Apply *strip_node* (returns keywords removed) to every dict node of each tool's
     parameters, in place. Handles OpenAI (``{"function": {"parameters": ..}}``) and Responses
     (``{"name": .., "parameters": ..}``) formats. Returns ``(tools, stripped_count)``."""

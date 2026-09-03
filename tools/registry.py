@@ -36,8 +36,7 @@ def _bound_error_text(text: str) -> str:
         return text
     logger.debug(
         "tool error body truncated for context (%d chars): %s",
-        len(text), text[:_MAX_LOGGED_ERROR_CHARS],
-    )
+        len(text), text[:_MAX_LOGGED_ERROR_CHARS])
     return text[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
 
 
@@ -228,8 +227,7 @@ _NO_CACHE_CHECK_FNS: Set[Callable] = set()
 _BROWSER_IDENTITY_KEYS = (
     "HERMES_SESSION_ID",
     "HERMES_BROWSER_CONTROL_PRINCIPAL",
-    "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY",
-)
+    "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY")
 
 
 def no_cache_check_fn(fn: Callable) -> Callable:
@@ -438,8 +436,7 @@ class ToolRegistry:
         return [entry for entry in self._merged_tools(scope).values() if entry.toolset == toolset]
 
     def _snapshot_state(
-        self, scope: Optional[str] = None,
-    ) -> tuple[List[ToolEntry], Dict[str, Callable]]:
+        self, scope: Optional[str] = None) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
         with self._lock:
             entries = list(self._merged_tools(scope).values())
@@ -469,8 +466,7 @@ class ToolRegistry:
             return self._merged_tools(scope).get(name)
 
     def snapshot_registration(
-        self, name: str, *, scope: Optional[str] = None,
-    ) -> Optional[ToolEntry]:
+        self, name: str, *, scope: Optional[str] = None) -> Optional[ToolEntry]:
         """Return the local slot state without following global fallback."""
         with self._lock:
             return self._slot(scope).get(name)
@@ -493,8 +489,7 @@ class ToolRegistry:
             existing = self._toolset_aliases.get(alias)
             if existing and existing != toolset:
                 logger.warning(
-                    "Toolset alias collision: '%s' (%s) overwritten by %s",
-                    alias, existing, toolset,
+                    "Toolset alias collision: '%s' (%s) overwritten by %s", alias, existing, toolset
                 )
             self._toolset_aliases[alias] = toolset
             self._generation += 1
@@ -650,12 +645,10 @@ class ToolRegistry:
             target = self._slot(scope, create=True)
             existing = (self._tools if scope is None else self._merged_tools(scope)).get(name)
             plugin_override_denied = (
-                owner is not None and not self._plugin_override_allowed(scope, owner)
-            )
+                owner is not None and not self._plugin_override_allowed(scope, owner))
             shadows_global = (
                 owner is not None and scope is not None
-                and name not in target and name in self._tools
-            )
+                and name not in target and name in self._tools)
             if shadows_global:
                 if not override:
                     logger.error(
@@ -763,8 +756,7 @@ class ToolRegistry:
 
     def restore_registration(
         self, name: str, current: ToolEntry, previous: Optional[ToolEntry], *,
-        scope: Optional[str] = None,
-    ) -> bool:
+        scope: Optional[str] = None) -> bool:
         """Restore a host-owned registration if it is still current (plugin ownership ledger).
         The identity check is deliberate: another plugin (or ``PluginManager`` in a
         multi-profile process) may have registered a newer entry under the same name, and
@@ -832,8 +824,7 @@ class ToolRegistry:
                 except Exception as exc:
                     logger.warning(
                         "dynamic_schema_overrides for tool %s raised %s; using static schema",
-                        name, exc,
-                    )
+                        name, exc)
             result.append({"type": "function", "function": schema_with_name})
         return result
 
@@ -861,8 +852,7 @@ class ToolRegistry:
             result_type=result_type)
 
     def dispatch(
-        self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs,
-    ) -> str | dict:
+        self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
         entry = self.get_entry(name, scope=scope)
