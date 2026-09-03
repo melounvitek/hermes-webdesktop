@@ -1,23 +1,18 @@
-"""Vision-routing decisions for ``computer_use`` capture results.
-
-``capture`` (mode som|vision) returns a ``_multimodal`` screenshot envelope as the tool result. A
-text-only main model, or a provider that rejects multimodal tool results, turns that into a hard
-400/404 — even with a working ``auxiliary.vision`` model in config. This module decides: multimodal
-envelope, or pre-analyse via aux vision so the main model only ever sees text?
+"""Vision-routing decisions for ``computer_use`` capture results. ``capture`` (mode som|vision) returns a
+``_multimodal`` screenshot envelope as the tool result. A text-only main model, or a provider that rejects multimodal
+tool results, turns that into a hard 400/404 — even with a working ``auxiliary.vision`` model in config. This module
+decides: multimodal envelope, or pre-analyse via aux vision so the main model only ever sees text?
 
 Decision order (mirrors ``vision_analyze``):
-1. ``auxiliary.vision`` explicitly configured (provider not ""/"auto", or model / base_url set) →
-   aux routing; users who pay for a vision model want it used.
-2. User-declared ``supports_vision`` for the active route (escape hatch for custom/local VLMs
-   absent from models.dev) → honour it (True → multimodal).
-3. Provider+model carries images inside tool-result messages AND models.dev says
-   ``supports_vision=True`` → multimodal.
-4. Everything else (non-vision model, provider rejecting multimodal tool results, lookup failure)
-   → aux routing.
+1. ``auxiliary.vision`` explicitly configured (provider not ""/"auto", or model / base_url set) → aux routing; users
+   who pay for a vision model want it used.
+2. User-declared ``supports_vision`` for the active route (escape hatch for custom/local VLMs absent from models.dev)
+   → honour it (True → multimodal).
+3. Provider+model carries images inside tool-result messages AND models.dev says ``supports_vision=True`` → multimodal.
+4. Everything else (non-vision model, provider rejecting multimodal tool results, lookup failure) → aux routing.
 
-Fails *closed* toward aux routing when metadata is missing or ambiguous: a screenshot sent to a
-model that cannot read it is a hard failure, while aux routing costs one extra LLM call and yields
-a usable description.
+Fails *closed* toward aux routing when metadata is missing or ambiguous: a screenshot sent to a model that cannot read
+it is a hard failure, while aux routing costs one extra LLM call and yields a usable description.
 """
 
 from __future__ import annotations

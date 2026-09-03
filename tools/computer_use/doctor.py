@@ -35,8 +35,8 @@ class HealthReportUnavailable(RuntimeError):
 
 def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
     """Run ``<binary> args`` with UTF-8 capture + sanitized env (raises on failure)."""
-    return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, env=_sanitized_cua_env())
+    return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                          env=_sanitized_cua_env())
 
 def _cli_text(binary: str, *args: str, timeout: float, exc_types: Tuple[type, ...] = _IO_EXC) -> Union[subprocess.CompletedProcess, BaseException]:
     """``_run_cli`` that returns (not raises) any exception in *exc_types*."""
@@ -78,9 +78,8 @@ def _build_identity(binary: str, report: Report) -> Report:
         m = text and re.search(r"(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)", text)
         return m.group(1) if m else text.strip().lower()
     cli, report_v = _read_cli_version(binary) or "", str(report.get("driver_version") or "")
-    cli_tok, report_tok = token(cli), token(report_v)
     return {"resolved_binary": binary, "cli_version": cli or None, "health_report_driver_version": report_v or None,
-            "version_mismatch": bool(cli_tok and report_tok and cli_tok != report_tok)}
+            "version_mismatch": bool(token(cli) and token(report_v) and token(cli) != token(report_v))}
 
 def _is_valid_health_report(payload: Any) -> bool:  # looks like a schema_version=1 health_report
     return isinstance(payload, dict) and {"schema_version", "overall"} <= payload.keys() and isinstance(payload.get("checks"), list)
@@ -180,14 +179,12 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
         if isinstance(server_info, dict):
             out["init_version"] = server_info.get("version")
         perms, out["permissions_error"] = _probe_tool(proc, 2, "check_permissions")  # primary TCC signal on 0.10
-        if perms is not None:
-            out["permissions"] = _structured(perms)
+        out["permissions"] = _structured(perms) if perms is not None else None
         # list_apps — light AX capability probe; text-only success still counts as AX working
         apps, out["list_apps_error"] = _probe_tool(proc, 3, "list_apps")
         out["list_apps_ok"] = apps is not None
-        if apps is not None:
-            app_list = _structured(apps).get("apps")
-            out["list_apps_count"] = len(app_list) if isinstance(app_list, list) else None
+        app_list = _structured(apps).get("apps") if apps is not None else None
+        out["list_apps_count"] = len(app_list) if isinstance(app_list, list) else None
     return out
 
 def _platform_name() -> str:
@@ -230,8 +227,7 @@ def _cli_doctor_row(ctx: Report) -> Optional[_Row]:
 # Fallback composite probe table, in emitted order: (check name, row builder(ctx) -> _Row | None to omit).
 _FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
     ("binary_version", lambda c: (c["ver_status"], c["ver_msg"], {})),
-    ("platform_supported", lambda c: ("pass", f"platform={c['plat']}", {}) if c["plat"] in _SUPPORTED_PLATFORMS
-                                      else ("fail", f"platform={c['plat']} (unsupported)", {})),
+    ("platform_supported", lambda c: ("pass", f"platform={c['plat']}", {}) if c["plat"] in _SUPPORTED_PLATFORMS else ("fail", f"platform={c['plat']} (unsupported)", {})),
     # doctor does not start a session, so session_active is never probed
     ("session_active", lambda c: ("skip", "not probed (doctor does not open a cua session)", {})),
     ("tcc_accessibility", lambda c: _tcc_row("accessibility", "Accessibility", False, c)),
@@ -277,9 +273,7 @@ def _apply_display_count_guard(report: Report) -> Report:
     / asleep panels — TCC fine, health_report ok, yet every capture is 0x0. Turns a silent failure actionable; applied
     at the report seam so the real and the fallback path both get it."""
     checks = report.get("checks")
-    for check in checks if isinstance(checks, list) else ():
-        if not isinstance(check, dict) or check.get("name") != "screen_capture_capability":
-            continue
+    for check in (c for c in (checks if isinstance(checks, list) else ()) if isinstance(c, dict) and c.get("name") == "screen_capture_capability"):
         data = check.get("data")
         if (data.get("display_count") if isinstance(data, dict) else None) == 0 and check.get("status") == "pass":
             check.update(status="fail", message=_ZERO_DISPLAY_MSG, hint=_ZERO_DISPLAY_HINT)
@@ -295,8 +289,7 @@ def _print_text_report(report: Report, color: bool, *, identity: Optional[Report
     cli_v = identity.get("cli_version") or ""
     header_v = cli_v or report_v  # binary's own --version wins when health_report is stale
     # No external color library — inline ANSI keeps doctor self-contained; colors only for known overall values.
-    ansi = ("\033[31m", "\033[33m", "\033[32m", "\033[0m", "\033[2m")
-    red, yellow, green, reset, dim = ansi if color and overall in _OVERALL_GLYPH else ("",) * 5
+    red, yellow, green, reset, dim = ("\033[31m", "\033[33m", "\033[32m", "\033[0m", "\033[2m") if color and overall in _OVERALL_GLYPH else ("",) * 5
     col_for = {"failed": red, "degraded": yellow, "ok": green}.get(overall, "")
     status_cols = {"pass": green, "fail": red, "skip": dim}
     lines = [f"{_OVERALL_GLYPH.get(overall, '•')} cua-driver {header_v} on {platform} — {col_for}{overall}{reset}"]
