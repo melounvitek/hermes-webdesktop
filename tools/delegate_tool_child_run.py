@@ -502,14 +502,13 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     """Hand ``child.close()`` to a Future done-callback and drain its transports.
 
     The interrupt is cooperative: the worker still runs its finally path, so
-    closing the child now could close SQLite under its final write — the
-    done-callback is the first safe close boundary. The abandoned worker is
-    usually parked in an OpenSSL read; NEVER hard-close that transport from this
-    thread (cross-thread FD release under a live SSL read corrupts native
-    state) — shutdown() the pooled sockets instead, which settles the read with
-    EOF so the worker unwinds. One immediate sweep + one delayed re-sweep for a
-    connection opened in between; a worker that still won't settle keeps its
-    resources until process exit.
+    closing now could close SQLite under its final write — the done-callback is
+    the first safe boundary. The abandoned worker is usually parked in an
+    OpenSSL read; NEVER hard-close that transport from this thread (cross-thread
+    FD release under a live SSL read corrupts native state) — shutdown() the
+    pooled sockets so the read settles with EOF and the worker unwinds. One
+    immediate sweep + one delayed re-sweep for a connection opened in between; a
+    worker that still won't settle keeps its resources until process exit.
     """
     child_future.add_done_callback(
         lambda _done: _close_child(child, "Failed to close timed-out child after worker exit")
@@ -575,16 +574,15 @@ def _await_child(
     child_progress_cb: Any,
     worktree: _WorktreeReporter,
 ) -> tuple[Optional[Dict[str, Any]], Optional[_ChildFailure]]:
-    """Run the child's conversation on a daemon worker and wait for it.
+    """Run the child's conversation on a daemon worker; ``(result, None)`` or
+    ``(None, failure)`` on timeout/exception.
 
-    Returns ``(result, None)`` or ``(None, failure)`` on timeout/exception.
-    The hard timeout is off by default (``result(timeout=None)`` blocks until
-    the child finishes; stuck-child protection is the heartbeat). The worker is
-    a daemon: a timed-out child is abandoned and a stdlib non-daemon worker
-    would block interpreter exit at atexit-join time. The worker installs a
-    non-interactive approval callback so dangerous-command prompts never fall
-    back to ``input()`` and deadlock the parent TUI (deny vs approve follows
-    delegation.subagent_auto_approve).
+    The hard timeout is off by default (``result(timeout=None)`` blocks; stuck
+    children are the heartbeat's job). Daemon worker: a timed-out child is
+    abandoned and a non-daemon thread would block interpreter exit at atexit
+    join. The worker installs a non-interactive approval callback so dangerous
+    command prompts never fall back to ``input()`` and deadlock the parent TUI
+    (deny vs approve follows delegation.subagent_auto_approve).
     """
     from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
     from tools.daemon_pool import DaemonThreadPoolExecutor

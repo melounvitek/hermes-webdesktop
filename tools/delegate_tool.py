@@ -2,19 +2,13 @@
 """
 Delegate Tool -- Subagent Architecture
 
-Spawns child AIAgent instances with isolated context, inherited toolsets,
-and their own terminal sessions. Supports single-task and batch (parallel)
-modes. Top-level model calls run in the background; orchestrator children
-wait for their own workers so they can synthesize the results.
-
-Each child gets:
-  - A fresh conversation (no parent history)
-  - Its own task_id (own terminal session, file ops cache)
-  - The parent's toolsets, with child-only blocked tools stripped
-  - A focused system prompt built from the delegated goal + context
-
-The parent's context only sees the delegation call and the summary result,
-never the child's intermediate tool calls or reasoning.
+Spawns child AIAgent instances with a fresh conversation, their own task_id
+(terminal session, file-ops cache), the parent's toolsets minus child-blocked
+tools, and a focused system prompt built from goal + context. Single-task and
+batch (parallel) modes; top-level model calls run in the background while
+orchestrator children wait for their own workers. The parent only ever sees
+the delegation call and the summary result, never the child's intermediate
+tool calls or reasoning.
 """
 
 import json
@@ -32,10 +26,9 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
-# The delegate_tool_* siblings hold the pieces split out of this module. Every
-# moved name is re-imported here so ``tools.delegate_tool.<name>`` keeps
-# resolving for callers and for tests that patch it. Mutable flag globals
-# (_spawn_paused, *_WARNED) live only in their owning module.
+# The delegate_tool_* siblings hold the pieces split out of this module; every
+# moved name is re-imported so ``tools.delegate_tool.<name>`` keeps resolving for
+# callers and patching tests. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
     _WorktreeReporter,
     _append_missed_steer,
@@ -133,8 +126,6 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
 
 # Nested delegation is granted by depth/role in _build_child_agent, never by the
 # model naming toolsets (there is no model-facing toolsets argument).
-
-
 def _normalize_role(r: Optional[str]) -> str:
     """'leaf' | 'orchestrator'; None/empty/unknown -> 'leaf' (unknown warns)."""
     if r is None or not r:
@@ -246,20 +237,18 @@ def _resolve_child_toolsets(
     """Return ``(enabled_toolsets, disabled_toolsets)`` for a child.
 
     Children never gain tools the parent lacks: explicit ``toolsets`` are
-    intersected with the parent's (composite-expanded) set, otherwise the
-    parent's enabled set is inherited. Blocked tools are stripped twice — whole
-    blocked toolsets here, and exact one-tool deny toolsets via
-    ``disabled_toolsets`` so blocked names inside mixed bundles (hermes-cli)
-    are subtracted AFTER composite expansion and survive registry refreshes.
-    Orchestrators get ``delegation`` re-added unconditionally (role-granted,
-    not inherited).
+    intersected with the parent's (composite-expanded) set, else the parent's
+    enabled set is inherited. Blocked tools are stripped twice — whole blocked
+    toolsets here, and exact one-tool deny toolsets via ``disabled_toolsets`` so
+    blocked names inside mixed bundles (hermes-cli) are subtracted AFTER
+    composite expansion and survive registry refreshes. Orchestrators get
+    ``delegation`` re-added unconditionally (role-granted, not inherited).
     """
     # enabled_toolsets=None means "all tools", so derive from loaded tool names.
     parent_enabled = getattr(parent_agent, "enabled_toolsets", None)
     if parent_enabled is not None:
         parent_toolsets = set(parent_enabled)
     elif parent_agent and hasattr(parent_agent, "valid_tool_names"):
-        # enabled_toolsets is None (all tools) — derive from loaded tool names
         import model_tools
 
         parent_toolsets = {
@@ -284,20 +273,16 @@ def _resolve_child_toolsets(
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
     raw_parent_disabled = getattr(parent_agent, "disabled_toolsets", None)
-    if isinstance(raw_parent_disabled, (list, tuple, set)):
-        inherited_disabled = [str(name) for name in raw_parent_disabled]
-    else:
-        inherited_disabled = []
+    inherited_disabled = (
+        [str(name) for name in raw_parent_disabled] if isinstance(raw_parent_disabled, (list, tuple, set)) else []
+    )
     if effective_role == "orchestrator":
         inherited_disabled = [name for name in inherited_disabled if name != "delegation"]
+        if "delegation" not in child_toolsets:
+            child_toolsets.append("delegation")
     child_disabled_toolsets = list(
-        dict.fromkeys(
-            inherited_disabled + _blocked_toolsets_for_role(effective_role) + ["kanban"]
-        )
+        dict.fromkeys(inherited_disabled + _blocked_toolsets_for_role(effective_role) + ["kanban"])
     )
-
-    if effective_role == "orchestrator" and "delegation" not in child_toolsets:
-        child_toolsets.append("delegation")
     return child_toolsets, child_disabled_toolsets
 
 
@@ -789,16 +774,13 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
     return parsed, None
 
 
-# Placeholder shapes for batch goal validation: bare 'TODO', bare 'task N'
-# labels, or goals still carrying unexpanded template markers.
-#
-# The marker regex is deliberately NARROW: it only fires on snake_case /
-# space-separated placeholder identifiers (`<feature_name>`, `{file path}`,
-# `<FEATURE-NAME>`) — the shape LLM templates actually leave behind. Bare
-# single-word brackets are left alone because legitimate coding goals are
-# full of them: generics (`Vec<T>`, `Result<String>`), HTML tags (`<div>`),
-# JSON/dict snippets (`{"key": 1}`), glob braces (`{a,b}`), and f-string
-# style (`{i}`) must never be rejected (post-merge audit of #81141).
+# Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels,
+# or unexpanded template markers. The marker regex is deliberately NARROW —
+# only snake_case / space-separated placeholder identifiers (`<feature_name>`,
+# `{file path}`, `<FEATURE-NAME>`), the shape LLM templates leave behind. Bare
+# single-word brackets must never be rejected: legitimate goals are full of
+# generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
+# braces (`{a,b}`) and f-string style (`{i}`).
 _PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
 _TEMPLATE_MARKER_RE = re.compile(
     r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>"
@@ -808,20 +790,14 @@ _MIN_BATCH_GOAL_LEN = 10
 
 
 def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
-    """Validate a tasks=[...] batch beyond per-task goal presence.
+    """Validate a tasks=[...] batch beyond per-task goal presence; actionable
+    error string or None.
 
-    Returns an actionable error string, or None when the batch is valid.
-
-    A one-entry array is the canonical single-task shape (the advertised
-    interface is tasks-only; legacy top-level `goal` is wrapped into a
-    one-entry batch), so no minimum count is enforced. The placeholder/
-    template checks below still run on every entry.
-
-    Duplicate goals are deliberately NOT rejected: identical-goal fan-outs
-    are a legitimate pattern (best-of-N / ensemble sampling), and blocking
-    them broke real workflows (post-merge audit of #81141).
+    No minimum count: a one-entry array is the canonical single-task shape
+    (legacy top-level `goal` is wrapped into one). Duplicate goals are
+    deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble
+    sampling) are legitimate and blocking them broke real workflows.
     """
-
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
         normalized = " ".join(goal.lower().split())
@@ -1238,11 +1214,8 @@ def delegate_task(
 
 
 def _build_top_level_description() -> str:
-    """Compose the delegate_task tool description.
-
-    Carries ONLY guidance stated nowhere else in the schema (limits live in
-    the 'tasks' parameter description, rebuilt per get_definitions() call).
-    """
+    """delegate_task description: ONLY guidance stated nowhere else in the schema
+    (limits live in the 'tasks' parameter description, rebuilt per get_definitions())."""
     try:
         orchestration_available = _get_max_spawn_depth() >= 2 and _get_orchestrator_enabled()
     except Exception:
@@ -1311,17 +1284,11 @@ def _build_tasks_param_description() -> str:
 
 
 def _build_dynamic_schema_overrides() -> dict:
-    """Return per-call schema overrides reflecting current config.
-
-    Plugged into ToolEntry.dynamic_schema_overrides so every
-    get_definitions() pass rewrites the description fields to the user's
-    actual limits.
-    """
+    """Per-call schema overrides (ToolEntry.dynamic_schema_overrides): every
+    get_definitions() pass rewrites the descriptions to the user's actual limits."""
     overrides_params = {**DELEGATE_TASK_SCHEMA["parameters"]}
-    # Deep-copy properties so we don't mutate the static schema dict.
-    overrides_params["properties"] = {
-        k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()
-    }
+    # Copy properties so the static schema dict is never mutated.
+    overrides_params["properties"] = {k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()}
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
 
     return {"description": _build_top_level_description(), "parameters": overrides_params}
@@ -1329,14 +1296,11 @@ def _build_dynamic_schema_overrides() -> dict:
 
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
-    # NOTE: description / tasks.description / role.description are placeholder
-    # values. The real text is generated per get_definitions() call by
-    # _build_dynamic_schema_overrides() (registered via
-    # dynamic_schema_overrides below) so the model sees the user's actual
-    # delegation.max_concurrent_children / max_spawn_depth, not the framework
-    # defaults. Building these lazily (instead of at module import) also
-    # avoids forcing cli.CLI_CONFIG to load before the test conftest can
-    # redirect HERMES_HOME.
+    # description / tasks.description are placeholders: the real text is built per
+    # get_definitions() call by _build_dynamic_schema_overrides() so the model sees
+    # the user's actual max_concurrent_children / max_spawn_depth. Lazy (not at
+    # import) so cli.CLI_CONFIG isn't forced to load before the test conftest
+    # redirects HERMES_HOME.
     "description": (
         "Spawn one or more subagents in isolated contexts. "
         "Description is rebuilt at every get_definitions() call to reflect "
@@ -1345,11 +1309,9 @@ DELEGATE_TASK_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            # NOTE: the handler also accepts the legacy single-goal shape —
-            # top-level `goal` (string), `context` (string), `output_schema`
-            # (object) — wrapped into a one-entry batch at dispatch. Legacy,
-            # unadvertised (old transcripts/callers only); tasks=[...] is the
-            # only advertised shape. Do not re-add these to the schema.
+            # The handler also accepts the legacy single-goal shape (top-level
+            # `goal`/`context`/`output_schema`), wrapped into a one-entry batch at
+            # dispatch. Unadvertised on purpose (old transcripts only); do not re-add.
             "tasks": {
                 "type": "array",
                 "minItems": 1,
@@ -1388,18 +1350,14 @@ DELEGATE_TASK_SCHEMA = {
                     },
                     "required": ["goal"],
                 },
-                # No maxItems — the runtime limit is configurable via
-                # delegation.max_concurrent_children (default 3) and
-                # enforced with a clear error in delegate_task().
-                # NOTE: the handler also accepts a per-task `role` — legacy,
-                # ignored: delegation capability is depth-derived, not
-                # caller-declared. Unadvertised on purpose; do not re-add.
+                # No maxItems — the runtime limit (delegation.max_concurrent_children)
+                # is enforced with a clear error in delegate_task(). A per-task `role`
+                # is also accepted — legacy, ignored (capability is depth-derived);
+                # unadvertised on purpose, do not re-add.
                 "description": "(rebuilt at get_definitions() time)",
             },
-            # NOTE: the handler also accepts `background` (bool) — DEPRECATED,
-            # ignored: top-level delegations always run in the background.
-            # Deliberately unadvertised (old transcripts/callers only); do not
-            # re-add to the schema.
+            # `background` (bool) is also accepted — DEPRECATED, ignored: top-level
+            # delegations always run in the background. Unadvertised; do not re-add.
             "action": {
                 "type": "string",
                 "enum": ["spawn", "list", "steer", "stop"],
@@ -1441,18 +1399,14 @@ from tools.registry import registry, tool_error
 def _model_background_value(args: dict, parent_agent=None) -> bool:
     """Background flag for the MODEL-facing dispatch path (registry fallback).
 
-    Delegations from the top-level agent always run in the background — the
-    model does not choose. This applies to both a single task and a fan-out
-    batch (the whole batch is one async unit that joins on all children and
-    returns one consolidated result). The one
-    exception is a delegation from an orchestrator subagent (depth > 0), which
-    needs its workers' results within its own turn. The live path is
-    ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare
-    case the intercept is bypassed. Direct Python callers of ``delegate_task``
-    keep the historical synchronous default.
+    Top-level delegations always run in the background — the model does not
+    choose — for single tasks and fan-out batches alike (one async unit, one
+    consolidated result). The exception is an orchestrator subagent (depth > 0),
+    which needs its workers' results within its own turn. The live path is
+    ``run_agent._dispatch_delegate_task``; this mirrors it for the rare case the
+    intercept is bypassed. Direct Python callers keep the synchronous default.
     """
-    is_subagent = getattr(parent_agent, "_delegate_depth", 0) > 0
-    return not is_subagent
+    return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

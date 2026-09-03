@@ -343,19 +343,12 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
 
 
 def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]:
-    """Per-summary character budget sized against the parent's *remaining*
-    context headroom, split across the batch.
-
-    The overflow this guards against is N summaries entering the parent
-    context at once (batch fan-out), not any single summary being large.  We
-    take a fraction of the headroom the parent has left (resolved context
-    length minus what's already in its prompt) and divide it across the batch,
-    converting tokens→chars at the standard ~4 chars/token estimate.
-
-    Returns the per-summary char budget, or None when the parent's context
-    state is unknown (no compressor / no token count) — in which case the
-    caller falls back to the static char ceiling only.
-    """
+    """Per-summary char budget from the parent's *remaining* context headroom
+    (context length minus prompt tokens minus the compressor's output reserve),
+    a fraction of it split across the batch at ~4 chars/token. Guards against N
+    summaries landing at once, not one large summary. None when the parent's
+    context state is unknown (no compressor / token count) — caller then uses
+    the static ceiling only."""
     try:
         compressor = getattr(parent_agent, "context_compressor", None)
         context_length = getattr(compressor, "context_length", None)
@@ -383,18 +376,14 @@ def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]
 
 
 def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
-    """Trim subagent summaries in-place so the batch can't overflow the
-    parent's context window, spilling full text to disk so nothing is lost.
+    """Trim subagent summaries in-place so a batch can't overflow the parent's
+    context window; full text is spilled to disk so nothing is lost.
 
-    The effective per-summary cap is the MIN of:
-      - the dynamic headroom budget (remaining parent context ÷ batch size), and
-      - the static ``delegation.max_summary_chars`` ceiling (0 = disabled).
-
-    When a summary exceeds the cap, its full text is written to a file and the
-    in-context summary becomes a head slice plus a pointer to that file. This
-    addresses issue/PR #9126: batch fan-out returned N full summaries verbatim,
-    blowing the parent context and (on rate-limited providers) triggering a
-    compression/429 death spiral.
+    Per-summary cap = MIN(dynamic headroom budget: remaining parent context ÷
+    batch size, static ``delegation.max_summary_chars`` ceiling; 0 = disabled).
+    Over-cap summaries become a head+tail slice plus a pointer to the spill file.
+    Without this, fan-out returned N full summaries verbatim, blowing the parent
+    context and (on rate-limited providers) triggering a compression/429 death spiral.
     """
     from tools.delegate_tool import _load_config
     summaries = [r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]]

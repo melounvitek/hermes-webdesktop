@@ -159,20 +159,16 @@ def steer_subagent(
     owner_transport: Any = None,
     owner_session_record: Any = None,
 ) -> bool:
-    """Queue steering text into a single running subagent without stopping it.
+    """Queue steering text into a running subagent without stopping it.
 
-    The redirection-side mirror of interrupt_subagent(): resolves the live
-    child in the registry and calls AIAgent.steer(), which appends the text
-    to the child's last tool result at its next iteration boundary — the
-    current tool call is never cut. Returns True if a matching subagent
-    QUEUED the text while the child was still accepting work; False for an
-    unknown/closed id, an ownership mismatch, a record with no live agent, or
-    empty text. ``owner_session_id=None`` deliberately preserves the internal
-    in-process helper contract; gateway callers must pass exact authority.
-
-    Acceptance and completion are linearized by the registry lock. If
-    acceptance wins but no delivery boundary remains, ``_run_single_child``
-    drains the exact text into the completion entry as ``missed_steer``.
+    Mirror of interrupt_subagent(): calls AIAgent.steer(), which appends the
+    text to the child's last tool result at its next iteration boundary — the
+    current tool call is never cut. True iff the text was QUEUED while the child
+    still accepted work; False for unknown/closed id, ownership mismatch, no
+    live agent, or empty text. ``owner_session_id=None`` keeps the in-process
+    helper contract; gateway callers must pass exact authority. Acceptance and
+    completion are linearized by the registry lock: if acceptance wins but no
+    delivery boundary remains, the text lands in the entry as ``missed_steer``.
     """
     if not text or not text.strip():
         return False
@@ -277,24 +273,16 @@ def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> st
 def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     """True when *parent_agent*'s conversation owns this live-child record.
 
-    Two-tier check:
-
-    1. Object identity — the ``_delegate_parent_ref`` weakref chain stamped
-       at build time reaches *parent_agent*. Fast path for the common case
-       where the parent AIAgent object survives the whole run.
-    2. Durable conversation lineage — the child was registered with the
-       owning conversation's durable session id
-       (``owner_agent_session_id``); match it against the calling parent's
-       ``session_id``, resolving compression-rotation lineage on both sides.
-
-    Tier 2 exists because the identity chain is BRITTLE across parent-agent
-    rebuilds: the CLI sets ``self.agent = None`` mid-session (route-signature
-    change, credential refresh, /model, MoA one-shots) and constructs a NEW
-    AIAgent for the next turn while the child keeps running with a weakref to
-    the old object. The delivery path always survived this (it routes by
-    durable session id); the control path must use the same durable spine or
-    running children go invisible/unsteerable (observed live: deleg_88454b70
-    / sa-0-dc0100f4, 2026-08-17).
+    Tier 1: object identity — the ``_delegate_parent_ref`` weakref chain reaches
+    *parent_agent* (fast path while the parent AIAgent survives the run).
+    Tier 2: durable lineage — the record's ``owner_agent_session_id`` matches the
+    caller's ``session_id``, resolving compression-rotation lineage on both
+    sides. Tier 2 exists because the identity chain is BRITTLE across parent
+    rebuilds: the CLI sets ``self.agent = None`` mid-session (route change,
+    credential refresh, /model, MoA one-shots) and builds a NEW AIAgent while
+    the child keeps a weakref to the old one. Delivery always routed by durable
+    session id; control must use the same spine or running children go
+    invisible/unsteerable.
     """
     agent = record.get("agent")
     if _is_descendant_of(agent, parent_agent):

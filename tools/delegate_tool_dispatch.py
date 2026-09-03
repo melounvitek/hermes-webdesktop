@@ -196,15 +196,13 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
 def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> tuple[str, str]:
     """``(session_key, origin_ui_session_id)`` the async registry routes completions by.
 
-    In desktop/TUI the routable key is the durable AIAgent.session_id: context
-    compression can rotate it mid-turn before the TUI-side session dict is
-    re-anchored, and a stale approval-context key would orphan the completion
-    for any desktop poller to consume. Gateway chats keep the platform
-    conversation key (agent:main:...). The CLI (single-process) has no bound
-    approval contextvar and no HERMES_SESSION_KEY, so the key resolves empty;
-    it drains completions through a positive-ownership filter keyed on the
-    durable session_id, so an empty key would fail closed — stamp the parent's
-    durable id (compression rotations resolve on the drain side via lineage).
+    Desktop/TUI: the routable key is the durable AIAgent.session_id — compression
+    can rotate it mid-turn before the TUI-side dict is re-anchored, and a stale
+    approval-context key would orphan the completion. Gateway chats keep the
+    platform conversation key (agent:main:...). The CLI has no bound approval
+    contextvar and no HERMES_SESSION_KEY, so the key resolves empty; its drain
+    is a positive-ownership filter keyed on the durable session_id, so an empty
+    key would fail closed — stamp the parent's durable id.
     """
     from tools.approval import get_current_session_key
 
@@ -227,17 +225,12 @@ def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> 
 
 
 def _batch_progress_token(child_agents: List[Any]) -> tuple:
-    """Progress token for the async registry's stale monitor.
-
-    The combined (api_call_count, current_tool, last_activity_ts) of every
-    child; last_activity_ts ticks on every streamed chunk, tool transition and
-    API-call start/completion, so a child streaming a long response is alive
-    even though api_call_count only advances when the call completes. A fully
-    frozen token past the stale threshold means the detached batch is wedged
-    (e.g. stuck inside the first model API call). ``in_tool`` is True while ANY
-    child is inside a tool so slow tools get the higher staleness ceiling,
-    mirroring the sync-path heartbeat monitor.
-    """
+    """Progress token for the async registry's stale monitor: every child's
+    (api_call_count, current_tool, last_activity_ts). last_activity_ts ticks on
+    streamed chunks, tool transitions and API-call start/completion, so a child
+    streaming a long response counts as alive; a fully frozen token past the
+    threshold means the batch is wedged. ``in_tool`` is True while ANY child is
+    inside a tool so slow tools get the higher ceiling (mirrors the sync heartbeat)."""
     parts = []
     in_tool = False
     for c in child_agents:
