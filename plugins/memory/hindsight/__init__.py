@@ -517,9 +517,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def _int_setting(self, key: str, env_var: str, default: int, env_default=None) -> int:
         """Config value if set (explicit 0 preserved), else env var, else default."""
         value = self._config.get(key)
-        if value is None:
-            value = os.environ.get(env_var, env_default)
-        return _parse_int_setting(value, default)
+        return _parse_int_setting(os.environ.get(env_var, env_default) if value is None else value, default)
 
     def _new_embedded_client(self):
         available, reason = _check_local_runtime()
@@ -743,9 +741,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._session_id = str(session_id or "").strip()
         self._parent_session_id = str(kwargs.get("parent_session_id", "") or "").strip()
         # Status channel for the retain indicator (recall reports via recall_status()).
-        status_cb = kwargs.get("status_callback")
-        if callable(status_cb):
-            self._status_callback = status_cb
+        if callable(kwargs.get("status_callback")):
+            self._status_callback = kwargs["status_callback"]
         # session_id stays in tags so processes for one session remain filterable together.
         self._document_id = _mint_document_id(self._session_id)
         _maybe_upgrade_client()
@@ -1172,9 +1169,7 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        if self._memory_mode == "context":
-            return []
-        return [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
+        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
 
     def _tool_retain(self, args: dict) -> str:
         content = args["content"]

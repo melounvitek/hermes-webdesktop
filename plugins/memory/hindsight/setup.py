@@ -129,11 +129,8 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     if mode == "cloud":
         print("\n  Get your API key at https://ui.hindsight.vectorize.io\n")
         existing_key = get_secret("HINDSIGHT_API_KEY", "") or ""
-        if existing_key:
-            masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "set"
-            api_key = _secret_prompt(f"  API key (current: {masked}, blank to keep): ")
-        else:
-            api_key = _secret_prompt("  API key: ")
+        masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "set"
+        api_key = _secret_prompt(f"  API key (current: {masked}, blank to keep): " if existing_key else "  API key: ")
         if api_key:
             env_writes["HINDSIGHT_API_KEY"] = api_key
         val = input(f"  API URL [{_DEFAULT_API_URL}]: ").strip()
@@ -150,9 +147,7 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     else:  # local_embedded
         if llm_provider == "openai_compatible":
             existing_base_url = provider_config.get("llm_base_url", "")
-            prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)"
-            if existing_base_url:
-                prompt += f" [{existing_base_url}]"
+            prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)" + (f" [{existing_base_url}]" if existing_base_url else "")
             val = input(prompt + ": ").strip()
             if val:
                 provider_config["llm_base_url"] = val

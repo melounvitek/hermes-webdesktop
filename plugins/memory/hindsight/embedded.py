@@ -82,13 +82,9 @@ def _load_simple_env(path) -> dict[str, str]:
     on the Hermes .env during post_setup, where a Notepad BOM would stick to the first key."""
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
+    pairs = (line.split("=", 1) for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+             if line and not line.startswith("#") and "=" in line)
+    return {key.strip(): value.strip() for key, value in pairs}
 
 
 def _embedded_profile_env_path(config: dict[str, Any]) -> Path:
@@ -99,11 +95,7 @@ def _embedded_profile_env_path(config: dict[str, Any]) -> Path:
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
     """Build the profile-scoped env that standalone hindsight-embed consumes."""
     if llm_api_key is None:
-        llm_api_key = (
-            config.get("llmApiKey")
-            or config.get("llm_api_key")
-            or get_secret("HINDSIGHT_LLM_API_KEY", "")
-        )
+        llm_api_key = config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
     env_values = {
         "HINDSIGHT_API_LLM_PROVIDER": str(_daemon_llm_provider(config.get("llm_provider", ""))),
         "HINDSIGHT_API_LLM_API_KEY": str(llm_api_key or ""),
@@ -117,9 +109,7 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     if idle_timeout is None:
         idle_timeout = os.environ.get("HINDSIGHT_IDLE_TIMEOUT")
     if idle_timeout is not None and idle_timeout != "":
-        env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(
-            _parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT)
-        )
+        env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(_parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT))
     return env_values
 
 

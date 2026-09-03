@@ -319,22 +319,17 @@ def _maybe_parse_json_string(value: str) -> Any:
 
     hint_key = "_hint" if trailing.startswith("[Hint:") else "_trailing_text"
     if isinstance(parsed, dict):
-        merged = dict(parsed)
-        merged[hint_key if hint_key not in merged else "_trailing_text"] = trailing
-        return merged
+        return {**parsed, (hint_key if hint_key not in parsed else "_trailing_text"): trailing}
     return {"data": parsed, hint_key: trailing}
 
 
 def _parse_read_file_lines(content: str) -> list[dict[str, Any]]:
     if not isinstance(content, str) or not content:
         return []
-    lines = []
-    for raw_line in content.splitlines():
-        match = _READ_FILE_LINE_RE.match(raw_line)
-        if not match:
-            return []
-        lines.append({"line": int(match.group(1)), "text": match.group(2)})
-    return lines
+    matches = [_READ_FILE_LINE_RE.match(raw_line) for raw_line in content.splitlines()]
+    if not all(matches):
+        return []
+    return [{"line": int(m.group(1)), "text": m.group(2)} for m in matches]
 
 
 def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> dict[str, Any]:
@@ -391,11 +386,8 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
         return {"type": "bytes", "len": len(value)}
     recurse = lambda v, d: _safe_value(v, max_chars=max_chars, depth=d, parse_json_strings=parse_json_strings)  # noqa: E731
     if isinstance(value, str):
-        if parse_json_strings:
-            parsed = _maybe_parse_json_string(value)
-            if parsed is not value:
-                return recurse(parsed, depth)
-        return _truncate_text(value, max_chars)
+        parsed = _maybe_parse_json_string(value) if parse_json_strings else value
+        return recurse(parsed, depth) if parsed is not value else _truncate_text(value, max_chars)
     if isinstance(value, dict):
         normalized = _normalize_payload(value)
         if normalized is not value:
@@ -485,8 +477,8 @@ def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     serialized = []
     for tool_call in tool_calls or ():
         fn = getattr(tool_call, "function", None)
-        name = getattr(fn, "name", None) if fn else None
-        safe_arguments = _capture_content(getattr(fn, "arguments", None) if fn else None)
+        name = getattr(fn, "name", None)
+        safe_arguments = _capture_content(getattr(fn, "arguments", None))
         serialized.append({
             "id": getattr(tool_call, "id", None),
             "type": getattr(tool_call, "type", None) or "function",
@@ -580,12 +572,9 @@ def _summary_usage_and_cost(usage: dict, *, provider: str, model: str, base_url:
         from agent.usage_pricing import CanonicalUsage
 
         canonical = CanonicalUsage(
-            input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
-            cache_read_tokens=usage.get("cache_read_tokens", 0),
-            cache_write_tokens=usage.get("cache_write_tokens", 0),
-            reasoning_tokens=usage.get("reasoning_tokens", 0),
             request_count=usage.get("request_count", 1),
+            **{attr: usage.get(attr, 0) for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
         )
         return _canonical_usage_and_cost(canonical, provider=provider, model=model, base_url=base_url)
     except Exception:

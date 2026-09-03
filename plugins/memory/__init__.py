@@ -316,10 +316,8 @@ class _ProviderCollector:
         if not self._register_skills:
             return
         try:
-            manager_context = self._plugin_context()
-            manager_context.register_skill(*args, **kwargs)
-            skill_name = args[0] if args else kwargs.get("name")
-            qualified_name = f"{self.name}:{skill_name}"
+            self._plugin_context().register_skill(*args, **kwargs)
+            qualified_name = f"{self.name}:{args[0] if args else kwargs.get('name')}"
 
             from hermes_cli.plugins import get_plugin_manager
 
