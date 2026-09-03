@@ -1,15 +1,15 @@
 """The prompt turn: ``_run_prompt_submit`` and the per-phase helpers it drives.
 
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
-
-Turn shape (all on a fresh daemon thread):
-  admit -> crash marker -> bind scopes -> resolve message -> run_conversation
-  -> commit history / message.complete -> goal & loop hooks -> release scopes
-  -> post-turn follow-ups (queued prompt, goal continuation, notifications).
+Bodies are rebound onto server.py's globals at install time (method_ctx.bind_module),
+so they reference server.py globals bare.  Turn shape (one fresh daemon thread):
+admit -> crash marker -> bind scopes -> resolve message -> run_conversation ->
+commit history / message.complete -> goal & loop hooks -> release scopes ->
+post-turn follow-ups (queued prompt, goal continuation, notifications).
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 from .method_ctx import HandlerRegistry, bind_module
 
@@ -159,17 +159,15 @@ def _record_turn_marker(session: dict, text: Any) -> str:
 # ── per-turn scopes ──────────────────────────────────────────────────
 
 
+@dataclasses.dataclass(slots=True)
 class _TurnScopes:
     """Reset tokens for the thread/context scopes a turn binds (filled incrementally)."""
 
-    __slots__ = ("approval", "session_tokens", "home", "secret", "terminal")
-
-    def __init__(self) -> None:
-        self.approval = None
-        self.session_tokens: list = []
-        self.home = None  # per-turn HERMES_HOME override for a resumed remote profile
-        self.secret = None
-        self.terminal = None
+    approval: Any = None
+    session_tokens: list = dataclasses.field(default_factory=list)
+    home: Any = None  # per-turn HERMES_HOME override for a resumed remote profile
+    secret: Any = None
+    terminal: Any = None
 
 
 def _bind_turn_scopes(sid: str, session: dict, scopes: _TurnScopes) -> None:
@@ -647,6 +645,7 @@ def _run_post_turn_followups(
 # ── the turn ─────────────────────────────────────────────────────────
 
 
+@dataclasses.dataclass(slots=True)
 class _TurnRun:
     """Mutable state the phase helpers of one turn thread share.
 
@@ -659,29 +658,23 @@ class _TurnRun:
     submitted (post @-expansion) so the cause can be checked for quoting it back.
     """
 
-    __slots__ = (
-        "agent", "scopes", "goal_followup", "result", "tts_queue", "thinking_started", "history",
-        "history_version", "run_kwargs", "one_turn_restore", "error_retained", "error_detail",
-        "prompt_text", "marker_key", "terminal_callback", "receipt_attempted", "receipt_committed")
-
-    def __init__(self, session: dict, terminal_callback) -> None:
-        self.agent = session["agent"]
-        self.scopes = _TurnScopes()
-        self.goal_followup = None
-        self.result = None  # read after the finally for leftover /steer
-        self.tts_queue = None
-        self.thinking_started = False
-        self.history: list = []
-        self.history_version = 0
-        self.run_kwargs = None
-        self.one_turn_restore = session.pop("one_turn_model_restore", None)
-        self.error_retained = False
-        self.error_detail = ""
-        self.prompt_text = ""
-        self.marker_key = ""
-        self.terminal_callback = terminal_callback
-        self.receipt_attempted = False
-        self.receipt_committed = terminal_callback is None
+    agent: Any
+    one_turn_restore: Any
+    terminal_callback: Any
+    receipt_committed: bool
+    scopes: _TurnScopes = dataclasses.field(default_factory=_TurnScopes)
+    goal_followup: Any = None
+    result: Any = None  # read after the finally for leftover /steer
+    tts_queue: Any = None
+    thinking_started: bool = False
+    history: list = dataclasses.field(default_factory=list)
+    history_version: int = 0
+    run_kwargs: Any = None
+    error_retained: bool = False
+    error_detail: str = ""
+    prompt_text: str = ""
+    marker_key: str = ""
+    receipt_attempted: bool = False
 
 
 def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images: list[str]):
@@ -962,7 +955,9 @@ def _run_prompt_submit(
         # tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
         runtime_session_token = _current_runtime_session_record.set(session)
-        st = _TurnRun(session, terminal_callback)
+        st = _TurnRun(
+            session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
+            receipt_committed=terminal_callback is None)
         st.marker_key = _record_turn_marker(session, text)
         try:
             prepared = _prepare_turn_input(sid, session, st, text, images)

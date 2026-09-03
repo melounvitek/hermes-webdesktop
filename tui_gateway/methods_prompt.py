@@ -1196,6 +1196,8 @@ def _(rid, params: dict) -> dict:
 
 
 # ── late-answer RPCs for tool-driven UI cards ───────────────────────────────
+
+
 # All use allow_expired=True: each tool's bounded wait (read_terminal 30s,
 # setup_mcp 10min, clarify ...) can expire — its _pending entry popped — while the
 # card is still visible (e.g. a WS reconnect dropped tool.complete). A late answer
