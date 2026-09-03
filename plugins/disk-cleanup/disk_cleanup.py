@@ -157,7 +157,6 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
     tracked = load_tracked()
     if any(item["path"] == str(path) for item in tracked):
         return False
-
     tracked.append({"path": str(path), "timestamp": datetime.now(timezone.utc).isoformat(),
                     "category": category, "size": size})
     save_tracked(tracked)
@@ -310,7 +309,6 @@ def status() -> Dict[str, Any]:
         c = cats.setdefault(item["category"], {"count": 0, "size": 0})
         c["count"] += 1
         c["size"] += item["size"]
-
     existing = sorted(((i["path"], i["size"], i["category"]) for i in tracked
                        if Path(i["path"]).exists()), key=lambda x: x[1], reverse=True)
     return {"categories": cats, "top10": existing[:10], "total_tracked": len(tracked)}
