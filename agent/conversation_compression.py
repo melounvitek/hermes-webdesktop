@@ -3667,9 +3667,7 @@ def compress_context(
             agent, compressed, messages, messages_before_compression, attempt_generation=attempt.generation,
             attempt_started_at=attempt.started_at,
         ):
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            lease.release()
-            return messages, _existing_sp
+            return messages, _existing_system_prompt(agent, system_message)
 
         if commit_fence is not None:
             _commit_fence_entered = commit_fence.begin_commit(_hard_cancel_event)
@@ -3689,7 +3687,6 @@ def compress_context(
                     agent, attempt.started_at,
                     STALL_INTERRUPTED_FAILURE_CLASS if _stall_backoff else "commit_fence_cancelled",
                 )
-                lease.release()
                 return messages, _existing_sp
 
         _warn_summary_or_aux_fallback(agent)
@@ -3706,7 +3703,6 @@ def compress_context(
             attempt=attempt,
         )
         if commit.refused_prompt is not None:
-            lease.release()
             return messages, commit.refused_prompt
         compressed = commit.compressed
         split_status = commit.split_status
