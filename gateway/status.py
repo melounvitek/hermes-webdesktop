@@ -1279,7 +1279,7 @@ def write_takeover_marker(
         marker_home = _canonical_hermes_home(target_home or _get_process_hermes_home())
         if target_start_time is _UNSET:
             target_start_time = _get_process_start_time(target_pid)
-        _write_json_file(_get_takeover_marker_path(marker_home), {
+        return _write_marker(_get_takeover_marker_path(marker_home), {
             "target_pid": target_pid,
             "target_start_time": target_start_time,
             "target_hermes_home": str(marker_home),
@@ -1287,6 +1287,14 @@ def write_takeover_marker(
             "replacer_hermes_home": str(_canonical_hermes_home(_get_process_hermes_home())),
             "written_at": _utc_now_iso(),
         })
+    except OSError:
+        return False
+
+
+def _write_marker(path: Path, record: dict[str, Any]) -> bool:
+    """Atomically write a marker record; False (never raise) on OS failure."""
+    try:
+        _write_json_file(path, record)
         return True
     except OSError:
         return False
@@ -1505,16 +1513,12 @@ def write_planned_stop_marker(target_pid: int) -> bool:
     Unexpected SIGTERM exits non-zero so service managers revive the gateway; the CLI writes
     this marker first so a deliberate stop exits cleanly.
     """
-    try:
-        _write_json_file(_get_planned_stop_marker_path(), {
-            "target_pid": target_pid,
-            "target_start_time": _get_process_start_time(target_pid),
-            "stopper_pid": os.getpid(),
-            "written_at": _utc_now_iso(),
-        })
-        return True
-    except OSError:
-        return False
+    return _write_marker(_get_planned_stop_marker_path(), {
+        "target_pid": target_pid,
+        "target_start_time": _get_process_start_time(target_pid),
+        "stopper_pid": os.getpid(),
+        "written_at": _utc_now_iso(),
+    })
 
 
 def consume_planned_stop_marker_for_self() -> bool:
@@ -1532,10 +1536,7 @@ def planned_stop_marker_targets_self() -> bool:
     up; markers naming another PID are left alone and report False.
     """
     parsed = _read_live_pid_marker(_get_planned_stop_marker_path(), _PLANNED_STOP_MARKER_TTL_S)
-    if parsed is None:
-        return False
-    _, target_pid, target_start_time = parsed
-    return _pid_marker_names_self(target_pid, target_start_time)
+    return parsed is not None and _pid_marker_names_self(parsed[1], parsed[2])
 
 
 def get_running_pid(
