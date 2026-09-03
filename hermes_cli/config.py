@@ -463,10 +463,9 @@ def get_container_exec_info() -> Optional[dict]:
     if is_container():
         return None
 
-    container_mode_file = get_hermes_home() / ".container-mode"
     try:
         info = {}
-        with open(container_mode_file, "r", encoding="utf-8") as f:
+        with open(get_hermes_home() / ".container-mode", "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
@@ -543,10 +542,9 @@ def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
         return None, None
 
     def _env_int(name: str) -> Optional[int]:
-        raw = os.environ.get(name, "").strip()
         try:
-            return int(raw) if raw else None
-        except ValueError:
+            return int(os.environ.get(name, "").strip() or None)
+        except (TypeError, ValueError):
             return None
 
     return _env_int("HERMES_UID"), _env_int("HERMES_GID")
@@ -737,16 +735,15 @@ def _split_key_path(key: str) -> list[str]:
     i = 0
     while i < len(key):
         ch = key[i]
-        if ch == "\\" and i + 1 < len(key) and key[i + 1] == ".":
+        if ch == "\\" and key[i + 1:i + 2] == ".":
             current.append(".")
             i += 2
             continue
         if ch == ".":
             parts.append("".join(current))
             current = []
-            i += 1
-            continue
-        current.append(ch)
+        else:
+            current.append(ch)
         i += 1
     parts.append("".join(current))
     return parts
@@ -1239,7 +1236,7 @@ def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:
     try:
         issues = validate_config_structure(config)
     except Exception:
-        return
+        issues = []
     if not issues:
         return
 
@@ -2370,13 +2367,9 @@ def _parse_env_value(raw_value: str) -> str:
         parsed: list[str] = []
         i = 0
         while i < len(quoted):
-            ch = quoted[i]
-            if ch == "\\" and i + 1 < len(quoted) and quoted[i + 1] in {'"', "\\"}:
-                parsed.append(quoted[i + 1])
-                i += 2
-                continue
-            parsed.append(ch)
-            i += 1
+            escaped = quoted[i] == "\\" and quoted[i + 1:i + 2] in ('"', "\\")
+            parsed.append(quoted[i + 1] if escaped else quoted[i])
+            i += 2 if escaped else 1
         return "".join(parsed)
     if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1]
@@ -2883,13 +2876,11 @@ def _show_compression_section(config: Dict[str, Any]) -> None:
         return
     print(f"  Threshold:    {compression.get('threshold', 0.50) * 100:.0f}%")
     tt = compression.get('threshold_tokens')
-    if tt is not None:
-        try:
-            tt = int(tt)
-            if tt > 0:
-                print(f"  Token cap:    {tt:,} tokens (takes lower of ratio vs absolute)")
-        except (TypeError, ValueError):
-            pass
+    try:
+        if tt is not None and int(tt) > 0:
+            print(f"  Token cap:    {int(tt):,} tokens (takes lower of ratio vs absolute)")
+    except (TypeError, ValueError):
+        pass
     print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
     print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
     print(f"  Protect first: {compression.get('protect_first_n', 3)} non-system head messages")
@@ -2901,8 +2892,7 @@ def _show_compression_section(config: Dict[str, Any]) -> None:
 
 
 def _show_aux_overrides(config: Dict[str, Any]) -> None:
-    auxiliary = config.get('auxiliary', {})
-    aux_tasks = {"Vision": auxiliary.get('vision', {})}
+    aux_tasks = {"Vision": config.get('auxiliary', {}).get('vision', {})}
     overrides = {
         label: (t.get('provider', 'auto'), t.get('model', ''))
         for label, t in aux_tasks.items()
@@ -2924,11 +2914,10 @@ def _show_skill_settings() -> None:
             resolved = resolve_skill_config_values(skill_vars)
             _section("Skill Settings")
             for var in skill_vars:
-                key = var["key"]
-                value = resolved.get(key, "")
-                skill_name = var.get("skill", "")
+                value = resolved.get(var["key"], "")
                 display_val = str(value) if value else color("(not set)", Colors.DIM)
-                print(f"  {key:<20s} {display_val}  {color(f'[{skill_name}]', Colors.DIM)}")
+                skill_tag = color(f"[{var.get('skill', '')}]", Colors.DIM)
+                print(f"  {var['key']:<20s} {display_val}  {skill_tag}")
     except Exception:
         pass
 
@@ -2990,13 +2979,12 @@ def edit_config():
         save_config(DEFAULT_CONFIG, strip_defaults=False)
         print(f"Created {config_path}")
 
-    editor = os.getenv('EDITOR') or os.getenv('VISUAL')
-    if not editor:
-        # Windows lands on notepad even without Git Bash/nano; POSIX prefers nano/vim, which
-        # headless servers are more likely to have.
-        candidates = (['notepad', 'code', 'vim', 'vi', 'nano'] if sys.platform == "win32"
-                      else ['nano', 'vim', 'vi', 'code', 'notepad'])
-        editor = next((cmd for cmd in candidates if shutil.which(cmd)), None)
+    # Windows lands on notepad even without Git Bash/nano; POSIX prefers nano/vim, which headless
+    # servers are more likely to have.
+    candidates = (['notepad', 'code', 'vim', 'vi', 'nano'] if sys.platform == "win32"
+                  else ['nano', 'vim', 'vi', 'code', 'notepad'])
+    editor = os.getenv('EDITOR') or os.getenv('VISUAL') or next(
+        (cmd for cmd in candidates if shutil.which(cmd)), None)
     if not editor:
         print("No editor found. Config file is at:")
         print(f"  {config_path}")
@@ -3648,42 +3636,38 @@ def _run_write_command(fn, *args) -> None:
         _exit_invalid(f"✗ {exc}")
 
 
+_USAGE_GET = ("Usage: hermes config get <key> [--json]", [
+    "hermes config get model", "hermes config get terminal.backend",
+    "hermes config get skills.config --json"], None)
+_USAGE_SET = ("Usage: hermes config set [--force] <key> <value>", [
+    "hermes config set model anthropic/claude-sonnet-4", "hermes config set terminal.backend docker",
+    "hermes config set OPENROUTER_API_KEY sk-or-..."], [
+    "", "  --force: skip the unknown-key notice for unrecognized keys,",
+    "           and allow a scalar to replace a whole mapping section"])
+_USAGE_UNSET = ("Usage: hermes config unset <key>", [
+    "hermes config unset model", "hermes config unset terminal.backend",
+    "hermes config unset OPENROUTER_API_KEY"], None)
+
+
 def _cmd_config_get(args):
     key = getattr(args, 'key', None)
     if not key:
-        _usage_exit("Usage: hermes config get <key> [--json]", [
-            "hermes config get model",
-            "hermes config get terminal.backend",
-            "hermes config get skills.config --json",
-        ])
+        _usage_exit(*_USAGE_GET)
     get_config_value(key, as_json=getattr(args, 'json', False))
 
 
 def _cmd_config_set(args):
     key = getattr(args, 'key', None)
     value = getattr(args, 'value', None)
-    force = bool(getattr(args, 'force', False))
     if not key or value is None:
-        _usage_exit("Usage: hermes config set [--force] <key> <value>", [
-            "hermes config set model anthropic/claude-sonnet-4",
-            "hermes config set terminal.backend docker",
-            "hermes config set OPENROUTER_API_KEY sk-or-...",
-        ], [
-            "",
-            "  --force: skip the unknown-key notice for unrecognized keys,",
-            "           and allow a scalar to replace a whole mapping section",
-        ])
-    _run_write_command(set_config_value, key, value, force)
+        _usage_exit(*_USAGE_SET)
+    _run_write_command(set_config_value, key, value, bool(getattr(args, 'force', False)))
 
 
 def _cmd_config_unset(args):
     key = getattr(args, 'key', None)
     if not key:
-        _usage_exit("Usage: hermes config unset <key>", [
-            "hermes config unset model",
-            "hermes config unset terminal.backend",
-            "hermes config unset OPENROUTER_API_KEY",
-        ])
+        _usage_exit(*_USAGE_UNSET)
     _run_write_command(unset_config_value, key)
 
 
@@ -3718,16 +3702,14 @@ def _cmd_config_migrate(args):
 
     required_missing = [v for v in missing_env if v.get("is_required")]
     optional_missing = [v for v in missing_env if not v.get("is_required") and not v.get("advanced")]
-
-    if required_missing:
-        print(f"\n  ⚠️  {len(required_missing)} required API key(s) missing:")
-        for var in required_missing:
-            print(f"     • {var['name']}")
-
-    if optional_missing:
-        print(f"\n  ℹ️  {len(optional_missing)} optional API key(s) not configured:")
-        for var in optional_missing:
-            print(f"     • {var['name']}{_tools_suffix(var, ' (enables: {})')}")
+    for heading, group, suffix in (
+        ("⚠️  {} required API key(s) missing:", required_missing, ""),
+        ("ℹ️  {} optional API key(s) not configured:", optional_missing, " (enables: {})"),
+    ):
+        if group:
+            print(f"\n  {heading.format(len(group))}")
+            for var in group:
+                print(f"     • {var['name']}{_tools_suffix(var, suffix) if suffix else ''}")
 
     print()
     results = migrate_config(interactive=True, quiet=False)
@@ -3754,21 +3736,16 @@ def _cmd_config_check(args):
     else:
         print(color(f"  Config version: {current_ver} → {latest_ver} (update available)", Colors.YELLOW))
 
-    print()
-    print(color("  Required:", Colors.BOLD))
-    for var_name in REQUIRED_ENV_VARS:
-        if get_env_value(var_name):
-            print(f"    ✓ {var_name}")
-        else:
-            print(color(f"    ✗ {var_name} (missing)", Colors.RED))
-
-    print()
-    print(color("  Optional:", Colors.BOLD))
-    for var_name, info in OPTIONAL_ENV_VARS.items():
-        if get_env_value(var_name):
-            print(f"    ✓ {var_name}")
-        else:
-            print(color(f"    ○ {var_name}{_tools_suffix(info, ' → {}')}", Colors.DIM))
+    groups = (
+        ("Required", REQUIRED_ENV_VARS, lambda n, i: color(f"    ✗ {n} (missing)", Colors.RED)),
+        ("Optional", OPTIONAL_ENV_VARS,
+         lambda n, i: color(f"    ○ {n}{_tools_suffix(i, ' → {}')}", Colors.DIM)),
+    )
+    for title, table, missing_line in groups:
+        print()
+        print(color(f"  {title}:", Colors.BOLD))
+        for var_name, info in table.items():
+            print(f"    ✓ {var_name}" if get_env_value(var_name) else missing_line(var_name, info))
 
     missing_config = get_missing_config_fields()
     if missing_config:
@@ -3827,12 +3804,12 @@ def _inject_profile_env_vars() -> None:
     try:
         from providers import list_providers
         for _pp in list_providers():
-            if _pp.auth_type not in {"api_key",}:
+            if _pp.auth_type != "api_key":
                 continue
             for _var in _pp.env_vars:
                 if _var in OPTIONAL_ENV_VARS:
                     continue
-                _is_key = not _var.endswith("_BASE_URL") and not _var.endswith("_URL")
+                _is_key = not _var.endswith(("_BASE_URL", "_URL"))
                 _label = _pp.display_name or _pp.name
                 OPTIONAL_ENV_VARS[_var] = {
                     "description": f"{_label} {'API key' if _is_key else 'base URL override'}",
@@ -3855,12 +3832,9 @@ def _platform_plugin_manifests():
     if not platforms_dir.is_dir():
         return
     for child in platforms_dir.iterdir():
-        if not child.is_dir():
-            continue
-        manifest_path = child / "plugin.yaml"
-        if not manifest_path.exists():
-            manifest_path = child / "plugin.yml"
-        if not manifest_path.exists():
+        manifest_path = next(
+            (p for p in (child / "plugin.yaml", child / "plugin.yml") if child.is_dir() and p.exists()), None)
+        if manifest_path is None:
             continue
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
@@ -3882,15 +3856,9 @@ def _inject_platform_plugin_env_vars() -> None:
         for dir_name, manifest in _platform_plugin_manifests():
             label = manifest.get("label") or manifest.get("name") or dir_name
             for entry in [*(manifest.get("requires_env") or []), *(manifest.get("optional_env") or [])]:
-                if isinstance(entry, str):
-                    name = entry
-                    meta: dict = {}
-                elif isinstance(entry, dict) and entry.get("name"):
-                    name = entry["name"]
-                    meta = entry
-                else:
-                    continue
-                if name in OPTIONAL_ENV_VARS:
+                meta = {"name": entry} if isinstance(entry, str) else entry if isinstance(entry, dict) else {}
+                name = meta.get("name")
+                if not name or name in OPTIONAL_ENV_VARS:
                     continue  # hardcoded entry wins (back-compat)
                 # *TOKEN / *SECRET / *KEY / *PASSWORD / *JSON are password fields unless overridden.
                 is_secret = bool(meta.get("password") or meta.get("secret"))
