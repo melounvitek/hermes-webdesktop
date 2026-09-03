@@ -1,23 +1,12 @@
 """Per-mutation skill audit ledger + single-edit rollback.
 
-Every skill mutation — any actor — appends one JSONL entry to
-``~/.hermes/skills/.curator_ledger.jsonl`` with before/after file manifests
-whose contents are stored content-addressed (sha256-deduped) under
-``~/.hermes/.curator_backups/blobs/``.
-
-Design decisions (Teknium-approved):
-  - JSONL, not the state DB: durable, human-greppable, survives DB resets.
-  - Covers ALL actors (``curator`` / ``agent`` / ``user``). The curator
-    invariant (never hard-delete autonomously) applies only to autonomous
-    actors; user deletes stay hard-delete but are ledgered and recoverable via
-    ``hermes curator rollback <entry-id>``.
-  - Per-file content-addressed blobs, not tarballs: a mutation usually touches
-    one file, and identical content dedupes to one blob.
-
-The ledger is TELEMETRY, NOT A GATE: a ledger failure must never block the
-mutation it describes — every public write path swallows and logs. The one
-exception is ``rollback_entry``, which FAILS CLOSED when its own pre-rollback
-safety capture fails (consistent with agent/curator_backup.py).
+Every skill mutation (any actor) appends one JSONL entry to
+``~/.hermes/skills/.curator_ledger.jsonl`` with before/after file manifests whose
+contents are stored content-addressed (sha256-deduped) under
+``~/.hermes/.curator_backups/blobs/``. JSONL, not the state DB: durable,
+human-greppable, survives DB resets. The ledger is TELEMETRY, NOT A GATE: every
+public write path swallows and logs. The one exception is ``rollback_entry``,
+which FAILS CLOSED when its own pre-rollback safety capture fails.
 """
 
 from __future__ import annotations
@@ -38,10 +27,6 @@ from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
-ACTOR_CURATOR = "curator"
-ACTOR_AGENT = "agent"
-ACTOR_USER = "user"
-
 # Snapshot-id shape used by agent.curator_backup (duplicated so the ledger can
 # read the newest skills.tar.gz without importing the backup stack).
 _BACKUP_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(-\d{2})?$")
@@ -51,13 +36,12 @@ _ARCHIVE_TS_SUFFIX_RE = re.compile(r"^(.+)-\d{14}$")
 # have re-homed support files out of the tree first, so a disk-only capture
 # would make rollback restore a hollow skill.
 _PACKAGE_RESTORE_ACTIONS = frozenset({"delete", "archive", "purge"})
-_VALID_ACTORS = {ACTOR_CURATOR, ACTOR_AGENT, ACTOR_USER}
+_VALID_ACTORS = {"curator", "agent", "user"}
 _NON_PACKAGE_TOPS = {".curator_backups", ".hub", ".archive"}
 
 # Explicit actor override: the CLI sets "user", the curator walk sets "curator".
 _actor_override: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "skill_ledger_actor", default=None
-)
+    "skill_ledger_actor", default=None)
 
 
 def set_ledger_actor(actor: Optional[str]) -> contextvars.Token:
@@ -76,17 +60,12 @@ def derive_actor() -> str:
         return override
     try:
         from tools.skill_provenance import is_background_review
-
         if is_background_review():
-            return ACTOR_CURATOR
+            return "curator"
     except Exception:
         pass
-    return ACTOR_AGENT
+    return "agent"
 
-
-# ---------------------------------------------------------------------------
-# Paths + config gate
-# ---------------------------------------------------------------------------
 
 def ledger_path() -> Path:
     return get_hermes_home() / "skills" / ".curator_ledger.jsonl"
@@ -101,11 +80,10 @@ def _skills_dir() -> Path:
 
 
 def ledger_enabled() -> bool:
-    """Config gate ``skills.ledger`` (default True). Lazy import so this
-    module stays importable without the CLI config layer."""
+    """Config gate ``skills.ledger`` (default True); lazy import keeps the module
+    importable without the CLI config layer."""
     try:
         from hermes_cli.config import cfg_get, load_config
-
         return bool(cfg_get(load_config(), "skills", "ledger", default=True))
     except Exception as e:  # pragma: no cover — best-effort config read
         logger.debug("skill_ledger: config read failed (%s); defaulting on", e)
@@ -133,9 +111,7 @@ def _is_within(root: Path, path: Path) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Blob store (content-addressed, deduped)
-# ---------------------------------------------------------------------------
+# --- Blob store (content-addressed, deduped) ---------------------------------
 
 def _store_blob(data: bytes) -> str:
     """Write *data* keyed by sha256 (existing blob left alone). Returns the hash."""
@@ -160,11 +136,7 @@ def read_blob(sha256: str) -> Optional[bytes]:
         return None
 
 
-def snapshot_paths(
-    root: Optional[Path],
-    *,
-    complete_package: bool = False,
-) -> List[Dict[str, str]]:
+def snapshot_paths(root: Optional[Path], *, complete_package: bool = False) -> List[Dict[str, str]]:
     """Capture {path, sha256} for every file under *root*, storing each as a blob.
 
     Empty when root is None/missing. Raises on I/O failure — callers decide
@@ -188,9 +160,7 @@ def snapshot_paths(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Package-completeness fill from the newest curator backup
-# ---------------------------------------------------------------------------
+# --- Package-completeness fill from the newest curator backup -----------------
 
 def _package_rel(root: Path) -> Optional[str]:
     """Relative POSIX path of a skill dir under ``skills/``; None when outside
@@ -215,10 +185,8 @@ def _skill_md_parent(items: Optional[List[Dict[str, str]]]) -> Optional[Path]:
 
 
 def package_prefixes(
-    root: Optional[Path] = None,
-    skill: Optional[str] = None,
-    before: Optional[List[Dict[str, str]]] = None,
-) -> List[str]:
+    root: Optional[Path] = None, skill: Optional[str] = None,
+    before: Optional[List[Dict[str, str]]] = None) -> List[str]:
     """Tar member prefixes that belong to this skill's package: its live
     location under ``skills/``, the package parent recorded in the before-state
     SKILL.md path (for rollback fills where *root* is gone), the bare skill
@@ -247,8 +215,7 @@ def _latest_skills_tarball() -> Optional[Path]:
     except OSError:
         return None
     candidates = [
-        child / "skills.tar.gz"
-        for child in children
+        child / "skills.tar.gz" for child in children
         if child.is_dir() and _BACKUP_ID_RE.match(child.name) and (child / "skills.tar.gz").is_file()
     ]
     if not candidates:
@@ -288,21 +255,17 @@ def _read_package_files_from_latest_backup(prefixes: List[str]) -> Dict[str, byt
 
 
 def fill_snapshot_from_curator_backup(
-    root: Optional[Path],
-    existing: Optional[List[Dict[str, str]]] = None,
-    *,
-    skill: Optional[str] = None,
-) -> List[Dict[str, str]]:
+    root: Optional[Path], existing: Optional[List[Dict[str, str]]] = None, *,
+    skill: Optional[str] = None) -> List[Dict[str, str]]:
     """Union missing skill-package files from the newest curator snapshot.
 
     Completeness fill, not a gate: failures are swallowed and *existing* is
-    returned unchanged; the backup only fills paths ABSENT from it.
-
-    Filled files are addressed where the rollback must restore them: under
-    *root* when known (for purge that is ``.archive/<name>/``, NOT the live
-    tree), else under the live skills dir. Backup members carry a leading
-    package-dir segment, stripped when *root* already names the package.
-    Every fill target must stay under ``skills/`` and HERMES_HOME.
+    returned unchanged; the backup only fills paths ABSENT from it. Filled files
+    are addressed where the rollback must restore them: under *root* when known
+    (for purge that is ``.archive/<name>/``, NOT the live tree), else under the
+    live skills dir. Backup members carry a leading package-dir segment, stripped
+    when *root* already names the package. Every fill target must stay under
+    ``skills/`` and HERMES_HOME.
     """
     out = list(existing or [])
     prefixes = package_prefixes(root, skill, out)
@@ -342,18 +305,12 @@ def fill_snapshot_from_curator_backup(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Append + read
-# ---------------------------------------------------------------------------
+# --- Append + read ------------------------------------------------------------
 
 def append_entry(
-    action: str,
-    skill: str,
-    before: Optional[List[Dict[str, str]]] = None,
-    after: Optional[List[Dict[str, str]]] = None,
-    actor: Optional[str] = None,
-    evidence: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    action: str, skill: str, before: Optional[List[Dict[str, str]]] = None,
+    after: Optional[List[Dict[str, str]]] = None, actor: Optional[str] = None,
+    evidence: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Append one ledger entry. Returns the entry id, or None when the
     ledger is disabled or the write failed (never raises)."""
     if not ledger_enabled():
@@ -367,8 +324,7 @@ def append_entry(
             "skill": skill,
             "evidence": evidence or {},
             "before": before or [],
-            "after": after or [],
-        }
+            "after": after or []}
         path = ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
@@ -380,14 +336,9 @@ def append_entry(
 
 
 def record_mutation(
-    action: str,
-    skill: str,
-    before_root: Optional[Path] = None,
-    before: Optional[List[Dict[str, str]]] = None,
-    after_root: Optional[Path] = None,
-    actor: Optional[str] = None,
-    evidence: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    action: str, skill: str, before_root: Optional[Path] = None,
+    before: Optional[List[Dict[str, str]]] = None, after_root: Optional[Path] = None,
+    actor: Optional[str] = None, evidence: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """One-stop hook for mutation call sites: capture after-state from
     *after_root* (pre-captured *before* list, or capture from *before_root*)
     and append. NEVER raises and never blocks the mutation.
@@ -404,18 +355,14 @@ def record_mutation(
             before = fill_snapshot_from_curator_backup(before_root, before, skill=skill)
         after = snapshot_paths(after_root)
         return append_entry(
-            action, skill, before=before, after=after, actor=actor, evidence=evidence
-        )
+            action, skill, before=before, after=after, actor=actor, evidence=evidence)
     except Exception as e:
         logger.warning("skill_ledger: record_mutation failed (%s) — mutation unaffected", e)
         return None
 
 
 def capture_before(
-    root: Optional[Path],
-    *,
-    complete_package: bool = False,
-    skill: Optional[str] = None,
+    root: Optional[Path], *, complete_package: bool = False, skill: Optional[str] = None,
 ) -> Optional[List[Dict[str, str]]]:
     """Best-effort pre-mutation capture; None on failure or when disabled
     (callers pass the result straight to record_mutation). Use
@@ -432,9 +379,7 @@ def capture_before(
         return None
 
 
-def list_entries(
-    skill: Optional[str] = None, limit: Optional[int] = None
-) -> List[Dict[str, Any]]:
+def list_entries(skill: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Read the ledger, newest first. Malformed lines are skipped."""
     path = ledger_path()
     if not path.exists():
@@ -468,9 +413,7 @@ def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
     return next((row for row in list_entries() if row.get("id") == entry_id), None)
 
 
-# ---------------------------------------------------------------------------
-# Single-edit rollback
-# ---------------------------------------------------------------------------
+# --- Single-edit rollback -----------------------------------------------------
 
 def _validate_entry_paths(entry: Dict[str, Any]) -> Optional[str]:
     """All paths in an entry must live under HERMES_HOME — a hand-edited
@@ -509,8 +452,7 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     # added, and the filled set is re-validated against HERMES_HOME.
     if entry.get("action") in _PACKAGE_RESTORE_ACTIONS:
         before = fill_snapshot_from_curator_backup(
-            _skill_md_parent(before), before, skill=str(entry.get("skill") or "") or None
-        )
+            _skill_md_parent(before), before, skill=str(entry.get("skill") or "") or None)
         path_err = _validate_entry_paths({**entry, "before": before, "after": after})
         if path_err:
             return False, f"refusing rollback: {path_err}"
@@ -518,10 +460,8 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     # Pre-check every blob we need so we never fail mid-restore.
     for item in before:
         if read_blob(str(item.get("sha256", ""))) is None:
-            return False, (
-                f"missing blob {item.get('sha256')} for {item.get('path')}; "
-                "rollback aborted, nothing was changed"
-            )
+            return False, (f"missing blob {item.get('sha256')} for {item.get('path')}; "
+                           "rollback aborted, nothing was changed")
 
     # Touched paths = union of before/after. Capture their CURRENT state as
     # the safety entry so the rollback itself is undoable. FAIL CLOSED.
@@ -533,22 +473,14 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
             if fp.is_file():
                 safety_before.append({"path": p, "sha256": _store_blob(fp.read_bytes())})
         safety_id = append_entry(
-            "pre-rollback",
-            entry.get("skill", "?"),
-            before=safety_before,
-            after=safety_before,
-            evidence={"rollback_target": entry_id},
-        )
+            "pre-rollback", entry.get("skill", "?"), before=safety_before, after=safety_before,
+            evidence={"rollback_target": entry_id})
     except Exception as e:
-        return False, (
-            f"pre-rollback safety capture failed ({e}); rollback aborted and "
-            "current skills were not changed"
-        )
+        return False, (f"pre-rollback safety capture failed ({e}); rollback aborted and "
+                       "current skills were not changed")
     if safety_id is None:
-        return False, (
-            "pre-rollback safety capture failed (ledger disabled or "
-            "unwritable); rollback aborted and current skills were not changed"
-        )
+        return False, ("pre-rollback safety capture failed (ledger disabled or "
+                       "unwritable); rollback aborted and current skills were not changed")
 
     # Restore: write every before-file, remove files the mutation created.
     before_paths = {str(i["path"]) for i in before}
@@ -573,14 +505,9 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
                 logger.warning("skill_ledger: could not remove %s during rollback: %s", p, e)
 
     append_entry(
-        "rollback",
-        entry.get("skill", "?"),
-        before=safety_before,
-        after=before,
-        evidence={"rollback_target": entry_id, "restored": restored, "removed": removed},
-    )
+        "rollback", entry.get("skill", "?"), before=safety_before, after=before,
+        evidence={"rollback_target": entry_id, "restored": restored, "removed": removed})
     return True, (
         f"rolled back entry {entry_id} ({entry.get('action')} on "
         f"'{entry.get('skill')}'): {restored} file(s) restored, {removed} removed. "
-        f"Safety entry {safety_id} captured the pre-rollback state."
-    )
+        f"Safety entry {safety_id} captured the pre-rollback state.")

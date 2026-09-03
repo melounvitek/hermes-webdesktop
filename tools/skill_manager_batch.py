@@ -19,9 +19,7 @@ _BATCH_MAX_OPS = 20
 
 def _norm_target(op) -> str:
     fp = (op.get("file_path") or "").strip()
-    if not fp:
-        return "SKILL.md"
-    return posixpath.normpath(fp.lstrip("/"))
+    return posixpath.normpath(fp.lstrip("/")) if fp else "SKILL.md"
 
 
 def _validate_batch_ops(operations, default_name, tool_error):
@@ -38,18 +36,15 @@ def _validate_batch_ops(operations, default_name, tool_error):
                 f"operations[{i}]: unknown action '{act}'. "
                 f"Batchable: {', '.join(sorted(_BATCH_OP_ACTIONS))}; "
                 "delete must be sole.",
-                success=False,
-            )
+                success=False)
         nm = op.get("name") or default_name
         if not nm:
             return None, tool_error(f"operations[{i}] needs a 'name' (the skill it targets).", success=False)
         names.append(nm)
         if act == "create" and nm in names[:-1]:
             return None, tool_error(
-                f"operations[{i}]: create for '{nm}' must precede that "
-                "skill's other ops.",
-                success=False,
-            )
+                f"operations[{i}]: create for '{nm}' must precede that skill's other ops.",
+                success=False)
         preflight = _background_review_preflight(act, nm)
         if preflight is not None:
             return None, json.dumps(preflight, ensure_ascii=False)
@@ -75,8 +70,7 @@ def _validate_batch_ops(operations, default_name, tool_error):
                 "op would silently discard its work. One destructive op "
                 "(write_file/remove_file/full rewrite) per file per batch; "
                 "put it first, or fold the change in. Patch chains are fine.",
-                success=False,
-            )
+                success=False)
         touched_files.add(key)
     return names, None
 
@@ -147,29 +141,20 @@ def _rollback(snapshots, find_skill):
         except Exception as exc:  # noqa: BLE001
             notes.append(
                 f"ROLLBACK FAILED for '{nm}' ({exc}); snapshot preserved at '{snap}'"
-                if snap is not None
-                else f"ROLLBACK FAILED for '{nm}' ({exc})"
-            )
+                if snap is not None else f"ROLLBACK FAILED for '{nm}' ({exc})")
     return ("; ".join(notes) if notes else "all touched skills rolled back"), bool(notes)
 
 
-def _skill_manage_batch(
-    operations,
-    default_name: str = None,
-    task_id: str = None,
-    session_id: str = None,
-) -> str:
+def _skill_manage_batch(operations, default_name: str = None, task_id: str = None,
+                        session_id: str = None) -> str:
     """Apply a sequence of operations atomically (memory-tool pattern).
 
-    Each op carries its own ``name`` and ``action``. Every touched skill is
-    snapshotted before any op runs; any failure rolls ALL touched skills back
-    (skills the batch created are removed).
-
-    Rules: ``delete`` only as the SOLE op (its recoverable-archive path doesn't
-    compose with rollback) and is routed to the single-op handler, preserving
-    absorbed_into/archive semantics; ``create`` must precede that skill's other
-    ops; the same-file clobber guard rejects silently-lost work.
-    ``default_name`` is the legacy top-level ``name`` fallback (staged replay).
+    Every touched skill is snapshotted before any op runs; any failure rolls ALL
+    touched skills back (skills the batch created are removed). ``delete`` is
+    only legal as the SOLE op (its recoverable-archive path doesn't compose with
+    rollback) and is routed to the single-op handler, preserving
+    absorbed_into/archive semantics. ``default_name`` is the legacy top-level
+    ``name`` fallback (staged replay).
     """
     from tools import skill_manager_tool as _smt
     from tools.registry import tool_error
@@ -183,19 +168,14 @@ def _skill_manage_batch(
             return tool_error(
                 "delete must be the SOLE op in its call — it doesn't "
                 "compose with other ops' rollback.",
-                success=False,
-            )
+                success=False)
         op = operations[0]
         nm = op.get("name") or default_name
         if not nm:
             return tool_error("operations[0] (delete) needs a 'name'.", success=False)
         return _smt.skill_manage(
-            action="delete",
-            name=nm,
-            absorbed_into=op.get("absorbed_into"),
-            task_id=task_id,
-            session_id=session_id,
-        )
+            action="delete", name=nm, absorbed_into=op.get("absorbed_into"),
+            task_id=task_id, session_id=session_id)
 
     names, err = _validate_batch_ops(operations, default_name, tool_error)
     if err is not None:
@@ -220,8 +200,7 @@ def _skill_manage_batch(
     try:
         for i, op in enumerate(operations):
             raw = _smt._skill_manage_from(
-                {**op, "name": names[i]}, task_id=task_id, session_id=session_id,
-            )
+                {**op, "name": names[i]}, task_id=task_id, session_id=session_id)
             try:
                 parsed = json.loads(raw)
             except Exception:  # noqa: BLE001
@@ -232,11 +211,9 @@ def _skill_manage_batch(
                     "success": False,
                     "error": (
                         f"operations[{i}] ({op['action']} on '{names[i]}') failed: "
-                        f"{parsed.get('error', 'unknown error')} — batch aborted, {note}."
-                    ),
+                        f"{parsed.get('error', 'unknown error')} — batch aborted, {note}."),
                     "failed_index": i,
-                    "completed_before_failure": i,
-                }
+                    "completed_before_failure": i}
                 # Carry the failing op's teaching payload (patch's file_preview /
                 # fuzzy-match hints) through — without it the model recovers blind.
                 for k, v in parsed.items():
@@ -244,21 +221,15 @@ def _skill_manage_batch(
                         fail.setdefault(k, v)
                 return json.dumps(fail, ensure_ascii=False)
             results.append({"name": names[i], "action": op["action"],
-                            "file_path": op.get("file_path"),
-                            "success": True})
+                            "file_path": op.get("file_path"), "success": True})
     finally:
         _smt._skill_gate_bypass.reset(token)
         if rollback_failed:
             # Keep the snapshots so the operator can still recover by hand.
-            logger.warning(
-                "skill_manage batch rollback failed, snapshots kept at %s",
-                snap_root,
-            )
+            logger.warning("skill_manage batch rollback failed, snapshots kept at %s", snap_root)
         else:
             shutil.rmtree(snap_root, ignore_errors=True)
 
     return json.dumps(
-        {"success": True, "operations_applied": len(results),
-         "results": results},
-        ensure_ascii=False,
-    )
+        {"success": True, "operations_applied": len(results), "results": results},
+        ensure_ascii=False)
