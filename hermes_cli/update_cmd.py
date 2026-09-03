@@ -744,6 +744,124 @@ def _repair_current_checkout(
     return current_checkout_complete
 
 
+def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
+    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on
+    the same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
+    # Diverged. A custom branch (local commits atop origin/<branch>) also can't ff,
+    # and reset --hard would discard that work: merge instead, stop on conflict.
+    _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
+    if _cur_branch and _cur_branch != branch:
+        print(
+            f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
+            f"merging origin/{branch} instead of resetting so local commits survive..."
+        )
+        # Best-effort safety tag as a recovery anchor.
+        subprocess.run(
+            git_cmd
+            + ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"],
+            cwd=_m().PROJECT_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        merge_result = _git_run(git_cmd, ["merge", "--no-edit", f"origin/{branch}"])
+        if merge_result.returncode != 0:
+            subprocess.run(
+                git_cmd + ["merge", "--abort"],
+                cwd=_m().PROJECT_ROOT,
+                capture_output=True,
+                check=False,
+            )
+            print(
+                "✗ Merge conflict between local commits and upstream — "
+                "update stopped, nothing was changed."
+            )
+            print(
+                f"  Resolve manually: cd {_m().PROJECT_ROOT} && "
+                f"git merge origin/{branch}"
+            )
+            print("  Then re-run the update. Local work is untouched.")
+            sys.exit(1)
+    else:
+        # Same branch: a true upstream force-push/rebase; local changes are stashed, so
+        # reset. Orphan divergence (no common ancestor: corrupted HEAD, re-init) would
+        # lose the whole local graph, so park pre_pull_sha behind a rescue ref first.
+        merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", f"origin/{branch}"])
+        has_common_ancestor = bool(
+            merge_base_result.returncode == 0
+            and merge_base_result.stdout.strip()
+        )
+        if not has_common_ancestor and pre_pull_sha:
+            from datetime import datetime as _dt, timezone
+
+            # SHA suffix so two updates in the same second get distinct refs.
+            rescue_ref = (
+                f"refs/hermes-update-backups/orphan-{branch}-"
+                f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+                f"-{pre_pull_sha[:12]}"
+            )
+            update_ref_result = _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha])
+            if update_ref_result.returncode == 0:
+                print(
+                    "  ⚠ Local history shares no common ancestor with "
+                    f"origin/{branch} (orphan divergence) — backed up "
+                    f"current HEAD to {rescue_ref} before resetting. "
+                    f"This backup expires after "
+                    f"{_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days."
+                )
+            else:
+                # update-ref failure is intentionally non-fatal, but never claim a backup exists.
+                print(
+                    "  ⚠ Local history shares no common ancestor with "
+                    f"origin/{branch} (orphan divergence) — attempted "
+                    f"to back up current HEAD to {rescue_ref} before "
+                    "resetting, but the backup write failed "
+                    f"(pre-reset SHA was {pre_pull_sha})."
+                )
+            _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
+        print(
+            "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+        )
+        reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
+        if reset_result.returncode != 0:
+            print(f"✗ Failed to reset to origin/{branch}.")
+            if reset_result.stderr.strip():
+                print(f"  {reset_result.stderr.strip()}")
+            print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
+            sys.exit(1)
+
+
+def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha) -> None:
+    """Post-pull syntax guard: roll back to *pre_pull_sha* and ``sys.exit(1)`` when a critical
+    file no longer compiles (a bad admin-merge past CI must not brick the CLI)."""
+    # Post-pull syntax guard: a bad commit past CI (admin-merge) is rolled back so the CLI stays bootable.
+    syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(_m().PROJECT_ROOT)
+    if not syntax_ok:
+        print()
+        print("✗ Pulled code has a syntax error in a critical file:")
+        print(f"  {failing_path}")
+        if syntax_error:
+            # py_compile errors can be multi-line; show enough for the SyntaxError text.
+            for line in str(syntax_error).splitlines()[:6]:
+                print(f"    {line}")
+        if pre_pull_sha:
+            print()
+            print(f"→ Rolling back to {pre_pull_sha[:10]}...")
+            rollback_result = _git_run(git_cmd, ["reset", "--hard", pre_pull_sha])
+            if rollback_result.returncode == 0:
+                print("  ✓ Rollback complete — your install is unchanged.")
+                print("  Try ``hermes update`` again later once a fix lands.")
+            else:
+                print("  ✗ Rollback failed. Recover manually with:")
+                print(f"    cd {_m().PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
+                if rollback_result.stderr.strip():
+                    print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
+        else:
+            print()
+            print("  Could not capture pre-pull SHA — recover manually with:")
+            print(f"    cd {_m().PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
+        sys.exit(1)
+
+
 def _pull_updates(
     git_cmd,
     branch,
@@ -765,115 +883,9 @@ def _pull_updates(
         # SECOND network fetch; identical in effect given the fresh tracking ref.
         pull_result = _git_run(git_cmd, ["merge", "--ff-only", f"origin/{branch}"])
         if pull_result.returncode != 0:
-            # Diverged. A custom branch (local commits atop origin/<branch>) also can't ff,
-            # and reset --hard would discard that work: merge instead, stop on conflict.
-            _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
-            if _cur_branch and _cur_branch != branch:
-                print(
-                    f"  ⚠ Checkout is on custom branch '{_cur_branch}' — "
-                    f"merging origin/{branch} instead of resetting so local commits survive..."
-                )
-                # Best-effort safety tag as a recovery anchor.
-                subprocess.run(
-                    git_cmd
-                    + ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"],
-                    cwd=_m().PROJECT_ROOT,
-                    capture_output=True,
-                    check=False,
-                )
-                merge_result = _git_run(git_cmd, ["merge", "--no-edit", f"origin/{branch}"])
-                if merge_result.returncode != 0:
-                    subprocess.run(
-                        git_cmd + ["merge", "--abort"],
-                        cwd=_m().PROJECT_ROOT,
-                        capture_output=True,
-                        check=False,
-                    )
-                    print(
-                        "✗ Merge conflict between local commits and upstream — "
-                        "update stopped, nothing was changed."
-                    )
-                    print(
-                        f"  Resolve manually: cd {_m().PROJECT_ROOT} && "
-                        f"git merge origin/{branch}"
-                    )
-                    print("  Then re-run the update. Local work is untouched.")
-                    sys.exit(1)
-            else:
-                # Same branch: a true upstream force-push/rebase; local changes are stashed, so
-                # reset. Orphan divergence (no common ancestor: corrupted HEAD, re-init) would
-                # lose the whole local graph, so park pre_pull_sha behind a rescue ref first.
-                merge_base_result = _git_run(git_cmd, ["merge-base", "HEAD", f"origin/{branch}"])
-                has_common_ancestor = bool(
-                    merge_base_result.returncode == 0
-                    and merge_base_result.stdout.strip()
-                )
-                if not has_common_ancestor and pre_pull_sha:
-                    from datetime import datetime as _dt, timezone
+            _reconcile_diverged_checkout(git_cmd, branch, pre_pull_sha)
 
-                    # SHA suffix so two updates in the same second get distinct refs.
-                    rescue_ref = (
-                        f"refs/hermes-update-backups/orphan-{branch}-"
-                        f"{_dt.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-                        f"-{pre_pull_sha[:12]}"
-                    )
-                    update_ref_result = _git_run(git_cmd, ["update-ref", rescue_ref, pre_pull_sha])
-                    if update_ref_result.returncode == 0:
-                        print(
-                            "  ⚠ Local history shares no common ancestor with "
-                            f"origin/{branch} (orphan divergence) — backed up "
-                            f"current HEAD to {rescue_ref} before resetting. "
-                            f"This backup expires after "
-                            f"{_ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days."
-                        )
-                    else:
-                        # update-ref failure is intentionally non-fatal, but never claim a backup exists.
-                        print(
-                            "  ⚠ Local history shares no common ancestor with "
-                            f"origin/{branch} (orphan divergence) — attempted "
-                            f"to back up current HEAD to {rescue_ref} before "
-                            "resetting, but the backup write failed "
-                            f"(pre-reset SHA was {pre_pull_sha})."
-                        )
-                    _prune_orphan_rescue_refs(git_cmd, _m().PROJECT_ROOT, branch)
-                print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
-                )
-                reset_result = _git_run(git_cmd, ["reset", "--hard", f"origin/{branch}"])
-                if reset_result.returncode != 0:
-                    print(f"✗ Failed to reset to origin/{branch}.")
-                    if reset_result.stderr.strip():
-                        print(f"  {reset_result.stderr.strip()}")
-                    print(f"  Try manually: git fetch origin && git reset --hard origin/{branch}")
-                    sys.exit(1)
-
-        # Post-pull syntax guard: a bad commit past CI (admin-merge) is rolled back so the CLI stays bootable.
-        syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(_m().PROJECT_ROOT)
-        if not syntax_ok:
-            print()
-            print("✗ Pulled code has a syntax error in a critical file:")
-            print(f"  {failing_path}")
-            if syntax_error:
-                # py_compile errors can be multi-line; show enough for the SyntaxError text.
-                for line in str(syntax_error).splitlines()[:6]:
-                    print(f"    {line}")
-            if pre_pull_sha:
-                print()
-                print(f"→ Rolling back to {pre_pull_sha[:10]}...")
-                rollback_result = _git_run(git_cmd, ["reset", "--hard", pre_pull_sha])
-                if rollback_result.returncode == 0:
-                    print("  ✓ Rollback complete — your install is unchanged.")
-                    print("  Try ``hermes update`` again later once a fix lands.")
-                else:
-                    print("  ✗ Rollback failed. Recover manually with:")
-                    print(f"    cd {_m().PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
-                    if rollback_result.stderr.strip():
-                        print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
-            else:
-                print()
-                print("  Could not capture pre-pull SHA — recover manually with:")
-                print(f"    cd {_m().PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
-            sys.exit(1)
+        _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha)
 
         update_succeeded = True
     finally:
