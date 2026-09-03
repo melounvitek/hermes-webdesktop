@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -123,10 +124,8 @@ def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
                 return f.read(), ".m4a"
         finally:
             for p in (src_path, dst_path):
-                try:
+                with suppress(OSError):
                     os.unlink(p)
-                except OSError:
-                    pass
     except subprocess.TimeoutExpired:
         logger.warning("Signal: AAC→M4A remux timed out (>10s)")
         return None
@@ -151,7 +150,7 @@ def _is_signal_service_id(value: str) -> bool:
     """Return True if *value* already looks like a Signal service identifier."""
     if not value:
         return False
-    if value.startswith("PNI:") or value.startswith("u:"):
+    if value.startswith(("PNI:", "u:")):
         return True
     try:
         uuid.UUID(value)
@@ -197,10 +196,9 @@ class SignalAdapter(BasePlatformAdapter):
         self.http_url = extra.get("http_url", "http://127.0.0.1:8080").rstrip("/")
         self.account = extra.get("account", "")
         self.ignore_stories = extra.get("ignore_stories", True)
-        # Allowlists are per-profile: scoped reads so secondary profiles don't inherit the
-        # default profile's list. Group policy derives from the group allowlist's presence.
+        # Allowlists are per-profile (scoped reads); group policy derives from the group
+        # allowlist's presence. Mention filter: only respond in groups when @mentioned.
         self.group_allow_from = set(_parse_comma_list(_sig_secret("SIGNAL_GROUP_ALLOWED_USERS", "")))
-        # Mention filter — only respond in groups when the bot account is @mentioned.
         _rm_cfg = extra.get("require_mention")
         self.require_mention = (
             bool(_rm_cfg) if _rm_cfg is not None
@@ -220,15 +218,13 @@ class SignalAdapter(BasePlatformAdapter):
         self._last_sse_activity = 0.0
         self._sse_response: Optional[httpx.Response] = None
         self._account_normalized = self.account.strip()
-        # Recently sent timestamps filter echo-backs (Note to Self / linked-device group
-        # sync-sents). LRU + TTL so a still-pending echo in a chatty group isn't evicted
-        # just because many outbounds happened; the cap only guards runaway producers.
+        # Recently sent timestamps filter echo-backs (Note to Self / linked-device sync-sents).
+        # LRU + TTL so a pending echo in a chatty group isn't evicted by many outbounds.
         self._recent_sent_timestamps: "OrderedDict[int, float]" = OrderedDict()
         self._max_recent_timestamps = 512
         self._recent_sent_ttl_seconds = 300.0
-        # Separate FIFO cache of outbound timestamps: Signal quote.id is the quoted
-        # message's timestamp, so replies to this bot are recognised even after the
-        # self-sync echo above was consumed.
+        # Separate FIFO of outbound timestamps: Signal quote.id is the quoted message's
+        # timestamp, so replies to this bot are recognised after the echo was consumed.
         self._sent_message_timestamps: "OrderedDict[str, None]" = OrderedDict()
         self._max_sent_message_timestamps = 500
         # Best-effort number↔ACI/PNI UUID mapping so outbound sends can upgrade a
@@ -285,10 +281,8 @@ class SignalAdapter(BasePlatformAdapter):
     async def _cancel_task(task: Optional[asyncio.Task]) -> None:
         if task:
             task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
     async def disconnect(self) -> None:
         """Stop SSE listener and clean up."""
@@ -384,21 +378,17 @@ class SignalAdapter(BasePlatformAdapter):
     def _force_reconnect(self) -> None:
         """Force SSE reconnection by closing the current response."""
         if self._sse_response and not self._sse_response.is_stream_consumed:
-            try:
+            with suppress(Exception):
                 task = asyncio.create_task(self._sse_response.aclose())
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
-            except Exception:
-                pass
             self._sse_response = None
 
     def _unwrap_sync_message(self, envelope_data: dict) -> Optional[dict]:
         """Promote a genuine "Note to Self" / group sync-sent to a dataMessage envelope;
         None for other sync events (read receipts, typing, our own outbound echoes)."""
         sync_msg = envelope_data.get("syncMessage")
-        if not sync_msg or not isinstance(sync_msg, dict):
-            return None
-        sent_msg = sync_msg.get("sentMessage")
+        sent_msg = sync_msg.get("sentMessage") if isinstance(sync_msg, dict) else None
         if not sent_msg or not isinstance(sent_msg, dict):
             return None
         dest = sent_msg.get("destinationNumber") or sent_msg.get("destination")
@@ -438,8 +428,7 @@ class SignalAdapter(BasePlatformAdapter):
         media_urls: List[str] = []
         media_types: List[str] = []
         for att in attachments_data:
-            att_id = att.get("id")
-            att_size = att.get("size", 0)
+            att_id, att_size = att.get("id"), att.get("size", 0)
             if not att_id:
                 continue
             if att_size > SIGNAL_MAX_ATTACHMENT_SIZE:
@@ -503,9 +492,8 @@ class SignalAdapter(BasePlatformAdapter):
             mentioned, text = self._apply_group_mention_rules(text, data_message)
             if not mentioned:
                 return
-        # Signal's quote.id is the quoted message's timestamp; quote.author the quoted
-        # sender. Preserve both so the gateway can tell the agent which message the
-        # user replied to.
+        # quote.id is the quoted message's timestamp, quote.author the quoted sender —
+        # both are preserved so the gateway can tell the agent which message was replied to.
         quote_data = data_message.get("quote") or {}
         reply_to_id = str(quote_data.get("id")) if quote_data.get("id") else None
         reply_to_author = self._extract_quote_author(quote_data)
@@ -526,9 +514,8 @@ class SignalAdapter(BasePlatformAdapter):
             user_name=sender_name or sender, user_id_alt=sender_uuid if sender_uuid else None,
             chat_id_alt=group_id if is_group else None,
         )
-        # First matching MIME prefix wins; everything else (application/*, text/*,
-        # unknown) is a DOCUMENT so run.py's document-context injection surfaces the
-        # cached path to the agent.
+        # First matching MIME prefix wins; everything else (application/*, text/*, unknown)
+        # is a DOCUMENT so run.py's document-context injection surfaces the cached path.
         msg_type = MessageType.TEXT
         if media_types:
             msg_type = next(
@@ -537,12 +524,9 @@ class SignalAdapter(BasePlatformAdapter):
         ts_ms = envelope_data.get("timestamp", 0)  # milliseconds since epoch
         timestamp = datetime.now(tz=timezone.utc)
         if ts_ms:
-            try:
+            with suppress(ValueError, OSError):
                 timestamp = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-            except (ValueError, OSError):
-                pass
-        # raw_message keeps sender + timestamp_ms so the processing hooks can build
-        # sendReaction targets.
+        # raw_message keeps sender + timestamp_ms so processing hooks can build sendReaction targets.
         event = MessageEvent(
             source=source, text=text or "", message_type=msg_type, media_urls=media_urls,
             media_types=media_types, timestamp=timestamp,
@@ -600,10 +584,9 @@ class SignalAdapter(BasePlatformAdapter):
         if not isinstance(contact, dict):
             return None
         service_id = contact.get("uuid") or contact.get("serviceId")
-        if not service_id:
-            profile = contact.get("profile")
-            if isinstance(profile, dict):
-                service_id = profile.get("serviceId") or profile.get("uuid")
+        profile = contact.get("profile")
+        if not service_id and isinstance(profile, dict):
+            service_id = profile.get("serviceId") or profile.get("uuid")
         if service_id and _is_signal_service_id(service_id) and (
             contact.get("number") == phone_number or contact.get("recipient") == phone_number):
             return service_id
@@ -611,11 +594,7 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _resolve_recipient(self, chat_id: str) -> str:
         """Return the preferred Signal recipient identifier for a direct chat."""
-        if (
-            not chat_id
-            or chat_id.startswith("group:")
-            or _is_signal_service_id(chat_id)
-            or not _looks_like_e164_number(chat_id)):
+        if not chat_id or chat_id.startswith("group:") or not _looks_like_e164_number(chat_id):
             return chat_id
         cached = self._recipient_uuid_by_number.get(chat_id)
         if cached:
@@ -654,20 +633,13 @@ class SignalAdapter(BasePlatformAdapter):
                 return None, ""
         raw_data = base64.b64decode(result)
         ext = _guess_extension(raw_data)
-        # Android voice notes are raw ADTS AAC, which Whisper-style STT rejects; remux
-        # losslessly to .m4a. If ffmpeg is absent the raw file is cached as-is (there is
-        # no downstream sniff-and-remux fallback).
+        # Android voice notes are raw ADTS AAC, which Whisper-style STT rejects; remux losslessly
+        # to .m4a. Without ffmpeg the raw file is cached as-is (no downstream remux fallback).
         if ext == ".aac":
-            remuxed: Optional[Tuple[bytes, str]] = await asyncio.to_thread(_remux_aac_to_m4a, raw_data)
-            if remuxed is not None:
-                raw_data, ext = remuxed
-        if _is_image_ext(ext):
-            path = cache_image_from_bytes(raw_data, ext)
-        elif _is_audio_ext(ext):
-            path = cache_audio_from_bytes(raw_data, ext)
-        else:
-            path = cache_document_from_bytes(raw_data, ext)
-        return path, ext
+            raw_data, ext = (await asyncio.to_thread(_remux_aac_to_m4a, raw_data)) or (raw_data, ext)
+        cache = (cache_image_from_bytes if _is_image_ext(ext)
+                 else cache_audio_from_bytes if _is_audio_ext(ext) else cache_document_from_bytes)
+        return cache(raw_data, ext), ext
 
     async def _rpc(
         self, method: str, params: dict, rpc_id: str = None, *,
@@ -697,13 +669,10 @@ class SignalAdapter(BasePlatformAdapter):
                 return None
             result = data.get("result")
             if isinstance(result, dict) and raise_on_rate_limit:
-                results = result.get("results")
-                if isinstance(results, list):
-                    for r in results:
-                        if isinstance(r, dict) and r.get("type") == "RATE_LIMIT_FAILURE":
-                            raise SignalRateLimitError(
-                                "Rate limit exceeded for recipient", retry_after=r.get("retryAfterSeconds")
-                            )
+                for r in result.get("results") if isinstance(result.get("results"), list) else ():
+                    if isinstance(r, dict) and r.get("type") == "RATE_LIMIT_FAILURE":
+                        raise SignalRateLimitError(
+                            "Rate limit exceeded for recipient", retry_after=r.get("retryAfterSeconds"))
             return result
         except SignalRateLimitError:
             raise
@@ -725,15 +694,14 @@ class SignalAdapter(BasePlatformAdapter):
         if not result or not isinstance(result, dict):
             return True, None
         results = result.get("results")
-        if isinstance(results, list):
-            for r in results:
-                if not isinstance(r, dict):
-                    continue
-                rtype = r.get("type")
-                if rtype and rtype != "SUCCESS":
-                    return False, str(rtype)
-                if "success" in r and not r.get("success"):
-                    return False, str(r.get("failure") or "Recipient delivery failed")
+        for r in results if isinstance(results, list) else ():
+            if not isinstance(r, dict):
+                continue
+            rtype = r.get("type")
+            if rtype and rtype != "SUCCESS":
+                return False, str(rtype)
+            if "success" in r and not r.get("success"):
+                return False, str(r.get("failure") or "Recipient delivery failed")
         return True, None
 
     @staticmethod
@@ -748,8 +716,7 @@ class SignalAdapter(BasePlatformAdapter):
         for style_string in text_styles:
             try:
                 start_s, length_s, style_type = style_string.split(":", 2)
-                style_start = int(start_s)
-                style_end = style_start + int(length_s)
+                style_start, style_end = int(start_s), int(start_s) + int(length_s)
             except (TypeError, ValueError):
                 logger.debug("[Signal] Ignoring malformed textStyle range: %r", style_string)
                 continue
@@ -786,10 +753,7 @@ class SignalAdapter(BasePlatformAdapter):
             start_idx = end_idx
         if len(chunks) == 1:
             return chunks
-        total = len(chunks)
-        return [
-            (f"{chunk_text} ({idx}/{total})", chunk_styles)
-            for idx, (chunk_text, chunk_styles) in enumerate(chunks, start=1)]
+        return [(f"{txt} ({idx}/{len(chunks)})", st) for idx, (txt, st) in enumerate(chunks, start=1)]
 
     async def _rpc_send(self, params: Dict[str, Any], fail_error: str) -> Tuple[Any, Optional[SendResult]]:
         """Run a ``send`` RPC, validate and track it; ``(result, None)`` or ``(None, failed SendResult)``."""
@@ -918,8 +882,8 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: image too large (%d bytes), skipping %s", detail, image_url)
             if reason:
                 skipped[reason] += 1
-                continue
-            attachments.append(file_path)
+            else:
+                attachments.append(file_path)
         if not attachments:
             logger.error("Signal: no valid images in batch of %d (download=%d missing=%d oversize=%d)",
                          len(images), skipped["download"], skipped["missing"], skipped["oversize"])
@@ -1026,40 +990,29 @@ class SignalAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"{media_label} too large ({file_size} bytes)")
         return await self._send_file(chat_id, file_path, caption, f"RPC send {media_label.lower()} failed")
 
-    async def send_document(
-        self, chat_id: str, file_path: str, caption: Optional[str] = None, filename: Optional[str] = None, **kwargs,
-    ) -> SendResult:
+    async def send_document(self, chat_id, file_path, caption=None, filename=None, **kwargs) -> SendResult:
         return await self._send_attachment(chat_id, file_path, "File", caption)
 
-    async def send_image_file(
-        self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, **kwargs,
-    ) -> SendResult:
-        """Send a local image file as a native Signal attachment (gateway MEDIA: delivery path)."""
+    async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, **kwargs) -> SendResult:
+        """Native Signal attachment for the gateway MEDIA: delivery path."""
         return await self._send_attachment(chat_id, image_path, "Image", caption)
 
-    async def send_voice(
-        self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, **kwargs,
-    ) -> SendResult:
-        """Send an audio file as a Signal attachment (Signal has no distinct voice-message API)."""
+    async def send_voice(self, chat_id, audio_path, caption=None, reply_to=None, **kwargs) -> SendResult:
+        """Audio attachment — Signal has no distinct voice-message API."""
         return await self._send_attachment(chat_id, audio_path, "Audio", caption)
 
-    async def send_video(
-        self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, **kwargs,
-    ) -> SendResult:
+    async def send_video(self, chat_id, video_path, caption=None, reply_to=None, **kwargs) -> SendResult:
         return await self._send_attachment(chat_id, video_path, "Video", caption)
 
     async def _stop_typing_indicator(self, chat_id: str) -> None:
         """Stop a typing indicator loop for a chat."""
         await self._cancel_task(self._typing_tasks.pop(chat_id, None))
-        # Explicit stop-typing RPC so the recipient drops the indicator now instead of
-        # after Signal's ~5s built-in timeout. Best-effort: any RPC or recipient-
-        # resolution failure must not prevent the backoff cleanup below.
-        try:
+        # Explicit stop-typing RPC so the recipient drops the indicator now instead of after
+        # Signal's ~5s timeout. Best-effort: failures must not prevent the backoff cleanup below.
+        with suppress(Exception):
             params = await self._with_target({"account": self.account}, chat_id)
             params["stop"] = True
             await self._rpc("sendTyping", params, rpc_id="typing-stop", log_failures=False)
-        except Exception:
-            pass
         self._typing_failures.pop(chat_id, None)
         self._typing_skip_until.pop(chat_id, None)
 
@@ -1115,7 +1068,7 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def on_processing_complete(self, event: MessageEvent, outcome: "ProcessingOutcome") -> None:
         """Swap 👀 for ✅/❌; on CANCELLED the 👀 stays to keep reflecting "in progress" (matches Telegram)."""
-        if not self._reactions_enabled(event) or outcome == ProcessingOutcome.CANCELLED:
+        if outcome == ProcessingOutcome.CANCELLED or not self._reactions_enabled(event):
             return
         target = self._extract_reaction_target(event)
         if not target:
@@ -1131,7 +1084,5 @@ class SignalAdapter(BasePlatformAdapter):
         if chat_id.startswith("group:"):
             return {"name": chat_id, "type": "group", "chat_id": chat_id}
         result = await self._rpc("getContact", {"account": self.account, "contactAddress": chat_id})
-        name = chat_id
-        if result and isinstance(result, dict):
-            name = result.get("name") or result.get("profileName") or chat_id
-        return {"name": name, "type": "dm", "chat_id": chat_id}
+        name = (result.get("name") or result.get("profileName")) if isinstance(result, dict) else None
+        return {"name": name or chat_id, "type": "dm", "chat_id": chat_id}
