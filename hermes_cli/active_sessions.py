@@ -106,25 +106,24 @@ def active_session_limit_message(
     )
 
 
-# Machine-readable refusal reasons: the reason is the contract, the message is
-# for people. Capacity = "busy, come back later"; ownership = "this session
-# has a live owner and writing would interleave with theirs".
+# Machine-readable refusal reasons (the reason is the contract, the message is for
+# people). Capacity = "busy, come back later"; ownership = "a live owner exists and
+# writing would interleave with theirs".
 SESSION_NOT_OWNED = "SESSION_NOT_OWNED"
 MAX_CONCURRENT_SESSIONS = "MAX_CONCURRENT_SESSIONS"
-# Ownership could not be PROVEN (registry unreadable/corrupt). Deliberately
-# distinct from SESSION_NOT_OWNED: collapsing "can't tell" into a silent
-# go-ahead is the fail-open hole that let two writers share one session.
+# Ownership could not be PROVEN (registry unreadable/corrupt). Deliberately distinct
+# from SESSION_NOT_OWNED: treating "can't tell" as a go-ahead is the fail-open hole
+# that let two writers share one session.
 SESSION_COORDINATION_UNAVAILABLE = "SESSION_COORDINATION_UNAVAILABLE"
 
-# Advertised through the gateway. A module constant, not a config flag: it is
-# true because try_acquire_active_session checks atomically, so it cannot drift
-# out of step with the enforcement without this file changing.
+# Advertised through the gateway. A module constant, not a config flag: it holds
+# because try_acquire_active_session checks atomically, so it cannot drift from the
+# enforcement without this file changing.
 PER_SESSION_EXCLUSIVE_SUBMIT = True
 
 
 class ActiveSessionRefusal(str):
-    """A refusal message (``str`` subclass, so existing callers are untouched)
-    that also carries a machine-readable ``reason``."""
+    """Refusal message (a ``str``, so callers are untouched) with a machine-readable ``reason``."""
 
     reason: str
 
@@ -136,9 +135,8 @@ class ActiveSessionRefusal(str):
 
 def _is_same_writer(entry: dict[str, Any], metadata: Optional[dict[str, Any]]) -> bool:
     """True when an existing lease belongs to the very caller re-acquiring it.
-    Identity is (pid, live_session_id): pid alone would let two live sessions in
-    one process steal each other's lease; the live id alone would let another
-    process with an equal id do the same."""
+    Identity is (pid, live_session_id): pid alone lets two live sessions in one process
+    steal each other's lease; the live id alone lets another process with an equal id."""
     try:
         if int(entry.get("pid") or -1) != os.getpid():
             return False
@@ -186,12 +184,10 @@ def _flock(fh, *, lock: bool) -> None:
     """Exclusive whole-file lock/unlock on ``fh`` (fcntl on POSIX, msvcrt on Windows)."""
     if os.name == "nt":
         import msvcrt
-
         fh.seek(0)
         msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK if lock else msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
-
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX if lock else fcntl.LOCK_UN)
 
 
@@ -309,11 +305,10 @@ def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
 
 
 def _process_start_time(pid: int) -> Optional[float]:
-    # Pair pid with process create_time when psutil can read it, so a recycled
-    # pid does not keep a stale lease alive indefinitely.
+    # Pair pid with create_time when psutil can read it, so a recycled pid does not
+    # keep a stale lease alive indefinitely.
     try:
         import psutil  # type: ignore
-
         return float(psutil.Process(pid).create_time())
     except Exception:
         return None
@@ -329,11 +324,8 @@ def _optional_float(value: Any) -> Optional[float]:
 
 
 def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = False) -> Optional[bool]:
-    """Return True/False for live/dead, or None when liveness is unknowable.
-
-    ``lenient`` never returns None: an unparseable pid or a failed existence
-    probe counts as dead, an unreadable current start time as alive.
-    """
+    """True/False for live/dead, or None when unknowable. ``lenient`` never returns None:
+    an unparseable pid or failed existence probe counts as dead, an unreadable start as alive."""
     unknown_dead = False if lenient else None
     try:
         pid_int = int(pid)
@@ -343,7 +335,6 @@ def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = F
         return unknown_dead
     try:
         from gateway.status import _pid_exists
-
         exists = bool(_pid_exists(pid_int))
     except Exception:
         return unknown_dead
@@ -380,9 +371,9 @@ class ActiveSessionLease:
     surface: str
     enabled: bool = True
     released: bool = False
-    # Pinned at acquisition: a lease acquired under the root HERMES_HOME must
-    # release against the same registry even when release() runs inside a
-    # profile-home override, or phantom leases fill the session cap.
+    # Pinned at acquisition: a lease taken under the root HERMES_HOME must release
+    # against the same registry even inside a profile-home override, or phantom
+    # leases fill the session cap.
     state_path: Optional[Path] = None
     lock_path: Optional[Path] = None
     track_liveness: bool = False
@@ -417,9 +408,8 @@ def _read_live_entries(
 ) -> Optional[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """``(raw, pruned)`` from the registry, or None when it is unreadable.
 
-    Liveness-tracked callers re-raise instead: they must not proceed on an
-    unprovable registry. Untracked callers get ``warn`` logged and decide
-    how to degrade themselves.
+    Liveness-tracked callers re-raise instead (they must not proceed on an unprovable
+    registry); untracked callers get ``warn`` logged and decide how to degrade.
     """
     try:
         raw_entries = _read_entries(state_path, strict=True)
@@ -432,12 +422,8 @@ def _read_live_entries(
 
 
 def _lease_entry(
-    *,
-    lease_id: str,
-    session_id: str,
-    surface: str,
-    metadata: Optional[dict[str, Any]] = None,
-    track_liveness: bool = False,
+    *, lease_id: str, session_id: str, surface: str,
+    metadata: Optional[dict[str, Any]] = None, track_liveness: bool = False,
 ) -> dict[str, Any]:
     now = time.time()
     entry: dict[str, Any] = {
@@ -457,23 +443,15 @@ def _lease_entry(
 
 
 def try_acquire_active_session(
-    *,
-    session_id: str,
-    surface: str,
-    config: Any,
-    metadata: Optional[dict[str, Any]] = None,
-    registry_home: str | Path | None = None,
-    track_liveness: bool = False,
+    *, session_id: str, surface: str, config: Any, metadata: Optional[dict[str, Any]] = None,
+    registry_home: str | Path | None = None, track_liveness: bool = False,
 ) -> tuple[Optional[ActiveSessionLease], Optional[str]]:
-    """Acquire an active-session slot.
+    """Acquire an active-session slot: ``(lease, None)`` or ``(None, ActiveSessionRefusal)``.
 
-    Per-session exclusivity is CORRECTNESS, enforced unconditionally: at most
-    one live owner per stored session. ``max_concurrent_sessions`` is resource
-    POLICY and applies only when configured. ``registry_home`` lets
-    profile-scoped backends share the owning profile's registry.
-
-    Returns ``(lease, None)`` or ``(None, ActiveSessionRefusal)``. Ownership
-    uncertainty fails CLOSED with ``SESSION_COORDINATION_UNAVAILABLE``.
+    Per-session exclusivity is CORRECTNESS, enforced unconditionally (at most one live
+    owner per stored session); ``max_concurrent_sessions`` is resource POLICY, applied
+    only when configured. ``registry_home`` lets profile-scoped backends share the owning
+    profile's registry. Ownership uncertainty fails CLOSED (SESSION_COORDINATION_UNAVAILABLE).
     """
     max_sessions = resolve_max_concurrent_sessions(config)
     lease_id = uuid.uuid4().hex
@@ -624,10 +602,9 @@ def transfer_active_session(
 def release_orphaned_leases(live_lease_ids: set[str]) -> int:
     """Drop this process's registry entries that no live session owns.
 
-    ``_prune_dead`` only reclaims leases of dead processes; a days-long server
-    never trips it, so a lease whose session skipped teardown is held until
-    restart. The owning process is the only authority on its own leases —
-    exact, no heartbeat on the turn path, no staleness threshold.
+    ``_prune_dead`` only reclaims leases of dead processes, so on a days-long server a
+    lease whose session skipped teardown is held until restart. The owning process is the
+    only authority on its own leases — exact, no heartbeat on the turn path, no threshold.
     """
     pid = os.getpid()
     state_path = _state_path()
@@ -670,9 +647,8 @@ def active_session_registry_snapshot(
 def active_session_liveness_guard(
     session_id: str, *, registry_home: str | Path | None = None
 ) -> Iterator[bool]:
-    """Hold the registry lock while reporting whether ``session_id`` is leased,
-    so no new backend can acquire a lease between the check and the caller's
-    ``end_session`` write."""
+    """Hold the registry lock while reporting whether ``session_id`` is leased, so no
+    new backend can acquire a lease between the check and the caller's ``end_session``."""
     state_path, lock_path = _lease_paths(registry_home=registry_home)
     with _FileLock(lock_path):
         entries = _prune_dead(_read_entries(state_path, strict=True), strict=True)
@@ -684,9 +660,8 @@ def active_session_liveness_guard(
 def release_active_session_liveness_guard(
     lease: ActiveSessionLease, session_id: str
 ) -> Iterator[bool]:
-    """Remove ``lease`` and hold its registry lock through a lifecycle write,
-    making cleanup one atomic ownership decision (release, check siblings,
-    end the durable row) before any new backend can reopen it."""
+    """Remove ``lease`` and hold its registry lock through a lifecycle write, making
+    cleanup one atomic decision (release, check siblings, end the durable row)."""
     if not lease.enabled or lease.released:
         home = lease.state_path.parent.parent if lease.state_path is not None else None
         with active_session_liveness_guard(session_id, registry_home=home) as active:
