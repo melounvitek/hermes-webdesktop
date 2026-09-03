@@ -269,6 +269,13 @@ def _bounded_counter(metric_name: str | None, event: Any) -> tuple[str, dict[str
     return None if dimensions is None else (metric_name, dimensions)
 
 
+def _scoped_dimensions(event: Any, metric_name: str, **shape: Any) -> dict[str, str] | None:
+    """Bounded ``event.data`` for a scope *end* event of the given shape, else None."""
+    if not _valid_shape(event, kind="scope", scope_category="end", **shape):
+        return None
+    return _bounded_dimensions(metric_name, getattr(event, "data", None))
+
+
 _MARK_SHAPE = dict(kind="mark", category=None, scope_category=None, category_profile=None)
 
 
@@ -291,12 +298,10 @@ def model_call_dimensions(event: Any) -> dict[str, str] | None:
         return auxiliary
     # The synthetic scope can span provider fallback. The accepted terminal
     # route is carried in the validated payload rather than this start profile.
-    if not _valid_shape(
-        event, kind="scope", category="llm", name=MODEL_CALL_SCOPE, scope_category="end",
+    return _scoped_dimensions(
+        event, MODEL_ROUTE_METRIC, category="llm", name=MODEL_CALL_SCOPE,
         category_profile={"model_name": MODEL_CALL_PROFILE_MODEL},
-    ):
-        return None
-    return _bounded_dimensions(MODEL_ROUTE_METRIC, getattr(event, "data", None))
+    )
 
 
 def _auxiliary_model_call_dimensions(event: Any) -> dict[str, str] | None:
@@ -328,20 +333,15 @@ def task_counter(event: Any) -> tuple[str, dict[str, str]] | None:
         event, kind="scope", category="function", name=TASK_SCOPE, category_profile=None
     ):
         return None
-    metric_name = {"start": TASK_STARTED_METRIC, "end": TASK_FINISHED_METRIC}.get(
-        _event_text(event, "scope_category")
-    )
-    return _bounded_counter(metric_name, event)
+    phases = {"start": TASK_STARTED_METRIC, "end": TASK_FINISHED_METRIC}
+    return _bounded_counter(phases.get(_event_text(event, "scope_category")), event)
 
 
 def tool_call_dimensions(event: Any) -> dict[str, str] | None:
     """Return package dimensions for one allowlisted tool lifecycle end event."""
-    if not _valid_shape(
-        event, kind="scope", category="tool", name=TOOL_CALL_SCOPE, scope_category="end",
-        category_profile={},
-    ):
-        return None
-    return _bounded_dimensions(TOOL_CALL_METRIC, getattr(event, "data", None))
+    return _scoped_dimensions(
+        event, TOOL_CALL_METRIC, category="tool", name=TOOL_CALL_SCOPE, category_profile={}
+    )
 
 
 def tool_approval_counter(event: Any) -> tuple[str, dict[str, str]] | None:
