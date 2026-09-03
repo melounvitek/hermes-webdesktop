@@ -138,8 +138,14 @@ class TestCallSiteWiring:
         src = self._impl_source()
         assert "_fleet_rows_expected = _m()._fleet_probe_expected_runtimes(" in src
         # The 2.0s settle window must key on the cross-platform signal, so a
-        # resumed Windows gateway gets its settle window too (#93406).
-        assert "if _fleet_rows_expected:\n" in src
+        # resumed Windows gateway gets its settle window too (#93406). The
+        # settle loop lives in _collect_fleet_snapshot, gated on that signal.
+        assert "_fleet_snapshot = _collect_fleet_snapshot(restart, _fleet_rows_expected)" in src
+        from hermes_cli import update_cmd_fleet
+
+        snap_src = inspect.getsource(update_cmd_fleet._collect_fleet_snapshot)
+        assert "if not rows_expected:\n" in snap_src
+        assert "_time.sleep(2.0)" in snap_src
         assert "if restarted_services or killed_pids:\n                _time.sleep" not in src
 
     def test_zero_row_guard_gated_on_expected_runtimes(self):
