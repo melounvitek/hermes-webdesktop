@@ -363,9 +363,7 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
     with session["history_lock"]:
         _batch, session["_kanban_pending"] = list(session.get("_kanban_pending") or []), []
     with contextlib.suppress(Exception):
-        _notif_submit(
-            f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch), "kanban notification dispatch failed"
-        )
+        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch), "kanban notification dispatch failed")
 
 
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
@@ -380,9 +378,7 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
         if evt.get("type") == "async_delegation" else {}
     )
     try:
-        _notif_submit(
-            f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs
-        )
+        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs)
     except Exception:
         release_event_delivery(evt, claim)
         return
@@ -396,31 +392,27 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> 
     process-global) → status.update once, then an agent turn if idle. Returns False when the drain
     must stop (session busy)."""
     queue = registry.completion_queue
+    evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
     if _notification_event_belongs_elsewhere(sid, session, evt):
         if deferred is not None:
             deferred.append(evt)
-        else:
-            # Otherwise a process started in session A surfaces its completion in whichever poller wakes first.
+        else:  # otherwise a process started in session A surfaces in whichever poller wakes first
             queue.put(evt)
             time.sleep(0.1)
         return True
     if _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
-        is_delegation = evt.get("type") == "async_delegation"
         origin, key = str(evt.get("origin_ui_session_id") or ""), str(evt.get("session_key") or "")
         if deferred is None:
             (logger.warning if is_delegation else logger.debug)(
                 "Dropping unowned %s notification (origin=%r key=%r) instead of delivering to session %s",
-                evt.get("type", "completion"), origin, key, sid,
+                evt_type, origin, key, sid,
             )
         elif is_delegation:
             deferred.append(evt)
         else:
-            logger.debug(
-                "Dropping unowned %s notification during shutdown drain (origin=%r key=%r)",
-                evt.get("type", "completion"), origin, key,
-            )
+            logger.debug("Dropping unowned %s notification during shutdown drain (origin=%r key=%r)", evt_type, origin, key)
         return True
-    if evt.get("type") == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
+    if evt_type == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
         return True
     text = fmt(evt)
     if not text:
