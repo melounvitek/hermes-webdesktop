@@ -37,12 +37,6 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
-def _normalize_public_video_url(video_url: Any) -> Optional[str]:
-    """Require a public HTTPS MP4 URL (``http``/``https`` only)."""
-    cleaned = _clean_string(video_url)
-    return cleaned if cleaned and cleaned.lower().startswith(("http://", "https://")) else None
-
-
 _VIDEO_URL_PARAM = {
     "type": "string",
     "description": (
@@ -94,11 +88,10 @@ XAI_VIDEO_EXTEND_SCHEMA: Dict[str, Any] = _xai_video_schema(
 
 
 def _run_xai_video_tool(args: Dict[str, Any], op: str, run, **extra: Any) -> str:
-    prompt = _clean_string(args.get("prompt"))
-    video_url = _normalize_public_video_url(args.get("video_url"))
+    prompt, video_url = _clean_string(args.get("prompt")), _clean_string(args.get("video_url"))
     if not prompt:
         return tool_error(f"prompt is required for xAI video {op}")
-    if not video_url:
+    if not (video_url and video_url.lower().startswith(("http://", "https://"))):  # public URL only
         return tool_error(
             "video_url must be a public HTTPS MP4 URL (the `video`/`public_url` "
             "from a prior Imagine result)"
@@ -122,8 +115,7 @@ def _handle_xai_video_edit(args: Dict[str, Any], **_kw: Any) -> str:
 
 
 def _handle_xai_video_extend(args: Dict[str, Any], **_kw: Any) -> str:
-    duration = _coerce_int(args.get("duration"))
-    return _run_xai_video_tool(args, "extend", run_xai_video_extend, duration=duration)
+    return _run_xai_video_tool(args, "extend", run_xai_video_extend, duration=_coerce_int(args.get("duration")))
 
 
 for _name, _schema, _handler in (

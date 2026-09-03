@@ -65,10 +65,6 @@ def _pending_path(subsystem: str, pending_id: str) -> Path:
     return get_hermes_home() / "pending" / subsystem / f"{pending_id}.json"
 
 
-def _read_record(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def _pending_files(subsystem: str) -> list:
     d = _pending_path(subsystem, "").parent
     return list(d.glob("*.json")) if d.exists() else []
@@ -101,7 +97,7 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for p in _pending_files(subsystem):
         try:
-            records.append(_read_record(p))
+            records.append(json.loads(p.read_text(encoding="utf-8")))
         except Exception:
             logger.warning("Skipping unreadable pending record: %s", p)
     records.sort(key=lambda r: r.get("created_at", 0))
@@ -112,7 +108,7 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
     with suppress(Exception):
         path = _pending_path(subsystem, pending_id)
-        return _read_record(path) if path.exists() else None
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     return None
 
 

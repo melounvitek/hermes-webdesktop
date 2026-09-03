@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -60,12 +61,6 @@ def bucket_limit(limit: int) -> int:
 def normalize_query(query: str) -> str:
     """Case-fold and collapse whitespace so trivial variants share an entry."""
     return re.sub(r"\s+", " ", (query or "").strip().lower())
-
-
-def _host_slug(url: str) -> str:
-    """Filesystem-safe hostname slug for cache filenames (``"page"`` when hostless)."""
-    host = (urlparse(url).hostname or "page").replace(":", "_")
-    return re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
 
 
 def _deep_copy(response: dict) -> dict:
@@ -200,10 +195,10 @@ def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional
     (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
     if (d := _cache_dir()) is None:
         return None
-    try:
-        slug = _host_slug(url)
-    except Exception:  # noqa: BLE001
-        slug = "page"
+    slug = "page"  # filesystem-safe hostname slug; "page" when hostless/unparseable
+    with suppress(Exception):
+        host = (urlparse(url).hostname or "page").replace(":", "_")
+        slug = re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
     return d / f"{slug}-{_url_digest(url, format, provider)}.cache.md"
 
 
