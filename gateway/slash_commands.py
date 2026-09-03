@@ -209,11 +209,9 @@ class GatewaySlashCommandsMixin(
 
     # ------------------------------------------------------------------ shared helpers
     def _cached_agent_for(self, session_key: str):
-        """Peek the cached AIAgent for *session_key* without evicting it, or None.
-
-        Cache entries are ``(agent, signature, ...)`` tuples; bare agents (test doubles) are
-        accepted too. Lock/cache may be absent on fixtures that skip ``__init__``.
-        """
+        """Peek the cached AIAgent for *session_key* without evicting it, or None. Entries are
+        ``(agent, signature, ...)`` tuples (bare agents from test doubles accepted); lock/cache may
+        be absent on fixtures that skip ``__init__``."""
         cache = getattr(self, "_agent_cache", None)
         if cache is None:
             return None
@@ -227,10 +225,8 @@ class GatewaySlashCommandsMixin(
         return entry or None
 
     def _resident_agent_for(self, session_key: str):
-        """The live running agent for *session_key*, else the cached one, else None.
-
-        The pending sentinel (a run that is starting) never counts as a usable agent.
-        """
+        """The live running agent for *session_key*, else the cached one, else None. The pending
+        sentinel (a run that is starting) never counts as a usable agent."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         agent = self._running_agents.get(session_key)
         if agent is not None and agent is not _AGENT_PENDING_SENTINEL:
@@ -271,12 +267,9 @@ class GatewaySlashCommandsMixin(
         )
 
     def _write_approval_setter(self, section: str, event: MessageEvent):
-        """``set_mode_fn`` for /memory and /skills: persist ``<section>.write_approval``.
-
-        Raw read is correct for the write-back round-trip (merged defaults must not be persisted
-        back to the user's file). The new setting must take effect next message, so the cached
-        agent is dropped.
-        """
+        """``set_mode_fn`` for /memory and /skills: persist ``<section>.write_approval``. Raw read is
+        correct for the write-back round-trip (merged defaults must not be persisted back to the
+        user's file); the cached agent is dropped so the setting takes effect next message."""
         from gateway.run import _gateway_config_home
         from hermes_cli.config import read_user_config_raw
         config_path = _gateway_config_home() / "config.yaml"
@@ -291,12 +284,9 @@ class GatewaySlashCommandsMixin(
         return _set_approval
 
     async def _deliver_approval_confirmation(self, event: MessageEvent, confirmation_text: str, verb: str):
-        """Return *confirmation_text* for normal delivery, or push it on native-streaming adapters.
-
-        Native-streaming adapters (WeCom msgtype:"stream") need the confirmation sent directly with
-        control-lane metadata (reliable proactive send, not the finalized reply stream). Everyone
-        else returns text for normal delivery. (``is not True``: mocks auto-create attrs.)
-        """
+        """Return *confirmation_text* for normal delivery, or push it on native-streaming adapters
+        (WeCom msgtype:"stream"), which need it sent directly with control-lane metadata (reliable
+        proactive send, not the finalized reply stream). ``is not True``: mocks auto-create attrs."""
         source = event.source
         adapter = self.adapters.get(source.platform)
         if adapter:
@@ -360,8 +350,7 @@ class GatewaySlashCommandsMixin(
         ])
 
     async def _handle_whoami_command(self, event: MessageEvent) -> str:
-        """Handle /whoami — the user's slash command access on this scope (always allowed: slash_access
-        floor). Reports platform, DM-vs-group scope, tier, and the commands the user can run here."""
+        """Handle /whoami — platform, DM-vs-group scope, tier and runnable commands (always allowed)."""
         from gateway.slash_access import policy_for_source
         source = event.source
         policy = policy_for_source(self.config, source)
@@ -381,11 +370,8 @@ class GatewaySlashCommandsMixin(
         return head + f"Tier: user\nSlash commands you can run: {runnable_str}"
 
     async def _handle_kanban_command(self, event: MessageEvent) -> str:
-        """Handle /kanban — delegate to the shared kanban CLI.
-
-        DB work runs in a thread pool to keep the event loop responsive. Reads and mutations are
-        allowed while an agent runs: the board is profile-agnostic and never touches agent state.
-        """
+        """Handle /kanban — delegate to the shared kanban CLI (DB work in a thread pool). Allowed
+        while an agent runs: the board is profile-agnostic and never touches agent state."""
         from hermes_cli.kanban import run_slash
 
         # Strip the leading "/kanban" (with or without slash), leaving args.
@@ -521,8 +507,7 @@ class GatewaySlashCommandsMixin(
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:
         """Handle ``/platform list|pause|resume [name]`` — inspect and manually control failed/paused
-        gateway adapters (pause stops the reconnect watcher; resume re-queues for retry).
-        """
+        adapters (pause stops the reconnect watcher; resume re-queues for retry)."""
         text = (getattr(event, "content", "") or "").strip()
         # Strip the leading "/platform" (or "/PLATFORM") token if present
         parts = text.split(maxsplit=2)
@@ -861,8 +846,7 @@ class GatewaySlashCommandsMixin(
 
     async def _handle_background_command(self, event: MessageEvent) -> str:
         """Handle /bg <prompt> — run a prompt in a background thread with its own session; the
-        result is sent to the same chat without touching the active session's history.
-        """
+        result is sent to the same chat without touching the active session's history."""
         prompt = event.get_command_args().strip()
         if not prompt:
             return t("gateway.background.usage")
@@ -877,10 +861,9 @@ class GatewaySlashCommandsMixin(
         return t("gateway.background.started", preview=_preview(prompt), task_id=task_id)
 
     async def _handle_btw_command(self, event: MessageEvent) -> str:
-        """Handle /btw <question> — answer a side question via a one-shot auxiliary LLM call on a
-        transcript snapshot; live history is never touched (alternation + prompt cache intact,
-        current turn keeps running). Unlike /bg, which spawns a fresh contextless session.
-        """
+        """Handle /btw <question> — one-shot auxiliary LLM call on a transcript snapshot; live history
+        is never touched (alternation + prompt cache intact, current turn keeps running). Unlike /bg,
+        which spawns a fresh contextless session."""
         question = event.get_command_args().strip()
         if not question:
             return t("gateway.btw.usage")
@@ -928,10 +911,8 @@ class GatewaySlashCommandsMixin(
         return t("gateway.btw.started", preview=preview)
 
     async def _handle_memory_command(self, event: MessageEvent) -> str:
-        """Handle /memory — review pending memory writes + toggle the approval gate.
-
-        Entries are small enough to review inline, so the full flow works on every platform.
-        """
+        """Handle /memory — review pending memory writes + toggle the approval gate. Entries are small
+        enough to review inline, so the full flow works on every platform."""
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         from tools.memory_tool import load_on_disk_store
@@ -946,11 +927,9 @@ class GatewaySlashCommandsMixin(
         )
 
     async def _handle_skills_command(self, event: MessageEvent) -> str:
-        """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only).
-
-        Gated by ``skills.write_approval`` but still answers when staged writes exist after the
-        gate is off (never stranded). ``diff`` is truncated for chat.
-        """
+        """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only). Gated
+        by ``skills.write_approval`` but still answers when staged writes exist after the gate is off
+        (never stranded). ``diff`` is truncated for chat."""
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         args = event.get_command_args().strip().split()
@@ -1004,11 +983,9 @@ class GatewaySlashCommandsMixin(
         return EphemeralReply(t("gateway.yolo.enabled"))
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
-        """Handle /verbose command — cycle tool progress display mode.
-
-        Gated by ``display.tool_progress_command`` (default off). Cycles off → new → all → verbose
-        → log per *current platform*, saved to ``display.platforms.<platform>.tool_progress``.
-        """
+        """Handle /verbose — cycle tool progress display mode (off → new → all → verbose → log) per
+        *current platform*, saved to ``display.platforms.<platform>.tool_progress``. Gated by
+        ``display.tool_progress_command`` (default off)."""
         from gateway.run import _load_gateway_config
         config_path, platform_key = self._display_config_target(event)
         try:
@@ -1129,12 +1106,9 @@ class GatewaySlashCommandsMixin(
         return t("gateway.footer.saved", state=_state(new_state), example=example)
 
     async def _handle_reload_mcp_command(self, event: MessageEvent) -> Optional[str]:
-        """Handle /reload-mcp — reconnect MCP servers and rebuild the cached agent.
-
-        Reloading invalidates the provider prompt cache (tool schemas live in the system prompt),
-        so it routes through slash-confirm; "Always Approve" persists
-        ``approvals.mcp_reload_confirm: false``.
-        """
+        """Handle /reload-mcp — reconnect MCP servers and rebuild the cached agent. Reloading
+        invalidates the provider prompt cache (tool schemas live in the system prompt), so it routes
+        through slash-confirm; "Always Approve" persists ``approvals.mcp_reload_confirm: false``."""
         session_key = self._session_key_for_source(event.source)
 
         # Read the gate fresh from disk so a prior "always" click takes effect on the next
@@ -1170,12 +1144,10 @@ class GatewaySlashCommandsMixin(
         )
 
     async def _handle_reload_skills_command(self, event: MessageEvent) -> str:
-        """Handle /reload-skills — rescan skills dir, queue a note for next turn.
-
-        Skills are invoked at runtime, not baked into the system prompt, so this does NOT clear the
-        prompt cache. Added/removed skills go into ``_pending_skills_reload_notes[session_key]``,
-        prepended to the NEXT user message — nothing out-of-band, so alternation is preserved.
-        """
+        """Handle /reload-skills — rescan skills dir, queue a note for next turn. Skills are invoked at
+        runtime, not baked into the system prompt, so this does NOT clear the prompt cache. The diff
+        goes into ``_pending_skills_reload_notes[session_key]``, prepended to the NEXT user message —
+        nothing out-of-band, so alternation is preserved."""
         try:
             from agent.skill_commands import reload_skills
 
@@ -1237,10 +1209,8 @@ class GatewaySlashCommandsMixin(
             return t("gateway.reload_skills.failed", error=e)
 
     async def _handle_bundles_command(self, event: MessageEvent) -> str:
-        """Handle /bundles — list installed skill bundles (mirrors the CLI handler).
-
-        Bundles are loaded by invoking their own ``/<slug>`` command, not by this one.
-        """
+        """Handle /bundles — list installed skill bundles (mirrors the CLI handler). Bundles are
+        loaded by invoking their own ``/<slug>`` command, not by this one."""
         reply = _execute("bundles")
         if "error" in reply.data:
             logger.warning("Bundles command unavailable: %s", reply.data["error"])
@@ -1266,9 +1236,7 @@ class GatewaySlashCommandsMixin(
 
     def _blocking_approval_or_stale(self, event: MessageEvent, stale_key: str, none_key: str):
         """``(session_key, None)`` when an agent thread is blocked on approval, else the reply to send.
-
-        A pending-approvals entry with no blocked thread is a stale prompt: drop it and say so.
-        """
+        A pending-approvals entry with no blocked thread is a stale prompt: drop it and say so."""
         from tools.approval import has_blocking_approval
         session_key = self._session_key_for_source(event.source)
         if has_blocking_approval(session_key):
@@ -1279,11 +1247,8 @@ class GatewaySlashCommandsMixin(
         return session_key, t(none_key)
 
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
-        """Handle /approve command — unblock waiting agent thread(s).
-
-        Agent threads block inside tools/approval.py; signalling the event resumes them so the
-        command executes inline — same flow as the CLI's synchronous approval.
-        """
+        """Handle /approve — unblock waiting agent thread(s). They block inside tools/approval.py;
+        signalling the event resumes them so the command executes inline (same flow as the CLI)."""
         from tools.approval import resolve_gateway_approval
         session_key, stale = self._blocking_approval_or_stale(
             event, "gateway.approval_expired", "gateway.approve.no_pending"
@@ -1304,11 +1269,8 @@ class GatewaySlashCommandsMixin(
         return await self._deliver_approval_confirmation(event, confirmation_text, "approve")
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
-        """Handle /deny command — reject pending dangerous command(s).
-
-        Signals blocked thread(s) with a 'deny' result so they get a definitive BLOCKED message,
-        as in the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything.
-        """
+        """Handle /deny — reject pending dangerous command(s) with a definitive BLOCKED result, as in
+        the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything."""
         from tools.approval import resolve_gateway_approval
         session_key, stale = self._blocking_approval_or_stale(
             event, "gateway.deny.stale", "gateway.deny.no_pending"
@@ -1333,11 +1295,8 @@ class GatewaySlashCommandsMixin(
         return await self._deliver_approval_confirmation(event, confirmation_text, "deny")
 
     async def _handle_debug_command(self, event: MessageEvent) -> str:
-        """Handle /debug — upload debug report (summary only) and return paste URLs.
-
-        Uploads ONLY the summary (system info + log tails), never full logs, to protect privacy;
-        use ``hermes debug share`` from the CLI for full uploads.
-        """
+        """Handle /debug — upload ONLY the summary (system info + log tails), never full logs, to
+        protect privacy; ``hermes debug share`` from the CLI does full uploads."""
         from hermes_cli.debug import (
             _GATEWAY_PRIVACY_NOTICE, _best_effort_sweep_expired_pastes, _capture_dump, _schedule_auto_delete,
             collect_debug_report, upload_to_pastebin,
@@ -1365,11 +1324,8 @@ class GatewaySlashCommandsMixin(
         return await self._run_in_executor_with_context(_collect_and_upload)
 
     async def _handle_update_command(self, event: MessageEvent) -> str:
-        """Handle /update command — update Hermes Agent to the latest version.
-
-        Spawns ``hermes update`` detached (``setsid``) so it survives the gateway restart it may
-        trigger; marker files let this or the next gateway process notify the user on completion.
-        """
+        """Handle /update — spawn ``hermes update`` detached (``setsid``) so it survives the gateway
+        restart it may trigger; marker files let this or the next gateway process notify the user."""
         from gateway.run import _hermes_home, _resolve_hermes_bin
         import json
         from hermes_cli.config import is_managed, format_managed_message

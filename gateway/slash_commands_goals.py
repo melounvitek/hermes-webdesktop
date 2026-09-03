@@ -1,8 +1,5 @@
 """Autonomy-loop gateway commands: /goal, /subgoal, /heartbeat, /loop, /refine, /review.
-
-Split out of ``gateway/slash_commands.py``; bound onto ``GatewayRunner`` through
-``GatewaySlashCommandsMixin``.
-"""
+Bound onto ``GatewayRunner`` through ``GatewaySlashCommandsMixin``."""
 
 from __future__ import annotations
 
@@ -89,8 +86,7 @@ class GatewayGoalCommandsMixin:
         """Enqueue *text* as the next turn through the adapter FIFO (the post-turn judge's path).
 
         A kickoff keeps the triggering message id / channel prompt; a resume continuation carries
-        none. *route* is a pre-resolved ``(adapter, quick_key)``; otherwise resolved here.
-        Best-effort: enqueue failures are logged, never surfaced.
+        none. *route* is a pre-resolved ``(adapter, quick_key)``. Best-effort: failures only logged.
         """
         try:
             adapter, quick_key = route or self._adapter_and_key_for(event)
@@ -279,10 +275,8 @@ class GatewayGoalCommandsMixin:
         )
 
     def _idle_cached_agent_or_error(self, event: MessageEvent, verb: str):
-        """``(session_key, cached_agent, None)`` for /refine and /review, or ``(_, _, error_text)``.
-
-        Both need a cached agent from a completed turn and refuse while a run is in flight.
-        """
+        """``(session_key, cached_agent, None)`` for /refine and /review, or ``(_, _, error_text)``:
+        both need a cached agent from a completed turn and refuse while a run is in flight."""
         quick_key = self._session_key_for_source(event.source) if event.source else None
         if not quick_key:
             return None, None, f"{verb.capitalize()} unavailable (no session)."
@@ -294,11 +288,8 @@ class GatewayGoalCommandsMixin:
         return quick_key, agent, None
 
     async def _handle_refine_command(self, event: MessageEvent) -> str:
-        """Handle /refine — run the memory/skill review fork on demand.
-
-        Runs in a daemon thread against a snapshot of the cached AIAgent's conversation; the live
-        session and prompt cache are untouched. Requires at least one completed turn.
-        """
+        """Handle /refine — run the memory/skill review fork on demand, in a daemon thread against a
+        snapshot of the cached AIAgent's conversation (live session and prompt cache untouched)."""
         args = (event.get_command_args() or "").strip()
         _quick_key, agent, error = self._idle_cached_agent_or_error(event, "refine")
         if error:
@@ -321,11 +312,9 @@ class GatewayGoalCommandsMixin:
         )
 
     async def _handle_review_command(self, event: MessageEvent) -> str:
-        """Handle /review — spawn an independent reviewer subagent.
-
-        The approval session-key contextvar is only bound during agent turns, so bind it explicitly
-        here or the completion event carries no gateway route and never re-enters this chat.
-        """
+        """Handle /review — spawn an independent reviewer subagent. The approval session-key
+        contextvar is only bound during agent turns, so bind it explicitly here or the completion
+        event carries no gateway route and never re-enters this chat."""
         args = (event.get_command_args() or "").strip()
         quick_key, agent, error = self._idle_cached_agent_or_error(event, "review")
         if error:
