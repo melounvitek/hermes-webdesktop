@@ -16,32 +16,25 @@ import time
 import weakref
 from typing import Any, Dict, List, Optional
 
-
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb  # noqa: F401  (used via _ChildRun.await_child)
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
 # The delegate_tool_* siblings hold the pieces split out of this module; every
-# moved name is re-imported so ``tools.delegate_tool.<name>`` keeps resolving for
-# callers and patching tests. Mutable flag globals live only in their owning module.
+# name callers or patching tests reach as ``tools.delegate_tool.<name>`` is
+# re-imported here. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
-    _ChildRun, _append_missed_steer, _attach_child, _build_result_entry, _dump_subagent_timeout_diagnostic,
-    _fabricated_entry, _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat,
-    _validate_child_output_schema,
+    _ChildRun, _attach_child, _build_result_entry, _dump_subagent_timeout_diagnostic, _fabricated_entry,
+    _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat, _validate_child_output_schema,
 )
 from tools.delegate_tool_config import (  # noqa: F401
-    _DEFAULT_MAX_CONCURRENT_CHILDREN, _get_child_timeout, _get_inherit_mcp_toolsets,
-    _get_max_async_children, _get_max_concurrent_children, _get_max_spawn_depth,
-    _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
-    _inherit_parent_base_url, _inherit_parent_capabilities, _load_config, _merge_request_overrides,
-    _resolve_child_credential_pool, _require_pinned_command, _resolve_child_runtime, _resolve_delegation_credentials,
-    _subagent_auto_approve, _subagent_auto_deny,
+    _DEFAULT_MAX_CONCURRENT_CHILDREN, _get_child_timeout, _get_max_async_children, _get_max_concurrent_children,
+    _get_max_spawn_depth, _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
+    _inherit_parent_capabilities, _load_config, _merge_request_overrides, _resolve_child_credential_pool,
+    _resolve_child_runtime, _resolve_delegation_credentials, _subagent_auto_approve, _subagent_auto_deny,
 )
-from tools.delegate_tool_dispatch import (  # noqa: F401
-    _Batch, _announce_batch, _capture_origin, _dispatch_background, _execute_and_aggregate, _run_batch,
-    _run_children_parallel,
-)
+from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
 from tools.delegate_tool_progress import (  # noqa: F401
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
     _build_child_system_prompt, _clean_error_text, _emit_parent_console, _quiet, _resolve_workspace_hint,
@@ -49,33 +42,29 @@ from tools.delegate_tool_progress import (  # noqa: F401
 )
 from tools.delegate_tool_registry import (  # noqa: F401
     _CONTROL_ACTIONS, _active_subagents, _active_subagents_lock, _capture_gateway_steer_authority,
-    _close_subagent_steering, _handle_control_action, _is_descendant_of, _owns_subagent_record,
-    _register_subagent, _unregister_subagent, get_subagent_attribution, interrupt_subagent,
-    is_spawn_paused, list_active_subagents, set_spawn_paused, steer_subagent,
+    _handle_control_action, _is_descendant_of, _owns_subagent_record, _register_subagent, _unregister_subagent,
+    get_subagent_attribution, interrupt_subagent, is_spawn_paused, list_active_subagents, set_spawn_paused,
+    steer_subagent,
 )
-from tools.delegate_tool_tasks import _coerce_task_schemas, _normalize_task_list  # noqa: F401
+from tools.delegate_tool_tasks import _coerce_task_schemas, _normalize_task_list
 from tools.delegate_tool_toolsets import (  # noqa: F401
-    DEFAULT_TOOLSETS, DELEGATE_BLOCKED_TOOLS, _expand_parent_toolsets, _resolve_child_toolsets,
-    _strip_blocked_tools,
+    DELEGATE_BLOCKED_TOOLS, _expand_parent_toolsets, _resolve_child_toolsets, _strip_blocked_tools,
 )
 from tools.delegate_tool_results import (  # noqa: F401
-    _apply_summary_budget, _build_child_preserving_parent_tools, _finalize_child_results,
-    _run_child_lifecycle, _summarize_tool_arguments,
+    _apply_summary_budget, _build_child_preserving_parent_tools, _run_child_lifecycle, _summarize_tool_arguments,
 )
 
+_ROLES = frozenset({"leaf", "orchestrator"})
 
 # Nested delegation is granted by depth/role in _build_child_agent, never by the
 # model naming toolsets (there is no model-facing toolsets argument).
 def _normalize_role(r: Optional[str]) -> str:
     """'leaf' | 'orchestrator'; None/empty/unknown -> 'leaf' (unknown warns)."""
-    if r is None or not r:
+    r_norm = str(r).strip().lower() if r else "leaf"
+    if r_norm not in _ROLES:
+        logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
         return "leaf"
-    r_norm = str(r).strip().lower()
-    if r_norm in {"leaf", "orchestrator"}:
-        return r_norm
-    logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
-    return "leaf"
-
+    return r_norm
 
 DEFAULT_MAX_ITERATIONS = 250
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
