@@ -2,6 +2,7 @@
 validation, migration, and the ``hermes config`` command."""
 
 import copy
+import difflib
 import json
 import logging
 import os
@@ -784,12 +785,11 @@ def _set_nested(config, dotted_key: str, value):
                 current[int(part)] = value
                 return
             try:
-                idx = int(part)
+                current = current[int(part)]
             except (TypeError, ValueError):
                 raise TypeError(
                     f"Cannot navigate into list at key {dotted_key!r}: "
                     f"segment {part!r} is not a numeric index")
-            current = current[idx]
             i += 1
         elif isinstance(current, dict):
             match = _greedy_literal_match(current, remaining)
@@ -798,9 +798,8 @@ def _set_nested(config, dotted_key: str, value):
                 if i + consumed == len(parts):
                     current[key] = value
                     return
-                existing = current.get(key)
                 # Preserve dicts and lists; replace scalar with a fresh dict.
-                if not isinstance(existing, (dict, list)):
+                if not isinstance(current.get(key), (dict, list)):
                     current[key] = {}
                 current = current[key]
                 i += consumed
@@ -817,8 +816,7 @@ def _set_nested(config, dotted_key: str, value):
                     f"the mapping already contains a literal key {shadowed!r} "
                     f"that contains a dot. If you meant that key, escape its "
                     f"dots with a backslash (e.g. {escaped}).")
-            current[part] = {}
-            current = current[part]
+            current = current.setdefault(part, {})
             i += 1
         else:
             raise TypeError(f"Cannot navigate into {type(current).__name__} at key {dotted_key!r}")
@@ -1066,13 +1064,17 @@ class ConfigIssue:
     hint: str
 
 
+def _issue(issues: List["ConfigIssue"], severity: str, message: str, hint: str) -> None:
+    issues.append(ConfigIssue(severity, message, hint))
+
+
 def _require_fields(
     issues: List["ConfigIssue"], entry: Dict[str, Any], label: str,
     fields: Tuple[Tuple[str, str], ...], suffix: str = "") -> None:
     """Append a warning for every falsy ``field`` of *entry* (message: ``<label> is missing '<f>' field``)."""
     for field, hint in fields:
         if not entry.get(field):
-            issues.append(ConfigIssue("warning", f"{label} is missing '{field}' field{suffix}", hint))
+            _issue(issues, "warning", f"{label} is missing '{field}' field{suffix}", hint)
 
 
 _CP_REQUIRED_FIELDS = (
@@ -1096,10 +1098,8 @@ def _validate_voice(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
     submit_mode = voice_cfg.get("submit_mode")
     normalized = submit_mode.strip().lower() if isinstance(submit_mode, str) else None
     if normalized not in {"direct", "draft"}:
-        issues.append(ConfigIssue(
-            "error",
-            f"voice.submit_mode must be 'direct' or 'draft', got {submit_mode!r}",
-            "Set voice.submit_mode to direct (submit immediately) or draft (edit before sending)"))
+        _issue(issues, "error", f"voice.submit_mode must be 'direct' or 'draft', got {submit_mode!r}",
+               "Set voice.submit_mode to direct (submit immediately) or draft (edit before sending)")
 
 
 def _validate_entry_list(
@@ -1110,7 +1110,7 @@ def _validate_entry_list(
     severity, message, hint = non_dict
     for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            issues.append(ConfigIssue(severity, message.format(i=i, type=type(entry).__name__), hint))
+            _issue(issues, severity, message.format(i=i, type=type(entry).__name__), hint)
         else:
             _require_fields(issues, entry, f"{label}[{i}]", fields)
 
@@ -1118,20 +1118,15 @@ def _validate_entry_list(
 def _validate_custom_providers(cp: Any, issues: List[ConfigIssue]) -> None:
     """custom_providers must be a list of dicts, not a dict."""
     if isinstance(cp, dict):
-        issues.append(ConfigIssue(
-            "error",
-            "custom_providers is a dict — it must be a YAML list (items prefixed with '-')",
-            "Change to:\n"
-            "  custom_providers:\n"
-            "    - name: my-provider\n"
-            "      base_url: https://...\n"
-            "      api_key: ..."))
+        _issue(issues, "error",
+               "custom_providers is a dict — it must be a YAML list (items prefixed with '-')",
+               "Change to:\n  custom_providers:\n    - name: my-provider\n      base_url: https://...\n"
+               "      api_key: ...")
         suspicious = set(cp.keys()) & _CUSTOM_PROVIDER_LIKE_FIELDS
         if suspicious:
-            issues.append(ConfigIssue(
-                "warning",
-                f"Root-level keys {sorted(suspicious)} look like custom_providers entry fields",
-                "These should be indented under a '- name: ...' list entry, not at root level"))
+            _issue(issues, "warning",
+                   f"Root-level keys {sorted(suspicious)} look like custom_providers entry fields",
+                   "These should be indented under a '- name: ...' list entry, not at root level")
     elif isinstance(cp, list):
         _validate_entry_list(cp, "custom_providers", issues, _CP_REQUIRED_FIELDS, non_dict=(
             "warning", "custom_providers[{i}] is not a dict (got {type})",
@@ -1144,13 +1139,9 @@ def _validate_fallback_model(fb: Any, issues: List[ConfigIssue]) -> None:
         _validate_entry_list(fb, "fallback_model", issues, _FB_REQUIRED_FIELDS, non_dict=(
             "error", "fallback_model[{i}] should be a dict, got {type}", "Each entry needs provider + model"))
     elif not isinstance(fb, dict):
-        issues.append(ConfigIssue(
-            "error",
-            f"fallback_model should be a dict with 'provider' and 'model', got {type(fb).__name__}",
-            "Change to:\n"
-            "  fallback_model:\n"
-            "    provider: openrouter\n"
-            "    model: anthropic/claude-sonnet-4"))
+        _issue(issues, "error",
+               f"fallback_model should be a dict with 'provider' and 'model', got {type(fb).__name__}",
+               "Change to:\n  fallback_model:\n    provider: openrouter\n    model: anthropic/claude-sonnet-4")
     elif fb:
         _require_fields(issues, fb, "fallback_model", _FB_SINGLE_REQUIRED_FIELDS,
                         suffix=" — fallback will be disabled")
@@ -1174,11 +1165,10 @@ def _validate_web_backends(config: Dict[str, Any], issues: List[ConfigIssue]) ->
         seen.add(_val)
         note = removed_backend_note("web", _val)
         if note:
-            issues.append(ConfigIssue(
-                "warning",
-                f"web.{_key} is set to '{_val}', but {note} — "
-                "web_search/web_extract will fail until it is changed",
-                "Run 'hermes tools' and pick a different Web Search & Extract provider"))
+            _issue(issues, "warning",
+                   f"web.{_key} is set to '{_val}', but {note} — "
+                   "web_search/web_extract will fail until it is changed",
+                   "Run 'hermes tools' and pick a different Web Search & Extract provider")
 
 
 def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["ConfigIssue"]:
@@ -1193,39 +1183,29 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
     issues: List[ConfigIssue] = []
     _validate_voice(config, issues)
     cp = config.get("custom_providers")
-    if cp is not None:
-        _validate_custom_providers(cp, issues)
     fb = config.get("fallback_model")
-    if fb is not None:
-        _validate_fallback_model(fb, issues)
+    for value, validator in ((cp, _validate_custom_providers), (fb, _validate_fallback_model)):
+        if value is not None:
+            validator(value, issues)
 
     if isinstance(cp, dict) and "fallback_model" not in config and "fallback_model" in (cp or {}):
-        issues.append(ConfigIssue(
-            "error",
-            "fallback_model appears inside custom_providers instead of at root level",
-            "Move fallback_model to the top level of config.yaml (no indentation)"))
+        _issue(issues, "error", "fallback_model appears inside custom_providers instead of at root level",
+               "Move fallback_model to the top level of config.yaml (no indentation)")
 
     if cp and not config.get("model"):
-        issues.append(ConfigIssue(
-            "warning",
-            "custom_providers defined but no 'model' section — Hermes won't know which provider to use",
-            "Add a model section:\n"
-            "  model:\n"
-            "    provider: custom\n"
-            "    default: your-model-name\n"
-            "    base_url: https://..."))
+        _issue(issues, "warning",
+               "custom_providers defined but no 'model' section — Hermes won't know which provider to use",
+               "Add a model section:\n  model:\n    provider: custom\n    default: your-model-name\n"
+               "    base_url: https://...")
 
     # Only provider-like fields are flagged as misplaced roots. Arbitrary unknown top-level keys
     # are deliberately NOT warned about: top-level scalars are bridged into os.environ so users
     # can feed skills/external apps env-style keys — a closed-world allowlist cannot enumerate those.
     for key in config:
-        if key.startswith("_"):
-            continue
-        if key not in _KNOWN_ROOT_KEYS and key in _CUSTOM_PROVIDER_LIKE_FIELDS:
-            issues.append(ConfigIssue(
-                "warning",
-                f"Root-level key '{key}' looks misplaced — should it be under 'model:' or inside a 'custom_providers' entry?",
-                f"Move '{key}' under the appropriate section"))
+        if not key.startswith("_") and key not in _KNOWN_ROOT_KEYS and key in _CUSTOM_PROVIDER_LIKE_FIELDS:
+            _issue(issues, "warning",
+                   f"Root-level key '{key}' looks misplaced — should it be under 'model:' or inside a 'custom_providers' entry?",
+                   f"Move '{key}' under the appropriate section")
 
     _validate_web_backends(config, issues)
     return issues
@@ -1525,15 +1505,10 @@ def _strip_dotted_keys(cfg: dict, dotted_keys: set) -> Tuple[dict, set]:
     value that would lose to the managed layer on the next load."""
     stripped: set = set()
     for dotted in dotted_keys:
-        parts = dotted.split(".")
-        node = cfg
-        for p in parts[:-1]:
-            if not isinstance(node, dict) or p not in node:
-                node = None
-                break
-            node = node[p]
-        if isinstance(node, dict) and parts[-1] in node:
-            del node[parts[-1]]
+        *parents, leaf = dotted.split(".")
+        node = cfg_get(cfg, *parents)
+        if isinstance(node, dict) and leaf in node:
+            del node[leaf]
             stripped.add(dotted)
     return cfg, stripped
 
@@ -1764,10 +1739,7 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
 
     config = dict(config)
     model = config.get("model")
-    if not isinstance(model, dict):
-        model = {"default": model} if model else {}
-    else:
-        model = dict(model)
+    model = dict(model) if isinstance(model, dict) else {"default": model} if model else {}
     config["model"] = model
 
     # Flatten ``{provider: <p>, model: <m>}``. The nested provider wins over the merged default
@@ -1796,10 +1768,9 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
     model.pop("api_base", None)
 
     # ``model``/``name`` are last-resort aliases (in that order), then dropped.
-    if not (model.get("default") or ""):
-        alias = model.get("model") or model.get("name")
-        if alias:
-            model["default"] = alias
+    alias = model.get("model") or model.get("name")
+    if not model.get("default") and alias:
+        model["default"] = alias
     if model.get("default"):
         model.pop("model", None)
         model.pop("name", None)
@@ -1812,15 +1783,8 @@ def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
     when the user set max_turns somewhere (so save_config can otherwise omit it)."""
     config = dict(config)
     agent_config = dict(config.get("agent") or {})
-
-    had_root = "max_turns" in config
-    had_agent = "max_turns" in agent_config
-
-    if had_root and not had_agent:
+    if "max_turns" in config and "max_turns" not in agent_config:
         agent_config["max_turns"] = config["max_turns"]
-    if (had_root or had_agent) and "max_turns" not in agent_config:
-        agent_config["max_turns"] = DEFAULT_CONFIG["agent"]["max_turns"]
-
     config["agent"] = agent_config
     config.pop("max_turns", None)
     return config
@@ -1844,10 +1808,8 @@ _UNLIMITED_SPELLINGS = frozenset({
 
 def resolve_turn_limit(raw: Any, default: int = TURN_LIMIT_UNLIMITED) -> int:
     """Normalize a raw ``agent.max_turns`` value into an int iteration cap (always >= 1)."""
-    if raw is None:
-        return default
-    if isinstance(raw, bool):
-        # bool is a subclass of int; reject explicitly so True/False don't become 1/0.
+    # bool is a subclass of int; reject explicitly so True/False don't become 1/0.
+    if raw is None or isinstance(raw, bool):
         return default
     if isinstance(raw, (int, float)):
         n = int(raw)
@@ -2469,11 +2431,10 @@ def _write_env_lines(env_path: Path, lines: list, *, preserve_mode: bool) -> Non
     ``preserve_mode`` keeps the original file mode (e.g. 0640 for Docker volume mounts) instead of
     letting ``_secure_file`` tighten to 0600; a new file is always secured."""
     original_mode = None
-    if preserve_mode:
-        try:
-            original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
+    try:
+        original_mode = stat.S_IMODE(env_path.stat().st_mode) if preserve_mode else None
+    except OSError:
+        pass
     fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix=".tmp", prefix=".env_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -2557,12 +2518,11 @@ def _publish_env_value(key: str, value: Optional[str]) -> None:
     except Exception:
         scope = None
     target = scope if isinstance(scope, dict) else (None if scope is not None else os.environ)
-    if target is None:
-        return
-    if value is None:
-        target.pop(key, None)
-    else:
-        target[key] = value
+    if target is not None:
+        if value is None:
+            target.pop(key, None)
+        else:
+            target[key] = value
 
 
 def _env_write_blocked(key: str, action: str) -> bool:
@@ -3016,9 +2976,7 @@ def _cron_section(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             config = load_config()
         except Exception:
             return None
-    if not isinstance(config, dict):
-        return None
-    cron_config = config.get("cron")
+    cron_config = config.get("cron") if isinstance(config, dict) else None
     return cron_config if isinstance(cron_config, dict) else None
 
 
@@ -3050,17 +3008,12 @@ def resolve_cron_model_drift_defaults(
     because they suppress a drift axis rather than changing the global assignment."""
     env = os.environ if environ is None else environ
     provider = ""
-    model = _model_assignment_text(env.get("HERMES_MODEL", ""))
     model_config = config.get("model") if isinstance(config, dict) else None
-    if isinstance(model_config, str):
-        configured_model = model_config.strip()
-    elif isinstance(model_config, dict):
+    if isinstance(model_config, dict):
         provider = _model_assignment_text(model_config.get("provider"))
-        configured_model = _model_assignment_text(
-            model_config.get("default") or model_config.get("model") or model_config.get("name"))
-    else:
-        configured_model = ""
-    return provider, configured_model or model
+        model_config = model_config.get("default") or model_config.get("model") or model_config.get("name")
+    configured_model = _model_assignment_text(model_config)
+    return provider, configured_model or _model_assignment_text(env.get("HERMES_MODEL", ""))
 
 
 def cron_model_drift_axes(
@@ -3092,10 +3045,8 @@ def _is_control_char(char: str) -> bool:
 
 
 def _valid_cron_impact_job_id(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    job_id = value.strip()
-    if not job_id or len(job_id) > _CRON_MODEL_IMPACT_ID_LIMIT or any(map(_is_control_char, job_id)):
+    job_id = value.strip() if isinstance(value, str) else ""
+    if len(job_id) > _CRON_MODEL_IMPACT_ID_LIMIT or any(map(_is_control_char, job_id)):
         return ""
     return job_id
 
@@ -3183,8 +3134,7 @@ def warn_unpinned_cron_jobs_after_model_config_change(
     if affected <= 0:
         return
 
-    noun = "job" if affected == 1 else "jobs"
-    verb = "has" if affected == 1 else "have"
+    noun, verb = ("job", "has") if affected == 1 else ("jobs", "have")
     print(
         f"⚠️  {affected} enabled unpinned cron {noun} {verb} stored "
         f"{axis}_snapshot values that differ from the new global {axis}. "
@@ -3196,12 +3146,8 @@ def warn_unpinned_cron_jobs_after_model_config_change(
 
 def _default_value_for_key(dotted_key: str):
     """Return the leaf value declared for *dotted_key* in ``DEFAULT_CONFIG`` (None for dicts/misses)."""
-    node = DEFAULT_CONFIG
-    for part in _split_key_path(dotted_key):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node if not isinstance(node, dict) else None
+    node = cfg_get(DEFAULT_CONFIG, *_split_key_path(dotted_key))
+    return None if isinstance(node, dict) else node
 
 
 # Top-level keys that accept arbitrary user-supplied child keys (schema declares the dict, the
@@ -3246,9 +3192,7 @@ def _known_top_level_keys() -> set[str]:
 
 def _suggest_closest_key(key: str, candidates: set[str], cutoff: float = 0.6) -> Optional[str]:
     """Closest candidate key name for a typo'd ``key``, or None."""
-    import difflib
-    matches = difflib.get_close_matches(key, sorted(candidates), n=1, cutoff=cutoff)
-    return matches[0] if matches else None
+    return next(iter(difflib.get_close_matches(key, sorted(candidates), n=1, cutoff=cutoff)), None)
 
 
 def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
@@ -3267,10 +3211,10 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
     known = _known_top_level_keys()
     if top not in known:
         suggestion = _suggest_closest_key(top, known)
-        if suggestion is not None:
-            rest = ".".join(segments[1:])
-            return False, f"{suggestion}.{rest}" if rest else suggestion
-        return False, None
+        if suggestion is None:
+            return False, None
+        rest = ".".join(segments[1:])
+        return False, f"{suggestion}.{rest}" if rest else suggestion
 
     if top in _OPEN_SUBKEY_TOP_LEVEL_KEYS:
         return True, None
@@ -3284,10 +3228,8 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
         if seg in _PLATFORM_CONTAINER_KEYS or not isinstance(node, dict):
             return True, None
         if seg not in node:
-            sibling_suggestion = _suggest_closest_key(seg, set(node.keys()))
-            if sibling_suggestion is not None:
-                return False, ".".join(consumed + [sibling_suggestion])
-            return False, None
+            sibling = _suggest_closest_key(seg, set(node.keys()))
+            return False, ".".join(consumed + [sibling]) if sibling is not None else None
         consumed.append(seg)
         node = node[seg]
     return True, None
@@ -3327,14 +3269,9 @@ def _coerce_float(value: str):
     Decimal-looking identifiers more precise than a binary float must stay strings."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")):
-        return None
-    try:
-        if Decimal(value) != Decimal(str(f)):
+        if f != f or f in (float("inf"), float("-inf")) or Decimal(value) != Decimal(str(f)):
             return None
-    except InvalidOperation:
+    except (TypeError, ValueError, InvalidOperation):
         return None
     return f
 
@@ -3415,10 +3352,8 @@ def _guard_section_overwrite(key: str, value: Any, user_config: Dict[str, Any], 
     """Refuse (or with ``force`` allow) a single-segment key overwriting a mapping with a scalar.
     Bare ``model`` is a documented shorthand — redirected to ``model.default`` so siblings survive.
     Returns the (possibly redirected) key."""
-    if "." in key:
-        return key
     existing = user_config.get(key)
-    if not isinstance(existing, dict):
+    if "." in key or not isinstance(existing, dict):
         return key
     if key == "model":
         if force:
@@ -3524,10 +3459,9 @@ def set_config_value(key: str, value: str, force: bool = False):
     value = _coerce_config_set_value(key, value)
     # A scalar ``model`` shorthand must become a dict before writing sub-keys, or _set_nested
     # replaces it with an empty dict and the model id is lost.
-    if key.strip().lower().startswith("model."):
-        _model_val = user_config.get("model")
-        if isinstance(_model_val, str) and _model_val:
-            user_config["model"] = {"default": _model_val}
+    _model_val = user_config.get("model")
+    if key.strip().lower().startswith("model.") and isinstance(_model_val, str) and _model_val:
+        user_config["model"] = {"default": _model_val}
     key = _guard_section_overwrite(key, value, user_config, force)
     try:
         _set_nested(user_config, key, value)
