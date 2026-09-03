@@ -11,6 +11,8 @@ flows (import cycle) and tests patch ``hermes_cli.config.load_config`` etc. at c
 
 from __future__ import annotations
 
+import contextlib
+
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import clear_model_endpoint_credentials
 
@@ -195,11 +197,9 @@ def _models_dev_merged(provider_id: str, curated) -> list:
     """models.dev agentic models for *provider_id* plus curated ids not yet listed
     (case-insensitive). Empty list when models.dev has nothing / is unavailable."""
     mdev_models: list = []
-    try:
+    with contextlib.suppress(Exception):
         from agent.models_dev import list_agentic_models
         mdev_models = list_agentic_models(provider_id)
-    except Exception:
-        pass
     if not mdev_models:
         return []
     seen = {m.lower() for m in mdev_models}

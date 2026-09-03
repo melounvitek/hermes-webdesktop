@@ -7,6 +7,7 @@ tests patch them at call time). Prompt strings and config write order are behavi
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import urllib.parse
@@ -252,11 +253,9 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     # (dashboard, desktop, ACP) show the full list; mirrors model_switch.py's
     # _save_discovered_models_to_config. A failed save is non-fatal.
     if live_models:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.model_switch import _save_discovered_models_to_config
             _save_discovered_models_to_config(base_url, live_models, api_mode=api_mode, headers=extra_headers or None)
-        except Exception:
-            pass
     return models, native_catalog_empty
 
 

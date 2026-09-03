@@ -7,6 +7,7 @@ imported lazily inside the functions that use them (call-time resolution keeps
 ``hermes_cli.main.<name>`` patches effective and avoids an import cycle).
 """
 
+import contextlib
 import subprocess
 
 from typing import Optional
@@ -86,12 +87,11 @@ def _all_aux_tasks() -> list[tuple[str, str, str]]:
     (:meth:`hermes_cli.plugins.PluginContext.register_auxiliary_task`)."""
     from hermes_cli.main import _AUX_TASKS
     tasks = list(_AUX_TASKS)
-    try:
+    # Plugin discovery failure must not break the aux config UI.
+    with contextlib.suppress(Exception):
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
         for entry in get_plugin_auxiliary_tasks():
             tasks.append((entry["key"], entry["display_name"], entry["description"]))
-    except Exception:
-        pass  # Plugin discovery failure must not break the aux config UI.
     return tasks
 
 
@@ -359,14 +359,12 @@ def _ask_index(prompt: str, count: int, *, echo_cancel: bool):
 def _prompt_provider_choice(choices, *, default=0, title="Select provider:"):
     """Provider menu with curses arrow keys; numbered-list fallback when curses is unavailable
     (piped stdin, non-TTY). Returns the selected index, or None if the user cancels."""
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.setup import _curses_prompt_choice
         idx = _curses_prompt_choice(title, choices, default)
         if idx >= 0:
             print()
             return idx
-    except Exception:
-        pass
 
     _print_numbered(title, choices, default)
     print()

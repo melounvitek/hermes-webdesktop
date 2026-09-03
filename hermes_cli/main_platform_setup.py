@@ -7,6 +7,7 @@ imported lazily inside the functions that use them (call-time resolution keeps
 ``hermes_cli.main.<name>`` patches effective and avoids an import cycle).
 """
 
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -179,12 +180,10 @@ def cmd_whatsapp(args):
     else:
         print("📱 Open WhatsApp on your phone, then scan:")
     _say("", "   Settings → Linked Devices → Link a Device", "─" * 50, "")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         subprocess.run(
             [find_node_executable("node") or "node", str(bridge_script), "--pair-only", "--session", str(session_dir)],
             cwd=str(bridge_dir), env=with_hermes_node_path())
-    except KeyboardInterrupt:
-        pass
 
     print()
     if not (session_dir / "creds.json").exists():

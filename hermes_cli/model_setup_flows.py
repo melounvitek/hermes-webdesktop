@@ -10,6 +10,7 @@ patch ``hermes_cli.config.load_config`` etc. at call time. The shared skeleton l
 
 from __future__ import annotations
 
+import contextlib
 import argparse
 import os
 
@@ -296,10 +297,8 @@ def _model_flow_nous(config, current_model="", args=None):
         def _login_then_offer_gateway(login_args, pconfig):
             _login_nous(login_args, pconfig)
             # Offer Tool Gateway enablement for paid subscribers
-            try:
+            with contextlib.suppress(Exception):
                 prompt_enable_tool_gateway(load_config() or {})
-            except Exception:
-                pass
 
         # login_nous already handles model selection + config update
         _run_login(_login_then_offer_gateway, _nous_login_args(args), PROVIDER_REGISTRY["nous"])
@@ -331,12 +330,10 @@ def _model_flow_nous(config, current_model="", args=None):
 
     # Portal URL is needed for upgrade links and the recommendations endpoints.
     _nous_portal_url = ""
-    try:
+    with contextlib.suppress(Exception):
         _nous_state = get_provider_auth_state("nous")
         if _nous_state:
             _nous_portal_url = _nous_state.get("portal_base_url", "")
-    except Exception:
-        pass
 
     catalog = _nous_model_catalog(free_tier, _nous_portal_url, model_ids, pricing)
     if catalog is None:
@@ -376,18 +373,14 @@ def _model_flow_openai_codex(config, current_model=""):
     # Prefer the credential pool (where `hermes auth` stores device_code tokens),
     # fall back to legacy provider state.
     _codex_token = None
-    try:
+    with contextlib.suppress(Exception):
         _codex_status = get_codex_auth_status()
         if _codex_status.get("logged_in"):
             _codex_token = _codex_status.get("api_key")
-    except Exception:
-        pass
     if not _codex_token:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.auth import resolve_codex_runtime_credentials
             _codex_token = resolve_codex_runtime_credentials().get("api_key")
-        except Exception:
-            pass
 
     codex_models = get_codex_model_ids(access_token=_codex_token)
     selected = _prompt_model_selection(
@@ -413,11 +406,9 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
     # credentials may live only in the pool (``hermes auth add xai-oauth``) — fall back to
     # the default base URL so the picker still completes.
     base_url = DEFAULT_XAI_OAUTH_BASE_URL
-    try:
+    with contextlib.suppress(Exception):
         creds = resolve_xai_oauth_runtime_credentials()
         base_url = (creds.get("base_url") or "").strip().rstrip("/") or base_url
-    except Exception:
-        pass
 
     models = provider_model_ids("xai-oauth")
     selected = _prompt_model_selection(models, current_model=current_model or (models[0] if models else "grok-4.6"))
@@ -443,11 +434,9 @@ def _model_flow_qwen_oauth(_config, current_model=""):
 
     # Try live model discovery, fall back to curated list.
     models = None
-    try:
+    with contextlib.suppress(Exception):
         creds = resolve_qwen_runtime_credentials(refresh_if_expiring=True)
         models = fetch_api_models(creds["api_key"], creds["base_url"])
-    except Exception:
-        pass
     if not models:
         models = list(_DEFAULT_QWEN_PORTAL_MODELS)
 
@@ -543,14 +532,12 @@ def _copilot_obtain_token() -> bool:
             print("  Cancelled.")
             return False
         # Validate token type
-        try:
+        with contextlib.suppress(ImportError):
             from hermes_cli.copilot_auth import validate_copilot_token
             valid, msg = validate_copilot_token(new_key)
             if not valid:
                 print(f"  ✗ {msg}")
                 return False
-        except ImportError:
-            pass
         save_env_value("COPILOT_GITHUB_TOKEN", new_key)
         _say("  Token saved.", "")
         return True
@@ -643,10 +630,8 @@ def _model_flow_copilot_acp(config, current_model=""):
     effective_base = creds.get("base_url") or effective_base
 
     catalog_api_key = ""
-    try:
+    with contextlib.suppress(Exception):
         catalog_api_key = resolve_api_key_provider_credentials("copilot").get("api_key", "")
-    except Exception:
-        pass
     _catalog, catalog_ids, _normalize = _copilot_catalog(catalog_api_key)
     selected = _pick_model_or_prompt(
         _copilot_model_list(catalog_ids), "Model name: ", current_model=_normalize(current_model),
@@ -974,12 +959,10 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     # localhost when the user just presses Enter.
     current_base = _env_base_url(base_url_env)
     if not current_base:
-        try:
+        with contextlib.suppress(Exception):
             _m = load_config().get("model") or {}
             if str(_m.get("provider") or "").strip().lower() == provider_id:
                 current_base = str(_m.get("base_url") or "").strip()
-        except Exception:
-            pass
     effective_base = current_base or pconfig.inference_base_url
 
     if provider_id == "zai":
@@ -1053,13 +1036,11 @@ def _model_flow_anthropic(config, current_model=""):
     # Check ALL credential sources
     existing_key = get_anthropic_key()
     cc_available = False
-    try:
+    with contextlib.suppress(Exception):
         from agent.anthropic_adapter import read_claude_code_credentials, is_claude_code_token_valid, _is_oauth_token
         cc_creds = read_claude_code_credentials()
         if cc_creds and is_claude_code_token_valid(cc_creds):
             cc_available = True
-    except Exception:
-        pass
 
     # Stale-OAuth guard: an expired OAuth token with no valid cc_creds fallback is treated
     # as missing so the re-auth path is offered.
