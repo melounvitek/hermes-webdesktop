@@ -1,17 +1,13 @@
 """Multi-provider authentication system for Hermes Agent.
 
-Architecture:
 - ``ProviderConfig`` / ``PROVIDER_REGISTRY`` describe every known inference provider.
-- The auth store (``~/.hermes/auth.json``) holds per-provider credential state, the credential
-  pool and suppression markers; ``_auth_store_lock`` / ``_load_auth_store`` / ``_save_auth_store``
-  are the only I/O primitives (cross-process flock, atomic 0o600 writes).
+- The auth store (``~/.hermes/auth.json``) holds per-provider state, the credential pool and
+  suppression markers; ``_auth_store_lock`` / ``_load_auth_store`` / ``_save_auth_store`` are the
+  only I/O primitives (cross-process flock, atomic 0o600 writes).
 - ``resolve_provider()`` picks the active provider via the documented priority chain.
-- ``OAUTH_PROVIDER_FLOWS`` maps each OAuth provider to its runtime-credential resolver, status
-  builder and terminal-refresh error codes; the flows themselves live in sibling modules
-  (``auth_nous``, ``auth_codex``, ``auth_xai``, ``auth_qwen``, ``auth_minimax``, ``auth_spotify``)
-  and are re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface.
-- ``get_auth_status()`` / ``resolve_api_key_provider_credentials()`` / ``logout_command()`` are
-  the generic entry points the CLI, gateway and dashboard call.
+- ``OAUTH_PROVIDER_FLOWS`` maps each OAuth provider to its resolver/status builder; the flows live in
+  ``auth_nous``/``auth_codex``/``auth_xai``/``auth_qwen``/``auth_minimax``/``auth_spotify`` and are
+  re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface.
 """
 
 from __future__ import annotations
@@ -146,11 +142,8 @@ def is_actual_local_base_url(base_url: str) -> bool:
 
 
 def normalize_actual_base_url(base_url: str) -> str:
-    """Return Actual's OpenAI-compatible base URL.
-
-    Hosted inference lives at api.actual.inc; the Actual client's offline local server binds a
-    loopback host. Both expose a /v1 surface for the Responses transport.
-    """
+    """Return Actual's OpenAI-compatible base URL (hosted api.actual.inc or the loopback local server;
+    both expose a /v1 surface for the Responses transport)."""
     url = str(base_url or "").strip().rstrip("/")
     if not url:
         return DEFAULT_ACTUAL_BASE_URL
@@ -160,9 +153,7 @@ def normalize_actual_base_url(base_url: str) -> str:
         path = parsed.path.rstrip("/")
     except Exception:
         return url
-    if host == "api.actual.inc" and path in {"", "/"}:
-        return url + "/v1"
-    if is_actual_local_base_url(url) and path in {"", "/"}:
+    if path in {"", "/"} and (host == "api.actual.inc" or is_actual_local_base_url(url)):
         return url + "/v1"
     return url
 
@@ -176,226 +167,115 @@ class ProviderConfig:
     """Describes a known inference provider."""
     id: str
     name: str
-    auth_type: str  # "oauth_device_code", "oauth_external", "oauth_minimax", or "api_key"
+    auth_type: str  # "oauth_device_code", "oauth_external", "oauth_minimax", "api_key", ...
     portal_base_url: str = ""
     inference_base_url: str = ""
     client_id: str = ""
     scope: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
-    # For API-key providers: env vars to check (in priority order)
-    api_key_env_vars: tuple = ()
-    # Optional env var for base URL override
-    base_url_env_var: str = ""
+    api_key_env_vars: tuple = ()  # API-key providers: env vars to check, in priority order
+    base_url_env_var: str = ""  # optional env var overriding the base URL
 
 
 def _api_key_provider(
-    id: str,
-    name: str,
-    inference_base_url: str,
-    api_key_env_vars: tuple,
-    base_url_env_var: str = "",
-    *,
-    auth_type: str = "api_key",
+    id: str, name: str, inference_base_url: str, api_key_env_vars: tuple,
+    base_url_env_var: str = "", auth_type: str = "api_key",
 ) -> ProviderConfig:
     """Compact constructor for the common env-var-keyed provider shape."""
     return ProviderConfig(
-        id=id,
-        name=name,
-        auth_type=auth_type,
-        inference_base_url=inference_base_url,
-        api_key_env_vars=api_key_env_vars,
-        base_url_env_var=base_url_env_var,
+        id=id, name=name, auth_type=auth_type, inference_base_url=inference_base_url,
+        api_key_env_vars=api_key_env_vars, base_url_env_var=base_url_env_var,
     )
 
 
-PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
-    "nous": ProviderConfig(
-        id="nous",
-        name="Nous Portal",
-        auth_type="oauth_device_code",
-        portal_base_url=DEFAULT_NOUS_PORTAL_URL,
-        inference_base_url=DEFAULT_NOUS_INFERENCE_URL,
-        client_id=DEFAULT_NOUS_CLIENT_ID,
+# Registry rows in priority order (resolve_provider() scans api_key rows in this order). A tuple
+# row is ``_api_key_provider(id, name, inference_base_url, api_key_env_vars[, base_url_env_var
+# [, auth_type]])``; OAuth / bespoke rows are full ``ProviderConfig`` objects.
+_REGISTRY_ROWS: Tuple[Any, ...] = (
+    ProviderConfig(
+        "nous", "Nous Portal", "oauth_device_code", portal_base_url=DEFAULT_NOUS_PORTAL_URL,
+        inference_base_url=DEFAULT_NOUS_INFERENCE_URL, client_id=DEFAULT_NOUS_CLIENT_ID,
         scope=DEFAULT_NOUS_SCOPE,
     ),
-    "openai-codex": ProviderConfig(
-        id="openai-codex",
-        name="OpenAI Codex",
-        auth_type="oauth_external",
-        inference_base_url=DEFAULT_CODEX_BASE_URL,
-    ),
-    "openai-api": _api_key_provider(
-        "openai-api", "OpenAI API", "https://api.openai.com/v1",
-        ("OPENAI_API_KEY",), "OPENAI_BASE_URL",
-    ),
-    "xai-oauth": ProviderConfig(
-        id="xai-oauth",
-        name="xAI Grok OAuth (SuperGrok / Premium+)",
-        auth_type="oauth_external",
+    ProviderConfig("openai-codex", "OpenAI Codex", "oauth_external", inference_base_url=DEFAULT_CODEX_BASE_URL),
+    ("openai-api", "OpenAI API", "https://api.openai.com/v1", ("OPENAI_API_KEY",), "OPENAI_BASE_URL"),
+    ProviderConfig(
+        "xai-oauth", "xAI Grok OAuth (SuperGrok / Premium+)", "oauth_external",
         inference_base_url=DEFAULT_XAI_OAUTH_BASE_URL,
     ),
-    "qwen-oauth": ProviderConfig(
-        id="qwen-oauth",
-        name="Qwen OAuth",
-        auth_type="oauth_external",
-        inference_base_url=DEFAULT_QWEN_BASE_URL,
+    ProviderConfig("qwen-oauth", "Qwen OAuth", "oauth_external", inference_base_url=DEFAULT_QWEN_BASE_URL),
+    ("lmstudio", "LM Studio", "http://127.0.0.1:1234/v1", ("LM_API_KEY",), "LM_BASE_URL"),
+    ("copilot", "GitHub Copilot", DEFAULT_GITHUB_MODELS_BASE_URL,
+     ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"), "COPILOT_API_BASE_URL"),
+    ProviderConfig(
+        "copilot-acp", "GitHub Copilot ACP", "external_process",
+        inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL, base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
-    "lmstudio": _api_key_provider(
-        "lmstudio", "LM Studio", "http://127.0.0.1:1234/v1",
-        ("LM_API_KEY",), "LM_BASE_URL",
-    ),
-    "copilot": _api_key_provider(
-        "copilot", "GitHub Copilot", DEFAULT_GITHUB_MODELS_BASE_URL,
-        ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"), "COPILOT_API_BASE_URL",
-    ),
-    "copilot-acp": ProviderConfig(
-        id="copilot-acp",
-        name="GitHub Copilot ACP",
-        auth_type="external_process",
-        inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
-        base_url_env_var="COPILOT_ACP_BASE_URL",
-    ),
-    "gemini": _api_key_provider(
-        "gemini", "Google AI Studio", "https://generativelanguage.googleapis.com/v1beta",
-        ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "GEMINI_BASE_URL",
-    ),
-    "zai": _api_key_provider(
-        "zai", "Z.AI / GLM", "https://api.z.ai/api/paas/v4",
-        ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "GLM_BASE_URL",
-    ),
-    # Legacy platform.moonshot.ai keys use this endpoint (OpenAI-compat).
-    # sk-kimi- (Kimi Code) keys are auto-redirected to api.kimi.com/coding
-    # by _resolve_kimi_base_url() below.
-    "kimi-coding": _api_key_provider(
-        "kimi-coding", "Kimi / Moonshot", "https://api.moonshot.ai/v1",
-        ("KIMI_API_KEY", "KIMI_CODING_API_KEY"), "KIMI_BASE_URL",
-    ),
-    "kimi-coding-cn": _api_key_provider(
-        "kimi-coding-cn", "Kimi / Moonshot (China)", "https://api.moonshot.cn/v1",
-        ("KIMI_CN_API_KEY",),
-    ),
-    "stepfun": _api_key_provider(
-        "stepfun", "StepFun Step Plan", STEPFUN_STEP_PLAN_INTL_BASE_URL,
-        ("STEPFUN_API_KEY",), "STEPFUN_BASE_URL",
-    ),
-    "arcee": _api_key_provider(
-        "arcee", "Arcee AI", "https://api.arcee.ai/api/v1",
-        ("ARCEEAI_API_KEY",), "ARCEE_BASE_URL",
-    ),
-    "gmi": _api_key_provider(
-        "gmi", "GMI Cloud", "https://api.gmi-serving.com/v1",
-        ("GMI_API_KEY",), "GMI_BASE_URL",
-    ),
-    "actual": _api_key_provider(
-        "actual", "Actual Computer", DEFAULT_ACTUAL_BASE_URL,
-        ("ACTUAL_API_KEY",), "ACTUAL_BASE_URL",
-    ),
-    "minimax": _api_key_provider(
-        "minimax", "MiniMax", "https://api.minimax.io/anthropic",
-        ("MINIMAX_API_KEY",), "MINIMAX_BASE_URL",
-    ),
-    "minimax-oauth": ProviderConfig(
-        id="minimax-oauth",
-        name="MiniMax (OAuth \u00b7 minimax.io)",
-        auth_type="oauth_minimax",
-        portal_base_url=MINIMAX_OAUTH_GLOBAL_BASE,
-        inference_base_url=MINIMAX_OAUTH_GLOBAL_INFERENCE,
-        client_id=MINIMAX_OAUTH_CLIENT_ID,
-        scope=MINIMAX_OAUTH_SCOPE,
+    ("gemini", "Google AI Studio", "https://generativelanguage.googleapis.com/v1beta",
+     ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "GEMINI_BASE_URL"),
+    ("zai", "Z.AI / GLM", "https://api.z.ai/api/paas/v4",
+     ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "GLM_BASE_URL"),
+    # Legacy platform.moonshot.ai keys use this endpoint (OpenAI-compat); sk-kimi- (Kimi Code)
+    # keys are auto-redirected to api.kimi.com/coding by _resolve_kimi_base_url().
+    ("kimi-coding", "Kimi / Moonshot", "https://api.moonshot.ai/v1",
+     ("KIMI_API_KEY", "KIMI_CODING_API_KEY"), "KIMI_BASE_URL"),
+    ("kimi-coding-cn", "Kimi / Moonshot (China)", "https://api.moonshot.cn/v1", ("KIMI_CN_API_KEY",)),
+    ("stepfun", "StepFun Step Plan", STEPFUN_STEP_PLAN_INTL_BASE_URL, ("STEPFUN_API_KEY",), "STEPFUN_BASE_URL"),
+    ("arcee", "Arcee AI", "https://api.arcee.ai/api/v1", ("ARCEEAI_API_KEY",), "ARCEE_BASE_URL"),
+    ("gmi", "GMI Cloud", "https://api.gmi-serving.com/v1", ("GMI_API_KEY",), "GMI_BASE_URL"),
+    ("actual", "Actual Computer", DEFAULT_ACTUAL_BASE_URL, ("ACTUAL_API_KEY",), "ACTUAL_BASE_URL"),
+    ("minimax", "MiniMax", "https://api.minimax.io/anthropic", ("MINIMAX_API_KEY",), "MINIMAX_BASE_URL"),
+    ProviderConfig(
+        "minimax-oauth", "MiniMax (OAuth \u00b7 minimax.io)", "oauth_minimax",
+        portal_base_url=MINIMAX_OAUTH_GLOBAL_BASE, inference_base_url=MINIMAX_OAUTH_GLOBAL_INFERENCE,
+        client_id=MINIMAX_OAUTH_CLIENT_ID, scope=MINIMAX_OAUTH_SCOPE,
         extra={"region": "global", "cn_portal_base_url": MINIMAX_OAUTH_CN_BASE,
                "cn_inference_base_url": MINIMAX_OAUTH_CN_INFERENCE},
     ),
-    # CLAUDE_CODE_OAUTH_TOKEN is NOT an API key, despite auth_type="api_key"
-    # and its place in this tuple (#82154). `claude setup-token` yields an
-    # `sk-ant-oat01…` OAuth token: sent as `x-api-key` it 401s, and sent as a
-    # bare Bearer it 429s. It is listed here because this tuple doubles as the
-    # credential-DISCOVERY list (agent/credential_pool.py builds its env scan
-    # from it), so removing it would stop Hermes finding a setup-token
-    # credential at all. The adapter routes such a value down the OAuth path
-    # on the strength of its prefix, not on this entry. Only ANTHROPIC_API_KEY
-    # and ANTHROPIC_TOKEN are usable as literal API keys.
-    "anthropic": _api_key_provider(
-        "anthropic", "Anthropic", "https://api.anthropic.com",
-        ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "ANTHROPIC_BASE_URL",
-    ),
-    "alibaba": _api_key_provider(
-        "alibaba", "Qwen Cloud", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        ("DASHSCOPE_API_KEY",), "DASHSCOPE_BASE_URL",
-    ),
-    "alibaba-coding-plan": _api_key_provider(
-        "alibaba-coding-plan", "Alibaba Cloud (Coding Plan)", "https://coding-intl.dashscope.aliyuncs.com/v1",
-        ("ALIBABA_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"), "ALIBABA_CODING_PLAN_BASE_URL",
-    ),
-    "minimax-cn": _api_key_provider(
-        "minimax-cn", "MiniMax (China)", "https://api.minimaxi.com/anthropic",
-        ("MINIMAX_CN_API_KEY",), "MINIMAX_CN_BASE_URL",
-    ),
-    "deepseek": _api_key_provider(
-        "deepseek", "DeepSeek", "https://api.deepseek.com/v1",
-        ("DEEPSEEK_API_KEY",), "DEEPSEEK_BASE_URL",
-    ),
-    "xai": _api_key_provider("xai", "xAI", "https://api.x.ai/v1", ("XAI_API_KEY",), "XAI_BASE_URL"),
-    "nvidia": _api_key_provider(
-        "nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1",
-        ("NVIDIA_API_KEY",), "NVIDIA_BASE_URL",
-    ),
-    "ai-gateway": _api_key_provider(
-        "ai-gateway", "Vercel AI Gateway", "https://ai-gateway.vercel.sh/v1",
-        ("AI_GATEWAY_API_KEY",), "AI_GATEWAY_BASE_URL",
-    ),
-    "opencode-zen": _api_key_provider(
-        "opencode-zen", "OpenCode Zen", "https://opencode.ai/zen/v1",
-        ("OPENCODE_ZEN_API_KEY",), "OPENCODE_ZEN_BASE_URL",
-    ),
-    # OpenCode Go mixes API surfaces by model:
-    # - GLM / Kimi use OpenAI-compatible chat completions under /v1
-    # - MiniMax models use Anthropic Messages under /v1/messages
-    # - Qwen 3.7 uses Anthropic Messages under /v1/messages
-    # Keep the provider base at /v1 and select api_mode per-model.
-    "opencode-go": _api_key_provider(
-        "opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1",
-        ("OPENCODE_GO_API_KEY",), "OPENCODE_GO_BASE_URL",
-    ),
-    # Deliberately NO api_key_env_vars: the free tier is served
-    # anonymously (any unrecognized bearer is a 401), so there is no
-    # secret to configure. Select via `hermes model` / `/model free`.
-    "opencode-free": _api_key_provider("opencode-free", "OpenCode Free", "https://opencode.ai/zen/v1", ()),
-    "kilocode": _api_key_provider(
-        "kilocode", "Kilo Code", "https://api.kilo.ai/api/gateway",
-        ("KILOCODE_API_KEY",), "KILOCODE_BASE_URL",
-    ),
-    "huggingface": _api_key_provider(
-        "huggingface", "Hugging Face", "https://router.huggingface.co/v1",
-        ("HF_TOKEN",), "HF_BASE_URL",
-    ),
-    "xiaomi": _api_key_provider(
-        "xiaomi", "Xiaomi MiMo", "https://api.xiaomimimo.com/v1",
-        ("XIAOMI_API_KEY",), "XIAOMI_BASE_URL",
-    ),
-    "tencent-tokenhub": _api_key_provider(
-        "tencent-tokenhub", "Tencent TokenHub", "https://tokenhub.tencentmaas.com/v1",
-        ("TOKENHUB_API_KEY",), "TOKENHUB_BASE_URL",
-    ),
-    "tencent-tokenplan": _api_key_provider(
-        "tencent-tokenplan", "Tencent TokenPlan", "https://api.lkeap.cloud.tencent.com/plan/anthropic",
-        ("TOKENPLAN_API_KEY",), "TOKENPLAN_BASE_URL",
-    ),
-    "ollama-cloud": _api_key_provider(
-        "ollama-cloud", "Ollama Cloud", DEFAULT_OLLAMA_CLOUD_BASE_URL,
-        ("OLLAMA_API_KEY",), "OLLAMA_BASE_URL",
-    ),
-    "bedrock": _api_key_provider(
-        "bedrock", "AWS Bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com",
-        (), "BEDROCK_BASE_URL", auth_type="aws_sdk",
-    ),
-    # No static inference_base_url: Vertex's endpoint is computed per
-    # request from project_id + region (agent/vertex_adapter.py's
-    # build_vertex_base_url), not a fixed host like the other entries.
-    "vertex": _api_key_provider("vertex", "Google Vertex AI", "", (), auth_type="vertex"),
-    "azure-foundry": _api_key_provider(
-        "azure-foundry", "Azure Foundry", "",
-        ("AZURE_FOUNDRY_API_KEY",), "AZURE_FOUNDRY_BASE_URL",
-    ),
+    # CLAUDE_CODE_OAUTH_TOKEN is NOT an API key despite auth_type="api_key": `claude setup-token`
+    # yields an `sk-ant-oat01…` OAuth token (401s as x-api-key, 429s as bare Bearer). It stays in
+    # this tuple because the tuple doubles as the credential-DISCOVERY list (agent/credential_pool.py
+    # builds its env scan from it); the adapter routes it down the OAuth path by prefix. Only
+    # ANTHROPIC_API_KEY and ANTHROPIC_TOKEN are usable as literal API keys.
+    ("anthropic", "Anthropic", "https://api.anthropic.com",
+     ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "ANTHROPIC_BASE_URL"),
+    ("alibaba", "Qwen Cloud", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+     ("DASHSCOPE_API_KEY",), "DASHSCOPE_BASE_URL"),
+    ("alibaba-coding-plan", "Alibaba Cloud (Coding Plan)", "https://coding-intl.dashscope.aliyuncs.com/v1",
+     ("ALIBABA_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"), "ALIBABA_CODING_PLAN_BASE_URL"),
+    ("minimax-cn", "MiniMax (China)", "https://api.minimaxi.com/anthropic", ("MINIMAX_CN_API_KEY",),
+     "MINIMAX_CN_BASE_URL"),
+    ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", ("DEEPSEEK_API_KEY",), "DEEPSEEK_BASE_URL"),
+    ("xai", "xAI", "https://api.x.ai/v1", ("XAI_API_KEY",), "XAI_BASE_URL"),
+    ("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", ("NVIDIA_API_KEY",), "NVIDIA_BASE_URL"),
+    ("ai-gateway", "Vercel AI Gateway", "https://ai-gateway.vercel.sh/v1", ("AI_GATEWAY_API_KEY",),
+     "AI_GATEWAY_BASE_URL"),
+    ("opencode-zen", "OpenCode Zen", "https://opencode.ai/zen/v1", ("OPENCODE_ZEN_API_KEY",),
+     "OPENCODE_ZEN_BASE_URL"),
+    # OpenCode Go mixes API surfaces by model (GLM/Kimi: OpenAI chat under /v1; MiniMax and
+    # Qwen 3.7: Anthropic Messages under /v1/messages). Keep the base at /v1; api_mode is per-model.
+    ("opencode-go", "OpenCode Go", "https://opencode.ai/zen/go/v1", ("OPENCODE_GO_API_KEY",),
+     "OPENCODE_GO_BASE_URL"),
+    # Deliberately NO api_key_env_vars: the free tier is served anonymously (any unrecognized
+    # bearer is a 401), so there is no secret to configure. Select via `hermes model` / `/model free`.
+    ("opencode-free", "OpenCode Free", "https://opencode.ai/zen/v1", ()),
+    ("kilocode", "Kilo Code", "https://api.kilo.ai/api/gateway", ("KILOCODE_API_KEY",), "KILOCODE_BASE_URL"),
+    ("huggingface", "Hugging Face", "https://router.huggingface.co/v1", ("HF_TOKEN",), "HF_BASE_URL"),
+    ("xiaomi", "Xiaomi MiMo", "https://api.xiaomimimo.com/v1", ("XIAOMI_API_KEY",), "XIAOMI_BASE_URL"),
+    ("tencent-tokenhub", "Tencent TokenHub", "https://tokenhub.tencentmaas.com/v1", ("TOKENHUB_API_KEY",),
+     "TOKENHUB_BASE_URL"),
+    ("tencent-tokenplan", "Tencent TokenPlan", "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+     ("TOKENPLAN_API_KEY",), "TOKENPLAN_BASE_URL"),
+    ("ollama-cloud", "Ollama Cloud", DEFAULT_OLLAMA_CLOUD_BASE_URL, ("OLLAMA_API_KEY",), "OLLAMA_BASE_URL"),
+    ("bedrock", "AWS Bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com", (), "BEDROCK_BASE_URL",
+     "aws_sdk"),
+    # No static inference_base_url: Vertex's endpoint is computed per request from project_id +
+    # region (agent/vertex_adapter.py build_vertex_base_url), not a fixed host.
+    ("vertex", "Google Vertex AI", "", (), "", "vertex"),
+    ("azure-foundry", "Azure Foundry", "", ("AZURE_FOUNDRY_API_KEY",), "AZURE_FOUNDRY_BASE_URL"),
+)
+PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
+    p.id: p for p in (r if isinstance(r, ProviderConfig) else _api_key_provider(*r) for r in _REGISTRY_ROWS)
 }
 
 # Providers handled outside the registry: copilot/kimi/zai have bespoke token refresh here;
@@ -412,17 +292,13 @@ def _register_plugin_provider(pp: Any) -> None:
     (otherwise ``hermes -m <that provider>`` dies with "Unknown provider" before a client is built).
     """
     if pp.auth_type == "external_process":
-        pconfig = ProviderConfig(
-            id=pp.name, name=pp.display_name or pp.name,
-            auth_type="external_process", inference_base_url=pp.base_url,
-        )
+        pconfig = ProviderConfig(pp.name, pp.display_name or pp.name, "external_process", inference_base_url=pp.base_url)
     elif pp.auth_type == "api_key" and pp.env_vars and pp.name not in _REGISTRY_PLUGIN_SKIP:
         is_url = lambda v: v.endswith("_BASE_URL") or v.endswith("_URL")  # noqa: E731
-        pconfig = ProviderConfig(
-            id=pp.name, name=pp.display_name or pp.name, auth_type="api_key",
-            inference_base_url=pp.base_url,
-            api_key_env_vars=tuple(v for v in pp.env_vars if not is_url(v)) or pp.env_vars,
-            base_url_env_var=next((v for v in pp.env_vars if is_url(v)), None) or "",
+        pconfig = _api_key_provider(
+            pp.name, pp.display_name or pp.name, pp.base_url,
+            tuple(v for v in pp.env_vars if not is_url(v)) or pp.env_vars,
+            next((v for v in pp.env_vars if is_url(v)), None) or "",
         )
     else:
         return
@@ -440,25 +316,14 @@ except Exception:
     pass
 
 
-# =============================================================================
-# Anthropic Key Helper
-# =============================================================================
-
 def get_anthropic_key() -> str:
-    """Return the first usable Anthropic credential, or ``""``.
+    """First usable Anthropic credential (``.env`` preferred over a stale shell export), or ``""``.
 
-    Checks both the ``.env`` file and the process environment, preferring ``~/.hermes/.env`` so a
-    deliberate key rotation isn't shadowed by a stale shell export (matches the api-key resolution
-    path — see #20591). The order mirrors the ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``
-    tuple:
+    Order mirrors ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``.
     """
     from hermes_cli.config import get_env_value_prefer_dotenv
 
-    for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
-        value = get_env_value_prefer_dotenv(var) or ""
-        if value:
-            return value
-    return ""
+    return next((v for v in (get_env_value_prefer_dotenv(var) or "" for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars) if v), "")
 
 
 # =============================================================================
@@ -466,18 +331,8 @@ def get_anthropic_key() -> str:
 # =============================================================================
 
 _PLACEHOLDER_SECRET_VALUES = {
-    "*",
-    "**",
-    "***",
-    "changeme",
-    "your_api_key",
-    "your_api_key_here",
-    "your-api-key",
-    "placeholder",
-    "example",
-    "dummy",
-    "null",
-    "none",
+    "*", "**", "***", "changeme", "your_api_key", "your_api_key_here", "your-api-key",
+    "placeholder", "example", "dummy", "null", "none",
 }
 
 
@@ -486,52 +341,48 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
     if not isinstance(value, str):
         return False
     cleaned = value.strip()
-    if len(cleaned) < min_length:
-        return False
-    return cleaned.lower() not in _PLACEHOLDER_SECRET_VALUES
+    return len(cleaned) >= min_length and cleaned.lower() not in _PLACEHOLDER_SECRET_VALUES
 
 
-# Known API-key prefixes per provider.  Only providers listed here get
-# prefix validation; everyone else is fail-open (unknown formats pass).
-# This exists so an obviously malformed key in .env (truncated paste, wrong
-# provider's key in the wrong var, etc.) doesn't silently shadow a valid
-# credential-pool entry and produce opaque 401s (#93593).
+# Known API-key prefixes per provider. Only listed providers get prefix validation; everyone else
+# is fail-open. Keeps an obviously malformed key in .env (truncated paste, wrong provider's key)
+# from silently shadowing a valid credential-pool entry and producing opaque 401s.
 KNOWN_PROVIDER_KEY_PREFIXES: Dict[str, tuple] = {
-    # All OpenRouter keys are issued as sk-or-... (currently sk-or-v1-).
-    "openrouter": ("sk-or-",),
+    "openrouter": ("sk-or-",),  # all OpenRouter keys are sk-or-... (currently sk-or-v1-)
 }
 
 
 def _secret_matches_declared_prefix(provider_id: str, value: str) -> bool:
-    """Return False only when the provider declares key prefixes and none match.
-
-    Providers without a declared prefix always pass (fail-open): we never hard-reject unknown key
-    formats, only skip values that provably don't belong to a provider whose key format we know.
-    """
+    """False only when the provider declares key prefixes and none match (fail-open otherwise)."""
     prefixes = KNOWN_PROVIDER_KEY_PREFIXES.get(provider_id)
-    if not prefixes:
-        return True
-    return any(value.startswith(p) for p in prefixes)
+    return not prefixes or any(value.startswith(p) for p in prefixes)
 
 
 def _warn_malformed_secret(provider_id: str, source: str) -> None:
-    prefixes = KNOWN_PROVIDER_KEY_PREFIXES.get(provider_id, ())
     logger.warning(
         "Ignoring %s for provider %r: value does not match the expected key "
         "prefix (%s). Falling back to the next credential source. Fix or "
         "remove the malformed key to silence this warning.",
-        source,
-        provider_id,
-        " or ".join(prefixes),
+        source, provider_id, " or ".join(KNOWN_PROVIDER_KEY_PREFIXES.get(provider_id, ())),
     )
 
 
-def _resolve_api_key_provider_secret(
-    provider_id: str, pconfig: ProviderConfig
-) -> tuple[str, str]:
+def _usable_declared_secret(provider_id: str, value: Any, source: str) -> Optional[str]:
+    """*value* stripped when it is a usable, prefix-valid secret; None (after warning on a provable
+    prefix mismatch, so it never shadows a later credential source) otherwise."""
+    val = str(value or "").strip()
+    if not has_usable_secret(val):
+        return None
+    if not _secret_matches_declared_prefix(provider_id, val):
+        _warn_malformed_secret(provider_id, source)
+        return None
+    return val
+
+
+def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) -> tuple[str, str]:
     """Resolve an API-key provider's token and indicate where it came from."""
     if provider_id == "copilot":
-        # Use the dedicated copilot auth module for proper token validation
+        # The dedicated copilot auth module does proper token validation/exchange.
         try:
             from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token
             token, source = resolve_copilot_token()
@@ -544,29 +395,21 @@ def _resolve_api_key_provider_secret(
             pass
         return "", ""
 
+    # Prefer ~/.hermes/.env over os.environ so a deliberate key rotation in .env isn't shadowed by
+    # a stale shell export inherited from a parent process (Codex CLI, test runners, etc.).
     from hermes_cli.config import get_env_value_prefer_dotenv
     for env_var in pconfig.api_key_env_vars:
-        # Prefer ~/.hermes/.env over os.environ so a deliberate key rotation
-        # in the user's .env file isn't shadowed by a stale shell export
-        # inherited from a parent process (Codex CLI, test runners, etc.).
-        val = (get_env_value_prefer_dotenv(env_var) or "").strip()
-        if not has_usable_secret(val):
-            continue
-        if not _secret_matches_declared_prefix(provider_id, val):
-            # A provably malformed key (declared prefix mismatch) must not
-            # shadow a valid credential-pool entry (#93593). Warn and keep
-            # looking instead of returning it.
-            _warn_malformed_secret(provider_id, env_var)
-            continue
-        return val, env_var
+        val = _usable_declared_secret(provider_id, get_env_value_prefer_dotenv(env_var), env_var)
+        if val:
+            return val, env_var
 
-    # Fallback: try credential pool (e.g. zai key stored via auth.json)
+    # Fallback: credential pool (e.g. zai key stored via auth.json). Prefer the pool's own
+    # selection (peek) but try the rest too so one malformed entry doesn't block a valid one.
+    pool_source = f"credential_pool:{provider_id}"
     try:
         from agent.credential_pool import load_pool
         pool = load_pool(provider_id)
         if pool and pool.has_credentials():
-            # Prefer the pool's own selection (peek), but iterate the rest of
-            # the entries too so one malformed entry doesn't block a valid one.
             candidates = []
             entry = pool.peek()
             if entry is not None:
@@ -579,13 +422,9 @@ def _resolve_api_key_provider_secret(
                 pass
             for entry in candidates:
                 key = getattr(entry, "access_token", "") or getattr(entry, "runtime_api_key", "")
-                key = str(key).strip()
-                if not has_usable_secret(key):
-                    continue
-                if not _secret_matches_declared_prefix(provider_id, key):
-                    _warn_malformed_secret(provider_id, f"credential_pool:{provider_id}")
-                    continue
-                return key, f"credential_pool:{provider_id}"
+                val = _usable_declared_secret(provider_id, key, pool_source)
+                if val:
+                    return val, pool_source
     except Exception:
         pass
 
@@ -597,46 +436,13 @@ def _resolve_api_key_provider_secret(
 # =============================================================================
 
 def is_rate_limited_auth_error(error: Exception) -> bool:
-    """True when an :class:`AuthError` represents upstream rate-limiting / quota
-
-    These failures are transient and re-authenticating cannot fix them, so callers should show a
-    "retry later" notice and prefer a fallback chain instead of suggesting ``hermes auth``.
-    """
-    return (
-        isinstance(error, AuthError)
-        and not error.relogin_required
-        and error.code == CODEX_RATE_LIMITED_CODE
-    )
+    """True when an :class:`AuthError` is upstream rate-limiting / quota: transient, and
+    re-authenticating cannot fix it, so callers should say "retry later", not ``hermes auth``."""
+    return isinstance(error, AuthError) and not error.relogin_required and error.code == CODEX_RATE_LIMITED_CODE
 
 
-def format_auth_error(error: Exception) -> str:
-    """Map auth failures to concise user-facing guidance."""
-    if not isinstance(error, AuthError):
-        return str(error)
-
-    # Rate-limit / quota errors are not credential problems — never append the
-    # "re-authenticate" remediation, which would mislead the operator.
-    if is_rate_limited_auth_error(error):
-        return str(error)
-
-    if error.relogin_required:
-        return f"{error} Run `hermes model` to re-authenticate."
-
-    if error.code in _ENTITLEMENT_ERROR_CODES:
-        if error.provider == "nous":
-            return _format_nous_entitlement_auth_error(error)
-        generic = _GENERIC_ENTITLEMENT_MESSAGES.get(error.code)
-        if generic:
-            return generic
-
-    if error.code == "temporarily_unavailable":
-        return f"{error} Please retry in a few seconds."
-
-    return str(error)
-
-
-# Entitlement failures: Nous gets a Portal-aware message; other providers a fixed
-# generic one (or the raw error when no generic text exists for the code).
+# Entitlement failures: Nous gets a Portal-aware message; other providers a fixed generic one (or the
+# raw error when no generic text exists for the code).
 _GENERIC_ENTITLEMENT_MESSAGES = {
     "subscription_required": "No active paid subscription found. Please purchase/activate a subscription, then retry.",
     "insufficient_credits": "Subscription credits are exhausted. Top up/renew credits, then retry.",
@@ -644,6 +450,24 @@ _GENERIC_ENTITLEMENT_MESSAGES = {
 _ENTITLEMENT_ERROR_CODES = frozenset(_GENERIC_ENTITLEMENT_MESSAGES) | {
     "subscription_expired", "no_usable_credits", "account_missing", "member_spend_cap_exceeded",
 }
+
+
+def format_auth_error(error: Exception) -> str:
+    """Map auth failures to concise user-facing guidance."""
+    if not isinstance(error, AuthError) or is_rate_limited_auth_error(error):
+        # Rate-limit / quota errors are not credential problems: never append "re-authenticate".
+        return str(error)
+    if error.relogin_required:
+        return f"{error} Run `hermes model` to re-authenticate."
+    if error.code in _ENTITLEMENT_ERROR_CODES:
+        if error.provider == "nous":
+            return _format_nous_entitlement_auth_error(error)
+        generic = _GENERIC_ENTITLEMENT_MESSAGES.get(error.code)
+        if generic:
+            return generic
+    if error.code == "temporarily_unavailable":
+        return f"{error} Please retry in a few seconds."
+    return str(error)
 
 
 def _nonempty_str(value: Any) -> bool:
@@ -656,11 +480,9 @@ def _nonempty_str(value: Any) -> bool:
 
 def _auth_file_path() -> Path:
     path = get_hermes_home() / "auth.json"
-    # Seat belt: if pytest is running and HERMES_HOME resolves to the real
-    # user's auth store, refuse rather than silently corrupt it. This catches
-    # tests that forgot to monkeypatch HERMES_HOME, tests invoked without the
-    # hermetic conftest, or sandbox escapes via threads/subprocesses. In
-    # production (no PYTEST_CURRENT_TEST) this is a single dict lookup.
+    # Seat belt: under pytest, refuse to touch the real user's auth store (catches tests that forgot
+    # to monkeypatch HERMES_HOME or escaped the hermetic conftest). In production this is one dict
+    # lookup.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         real_home_auth = (Path.home() / ".hermes" / "auth.json").resolve(strict=False)
         try:
@@ -677,53 +499,35 @@ def _auth_file_path() -> Path:
 
 
 def _global_auth_file_path() -> Optional[Path]:
-    """Return the global-root auth.json when the process is in profile mode.
+    """Global-root auth.json in profile mode; None when profile and global root are the same dir
+    (classic mode, or a custom HERMES_HOME that is not a profile).
 
-    Returns ``None`` when the profile and global root resolve to the same directory (classic mode,
-    or custom HERMES_HOME that is not a profile). Used by read-only fallback paths so providers
-    authed at the root are visible to profile processes that haven't configured them locally.
+    Read-only fallback path, so no pytest seat belt here: ``_load_global_auth_store()`` wraps the read
+    in try/except; the write-side seat belt lives on ``_auth_file_path()``.
     """
     try:
         from hermes_constants import get_default_hermes_root
         global_root = get_default_hermes_root()
     except Exception:
         return None
-    profile_home = get_hermes_home()
-    try:
-        if profile_home.resolve(strict=False) == global_root.resolve(strict=False):
-            return None
-    except Exception:
-        if profile_home == global_root:
-            return None
-    # No pytest seat belt here: this is a pure read-only path, and
-    # ``_load_global_auth_store()`` wraps the read in a try/except so an
-    # unreadable global file can never break the profile process.  The
-    # write-side seat belt still lives on ``_auth_file_path()`` where it
-    # belongs (that's what protects the real user's auth store from being
-    # corrupted by a mis-configured test).
-    return global_root / "auth.json"
+    return None if _same_path(get_hermes_home(), global_root) else global_root / "auth.json"
 
 
 def _load_global_auth_store() -> Dict[str, Any]:
-    """Load the global-root auth store (read-only fallback).
-
-    Returns an empty dict when no global fallback exists (classic mode, or the global auth.json is
-    absent). Never raises on missing file.
-    """
+    """Load the global-root auth store (read-only fallback, mtime-memoised); ``{}`` when absent or
+    unreadable — a malformed global store must never break profile reads."""
     global _global_auth_store_cache
     global_path = _global_auth_file_path()
     if global_path is None or not global_path.exists():
         _global_auth_store_cache = None
         return {}
     try:
-        resolved_path = str(global_path.resolve(strict=False))
-        mtime_ns = global_path.stat().st_mtime_ns
-        cache_key: Optional[Tuple[str, int]] = (resolved_path, mtime_ns)
+        cache_key: Optional[Tuple[str, int]] = (str(global_path.resolve(strict=False)), global_path.stat().st_mtime_ns)
     except Exception:
         cache_key = None
     if cache_key is not None and _global_auth_store_cache is not None:
         cached_path, cached_mtime, cached_store = _global_auth_store_cache
-        if cached_path == cache_key[0] and cached_mtime == cache_key[1]:
+        if (cached_path, cached_mtime) == cache_key:
             return cached_store
     if os.environ.get("PYTEST_CURRENT_TEST"):
         real_home_env = os.environ.get("HOME", "")
@@ -738,17 +542,11 @@ def _load_global_auth_store() -> Dict[str, Any]:
     try:
         store = _load_auth_store(global_path)
     except Exception:
-        # A malformed global store must not break profile reads. The
-        # profile's own auth store is still authoritative.
         _global_auth_store_cache = None
         return {}
     if cache_key is not None:
         _global_auth_store_cache = (cache_key[0], cache_key[1], store)
     return store
-
-
-def _auth_lock_path() -> Path:
-    return _auth_file_path().with_suffix(".lock")
 
 
 _auth_target_lock_holders: Dict[str, threading.local] = {}
@@ -773,18 +571,12 @@ def _auth_lock_holder_for(target_path: Path) -> threading.local:
 
 
 @contextmanager
-def _file_lock(
-    lock_path: Path,
-    holder: threading.local,
-    timeout_seconds: float,
-    timeout_message: str,
-):
-    """Cross-process advisory flock helper.
+def _file_lock(lock_path: Path, holder: threading.local, timeout_seconds: float, timeout_message: str):
+    """Cross-process advisory flock helper, reentrant per-thread via ``holder.depth``.
 
-    Reentrant per-thread via ``holder.depth``. Falls back to a depth-only guard when neither
-    ``fcntl`` nor ``msvcrt`` is available (rare). Callers supply their own ``threading.local`` so
-    independent locks (e.g. the profile auth store vs the global root store vs the shared Nous
-    store) track reentrancy separately.
+    Falls back to a depth-only guard when neither ``fcntl`` nor ``msvcrt`` is available. Callers
+    supply their own ``threading.local`` so independent locks (profile store vs global root vs the
+    shared Nous store) track reentrancy separately.
     """
     if getattr(holder, "depth", 0) > 0:
         holder.depth += 1
@@ -804,17 +596,9 @@ def _file_lock(
             holder.depth = 0
         return
 
-    # On Windows, msvcrt.locking needs the file to have content and the
-    # file pointer at position 0. Ensure the lock file has at least 1 byte.
-    # Under real concurrency (many threads/processes racing this same
-    # ensure-content check) this write can collide with another holder's
-    # msvcrt byte-range lock on the same file and raise PermissionError --
-    # uncaught, since it happens before the retry loop below even starts.
-    # A stress test with 20 concurrent Hermes processes reproduced this
-    # deterministically on Windows. It's a best-effort convenience write
-    # (whoever gets there first wins); losing the race here just means the
-    # lock file already has content, so swallow the failure and proceed
-    # straight to the acquire-with-retry loop.
+    # msvcrt.locking needs a non-empty file with the pointer at 0. This convenience write can race
+    # another holder's byte-range lock and raise PermissionError (reproduced with 20 concurrent
+    # processes on Windows); losing that race just means the file already has content, so swallow it.
     if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
         try:
             lock_path.write_text(" ", encoding="utf-8")
@@ -841,61 +625,50 @@ def _file_lock(
             yield
         finally:
             holder.depth = 0
-            if fcntl:
-                try:
+            try:
+                if fcntl:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                except (OSError, IOError):
-                    pass
-            elif msvcrt:
-                try:
+                elif msvcrt:
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                except (OSError, IOError):
-                    pass
+            except (OSError, IOError):
+                pass
 
 
 @contextmanager
-def _auth_store_lock(
-    timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS,
-    *,
-    target_path: Optional[Path] = None,
-):
+def _auth_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS, *, target_path: Optional[Path] = None):
     """Cross-process advisory lock for one auth.json read/write transaction.
 
-    ``target_path`` is required for profile-to-global write-throughs. A profile lock does not
-    protect the distinct global auth store; each path therefore uses its own reentrancy tracker and
-    kernel lock.
+    ``target_path`` is required for profile-to-global write-throughs: a profile lock does not protect
+    the distinct global store, so each path has its own reentrancy tracker and kernel lock.
 
-    Lock ordering invariant: when this lock is held together with ``_nous_shared_store_lock``,
-    acquire ``_auth_store_lock`` FIRST (outer) and the shared Nous lock SECOND (inner). All runtime
-    refresh paths follow this order; violating it risks deadlock against a concurrent import on the
-    shared store.
+    Lock ordering invariant: when held together with ``_nous_shared_store_lock``, acquire
+    ``_auth_store_lock`` FIRST (outer) and the shared Nous lock SECOND (inner). Violating it risks
+    deadlock against a concurrent import on the shared store.
     """
     auth_path = target_path if target_path is not None else _auth_file_path()
-    lock_path = auth_path.with_suffix(".lock") if target_path is not None else _auth_lock_path()
     with _file_lock(
-        lock_path,
-        _auth_lock_holder_for(auth_path),
-        timeout_seconds,
+        auth_path.with_suffix(".lock"), _auth_lock_holder_for(auth_path), timeout_seconds,
         "Timed out waiting for auth store lock",
     ):
         yield
 
 
+def _empty_auth_store() -> Dict[str, Any]:
+    return {"version": AUTH_STORE_VERSION, "providers": {}}
+
+
 def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     auth_file = auth_file or _auth_file_path()
     if not auth_file.exists():
-        return {"version": AUTH_STORE_VERSION, "providers": {}}
+        return _empty_auth_store()
 
     try:
         raw = json.loads(auth_file.read_text(encoding="utf-8-sig"))
     except OSError:
-        # The file exists (checked above) but could not be READ: EMFILE under
-        # fd exhaustion, EACCES, EIO, a stalled network mount. None of those
-        # mean the contents are bad, and this module does read-modify-write in
-        # ~15 places, so degrading to an empty store here is one
-        # _save_auth_store() away from erasing every stored credential.
-        # Fail loudly instead and leave the file on disk untouched.
+        # The file exists but could not be READ (EMFILE, EACCES, EIO, stalled mount). The contents
+        # are not bad, and this module does read-modify-write in ~15 places, so degrading to an empty
+        # store here is one _save_auth_store() away from erasing every credential. Fail loudly.
         logger.warning(
             "auth: could not read %s, leaving the store on disk untouched "
             "rather than degrading to an empty one",
@@ -903,73 +676,50 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
         )
         raise
     except Exception as exc:
-        # Genuine corruption: unparseable JSON, or bytes that are not UTF-8.
+        # Genuine corruption: unparseable JSON or non-UTF-8 bytes. Preserve a copy, but never
+        # advertise a backup that was not written.
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
             shutil.copy2(auth_file, corrupt_path)
             preserved = True
         except Exception:
             preserved = False
-            logger.debug(
-                "auth: could not preserve a copy of the corrupt store at %s",
-                corrupt_path, exc_info=True,
-            )
-        # Never advertise a backup that was not written.
+            logger.debug("auth: could not preserve a copy of the corrupt store at %s", corrupt_path, exc_info=True)
         logger.warning(
             "auth: failed to parse %s (%s), starting with empty store. %s %s",
             auth_file, exc,
             "Corrupt file preserved at" if preserved else "A copy could NOT be preserved at",
             corrupt_path,
         )
-        return {"version": AUTH_STORE_VERSION, "providers": {}}
+        return _empty_auth_store()
 
-    if isinstance(raw, dict) and (
-        isinstance(raw.get("providers"), dict)
-        or isinstance(raw.get("credential_pool"), dict)
-    ):
+    if isinstance(raw, dict) and (isinstance(raw.get("providers"), dict) or isinstance(raw.get("credential_pool"), dict)):
         raw.setdefault("providers", {})
         if isinstance(raw.get("providers"), dict):
             _migrate_stale_nous_portal_url(raw["providers"])
         return raw
 
-    # Migrate from PR's "systems" format if present
-    if isinstance(raw, dict) and isinstance(raw.get("systems"), dict):
-        systems = raw["systems"]
-        providers = {}
-        if "nous_portal" in systems:
-            providers["nous"] = systems["nous_portal"]
-        return {"version": AUTH_STORE_VERSION, "providers": providers,
-                "active_provider": "nous" if providers else None}
+    if isinstance(raw, dict) and isinstance(raw.get("systems"), dict):  # legacy "systems" format
+        providers = {"nous": raw["systems"]["nous_portal"]} if "nous_portal" in raw["systems"] else {}
+        return {**_empty_auth_store(), "providers": providers, "active_provider": "nous" if providers else None}
 
-    return {"version": AUTH_STORE_VERSION, "providers": {}}
+    return _empty_auth_store()
 
 
 def _write_private_file_atomic(
-    target: Path,
-    payload: str,
-    *,
-    replace: Optional[Callable[[Any, Any], Any]] = None,
-    fsync_dir: bool = False,
+    target: Path, payload: str, *, replace: Optional[Callable[[Any, Any], Any]] = None, fsync_dir: bool = False,
 ) -> None:
     """Write *payload* to *target* via a 0o600 temp file + atomic rename.
 
-    Creating the temp with ``os.open(O_EXCL, 0o600)`` closes the TOCTOU window where
-    ``write_text()`` + post-write ``chmod`` briefly exposed tokens at process umask (often 0o644).
-    Mirrors agent/google_oauth.py (#19673) and tools/mcp_oauth.py (#21148). The per-process random
-    temp suffix avoids collisions between concurrent writers and stale leftovers from a crashed
-    prior write.
+    ``os.open(O_EXCL, 0o600)`` closes the TOCTOU window where ``write_text()`` + post-write ``chmod``
+    briefly exposed tokens at process umask. The per-process random temp suffix avoids collisions
+    between concurrent writers and stale leftovers from a crashed prior write.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    # secure_parent_dir refuses to chmod /, top-level dirs, or the
-    # hermes-agent install tree (#25821, #93050).
-    secure_parent_dir(target)
+    secure_parent_dir(target)  # refuses to chmod /, top-level dirs, or the install tree
     tmp_path = target.with_name(f"{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
-        fd = os.open(
-            str(tmp_path),
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            stat.S_IRUSR | stat.S_IWUSR,
-        )
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
@@ -994,18 +744,12 @@ def _write_private_file_atomic(
 
 
 def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = None) -> Path:
-    # target_path=None preserves the existing contract (write the active
-    # store at _auth_file_path()). An explicit path lets callers persist a
-    # specific store — e.g. the global-root write-through for rotating xAI
-    # OAuth grants (#43589) — reusing this function's atomic O_EXCL + 0o600
-    # write so the root auth.json gets the same TOCTOU-safe treatment.
+    """Atomically persist *auth_store* (0o600, parent tightened to 0o700) to the active store, or to
+    an explicit *target_path* (e.g. the global-root write-through for rotating xAI OAuth grants)."""
     auth_file = target_path if target_path is not None else _auth_file_path()
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
-    # Parent dir is tightened to 0o700 inside the writer so siblings can't
-    # traverse to creds (no-op on Windows; failures ignored).
     _write_private_file_atomic(auth_file, json.dumps(auth_store, indent=2) + "\n", fsync_dir=True)
-    # Restrict file permissions to owner only
     try:
         auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
@@ -1017,37 +761,36 @@ def _store_section(auth_store: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return ``auth_store[key]`` as a dict, replacing a missing/non-dict value in place."""
     section = auth_store.get(key)
     if not isinstance(section, dict):
-        section = {}
-        auth_store[key] = section
+        section = auth_store[key] = {}
     return section
-
-
-def _load_provider_state_with_source(
-    auth_store: Dict[str, Any],
-    provider_id: str,
-) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
-    """Return a provider state plus the auth.json path it came from.
-
-    Most callers only need the state, but refresh paths that rotate single-use OAuth refresh tokens
-    must write the updated token chain back to the same store they read.
-    """
-    state = _provider_state_in(auth_store, provider_id)
-    if state is not None:
-        return state, _auth_file_path()
-    global_state = _provider_state_in(_load_global_auth_store(), provider_id)
-    if global_state is not None:
-        return global_state, _global_auth_file_path()
-    return None, None
 
 
 def _provider_state_in(store: Dict[str, Any], provider_id: str) -> Optional[Dict[str, Any]]:
     """Shallow copy of ``store["providers"][provider_id]`` when it is a dict, else None."""
     providers = store.get("providers") if store else None
-    if isinstance(providers, dict):
-        state = providers.get(provider_id)
-        if isinstance(state, dict):
-            return dict(state)
-    return None
+    state = providers.get(provider_id) if isinstance(providers, dict) else None
+    return dict(state) if isinstance(state, dict) else None
+
+
+def _load_provider_state_with_source(
+    auth_store: Dict[str, Any], provider_id: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
+    """Provider state plus the auth.json path it came from (profile first, then the global root).
+
+    Refresh paths that rotate single-use OAuth refresh tokens must write the updated chain back to
+    the same store they read.
+    """
+    state = _provider_state_in(auth_store, provider_id)
+    if state is not None:
+        return state, _auth_file_path()
+    global_state = _provider_state_in(_load_global_auth_store(), provider_id)
+    return (global_state, _global_auth_file_path()) if global_state is not None else (None, None)
+
+
+def _load_provider_state(auth_store: Dict[str, Any], provider_id: str) -> Optional[Dict[str, Any]]:
+    """Provider state; in profile mode falls back to the global-root ``auth.json`` per provider (same
+    shadowing as ``read_credential_pool``), so profile workers see globally-authed providers."""
+    return _load_provider_state_with_source(auth_store, provider_id)[0]
 
 
 @contextmanager
@@ -1056,35 +799,24 @@ def _provider_state_transaction(provider_id: str):
 
     Profile-backed refresh paths must take the global auth-store lock before any provider-specific
     shared-store lock. Re-reading the source after the target lock is acquired prevents both stale
-    refreshes and whole-file lost updates without inverting the documented auth -> shared lock
-    order.
+    refreshes and whole-file lost updates without inverting the documented auth -> shared lock order.
     """
     with _auth_store_lock():
         auth_store = _load_auth_store()
-        state, source_path = _load_provider_state_with_source(
-            auth_store,
-            provider_id,
-        )
-        active_path = _auth_file_path()
-        if source_path is None or _same_path(source_path, active_path):
+        state, source_path = _load_provider_state_with_source(auth_store, provider_id)
+        if source_path is None or _same_path(source_path, _auth_file_path()):
             yield auth_store, state, source_path
             return
-
         with _auth_store_lock(target_path=source_path):
-            source_state = _provider_state_in(_load_auth_store(source_path), provider_id)
-            yield auth_store, source_state, source_path
+            yield auth_store, _provider_state_in(_load_auth_store(source_path), provider_id), source_path
 
 
-def _load_provider_state(auth_store: Dict[str, Any], provider_id: str) -> Optional[Dict[str, Any]]:
-    """Return a provider's persisted state.
-
-    In profile mode, falls back to the global-root ``auth.json`` when the profile has no entry for
-    ``provider_id``. This mirrors the per-provider shadowing already used by
-    ``read_credential_pool``: workers spawned in a profile can see providers (e.g. ``nous``) that
-    were only authenticated at global scope.
-    """
-    state, _source_path = _load_provider_state_with_source(auth_store, provider_id)
-    return state
+def _store_provider_state(
+    auth_store: Dict[str, Any], provider_id: str, state: Dict[str, Any], *, set_active: bool = True,
+) -> None:
+    _store_section(auth_store, "providers")[provider_id] = state
+    if set_active:
+        auth_store["active_provider"] = provider_id
 
 
 def _save_provider_state(auth_store: Dict[str, Any], provider_id: str, state: Dict[str, Any]) -> None:
@@ -1100,65 +832,31 @@ def _save_active_provider_state(provider_id: str, state: Dict[str, Any]) -> Path
         return _save_auth_store(auth_store)
 
 
-def _save_provider_state_to_source(
-    auth_store: Dict[str, Any],
-    provider_id: str,
-    state: Dict[str, Any],
-    source_path: Optional[Path],
-) -> None:
-    """Persist provider state back to the auth store it was read from."""
-    active_path = _auth_file_path()
-    if source_path is None or _same_path(source_path, active_path):
-        _save_provider_state(auth_store, provider_id, state)
-        _save_auth_store(auth_store)
-        return
-
-    _persist_provider_state_to_store(
-        provider_id,
-        state,
-        source_path,
-        set_active=True,
-    )
-
-
-def _store_provider_state(
-    auth_store: Dict[str, Any],
-    provider_id: str,
-    state: Dict[str, Any],
-    *,
-    set_active: bool = True,
-) -> None:
-    _store_section(auth_store, "providers")[provider_id] = state
-    if set_active:
-        auth_store["active_provider"] = provider_id
-
-
 def _persist_provider_state_to_store(
-    provider_id: str,
-    state: Dict[str, Any],
-    target_path: Path,
-    *,
-    set_active: bool = False,
+    provider_id: str, state: Dict[str, Any], target_path: Path, *, set_active: bool = False,
 ) -> Path:
     """Merge one provider into a specific auth store under that store's lock."""
     with _auth_store_lock(target_path=target_path):
         auth_store = _load_auth_store(target_path)
-        _store_provider_state(
-            auth_store,
-            provider_id,
-            dict(state),
-            set_active=set_active,
-        )
+        _store_provider_state(auth_store, provider_id, dict(state), set_active=set_active)
         return _save_auth_store(auth_store, target_path=target_path)
 
 
-def mark_provider_active_if_unset(provider_id: str) -> None:
-    """Set ``active_provider`` to *provider_id* only when none is set yet.
+def _save_provider_state_to_source(
+    auth_store: Dict[str, Any], provider_id: str, state: Dict[str, Any], source_path: Optional[Path],
+) -> None:
+    """Persist provider state back to the auth store it was read from."""
+    if source_path is None or _same_path(source_path, _auth_file_path()):
+        _save_provider_state(auth_store, provider_id, state)
+        _save_auth_store(auth_store)
+    else:
+        _persist_provider_state_to_store(provider_id, state, source_path, set_active=True)
 
-    Used by ``hermes auth add`` OAuth paths that write pool entries directly: the first credential
-    for a provider must make it active so the setup wizard's credential check does not report
-    "No inference provider configured". Later adds leave the user's chosen provider untouched.
-    """
+
+def mark_provider_active_if_unset(provider_id: str) -> None:
+    """Set ``active_provider`` only when none is set yet: the first ``hermes auth add`` credential must
+    make its provider active (else setup reports "No inference provider configured"); later adds
+    leave the user's choice untouched."""
     with _auth_store_lock():
         auth_store = _load_auth_store()
         if not (auth_store.get("active_provider") or "").strip():
@@ -1179,17 +877,12 @@ def get_auth_provider_display_name(provider_id: str) -> str:
 
 
 def is_runtime_provider_routable(provider_id: str) -> bool:
-    """Return whether runtime resolution recognizes a provider identity.
-
-    A capability check, not a credential check: same alias/plugin-aware normalization as
-    ``resolve_provider`` while preserving special runtime identities that live outside the registry.
-    """
+    """Whether runtime resolution recognizes a provider identity (a capability check, not a credential
+    check): ``resolve_provider`` normalization plus the special runtime identities outside the registry."""
     normalized = (provider_id or "").strip().lower()
     if not normalized:
         return False
-    if normalized in {"auto", "openrouter", "custom", "moa"}:
-        return True
-    if normalized.startswith("custom:"):
+    if normalized in {"auto", "openrouter", "custom", "moa"} or normalized.startswith("custom:"):
         return True
     try:
         resolve_provider(normalized)
@@ -1201,85 +894,57 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the persisted credential pool, or one provider slice.
 
-    In profile mode, the profile's credential pool is authoritative. If a provider has no entries in
-    the profile, entries from the global-root ``auth.json`` are used as a read-only fallback — so
-    workers spawned in a profile can see providers that were only authenticated at global scope.
-
-    Profile entries always win: the global fallback only applies per-provider when the profile has
-    zero entries for that provider. Once the user runs ``hermes auth add <provider>`` inside the
-    profile, profile entries fully shadow global for that provider on the next read.
+    In profile mode the profile's pool is authoritative; the global-root ``auth.json`` is a read-only
+    fallback applied per provider ONLY when the profile has zero entries for that provider, so
+    profile workers can see globally-authed providers while ``hermes auth add`` inside the profile
+    fully shadows global on the next read.
     """
-    auth_store = _load_auth_store()
-    pool = auth_store.get("credential_pool")
-    if not isinstance(pool, dict):
-        pool = {}
-
-    global_pool: Dict[str, Any] = {}
+    pool = _load_auth_store().get("credential_pool")
+    pool = pool if isinstance(pool, dict) else {}
     global_store = _load_global_auth_store()
-    maybe_global_pool = global_store.get("credential_pool") if global_store else None
-    if isinstance(maybe_global_pool, dict):
-        global_pool = maybe_global_pool
+    global_pool = global_store.get("credential_pool") if global_store else None
+    global_pool = global_pool if isinstance(global_pool, dict) else {}
 
     if provider_id is None:
         merged = dict(pool)
         for gp_key, gp_entries in global_pool.items():
-            if not isinstance(gp_entries, list) or not gp_entries:
-                continue
-            # Per-provider shadowing: profile wins whenever it has ANY entries.
             existing = merged.get(gp_key)
-            if isinstance(existing, list) and existing:
-                continue
-            merged[gp_key] = list(gp_entries)
+            if isinstance(gp_entries, list) and gp_entries and not (isinstance(existing, list) and existing):
+                merged[gp_key] = list(gp_entries)
         return merged
 
     provider_entries = pool.get(provider_id)
     if isinstance(provider_entries, list) and provider_entries:
         return list(provider_entries)
-    # Profile has no entries for this provider — fall back to global.
     global_entries = global_pool.get(provider_id)
     return list(global_entries) if isinstance(global_entries, list) else []
 
 
 _POOL_STATUS_FIELDS = (
-    "last_status",
-    "last_status_at",
-    "last_error_code",
-    "last_error_reason",
-    "last_error_message",
+    "last_status", "last_status_at", "last_error_code", "last_error_reason", "last_error_message",
     "last_error_reset_at",
 )
 
 
-def _merge_disk_cooldown_state(
-    entry: Dict[str, Any],
-    disk_entry: Optional[Dict[str, Any]],
-    provider_id: str,
-) -> Dict[str, Any]:
+def _merge_disk_cooldown_state(entry: Dict[str, Any], disk_entry: Optional[Dict[str, Any]], provider_id: str) -> Dict[str, Any]:
     """Keep a newer on-disk cooldown/quarantine over a stale in-memory one.
 
-    ``write_credential_pool`` callers persist an in-memory snapshot that may predate another process
-    marking the same credential exhausted or dead (last-writer-wins lost update). Without this
-    merge, process B's later rewrite resurrects a rate-limited key as healthy and both processes
-    resume hammering it.
+    ``write_credential_pool`` persists an in-memory snapshot that may predate another process marking
+    the same credential exhausted/dead; without this merge the later rewrite resurrects a rate-limited
+    key as healthy and both processes resume hammering it.
     """
     if not isinstance(disk_entry, dict):
         return entry
     try:
         from agent.credential_pool import (
-            PooledCredential,
-            STATUS_DEAD,
-            STATUS_EXHAUSTED,
-            _exhausted_until,
-            _parse_absolute_timestamp,
+            PooledCredential, STATUS_DEAD, STATUS_EXHAUSTED, _exhausted_until, _parse_absolute_timestamp,
         )
 
         disk_status = disk_entry.get("last_status")
         if disk_status not in (STATUS_DEAD, STATUS_EXHAUSTED):
             return entry
-        # A token change means the caller re-authed/refreshed this entry and
-        # intentionally cleared its status (e.g. _sync_codex_entry_from_
-        # auth_store after a fresh device-code login) — never resurrect the
-        # old cooldown onto fresh credentials.
+        # A token change means the caller re-authed this entry and intentionally cleared its status:
+        # never resurrect the old cooldown onto fresh credentials.
         mem_access = entry.get("access_token") or ""
         disk_access = disk_entry.get("access_token") or ""
         if mem_access and disk_access and mem_access != disk_access:
@@ -1289,82 +954,65 @@ def _merge_disk_cooldown_state(
         if disk_ts <= mem_ts:
             return entry
         if disk_status == STATUS_EXHAUSTED:
-            until = _exhausted_until(
-                PooledCredential.from_dict(provider_id, disk_entry)
-            )
+            until = _exhausted_until(PooledCredential.from_dict(provider_id, disk_entry))
             if until is None or until <= time.time():
                 return entry
-        merged_entry = dict(entry)
-        for status_field in _POOL_STATUS_FIELDS:
-            merged_entry[status_field] = disk_entry.get(status_field)
-        return merged_entry
+        return {**entry, **{f: disk_entry.get(f) for f in _POOL_STATUS_FIELDS}}
     except Exception:  # pragma: no cover - best-effort merge
         return entry
 
 
+def _entry_ids(entries: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
+    return {e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")}
+
+
 def write_credential_pool(
-    provider_id: str,
-    entries: List[Dict[str, Any]],
-    *,
-    removed_ids: Optional[Iterable[str]] = None,
+    provider_id: str, entries: List[Dict[str, Any]], *, removed_ids: Optional[Iterable[str]] = None,
 ) -> Path:
     """Persist one provider's credential pool under auth.json.
 
-    This is the final disk-boundary guard for borrowed/reference-only credentials. Callers may pass
-    raw dictionaries, so sanitize here even when ``PooledCredential.to_dict()`` already did the same
-    work upstream.
+    Final disk-boundary guard for borrowed/reference-only credentials: callers may pass raw dicts, so
+    sanitize here even when ``PooledCredential.to_dict()`` already did.
 
-    Re-read the on-disk pool under the same lock and merge entries present on disk but missing from
-    ``entries``. Those were added by another process after the caller loaded its in-memory snapshot;
-    without this merge a later rotation/exhaustion rewrite drops the concurrent credential.
+    Entries present on disk but missing from *entries* (added by another process after the caller's
+    snapshot) are merged back in unless listed in *removed_ids*, so a rotation/exhaustion rewrite
+    never drops a concurrent credential.
     """
     removed = {rid for rid in (removed_ids or ()) if rid}
     with _auth_store_lock():
         auth_store = _load_auth_store()
         pool = _store_section(auth_store, "credential_pool")
-        sanitized_entries = [
-            sanitize_borrowed_credential_payload(entry, provider_id)
-            if isinstance(entry, dict) else entry
-            for entry in entries
-        ]
+        sanitized = [sanitize_borrowed_credential_payload(e, provider_id) if isinstance(e, dict) else e for e in entries]
         existing = pool.get(provider_id)
         existing_list = existing if isinstance(existing, list) else []
-        existing_by_id = {
-            entry.get("id"): entry
-            for entry in existing_list
-            if isinstance(entry, dict) and entry.get("id")
-        }
-        new_ids = {
-            entry.get("id")
-            for entry in sanitized_entries
-            if isinstance(entry, dict) and entry.get("id")
-        }
+        existing_by_id = _entry_ids(existing_list)
+        new_ids = set(_entry_ids(sanitized))
         merged: List[Dict[str, Any]] = [
-            _merge_disk_cooldown_state(
-                entry, existing_by_id.get(entry.get("id")), provider_id
-            )
-            if isinstance(entry, dict)
-            else entry
-            for entry in sanitized_entries
+            _merge_disk_cooldown_state(e, existing_by_id.get(e.get("id")), provider_id) if isinstance(e, dict) else e
+            for e in sanitized
         ]
         for disk_entry in existing_list:
-            if not isinstance(disk_entry, dict):
-                continue
-            disk_id = disk_entry.get("id")
-            if not disk_id or disk_id in new_ids or disk_id in removed:
-                continue
-            merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
+            disk_id = disk_entry.get("id") if isinstance(disk_entry, dict) else None
+            if disk_id and disk_id not in new_ids and disk_id not in removed:
+                merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
         pool[provider_id] = merged
         return _save_auth_store(auth_store)
 
 
-def suppress_credential_source(provider_id: str, source: str) -> None:
-    """Mark a credential source as suppressed so it won't be re-seeded.
+def _suppressed_source_list(suppressed: Dict[str, Any], provider_id: str) -> Optional[List[str]]:
+    """Canonical (list-form) suppressed sources for *provider_id*; a legacy mapping (keys = source
+    names) is migrated to the list form in place."""
+    raw_sources = suppressed.get(provider_id)
+    if isinstance(raw_sources, list):
+        return raw_sources
+    if isinstance(raw_sources, dict):
+        suppressed[provider_id] = [str(name) for name in raw_sources]
+        return suppressed[provider_id]
+    return None
 
-    Older auth stores may represent a provider's suppressed sources as a mapping. Treat its keys as
-    source names and migrate the value to the canonical list form before appending the requested
-    source.
-    """
+
+def suppress_credential_source(provider_id: str, source: str) -> None:
+    """Mark a credential source as suppressed so it won't be re-seeded."""
     with _auth_store_lock():
         auth_store = _load_auth_store()
         suppressed = _store_section(auth_store, "suppressed_sources")
@@ -1376,24 +1024,10 @@ def suppress_credential_source(provider_id: str, source: str) -> None:
         _save_auth_store(auth_store)
 
 
-def _suppressed_source_list(suppressed: Dict[str, Any], provider_id: str) -> Optional[List[str]]:
-    """Canonical (list-form) suppressed sources for *provider_id*, migrating a legacy mapping in place."""
-    raw_sources = suppressed.get(provider_id)
-    if isinstance(raw_sources, list):
-        return raw_sources
-    if isinstance(raw_sources, dict):
-        provider_list = [str(name) for name in raw_sources]
-        suppressed[provider_id] = provider_list
-        return provider_list
-    return None
-
-
 def is_source_suppressed(provider_id: str, source: str) -> bool:
     """Check if a credential source has been suppressed by the user."""
     try:
-        auth_store = _load_auth_store()
-        suppressed = auth_store.get("suppressed_sources", {})
-        return source in suppressed.get(provider_id, [])
+        return source in _load_auth_store().get("suppressed_sources", {}).get(provider_id, [])
     except Exception:
         return False
 
@@ -1418,20 +1052,13 @@ def unsuppress_credential_source(provider_id: str, source: str) -> bool:
 
 
 def get_provider_auth_state(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Return persisted auth state for a provider, or None.
-
-    In profile mode, ``_load_provider_state`` already falls back to the global-root ``auth.json``
-    per-provider when the profile has no entry — so this is now a thin convenience wrapper. Profile
-    state always wins when present.
-    """
-    auth_store = _load_auth_store()
-    return _load_provider_state(auth_store, provider_id)
+    """Persisted auth state for a provider (profile first, global-root fallback), or None."""
+    return _load_provider_state(_load_auth_store(), provider_id)
 
 
 def get_active_provider() -> Optional[str]:
     """Return the currently active provider ID from auth store."""
-    auth_store = _load_auth_store()
-    return auth_store.get("active_provider")
+    return _load_auth_store().get("active_provider")
 
 
 def _active_provider_is(normalized: str) -> bool:
@@ -1583,15 +1210,13 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
 
 
 def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
-    """Clear auth state for a provider. Used by `hermes logout`. If provider_id is None, clears the
-    active provider. Returns True if something was cleared.
-    """
+    """Clear auth state for a provider (the active one when *provider_id* is None). Used by
+    ``hermes logout``. Returns True if something was cleared."""
     with _auth_store_lock():
         auth_store = _load_auth_store()
         target = provider_id or auth_store.get("active_provider")
         if not target:
             return False
-
         cleared = False
         for section in ("providers", "credential_pool"):
             entries = _store_section(auth_store, section)
@@ -1601,17 +1226,14 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
         if auth_store.get("active_provider") == target:
             auth_store["active_provider"] = None
             cleared = True
-        if not cleared:
-            return False
-        _save_auth_store(auth_store)
-    return True
+        if cleared:
+            _save_auth_store(auth_store)
+        return cleared
 
 
 def deactivate_provider() -> None:
-    """Clear active_provider in auth.json without deleting credentials. Used when the user switches to
-    a non-OAuth provider (OpenRouter, custom) so auto-resolution doesn't keep picking the OAuth
-    provider.
-    """
+    """Clear active_provider without deleting credentials: used when the user switches to a non-OAuth
+    provider (OpenRouter, custom) so auto-resolution doesn't keep picking the OAuth provider."""
     with _auth_store_lock():
         auth_store = _load_auth_store()
         auth_store["active_provider"] = None
