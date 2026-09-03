@@ -1,7 +1,9 @@
 """Tool-call execution: sequential and concurrent dispatch, extracted from AIAgent.
 
-Functions take the parent ``AIAgent`` first; ``run_agent`` keeps thin wrappers, and
-tests that patch ``run_agent._set_interrupt`` still work because we reach it via ``_ra()``.
+Functions take the parent ``AIAgent`` first; ``run_agent`` keeps thin wrappers and is
+reached lazily via ``_ra()`` so ``run_agent._set_interrupt`` patches still work. Every
+call's identity travels as a ``_ToolCallRef``; both executors end in the same
+observe → commit → project pipeline so the tool-result wire shape is produced once.
 """
 
 from __future__ import annotations
@@ -79,12 +81,11 @@ def _record_persisted_path_for_stub(agent, tool_call_id: str, function_result) -
 
 
 def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effective_task_id: str) -> None:
-    """Checkpoint the same workspace path that the file tool will mutate."""
+    """Checkpoint the same workspace path that the file tool will mutate, resolved the way
+    file tools do (against the task's live cwd, which differs from the process cwd in Docker)."""
     file_path = function_args.get("path", "")
     if not file_path:
         return
-    # File tools resolve relative paths against the task's live cwd (differs from the
-    # process cwd in Docker); resolve the same way before locating the project root.
     from tools.file_tools import _resolve_path_for_task
 
     resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
@@ -93,36 +94,30 @@ def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effe
 
 
 def _budget_for_agent(agent) -> BudgetConfig:
-    """Tool-result BudgetConfig scaled to the agent's context window (default when unknown)."""
+    """Tool-result BudgetConfig scaled to the agent's context window. Unknown length goes
+    through ``budget_for_context_window(None)`` (not DEFAULT_BUDGET) so the MCP threshold
+    override still applies."""
     try:
         ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
-        # budget_for_context_window(None), not DEFAULT_BUDGET, so the MCP threshold
-        # override still applies when the context length isn't resolvable.
         return budget_for_context_window(int(ctx) if ctx else None)
     except Exception:
         return DEFAULT_BUDGET
 
-# Maximum number of concurrent worker threads for parallel tool execution.
-_MAX_TOOL_WORKERS = 8
+_MAX_TOOL_WORKERS = 8  # concurrent worker threads per batch
 _DEFAULT_IMAGE_PARALLEL_REQUESTS = 4
-# Generous ceiling for slow-but-valid tool work so the batch guard never preempts a legitimate attempt.
+# Generous: slow-but-valid tool work must never be preempted by the batch guard.
 _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S = 420.0
-# Start-order gate wait: long enough for an approval round-trip, short enough that one
-# wedged dispatch cannot starve the batch.
+# Long enough for an approval round-trip, short enough that one wedged dispatch can't starve the batch.
 _START_ORDER_GATE_TIMEOUT_S = 120.0
-# Fallback authorization-gate lock bound; the effective bound derives from approvals.timeout
-# (see _authorization_gate_lock_timeout) since overstaying it means wedged.
+# Fallback only; the effective bound derives from approvals.timeout (_authorization_gate_lock_timeout).
 _AUTHORIZATION_GATE_LOCK_TIMEOUT_S = 360.0
 
 
 def _authorization_gate_lock_timeout() -> float:
-    """Bound for the authorization serialization lock: approval timeout + margin.
-
-    Delegates to ``tools.approval.human_wait_ceiling`` so the two bounds can't drift: never
-    break serialization while an approval prompt is answerable, never let a wedged holder
-    park other workers forever. Safety-capped so a huge approvals.timeout can't overflow
-    Lock.acquire; deliberately NOT min()'d with the fallback so the gate never gives up early.
-    """
+    """Authorization-lock bound = ``tools.approval.human_wait_ceiling`` (approval timeout +
+    margin, capped so it can't overflow Lock.acquire): never break serialization while a
+    prompt is answerable, never let a wedged holder park workers forever. Deliberately NOT
+    min()'d with the fallback so the gate never gives up early."""
     try:
         from tools.approval import human_wait_ceiling
 
@@ -132,10 +127,8 @@ def _authorization_gate_lock_timeout() -> float:
 
 
 class _BatchAbandoned(BaseException):
-    """Raised inside a worker when the batch was abandoned before dispatch.
-
-    BaseException so ``except Exception`` handlers in the middleware chain can't swallow it.
-    """
+    """Raised inside a worker when the batch was abandoned before dispatch; a BaseException
+    so ``except Exception`` handlers in the middleware chain can't swallow it."""
 
 
 def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
@@ -170,10 +163,8 @@ def _resolve_concurrent_tool_timeout() -> float | None:
 
 
 def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) -> bool:
-    """Flush tool-call progress to the session DB before projecting it to any UI.
-
-    Tool side effects can kill/restart the process before turn-end persistence runs.
-    """
+    """Flush tool-call progress to the session DB before projecting it to any UI: tool side
+    effects can kill/restart the process before turn-end persistence runs."""
     try:
         persisted = agent._flush_messages_to_session_db(messages) is not False
         if not persisted:
@@ -192,8 +183,7 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) 
 
 
 def _image_generate_parallel_limit() -> int:
-    """Configured image-generation parallelism cap (conservative default; backend bursts
-    hit TTFB/rate-limit failures)."""
+    """Configured image-generation parallelism cap (conservative: backend bursts hit rate limits)."""
     try:
         from hermes_cli.config import load_config
 
@@ -305,13 +295,10 @@ def _append_skipped_tool_results(
     stop_on_flush_failure: bool = True,
 ) -> bool:
     """Append one ``tool`` result per unstarted call so the assistant tool-call turn never
-    lacks matching results (role-alternation violation).
-
-    ``content`` is formatted with ``{name}``. ``hook_error_type`` also emits the terminal
-    ``post_tool_call`` (status=cancelled) per call, ``hook_id`` overriding the hook's id.
-    ``flush_stage`` flushes the session DB after each append; returns False on the first
-    failed flush when ``stop_on_flush_failure`` (the caller must stop the batch).
-    """
+    lacks matching results (role alternation). ``content`` is formatted with ``{name}``;
+    ``hook_error_type`` also emits the terminal ``post_tool_call`` (status=cancelled) per
+    call with ``hook_id`` overriding the hook's id; ``flush_stage`` flushes after each
+    append and returns False on the first failed flush when ``stop_on_flush_failure``."""
     for tc in tool_calls:
         name = _tc_name(tc)
         result = content.format(name=name)
@@ -329,12 +316,9 @@ def _append_skipped_tool_results(
 
 
 def _tool_search_scoped_names(agent) -> frozenset:
-    """Deferrable tool names the session may invoke via ``tool_call``.
-
-    The Tool Search unwrap bypasses the bridge's scope check in
-    ``model_tools.handle_function_call``, so restricted sessions are validated against
-    this set. Cached on the agent; refreshed when the registry generation changes.
-    """
+    """Deferrable tool names the session may invoke via ``tool_call``; the unwrap bypasses
+    the bridge's scope check in ``model_tools.handle_function_call``, so restricted sessions
+    validate against this set. Cached on the agent, keyed by registry scope/generation."""
     try:
         import model_tools
         from tools import tool_search as _ts
@@ -354,13 +338,9 @@ def _tool_search_scoped_names(agent) -> frozenset:
     if cached is not None and cached[0] == cache_key:
         return cached[1]
     try:
-        scoped_defs = model_tools.get_tool_definitions(
-            enabled_toolsets=enabled,
-            disabled_toolsets=disabled,
-            quiet_mode=True,
-            skip_tool_search_assembly=True,
-        ) or []
-        names = _ts.scoped_deferrable_names(scoped_defs)
+        names = _ts.scoped_deferrable_names(model_tools.get_tool_definitions(
+            enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True, skip_tool_search_assembly=True,
+        ) or [])
     except Exception:
         names = frozenset()
     try:
@@ -380,44 +360,40 @@ def _canonical_tool_name(function_name: str) -> str:
 def _unwrap_tool_search_call(
     agent, function_name: str, function_args: dict, *, flatten_probe: bool = False
 ) -> tuple[str, dict, Optional[str]]:
-    """Peel the ``tool_call`` bridge so downstream hooks see the underlying tool.
+    """Peel the ``tool_call`` bridge so downstream hooks (checkpointing, guardrails, plugin
+    hooks, activity feed) see the underlying tool; ``tool_call.function`` stays untouched for
+    the transcript and tool_call_id pairing.
 
-    Checkpointing, guardrails, plugin hooks and the activity feed must observe the real
-    tool name, not the bridge. ``tool_call.function`` stays untouched for the transcript
-    and tool_call_id pairing. The unwrap bypasses handle_function_call's scope check, so
-    session toolset scope is enforced HERE. Returns ``(name, args, scope_block)``;
-    ``scope_block`` is the block message when the underlying tool is out of scope or its
-    args fail the deferred-schema probe (``flatten_probe`` collapses the probe's JSON
-    payload to one plain string for callers that wrap the message in ``{"error": ...}``).
+    The unwrap bypasses handle_function_call's scope check, so session toolset scope is
+    enforced HERE. Returns ``(name, args, scope_block)``; ``scope_block`` is the block
+    message when the underlying tool is out of scope or its args fail the deferred-schema
+    probe (``flatten_probe`` collapses the probe's JSON payload to one plain string for
+    callers that wrap the message in ``{"error": ...}``).
     """
     scope_block: Optional[str] = None
     try:
         from tools import tool_search as _ts
-        if function_name == _ts.TOOL_CALL_NAME:
-            underlying, underlying_args, err = _ts.resolve_underlying_call(function_args)
-            if not err and underlying:
-                if underlying in _tool_search_scoped_names(agent):
-                    # Validate before unwrapping: the generic bridge hides the concrete
-                    # parameter schema from provider-native tool-call validation.
-                    probe_err = _ts.validate_deferred_call_args(underlying, underlying_args)
-                    if probe_err is None:
-                        return underlying, underlying_args, None
-                    scope_block = probe_err
-                    if flatten_probe:
-                        try:
-                            probe = json.loads(probe_err)
-                            scope_block = (
-                                f"{probe.get('error', '')} Parameters schema: "
-                                f"{json.dumps(probe.get('parameters', {}), ensure_ascii=False)}. "
-                                f"{probe.get('hint', '')}"
-                            ).strip()
-                        except Exception:
-                            scope_block = probe_err
-                else:
-                    scope_block = (
-                        f"'{underlying}' is not available in this session. "
-                        "Use tool_search to find tools you can call."
-                    )
+        if function_name != _ts.TOOL_CALL_NAME:
+            return function_name, function_args, None
+        underlying, underlying_args, err = _ts.resolve_underlying_call(function_args)
+        if err or not underlying:
+            return function_name, function_args, None
+        if underlying not in _tool_search_scoped_names(agent):
+            return function_name, function_args, (
+                f"'{underlying}' is not available in this session. Use tool_search to find tools you can call."
+            )
+        # Validate before unwrapping: the generic bridge hides the concrete
+        # parameter schema from provider-native tool-call validation.
+        scope_block = _ts.validate_deferred_call_args(underlying, underlying_args)
+        if scope_block is None:
+            return underlying, underlying_args, None
+        if flatten_probe:
+            probe = json.loads(scope_block)
+            scope_block = (
+                f"{probe.get('error', '')} Parameters schema: "
+                f"{json.dumps(probe.get('parameters', {}), ensure_ascii=False)}. "
+                f"{probe.get('hint', '')}"
+            ).strip()
     except Exception:
         pass
     return function_name, function_args, scope_block
@@ -461,22 +437,17 @@ class _ToolTimeoutResult(str):
 
 
 class _ToolCancelledResult(str):
-    """Marker for a synthesized sequential-tool user-interrupt result.
-
-    The terminal post_tool_call event was already emitted (status=cancelled), so a
-    late-finishing abandoned worker must not report success.
-    """
+    """Marker for a synthesized sequential-tool user-interrupt result; its terminal
+    post_tool_call was already emitted, so a late-finishing abandoned worker must not report."""
 
 
 class _ConcurrentToolAuthorizationGate:
     """Serialize policy prompts and exclude human approval waits from batch deadlines.
 
-    The acquire is BOUNDED: on expiry the worker prompts unserialized rather than
-    starving the batch behind a wedged plugin/approval client.
-
-    Deadline exclusion is measured at the SOURCE of the human wait
-    (``tools.approval.human_wait_seconds``), NOT as gate residency: residency-based
-    exclusion let a wedged plugin keep the deadline from ever firing.
+    The acquire is BOUNDED: on expiry the worker prompts unserialized rather than starving
+    the batch behind a wedged plugin/approval client. Exclusion is measured at the SOURCE
+    of the human wait (``tools.approval.human_wait_seconds``), NOT as gate residency —
+    residency-based exclusion let a wedged plugin keep the deadline from ever firing.
     """
 
     def __init__(self, *, lock_timeout: float | None = None, session_key: str | None = None) -> None:
@@ -487,8 +458,8 @@ class _ConcurrentToolAuthorizationGate:
             try:
                 from tools.approval import get_current_session_key
 
-                # Snapshot on the SUBMITTING thread: excluded_seconds() is polled
-                # from the batch wait loop, whose context may differ from workers'.
+                # Snapshot on the SUBMITTING thread: excluded_seconds() is polled from the
+                # batch wait loop, whose context may differ from the workers'.
                 self._session_key = get_current_session_key()
             except Exception:
                 logger.debug(
@@ -528,11 +499,8 @@ class _ConcurrentToolAuthorizationGate:
 
 @contextlib.contextmanager
 def _registered_tool_worker(agent):
-    """Track this worker tid for interrupt fan-out (``AIAgent.interrupt()``).
-
-    On exit (including BaseException, which bypasses ``except Exception``) the tid is
-    discarded and its interrupt bit cleared so a recycled tid starts clean.
-    """
+    """Track this worker tid for interrupt fan-out (``AIAgent.interrupt()``); on ANY exit
+    (incl. BaseException) discard it and clear its interrupt bit so a recycled tid starts clean."""
     tid = threading.current_thread().ident
     with agent._tool_worker_threads_lock:
         agent._tool_worker_threads.add(tid)
@@ -570,8 +538,7 @@ def _set_worker_activity_callback(agent) -> None:
         pass
 
 
-# Heartbeat cadence; must stay far below the gateway turn-inactivity timeout
-# (default 1800s) so a silent-but-healthy tool never looks idle.
+# Must stay far below the gateway turn-inactivity timeout (default 1800s) so a silent tool never looks idle.
 _TOOL_ACTIVITY_HEARTBEAT_INTERVAL_S = 30.0
 
 
@@ -588,8 +555,7 @@ def _run_tool_activity_heartbeat(
         while not stop_event.wait(interval):
             agent._touch_activity(label)
     except Exception:
-        # A heartbeat must never break the agent loop.
-        pass
+        pass  # a heartbeat must never break the agent loop
 
 
 def _run_with_activity_heartbeat(agent, function_name: str, fn):
@@ -655,10 +621,9 @@ def _dispatch_authorized_once(
 ) -> Any:
     """Hermes policy (scope → plugin pre-hooks → guardrails) then the one real dispatch.
 
-    ``ref.args`` are the middleware-final args; plugin ``modify`` hooks may rewrite them
-    (mirrored into ``state.args``). ``begin_execution`` (concurrent start-order gate) is
-    advanced exactly once on every path so later-ordered workers keep moving; blocked
-    calls advance it without a callback.
+    Plugin ``modify`` hooks may rewrite ``ref.args`` (mirrored into ``state.args``).
+    ``begin_execution`` (concurrent start-order gate) is advanced exactly once on every
+    path so later-ordered workers keep moving; blocked calls advance it without a callback.
     """
     def _advance_start_order(callback=None) -> None:
         if begin_execution is not None:
@@ -772,21 +737,15 @@ def _run_agent_tool_execution_middleware(
     return state
 
 
-# Sequential wait-loop interrupt poll cadence: /stop lands within ~1s even when
-# the tool never polls is_interrupted().
+# Sequential wait-loop poll cadence: /stop lands within ~1s even if the tool never polls is_interrupted().
 _SEQUENTIAL_INTERRUPT_POLL_SECONDS = 1.0
 
 
 def _resolve_sequential_tool_timeout() -> float | None:
-    """Deadline for one sequential tool call.
-
-    ``timeouts.tools.sequential_call`` wins; unset inherits the concurrent batch deadline
-    so the two paths can't drift. ``0``/negative disables the bound.
-
-    Deliberately NOT ``agent.deadline.run_bounded_sync``: both executors extend their
-    deadline while an approval prompt is open (MUST-preserve), which the fixed-deadline
-    primitive can't express.
-    """
+    """Deadline for one sequential call: ``timeouts.tools.sequential_call``, else the
+    concurrent batch deadline so the two paths can't drift; ``0``/negative disables.
+    Deliberately NOT ``agent.deadline.run_bounded_sync``: both executors extend the
+    deadline while an approval prompt is open, which a fixed deadline can't express."""
     from agent.deadline import resolve_timeout
 
     return resolve_timeout("tools.sequential_call", default=_resolve_concurrent_tool_timeout())
@@ -800,12 +759,10 @@ def _abandoned_sequential_result(agent, ref: _ToolCallRef, message: str, result_
 
 
 def _poll_sequential_future(agent, future, function_name: str, deadline: float | None, started: float, authorization_gate) -> tuple[str, Any]:
-    """Wait for the worker in interrupt-poll slices, extending the deadline by human
-    approval wait. Returns ``("done", result)``, ``("timeout", None)`` or ``("interrupted", None)``.
-
+    """Wait for the worker in interrupt-poll slices, extending the deadline by human approval
+    wait; returns ``("done", result)``, ``("timeout", None)`` or ``("interrupted", None)``.
     A disabled deadline still polls: this loop is what makes a non-cooperative tool
-    interruptible, so no deadline must not mean no interrupt checks.
-    """
+    interruptible, so no deadline must not mean no interrupt checks."""
     _last_heartbeat = 0
     while True:
         wait_slice = _SEQUENTIAL_INTERRUPT_POLL_SECONDS
@@ -838,10 +795,8 @@ def _run_sequential_tool_execution_middleware(
     middleware_trace: list[dict[str, Any]] | None = None,
 ) -> _ManagedToolResult:
     """Run one sequential call on a worker thread under the concurrent executor's deadline.
-
     Interactive tools (``clarify``) own their wait via ``agent.clarify_timeout``; the
-    generic deadline would report ``tool_timeout`` while the prompt is still live.
-    """
+    generic deadline would report ``tool_timeout`` while the prompt is still live."""
     timeout_s = _resolve_sequential_tool_timeout()
     ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace)
     kwargs = dict(ref.middleware_kwargs(), execute=execute, scope_block=scope_block, display_index=display_index)
@@ -870,14 +825,13 @@ def _run_sequential_tool_execution_middleware(
         if state == "done":
             return result
         if state == "interrupted":
-            # Belt-and-braces: interrupt() already fans out to tracked worker
-            # tids, but the worker may have registered after the fan-out ran.
+            # interrupt() already fanned out to tracked tids, but this worker may have
+            # registered after that ran; then 3s grace (mirrors the concurrent path).
             _interrupt_worker_tids(agent, worker_tid, reason=getattr(agent, "_tool_interrupt_reason", None))
-            # Grace for a cooperative tool to notice its interrupt bit (mirrors the concurrent path's 3s).
             concurrent.futures.wait([future], timeout=3.0)
             if future.done() and not future.cancelled():
                 return future.result()
-            abandoned = True  # reuse the abandon-shutdown path in finally
+            abandoned = True
             future.cancel()
             interrupt_reason = getattr(agent, "_tool_interrupt_reason", None) or "interrupt requested"
             message = f"[Tool execution cancelled — {function_name} was abandoned: {interrupt_reason}]"
@@ -905,8 +859,7 @@ def _run_sequential_tool_execution_middleware(
             duration_ms=int(timeout_s * 1000), status="timeout", error_type="tool_timeout", error_message=message,
         )
     finally:
-        # Never join a wedged worker. DaemonThreadPoolExecutor also keeps it out
-        # of the stdlib atexit join, matching the concurrent timeout path.
+        # Never join a wedged worker (daemon pool also keeps it out of the atexit join).
         executor.shutdown(wait=not abandoned, cancel_futures=abandoned)
 
 
@@ -989,13 +942,10 @@ def _commit_tool_result(
     blocked: bool,
     effect_disposition,
 ):
-    """Mark the tool done; persist/spill, hint, wrap and append its result; flush the
-    session DB; then project ``tool.completed``.
-
-    Returns ``(persisted_result, display_result, risk_metadata)`` — ``display_result`` is
-    the pre-persist content for UI previews — or ``None`` when the flush failed (the
-    caller must stop the batch).
-    """
+    """Mark the tool done; persist/spill, hint, wrap and append its result; flush the session
+    DB; then project ``tool.completed``. Returns ``(persisted_result, display_result,
+    risk_metadata)`` (``display_result`` = pre-persist content for UI previews) or ``None``
+    when the flush failed (the caller must stop the batch)."""
     function_name, function_args, tool_call_id, effective_task_id = ref.name, ref.args, ref.call_id, ref.task_id
     agent._current_tool = None
     _status_suffix = " (error)" if is_error else ""
@@ -1020,8 +970,8 @@ def _commit_tool_result(
         else:
             persisted_result += subdir_hints
 
-    # Unwrap _multimodal dicts to an OpenAI-style content list; text-only servers
-    # get a string-safe fallback so a rejected image result never poisons history.
+    # Multimodal dicts become an OpenAI-style content list; text-only servers get a
+    # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
     messages.append(tool_message)
@@ -1054,11 +1004,9 @@ def _observe_and_commit_tool_result(
     verbose_text: Callable[[Any], Any] = lambda result: result,
 ):
     """Guardrail-observe a result that actually ran, log its outcome, feed the turn-end
-    file-mutation verifier, then ``_commit_tool_result`` it.
-
-    Blocked calls never ran, so they count as neither failure nor success and are not
-    observed. ``success_log_chars`` (sequential path) also logs the completion line.
-    """
+    file-mutation verifier, then ``_commit_tool_result`` it. Blocked calls never ran, so
+    they count as neither failure nor success and are not observed; ``success_log_chars``
+    (sequential path) also logs the completion line."""
     function_name, function_args, tool_call_id = ref.name, ref.args, ref.call_id
     if not blocked:
         function_result = agent._append_guardrail_observation(
@@ -1087,11 +1035,8 @@ def _observe_and_commit_tool_result(
 
 
 def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tools: int, budget: BudgetConfig) -> None:
-    """Per-turn aggregate budget enforcement, then /steer injection.
-
-    /steer stays pending until AFTER budget enforcement so the steer marker is never
-    truncated or discarded when enforcement replaces a tool result; see ``steer()``.
-    """
+    """Per-turn aggregate budget enforcement, then /steer injection — in that order, so the
+    steer marker is never truncated/discarded when enforcement replaces a result."""
     if num_tools <= 0:
         return
     enforce_turn_budget(messages[-num_tools:], env=get_active_env(effective_task_id), config=budget)
@@ -1138,11 +1083,8 @@ def _start_order_gate_timeout(batch_timeout: float | None) -> float:
 
 
 class _StartOrderGate:
-    """Serialize worker dispatch by submit order (prompts appear in call order).
-
-    ``abandon()`` releases every parked worker so none dispatches a tool the turn
-    already reported as timed out / interrupted.
-    """
+    """Serialize worker dispatch by submit order (prompts appear in call order); ``abandon()``
+    releases every parked worker so none dispatches a tool the turn already gave up on."""
 
     def __init__(self, timeout: float) -> None:
         self._condition = threading.Condition()
@@ -1158,17 +1100,14 @@ class _StartOrderGate:
     def begin_in_order(self, order: int, callback=None, *, tool_name: str = "") -> bool:
         """Wait for ``order``, run ``callback``, advance. Returns False if abandoned."""
         with self._condition:
-            # Bounded wait so one wedged dispatch can't starve/leak later-ordered workers;
-            # on expiry proceed out of order (interleaved prompts beat starvation).
-            # >= (not ==) releases every skipped worker at once; abandoned short-circuits.
+            # Bounded wait so one wedged dispatch can't starve later-ordered workers; on
+            # expiry proceed out of order (interleaved prompts beat starvation). ``>=`` (not
+            # ``==``) releases every skipped worker at once; abandoned short-circuits.
             in_order = self._condition.wait_for(
-                lambda: self._next_order >= order or self.abandoned.is_set(),
-                timeout=self._timeout,
+                lambda: self._next_order >= order or self.abandoned.is_set(), timeout=self._timeout,
             )
             if self.abandoned.is_set():
-                # Do not run the callback or advance the counter: the turn has
-                # already synthesized this tool's result and moved on.
-                return False
+                return False  # the turn already synthesized this result; don't advance
             if not in_order:
                 logger.warning(
                     "start-order gate timed out for %s (order=%d next=%d); proceeding out of order",
@@ -1221,9 +1160,9 @@ class _ConcurrentBatch:
         self.timed_out_indices: set[int] = set()
 
     def _dispatch_worker(self, index: int, ref: _ToolCallRef, scope_block, start_gate: _WorkerStartOnce) -> Optional[_ToolOutcome]:
-        """Run one call through the middleware and synthesize its slot outcome; ``None``
-        when the batch was abandoned at the gate (the main thread already wrote this slot,
-        so emitting anything would double-report the tool_call_id)."""
+        """Run one call through the middleware and synthesize its slot outcome; ``None`` when
+        abandoned at the gate (the main thread already wrote this slot; emitting would
+        double-report the tool_call_id)."""
         agent = self.agent
         start = time.time()
         blocked = dispatched = False
@@ -1275,12 +1214,10 @@ class _ConcurrentBatch:
         """Worker function executed in a thread."""
         agent = self.agent
         with _registered_tool_worker(agent) as _worker_tid:
-            # Race: interrupt may have fanned out before our registration; apply it to our own tid now.
+            # An interrupt may have fanned out before our registration; apply it to our tid.
             if agent._interrupt_requested:
                 _interrupt_worker_tids(agent, [_worker_tid], reason=getattr(agent, "_tool_interrupt_reason", None))
             _set_worker_activity_callback(agent)
-            # Approval/sudo callbacks and turn ContextVars are propagated by
-            # propagate_context_to_thread() at submit.
             start_gate = _WorkerStartOnce(self.gate, start_order, function_name)
             ref = _ToolCallRef(function_name, function_args, self.effective_task_id, _pairing_tool_call_id(tool_call), middleware_trace)
             try:
@@ -1288,19 +1225,16 @@ class _ConcurrentBatch:
                 if outcome is not None:
                     self.results[index] = outcome
             finally:
-                # Teardown advance keeps later-ordered workers moving; never let the
-                # abandonment signal escape here.
                 with contextlib.suppress(_BatchAbandoned):
-                    start_gate.advance()
+                    start_gate.advance()  # keep later-ordered workers moving
 
     def submit_all(self, executor, runnable_calls) -> tuple[list, dict]:
         """Submit every runnable call; on interpreter shutdown, synthesize error results
-        for the unsubmitted remainder instead of raising."""
+        for the unsubmitted remainder instead of raising. ``propagate_context_to_thread``
+        carries turn ContextVars and thread-local approval/sudo callbacks into the worker."""
         futures = []
         future_to_index = {}
         for submit_index, (i, tc, name, args, scope_block) in enumerate(runnable_calls):
-            # Propagate turn ContextVars and thread-local approval/sudo
-            # callbacks into the worker; clears callbacks on exit.
             try:
                 f = executor.submit(
                     propagate_context_to_thread(self.run_worker),
@@ -1333,9 +1267,8 @@ class _ConcurrentBatch:
         return [self.parsed_calls[future_to_index[f]].name for f in not_done if f in future_to_index]
 
     def await_completion(self, futures, future_to_index, deadline: float | None) -> bool:
-        """Wait with periodic heartbeats (gateway inactivity monitor) and interrupt checks
-        (/stop or a new message). Returns True when the batch was abandoned (deadline or
-        interrupt) and the executor must not join its workers."""
+        """Wait with periodic heartbeats and interrupt checks; True when the batch was
+        abandoned (deadline or interrupt) and the executor must not join its workers."""
         agent = self.agent
         _conc_start = time.time()
         while True:
@@ -1404,8 +1337,7 @@ class _ConcurrentBatch:
             return
         deadline = time.monotonic() + self.timeout_s if self.timeout_s is not None else None
         max_workers = _max_workers_for_tool_batch(runnable_calls)
-        # Daemon workers: stdlib ThreadPoolExecutor's atexit join would let one
-        # wedged tool thread block interpreter exit forever.
+        # Daemon workers: the stdlib pool's atexit join would let one wedged tool block exit.
         from tools.daemon_pool import DaemonThreadPoolExecutor
         executor = DaemonThreadPoolExecutor(max_workers=max_workers)
         abandon_executor = False
@@ -1413,21 +1345,17 @@ class _ConcurrentBatch:
             futures, future_to_index = self.submit_all(executor, runnable_calls)
             abandon_executor = self.await_completion(futures, future_to_index, deadline)
         finally:
-            # Any abandoning exit from the wait loop (including the exception
-            # path) must release gate-parked workers.
+            # Every abandoning exit releases gate-parked workers and leaves wedged threads
+            # detached rather than joining them; normal completion joins.
             if abandon_executor:
                 self.gate.abandon()
-            # On abandon do NOT join hung workers: a wedged thread is left detached
-            # rather than deadlocking the batch. Normal completion joins.
             executor.shutdown(wait=not abandon_executor, cancel_futures=abandon_executor)
 
 
 def _unfinished_tool_result(agent, ref: _ToolCallRef, *, timed_out: bool, timeout_s: float | None) -> tuple[str, float, Optional[str]]:
-    """Synthesize the result for a slot no worker filled (deadline, interrupt, or a
-    thread that never returned) and emit its terminal post_tool_call.
-
-    Returns ``(function_result, tool_duration, effect_disposition)``.
-    """
+    """Synthesize the result for a slot no worker filled (deadline, interrupt, or a thread
+    that never returned), emit its terminal post_tool_call, and return
+    ``(function_result, tool_duration, effect_disposition)``."""
     if timed_out:
         suffix = f"{timeout_s:.1f}s" if timeout_s is not None else "the configured timeout"
         function_result = f"Error executing tool '{ref.name}': timed out after {suffix}"
@@ -1489,15 +1417,11 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
 
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
     """Execute tool calls concurrently; results are appended in original call order.
-
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
-    segmented dispatcher owns turn-end work).
-    """
+    segmented dispatcher owns turn-end work)."""
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
-
-    # Resolve the context-scaled tool-output budget once per turn, not per result.
-    _tool_budget = _budget_for_agent(agent)
+    _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
 
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
@@ -1516,12 +1440,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     if _tool_progress_enabled(agent):
         print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
 
-    # Resolved before the batch is built so the start-order gate can clamp
-    # its own bound against the batch deadline it must stay under.
+    # Resolved before the batch is built so the start-order gate can clamp under the deadline.
     timeout_s = _resolve_concurrent_tool_timeout()
     batch = _ConcurrentBatch(agent, messages, effective_task_id, parsed_calls, timeout_s)
-
-    # Touch activity before launching workers so the gateway knows we're executing tools.
     agent._current_tool = tool_names_str
     agent._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
 
@@ -1544,10 +1465,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
 
 def _start_quiet_tool_spinner(agent, function_name: str, function_args: dict, *, gate: bool = True, label: Optional[str] = None):
-    """Start the quiet-mode kawaii spinner for one tool call, or return None.
-
-    ``gate=False`` skips ``_should_start_quiet_spinner`` (context-engine tools always spin).
-    """
+    """Start the quiet-mode kawaii spinner for one tool call, or return None; ``gate=False``
+    skips ``_should_start_quiet_spinner`` (context-engine tools always spin)."""
     if not agent._should_emit_quiet_tool_messages():
         return None
     if gate and not agent._should_start_quiet_spinner():
@@ -1609,11 +1528,9 @@ def _resolve_sequential_dispatch(
     tool_call_id: str,
     middleware_trace: list,
 ) -> _SequentialDispatch:
-    """Pick the execute callable for one sequential call and start its spinner.
-
-    Precedence is the historical if/elif order: inline agent-level tools, delegate_task,
-    context-engine tools, memory-provider tools, then the registry.
-    """
+    """Pick the execute callable for one sequential call and start its spinner. Precedence:
+    inline agent-level tools, delegate_task, context-engine tools, memory-provider tools,
+    then the registry."""
     if function_name != "delegate_task" and function_name in INLINE_TOOL_EXECUTORS:
         # Agent-level tools that need live AIAgent state; table shared with invoke_tool.
         inline_executor = INLINE_TOOL_EXECUTORS[function_name]
@@ -1707,10 +1624,8 @@ def _run_sequential_call(
     tool_start_time: float,
 ) -> tuple[_ManagedToolResult, float]:
     """Run one sequential call with its spinner/error policy; returns ``(managed, duration)``.
-
-    KeyboardInterrupt (registry tools only) emits results for THIS and every remaining
-    call before re-raising so the tool-call turn keeps matching results (alternation).
-    """
+    KeyboardInterrupt (registry tools only) emits results for THIS and every remaining call
+    before re-raising so the tool-call turn keeps matching results (alternation)."""
     _spinner_result = None
     try:
         managed = _run_sequential_tool_execution_middleware(
@@ -1784,21 +1699,17 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
-    """Execute tool calls sequentially (single calls or interactive tools).
-
-    ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
-    segmented dispatcher owns turn-end work).
-    """
-    # Resolve the context-scaled tool-output budget once per turn, not per result.
-    _tool_budget = _budget_for_agent(agent)
+    """Execute tool calls sequentially (single calls or interactive tools). ``finalize=False``
+    skips end-of-batch budget enforcement and /steer injection (the segmented dispatcher
+    owns turn-end work)."""
+    _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
 
     for i, tool_call in enumerate(tool_calls, 1):
         tool_call_id = _pairing_tool_call_id(tool_call)
         if getattr(agent, "_incremental_persistence_failed", False):
             return
-        # SAFETY: check interrupt BEFORE each tool so a "stop" during the previous
-        # tool skips all remaining ones.
+        # Check interrupt BEFORE each tool so a "stop" during the previous one skips the rest.
         if agent._interrupt_requested:
             if not _skip_remaining_sequential(
                 agent, messages, tool_calls[i - 1:], effective_task_id,
@@ -1819,8 +1730,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             continue
 
         tool_start_time = time.time()
-        # One bounded execution funnel for every runtime-tool branch; no duplicated
-        # timeout policy in the callbacks.
         dispatch = _resolve_sequential_dispatch(
             agent,
             function_name=ref.name,
@@ -1856,14 +1765,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
 
 def execute_tool_calls_segmented(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, segments=None) -> None:
-    """Execute a mixed batch as ordered parallel/sequential segments.
-
-    ``segments`` is the ``(kind, calls)`` plan from ``_plan_tool_batch_segments``;
-    contiguous segments preserve per-call result order and barrier boundaries exactly
-    as fully-sequential execution. Turn-end work (budget + /steer) runs once here;
-    segment executors run with ``finalize=False``. Each segment executor checks the
-    interrupt flag up front, so an interrupt drains later segments with one result per call.
-    """
+    """Execute a mixed batch as ordered parallel/sequential segments (the ``(kind, calls)``
+    plan from ``_plan_tool_batch_segments``), preserving per-call result order and barrier
+    boundaries exactly as fully-sequential execution. Turn-end work (budget + /steer) runs
+    once here (segments run with ``finalize=False``); each segment executor checks the
+    interrupt flag up front, so an interrupt drains later segments with one result per call."""
     from types import SimpleNamespace
 
     if segments is None:
