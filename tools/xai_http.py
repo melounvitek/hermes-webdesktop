@@ -21,14 +21,12 @@ def _dict_get(obj: Any, key: str) -> Any:
 def has_xai_credentials() -> bool:
     """Cheap probe: True when xAI credentials are *likely* usable.
 
-    Deliberately avoids :func:`resolve_xai_http_credentials` (disk locks, OAuth
-    network refresh) — hot-paint callers and ``WebSearchProvider.is_available()``
-    must not do network I/O. Checks, fast-to-slow: ``XAI_API_KEY``; a non-empty
-    ``providers.xai-oauth.tokens.access_token`` in ``auth.json``; any
-    ``credential_pool.xai-oauth`` entry with an ``access_token`` (pool-only
-    multi-account grants never write the providers singleton). Returns False on
-    any exception so a corrupted auth store can't block other availability
-    scans; truthful refresh/expiry handling happens in the caller's request.
+    Deliberately avoids :func:`resolve_xai_http_credentials` (disk locks, OAuth network
+    refresh) — hot-paint callers and ``WebSearchProvider.is_available()`` must not do network
+    I/O. Checks, fast-to-slow: ``XAI_API_KEY``; ``providers.xai-oauth.tokens.access_token`` in
+    ``auth.json``; any ``credential_pool.xai-oauth`` entry with an ``access_token`` (pool-only
+    multi-account grants never write the providers singleton). Returns False on any exception
+    so a corrupted auth store can't block other availability scans.
     """
     try:
         from agent.secret_scope import get_secret
@@ -49,11 +47,9 @@ def has_xai_credentials() -> bool:
         if str(_dict_get(tokens, "access_token") or "").strip():
             return True
         entries = _dict_get(_dict_get(store, "credential_pool"), "xai-oauth")
-        if isinstance(entries, list):
-            for entry in entries:
-                if isinstance(entry, dict) and str(entry.get("access_token", "") or "").strip():
-                    return True
-        return False
+        return isinstance(entries, list) and any(
+            isinstance(e, dict) and str(e.get("access_token", "") or "").strip() for e in entries
+        )
     except Exception:
         return False
 
@@ -61,14 +57,12 @@ def has_xai_credentials() -> bool:
 def get_env_value(name: str, default=None):
     """Read ``name`` from ``~/.hermes/.env`` first, then ``os.environ``.
 
-    Wraps :func:`hermes_cli.config.get_env_value` so tests can patch
-    ``tools.xai_http.get_env_value`` to inject dotenv-only secrets.
+    Wraps :func:`hermes_cli.config.get_env_value` so tests can patch ``tools.xai_http.get_env_value``.
     """
     try:
         from hermes_cli.config import get_env_value as _hermes_get_env_value
     except ImportError:
         return os.environ.get(name, default)
-
     value = _hermes_get_env_value(name)
     return value if value is not None else default
 
@@ -98,15 +92,17 @@ def _load_config_section(section_name: str) -> Dict[str, Any]:
         return {}
 
 
+_TRUE_WORDS = {"1", "true", "yes", "on", "enabled"}
+_FALSE_WORDS = {"0", "false", "no", "off", "disabled"}
+
+
 def _coerce_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "enabled"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "disabled"}:
-            return False
+        if normalized in _TRUE_WORDS | _FALSE_WORDS:
+            return normalized in _TRUE_WORDS
     return default
 
 
@@ -124,18 +120,15 @@ def _coerce_expires_after(value: Any) -> Optional[int]:
             return SAFE_XAI_STORAGE_EXPIRES_AFTER_SECONDS
     if isinstance(value, (int, float)):
         seconds = int(value)
-        if seconds <= 0:
-            return None
-        return min(seconds, MAX_XAI_STORAGE_EXPIRES_AFTER_SECONDS)
+        return None if seconds <= 0 else min(seconds, MAX_XAI_STORAGE_EXPIRES_AFTER_SECONDS)
     return SAFE_XAI_STORAGE_EXPIRES_AFTER_SECONDS
 
 
 def read_xai_imagine_storage_config(section_name: str) -> Dict[str, Any]:
-    """Read ``<section_name>.xai.storage`` (``image_gen`` or ``video_gen``).
+    """Read ``<section_name>.xai.storage`` (``image_gen``/``video_gen``) -> {enabled, public_url, expires_after}.
 
-    Shape: ``storage: {enabled: true, public_url: true, expires_after: null}``.
-    Storage is on by default so xAI returns permanent public URLs instead of
-    short-lived CDN URLs; ``expires_after: null`` means permanent.
+    Storage is on by default so xAI returns permanent public URLs instead of short-lived CDN
+    URLs; ``expires_after: null`` means permanent.
     """
     storage = _dict_get(_dict_get(_load_config_section(section_name), "xai"), "storage")
     storage = storage if isinstance(storage, dict) else {}
@@ -147,22 +140,17 @@ def read_xai_imagine_storage_config(section_name: str) -> Dict[str, Any]:
 
 
 def build_xai_storage_options(
-    section_name: str,
-    *,
-    filename_prefix: str,
-    extension: str,
+    section_name: str, *, filename_prefix: str, extension: str,
 ) -> Optional[Dict[str, Any]]:
     """Return an xAI ``storage_options`` payload, or None when disabled."""
     cfg = read_xai_imagine_storage_config(section_name)
     if not cfg["enabled"]:
         return None
-
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M%S")
     short = uuid.uuid4().hex[:8]
     ext = extension.lstrip(".") or "bin"
     payload: Dict[str, Any] = {
-        "filename": f"{filename_prefix}-{ts}-{short}.{ext}",
-        "public_url": bool(cfg["public_url"]),
+        "filename": f"{filename_prefix}-{ts}-{short}.{ext}", "public_url": bool(cfg["public_url"]),
     }
     if cfg["expires_after"] is not None:
         payload["expires_after"] = cfg["expires_after"]
@@ -174,9 +162,8 @@ def xai_storage_notice_text(section_name: str) -> str:
     cfg = read_xai_imagine_storage_config(section_name)
     if not cfg["enabled"]:
         return ""
-    if cfg["expires_after"] is None:
-        retention = "without an automatic expiry"
-    else:
+    retention = "without an automatic expiry"
+    if cfg["expires_after"] is not None:
         days = cfg["expires_after"] / (24 * 60 * 60)
         retention = f"for about {days:g} day{'s' if days != 1 else ''}"
     return (
@@ -209,9 +196,8 @@ def maybe_mark_xai_storage_notice_seen(section_name: str) -> Optional[str]:
 def _resolve_explicit_xai_api_key() -> str:
     """Read ``XAI_API_KEY`` via ``resolve_provider_secret`` (config → profile scope → env/.env → pool).
 
-    Both the preferred-key and the no-OAuth fallback paths go through here so
-    scope policy (incl. failing closed in a multiplexed gateway turn) is never
-    re-implemented per caller.
+    Both the preferred-key and the no-OAuth fallback paths go through here so scope policy
+    (incl. failing closed in a multiplexed gateway turn) is never re-implemented per caller.
     """
     try:
         from tools.tool_backend_helpers import resolve_provider_secret
@@ -227,12 +213,8 @@ def _xai_base_url_override() -> str:
 
 
 def _resolve_explicit_xai_base_url(default: str = DEFAULT_XAI_BASE_URL) -> str:
-    """Base URL for the explicit-API-key path.
-
-    Origin-pinned via ``_xai_validate_inference_base_url`` so a tampered env
-    override can't exfiltrate the bearer; on rejection falls back to ``default``
-    rather than raising.
-    """
+    """Base URL for the explicit-API-key path, origin-pinned via ``_xai_validate_inference_base_url``
+    so a tampered env override can't exfiltrate the bearer; rejection falls back to ``default``."""
     override = _xai_base_url_override()
     try:
         import hermes_cli.auth as auth_mod
@@ -243,21 +225,17 @@ def _resolve_explicit_xai_base_url(default: str = DEFAULT_XAI_BASE_URL) -> str:
 
 
 def resolve_xai_http_credentials(
-    *,
-    force_refresh: bool = False,
-    api_key_hint: Optional[str] = None,
-    prefer_api_key: bool = False,
+    *, force_refresh: bool = False, api_key_hint: Optional[str] = None, prefer_api_key: bool = False,
 ) -> Dict[str, str]:
     """Resolve bearer credentials for direct xAI HTTP endpoints.
 
-    Default order: Hermes-managed xAI OAuth, then ``XAI_API_KEY`` (read via
-    ``get_env_value`` so ``~/.hermes/.env`` keys count). ``prefer_api_key=True``
-    inverts that for API-metered endpoints where the subscription OAuth bearer
-    authorizes but misbehaves (x_search answers without citations, TTS 403s).
-    Both branches honor ``HERMES_XAI_BASE_URL``/``XAI_BASE_URL`` behind the same
-    origin-pinning validation. ``force_refresh=True`` forces an OAuth refresh;
-    pass the rejected bearer as ``api_key_hint`` so a multi-account pool
-    refreshes the issuing entry, not whichever its strategy selects first.
+    Default order: Hermes-managed xAI OAuth, then ``XAI_API_KEY`` (via ``get_env_value`` so
+    ``~/.hermes/.env`` keys count). ``prefer_api_key=True`` inverts that for API-metered
+    endpoints where the subscription OAuth bearer authorizes but misbehaves (x_search answers
+    without citations, TTS 403s). Both branches honor ``HERMES_XAI_BASE_URL``/``XAI_BASE_URL``
+    behind the same origin-pinning validation. ``force_refresh=True`` forces an OAuth refresh;
+    pass the rejected bearer as ``api_key_hint`` so a multi-account pool refreshes the issuing
+    entry, not whichever its strategy selects first.
     """
     if prefer_api_key:
         explicit_key = str(_resolve_explicit_xai_api_key() or "").strip()
@@ -275,18 +253,15 @@ def resolve_xai_http_credentials(
             # the next healthy account rather than resurrecting the stale row.
             entry = pool.select()
         access_token = str(
-            getattr(entry, "runtime_api_key", None)
-            or getattr(entry, "access_token", "")
+            getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         ).strip()
         fallback_base_url = str(
             getattr(entry, "runtime_base_url", None)
             or getattr(entry, "base_url", "")
             or auth_mod.DEFAULT_XAI_OAUTH_BASE_URL
         ).strip().rstrip("/")
-        base_url = auth_mod._xai_validate_inference_base_url(
-            _xai_base_url_override(),
-            fallback=fallback_base_url,
-        )
+        override = _xai_base_url_override()
+        base_url = auth_mod._xai_validate_inference_base_url(override, fallback=fallback_base_url)
         if access_token:
             return {"provider": "xai-oauth", "api_key": access_token, "base_url": base_url}
     except Exception:
