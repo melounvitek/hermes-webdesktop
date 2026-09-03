@@ -1,13 +1,11 @@
-"""Abstract backend interface for computer use.
-
-Any implementation (cua-driver over MCP, pyautogui, noop, future Linux/Windows)
-returns the shapes below. All methods are synchronous; async is handled inside
-the backend implementation if needed.
-"""
+"""Abstract backend interface for computer use. Any implementation (cua-driver over MCP,
+pyautogui, noop, future Linux/Windows) returns the shapes below. All methods are synchronous;
+async is handled inside the backend implementation if needed."""
 
 from __future__ import annotations
 
 import struct
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,11 +28,9 @@ def image_dimensions_from_bytes(raw: bytes) -> Optional[Tuple[int, int]]:
             if raw[i] != 0xFF:
                 i += 1
                 continue
-            marker = raw[i + 1]
-            i += 2
+            marker, i = raw[i + 1], i + 2
             while marker == 0xFF and i < len(raw):
-                marker = raw[i]
-                i += 1
+                marker, i = raw[i], i + 1
             if marker in {0xD8, 0xD9}:
                 continue
             if marker == 0xDA or i + 2 > len(raw):
@@ -43,9 +39,7 @@ def image_dimensions_from_bytes(raw: bytes) -> Optional[Tuple[int, int]]:
             if segment_len < 2 or i + segment_len > len(raw):
                 break
             if marker in _JPEG_SOF_MARKERS and segment_len >= 7:
-                height = int.from_bytes(raw[i + 3:i + 5], "big")
-                width = int.from_bytes(raw[i + 5:i + 7], "big")
-                return int(width), int(height)
+                return int.from_bytes(raw[i + 5:i + 7], "big"), int.from_bytes(raw[i + 3:i + 5], "big")
             i += segment_len
     return None
 
@@ -96,13 +90,11 @@ class CaptureResult:
 
 @dataclass
 class ActionResult:
-    """Result of any action (click / type / scroll / drag / key / wait).
-
-    ``ok`` is tool/transport success only — NOT the semantic verdict; read ``effect`` /
-    ``escalation`` (cua-driver's structured verdict) to pick the next rung of the
-    verify → escalate ladder. Structured fields are optional and additive: an older
-    driver that omits ``structuredContent`` leaves them ``None``, behavior unchanged.
-    """
+    """Result of any action (click / type / scroll / drag / key / wait). ``ok`` is
+    tool/transport success only — NOT the semantic verdict; read ``effect`` / ``escalation``
+    (cua-driver's structured verdict) to pick the next rung of the verify → escalate ladder.
+    Structured fields are optional and additive: an older driver that omits
+    ``structuredContent`` leaves them ``None``, behavior unchanged."""
 
     ok: bool
     action: str
@@ -121,12 +113,11 @@ class ActionResult:
 
 
 class ComputerUseBackend(ABC):
-    """Lifecycle: `start()` before first use, `stop()` at shutdown.
-
-    Pointer/keyboard actions take ``delivery_mode`` (background (default) | foreground)
-    and ``bring_to_front``; ``button`` is left | right | middle; ``modifiers`` a list of
-    key names. ``element`` args are 1-based SOM indices from a prior capture.
-    """
+    """Lifecycle: `start()` before first use, `stop()` at shutdown. Pointer/keyboard actions
+    take ``delivery_mode`` (background (default) | foreground) and ``bring_to_front``;
+    ``button`` is left | right | middle; ``modifiers`` a list of key names. ``element`` args
+    are 1-based SOM indices from a prior capture. `direction` is up | down | left | right and
+    `amount` is wheel ticks; `keys` is a combo such as 'cmd+s', 'ctrl+alt+t', 'return'."""
 
     @abstractmethod
     def start(self) -> None: ...
@@ -138,12 +129,10 @@ class ComputerUseBackend(ABC):
     def is_available(self) -> bool:
         """True if the backend can be used on this host right now (check_fn gating, setup wizard)."""
 
-    # ── Capture ─────────────────────────────────────────────────────
     @abstractmethod
     def capture(self, mode: str = "som", app: Optional[str] = None, pid: Optional[int] = None,
                 window_id: Optional[int] = None) -> CaptureResult: ...
 
-    # ── Pointer actions ─────────────────────────────────────────────
     @abstractmethod
     def click(self, *, element: Optional[int] = None, x: Optional[int] = None, y: Optional[int] = None,
               button: str = "left", click_count: int = 1, modifiers: Optional[List[str]] = None,
@@ -158,20 +147,15 @@ class ComputerUseBackend(ABC):
     @abstractmethod
     def scroll(self, *, direction: str, amount: int = 3, element: Optional[int] = None,
                x: Optional[int] = None, y: Optional[int] = None, modifiers: Optional[List[str]] = None,
-               delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
-        """`direction` is up | down | left | right; `amount` is wheel ticks."""
+               delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
-    # ── Keyboard ────────────────────────────────────────────────────
     @abstractmethod
     def type_text(self, text: str, *, delivery_mode: Optional[str] = None,
                   bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
-    def key(self, keys: str, *, delivery_mode: Optional[str] = None,
-            bring_to_front: bool = False) -> ActionResult:
-        """Send a key combo, e.g. 'cmd+s', 'ctrl+alt+t', 'return'."""
+    def key(self, keys: str, *, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
-    # ── Introspection ───────────────────────────────────────────────
     @abstractmethod
     def list_apps(self) -> List[Dict[str, Any]]:
         """Return running apps with bundle IDs, PIDs, window counts."""
@@ -191,6 +175,5 @@ class ComputerUseBackend(ABC):
 
     def wait(self, seconds: float) -> ActionResult:
         """Default implementation: time.sleep."""
-        import time
         time.sleep(max(0.0, min(seconds, 30.0)))
         return ActionResult(ok=True, action="wait", message=f"waited {seconds:.2f}s")
