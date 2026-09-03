@@ -172,8 +172,7 @@ class ProviderRegistry(Generic[P]):
 
 
 def is_available_safe(
-    provider: Any, logger: logging.Logger, fmt: str, *, level: int = logging.DEBUG,
-    exc_info: bool = False,
+    provider: Any, logger: logging.Logger, fmt: str, *, level: int = logging.DEBUG, exc_info: bool = False,
 ) -> bool:
     """``bool(provider.is_available())`` that treats a raising provider as unavailable."""
     try:

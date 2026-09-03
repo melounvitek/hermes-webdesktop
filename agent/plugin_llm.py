@@ -154,9 +154,8 @@ def _resolve_trust_policy(plugin_id: str) -> _TrustPolicy:
     allowed_models, allow_any_model = _coerce_allowlist(llm_cfg.get("allowed_models"))
     allowed_providers, allow_any_provider = _coerce_allowlist(llm_cfg.get("allowed_providers"))
     return _TrustPolicy(
-        plugin_id=plugin_id, allowed_providers=allowed_providers,
-        allow_any_provider=allow_any_provider, allowed_models=allowed_models,
-        allow_any_model=allow_any_model,
+        plugin_id=plugin_id, allowed_providers=allowed_providers, allow_any_provider=allow_any_provider,
+        allowed_models=allowed_models, allow_any_model=allow_any_model,
         **{name: bool(llm_cfg.get(name, False)) for name in _OVERRIDE_FLAGS},
     )
 
@@ -188,8 +187,7 @@ def _gate_ref_override(policy: _TrustPolicy, kind: str, requested: str) -> str:
 
 # Overrides gated by a bare trust flag (no allowlist): ``kind`` -> denial wording.
 _FLAG_ONLY_OVERRIDES = {
-    "agent_id": "run completions against a non-default agent id",
-    "profile": "override the auth profile",
+    "agent_id": "run completions against a non-default agent id", "profile": "override the auth profile",
 }
 
 
@@ -235,9 +233,7 @@ def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
     return frozenset(owned), frozenset(builtin)
 
 
-def _check_task(
-    policy: _TrustPolicy, *, plugin_id: str, requested_task: Optional[str],
-) -> Optional[str]:
+def _check_task(policy: _TrustPolicy, *, plugin_id: str, requested_task: Optional[str]) -> Optional[str]:
     """Validate a plugin's requested auxiliary ``task`` key.
 
     unset / ``""`` / ``"auto"`` → ``None`` (main-model path); a key the plugin
@@ -382,9 +378,7 @@ def _parse_structured_text(
         except ImportError:
             logger.debug("jsonschema unavailable; skipping schema validation")
         except jsonschema.ValidationError as exc:  # type: ignore[attr-defined]
-            raise ValueError(
-                f"Plugin LLM structured output did not match schema: {exc.message}"
-            ) from exc
+            raise ValueError(f"Plugin LLM structured output did not match schema: {exc.message}") from exc
 
     return parsed, "json"
 
@@ -512,10 +506,9 @@ class PluginLlm:
     # -- public API -----------------------------------------------------------
 
     def complete(
-        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None,
-        model: Optional[str] = None, temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None, timeout: Optional[float] = None,
-        agent_id: Optional[str] = None, profile: Optional[str] = None,
+        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None, model: Optional[str] = None,
+        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None, agent_id: Optional[str] = None, profile: Optional[str] = None,
         purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmCompleteResult:
         """Run a host-owned chat completion against the user's active model.
@@ -527,12 +520,10 @@ class PluginLlm:
         return self._finish("complete", agent, kw, self._invoke_sync(kw), purpose)
 
     def complete_structured(
-        self, *, instructions: str, input: Sequence[PluginLlmInput],
-        json_schema: Optional[Any] = None, json_mode: bool = False,
-        schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
-        provider: Optional[str] = None, model: Optional[str] = None,
-        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None, agent_id: Optional[str] = None,
+        self, *, instructions: str, input: Sequence[PluginLlmInput], json_schema: Optional[Any] = None,
+        json_mode: bool = False, schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
+        provider: Optional[str] = None, model: Optional[str] = None, temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None, timeout: Optional[float] = None, agent_id: Optional[str] = None,
         profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmStructuredResult:
         """Run a bounded host-owned structured completion.
@@ -545,10 +536,9 @@ class PluginLlm:
         return self._finish("complete_structured", agent, kw, self._invoke_sync(kw), purpose, spec)
 
     async def acomplete(
-        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None,
-        model: Optional[str] = None, temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None, timeout: Optional[float] = None,
-        agent_id: Optional[str] = None, profile: Optional[str] = None,
+        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None, model: Optional[str] = None,
+        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None, agent_id: Optional[str] = None, profile: Optional[str] = None,
         purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmCompleteResult:
         """Async sibling of :meth:`complete`."""
@@ -556,12 +546,10 @@ class PluginLlm:
         return self._finish("acomplete", agent, kw, await self._invoke_async(kw), purpose)
 
     async def acomplete_structured(
-        self, *, instructions: str, input: Sequence[PluginLlmInput],
-        json_schema: Optional[Any] = None, json_mode: bool = False,
-        schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
-        provider: Optional[str] = None, model: Optional[str] = None,
-        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None, agent_id: Optional[str] = None,
+        self, *, instructions: str, input: Sequence[PluginLlmInput], json_schema: Optional[Any] = None,
+        json_mode: bool = False, schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
+        provider: Optional[str] = None, model: Optional[str] = None, temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None, timeout: Optional[float] = None, agent_id: Optional[str] = None,
         profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmStructuredResult:
         """Async sibling of :meth:`complete_structured`."""
@@ -572,10 +560,9 @@ class PluginLlm:
     # -- shared core ----------------------------------------------------------
 
     def _gate(
-        self, provider: Optional[str], model: Optional[str], agent_id: Optional[str],
-        profile: Optional[str], task: Optional[str], messages: Optional[List[Dict[str, Any]]],
-        temperature: Optional[float], max_tokens: Optional[int], timeout: Optional[float],
-        spec: Optional[Dict[str, Any]] = None,
+        self, provider: Optional[str], model: Optional[str], agent_id: Optional[str], profile: Optional[str],
+        task: Optional[str], messages: Optional[List[Dict[str, Any]]], temperature: Optional[float],
+        max_tokens: Optional[int], timeout: Optional[float], spec: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Dict[str, Any]]:
         """Trust gate (task first, then overrides), then — for a structured ``spec`` —
         build messages/response_format (input-shape errors surface only after trust
