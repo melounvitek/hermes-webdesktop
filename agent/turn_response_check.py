@@ -74,10 +74,6 @@ def check_api_response(
     (bytes back != usable content); ``_preflight_compression_blocked``/``_last_preflight_pressure``
     reset only when the usage fold re-arms the compression budget."""
     from agent.conversation_loop import (
-        _arm_fallback_restart,
-        describe_invalid_response,
-        jittered_backoff,
-        interruptible_backoff_sleep,
         validate_response_shape,
     )
     api_duration = None
@@ -122,101 +118,33 @@ def check_api_response(
     response_invalid, error_details = validate_response_shape(agent, response)
 
     if response_invalid:
-        agent._invoke_api_request_error_hook(
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            api_call_count=api_call_count,
-            api_start_time=api_start_time,
+        _iv = retry_invalid_response(
+            agent,
+            response=response,
+            error_details=error_details,
+            _retry=_retry,
+            thinking_spinner=thinking_spinner,
+            messages=messages,
+            api_messages=api_messages,
             api_kwargs=api_kwargs,
-            error_type="InvalidAPIResponse",
-            error_message=", ".join(error_details) or "Invalid API response",
-            status_code=getattr(getattr(response, "error", None), "code", None),
+            active_system_prompt=active_system_prompt,
+            conversation_history=conversation_history,
             retry_count=retry_count,
             max_retries=max_retries,
-            retryable=True,
-            reason="invalid_response",
-        )
-        # Stop spinner silently — retry status is now buffered
-        # and only surfaced if every retry+fallback exhausts.
-        if thinking_spinner:
-            thinking_spinner.stop("")
-            thinking_spinner = None
-        if agent.thinking_callback:
-            agent.thinking_callback("")
-
-        # Invalid response — could be rate limiting, provider timeout,
-        # upstream server error, or malformed response.
-        retry_count += 1
-
-        # Eager fallback: empty/malformed responses often mean rate limiting
-        # — switch now instead of extended backoff.
-        if agent._fallback_index < len(agent._fallback_chain):
-            agent._buffer_status("⚠️ Empty/malformed response — switching to fallback...")
-        if agent._try_activate_fallback():
-            active_system_prompt = _arm_fallback_restart(
-                agent, api_messages, active_system_prompt, _retry)
-            retry_count = 0
-            compression_attempts = 0
-            return _verdict("break")
-
-        error_msg, provider_name, _failure_hint = describe_invalid_response(
-            agent, response, api_duration
-        )
-
-        agent._buffer_vprint(f"⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}")
-        agent._buffer_vprint(f"   🏢 Provider: {provider_name}")
-        cleaned_provider_error = agent._clean_error_message(error_msg)
-        agent._buffer_vprint(f"   📝 Provider message: {cleaned_provider_error}")
-        agent._buffer_vprint(f"   ⏱️  {_failure_hint}")
-
-        if retry_count >= max_retries:
-            # Try fallback before giving up
-            if agent._has_pending_fallback():
-                agent._buffer_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
-            if agent._try_activate_fallback():
-                active_system_prompt = _arm_fallback_restart(
-                    agent, api_messages, active_system_prompt, _retry)
-                retry_count = 0
-                compression_attempts = 0
-                return _verdict("break")
-            # Terminal — flush buffered retry trace so user sees what happened.
-            agent._flush_status_buffer()
-            agent._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
-            logger.error("%sInvalid API response after %d retries.", agent.log_prefix, max_retries)
-            agent._persist_session(messages, conversation_history)
-            _final_response = f"Invalid API response after {max_retries} retries: {_failure_hint}"
-            return _verdict("return", {
-                "final_response": _final_response,
-                "messages": messages,
-                "completed": False,
-                "api_calls": api_call_count,
-                "error": _final_response,
-                "failed": True  # Mark as failure for filtering
-            })
-
-        # Backoff before retry — jittered exponential: 5s base, 120s cap
-        wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
-        agent._buffer_vprint(f"⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...")
-        logger.warning("Invalid API response (retry %d/%d): %s | Provider: %s", retry_count, max_retries, ', '.join(error_details), provider_name)
-
-        # A redirect cancels only the live request; the helper preserves the
-        # pending correction (restart_with_redirected_messages) instead of
-        # destroying it with clear_interrupt().
-        _interrupted = interruptible_backoff_sleep(
-            agent, wait_time, _retry,
-            messages=messages,
-            conversation_history=conversation_history,
+            compression_attempts=compression_attempts,
             api_call_count=api_call_count,
-            abort_message="Interrupt detected during retry wait, aborting.",
-            interrupt_text=f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
-            activity_label=f"retry backoff ({retry_count}/{max_retries})",
+            api_request_id=api_request_id,
+            api_start_time=api_start_time,
+            api_duration=api_duration,
+            effective_task_id=effective_task_id,
+            turn_id=turn_id,
         )
-        if _interrupted is not None:
-            return _verdict("return", _interrupted)
-        if _retry.restart_with_redirected_messages:
-            return _verdict("break")  # rebuild this iteration from the correction
-        return _verdict("continue")  # Retry the API call
+        thinking_spinner = _iv.thinking_spinner
+        active_system_prompt = _iv.active_system_prompt
+        retry_count = _iv.retry_count
+        compression_attempts = _iv.compression_attempts
+        if _iv.action != "fallthrough":
+            return _verdict(_iv.action, _iv.result)
 
     agent._turn_received_provider_response = True
 
@@ -361,4 +289,159 @@ def check_api_response(
     )
     agent._touch_activity(f"API call #{api_call_count} completed")
     return _verdict("break")  # Success, exit retry loop
+    return _verdict("fallthrough")
+
+
+@dataclass
+class InvalidResponseVerdict:
+    """``action``: ``"continue"`` (retry the API call after backoff), ``"break"`` (fallback
+    armed / redirect pending) or ``"return"`` (``result``: terminal invalid-response result or
+    interrupt during backoff). Rebinds ``thinking_spinner``/``active_system_prompt``/
+    ``retry_count``/``compression_attempts``."""
+
+    action: str
+    thinking_spinner: Any
+    active_system_prompt: Any
+    retry_count: Any
+    compression_attempts: Any
+    result: Optional[Dict[str, Any]] = None
+
+
+def retry_invalid_response(
+    agent: Any,
+    *,
+    response: Any,
+    error_details: Any,
+    _retry: Any,
+    thinking_spinner: Any,
+    messages: Any,
+    api_messages: Any,
+    api_kwargs: Any,
+    active_system_prompt: Any,
+    conversation_history: Any,
+    retry_count: Any,
+    max_retries: Any,
+    compression_attempts: Any,
+    api_call_count: Any,
+    api_request_id: Any,
+    api_start_time: Any,
+    api_duration: Any,
+    effective_task_id: Any,
+    turn_id: Any,
+) -> InvalidResponseVerdict:
+    """Malformed/empty provider response: fire the error hook, stop the spinner, eager
+    fallback (empty responses often mean rate limiting), terminal result at max retries,
+    else jittered backoff that preserves a pending redirect."""
+    from agent.conversation_loop import (
+        _arm_fallback_restart,
+        describe_invalid_response,
+        interruptible_backoff_sleep,
+        jittered_backoff,
+    )
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> InvalidResponseVerdict:
+        return InvalidResponseVerdict(
+            action=action,
+            thinking_spinner=thinking_spinner,
+            active_system_prompt=active_system_prompt,
+            retry_count=retry_count,
+            compression_attempts=compression_attempts,
+            result=result,
+        )
+
+    agent._invoke_api_request_error_hook(
+        task_id=effective_task_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        api_call_count=api_call_count,
+        api_start_time=api_start_time,
+        api_kwargs=api_kwargs,
+        error_type="InvalidAPIResponse",
+        error_message=", ".join(error_details) or "Invalid API response",
+        status_code=getattr(getattr(response, "error", None), "code", None),
+        retry_count=retry_count,
+        max_retries=max_retries,
+        retryable=True,
+        reason="invalid_response",
+    )
+    # Stop spinner silently — retry status is now buffered
+    # and only surfaced if every retry+fallback exhausts.
+    if thinking_spinner:
+        thinking_spinner.stop("")
+        thinking_spinner = None
+    if agent.thinking_callback:
+        agent.thinking_callback("")
+
+    # Invalid response — could be rate limiting, provider timeout,
+    # upstream server error, or malformed response.
+    retry_count += 1
+
+    # Eager fallback: empty/malformed responses often mean rate limiting
+    # — switch now instead of extended backoff.
+    if agent._fallback_index < len(agent._fallback_chain):
+        agent._buffer_status("⚠️ Empty/malformed response — switching to fallback...")
+    if agent._try_activate_fallback():
+        active_system_prompt = _arm_fallback_restart(
+            agent, api_messages, active_system_prompt, _retry)
+        retry_count = 0
+        compression_attempts = 0
+        return _verdict("break")
+
+    error_msg, provider_name, _failure_hint = describe_invalid_response(
+        agent, response, api_duration
+    )
+
+    agent._buffer_vprint(f"⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}")
+    agent._buffer_vprint(f"   🏢 Provider: {provider_name}")
+    cleaned_provider_error = agent._clean_error_message(error_msg)
+    agent._buffer_vprint(f"   📝 Provider message: {cleaned_provider_error}")
+    agent._buffer_vprint(f"   ⏱️  {_failure_hint}")
+
+    if retry_count >= max_retries:
+        # Try fallback before giving up
+        if agent._has_pending_fallback():
+            agent._buffer_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
+        if agent._try_activate_fallback():
+            active_system_prompt = _arm_fallback_restart(
+                agent, api_messages, active_system_prompt, _retry)
+            retry_count = 0
+            compression_attempts = 0
+            return _verdict("break")
+        # Terminal — flush buffered retry trace so user sees what happened.
+        agent._flush_status_buffer()
+        agent._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
+        logger.error("%sInvalid API response after %d retries.", agent.log_prefix, max_retries)
+        agent._persist_session(messages, conversation_history)
+        _final_response = f"Invalid API response after {max_retries} retries: {_failure_hint}"
+        return _verdict("return", {
+            "final_response": _final_response,
+            "messages": messages,
+            "completed": False,
+            "api_calls": api_call_count,
+            "error": _final_response,
+            "failed": True  # Mark as failure for filtering
+        })
+
+    # Backoff before retry — jittered exponential: 5s base, 120s cap
+    wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
+    agent._buffer_vprint(f"⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...")
+    logger.warning("Invalid API response (retry %d/%d): %s | Provider: %s", retry_count, max_retries, ', '.join(error_details), provider_name)
+
+    # A redirect cancels only the live request; the helper preserves the
+    # pending correction (restart_with_redirected_messages) instead of
+    # destroying it with clear_interrupt().
+    _interrupted = interruptible_backoff_sleep(
+        agent, wait_time, _retry,
+        messages=messages,
+        conversation_history=conversation_history,
+        api_call_count=api_call_count,
+        abort_message="Interrupt detected during retry wait, aborting.",
+        interrupt_text=f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
+        activity_label=f"retry backoff ({retry_count}/{max_retries})",
+    )
+    if _interrupted is not None:
+        return _verdict("return", _interrupted)
+    if _retry.restart_with_redirected_messages:
+        return _verdict("break")  # rebuild this iteration from the correction
+    return _verdict("continue")  # Retry the API call
     return _verdict("fallthrough")
