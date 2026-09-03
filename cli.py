@@ -2,9 +2,6 @@
 """
 Hermes Agent CLI - Interactive Terminal Interface
 
-A beautiful command-line interface for the Hermes Agent, inspired by Claude Code.
-Features ASCII art branding, interactive REPL, toolset selection, and rich formatting.
-
 Usage:
     python cli.py                          # Start interactive mode with all tools
     python cli.py --toolsets web,terminal  # Start with specific toolsets
@@ -12,15 +9,12 @@ Usage:
     python cli.py --list-tools             # List available tools and exit
 """
 
-# IMPORTANT: hermes_bootstrap must be the very first import — UTF-8 stdio
-# on Windows.  No-op on POSIX.  See hermes_bootstrap.py for full rationale.
+# hermes_bootstrap must be the very first import — UTF-8 stdio on Windows (no-op on
+# POSIX). Missing only during a partial ``hermes update`` (git reset landed, pip
+# install didn't); then Windows UTF-8 setup is skipped.
 try:
     import hermes_bootstrap  # noqa: F401
 except ModuleNotFoundError:
-    # Graceful fallback when hermes_bootstrap isn't registered in the venv
-    # yet — happens during partial ``hermes update`` where git-reset landed
-    # new code but ``uv pip install -e .`` didn't finish.  Missing bootstrap
-    # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
     pass
 
 import logging
@@ -78,36 +72,38 @@ except (ImportError, AttributeError):
     _STEADY_CURSOR = None
 
 try:
-    from hermes_cli.pt_input_extras import (
-        install_cmd_backspace_alias,
-        install_ctrl_enter_alias,
-        install_ignored_terminal_sequences,
-        install_keypress_data_normalization,
-        install_modify_other_keys_aliases,
-        install_shift_enter_alias,
-    )
-    install_shift_enter_alias()
-    install_ctrl_enter_alias()
-    install_cmd_backspace_alias()
-    install_modify_other_keys_aliases()
-    install_keypress_data_normalization()
-    install_ignored_terminal_sequences()
-    del install_shift_enter_alias, install_ctrl_enter_alias, install_cmd_backspace_alias, install_modify_other_keys_aliases, install_keypress_data_normalization, install_ignored_terminal_sequences
+    from hermes_cli import pt_input_extras as _pt_extras
+
+    _pt_extras.install_shift_enter_alias()
+    _pt_extras.install_ctrl_enter_alias()
+    _pt_extras.install_cmd_backspace_alias()
+    _pt_extras.install_modify_other_keys_aliases()
+    _pt_extras.install_keypress_data_normalization()
+    _pt_extras.install_ignored_terminal_sequences()
+    del _pt_extras
 except Exception:
     pass
 import threading
 import queue
 
-def CanonicalUsage(*args, **kwargs):
-    from agent.usage_pricing import CanonicalUsage as _CanonicalUsage
 
-    return _CanonicalUsage(*args, **kwargs)
+def _lazy_shim(module: str, name: str, alias: str | None = None):
+    """Module-level function that imports ``module.name`` on first call and delegates to it.
+
+    Keeps heavy imports (agent, tools, toolsets) off the bare-startup path while the
+    symbol stays importable/patchable as ``cli.<alias or name>``.
+    """
+    import importlib
+
+    def shim(*args, **kwargs):
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    shim.__name__ = shim.__qualname__ = alias or name
+    return shim
 
 
-def estimate_usage_cost(*args, **kwargs):
-    from agent.usage_pricing import estimate_usage_cost as _estimate_usage_cost
-
-    return _estimate_usage_cost(*args, **kwargs)
+CanonicalUsage = _lazy_shim("agent.usage_pricing", "CanonicalUsage")
+estimate_usage_cost = _lazy_shim("agent.usage_pricing", "estimate_usage_cost")
 
 
 def format_duration_compact(*args, **kwargs):
@@ -125,26 +121,27 @@ def format_duration_compact(*args, **kwargs):
     return f"{days:.1f}d"
 
 
-# Cached reverse map of config.yaml ``model_aliases:`` so the TUI can show
-# friendly names instead of full Palantir RIDs / long catalog IDs. Built
-# lazily on first call; cache is process-lifetime (config is read once at
-# session start, so further invalidation is unnecessary).
+# Reverse map of config.yaml ``model_aliases:`` so the TUI can show friendly names
+# instead of long catalog IDs. Process-lifetime cache (config is read once per session).
 _REVERSE_ALIAS_CACHE: dict[str, str] | None = None
 
 
 def _reverse_alias_for_display(model_name: str) -> str:
     """Return the shortest configured alias for ``model_name``, or ``model_name``.
 
-    Looks up both ``model_aliases:`` (dict-based, full DirectAlias entries)
-    and ``model.aliases:`` (string-based, set via ``hermes config set``)
-    from config.yaml. Multiple aliases pointing at the same model — the
-    shortest wins, so ``opus47`` beats ``palantir-claude47``.
+    Looks up both ``model_aliases:`` (dict entries) and ``model.aliases:`` (strings,
+    set via ``hermes config set``); the shortest alias wins.
     """
     global _REVERSE_ALIAS_CACHE
     if not model_name:
         return model_name
     if _REVERSE_ALIAS_CACHE is None:
         rmap: dict[str, str] = {}
+
+        def _put(m: str, alias: str) -> None:
+            if m and (m not in rmap or len(alias) < len(rmap[m])):
+                rmap[m] = alias
+
         try:
             from hermes_cli.config import load_config
             cfg = load_config() or {}
@@ -152,9 +149,7 @@ def _reverse_alias_for_display(model_name: str) -> str:
             if isinstance(ma, dict):
                 for alias, entry in ma.items():
                     if isinstance(entry, dict):
-                        m = str(entry.get("model", "") or "").strip()
-                        if m and (m not in rmap or len(alias) < len(rmap[m])):
-                            rmap[m] = alias
+                        _put(str(entry.get("model", "") or "").strip(), alias)
             mdl = cfg.get("model", {}) or {}
             if isinstance(mdl, dict):
                 simple = mdl.get("aliases")
@@ -162,9 +157,7 @@ def _reverse_alias_for_display(model_name: str) -> str:
                     for alias, val in simple.items():
                         if isinstance(val, str) and val.strip():
                             v = val.strip()
-                            m = v.split("/", 1)[1] if "/" in v else v
-                            if m and (m not in rmap or len(alias) < len(rmap[m])):
-                                rmap[m] = alias
+                            _put(v.split("/", 1)[1] if "/" in v else v, alias)
         except Exception:
             pass
         _REVERSE_ALIAS_CACHE = rmap
@@ -195,25 +188,11 @@ def format_token_count_compact(*args, **kwargs):
     return f"{value:,}"
 
 
-def is_table_divider(*args, **kwargs):
-    from agent.markdown_tables import is_table_divider as _is_table_divider
-
-    return _is_table_divider(*args, **kwargs)
-
-
-def looks_like_table_row(*args, **kwargs):
-    from agent.markdown_tables import looks_like_table_row as _looks_like_table_row
-
-    return _looks_like_table_row(*args, **kwargs)
-
-
-def realign_markdown_tables(*args, **kwargs):
-    from agent.markdown_tables import realign_markdown_tables as _realign_markdown_tables
-
-    return _realign_markdown_tables(*args, **kwargs)
-# NOTE: `from agent.account_usage import ...` is deliberately NOT at module
-# top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
-# needed when the user runs `/limits`. Lazy-imported inside the handler below.
+is_table_divider = _lazy_shim("agent.markdown_tables", "is_table_divider")
+looks_like_table_row = _lazy_shim("agent.markdown_tables", "looks_like_table_row")
+realign_markdown_tables = _lazy_shim("agent.markdown_tables", "realign_markdown_tables")
+# `agent.account_usage` is deliberately NOT imported at module top — it pulls the
+# OpenAI SDK chain (~230 ms cold) and is only needed by `/limits`.
 from hermes_cli.banner import format_banner_version_label
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -237,62 +216,26 @@ _REASONING_TAGS = (
     "reasoning",
     "thought",
 )
+_TOOL_CALL_TAGS = ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls")
 
 
 def _strip_reasoning_tags(text: str) -> str:
     """Remove reasoning/thinking blocks from displayed text.
 
-    Handles every case:
-      * Closed pairs ``<tag>…</tag>`` (case-insensitive, multi-line).
-      * Unterminated open tags that run to end-of-text (e.g. truncated
-        generations on NIM/MiniMax where the close tag is dropped).
-      * Stray orphan close tags (``stuff</think>answer``) left behind by
-        partial-content dumps.
-
-    Covers the variants emitted by reasoning models today: ``<think>``,
-    ``<thinking>``, ``<reasoning>``, ``<REASONING_SCRATCHPAD>``, and
-    ``<thought>`` (Gemma 4).  Must stay in sync with
+    Handles closed pairs, unterminated open tags (truncated generations), and stray
+    orphan close tags, case-insensitively. Must stay in sync with
     ``run_agent.py::_strip_think_blocks`` and the stream consumer's
-    ``_OPEN_THINK_TAGS`` / ``_CLOSE_THINK_TAGS`` tuples.
-
-    Also strips tool-call XML blocks some open models leak into visible
-    content (``<tool_call>``, ``<function_calls>``, Gemma-style
-    ``<function name="…">…</function>``). Ported from
-    openclaw/openclaw#67318.
+    ``_OPEN_THINK_TAGS`` / ``_CLOSE_THINK_TAGS``. Also strips tool-call XML some open
+    models leak into visible content (``<tool_call>``, Gemma-style ``<function name=…>``).
     """
     cleaned = text
     for tag in _REASONING_TAGS:
-        # Closed pair — case-insensitive so <THINK>…</THINK> is handled too.
-        cleaned = re.sub(
-            rf"<{tag}>.*?</{tag}>\s*",
-            "",
-            cleaned,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        # Unterminated open tag — strip from the tag to end of text.
-        cleaned = re.sub(
-            rf"<{tag}>.*$",
-            "",
-            cleaned,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        # Stray orphan close tag left behind by partial dumps.
-        cleaned = re.sub(
-            rf"</{tag}>\s*",
-            "",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-    # Tool-call XML blocks (openclaw/openclaw#67318).
-    for tc_tag in ("tool_call", "tool_calls", "tool_result",
-                   "function_call", "function_calls"):
-        cleaned = re.sub(
-            rf"<{tc_tag}\b[^>]*>.*?</{tc_tag}>\s*",
-            "",
-            cleaned,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-    # <function name="..."> — boundary + attribute gated to avoid prose FPs.
+        cleaned = re.sub(rf"<{tag}>.*?</{tag}>\s*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(rf"<{tag}>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(rf"</{tag}>\s*", "", cleaned, flags=re.IGNORECASE)
+    for tc_tag in _TOOL_CALL_TAGS:
+        cleaned = re.sub(rf"<{tc_tag}\b[^>]*>.*?</{tc_tag}>\s*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    # <function name="..."> — boundary + attribute gated to avoid prose false positives.
     cleaned = re.sub(
         r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*'
         r'<function\b[^>]*\bname\s*=[^>]*>'
@@ -301,7 +244,6 @@ def _strip_reasoning_tags(text: str) -> str:
         cleaned,
         flags=re.DOTALL | re.IGNORECASE,
     )
-    # Stray tool-call close tags.
     cleaned = re.sub(
         r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*',
         '',
@@ -335,13 +277,9 @@ def _assistant_copy_text(content: Any) -> str:
 # =============================================================================
 
 def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
-    """Load ephemeral prefill messages from a JSON file.
-    
-    The file should contain a JSON array of {role, content} dicts, e.g.:
-        [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
-    
-    Relative paths are resolved from ~/.hermes/.
-    Returns an empty list if the path is empty or the file doesn't exist.
+    """Load ephemeral prefill messages (JSON array of {role, content}) from a file.
+
+    Relative paths resolve from ~/.hermes/. Empty path or missing file -> [].
     """
     if not file_path:
         return []
@@ -364,12 +302,8 @@ def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
 
 
 def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
-    """Resolve the prefill file path from env/config.
-
-    ``prefill_messages_file`` at the top level is the canonical config key.
-    ``agent.prefill_messages_file`` remains a legacy fallback for older CLI and
-    godmode-generated configs.
-    """
+    """Resolve the prefill file path: env, then top-level ``prefill_messages_file``,
+    then the legacy ``agent.prefill_messages_file``."""
     env_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "").strip()
     if env_path:
         return env_path
@@ -383,11 +317,7 @@ def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
 
 
 def _parse_reasoning_config(effort) -> dict | None:
-    """Parse a reasoning effort level into an OpenRouter reasoning config dict.
-
-    Accepts the raw config value (string or YAML boolean — ``false``/``off``
-    parse as thinking disabled, see parse_reasoning_effort).
-    """
+    """Parse a reasoning effort level (string or YAML bool; ``false``/``off`` = disabled)."""
     from hermes_constants import parse_reasoning_effort
     result = parse_reasoning_effort(effort)
     if effort and str(effort).strip() and result is None:
@@ -407,141 +337,109 @@ def _parse_service_tier_config(raw: str) -> str | None:
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
 
+
+_TERMINAL_ENV_MAPPINGS = {
+    "env_type": "TERMINAL_ENV",
+    "degraded_mode": "TERMINAL_DEGRADED_MODE",
+    "cwd": "TERMINAL_CWD",
+    "timeout": "TERMINAL_TIMEOUT",
+    "home_mode": "TERMINAL_HOME_MODE",
+    "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
+    "docker_image": "TERMINAL_DOCKER_IMAGE",
+    "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
+    "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
+    "modal_image": "TERMINAL_MODAL_IMAGE",
+    "daytona_image": "TERMINAL_DAYTONA_IMAGE",
+    "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+    "ssh_host": "TERMINAL_SSH_HOST",
+    "ssh_user": "TERMINAL_SSH_USER",
+    "ssh_port": "TERMINAL_SSH_PORT",
+    "ssh_key": "TERMINAL_SSH_KEY",
+    # Container resources (docker, singularity, modal, daytona, vercel_sandbox; ignored for local/ssh)
+    "container_cpu": "TERMINAL_CONTAINER_CPU",
+    "container_memory": "TERMINAL_CONTAINER_MEMORY",
+    "container_disk": "TERMINAL_CONTAINER_DISK",
+    "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
+    "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+    "docker_env": "TERMINAL_DOCKER_ENV",
+    "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
+    "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
+    "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+    "docker_network": "TERMINAL_DOCKER_NETWORK",
+    "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
+    "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
+    "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
+    "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
+    "sandbox_dir": "TERMINAL_SANDBOX_DIR",
+    "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
+    "sudo_password": "SUDO_PASSWORD",
+}
+# Per-task auxiliary endpoint tuples (config key -> env var).
+_AUXILIARY_TASK_ENV = {
+    "vision": {
+        "provider": "AUXILIARY_VISION_PROVIDER",
+        "model": "AUXILIARY_VISION_MODEL",
+        "base_url": "AUXILIARY_VISION_BASE_URL",
+        "api_key": "AUXILIARY_VISION_API_KEY",
+    },
+    "approval": {
+        "provider": "AUXILIARY_APPROVAL_PROVIDER",
+        "model": "AUXILIARY_APPROVAL_MODEL",
+        "base_url": "AUXILIARY_APPROVAL_BASE_URL",
+        "api_key": "AUXILIARY_APPROVAL_API_KEY",
+    },
+}
+_CWD_PLACEHOLDERS = (".", "auto", "cwd")
+
+
 def _mirror_config_to_env(defaults, _file_has_terminal_config):
     """Project config.yaml values into the env vars the tool modules read (terminal/browser/auxiliary/security/sessions). Env always wins when already set."""
-    # Apply terminal config to environment variables (so terminal_tool picks them up)
     terminal_config = defaults.get("terminal", {})
 
-    # Normalize config key: the new config system (hermes_cli/config.py) and all
-    # documentation use "backend", the legacy cli-config.yaml uses "env_type".
-    # Accept both, with "backend" taking precedence (it's the documented key).
+    # "backend" (hermes_cli/config.py + docs) and legacy "env_type" (cli-config.yaml)
+    # are both accepted; "backend" wins.
     if "backend" in terminal_config:
         terminal_config["env_type"] = terminal_config["backend"]
 
-    # CWD resolution for CLI/TUI. The gateway has its own config bridge in
-    # gateway/run.py but may lazily import cli.py (triggering this code).
-    # Local backend: always os.getcwd(). Use `cd /dir && hermes` to control it.
-    # Non-local with placeholder: pop so terminal_tool uses its per-backend default.
-    # Non-local with explicit path: keep as-is.
-    _CWD_PLACEHOLDERS = (".", "auto", "cwd")
+    # CWD: local backend is always os.getcwd() (`cd /dir && hermes` controls it);
+    # non-local with a placeholder pops it so terminal_tool uses its per-backend
+    # default; non-local with an explicit path keeps it.
     effective_backend = terminal_config.get("env_type", "local")
-
     if effective_backend == "local":
         terminal_config["cwd"] = os.getcwd()
         defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
 
-    env_mappings = {
-        "env_type": "TERMINAL_ENV",
-        "degraded_mode": "TERMINAL_DEGRADED_MODE",
-        "cwd": "TERMINAL_CWD",
-        "timeout": "TERMINAL_TIMEOUT",
-        "home_mode": "TERMINAL_HOME_MODE",
-        "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
-        "docker_image": "TERMINAL_DOCKER_IMAGE",
-        "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
-        "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
-        "modal_image": "TERMINAL_MODAL_IMAGE",
-        "daytona_image": "TERMINAL_DAYTONA_IMAGE",
-        "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
-        # SSH config
-        "ssh_host": "TERMINAL_SSH_HOST",
-        "ssh_user": "TERMINAL_SSH_USER",
-        "ssh_port": "TERMINAL_SSH_PORT",
-        "ssh_key": "TERMINAL_SSH_KEY",
-        # Container resource config (docker, singularity, modal, daytona, vercel_sandbox -- ignored for local/ssh)
-        "container_cpu": "TERMINAL_CONTAINER_CPU",
-        "container_memory": "TERMINAL_CONTAINER_MEMORY",
-        "container_disk": "TERMINAL_CONTAINER_DISK",
-        "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
-        "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
-        "docker_env": "TERMINAL_DOCKER_ENV",
-        "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
-        "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
-        "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
-        "docker_network": "TERMINAL_DOCKER_NETWORK",
-        "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
-        "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
-        "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
-        "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
-        "sandbox_dir": "TERMINAL_SANDBOX_DIR",
-        # Persistent shell (non-local backends)
-        "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
-        # Sudo support (works with all backends)
-        "sudo_password": "SUDO_PASSWORD",
-    }
-
-    # Bridge config → env vars for terminal_tool. TERMINAL_CWD is force-exported
-    # UNLESS we're inside a gateway process (detected by _HERMES_GATEWAY marker)
-    # where it was already set correctly by gateway/run.py's config bridge.
+    # TERMINAL_CWD is force-exported (overrides stale .env/inherited values) UNLESS
+    # inside a gateway process, where gateway/run.py's config bridge already set it.
     _is_gateway = os.environ.get("_HERMES_GATEWAY") == "1"
-    for config_key, env_var in env_mappings.items():
-        if config_key in terminal_config:
-            if env_var == "TERMINAL_CWD":
-                if _is_gateway:
-                    continue
-                # CLI: always export (overrides stale .env or inherited values)
-                os.environ[env_var] = str(terminal_config[config_key])
-                continue
-            if _file_has_terminal_config or env_var not in os.environ:
-                val = terminal_config[config_key]
-                if isinstance(val, (list, dict)):
-                    os.environ[env_var] = json.dumps(val)
-                else:
-                    os.environ[env_var] = str(val)
+    for config_key, env_var in _TERMINAL_ENV_MAPPINGS.items():
+        if config_key not in terminal_config:
+            continue
+        val = terminal_config[config_key]
+        if env_var == "TERMINAL_CWD":
+            if not _is_gateway:
+                os.environ[env_var] = str(val)
+        elif _file_has_terminal_config or env_var not in os.environ:
+            os.environ[env_var] = json.dumps(val) if isinstance(val, (list, dict)) else str(val)
 
-    # Apply browser config to environment variables
     browser_config = defaults.get("browser", {})
-    browser_env_mappings = {
-        "inactivity_timeout": "BROWSER_INACTIVITY_TIMEOUT",
-    }
+    if "inactivity_timeout" in browser_config:
+        os.environ["BROWSER_INACTIVITY_TIMEOUT"] = str(browser_config["inactivity_timeout"])
 
-    for config_key, env_var in browser_env_mappings.items():
-        if config_key in browser_config:
-            os.environ[env_var] = str(browser_config[config_key])
-
-    # Apply auxiliary model/direct-endpoint overrides to environment variables.
-    # Vision and web_extract each have their own provider/model/base_url/api_key tuple.
-    # Compression config is read directly from config.yaml by run_agent.py and
-    # auxiliary_client.py — no env var bridging needed.
-    # Only set env vars for non-empty / non-default values so auto-detection
-    # still works.
+    # Auxiliary overrides: only non-empty / non-"auto" values so auto-detection still
+    # works. (Compression config is read directly from config.yaml — no bridging.)
     auxiliary_config = defaults.get("auxiliary", {})
-    auxiliary_task_env = {
-        # config key → env var mapping
-        "vision": {
-            "provider": "AUXILIARY_VISION_PROVIDER",
-            "model": "AUXILIARY_VISION_MODEL",
-            "base_url": "AUXILIARY_VISION_BASE_URL",
-            "api_key": "AUXILIARY_VISION_API_KEY",
-        },
-        "approval": {
-            "provider": "AUXILIARY_APPROVAL_PROVIDER",
-            "model": "AUXILIARY_APPROVAL_MODEL",
-            "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-            "api_key": "AUXILIARY_APPROVAL_API_KEY",
-        },
-    }
-
-    for task_key, env_map in auxiliary_task_env.items():
+    for task_key, env_map in _AUXILIARY_TASK_ENV.items():
         task_cfg = auxiliary_config.get(task_key, {})
         if not isinstance(task_cfg, dict):
             continue
-        prov = str(task_cfg.get("provider", "")).strip()
-        model = str(task_cfg.get("model", "")).strip()
-        base_url = str(task_cfg.get("base_url", "")).strip()
-        api_key = str(task_cfg.get("api_key", "")).strip()
-        if prov and prov != "auto":
-            os.environ[env_map["provider"]] = prov
-        if model:
-            os.environ[env_map["model"]] = model
-        if base_url:
-            os.environ[env_map["base_url"]] = base_url
-        if api_key:
-            os.environ[env_map["api_key"]] = api_key
+        for field, env_var in env_map.items():
+            val = str(task_cfg.get(field, "")).strip()
+            if val and not (field == "provider" and val == "auto"):
+                os.environ[env_var] = val
 
-    # Security settings
     security_config = defaults.get("security", {})
     if isinstance(security_config, dict):
         redact = security_config.get("redact_secrets")
@@ -554,15 +452,12 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
         if "cjk_fts" in sessions_config:
             os.environ["HERMES_CJK_FTS"] = str(sessions_config["cjk_fts"])
         if "search_slow_ms" in sessions_config:
-            os.environ["HERMES_SEARCH_SLOW_MS"] = str(
-                sessions_config["search_slow_ms"]
-            )
+            os.environ["HERMES_SEARCH_SLOW_MS"] = str(sessions_config["search_slow_ms"])
 
 
 def _cli_config_defaults():
     """Built-in defaults for every config key the CLI reads (the file overlays these)."""
-    # Default configuration
-    defaults = {
+    return {
         "model": {
             "default": "",
             "base_url": "",
@@ -594,7 +489,7 @@ def _cli_config_defaults():
         "compression": {
             "enabled": True,      # Auto-compress when approaching context limit
             "threshold": 0.50,    # Compress at 50% of model's context limit
-            "min_tail_user_messages": 1,  # Real user messages guaranteed in the tail (1 = existing single anchor)
+            "min_tail_user_messages": 1,  # Real user messages guaranteed in the tail
         },
         "agent": {
             "max_turns": 500,  # Default max tool-calling iterations (shared with subagents)
@@ -603,9 +498,8 @@ def _cli_config_defaults():
             "prefill_messages_file": "",
             "reasoning_effort": "",
             "service_tier": "",
-            # Built-in personalities live in hermes_cli.personality
-            # (BUILTIN_PERSONALITIES) — the single owner. Entries here are
-            # user-defined additions/overrides merged on top by name.
+            # Built-in personalities live in hermes_cli.personality (BUILTIN_PERSONALITIES);
+            # entries here are user additions/overrides merged on top by name.
             "personalities": {},
         },
 
@@ -618,22 +512,18 @@ def _cli_config_defaults():
             "resume_max_assistant_chars": 200,
             "resume_max_assistant_lines": 3,
             "resume_skip_tool_only": True,
-            # Live reasoning display default ON — keep in sync with
-            # hermes_cli/config.py DEFAULT_CONFIG (display.show_reasoning).
+            # Keep in sync with hermes_cli/config.py DEFAULT_CONFIG (display.show_reasoning).
             "show_reasoning": True,
             "reasoning_full": False,
             "streaming": True,
             "busy_input_mode": "interrupt",
             "persistent_output": True,
             "persistent_output_max_lines": 200,
-            # Clear terminal scrollback as well as the visible viewport when the
-            # classic CLI performs a full redraw/resize recovery. Disabled by
-            # default because some users prefer preserving terminal history;
-            # enable when a terminal/tmux stack stamps stale prompt chrome into
-            # scrollback during fullscreen/restore resizes.
+            # Clear scrollback as well as the viewport on full redraw/resize recovery.
+            # Off by default (users prefer history); enable when a terminal/tmux stack
+            # stamps stale prompt chrome into scrollback during resizes.
             "cli_rebuild_scrollback_on_redraw": False,
-            # Print a one-line summary of resolved modal prompts (approval /
-            # clarify) into scrollback so the decision survives the repaint.
+            # One-line summary of resolved modal prompts (approval / clarify) into scrollback.
             "persist_prompts": True,
 
             "skin": "default",
@@ -661,122 +551,93 @@ def _cli_config_defaults():
             "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
         },
         "onboarding": {
-            # First-touch hint flags (see agent/onboarding.py).  Each hint is
-            # shown once per install then latched here.
+            # First-touch hint flags (see agent/onboarding.py), latched once shown.
             "seen": {},
         },
     }
-    return defaults
+
+
+def _merge_file_config(defaults: Dict[str, Any], file_config: Dict[str, Any]) -> None:
+    """Overlay a parsed config file onto *defaults* in place (model normalization, deep merge, legacy keys)."""
+    # model: string (new format) or dict (old format with default/base_url)
+    if "model" in file_config:
+        if isinstance(file_config["model"], str):
+            defaults["model"]["default"] = file_config["model"]
+        elif isinstance(file_config["model"], dict):
+            defaults["model"].update(file_config["model"])
+            # Promote model.model to model.default when only the former is set, so a
+            # profile config that sets "model:" isn't shadowed by the hardcoded default
+            # (HermesCLI.__init__ checks "default" first).
+            if "model" in file_config["model"] and "default" not in file_config["model"]:
+                defaults["model"]["default"] = file_config["model"]["model"]
+
+    # Deep-merge dict sections, overwrite scalars; a None section keeps the defaults.
+    for key in defaults:
+        if key == "model" or key not in file_config:
+            continue
+        if isinstance(defaults[key], dict) and file_config[key] is None:
+            continue
+        if isinstance(defaults[key], dict) and isinstance(file_config[key], dict):
+            defaults[key].update(file_config[key])
+        else:
+            defaults[key] = file_config[key]
+
+    # Carry over keys not in defaults (platform_toolsets, provider_routing, memory, ...)
+    for key in file_config:
+        if key not in defaults and key != "model":
+            defaults[key] = file_config[key]
+
+    # Legacy root-level max_turns -> agent.max_turns whenever the nested key is missing.
+    agent_file_config = file_config.get("agent")
+    if "max_turns" in file_config and not (
+        isinstance(agent_file_config, dict)
+        and agent_file_config.get("max_turns") is not None
+    ):
+        defaults["agent"]["max_turns"] = file_config["max_turns"]
 
 
 def load_cli_config() -> Dict[str, Any]:
-    """
-    Load CLI configuration from config files.
-    
-    Config lookup order:
-    1. ~/.hermes/config.yaml (user config - preferred)
-    2. ./cli-config.yaml (project config - fallback)
-    
-    Environment variables take precedence over config file values.
-    Returns default values if no config file exists.
+    """Load CLI configuration: ~/.hermes/config.yaml, else ./cli-config.yaml, over built-in defaults.
 
-    If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
-    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
-    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
-    Credentials in ``.env`` are still loaded — this flag only suppresses
-    behavioral/config settings.
+    Env vars take precedence over file values. ``HERMES_IGNORE_USER_CONFIG=1``
+    (``hermes chat --ignore-user-config``) skips the user config entirely — only
+    defaults plus the project ``cli-config.yaml`` apply; ``.env`` credentials still load.
     """
-    # Check user config first ({HERMES_HOME}/config.yaml)
     user_config_path = _hermes_home / 'config.yaml'
     project_config_path = Path(__file__).parent / 'cli-config.yaml'
-
-    # --ignore-user-config: force-skip the user config.yaml (still honor project
-    # config as a fallback so defaults stay sensible).
     ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
 
-    # Use user config if it exists, otherwise project config
     if user_config_path.exists() and not ignore_user_config:
         config_path = user_config_path
     else:
         config_path = project_config_path
 
     defaults = _cli_config_defaults()
-    
-    # Track whether the config file explicitly set terminal config.
-    # When using defaults (no config file / no terminal section), we should NOT
-    # overwrite env vars that were already set by .env -- only a user's config
-    # file should be authoritative.
+
+    # Only a user's config file may overwrite terminal env vars already set by .env;
+    # defaults (no file / no terminal section) must not.
     _file_has_terminal_config = False
 
-    # Load from file if exists
     if config_path.exists():
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 from hermes_cli.config import _normalize_root_model_keys
 
                 file_config = _normalize_root_model_keys(fast_safe_load(f) or {})
-            
+
             _file_has_terminal_config = "terminal" in file_config
-
-            # Handle model config - can be string (new format) or dict (old format)
-            if "model" in file_config:
-                if isinstance(file_config["model"], str):
-                    # New format: model is just a string, convert to dict structure
-                    defaults["model"]["default"] = file_config["model"]
-                elif isinstance(file_config["model"], dict):
-                    # Old format: model is a dict with default/base_url
-                    defaults["model"].update(file_config["model"])
-                    # If the user config sets model.model but not model.default,
-                    # promote model.model to model.default so the user's explicit
-                    # choice isn't shadowed by the hardcoded default.  Without this,
-                    # profile configs that only set "model:" (not "default:") silently
-                    # fall back to claude-opus because the merge preserves the
-                    # hardcoded default and HermesCLI.__init__ checks "default" first.
-                    if "model" in file_config["model"] and "default" not in file_config["model"]:
-                        defaults["model"]["default"] = file_config["model"]["model"]
-
-            # Deep merge file_config into defaults.
-            # First: merge keys that exist in both (deep-merge dicts, overwrite scalars)
-            for key in defaults:
-                if key == "model":
-                    continue  # Already handled above
-                if key in file_config:
-                    if isinstance(defaults[key], dict) and file_config[key] is None:
-                        continue
-                    if isinstance(defaults[key], dict) and isinstance(file_config[key], dict):
-                        defaults[key].update(file_config[key])
-                    else:
-                        defaults[key] = file_config[key]
-            
-            # Second: carry over keys from file_config that aren't in defaults
-            # (e.g. platform_toolsets, provider_routing, memory, honcho, etc.)
-            for key in file_config:
-                if key not in defaults and key != "model":
-                    defaults[key] = file_config[key]
-            
-            # Handle legacy root-level max_turns (backwards compat) - copy to
-            # agent.max_turns whenever the nested key is missing.
-            agent_file_config = file_config.get("agent")
-            if "max_turns" in file_config and not (
-                isinstance(agent_file_config, dict)
-                and agent_file_config.get("max_turns") is not None
-            ):
-                defaults["agent"]["max_turns"] = file_config["max_turns"]
+            _merge_file_config(defaults, file_config)
         except Exception as e:
             logger.warning("Failed to load cli-config.yaml: %s", e)
 
-    # Expand ${ENV_VAR} references in config values before bridging to env vars.
+    # Expand ${ENV_VAR} references before bridging to env vars.
     from hermes_cli.config import _expand_env_vars
     defaults = _expand_env_vars(defaults)
 
-    # Managed scope: overlay administrator-pinned values LAST so they win over
-    # the user's config here too. cli.py builds its config independently of
-    # hermes_cli.config._load_config_impl (which has its own managed merge), so
-    # without this the entire interactive CLI/TUI surface — skin, display prefs,
-    # etc. read from CLI_CONFIG — would silently ignore managed scope while
-    # `hermes config`/`doctor`/guards (which use load_config) honor it. The
-    # shared helper mirrors _load_config_impl (env-only expansion, root-model
-    # normalization, leaf-merge) and is fail-open.
+    # Managed scope overlays administrator-pinned values LAST. cli.py builds its config
+    # independently of hermes_cli.config._load_config_impl, so without this the whole
+    # interactive CLI/TUI surface (skin, display prefs) would ignore managed scope
+    # while `hermes config`/`doctor` honor it. The shared helper is fail-open.
     from hermes_cli import managed_scope
 
     defaults = managed_scope.apply_managed_overlay(defaults)
@@ -789,49 +650,44 @@ def load_cli_config() -> Dict[str, Any]:
 CLI_CONFIG = load_cli_config()
 
 
-# Initialize centralized logging early — agent.log + errors.log in ~/.hermes/logs/.
-# This ensures CLI sessions produce a log trail even before AIAgent is instantiated.
-try:
-    from hermes_logging import setup_logging
-    setup_logging(mode="cli")
-except Exception:
-    pass  # Logging setup is best-effort — don't crash the CLI
+def _init_logging_and_display_from_config() -> None:
+    """Best-effort startup side effects: logging, config warnings, skin, display knobs."""
+    try:
+        from hermes_logging import setup_logging
+        setup_logging(mode="cli")
+    except Exception:
+        pass
+    try:
+        from hermes_cli.config import print_config_warnings
+        print_config_warnings()
+    except Exception:
+        pass
+    try:
+        from hermes_cli.skin_engine import init_skin_from_config
+        init_skin_from_config(CLI_CONFIG)
+    except Exception:
+        pass
+    try:
+        from agent.display import set_tool_preview_max_len
+        _tpl = CLI_CONFIG.get("display", {}).get("tool_preview_length", 0)
+        set_tool_preview_max_len(int(_tpl) if _tpl else 0)
+    except Exception:
+        pass
+    try:
+        from agent.display import set_friendly_tool_labels
+        _ftl = CLI_CONFIG.get("display", {}).get("friendly_tool_labels", True)
+        set_friendly_tool_labels(bool(_ftl))
+    except Exception:
+        pass
 
-# Validate config structure early — print warnings before user hits cryptic errors
-try:
-    from hermes_cli.config import print_config_warnings
-    print_config_warnings()
-except Exception:
-    pass
 
-# Initialize the skin engine from config
-try:
-    from hermes_cli.skin_engine import init_skin_from_config
-    init_skin_from_config(CLI_CONFIG)
-except Exception:
-    pass  # Skin engine is optional — default skin used if unavailable
-
-# Initialize tool preview length from config
-try:
-    from agent.display import set_tool_preview_max_len
-    _tpl = CLI_CONFIG.get("display", {}).get("tool_preview_length", 0)
-    set_tool_preview_max_len(int(_tpl) if _tpl else 0)
-except Exception:
-    pass
-
-# Initialize friendly tool labels from config (default on)
-try:
-    from agent.display import set_friendly_tool_labels
-    _ftl = CLI_CONFIG.get("display", {}).get("friendly_tool_labels", True)
-    set_friendly_tool_labels(bool(_ftl))
-except Exception:
-    pass
+_init_logging_and_display_from_config()
 
 # Neuter AsyncHttpxClientWrapper.__del__ before any AsyncOpenAI client exists: the
 # SDK's __del__ schedules aclose() on the running loop, which during CLI idle time is
 # prompt_toolkit's loop, closing transports bound to dead worker loops ("Event loop is
 # closed" / "Press ENTER to continue..."). A sys.meta_path finder applies the patch
-# when ``openai._base_client`` is first imported — eager import cost ~166ms/30MB per
+# when ``openai._base_client`` is first imported — eager import costs ~166ms/30MB per
 # cold start, and the import system guarantees the patch lands before instantiation.
 try:
     import sys as _httpx_neuter_sys
@@ -840,10 +696,8 @@ try:
     class _AsyncHttpxDelNeuter:
         """Defer ``AsyncHttpxClientWrapper.__del__`` neutering until import.
 
-        Saves ~166ms on cold CLI start where openai is never used (e.g.
-        ``hermes --help`` paths inside the chat command flow).  See
-        ``agent.auxiliary_client.neuter_async_httpx_del`` for full rationale
-        on why ``__del__`` must be a no-op.
+        See ``agent.auxiliary_client.neuter_async_httpx_del`` for why ``__del__``
+        must be a no-op.
         """
 
         _armed = True
@@ -851,8 +705,7 @@ try:
         def find_spec(self, fullname, path=None, target=None):
             if not self._armed or fullname != "openai._base_client":
                 return None
-            # Disarm before delegating so the recursive find_spec call
-            # below doesn't loop through us.
+            # Disarm before delegating so the recursive find_spec doesn't loop through us.
             self._armed = False
             try:
                 _httpx_neuter_sys.meta_path.remove(self)
@@ -885,12 +738,9 @@ from rich.markup import escape as _escape
 from rich.panel import Panel
 from rich.text import Text as _RichText
 
-# Import agent and tool systems lazily. Bare interactive startup only needs the
-# prompt; the full agent/tool registry is initialized on first use.
-def AIAgent(*args, **kwargs):
-    from run_agent import AIAgent as _AIAgent
-
-    return _AIAgent(*args, **kwargs)
+# Agent and tool systems are imported lazily: bare interactive startup only needs
+# the prompt; the full agent/tool registry is initialized on first use.
+AIAgent = _lazy_shim("run_agent", "AIAgent")
 
 
 def get_tool_definitions(*args, **kwargs):
@@ -901,30 +751,13 @@ def get_tool_definitions(*args, **kwargs):
     return _get_tool_definitions(*args, **kwargs)
 
 
-def get_toolset_for_tool(*args, **kwargs):
-    from model_tools import get_toolset_for_tool as _get_toolset_for_tool
-
-    return _get_toolset_for_tool(*args, **kwargs)
+get_toolset_for_tool = _lazy_shim("model_tools", "get_toolset_for_tool")
 
 from hermes_cli.banner import build_welcome_banner  # noqa: F401  (CLIInfoMixin imports via cli)
 
-
-def get_all_toolsets(*args, **kwargs):
-    from toolsets import get_all_toolsets as _get_all_toolsets
-
-    return _get_all_toolsets(*args, **kwargs)
-
-
-def get_toolset_info(*args, **kwargs):
-    from toolsets import get_toolset_info as _get_toolset_info
-
-    return _get_toolset_info(*args, **kwargs)
-
-
-def validate_toolset(*args, **kwargs):
-    from toolsets import validate_toolset as _validate_toolset
-
-    return _validate_toolset(*args, **kwargs)
+get_all_toolsets = _lazy_shim("toolsets", "get_all_toolsets")
+get_toolset_info = _lazy_shim("toolsets", "get_toolset_info")
+validate_toolset = _lazy_shim("toolsets", "validate_toolset")
 
 
 def _sync_process_session_id(session_id: str) -> None:
@@ -933,65 +766,33 @@ def _sync_process_session_id(session_id: str) -> None:
 
     set_current_session_id(session_id)
 
+
 # Cron job system for scheduled tasks (execution is handled by the gateway)
-def get_job(*args, **kwargs):
-    from cron import get_job as _get_job
-
-    return _get_job(*args, **kwargs)
-
-
-
-def _cleanup_all_terminals(*args, **kwargs):
-    from tools.terminal_tool import cleanup_all_environments
-
-    return cleanup_all_environments(*args, **kwargs)
-
-
-def set_sudo_password_callback(*args, **kwargs):
-    from tools.terminal_tool import set_sudo_password_callback as _set_sudo_password_callback
-
-    return _set_sudo_password_callback(*args, **kwargs)
-
-
-def set_approval_callback(*args, **kwargs):
-    from tools.terminal_tool import set_approval_callback as _set_approval_callback
-
-    return _set_approval_callback(*args, **kwargs)
-
-
-def set_secret_capture_callback(*args, **kwargs):
-    from tools.skills_tool import set_secret_capture_callback as _set_secret_capture_callback
-
-    return _set_secret_capture_callback(*args, **kwargs)
-
-
-def _cleanup_all_browsers(*args, **kwargs):
-    from tools.browser_tool import _emergency_cleanup_all_sessions
-
-    return _emergency_cleanup_all_sessions(*args, **kwargs)
+get_job = _lazy_shim("cron", "get_job")
+_cleanup_all_terminals = _lazy_shim("tools.terminal_tool", "cleanup_all_environments", "_cleanup_all_terminals")
+set_sudo_password_callback = _lazy_shim("tools.terminal_tool", "set_sudo_password_callback")
+set_approval_callback = _lazy_shim("tools.terminal_tool", "set_approval_callback")
+set_secret_capture_callback = _lazy_shim("tools.skills_tool", "set_secret_capture_callback")
+_cleanup_all_browsers = _lazy_shim("tools.browser_tool", "_emergency_cleanup_all_sessions", "_cleanup_all_browsers")
 
 # Guard to prevent cleanup from running multiple times on exit
 _cleanup_done = False
 _cleanup_in_progress = False
 _cli_wake_owner = None
-# One-shot CLI finalization runs before process cleanup so plugins can observe
-# the session boundary while the agent is still attached. If a signal lands in
-# that narrow window, atexit cleanup must not emit that session finalization again.
+# One-shot CLI finalization runs before process cleanup so plugins can observe the
+# session boundary while the agent is still attached; atexit cleanup must not emit
+# that session's finalization again.
 _single_query_finalize_attempted_session_ids: set[str | None] = set()
-# Session IDs that were handed off to the gateway via /handoff.  The CLI
-# process exits after a successful handoff, but the gateway now owns the
-# session lifecycle — _run_cleanup must NOT call finalize_session on these,
-# because doing so sets end_reason on a row the gateway just reopened and is
-# actively writing to (#88234).  The race made the handoff leg vanish from
-# session history and broke session_search recall for the handed-off session.
+# Sessions handed off to the gateway via /handoff: the gateway owns their lifecycle,
+# so _run_cleanup must NOT finalize them (it would set end_reason on a row the gateway
+# just reopened and is writing to, making the handoff leg vanish from history).
 _handed_off_session_ids: set[str | None] = set()
 # Weak reference to the active AIAgent for memory provider shutdown at exit
 _active_agent_ref = None
 _deferred_agent_startup_done = False
-# Set True once the TUI's prompt_toolkit app starts (which enables focus
-# reporting + mouse tracking). Gates the on-exit terminal reset so non-TUI
-# one-shot CLI runs — which also register _run_cleanup via atexit — don't emit
-# escape codes for modes they never enabled (#36823).
+# True once the TUI's prompt_toolkit app starts (focus reporting + mouse tracking on).
+# Gates the on-exit terminal reset so non-TUI one-shot runs — which also register
+# _run_cleanup via atexit — don't emit escape codes for modes they never enabled.
 _tui_input_modes_active = False
 
 
@@ -1020,22 +821,13 @@ def _prepare_deferred_agent_startup() -> None:
 
         discover_plugins()
     except Exception:
-        logger.warning(
-            "plugin discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.warning("plugin discovery failed at deferred CLI startup", exc_info=True)
     try:
         from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        start_background_mcp_discovery(
-            logger=logger,
-            thread_name="termux-cli-mcp-discovery",
-        )
+        start_background_mcp_discovery(logger=logger, thread_name="termux-cli-mcp-discovery")
     except Exception:
-        logger.debug(
-            "MCP tool discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.debug("MCP tool discovery failed at deferred CLI startup", exc_info=True)
     try:
         from agent.shell_hooks import register_from_config
         from hermes_cli.config import load_config
@@ -1049,55 +841,44 @@ def _prepare_deferred_agent_startup() -> None:
 
         register_outbound_webhooks(_hooks_cfg)
     except Exception:
-        logger.debug(
-            "shell-hook registration failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.debug("shell-hook registration failed at deferred CLI startup", exc_info=True)
+
+
+def _exit_watchdog_timeout() -> float:
+    """``HERMES_EXIT_WATCHDOG_S`` as a float (default 30; ``0`` disables)."""
+    try:
+        return float(os.getenv("HERMES_EXIT_WATCHDOG_S", "30"))
+    except (TypeError, ValueError):
+        return 30.0
+
 
 def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = False) -> None:
     """Guarantee the process actually exits once shutdown has begun.
 
-    Two hang classes have kept "dead" CLI processes alive for minutes:
-
-      1. A cleanup step wedged on network I/O (memory provider
-         ``on_session_end``, MCP teardown, remote terminal cleanup).
-      2. Interpreter teardown blocked joining non-daemon threads —
-         stdlib ``ThreadPoolExecutor`` workers are joined unconditionally
-         by ``concurrent.futures``' atexit hook even after
-         ``shutdown(wait=False)``, so one tool thread wedged on a socket
-         held the process open forever (#27563 class).
-
-    The shared daemon pool (``tools.daemon_pool``) removes the main cause
-    of (2); this watchdog is the backstop for both. It arms a daemon
-    timer when ``_run_cleanup`` starts; if the process is still alive
-    after ``timeout_s`` it flushes logging/stdio and calls ``os._exit(0)``.
-    Daemon threads keep running through ``Py_FinalizeEx``'s thread joins,
-    so the timer fires even when the main thread is stuck in teardown.
-
-    Tune with ``HERMES_EXIT_WATCHDOG_S`` (seconds); ``0`` disables.
+    Backstop for two hang classes: a cleanup step wedged on network I/O (memory
+    provider ``on_session_end``, MCP teardown, remote terminal cleanup), and
+    interpreter teardown blocked joining non-daemon threads (stdlib
+    ``ThreadPoolExecutor`` workers are joined unconditionally by its atexit hook even
+    after ``shutdown(wait=False)``). A daemon timer keeps running through
+    ``Py_FinalizeEx``'s joins; after ``timeout_s`` it flushes logging/stdio and calls
+    ``os._exit(0)``. Tune with ``HERMES_EXIT_WATCHDOG_S`` (seconds); ``0`` disables.
     """
     if timeout_s is None:
-        try:
-            timeout_s = float(os.getenv("HERMES_EXIT_WATCHDOG_S", "30"))
-        except (TypeError, ValueError):
-            timeout_s = 30.0
+        timeout_s = _exit_watchdog_timeout()
     if timeout_s <= 0:
         return
-    # Never arm under pytest: tests invoke _run_cleanup() directly and a
-    # 30s-delayed os._exit(0) would silently kill the test worker.
+    # Never arm under pytest: tests invoke _run_cleanup() directly and a delayed
+    # os._exit(0) would silently kill the test worker.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
     def _watchdog():
         time.sleep(timeout_s)
-        # If this is the outer, signal-armed watchdog and cleanup is already in
-        # progress, let the cleanup-owned timer enforce shutdown for the current
-        # cycle. The signal timer is a broader backstop when graceful unwind
-        # never starts.
+        # The signal-armed outer watchdog yields to the cleanup-owned timer once
+        # cleanup is in progress; it only wins when graceful unwind never started.
         if from_signal and _cleanup_in_progress:
             return
 
-        # Still alive — cleanup or interpreter teardown is wedged.
         try:
             logger.warning(
                 "Exit watchdog fired after %.0fs — forcing process exit "
@@ -1119,9 +900,7 @@ def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = Fa
         os._exit(0)
 
     try:
-        threading.Thread(
-            target=_watchdog, daemon=True, name="exit-watchdog"
-        ).start()
+        threading.Thread(target=_watchdog, daemon=True, name="exit-watchdog").start()
     except Exception:
         pass  # best-effort — never block shutdown on watchdog setup
 
@@ -1132,42 +911,94 @@ _signal_watchdog_armed = False
 def _arm_exit_watchdog_on_shutdown_signal() -> None:
     """Arm the exit backstop the moment a termination signal arrives.
 
-    SIGTERM/SIGHUP establish unambiguous shutdown intent, but the graceful
-    path from signal → ``agent.interrupt()`` → ``app.exit()`` /
-    ``KeyboardInterrupt`` → ``finally`` → ``_run_cleanup`` has several wedge
-    points BEFORE ``_run_cleanup`` arms the normal watchdog: a main thread
-    parked in a syscall that never observes the unwind, a prompt_toolkit
-    teardown that never returns, or an agent worker blocking the ``finally``.
-    When that happens the process has NO backstop and a "dead" CLI lingers
-    (observed: ``hermes --tui`` alive ~47 min at 4% CPU after terminal close —
-    the #65998 class).
-
-    Arming at signal time closes that window. The leash is 2× the normal
-    cleanup timeout so a slow-but-progressing ``_run_cleanup`` (which arms
-    its own tighter timer when it starts) is never cut short by this outer
-    backstop — this timer only wins when cleanup was never reached at all.
-
-    Deliberately NOT armed at chat startup: the watchdog thread calls
-    ``os._exit(0)`` unconditionally after its sleep, so arming without
-    shutdown intent would hard-kill every session that outlives the timeout.
-
-    Idempotent (module flag) so repeated signals don't stack timer threads.
-    Never raises — safe to call from a signal handler.
+    The graceful signal -> interrupt -> app.exit -> finally -> ``_run_cleanup`` path
+    has several wedge points BEFORE ``_run_cleanup`` arms the normal watchdog (main
+    thread parked in a syscall, prompt_toolkit teardown never returning, an agent
+    worker blocking the ``finally``); then a "dead" CLI lingers with no backstop.
+    The leash is 2x the cleanup timeout so a slow-but-progressing cleanup (which arms
+    its own tighter timer) is never cut short. Deliberately NOT armed at chat startup:
+    the timer calls ``os._exit(0)`` unconditionally, so arming without shutdown intent
+    would hard-kill every session outliving it. Idempotent; never raises.
     """
     global _signal_watchdog_armed
     if _signal_watchdog_armed:
         return
     _signal_watchdog_armed = True
-    try:
-        base = float(os.getenv("HERMES_EXIT_WATCHDOG_S", "30"))
-    except (TypeError, ValueError):
-        base = 30.0
+    base = _exit_watchdog_timeout()
     if base <= 0:
         return  # explicitly disabled
     try:
         _arm_exit_watchdog(timeout_s=base * 2, from_signal=True)
     except Exception:
         pass  # never let the backstop break signal handling
+
+
+def _shutdown_agent_memory_provider(agent) -> None:
+    """Memory-provider shutdown (on_session_end + shutdown_all) at the real session boundary."""
+    if not (agent and hasattr(agent, 'shutdown_memory_provider')):
+        return
+    # A /new shortly before exit leaves its end->switch boundary task (old-session
+    # extraction, LLM-bound) queued on the memory manager's serialized worker;
+    # shutdown_all()'s ~5s drain cancels queued tasks, so give pending work a bounded
+    # head start. The exit watchdog remains the hard backstop.
+    _mm = getattr(agent, '_memory_manager', None)
+    if _mm is not None and hasattr(_mm, 'flush_pending'):
+        try:
+            _mm.flush_pending(timeout=10)
+        except Exception:
+            pass
+    # Forward the agent's own transcript so on_session_end hooks see the real
+    # conversation. ``_session_messages`` is refreshed every turn via ``_persist_session``;
+    # fall back to no-arg on test stubs / partially-initialised agents.
+    _session_msgs = getattr(agent, '_session_messages', None)
+    if isinstance(_session_msgs, list):
+        logger.info(
+            "CLI cleanup calling memory shutdown for session %s with %d message(s)",
+            getattr(agent, "session_id", None) or "<unknown>",
+            len(_session_msgs),
+        )
+        agent.shutdown_memory_provider(_session_msgs)
+    else:
+        logger.info(
+            "CLI cleanup calling memory shutdown for session %s without session message list",
+            getattr(agent, "session_id", None) or "<unknown>",
+        )
+        agent.shutdown_memory_provider()
+
+
+def _stop_cli_wake_word() -> None:
+    from tools.wake_word import stop_listening
+    if _cli_wake_owner is not None:
+        stop_listening(owner=_cli_wake_owner)
+
+
+def _interrupt_async_delegations() -> None:
+    from tools.async_delegation import interrupt_all
+    interrupt_all(reason="CLI shutdown")
+
+
+def _shutdown_mcp_servers() -> None:
+    from tools.mcp_tool import shutdown_mcp_servers
+    shutdown_mcp_servers()
+
+
+def _shutdown_cached_aux_clients() -> None:
+    # Close cached auxiliary LLM clients so AsyncHttpxClientWrapper.__del__ doesn't
+    # fire on a closed loop and trigger prompt_toolkit's "Press ENTER to continue...".
+    from agent.auxiliary_client import shutdown_cached_clients
+    shutdown_cached_clients()
+
+
+# Ordered best-effort teardown steps (module attribute names, resolved at call time so
+# tests can patch ``cli._cleanup_all_terminals`` etc.) and the exception each swallows.
+_CLEANUP_STEPS = (
+    ("_stop_cli_wake_word", Exception),
+    ("_cleanup_all_terminals", Exception),
+    ("_interrupt_async_delegations", Exception),
+    ("_cleanup_all_browsers", Exception),
+    ("_shutdown_mcp_servers", BaseException),
+    ("_shutdown_cached_aux_clients", Exception),
+)
 
 
 def _run_cleanup(*, notify_session_finalize: bool = True):
@@ -1179,51 +1010,19 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
     _cleanup_in_progress = True
 
     try:
-        # Bound total shutdown time: if cleanup (or the interpreter's
-        # thread-join teardown after it) wedges, force-exit instead of
-        # leaving a zombie CLI holding the terminal for minutes.
+        # Bound total shutdown time: a wedged cleanup (or interpreter thread-join
+        # teardown) force-exits instead of leaving a zombie CLI holding the terminal.
         _arm_exit_watchdog()
 
-        # Reset terminal input modes first, before the slower resource teardown
-        # below (MCP / browser / memory shutdown can take seconds). On Ctrl+C the
-        # user's terminal becomes usable immediately, and a later step raising
-        # can't skip the reset (#36823). No-op unless the TUI actually ran.
+        # Reset terminal input modes FIRST: the slower teardown below can take seconds,
+        # and a later step raising must not skip the reset. No-op unless the TUI ran.
         _reset_terminal_input_modes_on_exit()
 
-        try:
-            from tools.wake_word import stop_listening as _stop_wake_word
-            if _cli_wake_owner is not None:
-                _stop_wake_word(owner=_cli_wake_owner)
-        except Exception:
-            pass
-        try:
-            _cleanup_all_terminals()
-        except Exception:
-            pass
-        try:
-            from tools.async_delegation import interrupt_all as _interrupt_async_delegations
-            _interrupt_async_delegations(reason="CLI shutdown")
-        except Exception:
-            pass
-        try:
-            _cleanup_all_browsers()
-        except Exception:
-            pass
-        try:
-            from tools.mcp_tool import shutdown_mcp_servers
-            shutdown_mcp_servers()
-        except BaseException:
-            pass
-        # Close cached auxiliary LLM clients (sync + async) so that
-        # AsyncHttpxClientWrapper.__del__ doesn't fire on a closed event loop
-        # and trigger prompt_toolkit's "Press ENTER to continue..." handler.
-        try:
-            from agent.auxiliary_client import shutdown_cached_clients
-            shutdown_cached_clients()
-        except Exception:
-            pass
-        # Shut down memory provider (on_session_end + shutdown_all) at actual
-        # session boundary — NOT per-turn inside run_conversation().
+        for step, swallow in _CLEANUP_STEPS:
+            try:
+                globals()[step]()
+            except swallow:
+                pass
         if notify_session_finalize:
             cleanup_session_id = _active_agent_ref.session_id if _active_agent_ref else None
             if _should_emit_cleanup_session_finalize(cleanup_session_id):
@@ -1233,40 +1032,7 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
                     reason="shutdown",
                 )
         try:
-            if _active_agent_ref and hasattr(_active_agent_ref, 'shutdown_memory_provider'):
-                # A /new shortly before exit leaves its end→switch boundary task
-                # (old-session extraction, LLM-bound) queued on the memory
-                # manager's serialized worker. shutdown_all()'s drain only waits
-                # ~5s and cancels queued tasks, so give pending work a bounded
-                # head start via the manager's own barrier — otherwise a
-                # "/new then quit" silently drops the old session's extraction.
-                # The 30s exit watchdog remains the hard backstop.
-                _mm = getattr(_active_agent_ref, '_memory_manager', None)
-                if _mm is not None and hasattr(_mm, 'flush_pending'):
-                    try:
-                        _mm.flush_pending(timeout=10)
-                    except Exception:
-                        pass
-                # Forward the agent's own transcript so memory providers'
-                # on_session_end hooks see the real conversation instead of
-                # an empty list (#15165). ``_session_messages`` is set on
-                # ``AIAgent.__init__`` and refreshed every turn via
-                # ``_persist_session``. Fall back to no-arg on test stubs /
-                # partially-initialised agents where the attribute is missing.
-                _session_msgs = getattr(_active_agent_ref, '_session_messages', None)
-                if isinstance(_session_msgs, list):
-                    logger.info(
-                        "CLI cleanup calling memory shutdown for session %s with %d message(s)",
-                        getattr(_active_agent_ref, "session_id", None) or "<unknown>",
-                        len(_session_msgs),
-                    )
-                    _active_agent_ref.shutdown_memory_provider(_session_msgs)
-                else:
-                    logger.info(
-                        "CLI cleanup calling memory shutdown for session %s without session message list",
-                        getattr(_active_agent_ref, "session_id", None) or "<unknown>",
-                    )
-                    _active_agent_ref.shutdown_memory_provider()
+            _shutdown_agent_memory_provider(_active_agent_ref)
         except Exception as e:
             logger.warning("CLI cleanup memory shutdown failed: %s", e, exc_info=True)
     finally:
@@ -1274,10 +1040,7 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
 
 
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
-    # A session that was handed off to the gateway is now owned by the
-    # gateway process.  The CLI must not finalize it on exit — that sets
-    # end_reason on a row the gateway reopened and is actively writing
-    # to, causing the handoff leg to vanish from session history (#88234).
+    # A handed-off session is owned by the gateway process — never finalize it here.
     if session_id is not None and session_id in _handed_off_session_ids:
         return False
     if not _single_query_finalize_attempted_session_ids:
@@ -1295,11 +1058,7 @@ def _notify_session_finalize(
 ) -> None:
     try:
         from hermes_cli.lifecycle import finalize_session
-        finalize_session(
-            session_id=session_id,
-            platform=platform,
-            reason=reason,
-        )
+        finalize_session(session_id=session_id, platform=platform, reason=reason)
     except Exception:
         pass
 
@@ -1316,9 +1075,7 @@ def _emit_interrupted_session_end(cli, *, reason: str = "keyboard_interrupt") ->
         pass
 
     session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
-    # Don't emit session-end for a session that was handed off to the
-    # gateway — the gateway owns the lifecycle now (#88234).
-    if session_id in _handed_off_session_ids:
+    if session_id in _handed_off_session_ids:  # gateway owns the lifecycle now
         return
     if session_id:
         try:
@@ -1349,9 +1106,7 @@ def _notify_single_query_session_finalize(cli, *, reason: str = "shutdown") -> N
     session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
     if session_id in _single_query_finalize_attempted_session_ids:
         return
-    # Don't finalize a session that was handed off to the gateway —
-    # the gateway owns the lifecycle now (#88234).
-    if session_id in _handed_off_session_ids:
+    if session_id in _handed_off_session_ids:  # gateway owns the lifecycle now
         return
 
     try:
@@ -1367,27 +1122,13 @@ def _notify_single_query_session_finalize(cli, *, reason: str = "shutdown") -> N
 def _flush_one_shot_session_store(cli) -> None:
     """Durably flush + finalize the one-shot session row before process exit.
 
-    The quiet/one-shot ``-q`` / ``-Q`` paths (including resume-or-create of a
-    titled session via ``-c <name> --create-if-missing``, the Bot Mode
-    bot-to-bot send) get exactly ONE turn and then exit. The interactive CLI
-    finalizes its session row on quit (``end_session(..., "cli_close")``) and
-    every later turn retries a transiently-failed transcript flush; the
-    one-shot path had neither, so:
-
-    - a turn whose in-loop ``_flush_messages_to_session_db`` failed under
-      write-lock contention (e.g. a busy multiplex gateway sharing state.db)
-      was silently lost — the reply reached stdout and agent.log but the
-      resumed session's stored history never changed (#88583);
-    - the resumed/created titled session row was left dangling open
-      (``ended_at``/``end_reason`` NULL) on every one-shot exit;
-    - queued async token-accounting deltas relied on interpreter-exit hooks,
-      which the kanban SIGTERM path's ``os._exit(0)`` skips entirely.
-
-    Idempotent and best-effort: ``_persist_session`` dedupes via the
-    per-message ``_DB_PERSISTED_MARKER`` stamps (already-written turns are
-    not re-written) and ``end_session`` no-ops on an already-ended row.
-    Sessions handed off to the gateway are owned by the gateway process and
-    are left strictly alone (#88234).
+    The ``-q`` / ``-Q`` paths get exactly one turn and then exit, so unlike the
+    interactive CLI nothing retried a transiently-failed transcript flush (lost turns
+    under state.db write-lock contention), the resumed/created titled row was left
+    open, and queued token-accounting deltas relied on interpreter-exit hooks the
+    kanban ``os._exit(0)`` path skips. Idempotent and best-effort: ``_persist_session``
+    dedupes via per-message markers and ``end_session`` no-ops on an ended row.
+    Handed-off sessions are left strictly alone.
     """
     agent = getattr(cli, "agent", None)
     if agent is None:
@@ -1397,16 +1138,12 @@ def _flush_one_shot_session_store(cli) -> None:
         return
     if getattr(agent, "_persist_disabled", False):
         return
-    # Retry persistence for any rows the in-turn flush failed to write.
-    # ``cli.conversation_history`` holds the resumed history's live dicts, so
-    # passing it keeps restored messages identity-skipped even when the failed
-    # first flush never got to stamp them.
+    # ``cli.conversation_history`` holds the resumed history's live dicts, so passing it
+    # keeps restored messages identity-skipped even when the failed flush never stamped them.
     try:
         msgs = getattr(agent, "_session_messages", None)
         if isinstance(msgs, list) and msgs and hasattr(agent, "_persist_session"):
-            agent._persist_session(
-                msgs, getattr(cli, "conversation_history", None)
-            )
+            agent._persist_session(msgs, getattr(cli, "conversation_history", None))
     except Exception:
         logger.debug("one-shot final session persist retry failed", exc_info=True)
     db = getattr(agent, "_session_db", None) or getattr(cli, "_session_db", None)
@@ -1423,25 +1160,18 @@ def _flush_one_shot_session_store(cli) -> None:
 
 
 def _wait_for_oneshot_background_completions(cli) -> None:
-    """Bounded linger for notify_on_complete background processes (#90879).
+    """Bounded linger for notify_on_complete background processes.
 
-    A one-shot run (``-q`` / ``-Q``) that spawned bounded background work —
-    most importantly a Bot Mode handoff reply via ``message_agent`` /
-    ``bot_relay``, spawned as ``terminal(background=true,
-    notify_on_complete=true)`` — must not exit while that work is still
-    running: the children write to pipes owned by this process and are
-    destroyed shortly after it dies. Delegates the actual wait (and its
-    ``terminal.oneshot_completion_wait_seconds`` bound) to the process
-    registry. Cheap no-op when nothing is pending.
+    A one-shot run that spawned bounded background work (e.g. a Bot Mode handoff reply
+    via ``terminal(background=true, notify_on_complete=true)``) must not exit while it
+    runs: the children write to pipes owned by this process. Waits on the whole
+    registry (a one-shot process hosts exactly one agent, and task_id filtering would
+    skip processes registered before the session id settled). Cheap no-op when idle.
     """
     from tools.process_registry import process_registry
 
     agent = getattr(cli, "agent", None)
     task_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
-    # Wait on the whole registry, not just this task's processes: a one-shot
-    # CLI process hosts exactly one agent, so every tracked process in this
-    # interpreter was spawned by this run (task_id filtering would silently
-    # skip processes registered before the session id settled).
     result = process_registry.wait_for_pending_completions(None)
     if result.get("waited"):
         logger.info(
@@ -1455,20 +1185,14 @@ def _wait_for_oneshot_background_completions(cli) -> None:
 def _finalize_single_query(cli) -> None:
     """Close one-shot CLI resources before releasing the active session lease."""
     try:
-        # Linger (bounded) for background processes the turn spawned with
-        # notify_on_complete=true BEFORE any teardown. The one-shot parent
-        # owns those children's stdout pipes; exiting now kills the delivery
-        # a few seconds later. Bot Mode handoff replies dispatched from a
-        # short-lived `hermes -p <bot> chat -Q` recipient (message_agent /
-        # bot_relay spawns) are exactly this shape and were silently
-        # destroyed on parent exit (#90879).
+        # Linger for spawned background work BEFORE any teardown (the parent owns
+        # those children's stdout pipes).
         try:
             _wait_for_oneshot_background_completions(cli)
         except Exception:
             logger.debug("one-shot background completion wait failed", exc_info=True)
-        # Durable flush FIRST: memory-provider shutdown inside _run_cleanup
-        # can issue aux-LLM calls, and nothing after it may fail in a way
-        # that loses the turn (#88583).
+        # Durable flush FIRST: memory-provider shutdown inside _run_cleanup can issue
+        # aux-LLM calls, and nothing after it may fail in a way that loses the turn.
         try:
             _flush_one_shot_session_store(cli)
         except Exception:
@@ -1480,33 +1204,20 @@ def _finalize_single_query(cli) -> None:
 
 
 def _reset_terminal_input_modes_on_exit() -> None:
-    """Best-effort: disable focus reporting + mouse tracking on TUI exit so they
-    don't leak into the next shell session sharing the tab.
+    """Best-effort: disable focus reporting + mouse tracking on TUI exit.
 
-    prompt_toolkit restores these on a clean teardown, but Ctrl+C, SIGTERM /
-    SIGHUP and crashes can bypass its unwind, leaving the modes enabled. The
-    terminal then emits raw ``ESC[I`` / ``ESC[O`` focus events and fragmented
-    SGR mouse reports as visible text in whatever runs next in the same tab
-    (#36823). Called from ``_run_cleanup`` (atexit-registered + invoked on the
-    normal / EOF / interrupt exit paths) this covers normal quit, Ctrl+C and
-    SIGTERM/SIGHUP. ``kill -9`` is uncatchable, and the kanban worker's
-    ``os._exit(0)`` path bypasses ``atexit``; neither runs this — but both are
-    non-TTY / non-TUI, so there is nothing to reset there.
-
-    Gated on ``_tui_input_modes_active`` so one-shot non-TUI CLI runs (which
-    share ``_run_cleanup`` via ``atexit``) never emit these codes. Writes to the
-    controlling terminal directly: by exit, prompt_toolkit's own output is torn
-    down, so ``sys.stdout`` is the real fd; falls back to ``/dev/tty`` when
-    stdout is redirected away from the terminal.
+    prompt_toolkit restores these on a clean teardown, but Ctrl+C, SIGTERM/SIGHUP and
+    crashes bypass its unwind, leaving raw ``ESC[I``/``ESC[O`` focus events and SGR
+    mouse reports as visible text in the next shell sharing the tab. Gated on
+    ``_tui_input_modes_active`` so one-shot non-TUI runs never emit these codes. By
+    exit prompt_toolkit's output is torn down, so write to ``sys.stdout`` when it is
+    the terminal, else ``/dev/tty`` (the TUI may have driven it while stdout was redirected).
     """
     global _tui_input_modes_active
     if not _tui_input_modes_active:
         return
-    # About to disable the modes — clear the flag so a re-armed _run_cleanup (or
-    # a long-lived process that reuses it) doesn't re-emit them.
+    # Clear first so a re-armed _run_cleanup doesn't re-emit.
     _tui_input_modes_active = False
-    # Prefer stdout when it's the terminal; otherwise the TUI may have driven
-    # /dev/tty while stdout was redirected — reset there instead of nowhere.
     try:
         stream = sys.stdout
         if stream is not None and stream.isatty():
@@ -1524,1027 +1235,58 @@ def _reset_terminal_input_modes_on_exit() -> None:
 
 
 # =============================================================================
-# Git Worktree Isolation (#652)
+# Git Worktree Isolation
 # =============================================================================
+
+from hermes_cli.worktree_ops import (  # noqa: F401  (mixins/tests/worktree_gc import via cli)
+    _PACK_SPRAWL_THRESHOLD,
+    _WORKTREE_MERGE_CACHE_MAX,
+    _classify_prune_candidates,
+    _cleanup_failed_worktree_add,
+    _copy_worktree_includes,
+    _deepen_shallow_repo,
+    _ensure_worktrees_gitignored,
+    _fetch_remote_branch_heads,
+    _git,
+    _git_quiet,
+    _git_repo_root,
+    _load_worktree_merge_cache,
+    _maintain_pack_health,
+    _normalize_git_bash_path,
+    _path_is_within_root,
+    _prune_candidates,
+    _prune_orphaned_branches,
+    _prune_stale_worktrees,
+    _reap_prune_verdicts,
+    _repo_is_shallow,
+    _resolve_worktree_base,
+    _save_worktree_merge_cache,
+    _setup_worktree,
+    _worktree_add,
+    _worktree_branch_pr_merged,
+    _worktree_branch_pushed_exact,
+    _worktree_commits_all_merged_upstream,
+    _worktree_current_branch,
+    _worktree_has_unpushed_commits,
+    _worktree_is_dirty,
+    _worktree_lock_is_live,
+    _worktree_merge_cache_path,
+)
 
 # Tracks the active worktree for cleanup on exit
 _active_worktree: Optional[Dict[str, str]] = None
 
 
-def _normalize_git_bash_path(p: Optional[str]) -> Optional[str]:
-    """Translate a Git Bash-style path (``/c/Users/...``) to the native
-    Windows form (``C:\\Users\\...``) that Python's ``subprocess.Popen``
-    and ``pathlib.Path`` accept.
-
-    No-op on non-Windows and for paths that already look native.  Git on
-    native Windows normally emits forward-slash Windows paths
-    (``C:/Users/...``) which both bash and Python handle, but certain
-    configurations (Git Bash shells, MSYS2, WSL-mounted repos) surface
-    ``/c/...`` or ``/cygdrive/c/...`` variants.
-    """
-    if not p:
-        return p
-    if sys.platform != "win32":
-        return p
-    import re as _re
-    # /c/Users/... or /C/Users/...
-    m = _re.match(r"^/([a-zA-Z])/(.*)$", p)
-    if m:
-        drive, rest = m.group(1), m.group(2)
-        return f"{drive.upper()}:\\{rest.replace('/', chr(92))}"
-    # /cygdrive/c/... or /mnt/c/...
-    m = _re.match(r"^/(?:cygdrive|mnt)/([a-zA-Z])/(.*)$", p)
-    if m:
-        drive, rest = m.group(1), m.group(2)
-        return f"{drive.upper()}:\\{rest.replace('/', chr(92))}"
-    return p
-
-
-def _git_repo_root() -> Optional[str]:
-    """Return the git repo root for CWD, or None if not in a repo.
-
-    Runs through :func:`_normalize_git_bash_path` so callers can pass
-    the result directly to ``Path``/``subprocess.Popen(cwd=...)`` on
-    Windows without hitting ``C:\\c\\Users\\...`` style resolution
-    mistakes.
-    """
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-        )
-        if result.returncode == 0:
-            return _normalize_git_bash_path(result.stdout.strip())
-    except Exception:
-        pass
-    return None
-
-
-def _path_is_within_root(path: Path, root: Path) -> bool:
-    """Return True when a resolved path stays within the expected root."""
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _cleanup_failed_worktree_add(repo_root: str, wt_path: Path, branch_name: str) -> None:
-    """Make a failed/timed-out ``git worktree add`` atomic after the fact.
-
-    ``git worktree add`` is not transactional: killed mid-checkout (the 30s
-    timeout) it leaves (a) the partially-materialized worktree directory,
-    (b) an admin entry under ``.git/worktrees/<name>`` that is LOCKED with a
-    reason naming the *current, live* pid — so the startup pruner's
-    dead-pid unlock will never touch it — and (c) sometimes the new branch.
-    Any retry of the same name then fails on the leftovers. Sweep all three,
-    quietly; every step is fail-soft because this runs on an error path.
-    """
-    import shutil
-    import subprocess
-
-    def _git(*args: str) -> None:
-        try:
-            subprocess.run(
-                ["git", *args],
-                capture_output=True, text=True, timeout=15, cwd=repo_root, check=False,
-            )
-        except Exception:
-            pass
-
-    try:
-        # Unlock first: `worktree remove --force` refuses a locked tree.
-        _git("worktree", "unlock", str(wt_path))
-        _git("worktree", "remove", "--force", str(wt_path))
-        if wt_path.exists():
-            shutil.rmtree(wt_path, ignore_errors=True)
-        # Drop the orphaned admin entry when the dir is already gone
-        # (`remove` needs the dir; `prune` handles the dirless case).
-        _git("worktree", "prune")
-        _git("branch", "-D", branch_name)
-    except Exception as e:
-        logger.debug("cleanup after failed worktree add: %s", e)
-
-
-_PACK_SPRAWL_THRESHOLD = 15
-
-
-def _maintain_pack_health(repo_root: str) -> None:
-    """Repack the object store when pack files sprawl (background thread).
-
-    On a multi-agent box every fetch/salvage session adds packs; git never
-    consolidates them on its own aggressively enough (``gc --auto``'s
-    threshold is 50 *and* it counts only non-kept packs). Past a few dozen
-    packs every object lookup scans every pack index, and worktree creation
-    can blow its 30s timeout under concurrent load (Aug 2026 incident: 39
-    packs, 638MB → ``hermes -w`` timing out; a full repack halved the store
-    and restored 0.5s creates). Threshold 15 keeps lookups fast without
-    repacking on every startup; ``nice`` + background thread keeps it off
-    the startup path. Fail-soft everywhere.
-    """
-    import subprocess
-
-    try:
-        pack_dir = Path(repo_root) / ".git" / "objects" / "pack"
-        if not pack_dir.is_dir():
-            return
-        packs = len(list(pack_dir.glob("*.pack")))
-        if packs < _PACK_SPRAWL_THRESHOLD:
-            return
-        logger.info("git pack sprawl (%d packs) — repacking in background", packs)
-        cmd = ["git", "repack", "-a", "-d", "--quiet"]
-        if os.name == "posix":
-            cmd = ["nice", "-n", "19", *cmd]
-        subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=1800, cwd=repo_root, check=False,
-        )
-        # Repacking can strand now-duplicated admin files; a prune here keeps
-        # the worktree bookkeeping tight on the same maintenance pass.
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            capture_output=True, text=True, timeout=60, cwd=repo_root, check=False,
-        )
-    except Exception as e:
-        logger.debug("pack maintenance skipped: %s", e)
-
-
-def _resolve_worktree_base(
-    repo_root: str,
-    fetch_timeout: float = 5,
-    freshness_window: float = 300,
-) -> tuple:
-    """Resolve the freshest base ref to branch a new worktree from.
-
-    The standalone clone's ``HEAD`` can lag the remote by hundreds of commits
-    (the ``~/.hermes/hermes-agent`` clone is updated only by ``hermes update``,
-    not on every session). Branching a worktree from that stale ``HEAD`` roots
-    every new branch on an old base — so the PR diff GitHub computes against
-    current ``main`` balloons with unrelated changes, and the agent has to
-    discover the staleness via the pre-push gate and rebase. Branching from the
-    freshly-fetched remote tip instead means the worktree starts current.
-
-    Strategy (each step falls back to the next on failure):
-      1. If the current branch tracks an upstream, refresh and use that
-         upstream ref — so a deliberate feature-branch worktree tracks its own
-         remote, not the default branch.
-      2. Else refresh the remote's default branch (``origin/HEAD`` → e.g.
-         ``origin/main``) and use it.
-      3. Else fall back to ``HEAD`` (offline, no remote, or detached) — the
-         old behavior, never worse than before.
-
-    "Refresh" is deliberately cheap on the startup path (the fetch here used
-    to stall ``hermes -w`` launches for 30-60s on flaky smart-HTTP
-    connections):
-
-    - The fetch is SKIPPED entirely when the repo's ``FETCH_HEAD`` is younger
-      than *freshness_window* seconds — a base fetched moments ago cannot have
-      meaningfully moved, so repeated launches don't re-pay a network round
-      trip.
-    - The fetch is capped at *fetch_timeout* seconds. On timeout or failure we
-      fall back to the locally-known remote-tracking ref (labelled "cached")
-      instead of cascading into a second fetch attempt. Genuine staleness is
-      backstopped by the pre-push stale-base gate.
-
-    Returns ``(base_ref, label)`` where *base_ref* is a git revision suitable
-    for ``git worktree add ... <base_ref>`` and *label* is a short
-    human-readable description for the session banner.
-    """
-    import subprocess
-
-    from hermes_cli._subprocess_compat import noninteractive_git_env
-
-    def _git(args, timeout: float = 20):
-        return subprocess.run(
-            ["git", *args],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=repo_root,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
-        )
-
-    def _ref_exists(ref: str) -> bool:
-        try:
-            return _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"]).returncode == 0
-        except Exception:
-            return False
-
-    def _fetch_head_age() -> Optional[float]:
-        """Seconds since the last fetch in this repo, or None if unknown."""
-        try:
-            gd = _git(["rev-parse", "--git-dir"])
-            if gd.returncode != 0:
-                return None
-            git_dir = Path(gd.stdout.strip())
-            if not git_dir.is_absolute():
-                git_dir = Path(repo_root) / git_dir
-            fetch_head = git_dir / "FETCH_HEAD"
-            if not fetch_head.exists():
-                return None
-            return max(0.0, time.time() - fetch_head.stat().st_mtime)
-        except Exception:
-            return None
-
-    def _refresh(remote: str, branch: str, ref: str) -> tuple:
-        """Return (ref, label) after a cheap best-effort refresh of *ref*.
-
-        Never raises, never fetches twice, never blocks longer than
-        *fetch_timeout*.
-        """
-        age = _fetch_head_age()
-        if age is not None and age < freshness_window and _ref_exists(ref):
-            return ref, f"{ref} (fetched {int(age)}s ago)"
-        try:
-            fetched = _git(["fetch", remote, branch], timeout=fetch_timeout)
-            if fetched.returncode == 0:
-                return ref, f"{ref} (fetched)"
-            reason = "fetch failed"
-        except subprocess.TimeoutExpired:
-            reason = f"fetch timed out after {fetch_timeout:g}s"
-        except Exception as e:
-            reason = f"fetch error: {e}"
-        if _ref_exists(ref):
-            logger.debug("worktree base: %s — using cached %s", reason, ref)
-            return ref, f"{ref} (cached — {reason})"
-        return "HEAD", f"HEAD (local — {reason}, no cached {ref})"
-
-    # 1. Current branch's upstream, if it tracks one.
-    try:
-        up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-        if up.returncode == 0:
-            upstream = up.stdout.strip()  # e.g. "origin/main"
-            if upstream and "/" in upstream:
-                remote, branch = upstream.split("/", 1)
-                return _refresh(remote, branch, upstream)
-    except Exception as e:
-        logger.debug("worktree base: upstream resolution failed: %s", e)
-
-    # 2. Remote default branch (origin/HEAD).
-    try:
-        # Resolve the remote's default branch symref.
-        head_ref = _git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        default_ref = ""
-        if head_ref.returncode == 0:
-            default_ref = head_ref.stdout.strip().replace("refs/remotes/", "", 1)
-        if not default_ref:
-            # origin/HEAD not set locally; ask the remote (network — capped
-            # like the fetch so a stalled connection can't hang startup).
-            show = _git(["remote", "show", "origin"], timeout=max(fetch_timeout, 5))
-            for line in show.stdout.splitlines():
-                line = line.strip()
-                if line.startswith("HEAD branch:"):
-                    _branch = line.split(":", 1)[1].strip()
-                    # A remote with no default branch reports "(unknown)";
-                    # don't construct a bogus "origin/(unknown)" ref from it.
-                    if _branch and _branch != "(unknown)":
-                        default_ref = "origin/" + _branch
-                    break
-        if default_ref and "/" in default_ref:
-            remote, branch = default_ref.split("/", 1)
-            return _refresh(remote, branch, default_ref)
-    except Exception as e:
-        logger.debug("worktree base: default-branch resolution failed: %s", e)
-
-    # 3. Fall back to local HEAD (offline / no remote / detached).
-    return "HEAD", "HEAD (local — could not reach remote)"
-
-
-def _setup_worktree(repo_root: str = None, sync_base: bool = True,
-                    name: Optional[str] = None) -> Optional[Dict[str, str]]:
-    """Create an isolated git worktree for this CLI session.
-
-    Returns a dict with worktree metadata on success, None on failure.
-    The dict contains: path, branch, repo_root.
-
-    When *sync_base* is True (default), the worktree branches from the
-    freshly-fetched remote tip rather than the (possibly stale) local ``HEAD``
-    — see ``_resolve_worktree_base``. Set ``worktree_sync: false`` in config to
-    branch from local ``HEAD`` (the pre-#10760-followup behavior).
-
-    When *name* is given (``/worktree new <name>``), the worktree directory
-    and branch use the sanitized name instead of a random ``hermes-<id>``.
-    Named trees intentionally skip the ``hermes-`` prefix so the startup
-    pruner ages them on its slower named-tree schedule.
-    """
-    import subprocess
-
-    from hermes_cli._subprocess_compat import (
-        noninteractive_git_env as _noninteractive_git_env,
-    )
-
-    repo_root = repo_root or _git_repo_root()
-    if not repo_root:
-        _cprint("\033[31m✗ --worktree requires being inside a git repository.\033[0m")
-        print("  cd into your project repo first, then run hermes -w")
-        return None
-
-    if name:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")[:40]
-        wt_name = safe or f"hermes-{uuid.uuid4().hex[:8]}"
-    else:
-        wt_name = f"hermes-{uuid.uuid4().hex[:8]}"
-    branch_name = f"hermes/{wt_name}"
-
-    worktrees_dir = Path(repo_root) / ".worktrees"
-    worktrees_dir.mkdir(parents=True, exist_ok=True)
-
-    wt_path = worktrees_dir / wt_name
-    if name and wt_path.exists():
-        _cprint(f"\033[31m✗ Worktree already exists: {wt_path}\033[0m")
-        print("  Pick a different name, or remove it with: "
-              f"git worktree remove {wt_path}")
-        return None
-
-    # Ensure .worktrees/ is in .gitignore
-    gitignore = Path(repo_root) / ".gitignore"
-    _ignore_entry = ".worktrees/"
-    try:
-        # utf-8-sig: git files are UTF-8 and Notepad prepends a BOM, which
-        # would glue to the first line and defeat the membership check below
-        # (duplicating the entry); the locale default also breaks non-ASCII
-        # patterns on Windows. The append below already writes UTF-8.
-        existing = (
-            gitignore.read_text(encoding="utf-8-sig", errors="replace")
-            if gitignore.exists()
-            else ""
-        )
-        if _ignore_entry not in existing.splitlines():
-            with open(gitignore, "a", encoding="utf-8") as f:
-                if existing and not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(f"{_ignore_entry}\n")
-    except Exception as e:
-        logger.debug("Could not update .gitignore: %s", e)
-
-    # Resolve the base ref. By default branch from the freshly-fetched remote
-    # tip so the worktree starts current with the project, not from the
-    # (possibly stale) local HEAD of the standalone clone (#10760 follow-up).
-    if sync_base:
-        base_ref, base_label = _resolve_worktree_base(repo_root)
-    else:
-        base_ref, base_label = "HEAD", "HEAD (local — worktree_sync disabled)"
-
-    # Create the worktree. checkout.workers parallelizes the file
-    # materialization (~6k files on this repo): 0.6s serial → ~0.2s with 8
-    # workers. Harmless on git builds without parallel-checkout support —
-    # unknown -c keys are ignored for checkout, and the fallback retry
-    # below drops the flags entirely.
-    _wt_add_cfg = [
-        "-c", "checkout.workers=8",
-        "-c", "checkout.thresholdForParallelism=100",
-    ]
-    try:
-        # 120s, not 30: on a multi-agent box the ~10k-file materialization
-        # contends with sibling sessions' checkouts/fetches/Electron dev
-        # builds for the same disk — measured 113s wall at near-zero CPU
-        # under load vs 1.2s idle (Aug 2026). A too-tight timeout kills a
-        # legitimately slow create and wastes the work already done.
-        result = subprocess.run(
-            ["git", *_wt_add_cfg, "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, cwd=repo_root,
-            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
-        )
-        if result.returncode != 0:
-            # If branching from the resolved remote ref failed for any reason
-            # (e.g. a partial fetch left the ref unusable), retry from local
-            # HEAD so worktree creation never hard-fails on a sync hiccup.
-            if base_ref != "HEAD":
-                logger.warning(
-                    "worktree add from %s failed (%s); retrying from local HEAD",
-                    base_ref, result.stderr.strip(),
-                )
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
-                base_ref, base_label = "HEAD", "HEAD (fallback — remote base failed)"
-                result = subprocess.run(
-                    ["git", "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, cwd=repo_root,
-                    stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
-                )
-            if result.returncode != 0:
-                _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
-                _cprint(f"\033[31m✗ Failed to create worktree: {result.stderr.strip()}\033[0m")
-                return None
-    except Exception as e:
-        # A timed-out/failed `worktree add` is NOT atomic: git leaves the
-        # partially-materialized directory plus a LOCKED admin entry under
-        # .git/worktrees/<name> whose lock pid is THIS live process — so the
-        # startup pruner's dead-pid unlock never reaps it and every retry of
-        # the same name fails. Clean up our own wreckage before surfacing
-        # the error (Aug 2026 incident: 30s timeout during pack-sprawl left
-        # exactly this poison).
-        _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
-        _cprint(f"\033[31m✗ Failed to create worktree: {e}\033[0m")
-        return None
-
-    # Copy files listed in .worktreeinclude (gitignored files the agent needs)
-    include_file = Path(repo_root) / ".worktreeinclude"
-    if include_file.exists():
-        try:
-            repo_root_resolved = Path(repo_root).resolve()
-            wt_path_resolved = wt_path.resolve()
-            # utf-8-sig, not the locale default: on a cp1251/GBK Windows
-            # machine a UTF-8 include list either decodes to mojibake paths
-            # (entries silently not copied) or raises UnicodeDecodeError,
-            # which the enclosing handler swallows at DEBUG — no include is
-            # copied at all. A Notepad BOM likewise glued to the first entry.
-            for line in include_file.read_text(
-                encoding="utf-8-sig", errors="replace"
-            ).splitlines():
-                entry = line.strip()
-                if not entry or entry.startswith("#"):
-                    continue
-                src = Path(repo_root) / entry
-                dst = wt_path / entry
-                # Prevent path traversal and symlink escapes: both the resolved
-                # source and the resolved destination must stay inside their
-                # expected roots before any file or symlink operation happens.
-                try:
-                    src_resolved = src.resolve(strict=False)
-                    dst_resolved = dst.resolve(strict=False)
-                except (OSError, ValueError):
-                    logger.debug("Skipping invalid .worktreeinclude entry: %s", entry)
-                    continue
-                if not _path_is_within_root(src_resolved, repo_root_resolved):
-                    logger.warning("Skipping .worktreeinclude entry outside repo root: %s", entry)
-                    continue
-                if not _path_is_within_root(dst_resolved, wt_path_resolved):
-                    logger.warning("Skipping .worktreeinclude entry that escapes worktree: %s", entry)
-                    continue
-                if src.is_file():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(src), str(dst))
-                elif src.is_dir():
-                    # Symlink directories (faster, saves disk).  On Windows,
-                    # symlink creation requires Developer Mode or elevation,
-                    # and fails with OSError otherwise — fall back to a
-                    # recursive copy so the worktree is still usable.  The
-                    # copy is slower and uses disk, but it doesn't require
-                    # admin and matches the Linux/macOS symlink outcome
-                    # functionally.
-                    if not dst.exists():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            os.symlink(str(src_resolved), str(dst))
-                        except (OSError, NotImplementedError) as _sym_err:
-                            if sys.platform == "win32":
-                                logger.info(
-                                    ".worktreeinclude: symlink failed (%s) — "
-                                    "falling back to copytree on Windows.",
-                                    _sym_err,
-                                )
-                                try:
-                                    shutil.copytree(
-                                        str(src_resolved),
-                                        str(dst),
-                                        symlinks=True,
-                                        dirs_exist_ok=False,
-                                    )
-                                except Exception as _copy_err:
-                                    logger.warning(
-                                        ".worktreeinclude: copy fallback "
-                                        "also failed for %s -> %s: %s",
-                                        src, dst, _copy_err,
-                                    )
-                            else:
-                                raise
-        except Exception as e:
-            logger.debug("Error copying .worktreeinclude entries: %s", e)
-
-    # Lock the worktree so other processes (and `git worktree remove`) can see
-    # it is actively in use.  Fail-soft: a lock failure never blocks the session.
-    try:
-        subprocess.run(
-            ["git", "worktree", "lock", "--reason", f"hermes pid={os.getpid()}", str(wt_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-        logger.debug("Worktree locked: %s (pid=%s)", wt_path, os.getpid())
-    except Exception as e:
-        logger.debug("git worktree lock failed (non-fatal): %s", e)
-
-    info = {
-        "path": str(wt_path),
-        "branch": branch_name,
-        "repo_root": repo_root,
-        "base": base_ref,
-    }
-
-    _cprint(f"\033[32m✓ Worktree created:\033[0m {wt_path}")
-    print(f"  Branch: {branch_name}")
-    print(f"  Base:   {base_label}")
-
-    return info
-
-
-def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> bool:
-    """Return whether a worktree has commits not reachable from any remote branch.
-
-    ``git log HEAD --not --remotes`` compares against remote-tracking refs under
-    ``refs/remotes/*``. If a repo has no remote-tracking refs yet, there is no
-    usable remote baseline to compare against, so treat it as having no
-    "unpushed" commits.
-
-    SHALLOW-CLONE CAVEAT: in a shallow clone (the installer default) the
-    shallow boundary can disconnect an older worktree HEAD from origin/*,
-    making already-public commits look unpushed. The verdict here stays
-    conservative (True) on purpose — deleting on unverifiable history would
-    risk real work. Callers that can afford it should deepen first via
-    ``_deepen_shallow_repo`` (the startup pruner does) or check
-    ``_repo_is_shallow`` before presenting this verdict as fact.
-    """
-    import subprocess
-
-    try:
-        remote_refs = subprocess.run(
-            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if remote_refs.returncode != 0:
-            return True
-        if not remote_refs.stdout.strip():
-            return False
-
-        result = subprocess.run(
-            ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if result.returncode != 0:
-            return True
-        return bool(result.stdout.strip())
-    except Exception:
-        return True
-
-
-def _worktree_is_dirty(worktree_path: str, timeout: int = 10) -> bool:
-    """Return whether a worktree has uncommitted changes (staged, unstaged, or
-    untracked).
-
-    Fails SAFE: on any error returns True so callers do not delete a worktree
-    whose state they cannot determine.
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if result.returncode != 0:
-            return True
-        return bool(result.stdout.strip())
-    except Exception:
-        return True
-
-
-def _repo_is_shallow(repo_path: str, timeout: int = 5) -> bool:
-    """Return whether *repo_path* belongs to a shallow clone.
-
-    Shallowness poisons every history-connectivity verdict the worktree
-    machinery relies on: an older worktree's HEAD (a past snapshot of main)
-    is disconnected from current ``origin/main`` by the shallow boundary, so
-    ``git log HEAD --not --remotes`` misreports thousands of already-public
-    commits as "unpushed" and the worktree is preserved forever. The default
-    installer clones with ``--depth 1``, so this is the normal state of a
-    user install, not an edge case.
-
-    Fails toward False: if git can't be queried we don't want callers to
-    take shallow-specific branches on top of an unknown state.
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-shallow-repository"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=repo_path,
-        )
-        return result.returncode == 0 and result.stdout.strip() == "true"
-    except Exception:
-        return False
-
-
-def _deepen_shallow_repo(repo_root: str, timeout: int = 600) -> bool:
-    """One-time blobless unshallow so history-based verdicts become correct.
-
-    Fetches the full commit/tree graph (``--unshallow --filter=blob:none``)
-    without downloading historical file contents, which keeps the transfer a
-    small fraction of a full clone. Runs only from background paths (the
-    startup pruner thread), never on the interactive session-close path.
-
-    Falls back to a plain ``--unshallow`` if the server rejects partial-clone
-    filters. Fail-soft: returns whether the repo is actually non-shallow
-    afterwards; on failure (offline, no remote) callers keep today's
-    preserve-everything behavior.
-    """
-    import subprocess
-
-    if not _repo_is_shallow(repo_root):
-        return True
-
-    try:
-        remotes = subprocess.run(
-            ["git", "remote"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-        names = [r.strip() for r in remotes.stdout.splitlines() if r.strip()]
-        if remotes.returncode != 0 or not names:
-            return False
-        remote = "origin" if "origin" in names else names[0]
-
-        for extra in (["--filter=blob:none"], []):
-            try:
-                result = subprocess.run(
-                    ["git", "fetch", remote, "--unshallow", *extra],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=repo_root,
-                )
-            except subprocess.TimeoutExpired:
-                return False
-            if result.returncode == 0:
-                break
-            logger.debug(
-                "git fetch --unshallow%s failed: %s",
-                " " + " ".join(extra) if extra else "",
-                result.stderr.strip()[-500:],
-            )
-    except Exception as e:
-        logger.debug("Deepening shallow repo failed (non-fatal): %s", e)
-        return False
-
-    deepened = not _repo_is_shallow(repo_root)
-    if deepened:
-        logger.info(
-            "Deepened shallow clone at %s so worktree cleanup can verify "
-            "push state", repo_root,
-        )
-    return deepened
-
-
-# Upper bound on retained `git cherry` verdict entries (see
-# _save_worktree_merge_cache). Each entry is ~90 bytes, so this caps the cache
-# near 90 KB even on a repo that churns thousands of worktree branches.
-_WORKTREE_MERGE_CACHE_MAX = 1000
-
-
-def _worktree_merge_cache_path() -> Path:
-    """Path of the patch-equivalence verdict cache (profile-aware)."""
-    return get_hermes_home() / "cache" / "worktree_merge_verdicts.json"
-
-
-def _load_worktree_merge_cache() -> Dict[str, bool]:
-    """Load the ``git cherry`` verdict cache. Missing/corrupt cache = empty."""
-    try:
-        raw = json.loads(
-            _worktree_merge_cache_path().read_text(encoding="utf-8")
-        )
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    entries = raw.get("verdicts")
-    if not isinstance(entries, dict):
-        return {}
-    # Only keep well-formed bool verdicts — a hand-edited or partially written
-    # cache must never inject a non-bool into the prune decision.
-    return {k: v for k, v in entries.items() if isinstance(v, bool)}
-
-
-def _save_worktree_merge_cache(verdicts: Dict[str, bool]) -> None:
-    """Persist the verdict cache atomically. Best-effort — never raises.
-
-    Bounded to the most recent ``_WORKTREE_MERGE_CACHE_MAX`` entries so the
-    file can't grow without limit across thousands of sessions.
-    """
-    path = _worktree_merge_cache_path()
-    tmp = None
-    try:
-        items = list(verdicts.items())
-        if len(items) > _WORKTREE_MERGE_CACHE_MAX:
-            items = items[-_WORKTREE_MERGE_CACHE_MAX:]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "verdicts": dict(items)}),
-            encoding="utf-8",
-        )
-        os.replace(str(tmp), str(path))
-    except Exception as e:
-        logger.debug("Could not persist worktree merge cache: %s", e)
-        if tmp is not None:
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
-
-
-def _worktree_commits_all_merged_upstream(
-    worktree_path: str,
-    timeout: int = 30,
-    max_ahead: int = 20,
-    cache: Optional[Dict[str, bool]] = None,
-) -> bool:
-    """Return whether every local-only commit is patch-equivalent to a commit
-    already on the default upstream branch.
-
-    The dominant ``.worktrees/`` leak: a branch is pushed, its PR is
-    squash-merged (or cherry-picked), and the remote branch is deleted. The
-    local commits are then unreachable from ``refs/remotes/*`` forever, so the
-    unpushed-commits guard preserves the worktree indefinitely even though its
-    content is fully merged. ``git cherry`` detects patch-equivalence, letting
-    the pruner reap these.
-
-    Bounded: skips (returns False) when the branch is more than ``max_ahead``
-    commits ahead — a stale-base tree, too expensive to diff-hash and unlikely
-    to be a merged scratch branch. Fails SAFE toward False (preserve).
-
-    ``git cherry`` diff-hashes every commit in the range, which on a large repo
-    costs ~0.2-1.0s per worktree — and a tree preserved for unpushed work is
-    re-tested on *every* startup, forever, always reaching the same answer. When
-    *cache* is provided, the verdict is memoized against
-    ``(base_sha, head_sha, max_ahead)``: the exact inputs ``git cherry``
-    consumes. A cache hit is therefore identical to recomputation by
-    construction — if either ref moves the key changes and the real git call
-    runs again.
-    """
-    import subprocess
-
-    base = None
-    for candidate in ("origin/HEAD", "origin/main", "origin/master"):
-        try:
-            probe = subprocess.run(
-                ["git", "rev-parse", "--verify", "--quiet", candidate],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-            )
-            if probe.returncode == 0 and probe.stdout.strip():
-                base = candidate
-                break
-        except Exception:
-            return False
-    if base is None:
-        return False
-
-    try:
-        # Resolve both endpoints to shas up front. These are the complete
-        # inputs to the range below, so they form an exact cache key. Cheap
-        # (~1ms) relative to the diff-hashing `git cherry` they guard.
-        cache_key = None
-        if cache is not None:
-            revs = subprocess.run(
-                ["git", "rev-parse", f"{base}^{{commit}}", "HEAD^{commit}"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-            )
-            if revs.returncode == 0:
-                shas = revs.stdout.split()
-                if len(shas) == 2:
-                    cache_key = f"{shas[0]}..{shas[1]}:{max_ahead}"
-                    if cache_key in cache:
-                        return cache[cache_key]
-
-        def _memo(verdict: bool) -> bool:
-            if cache is not None and cache_key is not None:
-                cache[cache_key] = verdict
-            return verdict
-
-        ahead = subprocess.run(
-            ["git", "rev-list", "--count", f"{base}..HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if ahead.returncode != 0:
-            return False
-        count = int(ahead.stdout.strip() or "0")
-        if count == 0:
-            return _memo(True)
-        if count > max_ahead:
-            return _memo(False)
-
-        cherry = subprocess.run(
-            ["git", "cherry", base, "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if cherry.returncode != 0:
-            return False
-        lines = [ln for ln in cherry.stdout.splitlines() if ln.strip()]
-        # "-" = patch-equivalent commit exists upstream; "+" = unique local work
-        return _memo(bool(lines) and all(ln.startswith("-") for ln in lines))
-    except Exception:
-        return False
-
-
-def _worktree_branch_pr_merged(
-    worktree_path: str,
-    timeout: int = 15,
-    cache: Optional[Dict[str, bool]] = None,
-) -> bool:
-    """Return whether the worktree branch's PR is MERGED on GitHub.
-
-    Escape hatch for the case ``git cherry`` cannot catch: a rebase-merge that
-    altered the diff (conflict resolution against a moved base, follow-up
-    commits added during salvage/CI-fix) changes the patch-id, so the local
-    commits are no longer patch-equivalent to anything upstream even though
-    the PR merged. Those trees survive the cherry check forever (Aug 2026:
-    12 of 22 "unpushed" trees on a loaded box had MERGED PRs).
-
-    GitHub's PR state is the authoritative merge signal, so a clean tree
-    whose branch has a MERGED PR is reaped. Verdicts are memoized keyed on
-    ``(branch, head_sha)`` — MERGED is monotonic, so a True verdict is cached
-    permanently; False is never cached (the PR may merge later without new
-    local commits, which would leave the key unchanged).
-
-    Fails SAFE toward False (preserve): no gh binary, offline, rate-limited,
-    detached HEAD, or any parse failure keeps the tree.
-    """
-    import subprocess
-
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if head.returncode != 0:
-            return False
-        branch = head.stdout.strip()
-        if not branch or branch == "HEAD":  # detached — no PR to look up
-            return False
-
-        cache_key = None
-        if cache is not None:
-            sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-            )
-            if sha.returncode == 0 and sha.stdout.strip():
-                cache_key = f"pr-merged:{branch}:{sha.stdout.strip()}"
-                if cache.get(cache_key) is True:
-                    return True
-
-        result = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "merged",
-             "--json", "number", "--limit", "1"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if result.returncode != 0:
-            return False
-        prs = json.loads(result.stdout or "[]")
-        merged = isinstance(prs, list) and len(prs) > 0
-        if merged and cache is not None and cache_key is not None:
-            cache[cache_key] = True
-        return merged
-    except Exception:
-        return False
-
-
-def _fetch_remote_branch_heads(repo_root: str, timeout: int = 20) -> Optional[Dict[str, str]]:
-    """Return ``{branch_name: sha}`` for every branch on origin, or None.
-
-    One ``git ls-remote --heads origin`` call answers "is this branch pushed?"
-    for EVERY worktree in the sweep, so callers pay a single bounded network
-    round-trip instead of per-tree probes. Needed because managed installs
-    fetch with a single-branch refspec (``+refs/heads/main:...``), so
-    ``refs/remotes/origin/<branch>`` never exists for pushed PR branches and
-    ``git log HEAD --not --remotes`` misreports them as unpushed forever —
-    the dominant reason open-PR worktrees accumulate (Aug 2026: 24 of 33
-    preserved trees on a loaded box were pushed branches with open PRs).
-
-    Fails SAFE toward None (offline, no remote, timeout): callers must treat
-    None as "cannot verify — preserve".
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", "origin"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=repo_root,
-        )
-        if result.returncode != 0:
-            return None
-        heads: Dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2 and parts[1].startswith("refs/heads/"):
-                heads[parts[1][len("refs/heads/"):].strip()] = parts[0].strip()
-        return heads
-    except Exception:
-        return None
-
-
-def _worktree_branch_pushed_exact(
-    worktree_path: str,
-    remote_heads: Optional[Dict[str, str]],
-    timeout: int = 10,
-) -> bool:
-    """Return whether the worktree's branch head is EXACTLY what origin holds.
-
-    True means the working tree contains nothing origin doesn't already have:
-    the checkout is redundant — the work lives on the remote (typically as an
-    open PR) and in the local branch ref. Reaping the TREE while keeping the
-    BRANCH loses nothing and is one ``git worktree add`` away from undone.
-
-    Exact-match is deliberately the only True case: a local head that is
-    ahead of (or diverged from) the pushed branch has commits origin lacks,
-    and without remote-tracking refs we cannot cheaply prove ancestry — so
-    anything but equality fails SAFE toward preserve.
-    """
-    import subprocess
-
-    if not remote_heads:
-        return False
-    try:
-        head = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if head.returncode != 0:
-            return False
-        branch = head.stdout.strip()
-        if not branch or branch == "HEAD":
-            return False
-        remote_sha = remote_heads.get(branch)
-        if not remote_sha:
-            return False
-        local = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
-        )
-        if local.returncode != 0:
-            return False
-        return local.stdout.strip() == remote_sha
-    except Exception:
-        return False
-
-
-def _worktree_lock_is_live(repo_root: str, worktree_path: str, timeout: int = 10):
-    """Classify a worktree's git lock as live, dead, or absent.
-
-    ``hermes -w`` locks each worktree with reason ``hermes pid=<pid>`` so a
-    concurrent hermes process' startup prune leaves an in-use worktree alone.
-    But a *crashed* session leaves the lock behind forever, and
-    ``git worktree remove --force`` (single ``-f``) refuses to remove a locked
-    worktree — so dead-locked worktrees accumulate indefinitely. This lets the
-    pruner tell the two apart:
-
-    - ``"live"``  — locked and the owning pid is still running (skip it).
-    - ``"dead"``  — locked but the owning pid is gone, or the reason isn't a
-                    parseable hermes lock (safe to unlock + reap).
-    - ``None``    — not locked at all.
-
-    Fails SAFE toward ``"live"``: if git can't be queried at all we cannot
-    prove the worktree is safe to touch, so we report it as live.
-    """
-    import re
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=repo_root,
-        )
-        if result.returncode != 0:
-            return "live"
-    except Exception:
-        return "live"
-
-    target = Path(worktree_path).resolve()
-    current: Optional[Path] = None
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            try:
-                current = Path(line[len("worktree "):].strip()).resolve()
-            except Exception:
-                current = None
-        elif line == "locked" or line.startswith("locked "):
-            if current != target:
-                continue
-            reason = line[len("locked"):].strip()
-            m = re.search(r"hermes pid=(\d+)", reason)
-            if not m:
-                # Locked by something we don't recognize as a hermes session
-                # (or lock reason unavailable). Treat as dead — a foreign lock
-                # on a hermes -w worktree is almost certainly a leftover, and
-                # the age/dirty/unpushed gates already ran before we got here.
-                return "dead"
-            pid = int(m.group(1))
-            if pid == os.getpid():
-                return "live"
-            try:
-                from gateway.status import _pid_exists
-                return "live" if _pid_exists(pid) else "dead"
-            except Exception:
-                # Can't determine liveness — fail safe toward keeping it.
-                return "live"
-    return None
-
-
 def _cleanup_worktree(info: Dict[str, str] = None) -> None:
     """Remove a worktree and its branch on exit.
 
-    Preserves the worktree only if it has unpushed commits (real work
-    that hasn't been pushed to any remote).  Uncommitted changes alone
-    (untracked files, test artifacts) are not enough to keep it — agent
-    work lives in commits/PRs, not the working tree.
+    Preserved only when it has unpushed commits (real work). Uncommitted changes alone
+    are not enough — agent work lives in commits/PRs, not the working tree.
     """
     global _active_worktree
     info = info or _active_worktree
     if not info:
         return
-
-    import subprocess
 
     wt_path = info["path"]
     branch = info["branch"]
@@ -2553,15 +1295,10 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
     if not Path(wt_path).exists():
         return
 
-    has_unpushed = _worktree_has_unpushed_commits(wt_path, timeout=10)
-
-    if has_unpushed:
+    if _worktree_has_unpushed_commits(wt_path, timeout=10):
         if _repo_is_shallow(repo_root):
-            # In a shallow clone the unpushed verdict is unreliable: the
-            # shallow boundary disconnects this worktree's history from
-            # origin/*, so already-public commits look "unpushed". Be honest
-            # about why we're keeping it — the startup pruner deepens the
-            # clone in the background and will reap it on a later startup.
+            # The shallow boundary makes the unpushed verdict unreliable; the startup
+            # pruner deepens the clone in the background and reaps it later.
             _cprint(f"\n\033[33m⚠ Shallow clone — cannot verify push state, keeping: {wt_path}\033[0m")
             print("  The next `hermes -w` session deepens the clone and prunes merged worktrees automatically.")
         else:
@@ -2570,49 +1307,20 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         _active_worktree = None
         return
 
-    # Remove worktree (even if working tree is dirty — uncommitted
-    # changes without unpushed commits are just artifacts)
-    # Unlock first so `git worktree remove` isn't blocked by the lock we
-    # placed at creation time.  Fail-soft — never block cleanup.
-    try:
-        subprocess.run(
-            ["git", "worktree", "unlock", wt_path],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-    except Exception as e:
-        logger.debug("git worktree unlock failed (non-fatal): %s", e)
-
-    try:
-        subprocess.run(
-            ["git", "worktree", "remove", wt_path, "--force"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, cwd=repo_root,
-        )
-    except Exception as e:
-        logger.debug("Failed to remove worktree: %s", e)
-
-    # Delete the branch
-    try:
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-    except Exception as e:
-        logger.debug("Failed to delete branch %s: %s", branch, e)
+    # Unlock first so `remove` isn't blocked by the lock placed at creation. Fail-soft.
+    _git_quiet(["worktree", "unlock", wt_path], repo_root, log="git worktree unlock failed (non-fatal)")
+    _git_quiet(["worktree", "remove", wt_path, "--force"], repo_root, timeout=15, log="Failed to remove worktree")
+    _git_quiet(["branch", "-D", branch], repo_root, log=f"Failed to delete branch {branch}")
 
     _active_worktree = None
     _cprint(f"\033[32m✓ Worktree cleaned up: {wt_path}\033[0m")
 
 
 def _run_state_db_auto_maintenance(session_db) -> None:
-    """Call ``SessionDB.maybe_auto_prune_and_vacuum`` using current config.
+    """Run one-time repairs + ``SessionDB.maybe_auto_prune_and_vacuum`` per the ``sessions:`` config.
 
-    Reads the ``sessions:`` section from config.yaml via
-    :func:`hermes_cli.config.load_config` (the authoritative loader that
-    deep-merges DEFAULT_CONFIG, so unmigrated configs still get default
-    values). Honours ``auto_prune`` / ``retention_days`` /
-    ``vacuum_after_prune`` / ``min_vacuum_interval_days`` /
-    ``min_interval_hours``, and delegates to the DB. Never raises —
-    maintenance must never block interactive startup.
+    Uses :func:`hermes_cli.config.load_config` (deep-merges DEFAULT_CONFIG so unmigrated
+    configs still get defaults). Never raises — maintenance must never block startup.
     """
     if session_db is None:
         return
@@ -2633,23 +1341,20 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _prune_exc:
             logger.debug("Ghost session prune skipped: %s", _prune_exc)
 
-        # One-time finalize of orphaned compression continuations (#20001).
+        # One-time finalize of orphaned compression continuations.
         try:
             if not session_db.get_meta("orphaned_compression_finalize_v1"):
                 finalized = session_db.finalize_orphaned_compression_sessions()
                 session_db.set_meta("orphaned_compression_finalize_v1", "1")
                 if finalized:
-                    logger.info(
-                        "Finalized %d orphaned compression sessions", finalized
-                    )
+                    logger.info("Finalized %d orphaned compression sessions", finalized)
         except Exception as _finalize_exc:
             logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
 
         cfg = (_load_full_config().get("sessions") or {})
 
-        # Auto-archive (soft-hide stale sessions) is independent of the
-        # destructive auto_prune sweep — run it first, before prune's early
-        # return, so enabling one doesn't require the other.
+        # Auto-archive is independent of the destructive auto_prune sweep — run it
+        # first, before prune's early return.
         if cfg.get("auto_archive", False):
             session_db.maybe_auto_archive(
                 idle_days=float(cfg.get("auto_archive_days", 3)),
@@ -2670,24 +1375,16 @@ def _run_state_db_auto_maintenance(session_db) -> None:
 
 
 def _run_checkpoint_auto_maintenance() -> None:
-    """Call ``checkpoint_manager.maybe_auto_prune_checkpoints`` using current config.
-
-    Reads the ``checkpoints:`` section from config.yaml via
-    :func:`hermes_cli.config.load_config`. Honours ``auto_prune`` /
-    ``retention_days`` / ``delete_orphans`` / ``min_interval_hours``.
-    Never raises — maintenance must never block interactive startup.
-    """
+    """Call ``maybe_auto_prune_checkpoints`` per the ``checkpoints:`` config. Never raises."""
     try:
         from hermes_cli.config import load_config as _load_full_config
         cfg = (_load_full_config().get("checkpoints") or {})
         if not cfg.get("auto_prune", False):
             return
         from tools.checkpoint_manager import maybe_auto_prune_checkpoints
-        # delete_orphans is intentionally never honoured here: a missing
-        # workdir at startup is ambiguous (deleted project vs. an unmounted
-        # external volume / network share / VPN not yet up) and this sweep
-        # runs unattended. Orphan cleanup is only ever done via the explicit
-        # `hermes checkpoints prune` command, which the user has to invoke.
+        # delete_orphans is never honoured here: a missing workdir at startup is
+        # ambiguous (deleted project vs. unmounted volume / VPN not yet up) and this
+        # sweep runs unattended. Orphans are only reclaimed by `hermes checkpoints prune`.
         maybe_auto_prune_checkpoints(
             retention_days=int(cfg.get("retention_days", 7)),
             min_interval_hours=int(cfg.get("min_interval_hours", 24)),
@@ -2698,410 +1395,23 @@ def _run_checkpoint_auto_maintenance() -> None:
         logger.debug("checkpoint auto-maintenance skipped: %s", exc)
 
 
-def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
-    """Remove stale worktrees and orphaned branches on startup.
-
-    Covers EVERY directory under ``.worktrees/`` except kanban task trees
-    (``t_<hex>`` — owned by the kanban dispatcher's own gc). Scratch trees
-    created by ``hermes -w`` (``hermes-*``) age out fast; named trees created
-    manually for salvage/review lanes age out on a slower schedule:
-
-    - ``hermes-*``: skip under 24h; reap 24h+ when clean and merged/pushed;
-      72h+ is the aggressive tier (still never deletes real work).
-    - named trees: same logic at 3x the timeline (72h soft / 9d hard).
-
-    Work-preservation guards (all tiers, any age):
-    - uncommitted changes (dirty) — never removed;
-    - unpushed commits — never removed, UNLESS every local-only commit is
-      patch-equivalent to a commit already on upstream (``git cherry``): the
-      squash-merged-PR case, which is the dominant ``.worktrees/`` leak since
-      those commits stay unreachable from ``refs/remotes/*`` forever;
-    - pushed-branch tier: when the tree's branch head EXACTLY matches what
-      origin holds (one ``git ls-remote`` per sweep, lazily), the checkout is
-      redundant — typically an open-PR lane. The TREE is reaped but its
-      BRANCH ref is kept (and shielded from the orphaned-branch pass), so
-      the lane is one ``git worktree add`` away from restored. Needed because
-      managed installs fetch with a single-branch refspec, leaving pushed PR
-      branches with no ``refs/remotes/*`` entry — they read as "unpushed"
-      forever and were the dominant survivor class (Aug 2026: 24 of 33
-      preserved trees, ~18GB).
-
-    Lock handling (orthogonal to age): ``hermes -w`` locks each worktree with
-    reason ``hermes pid=<pid>`` so a concurrent hermes process leaves an in-use
-    worktree alone. A *live*-locked worktree is skipped at any age; a
-    *dead*-locked one (owning pid gone — a crashed session) is unlocked first
-    so ``git worktree remove --force`` can actually reap it, otherwise those
-    leftovers accumulate forever (``remove --force`` refuses a locked tree).
-
-    Branch deletion is gated on ``git worktree remove`` succeeding, so a failed
-    removal never orphans the branch (which would drop easy reachability of any
-    commits still in the worktree).
-
-    Preserved-work visibility: trees skipped for unpushed/dirty reasons that
-    are older than 7 days are listed in a single WARNING so real in-flight
-    work can't rot silently.
-
-    Also prunes orphaned ``hermes/*`` and ``pr-*`` local branches that
-    have no corresponding worktree.
-
-    Performance: this runs on the startup path of every ``hermes -w`` session,
-    and each candidate tree costs several git subprocesses (the ``git cherry``
-    patch-equivalence probe dominates at ~0.2-1.0s on a large repo). With
-    dozens of accumulated worktrees the serial version added ~11-18s of latency
-    before the banner. Two changes keep the decisions byte-identical while
-    removing nearly all of that:
-
-    1. The read-only classification of each tree (dirty / unpushed / merged /
-       lock state) is independent per tree, so it runs on a thread pool. Only
-       the mutating phase (unlock, remove, branch -D) stays serial and ordered.
-    2. ``git cherry`` verdicts are memoized on disk keyed by the exact
-       ``(base_sha, head_sha)`` range they were computed from, so a tree
-       preserved for unpushed work is not re-diff-hashed on every subsequent
-       startup.
-    """
-    import re
-    import subprocess
-    import time
-
-    worktrees_dir = Path(repo_root) / ".worktrees"
-    if not worktrees_dir.exists():
-        _prune_orphaned_branches(repo_root)
-        return
-
-    # A shallow clone (the installer's default `--depth 1`) disconnects old
-    # worktree HEADs from current origin/main, so the unpushed-commits guard
-    # misclassifies every aged worktree as unpushed work and preserves it
-    # forever. Deepen once — bloblessly, in this background thread — so all
-    # history verdicts below (and the session-exit cleanup) become correct.
-    # Fail-soft: offline, we just keep today's preserve-everything behavior.
-    if _repo_is_shallow(repo_root):
-        _deepen_shallow_repo(repo_root)
-
-    now = time.time()
-    stale_work_cutoff = now - (7 * 24 * 3600)
-    preserved_stale: list = []
-    # Kanban task worktrees (<repo>/.worktrees/t_<hex>) have their own
-    # dispatcher-driven lifecycle (hermes kanban gc) — never touch them here.
-    kanban_re = re.compile(r"^t_[0-9a-f]+$")
-
-    # ── Phase 1: age filter (no subprocesses) ───────────────────────────────
-    # Cheap stat-only pass so the thread pool below is sized to the trees that
-    # actually need git work, not to everything on disk.
-    candidates: list = []
-    for entry in sorted(worktrees_dir.iterdir()):
-        if not entry.is_dir() or kanban_re.match(entry.name):
-            continue
-
-        # Scratch trees (hermes-*) age out on the default schedule; named
-        # trees (salvage/review lanes someone created deliberately) get 3x.
-        scratch = entry.name.startswith("hermes-")
-        tier_hours = max_age_hours if scratch else max_age_hours * 3
-        soft_cutoff = now - (tier_hours * 3600)
-        hard_cutoff = now - (tier_hours * 3 * 3600)
-
-        try:
-            mtime = entry.stat().st_mtime
-            if mtime > soft_cutoff:
-                continue  # Too recent — skip
-        except Exception:
-            continue
-
-        candidates.append((entry, mtime, mtime <= hard_cutoff))
-
-    if not candidates:
-        _prune_orphaned_branches(repo_root)
-        return
-
-    # ── Phase 2: classify in parallel (read-only git queries) ───────────────
-    # Every check here is a read-only git query against a distinct worktree, so
-    # they are safe to run concurrently (git takes no repo-wide lock for these,
-    # and each has its own index). Verdicts are collected and applied serially
-    # below so removal order and log output stay deterministic.
-    merge_cache = _load_worktree_merge_cache()
-    cache_size_before = len(merge_cache)
-    cache_lock = threading.Lock()
-
-    # Lazy, once-per-sweep ls-remote: answers "is this branch pushed as-is?"
-    # for every tree. Only paid when some tree actually reaches the
-    # pushed-tier check (the TUI path runs this pruner synchronously, so an
-    # unconditional network call would tax every launch; offline it costs
-    # one bounded timeout at most, and None degrades verdicts to preserve).
-    _remote_heads_memo: dict = {}
-    _remote_heads_lock = threading.Lock()
-
-    def _get_remote_heads():
-        with _remote_heads_lock:
-            if "heads" not in _remote_heads_memo:
-                _remote_heads_memo["heads"] = _fetch_remote_branch_heads(
-                    repo_root, timeout=10
-                )
-            return _remote_heads_memo["heads"]
-
-    def _classify(item):
-        entry, mtime, force = item
-        # Never delete real work, regardless of age or tier. Uncommitted
-        # changes and unpushed commits may be a crashed session's in-flight
-        # work; only clean, fully-merged/pushed trees (the scratch trees that
-        # actually cause .worktrees/ bloat) are ever reaped.
-        if _worktree_is_dirty(str(entry), timeout=5):
-            return (entry, mtime, force, "dirty", None)
-        keep_branch = False
-        if _worktree_has_unpushed_commits(str(entry), timeout=5):
-            # Squash-merge escape hatch: commits unreachable from any remote
-            # ref but patch-equivalent to upstream commits are merged work,
-            # not unpushed work.
-            with cache_lock:
-                snapshot = dict(merge_cache)
-            merged = _worktree_commits_all_merged_upstream(
-                str(entry), timeout=30, cache=snapshot
-            )
-            if not merged:
-                # Rebase-merge escape hatch: conflict resolution or follow-up
-                # commits change the patch-id, so cherry misses them — but
-                # GitHub knows the PR merged. Authoritative and cheap (~0.3s,
-                # memoized on (branch, head_sha) so it's paid once per tree).
-                merged = _worktree_branch_pr_merged(
-                    str(entry), timeout=15, cache=snapshot
-                )
-            with cache_lock:
-                merge_cache.update(snapshot)
-            if not merged:
-                # Pushed-branch tier: single-branch fetch refspecs (the
-                # managed-install default) leave pushed PR branches with no
-                # refs/remotes/* entry, so they read as "unpushed" forever
-                # even though every byte is on origin. When the local head
-                # EXACTLY matches the remote branch, the checkout is
-                # redundant: reap the tree, keep the branch ref so the lane
-                # is one `git worktree add` from restored.
-                if _worktree_branch_pushed_exact(str(entry), _get_remote_heads(), timeout=10):
-                    keep_branch = True
-                else:
-                    return (entry, mtime, force, "unpushed", None)
-
-        # Respect git-native session locks. A lock owned by a still-running
-        # hermes process means the worktree is actively in use — never touch
-        # it. A lock whose owning pid is gone is a crashed session's leftover:
-        # unlock it so `git worktree remove --force` (single -f) can reap it,
-        # otherwise dead-locked worktrees pile up indefinitely.
-        lock_state = _worktree_lock_is_live(repo_root, str(entry), timeout=5)
-        if lock_state == "live":
-            return (entry, mtime, force, "locked-live", None)
-        return (entry, mtime, force,
-                "reap-keep-branch" if keep_branch else "reap", lock_state)
-
-    # Bounded pool: enough to hide git's per-process startup latency without
-    # spawning dozens of concurrent git processes on a small machine.
-    workers = max(1, min(8, (os.cpu_count() or 4), len(candidates)))
-    try:
-        if workers > 1:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="hermes-wt-prune"
-            ) as pool:
-                verdicts = list(pool.map(_classify, candidates))
-        else:
-            verdicts = [_classify(c) for c in candidates]
-    except Exception as e:
-        # Never let a pool failure block startup — fall back to serial.
-        logger.debug("Parallel worktree classification failed (%s); serial", e)
-        verdicts = [_classify(c) for c in candidates]
-
-    if len(merge_cache) != cache_size_before:
-        _save_worktree_merge_cache(merge_cache)
-
-    # ── Phase 3: mutate serially (unlock / remove / branch -D) ──────────────
-    # Branch refs deliberately preserved by the pushed tier — must survive
-    # the orphaned-branch pass even though their worktree is now gone.
-    kept_branches: set = set()
-    for entry, mtime, force, verdict, lock_state in verdicts:
-        if verdict == "dirty":
-            if mtime <= stale_work_cutoff:
-                preserved_stale.append(f"{entry.name} (uncommitted changes)")
-            continue
-        if verdict == "unpushed":
-            if mtime <= stale_work_cutoff:
-                preserved_stale.append(f"{entry.name} (unpushed commits)")
-            continue
-        if verdict == "locked-live":
-            logger.debug("Skipping live-locked worktree: %s", entry.name)
-            continue
-
-        if lock_state == "dead":
-            try:
-                subprocess.run(
-                    ["git", "worktree", "unlock", str(entry)],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-                )
-            except Exception as e:
-                logger.debug("Failed to unlock dead worktree %s: %s", entry.name, e)
-
-        # Safe to remove
-        try:
-            branch_result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, cwd=str(entry),
-            )
-            branch = branch_result.stdout.strip()
-
-            remove_result = subprocess.run(
-                ["git", "worktree", "remove", str(entry), "--force"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, cwd=repo_root,
-            )
-            if remove_result.returncode != 0:
-                # Removal failed — keep the branch so any commits stay
-                # reachable rather than orphaning it.
-                logger.debug(
-                    "Failed to remove worktree %s: %s",
-                    entry.name, remove_result.stderr.strip(),
-                )
-                continue
-            if branch and verdict == "reap-keep-branch":
-                # Pushed-tier trees keep their branch ref: the branch IS the
-                # work (an open PR's local anchor) — only the checkout was
-                # redundant. Also shield it from the orphaned-branch pass
-                # below, which would otherwise delete hermes/*- and pr-*
-                # named refs the moment their worktree is gone.
-                kept_branches.add(branch)
-            elif branch:
-                subprocess.run(
-                    ["git", "branch", "-D", branch],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-                )
-            logger.debug("Pruned stale worktree: %s (force=%s)", entry.name, force)
-        except Exception as e:
-            logger.debug("Failed to prune worktree %s: %s", entry.name, e)
-
-    if preserved_stale:
-        logger.warning(
-            "Preserving %d worktree(s) older than 7 days with unmerged work "
-            "(run `hermes worktree prune` to review and reclaim): %s",
-            len(preserved_stale), ", ".join(sorted(preserved_stale)),
-        )
-
-    _prune_orphaned_branches(repo_root, protect=kept_branches)
-
-    # Escalation notice: the startup pass is deliberately conservative, so
-    # installs accumulate preserved trees it can never reclaim. Once the
-    # footprint is clearly a problem (many trees or multi-GB), say so once
-    # per launch and name the attended reclaim command — silence here is how
-    # boxes reach 15GB+ of .worktrees/ without anyone noticing.
-    try:
-        from hermes_cli.worktree_gc import worktrees_summary
-
-        count, size_mb = worktrees_summary(repo_root)
-        if count >= 10 or (size_mb or 0) >= 5120:
-            size_txt = f"{size_mb / 1024:.1f}GB" if size_mb else "unknown size"
-            logger.warning(
-                ".worktrees/ holds %d tree(s) (%s) — run `hermes worktree list` "
-                "to audit and `hermes worktree prune` to reclaim safely.",
-                count, size_txt,
-            )
-    except Exception:
-        pass
-
-
-def _prune_orphaned_branches(repo_root: str, protect: Optional[set] = None) -> None:
-    """Delete local ``hermes/hermes-*`` and ``pr-*`` branches with no worktree.
-
-    These are auto-generated by ``hermes -w`` sessions and PR review
-    workflows respectively.  Once their worktree is gone they serve no
-    purpose and just accumulate.
-
-    ``protect``: branch names to never delete this pass — the pushed-tier
-    reap above removes a tree while deliberately keeping its branch (an open
-    PR's local anchor), and some of those carry ``hermes/hermes-*`` names
-    this sweep would otherwise collect immediately.
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-        if result.returncode != 0:
-            return
-        all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
-    except Exception:
-        return
-
-    # Collect branches that are actively checked out in a worktree
-    active_branches: set = set()
-    try:
-        wt_result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=repo_root,
-        )
-        for line in wt_result.stdout.split("\n"):
-            if line.startswith("branch refs/heads/"):
-                active_branches.add(line.split("branch refs/heads/", 1)[-1].strip())
-    except Exception:
-        return  # Can't determine active branches — bail
-
-    # Also protect the currently checked-out branch and main
-    try:
-        head_result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, cwd=repo_root,
-        )
-        current = head_result.stdout.strip()
-        if current:
-            active_branches.add(current)
-    except Exception:
-        pass
-    active_branches.add("main")
-
-    orphaned = [
-        b for b in all_branches
-        if b not in active_branches
-        and b not in (protect or ())
-        and (b.startswith("hermes/hermes-") or b.startswith("pr-"))
-    ]
-
-    if not orphaned:
-        return
-
-    # Delete in batches
-    for i in range(0, len(orphaned), 50):
-        batch = orphaned[i:i + 50]
-        try:
-            subprocess.run(
-                ["git", "branch", "-D"] + batch,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, cwd=repo_root,
-            )
-        except Exception as e:
-            logger.debug("Failed to prune orphaned branches: %s", e)
-
-    logger.debug("Pruned %d orphaned branches", len(orphaned))
-
 # ============================================================================
 # ASCII Art & Branding
 # ============================================================================
-
-# Color palette (hex colors for Rich markup):
-# - Gold: #FFD700 (headers, highlights)
-# - Amber: #FFBF00 (secondary highlights)
-# - Bronze: #CD7F32 (tertiary elements)
-# - Light: #FFF8DC (text)
-# - Dim: #B8860B (muted text)
 
 # ANSI building blocks for conversation display
 _ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — fallback
 _BOLD = "\033[1m"
 _RST = "\033[0m"
-_STREAM_PAD = ""  # No indent for streamed response text — leading whitespace pollutes
-# terminal copy/paste (every selected line carried 4 spaces).  Matches the
-# response Panel's flush-left padding.
-_STREAM_PARTIAL_PREVIEW_LEN = 60  # tail of an unfinished logical line mirrored
-# into the spinner while streaming (TTFT perception without hard-wrapping)
+# No indent for streamed response text — leading whitespace pollutes terminal
+# copy/paste. Matches the response Panel's flush-left padding.
+_STREAM_PAD = ""
+# Tail of an unfinished logical line mirrored into the spinner while streaming.
+_STREAM_PARTIAL_PREVIEW_LEN = 60
 
 
 def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
-    """Convert a hex color like '#268bd2' to a true-color ANSI escape.
-
-    Auto-remaps known dark-mode-tuned colors to readable light-mode
-    equivalents when running on a light terminal (see
-    _maybe_remap_for_light_mode + _LIGHT_MODE_REMAP).
-    """
+    """Convert '#RRGGBB' to a true-color ANSI escape, remapping dark-tuned colors in light mode."""
     hex_color = _maybe_remap_for_light_mode(hex_color)
     try:
         r = int(hex_color[1:3], 16)
@@ -3114,22 +1424,16 @@ def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Light/dark terminal mode detection.
-#
-# Mirrors ui-tui/src/theme.ts detectLightMode().  Used to decide whether
-# to remap "near-white" skin colors (e.g. #FFF8DC banner_text, #B8860B
-# banner_dim) to darker equivalents that are readable on a light
-# Terminal.app / iTerm2 background.
-#
-# Detection priority:
-#   1. HERMES_LIGHT / HERMES_TUI_LIGHT env (true/false) — explicit override
-#   2. HERMES_TUI_THEME=light|dark — explicit theme
-#   3. HERMES_TUI_BACKGROUND=#RRGGBB — explicit bg hint
-#   4. COLORFGBG env (set by xterm/Konsole/urxvt) — bg slot 7/15 = light
-#   5. OSC 11 query (\x1b]11;?\x1b\\) — ask the terminal directly
-#   6. Default: assume dark (matches the legacy Hermes assumption)
-#
-# Cached after first call so we don't query the terminal repeatedly.
+# Light/dark terminal mode detection (mirrors ui-tui/src/theme.ts detectLightMode()).
+# Decides whether near-white skin colors are remapped to darker equivalents readable
+# on a light Terminal.app / iTerm2 background. Priority:
+#   1. HERMES_LIGHT / HERMES_TUI_LIGHT env (true/false)
+#   2. HERMES_TUI_THEME=light|dark
+#   3. HERMES_TUI_BACKGROUND=#RRGGBB
+#   4. COLORFGBG (xterm/Konsole/urxvt) — bg slot 7/15 = light
+#   5. OSC 11 query — ask the terminal directly
+#   6. Default: dark
+# Cached after first call so the terminal is never queried twice.
 _LIGHT_MODE_CACHE: bool | None = None
 _TRUE_RE = re.compile(r"^(1|true|on|yes|y)$")
 _FALSE_RE = re.compile(r"^(0|false|off|no|n)$")
@@ -3137,6 +1441,7 @@ _LIGHT_DEFAULT_TERM_PROGRAMS = frozenset()  # Apple_Terminal doesn't reliably in
 
 
 def _luminance_from_hex(hex_str: str) -> float | None:
+    """Rec.709 luma in [0, 1] for '#RGB'/'#RRGGBB', or None when malformed."""
     s = (hex_str or "").strip().lstrip("#")
     if len(s) == 3:
         s = "".join(c * 2 for c in s)
@@ -3146,7 +1451,6 @@ def _luminance_from_hex(hex_str: str) -> float | None:
         r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
     except ValueError:
         return None
-    # Rec.709 luma
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
 
 
@@ -3154,31 +1458,18 @@ _DA1_REPLY_RE = re.compile(rb"\x1b\[\?[0-9;]*c")
 
 
 def _query_osc11_background() -> str | None:
-    """Ask the terminal for its background color via OSC 11.
+    """Ask the terminal for its background color via OSC 11; "#RRGGBB" or None.
 
-    Most modern terminals reply with \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\
-    within a few ms.  Returns "#RRGGBB" or None on timeout / non-tty.
+    The query is fenced with a DA1 sentinel (``ESC[c``), as in the Ink TUI's
+    TerminalQuerier: terminals answer in order and virtually all answer DA1, so the
+    DA1 reply proves the terminal already processed (or ignored) our OSC 11. Without
+    the fence a reply arriving after we stop listening leaks into prompt_toolkit's
+    stdin as typed text (the "gibberish ANSI" seen under herdr/WSL bridges/tmux).
 
-    The OSC 11 query is fenced with a DA1 sentinel (\x1b[c) — the same
-    pattern the Ink TUI's TerminalQuerier uses.  Terminals answer queries
-    in order and virtually every terminal answers DA1, so seeing the DA1
-    reply proves the terminal already ignored our OSC 11 (multiplexers
-    like herdr answer DA1 in <1ms while swallowing OSC 11).  Without the
-    fence we can only wait out a blind timeout, and a reply that arrives
-    AFTER we stop listening leaks into prompt_toolkit's stdin as typed
-    text — the "gibberish ANSI characters" seen inside terminal managers
-    that relay color queries slowly (herdr, WSL bridges, some tmux
-    setups).
-
-    Skipped over SSH: the round-trip routinely exceeds our budget, so a
-    late reply lands after prompt_toolkit has grabbed the tty — its payload
-    leaks in as typed text and the BEL terminator reads as Ctrl+G (open
-    editor), trapping the user in a stray editor. Remote sessions fall back
-    to COLORFGBG / env hints / the dark default instead.
-
-    After the main read + TCSAFLUSH, a short drain window (50 ms) catches
-    late-arriving bytes that slipped past the flush — a race observed on VPS
-    and container terminals under load (#40250).
+    Skipped over SSH: the round-trip routinely exceeds the budget, and a late reply's
+    BEL terminator reads as Ctrl+G (open editor). After restoring termios with
+    TCSAFLUSH, a 50 ms drain catches late bytes that slipped past the flush (seen on
+    loaded VPS/container terminals).
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
@@ -3197,24 +1488,14 @@ def _query_osc11_background() -> str | None:
         except Exception:
             return None
         try:
-            # OSC 11 query + DA1 sentinel fence, in one write so no
-            # reordering is possible.
+            # One write so the OSC 11 query and DA1 fence cannot reorder.
             sys.stdout.write("\x1b]11;?\x1b\\\x1b[c")
             sys.stdout.flush()
         except Exception:
             return None
-        # Read until the DA1 fence closes — proof the terminal has processed
-        # everything up to and including our OSC 11, so nothing can arrive
-        # late and leak into prompt_toolkit's stdin.  DA1 is answered by
-        # effectively every terminal ever made (it predates color), and on
-        # real terminals the fence closes in single-digit milliseconds
-        # (herdr: <1ms, xterm/kitty/tmux: <5ms).  The 1s deadline is a
-        # safety net for a hypothetical terminal that ignores DA1 — not a
-        # window we ever expect to wait out.  A slow in-order relay that
-        # delivers the OSC 11 reply at e.g. 400ms is handled correctly:
-        # we keep listening until its DA1 reply follows, so the payload is
-        # consumed here instead of leaking as typed input (the "gibberish
-        # ANSI characters" seen inside terminal managers).
+        # Read until the DA1 fence closes (single-digit ms on real terminals). The 1s
+        # deadline is only a safety net for a terminal that ignores DA1; a slow in-order
+        # relay delivering OSC 11 at 400ms is handled since we wait for its DA1 reply.
         import select
         deadline = time.monotonic() + 1.0
         buf = b""
@@ -3231,30 +1512,24 @@ def _query_osc11_background() -> str | None:
             buf += chunk
             if _DA1_REPLY_RE.search(buf):
                 break
-        # Parse: \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\
+        # Reply: \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\ — components are 1-4 hex digits.
         m = re.search(rb"rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", buf)
         if not m:
             return None
-        # Each component is 1-4 hex digits — normalize to 8-bit
+
         def norm(h: bytes) -> int:
             v = int(h, 16)
-            # Scale to 0-255 based on hex length
             bits = len(h) * 4
             return (v * 255) // ((1 << bits) - 1) if bits else 0
         r, g, b = norm(m.group(1)), norm(m.group(2)), norm(m.group(3))
         return f"#{r:02X}{g:02X}{b:02X}"
     finally:
-        # TCSAFLUSH discards any unread input as it restores the original
-        # attributes — scrubs a slow/partial OSC 11 reply out of the tty
-        # buffer before prompt_toolkit can read it as keystrokes.
+        # TCSAFLUSH discards unread input while restoring — scrubs a slow/partial
+        # OSC 11 reply before prompt_toolkit can read it as keystrokes.
         try:
             termios.tcsetattr(fd, termios.TCSAFLUSH, old)
         except Exception:
             pass
-        # Race guard: on slow terminals (VPS, container, heavy load), the
-        # OSC 11 reply can arrive *after* TCSAFLUSH completes.  Drain any
-        # late bytes with a short post-flush window so they don't leak into
-        # prompt_toolkit's input buffer as typed text.
         try:
             import select as _sel
             drain_deadline = time.monotonic() + 0.05
@@ -3270,30 +1545,16 @@ def _query_osc11_background() -> str | None:
 
 
 def _heal_cooked_mode_drift(fd: int) -> bool:
-    """Detect and heal cooked-mode termios drift on *fd* while prompt_toolkit
-    expects raw mode.
+    """Re-apply raw mode on *fd* when termios drifted back to cooked under prompt_toolkit.
 
-    prompt_toolkit's ``run_in_terminal`` / ``in_terminal`` wraps every
-    "print above the prompt" in a ``cooked_mode()`` context: it flips the
-    tty back to cooked (ICANON/ECHO/ISIG), runs the function, then restores
-    raw mode.  Hermes schedules those windows cross-thread constantly — the
-    background self-review's ``💾`` summary, background process notification
-    drains, curses pickers — and if a restore is ever lost (coroutine
-    cancelled mid-window, racing chains, an external writer touching the
-    shared tty), the terminal is left in cooked mode while the Application
-    still believes it owns raw mode.  The kernel line-buffers every
-    keystroke and the CLI appears to "stop taking input" even though the
-    process is perfectly healthy (observed live: pts in ``icanon echo``
-    while the event loop idled normally in ``ep_poll``).
-
-    This helper is the last line of defense for that whole class: when the
-    lflag has drifted back to cooked, re-apply prompt_toolkit's own raw-mode
-    flag surgery (mirrors ``prompt_toolkit.input.vt100.raw_mode``) in place.
-    Returns True when drift was detected and healed, False when the tty was
-    already raw (or could not be inspected).
-
-    POSIX-only by construction — callers must not invoke this on Windows
-    (no termios; prompt_toolkit uses the win32 console API there instead).
+    prompt_toolkit's ``run_in_terminal`` wraps every print-above-the-prompt in a
+    ``cooked_mode()`` window; Hermes schedules those cross-thread constantly, and if a
+    restore is ever lost (coroutine cancelled mid-window, racing chains, an external
+    writer on the shared tty) the kernel line-buffers every keystroke and the CLI
+    appears to stop taking input while the process is healthy. This is the last line of
+    defense: mirrors ``prompt_toolkit.input.vt100.raw_mode`` flag surgery in place.
+    Returns True when drift was healed; False when already raw or not inspectable.
+    POSIX-only — callers must not invoke this on Windows (no termios).
     """
     try:
         import termios
@@ -3303,12 +1564,9 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
     lflag = attrs[3]
     if not (lflag & (termios.ICANON | termios.ECHO)):
         return False  # still raw — nothing to do
-    # Same surgery as prompt_toolkit.input.vt100.raw_mode._patch_lflag /
-    # _patch_iflag, applied to the *current* attrs so any user settings
-    # (speed, size-independent flags) are preserved.
-    attrs[3] = lflag & ~(
-        termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG
-    )
+    # Same surgery as raw_mode._patch_lflag / _patch_iflag on the *current* attrs so
+    # user settings are preserved.
+    attrs[3] = lflag & ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
     attrs[0] = attrs[0] & ~(
         termios.IXON
         | termios.IXOFF
@@ -3316,8 +1574,7 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
         | termios.INLCR
         | termios.IGNCR
     )
-    # VMIN=1 so reads return per-byte (Solaris-derived systems default to 4;
-    # prompt_toolkit sets this explicitly in raw_mode.__enter__).
+    # VMIN=1 so reads return per-byte (prompt_toolkit sets this in raw_mode.__enter__).
     attrs[6][termios.VMIN] = 1
     try:
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
@@ -3326,79 +1583,64 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
     return True
 
 
+def _detect_light_mode_uncached() -> bool:
+    """The detection ladder documented above; may raise (caller maps errors to dark)."""
+    # 1. Explicit env override
+    for var in ("HERMES_LIGHT", "HERMES_TUI_LIGHT"):
+        v = (os.environ.get(var) or "").strip().lower()
+        if _TRUE_RE.match(v):
+            return True
+        if _FALSE_RE.match(v):
+            return False
+    # 2. Theme hint
+    theme = (os.environ.get("HERMES_TUI_THEME") or "").strip().lower()
+    if theme == "light":
+        return True
+    if theme == "dark":
+        return False
+    # 3. Explicit bg hex
+    bg_lum = _luminance_from_hex(os.environ.get("HERMES_TUI_BACKGROUND") or "")
+    if bg_lum is not None:
+        return bg_lum >= 0.5
+    # 4. COLORFGBG (xterm/Konsole/urxvt)
+    cfgbg = (os.environ.get("COLORFGBG") or "").strip()
+    if cfgbg:
+        last = cfgbg.split(";")[-1] if ";" in cfgbg else cfgbg
+        if last.isdigit():
+            bg = int(last)
+            if bg in {7, 15}:
+                return True
+            if 0 <= bg < 16:
+                return False
+    # 5. OSC 11 query (best-effort, only when stdin/stdout are TTY)
+    bg_color = _query_osc11_background()
+    if bg_color:
+        lum = _luminance_from_hex(bg_color)
+        if lum is not None:
+            return lum >= 0.5
+    # 6. TERM_PROGRAM allow-list (currently empty)
+    tp = (os.environ.get("TERM_PROGRAM") or "").strip()
+    return tp in _LIGHT_DEFAULT_TERM_PROGRAMS
+
+
 def _detect_light_mode() -> bool:
     global _LIGHT_MODE_CACHE
     if _LIGHT_MODE_CACHE is not None:
         return _LIGHT_MODE_CACHE
-    result = False
     try:
-        # 1. Explicit env override
-        for var in ("HERMES_LIGHT", "HERMES_TUI_LIGHT"):
-            v = (os.environ.get(var) or "").strip().lower()
-            if _TRUE_RE.match(v):
-                result = True
-                _LIGHT_MODE_CACHE = result
-                return result
-            if _FALSE_RE.match(v):
-                _LIGHT_MODE_CACHE = result
-                return result
-        # 2. Theme hint
-        theme = (os.environ.get("HERMES_TUI_THEME") or "").strip().lower()
-        if theme == "light":
-            result = True
-            _LIGHT_MODE_CACHE = result
-            return result
-        if theme == "dark":
-            _LIGHT_MODE_CACHE = result
-            return result
-        # 3. Explicit bg hex
-        bg_hint = os.environ.get("HERMES_TUI_BACKGROUND") or ""
-        bg_lum = _luminance_from_hex(bg_hint)
-        if bg_lum is not None:
-            result = bg_lum >= 0.5
-            _LIGHT_MODE_CACHE = result
-            return result
-        # 4. COLORFGBG (xterm/Konsole/urxvt)
-        cfgbg = (os.environ.get("COLORFGBG") or "").strip()
-        if cfgbg:
-            last = cfgbg.split(";")[-1] if ";" in cfgbg else cfgbg
-            if last.isdigit():
-                bg = int(last)
-                if bg in {7, 15}:
-                    result = True
-                    _LIGHT_MODE_CACHE = result
-                    return result
-                if 0 <= bg < 16:
-                    _LIGHT_MODE_CACHE = result
-                    return result
-        # 5. OSC 11 query (best-effort, only when stdin/stdout are TTY)
-        bg_color = _query_osc11_background()
-        if bg_color:
-            lum = _luminance_from_hex(bg_color)
-            if lum is not None:
-                result = lum >= 0.5
-                _LIGHT_MODE_CACHE = result
-                return result
-        # 6. TERM_PROGRAM allow-list (currently empty)
-        tp = (os.environ.get("TERM_PROGRAM") or "").strip()
-        if tp in _LIGHT_DEFAULT_TERM_PROGRAMS:
-            result = True
+        result = _detect_light_mode_uncached()
     except Exception:
         result = False
     _LIGHT_MODE_CACHE = result
     return result
 
 
-# Light-mode equivalents of skin colors that are unreadable on cream
-# Terminal.app backgrounds.  Used by _SkinAwareAnsi to remap colors
-# at resolution time when light mode is detected.
-#
-# IMPORTANT: only remap colors that are used as STANDALONE foregrounds
-# on the terminal's background.  Don't remap colors that are paired
-# with a dark bg (e.g. status bar text on bg:#1a1a2e) — those would
-# become invisible the OTHER direction (dark gray on dark navy).
+# Light-mode equivalents of skin colors unreadable on cream Terminal.app backgrounds,
+# applied by _SkinAwareAnsi at resolution time.
+# IMPORTANT: only remap colors used as STANDALONE foregrounds on the terminal
+# background. Colors paired with a dark bg (status bar text on bg:#1a1a2e) would
+# become invisible the OTHER direction — hence #C0C0C0/#888888/#555555/#8B8682 are skipped.
 _LIGHT_MODE_REMAP: dict[str, str] = {
-    # Original (dark-mode) -> Light-mode replacement (darker, readable)
     "#FFF8DC": "#1A1A1A",   # cornsilk -> near-black
     "#FFD700": "#9A6B00",   # gold -> dark goldenrod (readable on cream)
     "#FFBF00": "#8A5A00",   # amber -> dark amber
@@ -3411,33 +1653,22 @@ _LIGHT_MODE_REMAP: dict[str, str] = {
     "#FFF0D4": "#1A1A1A",
     "#CD7F32": "#8A4F1A",   # bronze -> darker bronze
     "#FFEFB5": "#3A2A00",
-    # NOTE: skipping #C0C0C0/#888888/#555555/#8B8682 — those are
-    # status-bar foregrounds paired with dark navy bg, where dark
-    # remap values would become invisible.
 }
-
-
-def _maybe_remap_for_light_mode(hex_color: str) -> str:
-    """If we're in light mode, remap a dark-mode-tuned color to a
-    higher-contrast equivalent.  No-op in dark mode."""
-    if not _detect_light_mode():
-        return hex_color
-    if not hex_color or not hex_color.startswith("#"):
-        return hex_color
-    # Case-insensitive lookup
-    upper = hex_color.upper()
-    if upper in _LIGHT_MODE_REMAP_UPPER:
-        return _LIGHT_MODE_REMAP_UPPER[upper]
-    return hex_color
-
-
 # Pre-uppercased lookup table for case-insensitive remapping
 _LIGHT_MODE_REMAP_UPPER = {k.upper(): v for k, v in _LIGHT_MODE_REMAP.items()}
 
 
+def _maybe_remap_for_light_mode(hex_color: str) -> str:
+    """In light mode, remap a dark-mode-tuned color to a higher-contrast equivalent. No-op in dark mode."""
+    if not _detect_light_mode():
+        return hex_color
+    if not hex_color or not hex_color.startswith("#"):
+        return hex_color
+    return _LIGHT_MODE_REMAP_UPPER.get(hex_color.upper(), hex_color)
+
+
 def _install_skin_light_mode_hook() -> None:
-    """Wrap SkinConfig.get_color at import time so EVERY skin color read goes
-    through the light-mode remap.  Idempotent."""
+    """Wrap SkinConfig.get_color so EVERY skin color read goes through the light-mode remap. Idempotent."""
     try:
         from hermes_cli.skin_engine import SkinConfig  # type: ignore[import]
     except Exception:
@@ -3460,9 +1691,8 @@ def _install_skin_light_mode_hook() -> None:
 _install_skin_light_mode_hook()
 
 
-# Prime the light-mode detection cache early (at module load) when
-# we're running interactively so OSC 11 happens before pt grabs the
-# tty.  Skip for non-tty contexts (subagents, gateway, tests).
+# Prime the light-mode cache at module load when interactive, so OSC 11 happens
+# before prompt_toolkit grabs the tty. Skipped for non-tty contexts (subagents, gateway, tests).
 try:
     if sys.stdin.isatty() and sys.stdout.isatty():
         _detect_light_mode()
@@ -3470,12 +1700,11 @@ except Exception:
     pass
 
 
-
 class _SkinAwareAnsi:
-    """Lazy ANSI escape that resolves from the skin engine on first use.
+    """Lazy ANSI escape resolved from the skin engine on first use.
 
-    Acts as a string in f-strings and concatenation.  Call ``.reset()`` to
-    force re-resolution after a ``/skin`` switch.
+    Acts as a string in f-strings and concatenation. ``.reset()`` forces
+    re-resolution after a ``/skin`` switch.
     """
 
     def __init__(self, skin_key: str, fallback_hex: str = "#FFD700", *, bold: bool = False):
@@ -3508,30 +1737,27 @@ class _SkinAwareAnsi:
 
 
 _ACCENT = _SkinAwareAnsi("response_border", "#FFD700", bold=True)
-# Use ANSI dim+italic attributes (\x1b[2;3m) instead of a hardcoded
-# hex color so dim/thinking text inherits the terminal's default
-# foreground color and stays readable in both light and dark
-# Terminal.app modes.  Hardcoded skin colors like #B8860B
-# (dark goldenrod) become invisible against light cream backgrounds.
+# ANSI dim+italic attributes instead of a hardcoded hex so dim/thinking text inherits
+# the terminal's default foreground and stays readable in light and dark modes.
 _DIM = "\x1b[2;3m"
 
 
-def _b(s: str) -> str:
-    """Bold if stdout is a real TTY; plain text otherwise (slash-worker safe)."""
-    import sys as _sys
+def _tty_wrap(s: str, sgr: str) -> str:
+    """Wrap *s* in an SGR attribute if stdout is a real TTY; plain text otherwise (slash-worker safe)."""
     try:
-        return f"\x1b[1m{s}\x1b[0m" if _sys.stdout.isatty() else str(s)
+        return f"{sgr}{s}\x1b[0m" if sys.stdout.isatty() else str(s)
     except Exception:
         return str(s)
+
+
+def _b(s: str) -> str:
+    """Bold if stdout is a real TTY; plain text otherwise."""
+    return _tty_wrap(s, "\x1b[1m")
 
 
 def _d(s: str) -> str:
     """Dim-italic if stdout is a real TTY; plain text otherwise."""
-    import sys as _sys
-    try:
-        return f"\x1b[2;3m{s}\x1b[0m" if _sys.stdout.isatty() else str(s)
-    except Exception:
-        return str(s)
+    return _tty_wrap(s, "\x1b[2;3m")
 
 
 def _accent_hex() -> str:
@@ -3544,27 +1770,19 @@ def _accent_hex() -> str:
 
 
 def _rich_text_from_ansi(text: str) -> _RichText:
-    """Safely render assistant/tool output that may contain ANSI escapes.
-
-    Using Rich Text.from_ansi preserves literal bracketed text like
-    ``[not markup]`` while still interpreting real ANSI color codes.
-    """
+    """Render output that may contain ANSI escapes; literal ``[not markup]`` survives."""
     return _RichText.from_ansi(text or "")
 
 
 def _strip_markdown_syntax(text: str) -> str:
     """Best-effort markdown marker removal for plain-text display."""
     plain = _rich_text_from_ansi(text or "").plain
-    # Avoid stripping cron-style expressions like "* * * * *" as if they were
-    # Markdown horizontal rules. CommonMark treats three or more "*" as an HR,
-    # but in Hermes output it's common to display cron schedules verbatim.
-    #
-    # Keep the behavior for "-" / "_" HR markers, and only strip "*" HR lines
-    # when there are exactly 3 asterisks (with optional whitespace).
+    # HR markers: "-"/"_" runs of 3+, but "*" only when exactly 3 — Hermes output
+    # commonly shows cron schedules like "* * * * *" verbatim.
     plain = re.sub(r"^\s{0,3}(?:[-_]\s*){3,}$", "", plain, flags=re.MULTILINE)
     plain = re.sub(r"^\s{0,3}(?:\*\s*){3}\s*$", "", plain, flags=re.MULTILINE)
     plain = re.sub(r"^\s{0,3}#{1,6}\s+", "", plain, flags=re.MULTILINE)
-    # Preserve blockquotes, lists, and checkboxes because they carry structure.
+    # Blockquotes, lists, and checkboxes are preserved because they carry structure.
     plain = re.sub(r"(```+|~~~+)", "", plain)
     plain = re.sub(r"`([^`]*)`", r"\1", plain)
     plain = re.sub(r"!\[([^\]]*)\]\([^\)]*\)", r"\1", plain)
@@ -3573,8 +1791,7 @@ def _strip_markdown_syntax(text: str) -> str:
     plain = re.sub(r"(?<!\w)___([^_]+)___(?!\w)", r"\1", plain)
     plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", plain)
     plain = re.sub(r"(?<!\w)__([^_]+)__(?!\w)", r"\1", plain)
-    # Only strip `*emphasis*` markers when the inner text is non-whitespace.
-    # This avoids corrupting cron expressions like "* * * * *".
+    # `*emphasis*` only when the inner text is non-whitespace (cron expressions again).
     plain = re.sub(r"\*([^\s*][^*]*?[^\s*])\*", r"\1", plain)
     plain = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", plain)
     plain = re.sub(r"~~([^~]+)~~", r"\1", plain)
@@ -3582,18 +1799,14 @@ def _strip_markdown_syntax(text: str) -> str:
     return plain.strip("\n")
 
 
-_WINDOWS_PATH_WITH_DOT_SEGMENT_RE = re.compile(
-    r"(?i)(?:\b[a-z]:\\|\\\\)[^\s`]*\\\.[^\s`]*"
-)
+_WINDOWS_PATH_WITH_DOT_SEGMENT_RE = re.compile(r"(?i)(?:\b[a-z]:\\|\\\\)[^\s`]*\\\.[^\s`]*")
 
 
 def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
-    r"""Keep Windows path separators before hidden directories in Markdown.
+    r"""Double the ``\`` before hidden directories in Windows-path-looking tokens.
 
-    CommonMark treats ``\.`` as an escaped literal dot, so Rich Markdown would
-    render ``D:\repo\.ai`` as ``D:\repo.ai``.  Doubling only that separator
-    inside Windows path-looking tokens preserves the path without changing
-    ordinary markdown escapes like ``1\. not a list``.
+    CommonMark treats ``\.`` as an escaped dot, so Rich would render ``D:\repo\.ai`` as
+    ``D:\repo.ai``. Ordinary escapes like ``1\. not a list`` are left alone.
     """
     if "\\." not in text:
         return text
@@ -3604,57 +1817,35 @@ def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
     return _WINDOWS_PATH_WITH_DOT_SEGMENT_RE.sub(_protect, text)
 
 
-def _terminal_width_for_streaming() -> int:
-    """Display cells available inside the streamed response box.
-
-    The streaming path prefixes every line with ``_STREAM_PAD`` (now
-    empty — flush-left so copy/paste stays clean) inside an open
-    response panel.  The realigner uses this number as its budget when
-    deciding whether to keep a horizontal table or fall back to
-    vertical key-value rendering.  We subtract a small safety margin
-    so terminal-resize races don't push a borderline table into
-    mid-cell soft-wrap.
-    """
-
+def _terminal_columns() -> int:
     try:
-        cols = shutil.get_terminal_size((80, 24)).columns
+        return shutil.get_terminal_size((80, 24)).columns
     except Exception:
-        cols = 80
-    return max(20, cols - len(_STREAM_PAD) - 2)
+        return 80
+
+
+def _terminal_width_for_streaming() -> int:
+    """Display cells available inside the streamed response box (small margin for resize races)."""
+    return max(20, _terminal_columns() - len(_STREAM_PAD) - 2)
 
 
 def _render_final_assistant_content(text: str, mode: str = "render"):
     """Render final assistant content as markdown, stripped text, or raw text."""
     from rich.markdown import Markdown
 
-    # Estimate the cells available to the rendered table.  The Panel
-    # used by the background-task / final-response path renders
-    # flush-left (no horizontal padding — leading spaces pollute
-    # terminal copy/paste) with 1 cell of border on each side.
-    # Subtract a small safety margin so resize races don't push a
-    # borderline table into soft-wrap.
-    try:
-        cols = shutil.get_terminal_size((80, 24)).columns
-    except Exception:
-        cols = 80
-    panel_width = max(20, cols - 4)
+    # The final-response Panel renders flush-left with 1 border cell each side; small
+    # safety margin so resize races don't push a borderline table into soft-wrap.
+    panel_width = max(20, _terminal_columns() - 4)
 
     normalized_mode = str(mode or "render").strip().lower()
     if normalized_mode == "strip":
-        # Strip first — inline markdown inside cells (`code`, **bold**, ~~strike~~)
-        # changes cell display width — then re-align so the column padding
-        # reflects the final visible text, not the marker-decorated source.
-        return _RichText(
-            realign_markdown_tables(_strip_markdown_syntax(text), panel_width)
-        )
+        # Strip first (inline markdown changes cell width), then re-align padding.
+        return _RichText(realign_markdown_tables(_strip_markdown_syntax(text), panel_width))
     if normalized_mode == "raw":
         return _rich_text_from_ansi(text or "")
 
-    # `render` mode: Rich's Markdown renderer handles CJK width via wcwidth
-    # internally, so a pre-pass through realign_markdown_tables would just
-    # rewrite already-correct padding.  But on the way in we still want to
-    # normalise model-emitted under-padded tables so that mid-render fallbacks
-    # (narrow panels, etc.) at least see consistent input.
+    # Rich handles CJK width itself, but normalising model-emitted under-padded tables
+    # on the way in gives mid-render fallbacks (narrow panels) consistent input.
     plain = _rich_text_from_ansi(text or "").plain
     plain = _preserve_windows_dot_segments_for_markdown(plain)
     plain = realign_markdown_tables(plain, panel_width)
@@ -3662,13 +1853,11 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
 
 
 def _post_stream_transform_output(response: str, result: dict | None) -> str:
-    """Return text that still needs display after a streamed response transform.
+    """Text still needing display after a streamed response transform.
 
-    A transform hook is allowed to replace the final response, not merely append
-    to it. When the transformed text retains the streamed response as a prefix,
-    printing only its suffix avoids duplicating the already-rendered body. A
-    replacement has no safe suffix, so deliberately print the complete final
-    response rather than silently dropping it.
+    When the transformed text keeps the streamed response as a prefix, only the suffix
+    is printed; a full replacement has no safe suffix, so the complete final response
+    is printed rather than silently dropped.
     """
     if not result or not result.get("response_transformed"):
         return ""
@@ -3717,18 +1906,19 @@ def _suspend_output_history():
         _OUTPUT_HISTORY_SUPPRESSED = old_value
 
 
+def _output_history_recording() -> bool:
+    return _OUTPUT_HISTORY_ENABLED and not _OUTPUT_HISTORY_REPLAYING and not _OUTPUT_HISTORY_SUPPRESSED
+
+
 def _record_output_history_entry(entry) -> None:
-    if not _OUTPUT_HISTORY_ENABLED or _OUTPUT_HISTORY_REPLAYING or _OUTPUT_HISTORY_SUPPRESSED:
-        return
-    _OUTPUT_HISTORY.append(entry)
+    if _output_history_recording():
+        _OUTPUT_HISTORY.append(entry)
 
 
 def _record_output_history(text: str) -> None:
-    if not _OUTPUT_HISTORY_ENABLED or _OUTPUT_HISTORY_REPLAYING or _OUTPUT_HISTORY_SUPPRESSED:
+    if not _output_history_recording():
         return
     normalized = str(text).replace("\r", "").rstrip("\n")
-    if not normalized:
-        return
     for line in normalized.splitlines():
         _record_output_history_entry(line)
 
@@ -3753,12 +1943,8 @@ def _replay_output_history() -> None:
                 lines = [entry]
             rendered_lines.extend(str(line) for line in lines)
         if rendered_lines:
-            # Replay after resize can contain hundreds of history lines. A
-            # per-line prompt_toolkit print forces one synchronous terminal I/O
-            # and redraw cycle per line, which users perceive as a waterfall of
-            # old output. Keep the existing history contents unchanged, but
-            # emit the replay as one ANSI payload so resize recovery does a
-            # single prompt_toolkit print/redraw.
+            # One ANSI payload, not per-line prints: each prompt_toolkit print forces a
+            # synchronous terminal I/O + redraw, which reads as a waterfall of old output.
             _pt_print(_PT_ANSI("\n".join(rendered_lines)))
     except Exception:
         pass
@@ -3766,21 +1952,27 @@ def _replay_output_history() -> None:
         _OUTPUT_HISTORY_REPLAYING = False
 
 
+def _pt_print_ansi(text: str) -> None:
+    """``_pt_print(ANSI(text))``, falling back to ``print`` when stdout is not a real console."""
+    try:
+        _pt_print(_PT_ANSI(text))
+    except Exception:
+        # prompt_toolkit raises NoConsoleScreenBufferError (Windows) / OSError when
+        # stdout is e.g. a subprocess worker's log file.
+        try:
+            print(text)
+        except Exception:
+            pass
+
+
 def _cprint(text: str):
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
-    Raw ANSI escapes written via print() are swallowed by patch_stdout's
-    StdoutProxy.  Routing through print_formatted_text(ANSI(...)) lets
-    prompt_toolkit parse the escapes and render real colors.
-
-    When called from a background thread while a prompt_toolkit
-    ``Application`` is running (the common case for the self-improvement
-    background review's ``💾 …`` summary, curator summaries, and other
-    bg-thread emissions), a direct ``_pt_print`` races with the input
-    area's redraw and the line can end up visually buried behind the
-    prompt.  Route those cases through ``run_in_terminal`` via
-    ``loop.call_soon_threadsafe``, which pauses the input area, prints
-    the line above it, and redraws the prompt cleanly.
+    Raw ANSI written via print() is swallowed by patch_stdout's StdoutProxy; routing
+    through print_formatted_text(ANSI(...)) renders real colors. From a background
+    thread while an Application is running (self-review summaries, curator output), a
+    direct print races the input area's redraw and can end up buried behind the
+    prompt — those cases go through ``run_in_terminal`` via ``call_soon_threadsafe``.
     """
     _record_output_history(text)
 
@@ -3790,75 +1982,45 @@ def _cprint(text: str):
         _pt_print(_PT_ANSI(text))
         return
 
-    app = None
     try:
         app = get_app_or_none()
     except Exception:
         app = None
 
-    # No active app, or we're already on the app's main thread: the
-    # direct prompt_toolkit print is safe and matches existing behavior
-    # (spinner frames, streamed tokens, tool activity prefixes, …).
+    # No active app: the direct print matches existing behavior (spinner frames,
+    # streamed tokens, tool activity prefixes, …).
     if app is None or not getattr(app, "_is_running", False):
-        try:
-            _pt_print(_PT_ANSI(text))
-        except Exception:
-            # Fallback when stdout is not a real console (e.g. subprocess
-            # worker logging to a file). prompt_toolkit raises
-            # NoConsoleScreenBufferError (Windows) or OSError (other).
-            try:
-                print(text)
-            except Exception:
-                pass
+        _pt_print_ansi(text)
         return
+
+    import asyncio as _asyncio
 
     try:
         loop = app.loop  # type: ignore[attr-defined]
     except Exception:
         loop = None
-    if loop is None:
-        _pt_print(_PT_ANSI(text))
-        return
-
-    import asyncio as _asyncio
     try:
-        # Use get_running_loop() instead of get_event_loop() to avoid the
-        # DeprecationWarning / RuntimeWarning emitted by Python 3.10+ when
-        # get_event_loop() is called from a thread that has no current event
-        # loop set (e.g. the process_loop background thread).  Fixes #19285.
+        # get_running_loop(), not get_event_loop(): the latter warns from threads with
+        # no current loop (e.g. the process_loop background thread).
         current_loop = _asyncio.get_running_loop()
-    except RuntimeError:
-        current_loop = None
     except Exception:
         current_loop = None
-    # Same thread as the app's loop → safe to print directly.
-    if current_loop is loop and loop.is_running():
+    # No loop, or same thread as the app's loop → safe to print directly.
+    if loop is None or (current_loop is loop and loop.is_running()):
         _pt_print(_PT_ANSI(text))
         return
 
-    # Cross-thread emission: ask the app's event loop to schedule a
-    # ``run_in_terminal`` that wraps ``_pt_print``.  This hides the
-    # prompt, prints, and redraws.  Fire-and-forget — if scheduling
-    # fails we fall back to a direct print so the line isn't lost.
     def _schedule():
-        # run_in_terminal() may return either:
-        #   • a coroutine / Future (prompt_toolkit ≥ 3.0) — must be scheduled
-        #     via ensure_future so the coroutine is actually awaited; calling
-        #     it bare would leave it unawaited and silently drop the output
-        #     (fixes #23185 Bug A).
-        #   • None (some mocks / older PT builds) — just call the inner
-        #     function directly since PT already executed it synchronously.
-        # Do NOT fall back to a bare _pt_print when ensure_future raises,
-        # because run_in_terminal already invoked the lambda in that case
-        # (the mock path), which would double-print the line.
+        # run_in_terminal() returns a coroutine/Future (pt >= 3.0) that must be
+        # scheduled or the output is silently dropped, or None (mocks / older PT) when
+        # it already ran the callable synchronously. Never fall back to a bare
+        # _pt_print when ensure_future raises — the mock path already printed.
         try:
             import asyncio as _aio
             import inspect as _inspect
             coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
             if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
                 _aio.ensure_future(coro)
-            # else: run_in_terminal ran the lambda synchronously; nothing more
-            # to do (double-scheduling would print twice).
         except Exception:
             pass  # best-effort; the line may already have been printed
 
@@ -3874,18 +2036,10 @@ def _cprint(text: str):
 def _prepend_note_to_message(message, note: str):
     """Prepend a one-shot system-style note to a user message.
 
-    ``message`` is normally a plain string, but when the user attaches an image
-    to a vision-capable model it becomes a list of OpenAI-style content parts
-    (text + ``image_url`` blocks). Naively doing ``note + "\\n\\n" + message``
-    then raises ``TypeError: can only concatenate str (not "list") to str`` —
-    e.g. running ``/model ...`` (which queues a model-switch note) and then
-    sending a pasted image in the same turn.
-
-    Returns the message with ``note`` prepended:
-      * ``str``  → ``f"{note}\\n\\n{message}"`` (just ``note`` when empty)
-      * ``list`` → note folded into the first text part, or inserted as a new
-        leading ``{"type": "text"}`` part when there is no text part.
-    Unknown shapes are returned unchanged (fail-open).
+    ``message`` is a str, or a list of OpenAI-style content parts when an image is
+    attached (naive ``note + message`` then raises TypeError — e.g. ``/model`` followed
+    by a pasted image). For lists the note is folded into the first text part or
+    inserted as a leading text part. Unknown shapes are returned unchanged.
     """
     note = str(note or "").strip()
     if not note:
@@ -3901,40 +2055,40 @@ def _prepend_note_to_message(message, note: str):
                 merged["text"] = f"{note}\n\n{text}" if text else note
                 parts[i] = merged
                 return parts
-        # No text part (image-only) — insert the note as a leading text block.
         return [{"type": "text", "text": note}, *parts]
     return message
 
 
-def _cli_visible_print(text: str = "") -> None:
-    """Print normally unless prompt_toolkit owns the live terminal.
-
-    Bare ``print()`` output is swallowed by ``patch_stdout`` while an
-    interactive ``Application`` is running, so ``/sessions`` and ``/history``
-    would render nothing. Route through ``_cprint`` (prompt_toolkit-native)
-    in that case, and fall back to ``print`` otherwise.
-    """
+def _pt_app_is_running() -> bool:
+    """Whether a prompt_toolkit Application currently owns the live terminal."""
     try:
         from prompt_toolkit.application import get_app_or_none
         app = get_app_or_none()
     except Exception:
-        app = None
+        return False
+    return app is not None and bool(getattr(app, "_is_running", False))
 
-    if app is not None and getattr(app, "_is_running", False):
+
+def _cli_visible_print(text: str = "") -> None:
+    """Print normally unless prompt_toolkit owns the live terminal (then route via ``_cprint``).
+
+    Bare ``print()`` is swallowed by ``patch_stdout`` while an Application runs, so
+    ``/sessions`` and ``/history`` would render nothing.
+    """
+    if _pt_app_is_running():
         _cprint(text)
     else:
         print(text)
 
 
 # ---------------------------------------------------------------------------
-# File-drop / local attachment detection — extracted as pure helpers for tests.
+# File-drop / local attachment detection — pure helpers.
 # ---------------------------------------------------------------------------
 
 _IMAGE_EXTENSIONS = frozenset({
     '.png', '.jpg', '.jpeg', '.gif', '.webp',
     '.bmp', '.tiff', '.tif', '.svg', '.ico',
 })
-
 
 
 def _termux_example_image_path(filename: str = "cat.png") -> str:
@@ -3945,8 +2099,7 @@ def _termux_example_image_path(filename: str = "cat.png") -> str:
         "/storage/emulated/0",
         "/storage/self/primary",
     ]
-    # Termux/Android roots are POSIX paths — join with literal forward
-    # slashes so the hint stays correct even when this renders on Windows.
+    # Android roots are POSIX paths — literal "/" so the hint is right even on Windows.
     for root in candidates:
         if os.path.isdir(root):
             return f"{root}/Pictures/{filename}"
@@ -4007,7 +2160,7 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     if not token:
         return None
 
-    if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
+    if token[0] == token[-1] and token[0] in {'"', "'"}:
         token = token[1:-1].strip()
     token = token.replace('\\ ', ' ')
     if not token:
@@ -4048,17 +2201,9 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     except Exception:
         resolved = path
 
-    # Path.exists() / is_file() invoke os.stat(), which raises OSError when
-    # the candidate string is structurally invalid as a path — most commonly
-    # ENAMETOOLONG (errno 63 on macOS, errno 36 on Linux) when the input
-    # exceeds NAME_MAX (typically 255 bytes). This bites pasted slash
-    # commands like `/goal <long prose>` because `_detect_file_drop()`'s
-    # `starts_like_path` prefilter accepts any input starting with `/`,
-    # then this resolver tries to stat it before short-circuiting on the
-    # slash-command path. Without this guard the OSError propagates up to
-    # the process_loop catch-all in _interactive_loop and the user input
-    # is silently lost (the warning ends up in agent.log but the user sees
-    # nothing — the prompt just hangs).
+    # os.stat raises OSError (ENAMETOOLONG) for structurally invalid paths — e.g. a
+    # pasted `/goal <long prose>` that passed _detect_file_drop's `/` prefilter. Without
+    # this guard the error reaches process_loop and the input is silently lost.
     try:
         if not resolved.exists() or not resolved.is_file():
             return None
@@ -4067,24 +2212,15 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     return resolved
 
 
-
+def _file_drop_result(path: Path, remainder: str) -> dict:
+    return {"path": path, "is_image": path.suffix.lower() in _IMAGE_EXTENSIONS, "remainder": remainder}
 
 
 def _detect_file_drop(user_input: str) -> "dict | None":
-    """Detect if *user_input* starts with a real local file path.
+    """Detect a dragged/pasted local file path at the start of *user_input*.
 
-    This catches dragged/pasted paths before they are mistaken for slash
-    commands, and also supports Termux-friendly paths like ``~/storage/...``.
-
-    Returns a dict on match::
-
-        {
-            "path": Path,          # resolved file path
-            "is_image": bool,      # True when suffix is a known image type
-            "remainder": str,      # any text after the path
-        }
-
-    Returns ``None`` when the input is not a real file path.
+    Returns ``{"path": Path, "is_image": bool, "remainder": str}`` or None. Catches
+    paths before they are mistaken for slash commands (incl. Termux ``~/storage/...``).
     """
     if not isinstance(user_input, str):
         return None
@@ -4093,33 +2229,20 @@ def _detect_file_drop(user_input: str) -> "dict | None":
     if not stripped:
         return None
 
+    # Optionally quoted; then /, ~, ./, ../, a Windows drive prefix, or (unquoted) file://.
+    quoted = stripped[:1] in {"'", '"'}
+    unquoted = stripped[1:] if quoted else stripped
     starts_like_path = (
-        stripped.startswith("/")
-        or stripped.startswith("~")
-        or stripped.startswith("./")
-        or stripped.startswith("../")
-        or stripped.startswith("file://")
-        or (len(stripped) >= 3 and stripped[1] == ":" and stripped[2] in {"\\", "/"} and stripped[0].isalpha())
-        or stripped.startswith('"/')
-        or stripped.startswith('"~')
-        or stripped.startswith("'/")
-        or stripped.startswith("'~")
-        or stripped.startswith('"./')
-        or stripped.startswith('"../')
-        or stripped.startswith("'./")
-        or stripped.startswith("'../")
-        or (len(stripped) >= 4 and stripped[0] in {"'", '"'} and stripped[2] == ":" and stripped[3] in {"\\", "/"} and stripped[1].isalpha())
+        unquoted.startswith(("/", "~", "./", "../"))
+        or (not quoted and unquoted.startswith("file://"))
+        or (len(unquoted) >= 3 and unquoted[1] == ":" and unquoted[2] in {"\\", "/"} and unquoted[0].isalpha())
     )
     if not starts_like_path:
         return None
 
     direct_path = _resolve_attachment_path(stripped)
     if direct_path is not None:
-        return {
-            "path": direct_path,
-            "is_image": direct_path.suffix.lower() in _IMAGE_EXTENSIONS,
-            "remainder": "",
-        }
+        return _file_drop_result(direct_path, "")
 
     first_token, remainder = _split_path_input(stripped)
     drop_path = _resolve_attachment_path(first_token)
@@ -4134,20 +2257,11 @@ def _detect_file_drop(user_input: str) -> "dict | None":
                 break
     if drop_path is None:
         return None
-
-    return {
-        "path": drop_path,
-        "is_image": drop_path.suffix.lower() in _IMAGE_EXTENSIONS,
-        "remainder": remainder,
-    }
+    return _file_drop_result(drop_path, remainder)
 
 
 def _format_image_attachment_badges(attached_images: list[Path], image_counter: int, width: int | None = None) -> str:
-    """Format the attached-image badge row for the interactive CLI.
-
-    Narrow terminals such as Termux should get a compact summary that fits on a
-    single row, while wider terminals can show the classic per-image badges.
-    """
+    """Attached-image badge row: compact summary on narrow terminals (Termux), per-image badges otherwise."""
     if not attached_images:
         return ""
 
@@ -4169,10 +2283,7 @@ def _format_image_attachment_badges(attached_images: list[Path], image_counter: 
         return f"[📎 {first}] [+{extra}]"
 
     base = image_counter - len(attached_images) + 1
-    return " ".join(
-        f"[📎 Image #{base + i}]"
-        for i in range(len(attached_images))
-    )
+    return " ".join(f"[📎 Image #{base + i}]" for i in range(len(attached_images)))
 
 
 def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
@@ -4180,10 +2291,9 @@ def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
     return not pasted_text.strip()
 
 
-def _strip_leaked_bracketed_paste_wrappers(text: str) -> str:
-    from hermes_cli.input_sanitize import strip_leaked_bracketed_paste_wrappers
-
-    return strip_leaked_bracketed_paste_wrappers(text)
+_strip_leaked_bracketed_paste_wrappers = _lazy_shim(
+    "hermes_cli.input_sanitize", "strip_leaked_bracketed_paste_wrappers", "_strip_leaked_bracketed_paste_wrappers"
+)
 
 
 def _hermes_call_output_screen_diff(
@@ -4204,13 +2314,11 @@ def _hermes_call_output_screen_diff(
 ):
     """Call prompt_toolkit ``_output_screen_diff`` with Hermes resize guards.
 
-    1. Inflate ``previous_screen.height`` when the new screen is taller so pt
-       skips the reserve-vertical-space cursor move that stamps chrome into
-       scrollback (pt #29 / Hermes #26137).
-    2. On AttributeError/TypeError from a corrupt previous paint buffer
-       (classic after tmux attach with same width), retry once with
-       ``previous_screen=None`` so pt first-paints cleanly instead of crashing
-       the event loop with ``'cell' object has no attribute 'char'``.
+    1. Inflate ``previous_screen.height`` when the new screen is taller so pt skips
+       the reserve-vertical-space cursor move that stamps chrome into scrollback.
+    2. On AttributeError/TypeError from a corrupt previous paint buffer (classic after
+       tmux attach at the same width), retry once with ``previous_screen=None`` so pt
+       first-paints cleanly instead of crashing the event loop.
     """
     try:
         if previous_screen is not None and hasattr(previous_screen, "height") and previous_screen.height < screen.height:
@@ -4240,18 +2348,11 @@ def _hermes_call_output_screen_diff(
 def _apply_bracketed_paste_timeout_patch() -> None:
     """Patch prompt_toolkit to recover from torn bracketed-paste sequences.
 
-    prompt_toolkit's ``Vt100Parser.feed()`` buffers all input while waiting
-    for the ESC[201~ end mark.  If a terminal drops that end mark (terminal
-    race, torn write, SSH glitch, macOS sleep/wake), input appears frozen
-    forever — the only recovery used to be killing the tab.
-
-    This patch wraps ``Vt100Parser.feed`` so that bracketed-paste mode
-    flushes buffered content as a normal ``BracketedPaste`` event after
-    ``_BP_TIMEOUT_S`` seconds without an end marker, then resumes normal
-    parsing.  See upstream issue #16263.
-
-    The patch is idempotent — repeated calls are no-ops via the
-    ``_hermes_bp_timeout_patched`` sentinel on the module.
+    ``Vt100Parser.feed()`` buffers all input while waiting for the ESC[201~ end mark;
+    if the terminal drops it (race, torn write, SSH glitch, sleep/wake) input appears
+    frozen forever. The wrapper flushes the buffer as a normal ``BracketedPaste`` event
+    after ``_BP_TIMEOUT_S`` seconds without an end marker. Idempotent via the
+    ``_hermes_bp_timeout_patched`` module sentinel.
     """
     try:
         import prompt_toolkit.input.vt100_parser as _vt100_mod
@@ -4275,9 +2376,7 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                         _PtKeyPress(_PtKeys.BracketedPaste, paste_content)
                     )
                     self_parser._in_bracketed_paste = False
-                    remaining = self_parser._paste_buffer[
-                        end_index + len(end_mark):
-                    ]
+                    remaining = self_parser._paste_buffer[end_index + len(end_mark):]
                     self_parser._paste_buffer = ""
                     self_parser._hermes_bp_start = None
                     if remaining:
@@ -4304,9 +2403,8 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                                 len(paste_content),
                             )
             else:
-                # Normal mode — re-inline prompt_toolkit's normal feed path.
-                # Calling the original feed here would double-buffer after the
-                # bracketed-paste entry transition.
+                # Re-inline the normal feed path: calling the original would
+                # double-buffer after the bracketed-paste entry transition.
                 for i, c in enumerate(data):
                     if self_parser._in_bracketed_paste:
                         _patched_vt100_feed(self_parser, data[i:])
@@ -4320,20 +2418,16 @@ def _apply_bracketed_paste_timeout_patch() -> None:
         logger.debug("Bracketed-paste timeout patch skipped: %s", exc)
 
 
-# Cursor Position Report (CPR / DSR) response, format ``ESC[<row>;<col>R``.
-# prompt_toolkit's _on_resize() + renderer send ``ESC[6n`` queries to the
-# terminal; under resize storms or tab switches the terminal's reply can
-# race past the input parser and end up in the input buffer as literal
-# text (see issue #14692). Also matches the visible-form ``^[[<row>;<col>R``
-# that appears when the ESC byte was stripped by a prior filter.
+# Cursor Position Report (CPR / DSR) replies ``ESC[<row>;<col>R`` to prompt_toolkit's
+# ``ESC[6n`` queries can race past the input parser under resize storms / tab switches
+# and land in the input buffer as literal text; the visible ``^[[...R`` form appears
+# when a prior filter stripped the ESC byte.
 _DSR_CPR_ESC_RE = re.compile(r"\x1b\[\d+;\d+R")
 _DSR_CPR_VISIBLE_RE = re.compile(r"\^\[\[\d+;\d+R")
 _SGR_MOUSE_ESC_RE = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_VISIBLE_RE = re.compile(r"\^\[\[<\d+;\d+;\d+[Mm]")
-# Some terminals/filters can drop ESC and literal "^[[", leaving only
-# "<btn;col;rowM" fragments in the buffer. Keep this broad on purpose:
-# these fragments are extremely unlikely to be intentional user input, and
-# stripping them is better than sending corrupted prompts.
+# Bare "<btn;col;rowM" fragments (ESC and "^[[" dropped). Deliberately broad: such
+# fragments are almost never intentional input and stripping beats corrupted prompts.
 _SGR_MOUSE_BARE_RE = re.compile(r"<\d+;\d+;\d+[Mm]")
 _TERMINAL_INPUT_MODE_RESET_SEQ = (
     "\x1b[?1006l"  # disable SGR mouse
@@ -4359,15 +2453,10 @@ _BACKSLASH_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*$")
 def _is_ghostty_terminal(env: Optional[Mapping[str, str]] = None) -> bool:
     """Whether the terminal is Ghostty (either detection path).
 
-    Ghostty must be pushed ONLY modifyOtherKeys, not the Kitty keyboard
-    protocol: its Kitty disambiguate-mode implementation strips the Alt
-    modifier from the Backspace key, so Option+Backspace arrives as bare
-    \\x7f instead of the CSI-u form ``\\x1b[127;3u`` the protocol calls for
-    (upstream Ghostty bug), breaking backward-kill-word (#87630
-    regression).  Ghostty implements modifyOtherKeys correctly (it then
-    emits ``\\x1b[27;3;127~``, which the alias table also maps).
-
-    Matches exactly the two conditions that admit Ghostty through
+    Ghostty must be pushed ONLY modifyOtherKeys, not the Kitty keyboard protocol: its
+    Kitty disambiguate mode strips Alt from Backspace (Option+Backspace arrives as bare
+    \\x7f, breaking backward-kill-word — upstream bug), while its modifyOtherKeys is
+    correct. Matches exactly the two conditions that admit Ghostty through
     ``_terminal_supports_extended_enter_keys``.
     """
     if env is None:
@@ -4405,32 +2494,14 @@ def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = No
 def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = None) -> bool:
     """Ask allowlisted terminals to report modified keys distinctly.
 
-    Writes the Kitty keyboard protocol push (CSI >1u, disambiguate mode) AND
-    xterm modifyOtherKeys level 2 (CSI >4;2m), mirroring the Ink TUI —
-    terminals honor whichever protocol they implement (except Ghostty, which
-    gets only modifyOtherKeys; see the Ghostty exception below).  Both are
-    needed:
-    kitty-the-terminal removed modifyOtherKeys support entirely (it only
-    speaks its own protocol), while tmux/VS Code only accept modifyOtherKeys.
-
-    Under either protocol the terminal re-encodes modified keys as escape
-    sequences — Kitty disambiguate mode as ``ESC[<codepoint>;<mod>u`` (plus
-    the Esc key as ``ESC[27u``), modifyOtherKeys=2 as
-    ``ESC[27;<mod>;<codepoint>~``.  Stock prompt_toolkit 3.x maps almost
-    none of these, which is why the CSI >1u push was temporarily removed in
-    #87074 (Ctrl+C arrived as ``ESC[99;5u`` and died, #56684).
-    ``install_modify_other_keys_aliases()`` (called at CLI startup from
-    ``hermes_cli.pt_input_extras``) now populates ``ANSI_SEQUENCES`` with the
-    full Ctrl/Alt/Shift/multi-modifier and functional-key tables under BOTH
-    formats, so every existing key binding continues to fire — including
-    Ctrl+C, which is handled by prompt_toolkit's ``c-c`` binding (raw mode
-    clears ISIG, so the kernel INTR path was never in play for the CLI).
-
-    Ghostty exception: pushes only modifyOtherKeys — see
-    ``_is_ghostty_terminal`` for the full rationale (#87630).
-
-    The exit reset sequence pops/resets both modes, so this is safe across
-    normal exits, Ctrl+C, and SIGTERM cleanup.
+    Writes BOTH the Kitty keyboard protocol push (CSI >1u, disambiguate mode) and xterm
+    modifyOtherKeys level 2 (CSI >4;2m), mirroring the Ink TUI: kitty dropped
+    modifyOtherKeys entirely while tmux/VS Code only accept modifyOtherKeys. Either
+    protocol re-encodes modified keys as escape sequences (``ESC[<cp>;<mod>u`` /
+    ``ESC[27;<mod>;<cp>~``) that stock prompt_toolkit barely maps — Ctrl+C once arrived
+    as ``ESC[99;5u`` and died — so ``install_modify_other_keys_aliases()`` (run at CLI
+    startup) must populate ``ANSI_SEQUENCES`` under both formats first. Ghostty gets only
+    modifyOtherKeys (see ``_is_ghostty_terminal``). The exit reset sequence pops both modes.
     """
     if not _terminal_supports_extended_enter_keys(env):
         return False
@@ -4453,13 +2524,10 @@ def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = 
 
 
 def _cli_multiline_shortcuts_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
-    """Return whether classic CLI harness-standard multiline fallbacks are on.
+    """Whether classic CLI harness-standard multiline fallbacks (Ctrl+J = newline) are on.
 
-    Default is on to match the norm in adjacent agent harnesses: Ctrl+J is a
-    documented no-setup newline shortcut in Claude Code, OpenCode defaults
-    ``input_newline`` to include ``ctrl+j``, and Codex exposes Ctrl+J/keymap
-    newline behavior. Users on unusual POSIX PTYs that send bare LF for plain
-    Enter can set ``display.cli_multiline_shortcuts: false`` to restore the
+    Default on, matching adjacent agent harnesses. POSIX PTYs that send bare LF for
+    plain Enter can set ``display.cli_multiline_shortcuts: false`` to restore the
     legacy c-j submit fallback.
     """
     if config is None:
@@ -4490,29 +2558,20 @@ def _apply_backslash_line_continuation(text: str) -> str:
 def _preserve_ctrl_enter_newline() -> bool:
     """Detect environments where Ctrl+Enter must produce a newline, not submit.
 
-    Windows Terminal, WSL, SSH sessions, Ghostty, and some modern terminals
-    deliver Ctrl+Enter/Ctrl+J as bare LF (c-j). On those terminals c-j must
-    NOT be bound to submit;
-    binding it to submit makes Ctrl+Enter (intended as 'newline like Alt+Enter')
-    submit instead. Local POSIX TTYs that deliver Enter as LF (docker exec,
-    some thin PTYs without SSH) still need c-j bound to submit when
-    display.cli_multiline_shortcuts is disabled, so we keep that legacy opt-out.
-
-    See issue #22379.
+    Windows Terminal, WSL, SSH, Ghostty and some modern terminals deliver Ctrl+Enter as
+    bare LF (c-j); binding c-j to submit there makes Ctrl+Enter submit. Local thin POSIX
+    PTYs that deliver Enter as LF still need c-j bound to submit when
+    display.cli_multiline_shortcuts is disabled, so that legacy opt-out survives.
     """
+    env = os.environ
     if sys.platform == "win32":
         return True
-    if any(os.environ.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
+    if any(env.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "WT_SESSION",
+                                "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR")):
         return True
-    if os.environ.get("WT_SESSION"):
+    if env.get("TERM", "").lower() == "xterm-ghostty" or env.get("TERM_PROGRAM", "").lower() == "ghostty":
         return True
-    if os.environ.get("GHOSTTY_RESOURCES_DIR") or os.environ.get("GHOSTTY_BIN_DIR"):
-        return True
-    if os.environ.get("TERM", "").lower() == "xterm-ghostty":
-        return True
-    if os.environ.get("TERM_PROGRAM", "").lower() == "ghostty":
-        return True
-    if "microsoft" in os.environ.get("WSL_DISTRO_NAME", "").lower():
+    if "microsoft" in env.get("WSL_DISTRO_NAME", "").lower():
         return True
     # WSL detection — env vars can be scrubbed under sudo, also peek /proc.
     for p in ("/proc/version", "/proc/sys/kernel/osrelease"):
@@ -4533,16 +2592,10 @@ def _bind_prompt_submit_keys(
 ) -> None:
     """Bind terminal Enter forms to the submit handler.
 
-    Enter is always submit. By default, c-j (Ctrl+J/LF) is left for the
-    multiline newline handler because that is the common agent-harness UX.
-    Users can set ``display.cli_multiline_shortcuts: false`` to restore the
-    legacy POSIX fallback that binds c-j to submit on local thin PTYs whose
-    plain Enter arrives as LF instead of CR.
-
-    Even when the setting is disabled, environments where Ctrl+Enter is known
-    to arrive as c-j (Windows, WSL, SSH, Windows Terminal, Ghostty) keep c-j
-    reserved for newline; otherwise Ctrl+Enter submits instead of composing.
-    See _preserve_ctrl_enter_newline() and issue #22379.
+    Enter is always submit; c-j (Ctrl+J/LF) is left for the newline handler unless
+    ``display.cli_multiline_shortcuts: false`` restores the legacy POSIX submit
+    fallback — and even then environments where Ctrl+Enter arrives as c-j
+    (``_preserve_ctrl_enter_newline``) keep it reserved for newline.
     """
     if multiline_shortcuts_enabled is None:
         multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled()
@@ -4566,44 +2619,22 @@ def _disable_prompt_toolkit_cpr_warning(app) -> None:
 def _terminal_may_leak_cpr() -> bool:
     """Whether classic CLI should suppress prompt_toolkit CPR (ESC[6n) queries.
 
-    Delayed CPR replies (``ESC[<row>;<col>R`` / visible ``^[[<row>;<col>R``)
-    leak into the status line and can freeze input when the reply is slow
-    (#13870 on SSH/slow PTYs). The same race hits local POSIX TTYs under
-    heavy subagent / status-line load — see ``tests/cli/test_cpr_local_leak.py``.
-
-    Policy:
-    - ``PROMPT_TOOLKIT_NO_CPR=1`` → always suppress
-    - native Windows (``win32``) → keep prompt_toolkit's default for now
-      (no native-Windows Application coverage yet); still honor NO_CPR
-    - all other platforms → suppress (CPR is only a layout hint; heuristic
-      height is enough). SSH env is no longer required to trigger this.
+    Delayed CPR replies leak into the status line and can freeze input on SSH/slow
+    PTYs and on loaded local TTYs. ``PROMPT_TOOLKIT_NO_CPR=1`` always suppresses;
+    native Windows otherwise keeps prompt_toolkit's default (no Application coverage
+    yet); every other platform suppresses (CPR is only a layout hint).
     """
-    if os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1":
-        return True
-    if sys.platform == "win32":
-        return False
-    return True
+    return os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1" or sys.platform != "win32"
 
 
 def _build_cpr_disabled_output(stdout):
     """Build a Vt100_Output that never sends Cursor Position Report queries.
 
-    prompt_toolkit's renderer sends ``ESC[6n`` (Device Status Report) to learn
-    the cursor row before painting in non-fullscreen mode; the terminal replies
-    ``ESC[<row>;<col>R``. When that reply is delayed it races into the display
-    as raw ``^[[39;1R`` and can stall the renderer's pending-CPR future
-    (#13870; also local POSIX under heavy subagent load).
-
-    Constructing the output with ``enable_cpr=False`` marks CPR
-    ``NOT_SUPPORTED`` so ``ESC[6n`` is never sent. prompt_toolkit then uses its
-    heuristic available-height fallback. Input-side
-    ``_strip_leaked_terminal_responses`` remains belt-and-suspenders.
-
-    Note: ``Vt100_Output.from_pty()`` does NOT expose ``enable_cpr`` in
-    prompt_toolkit 3.x, so we reproduce its ``get_size`` setup and call the
-    constructor directly. Returns ``None`` on any failure so the caller falls back
-    to prompt_toolkit's default output (CPR enabled, but input-side scrubbing
-    still protects against leaks).
+    ``enable_cpr=False`` marks CPR ``NOT_SUPPORTED`` so ``ESC[6n`` is never sent and
+    prompt_toolkit uses its heuristic height; input-side
+    ``_strip_leaked_terminal_responses`` stays as belt-and-suspenders.
+    ``Vt100_Output.from_pty()`` doesn't expose ``enable_cpr`` in pt 3.x, so its
+    ``get_size`` setup is reproduced here. Returns None on failure (caller keeps pt's default).
     """
     try:
         import io as _io
@@ -4636,19 +2667,10 @@ def _select_classic_cli_pt_output(stdout):
 
 
 def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
-    """Strip leaked terminal control-response sequences from user input.
+    """Strip leaked CPR/DSR replies and SGR mouse-report fragments from user input.
 
-    Covers Cursor Position Report (CPR / DSR) responses — ``ESC[<row>;<col>R``
-    and the visible ``^[[<row>;<col>R`` form. These are replies the terminal
-    sends back to queries prompt_toolkit makes during ``_on_resize`` /
-    ``_request_absolute_cursor_position``. When the input parser drops one
-    (resize storms, multiplexer focus changes, slow PTYs) the response
-    lands in the input buffer as literal text and corrupts what the user
-    typed.
-
-    Also strips leaked SGR mouse-report fragments (``ESC[<...M/m`` and
-    degraded visible forms). Returns ``(cleaned_text, had_mouse_reports)``
-    so callers can trigger an in-place terminal mode recovery when needed.
+    Returns ``(cleaned_text, had_mouse_reports)`` so callers can trigger an in-place
+    terminal mode recovery when mouse reports leaked.
     """
     if not text:
         return text, False
@@ -4656,25 +2678,18 @@ def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
     has_esc = "\x1b[" in text
     has_visible = "^[" in text
     has_bare_mouse = "<" in text and ";" in text and ("M" in text or "m" in text)
-    if not (has_esc or has_visible or has_bare_mouse):
-        return text, False
-
     had_mouse_reports = False
-
     if has_esc:
         text = _DSR_CPR_ESC_RE.sub("", text)
         text, count = _SGR_MOUSE_ESC_RE.subn("", text)
         had_mouse_reports = had_mouse_reports or count > 0
-
     if has_visible:
         text = _DSR_CPR_VISIBLE_RE.sub("", text)
         text, count = _SGR_MOUSE_VISIBLE_RE.subn("", text)
         had_mouse_reports = had_mouse_reports or count > 0
-
     if has_bare_mouse:
         text, count = _SGR_MOUSE_BARE_RE.subn("", text)
         had_mouse_reports = had_mouse_reports or count > 0
-
     return text, had_mouse_reports
 
 
@@ -4693,13 +2708,9 @@ def _estimate_tui_input_height(
 ) -> int:
     """Estimate classic prompt_toolkit input rows using live terminal cells.
 
-    The TextArea prompt is injected with prompt_toolkit's BeforeInput
-    processor, which means it consumes cells only on logical line 0. After a
-    narrow resize, that first row can leave only one input cell beside an icon
-    prompt such as ``⚔ ``, while continuation rows use the full terminal width.
-    Never substitute a fake wide fallback here: under- or over-allocating the
-    TextArea height leaves stale prompt/input cells visible at the bottom of the
-    terminal.
+    The prompt is injected via BeforeInput, so it consumes cells only on logical line 0;
+    continuation rows use the full width. Never substitute a fake wide fallback: mis-
+    allocating the TextArea height leaves stale prompt/input cells at the terminal bottom.
     """
     try:
         from prompt_toolkit.utils import get_cwidth
@@ -4716,11 +2727,6 @@ def _estimate_tui_input_height(
 
     visual_lines = 0
     for index, line in enumerate(lines or [""]):
-        # prompt_toolkit's TextArea injects ``prompt`` via BeforeInput, which
-        # applies only to logical line 0. Wrapped continuation rows, and later
-        # logical lines, use the full terminal width. Count the display cells
-        # after that same transformation rather than subtracting the prompt from
-        # every wrapped row.
         line_width = get_cwidth(line or "")
         display_width = line_width + (prompt_width if index == 0 else 0)
         if display_width <= 0:
@@ -4732,20 +2738,15 @@ def _estimate_tui_input_height(
 
 
 def _status_bar_visible_from_display_config(display_config: object) -> bool:
-    """Return the initial classic-CLI status-bar visibility from display config.
+    """Initial classic-CLI status-bar visibility from display config.
 
-    ``display.tui_statusbar`` is the persisted user-facing setting toggled by
-    the TUI/statusbar controls. YAML parses bare ``off`` as ``False``, while
-    older config snapshots or hand edits may use strings such as ``"off"`` or
-    ``"hidden"``. Treat those values consistently so a new CLI process does not
-    re-enable a status bar that the user deliberately disabled.
+    YAML parses bare ``off`` as False, while older snapshots or hand edits may hold
+    strings like ``"off"``/``"hidden"``; treat both so a new process never re-enables
+    a status bar the user disabled.
     """
     if not isinstance(display_config, dict):
         display_config = {}
-    statusbar_config = display_config.get(
-        "statusbar",
-        display_config.get("tui_statusbar", "top"),
-    )
+    statusbar_config = display_config.get("statusbar", display_config.get("tui_statusbar", "top"))
     if isinstance(statusbar_config, str):
         return statusbar_config.strip().lower() not in {"0", "false", "hidden", "no", "off"}
     return statusbar_config is not False
@@ -4770,31 +2771,17 @@ def _collect_query_images(query: str | None, image_arg: str | None = None) -> tu
             raise ValueError(f"Not a supported image file: {explicit_path}")
         images.append(explicit_path)
 
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for img in images:
-        key = str(img)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(img)
-    return message, deduped
+    return message, list(dict.fromkeys(images))
 
 
-# Strip OSC escape sequences (e.g. OSC-8 hyperlinks) that prompt_toolkit's
-# ANSI parser can't handle — it strips \x1b but passes the payload through
-# as literal text, garbling the TUI output.
+# OSC sequences (e.g. OSC-8 hyperlinks): prompt_toolkit's ANSI parser strips the ESC
+# but passes the payload through as literal text, garbling TUI output.
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][\s\S]*?(?:\x07|\x1b\\)")
 
 
 class ChatConsole:
-    """Rich Console adapter for prompt_toolkit's patch_stdout context.
-
-    Captures Rich's rendered ANSI output and routes it through _cprint
-    so colors and markup render correctly inside the interactive chat loop.
-    Drop-in replacement for Rich Console — just pass this to any function
-    that expects a console.print() interface.
-    """
+    """Rich Console drop-in that routes rendered ANSI through ``_cprint`` so colors
+    and markup survive prompt_toolkit's patch_stdout in the interactive loop."""
 
     def __init__(self):
         from io import StringIO
@@ -4813,50 +2800,21 @@ class ChatConsole:
         self._inner.width = shutil.get_terminal_size((80, 24)).columns
         self._inner.print(*args, **kwargs)
         output = self._buffer.getvalue()
-        # Strip OSC escape sequences (e.g. OSC-8 hyperlinks) before
-        # routing through prompt_toolkit's ANSI parser, which only
-        # handles CSI/SGR and passes OSC payload through as literal text.
         output = _OSC_ESCAPE_RE.sub("", output)
         for line in output.rstrip("\n").split("\n"):
             _cprint(line)
 
     @contextmanager
     def status(self, *_args, **_kwargs):
-        """Provide a no-op Rich-compatible status context.
+        """No-op Rich-compatible status context.
 
-        Some slash command helpers use ``console.status(...)`` when running in
-        the standalone CLI. Interactive chat routes those helpers through
-        ``ChatConsole()``, which historically only implemented ``print()``.
-        Returning a silent context manager keeps slash commands compatible
-        without duplicating the higher-level busy indicator already shown by
-        ``HermesCLI._busy_command()``.
+        Slash-command helpers call ``console.status(...)``; a silent context keeps them
+        compatible without duplicating ``HermesCLI._busy_command()``'s busy indicator.
         """
         yield self
 
-# ASCII Art - HERMES-AGENT logo (full width, single line - requires ~95 char terminal)
-HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
-
-# ASCII Art - Hermes Caduceus (compact, fits in left panel)
-HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⢀⣠⣴⣶⠿⠋⣩⡿⣿⡿⠻⣿⡇⢠⡄⢸⣿⠟⢿⣿⢿⣍⠙⠿⣶⣦⣄⡀⠀[/]
-[#FFBF00]⠀⠀⠉⠉⠁⠶⠟⠋⠀⠉⠀⢀⣈⣁⡈⢁⣈⣁⡀⠀⠉⠀⠙⠻⠶⠈⠉⠉⠀⠀[/]
-[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⡿⠛⢁⡈⠛⢿⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFD700]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠿⣿⣦⣤⣈⠁⢠⣴⣿⠿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠻⢿⣿⣦⡉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#FFBF00]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢷⣦⣈⠛⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣴⠦⠈⠙⠿⣦⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⣿⣤⡈⠁⢤⣿⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠷⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⠑⢶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⠁⢰⡆⠈⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
+# Rich-markup ASCII art (re-exported; canonical copies live in hermes_cli.banner).
+from hermes_cli.banner import HERMES_AGENT_LOGO, HERMES_CADUCEUS  # noqa: E402,F401
 
 
 
@@ -4915,21 +2873,11 @@ def _build_compact_banner() -> str:
 # ============================================================================
 
 def _looks_like_slash_command(text: str) -> bool:
-    """Return True if *text* looks like a slash command, not a file path.
-
-    Slash commands are ``/help``, ``/model gpt-4``, ``/q``, etc.
-    File paths like ``/Users/ironin/file.md:45-46 can you fix this?``
-    also start with ``/`` but contain additional ``/`` characters in
-    the first whitespace-delimited word.  This helper distinguishes
-    the two so that pasted paths are sent to the agent instead of
-    triggering "Unknown command".
-    """
+    """True if *text* looks like a slash command (``/help``), not a pasted path
+    (``/Users/x/file.md ...``): a command's first word has no further ``/``."""
     if not text or not text.startswith("/"):
         return False
-    first_word = text.split()[0]
-    # After stripping the leading /, a command name has no slashes.
-    # A path like /Users/foo/bar.md always does.
-    return "/" not in first_word[1:]
+    return "/" not in text.split()[0][1:]
 
 
 # ============================================================================
@@ -4959,16 +2907,8 @@ def get_skill_commands() -> dict:
     return _ensure_skill_commands()
 
 
-def build_skill_invocation_message(*args, **kwargs):
-    from agent.skill_commands import build_skill_invocation_message as _impl
-
-    return _impl(*args, **kwargs)
-
-
-def build_preloaded_skills_prompt(*args, **kwargs):
-    from agent.skill_commands import build_preloaded_skills_prompt as _impl
-
-    return _impl(*args, **kwargs)
+build_skill_invocation_message = _lazy_shim("agent.skill_commands", "build_skill_invocation_message")
+build_preloaded_skills_prompt = _lazy_shim("agent.skill_commands", "build_preloaded_skills_prompt")
 
 
 def get_skill_bundles() -> dict:
@@ -4980,10 +2920,7 @@ def get_skill_bundles() -> dict:
     return _skill_bundles
 
 
-def build_bundle_invocation_message(*args, **kwargs):
-    from agent.skill_bundles import build_bundle_invocation_message as _impl
-
-    return _impl(*args, **kwargs)
+build_bundle_invocation_message = _lazy_shim("agent.skill_bundles", "build_bundle_invocation_message")
 
 
 def _get_plugin_cmd_handler_names() -> set:
@@ -4999,72 +2936,40 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     """Normalize a CLI skills flag into a deduplicated list of skill identifiers."""
     if not skills:
         return []
-
-    if isinstance(skills, str):
-        raw_values = [skills]
-    elif isinstance(skills, (list, tuple)):
+    if isinstance(skills, (list, tuple)):
         raw_values = [str(item) for item in skills if item is not None]
     else:
         raw_values = [str(skills)]
-
-    parsed: list[str] = []
-    seen: set[str] = set()
-    for raw in raw_values:
-        for part in raw.split(","):
-            normalized = part.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            parsed.append(normalized)
-    return parsed
+    parts = (p.strip() for raw in raw_values for p in raw.split(","))
+    return list(dict.fromkeys(p for p in parts if p))
 
 
 def save_config_value(key_path: str, value: any) -> bool:
+    """Persist ``key_path`` (dot-separated, e.g. "agent.system_prompt") = value; True on success.
+
+    ALWAYS targets HERMES_HOME/config.yaml (created if needed), resolved live so profile
+    switches and test isolation land right. Never the repo's cli-config.yaml: it is a
+    shipped template no config reader loads, so a value written there silently vanishes.
     """
-    Save a value to the active config file at the specified key path.
-    
-    Respects the same lookup order as load_cli_config():
-    1. ~/.hermes/config.yaml (user config - preferred, used if it exists)
-    2. ./cli-config.yaml (project config - fallback)
-    
-    Args:
-        key_path: Dot-separated path like "agent.system_prompt"
-        value: Value to save
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    # Runtime persistence ALWAYS targets HERMES_HOME/config.yaml (created if needed),
-    # resolved live so profile switches and test isolation land right. Never fall back
-    # to the repo's cli-config.yaml: it is a shipped template that config readers
-    # (load_config, load_wake_word_config) never read, so a setting written there
-    # silently vanishes on the next start (the "wake-word reverts to disabled" bug).
     config_path = get_hermes_home() / 'config.yaml'
-    
+
     try:
-        # Ensure parent directory exists (for ~/.hermes/config.yaml on first use)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Save back atomically while preserving comments, ordering, quotes, and
-        # readable Unicode in user-edited config.yaml.
+        # Atomic write preserving comments, ordering, quotes and readable Unicode.
         from utils import atomic_roundtrip_yaml_update
         atomic_roundtrip_yaml_update(config_path, key_path, value)
-        
-        # Enforce owner-only permissions on config files (contain API keys)
+        # Owner-only permissions: config files contain API keys.
         try:
             os.chmod(config_path, 0o600)
         except (OSError, NotImplementedError):
             pass
-
-        # Model/provider changes made through /model and the TUI use this
-        # persistence path rather than ``hermes config set``. Surface the same
-        # fail-closed cron drift warning for every operator-facing model switch.
+        # /model and the TUI persist through here rather than `hermes config set`;
+        # surface the same fail-closed cron drift warning for every model switch.
         from hermes_cli.config import (
             warn_unpinned_cron_jobs_after_model_config_change,
         )
 
         warn_unpinned_cron_jobs_after_model_config_change(key_path, value)
-        
         return True
     except Exception as e:
         logger.error("Failed to save config: %s", e)
@@ -5079,16 +2984,11 @@ def save_config_value(key_path: str, value: any) -> bool:
 
 
 def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Map a ``moa:<preset>`` model string to ``(provider, preset)``.
+    """Map ``moa:<preset>`` to ``("moa", "<preset>")``; anything else -> ``(None, model)``.
 
-    Returns ``("moa", "<preset>")`` when *model* selects the MoA virtual
-    provider, otherwise ``(None, model)`` unchanged. This gives non-interactive
-    ``hermes chat -Q -m moa:<preset>`` the same routing the interactive
-    ``/moa`` command and the model picker already use: ``resolve_runtime_provider``
-    handles ``requested_provider == "moa"`` and ``agent_init`` builds the
-    MoAClient off ``provider == "moa"``. Without this the raw ``moa:<preset>``
-    string is sent to the real provider and rejected with a 401/400 "model not
-    supported" (#56828).
+    Gives ``hermes chat -Q -m moa:<preset>`` the same routing as the interactive
+    ``/moa`` command (``resolve_runtime_provider`` / ``agent_init`` key off
+    ``provider == "moa"``); the raw string would be rejected by the real provider.
     """
     if isinstance(model, str):
         stripped = model.strip()
@@ -5098,20 +2998,12 @@ def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[
                 return "moa", preset
     return None, model
 
-def _split_model_config_default(raw_default: Any) -> tuple[str, str]:
-    # Thin wrapper around the shared helper in config.py — kept for
-    # backward compat with existing call sites in this module.
-    from hermes_cli.config import split_model_config_default
-    return split_model_config_default(raw_default)
+_split_model_config_default = _lazy_shim("hermes_cli.config", "split_model_config_default", "_split_model_config_default")
 
 
 class _VoiceInputMessage:
-    """Sentinel wrapper for voice-transcribed messages in ``_pending_input``.
-
-    Distinguishes STT output from manually typed text while voice mode is
-    active, so the concise-voice-response prefix is applied only to messages
-    that actually came from the microphone (#65827).
-    """
+    """Sentinel for voice-transcribed messages in ``_pending_input`` so the concise
+    voice-response prefix applies only to microphone input, not typed text."""
 
     __slots__ = ("text",)
 
@@ -5123,16 +3015,11 @@ class _VoiceInputMessage:
 
 
 class _SeededQueryMessage:
-    """Sentinel wrapper for a ``-q/--query`` prompt seeded into an
-    interactive session.
+    """Sentinel wrapper for a ``-q/--query`` prompt seeded into an interactive session.
 
-    When ``hermes chat -q "…"`` runs on a real TTY, the query is submitted as
-    the first turn of a normal interactive session instead of the legacy
-    answer-and-exit single-query mode. The prompt is arbitrary user text (an
-    OS launcher, a desktop integration, a script) — it must be treated
-    LITERALLY: no slash-command routing, no ``!`` shell dispatch, no
-    file-drop detection. This sentinel marks the seeded first message so
-    ``process_loop`` skips those dispatchers for it (and only it).
+    The seeded prompt is arbitrary user text (OS launcher, script) and must be treated
+    LITERALLY — no slash-command routing, ``!`` shell dispatch, or file-drop detection.
+    ``process_loop`` skips those dispatchers for this message only.
     """
 
     __slots__ = ("text", "images")
@@ -5148,16 +3035,9 @@ class _SeededQueryMessage:
 def _should_seed_interactive(query, image, quiet: bool, oneshot: bool) -> bool:
     """Whether a ``-q/--image`` invocation should seed an interactive session.
 
-    New default (Aug 2026): on a real TTY, ``chat -q`` submits the prompt as
-    the first turn of a normal interactive session (parity with other coding
-    agents' seeded launches — e.g. Omarchy's prompted agent terminals).
-
-    The legacy answer-and-exit behavior is preserved for every automation
-    surface:
-      - ``--oneshot`` on the chat subcommand (explicit legacy opt-in)
-      - ``-Q/--quiet`` (machine-readable single-query contract)
-      - any non-TTY stdin/stdout (kanban workers, cron, pipes, A2A)
-    ``-z/--oneshot`` at the top level never reaches this path at all.
+    On a real TTY ``chat -q`` submits the prompt as the first interactive turn. The
+    legacy answer-and-exit behavior is kept for every automation surface: ``--oneshot``,
+    ``-Q/--quiet``, and any non-TTY stdin/stdout (kanban, cron, pipes, A2A).
     """
     if not (query or image):
         return False
@@ -5205,10 +3085,9 @@ def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
 class _ChatTurn:
     """Per-turn state shared by the ``chat()`` phases and the agent worker thread.
 
-    ``result`` is written by the worker thread and read by the main thread after the join
-    (same object, so late writes from an abandoned thread stay visible exactly as before).
-    ``box_opened`` is flipped by the TTS display callback; ``normal_exit`` is set only when
-    the TTS worker drained on its own so the ``finally`` never cuts the last sentence.
+    ``result`` is written by the worker thread and read after the join (same object, so
+    late writes from an abandoned thread stay visible). ``tts_normal_exit`` is set only
+    when the TTS worker drained on its own so the ``finally`` never cuts the last sentence.
     """
 
     result: Optional[dict] = None
