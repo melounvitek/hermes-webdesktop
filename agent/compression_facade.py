@@ -66,8 +66,7 @@ def _report_compression_timeout(
             touch("context compression timed out", provenance=ActivityProvenance.AGENT_COMPRESSION_TIMEOUT)
         except Exception:
             logger.debug("compress_context timeout activity touch failed", exc_info=True)
-    # Same timeout cooldown ladder as summary-LLM timeouts: avoid re-burning the
-    # full idle budget every turn.
+    # Same timeout cooldown ladder as summary-LLM timeouts: avoid re-burning the full idle budget every turn.
     compressor = getattr(agent, "context_compressor", None)
     record = getattr(compressor, "record_timeout_failure", None) if compressor is not None else None
     if callable(record):
@@ -133,10 +132,9 @@ def _run_under_progress_timeout(
 ):
     """Run ``run(fence, target_messages=snapshot)`` on the pool under the progress-aware timeout.
 
-    The pooled worker must NEVER share the caller's live transcript — a late engine after a
-    host timeout could rewrite it. It deep-snapshots on the worker and publishes only via an
-    ADMITTED commit; a no-op/abort returns the snapshot unchanged, so the ORIGINAL list is
-    handed back to keep identity semantics.
+    The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could rewrite
+    it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort returns the snapshot
+    unchanged, so the ORIGINAL list is handed back to keep identity semantics.
     """
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
     def _snapshot_worker(fence=None):
@@ -314,8 +312,7 @@ class CompressionFacadeMixin:
                     vars(self).pop("_active_compression_commit_fence", None)
                 else:
                     self._active_compression_commit_fence = previous_fence
-            # Restore whatever the caller had, so a compaction never leaks its
-            # tag into the surrounding scope.
+            # Restore whatever the caller had, so a compaction never leaks its tag into the surrounding scope.
             if token is not None:
                 reset_conversation_context(token)
             if affinity_token is not None:
