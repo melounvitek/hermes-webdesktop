@@ -1,27 +1,12 @@
-"""One-shot artifact transport for browser control (Gateway side).
+"""One-shot artifact transport for browser control (Gateway side): a transport-neutral
+store for bounded artifacts; :mod:`gateway.platforms.api_server` authenticates and
+rate-limits, then hands bytes here.
 
-Transport-neutral store core for bounded browser-control artifacts
-(screenshots, PDFs, uploads). It knows nothing about aiohttp: the routes in
-:mod:`gateway.platforms.api_server` authenticate callers and rate-limit, then
-hand bytes here. The controller WebSocket is a command channel, not a file
-pipe — frames carry only ``artifact_id`` strings and the bytes live on disk
-under a controlled root for a short TTL.
-
-Contract (tests/gateway/test_browser_control_artifacts.py):
-
-- Server-minted ``[0-9a-f]{32}`` ids resolved strictly inside the root;
-  client filenames are metadata only, never paths.
-- Exact size and MIME caps enforced before any disk write.
-- SHA-256 recorded in the receipt and re-verified by ``load``/``validate``.
-- ``load`` requires the exact scope key and consumes atomically;
-  ``validate`` checks existence/TTL/scope without consuming.
-- No overwrite: an id collision is retried with a fresh id.
-- ``prune_expired`` removes expired entries; the API server sweeps on demand.
-
-Thread-safety: the in-memory index is lock-guarded; files are written to a
-temp name and atomically renamed so a concurrent ``load`` never sees a
-partial artifact.
-"""
+Controller frames carry only server-minted ``[0-9a-f]{32}`` ids (client filenames are
+metadata, never paths); bytes live under a controlled root for a short TTL. Size/MIME
+caps apply before any write; SHA-256 is re-verified on read; ``load`` needs the exact
+scope key and consumes atomically. The index is lock-guarded and files are temp-written
+then renamed so readers never see partials."""
 
 from __future__ import annotations
 
@@ -46,7 +31,6 @@ DEFAULT_ALLOWED_MIME_TYPES = frozenset({
     "application/json", "application/pdf", "image/gif", "image/jpeg",
     "image/png", "image/webp", "text/plain",
 })
-_ARTIFACT_ID_HEX = 32
 _ARTIFACT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _TEMP_SUFFIX = ".tmp"
 
@@ -100,15 +84,9 @@ class ArtifactReceipt:
     def to_dict(self, *, download_path: str = "") -> dict[str, Any]:
         """Serialize to the wire receipt (never contains file paths)."""
         receipt = {
-            "artifact_id": self.artifact_id,
-            "sha256": self.sha256,
-            "size_bytes": self.size_bytes,
-            "content_type": self.content_type,
-            "filename": self.filename,
-            "created_at": self.created_at,
-            "expires_at": self.expires_at,
-            "ttl_seconds": self.ttl_seconds,
-            "one_shot": True,
+            "artifact_id": self.artifact_id, "sha256": self.sha256, "size_bytes": self.size_bytes,
+            "content_type": self.content_type, "filename": self.filename, "created_at": self.created_at,
+            "expires_at": self.expires_at, "ttl_seconds": self.ttl_seconds, "one_shot": True,
         }
         if download_path:
             receipt["download_path"] = download_path
@@ -118,16 +96,12 @@ class ArtifactReceipt:
 def artifact_scope_key(scope: Any) -> str:
     """Derive the stable scope key an artifact is bound to.
 
-    Only principal (mandatory) + transport family participate. ``session_id``
-    is deliberately EXCLUDED: HTTP artifact routes authenticate by API key and
-    can't resolve a session, while broker dispatch always carries one — hashing
-    it would make upload and dispatch never compose. Ids are unguessable and
-    downloads one-shot, so cross-session reuse within one principal is by
-    design. Capabilities/optional ids are excluded so a reconnect keeps its
-    artifacts.
-    """
-    principal = ""
-    family = ""
+    Only principal (mandatory) + transport family participate. ``session_id`` is deliberately
+    EXCLUDED: HTTP artifact routes authenticate by API key and can't resolve a session, while
+    broker dispatch always carries one — hashing it would make upload and dispatch never compose
+    (ids are unguessable and downloads one-shot, so cross-session reuse within one principal is
+    by design). Capabilities/optional ids are excluded so a reconnect keeps its artifacts."""
+    principal = family = ""
     try:
         principal = str(getattr(scope, "principal_id", "") or "")
         family = str(getattr(scope, "transport_family", "") or "")
@@ -136,12 +110,7 @@ def artifact_scope_key(scope: Any) -> str:
     if not principal:
         # Fail closed: only an authenticated principal may mint artifacts.
         raise ArtifactError("artifact scope must carry a resolved principal")
-    material = f"{principal}\x00{family}".encode("utf-8")
-    return hashlib.sha256(material).hexdigest()
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(f"{principal}\x00{family}".encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -154,10 +123,8 @@ class ArtifactStore:
     """Thread-safe, TTL-bounded, scope-bound one-shot artifact store."""
 
     def __init__(
-        self, root: Path, *,
-        ttl_seconds: float = DEFAULT_ARTIFACT_TTL_SECONDS,
-        max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
-        allowed_mime_types: frozenset = DEFAULT_ALLOWED_MIME_TYPES,
+        self, root: Path, *, ttl_seconds: float = DEFAULT_ARTIFACT_TTL_SECONDS,
+        max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES, allowed_mime_types: frozenset = DEFAULT_ALLOWED_MIME_TYPES,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._root = Path(root)
@@ -173,11 +140,8 @@ class ArtifactStore:
         self._sweep_orphan_files()
 
     def _sweep_orphan_files(self) -> None:
-        """Delete on-disk files with no live index entry.
-
-        Only names matching the minted 32-hex id shape or the ``*.tmp``
-        staging suffix are touched; anything else in the directory is left.
-        """
+        """Delete on-disk files with no live index entry; only minted-id-shaped names
+        and ``*.tmp`` staging files are touched, anything else is left."""
         try:
             candidates = list(self._root.iterdir())
         except OSError:
@@ -185,18 +149,10 @@ class ArtifactStore:
         with self._lock:
             live = set(self._entries)
         for path in candidates:
-            name = path.name
-            is_temp = name.endswith(_TEMP_SUFFIX)
-            if not path.is_file() or not (is_temp or _ARTIFACT_ID_RE.fullmatch(name)):
-                continue
-            if not is_temp and name in live:
-                continue
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+            is_temp = path.name.endswith(_TEMP_SUFFIX)
+            if path.is_file() and (is_temp or (_ARTIFACT_ID_RE.fullmatch(path.name) and path.name not in live)):
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
 
     @property
     def root(self) -> Path:
@@ -212,11 +168,8 @@ class ArtifactStore:
         return self._allowed_mime_types
 
     def store(self, data: bytes, *, filename: str, content_type: str, scope: Any) -> ArtifactReceipt:
-        """Validate and store one artifact, returning its provenance receipt.
-
-        Raises :class:`ArtifactTooLarge` / :class:`ArtifactMimeRejected`
-        before any disk write; :class:`ArtifactError` on an unresolved scope.
-        """
+        """Validate and store one artifact, returning its receipt; :class:`ArtifactTooLarge` /
+        :class:`ArtifactMimeRejected` fire before any disk write."""
         size = len(data)
         if size > self._max_bytes:
             raise ArtifactTooLarge(f"artifact is {size} bytes; cap is {self._max_bytes}")
@@ -225,23 +178,21 @@ class ArtifactStore:
             raise ArtifactMimeRejected(f"content type {content_type!r} is outside the exact allowlist")
         scope_key = artifact_scope_key(scope)
         now = self._clock()
-
         # Mint a fresh id; retry on an astronomically unlikely collision.
         while True:
-            artifact_id = secrets.token_hex(_ARTIFACT_ID_HEX // 2)
+            artifact_id = secrets.token_hex(16)
             target = self._artifact_path(artifact_id)
             with self._lock:
                 if artifact_id in self._entries or target.exists():
                     continue
                 receipt = ArtifactReceipt(
-                    artifact_id=artifact_id, sha256=_sha256(data), size_bytes=size,
+                    artifact_id=artifact_id, sha256=hashlib.sha256(data).hexdigest(), size_bytes=size,
                     content_type=normalized_type, filename=_bounded_filename(filename),
                     created_at=now, expires_at=now + self._ttl_seconds,
                     ttl_seconds=self._ttl_seconds, scope_key=scope_key,
                 )
                 self._entries[artifact_id] = _ArtifactEntry(receipt=receipt, path=target)
                 break
-
         # Temp + atomic rename so readers never observe a partial artifact.
         temp = target.with_name(f"{target.name}{_TEMP_SUFFIX}")
         try:
@@ -259,39 +210,33 @@ class ArtifactStore:
         return receipt
 
     def validate(self, artifact_id: str, *, scope: Any) -> ArtifactReceipt:
-        """Return the receipt when the artifact is live for ``scope``
-        (existence, TTL, scope) without consuming it; raises otherwise."""
+        """Receipt when the artifact is live for ``scope`` (existence, TTL, scope), without consuming."""
         return self._entry_for(artifact_id, scope=scope).receipt
 
     def load(self, artifact_id: str, *, scope: Any) -> tuple[bytes, ArtifactReceipt]:
-        """One-shot download: verify, read, checksum, then consume.
-
-        A second ``load`` raises :class:`ArtifactNotFound`. A checksum
-        mismatch raises :class:`ArtifactChecksumMismatch` without consuming.
-        """
+        """One-shot download: verify, read, checksum, then consume. A second ``load`` raises
+        :class:`ArtifactNotFound`; a checksum mismatch raises without consuming."""
         with self._lock:
             entry = self._entry_for(artifact_id, scope=scope)
-            path = entry.path
-            if not path.exists():
+            if not entry.path.exists():
                 self._entries.pop(artifact_id, None)
                 raise ArtifactNotFound(f"artifact {artifact_id!r} is gone")
             try:
-                data = path.read_bytes()
+                data = entry.path.read_bytes()
             except OSError as exc:
                 raise ArtifactError(f"artifact read failed: {exc}") from exc
-            if _sha256(data) != entry.receipt.sha256:
+            if hashlib.sha256(data).hexdigest() != entry.receipt.sha256:
                 raise ArtifactChecksumMismatch(f"artifact {artifact_id!r} failed SHA-256 validation")
             # Drop the index entry first so a concurrent load fails closed.
             self._entries.pop(artifact_id, None)
         try:
-            path.unlink(missing_ok=True)
+            entry.path.unlink(missing_ok=True)
         except OSError:
             logger.warning("artifact %s: file removal failed; TTL sweep will retry", artifact_id)
         return data, entry.receipt
 
     def prune_expired(self, now: Optional[float] = None) -> int:
-        """Delete every artifact past its TTL (and stale temp files); return
-        the count removed. Idempotent."""
+        """Delete every artifact past its TTL (and stale temp files); return the count removed."""
         now = self._clock() if now is None else float(now)
         with self._lock:
             removed = self._prune_expired_locked(now)
@@ -308,9 +253,11 @@ class ArtifactStore:
         with self._lock:
             return len(self._entries)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
+    def _discard_locked(self, artifact_id: str, path: Path) -> None:
+        """Drop the index entry and best-effort unlink its file."""
+        self._entries.pop(artifact_id, None)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
     def _entry_for(self, artifact_id: str, *, scope: Any) -> _ArtifactEntry:
         path = self._artifact_path(artifact_id)
@@ -326,9 +273,7 @@ class ArtifactStore:
             if entry is None:
                 raise ArtifactNotFound(f"unknown artifact {artifact_id!r}")
             if entry.receipt.expires_at <= now:
-                self._entries.pop(artifact_id, None)
-                with contextlib.suppress(OSError):
-                    path.unlink(missing_ok=True)
+                self._discard_locked(artifact_id, path)
                 raise ArtifactExpired(f"artifact {artifact_id!r} expired")
             if entry.receipt.scope_key != scope_key:
                 raise ArtifactScopeMismatch(f"artifact {artifact_id!r} is bound to a different scope")
@@ -338,9 +283,7 @@ class ArtifactStore:
         removed = 0
         for artifact_id, entry in list(self._entries.items()):
             if entry.receipt.expires_at <= now:
-                self._entries.pop(artifact_id, None)
-                with contextlib.suppress(OSError):
-                    entry.path.unlink(missing_ok=True)
+                self._discard_locked(artifact_id, entry.path)
                 removed += 1
         return removed
 
@@ -360,32 +303,19 @@ class ArtifactStore:
 
 def _normalize_content_type(value: str) -> str:
     """Return the canonical MIME type, or ``""`` for malformed input."""
-    if not isinstance(value, str):
-        return ""
-    return value.strip().split(";", 1)[0].strip().lower()
+    return value.strip().split(";", 1)[0].strip().lower() if isinstance(value, str) else ""
 
 
 def _bounded_filename(value: str, limit: int = 160) -> str:
     """Sanitize a display-only filename; never used as a filesystem path."""
-    if not isinstance(value, str):
-        return ""
-    cleaned = value.strip().replace("\\", "_").replace("/", "_")
-    cleaned = "".join(character for character in cleaned if ord(character) >= 32)
-    return cleaned[:limit]
-
-
-# ----------------------------------------------------------------------
-# Rate limiting (route-level, per principal)
-# ----------------------------------------------------------------------
+    cleaned = value.strip().replace("\\", "_").replace("/", "_") if isinstance(value, str) else ""
+    return "".join(character for character in cleaned if ord(character) >= 32)[:limit]
 
 
 class ArtifactRateLimiter:
     """Sliding-window per-key limiter; the API server keys it by principal."""
 
-    def __init__(
-        self, *, window_seconds: float = 60.0, max_requests: int = 30,
-        clock: Optional[Callable[[], float]] = None,
-    ) -> None:
+    def __init__(self, *, window_seconds: float = 60.0, max_requests: int = 30, clock: Optional[Callable[[], float]] = None) -> None:
         self._window_seconds = max(1.0, float(window_seconds))
         self._max_requests = max(1, int(max_requests))
         self._clock = clock if clock is not None else time.time
