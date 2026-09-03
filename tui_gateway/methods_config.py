@@ -39,8 +39,8 @@ def _(rid, params: dict) -> dict:
         policy = _repo_discovery_policy()
         with pdb.connect_closing() as conn:
             _reconcile_repo_discovery(pdb, conn, policy, _repo_discovery_policy_key(policy))
-            # `scan=true` (remote-gateway desktop): its native scan only sees its own
-            # filesystem, so the host scans the policy roots so zero-session repos surface.
+            # `scan=true` (remote-gateway desktop): its native scan only sees its own filesystem,
+            # so the host scans the policy roots so zero-session repos surface.
             if params.get("scan") and policy["enabled"]:
                 _scan_discovered_repos_remote(conn, policy)
             repos = _discover_repos_payload(db, conn=conn, include_cached=policy["enabled"])
@@ -83,9 +83,9 @@ def _stamped_project_tree(db, params, **kwargs):
 
 @_projects_handler("projects.tree")
 def _(rid, params: dict) -> dict:
-    """Project -> repo -> lane overview with counts + a few preview sessions per project, plus
-    the flat set of session ids claimed by any project (excluded from flat Recents). Lanes carry
-    no session rows here; drill-in uses ``projects.project_sessions``."""
+    """Project -> repo -> lane overview with counts + a few preview sessions per project, plus the
+    flat set of session ids claimed by any project (excluded from flat Recents). Lanes carry no
+    session rows; drill-in uses ``projects.project_sessions``."""
     with _profile_db(params) as db:
         if db is None:
             return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
@@ -241,32 +241,23 @@ def _(rid, params: dict) -> dict:
 
 # ── setup readiness
 
-def _readiness_profile_scope(params: dict):
-    """``(profile, scope)`` for the readiness RPCs' optional ``profile``: ``scope`` binds that
-    profile's HERMES_HOME + ``.env`` secret scope (ContextVars: concurrent checks stay isolated);
-    no param -> ``("", nullcontext())``. Unknown profile raises ``FileNotFoundError`` — never
-    quietly answer for the launch profile instead."""
+def _readiness_check(rid, params, probe):
+    """Shared shell of setup.status / setup.runtime_check. ``probe(profile, scoped)`` runs inside the
+    optional ``profile`` param's HERMES_HOME + ``.env`` secret scope (ContextVars: concurrent checks
+    stay isolated); ``scoped`` is the ``{"profile": ...}`` payload stamp (``{}`` for the launch
+    profile). An unknown profile answers ``ok=False`` (never a JSON-RPC error, never a quiet answer
+    for the launch profile instead)."""
     import contextlib
     profile = str(params.get("profile") or "").strip() if isinstance(params, dict) else ""
-    if not profile:
-        return "", contextlib.nullcontext()
-    from hermes_cli import profiles as profiles_mod
-    if not profiles_mod.profile_exists(profile):
-        raise FileNotFoundError(f"Profile '{profile}' does not exist on this backend.")
-    home = _profile_home(profile)
-    if home is None:
-        return profile, contextlib.nullcontext()
-    return profile, _session_profile_runtime_scope({"profile_home": str(home)})
-
-
-def _readiness_check(rid, params, probe):
-    """Shared shell of setup.status / setup.runtime_check: ``probe(profile, scoped)`` runs inside
-    the profile scope (``scoped`` = the ``{"profile": ...}`` payload stamp, ``{}`` for the launch
-    profile); an unknown profile answers ``ok=False`` (never a JSON-RPC error)."""
-    try:
-        profile, scope = _readiness_profile_scope(params)
-    except FileNotFoundError as e:
-        return _ok(rid, {"ok": False, "profile": params.get("profile"), "error": str(e)})
+    scope = contextlib.nullcontext()
+    if profile:
+        from hermes_cli import profiles as profiles_mod
+        if not profiles_mod.profile_exists(profile):
+            return _ok(rid, {"ok": False, "profile": params.get("profile"),
+                             "error": f"Profile '{profile}' does not exist on this backend."})
+        home = _profile_home(profile)
+        if home is not None:
+            scope = _session_profile_runtime_scope({"profile_home": str(home)})
     with scope:
         payload = probe(profile, {"profile": profile} if profile else {})
     return _ok(rid, payload)

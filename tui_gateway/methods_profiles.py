@@ -232,9 +232,10 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"profiles": out, "bot_mode_protocol": True})
 
 
-def _copy_secret_file(src, dst, wanted: bool) -> bool:
-    """Copy ``src`` -> ``dst`` (0600) when ``src`` exists and ``wanted``; True if copied."""
-    if not (src.is_file() and wanted):
+def _mirror_secret(path, launch_home, name: str, wanted) -> bool:
+    """Copy the launch ``name`` file into the profile (0600) when it exists and ``wanted(src, dst)``."""
+    src, dst = launch_home / name, path / name
+    if not (src.is_file() and wanted(src, dst)):
         return False
     import shutil
     shutil.copy2(src, dst)
@@ -243,25 +244,9 @@ def _copy_secret_file(src, dst, wanted: bool) -> bool:
     return True
 
 
-def _mirror_env(path, launch_home) -> bool:
-    """Copy the launch .env only over the seeded comment-only stub (never a clone's secrets)."""
-    def has_content(env_path) -> bool:
-        lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return any(s and not s.startswith("#") for s in map(str.strip, lines))
-    src, dst = launch_home / ".env", path / ".env"
-    return _copy_secret_file(src, dst, has_content(src) and not _try(lambda: has_content(dst), False))
-
-
-def _mirror_auth(path, launch_home) -> bool:
-    """Copy the launch auth.json when absent (skipped under ``share_auth``: a copy forks token
-    state and the first refresh in either store strands the other)."""
-    src, dst = launch_home / "auth.json", path / "auth.json"
-    if not _copy_secret_file(src, dst, not dst.exists()):
-        return False
-    # Drop single-use OAuth grants (first refresh strands every sibling); they read from
-    # the root grant via the pool fallback. API keys stay.
-    _best_effort(lambda: _lazy("hermes_cli.auth", "strip_cloned_single_use_oauth_grants")(path))
-    return True
+def _env_has_content(env_path) -> bool:
+    lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return any(s and not s.startswith("#") for s in map(str.strip, lines))
 
 
 def _mirror_voice_sections(path) -> bool:
@@ -309,9 +294,16 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
     if not is_truthy_value(params.get("mirror_credentials", True)):
         return mirrored
     launch_home = get_hermes_home()
-    mirrored["env"] = _try(lambda: _mirror_env(path, launch_home), False)
-    if not share_auth:
-        mirrored["auth"] = _try(lambda: _mirror_auth(path, launch_home), False)
+    # .env: only over the seeded comment-only stub (never a clone's secrets).
+    mirrored["env"] = _try(lambda: _mirror_secret(path, launch_home, ".env", lambda src, dst: (
+        _env_has_content(src) and not _try(lambda: _env_has_content(dst), False))), False)
+    if not share_auth:  # a copy forks token state: the first refresh in either store strands the other
+        mirrored["auth"] = _try(lambda: _mirror_secret(path, launch_home, "auth.json",
+                                                       lambda src, dst: not dst.exists()), False)
+        if mirrored["auth"]:
+            # Drop single-use OAuth grants (first refresh strands every sibling); they read from the
+            # root grant via the pool fallback. API keys stay.
+            _best_effort(lambda: _lazy("hermes_cli.auth", "strip_cloned_single_use_oauth_grants")(path))
     mirrored["voice"] = _mirror_voice_sections(path)
     return mirrored
 
@@ -465,9 +457,9 @@ def _configure_model(profile_dir, params, applied):
     """Apply a ``model`` + ``provider`` pin, or return a confirm message and write NOTHING (client
     resends with ``confirm_expensive_model``). A failing guard = no warning (as _apply_model_switch)."""
     model, provider = _model_provider_params(params)
-    confirm_message = None
     if not (model and provider):
         return None
+    confirm_message = None
     if not is_truthy_value(params.get("confirm_expensive_model", False)):
         warn = _lazy("hermes_cli.model_selection_guards", "combined_selection_warning")
         confirm_message = _try(lambda: getattr(warn(model, provider=provider or None), "message", None), None)
