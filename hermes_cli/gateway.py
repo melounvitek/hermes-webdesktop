@@ -1038,11 +1038,10 @@ def _hermes_home_from_systemd_unit_file(system: bool = False) -> str | None:
         return None
     for line in text.splitlines():
         body = line.strip()
-        if not body.startswith("Environment="):
-            continue
-        body = body[len("Environment=") :].strip().strip('"')
-        if body.startswith("HERMES_HOME="):
-            return body.split("=", 1)[1].strip().strip('"') or None
+        if body.startswith("Environment="):
+            body = body[len("Environment=") :].strip().strip('"')
+            if body.startswith("HERMES_HOME="):
+                return body.split("=", 1)[1].strip().strip('"') or None
     return None
 
 
@@ -1068,20 +1067,22 @@ def _read_systemd_unit_properties(
     return _systemctl_show(properties, system=system)
 
 
-def _systemd_main_pid_from_props(props: dict[str, str]) -> int | None:
+def _positive_pid(value) -> int | None:
+    """``int(value)`` when it parses and is > 0, else None."""
     try:
-        pid = int(props.get("MainPID", "0") or "0")
+        pid = int(value or 0)
     except (TypeError, ValueError):
         return None
     return pid if pid > 0 else None
 
 
+def _systemd_main_pid_from_props(props: dict[str, str]) -> int | None:
+    return _positive_pid(props.get("MainPID", "0") or "0")
+
+
 def _runtime_state_pid(state: dict | None) -> int:
-    """``pid`` recorded in a runtime-status dict; 0 when absent or unparsable."""
-    try:
-        return int((state or {}).get("pid", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    """``pid`` recorded in a runtime-status dict; 0 when absent, unparsable, or non-positive."""
+    return _positive_pid((state or {}).get("pid", 0)) or 0
 
 
 def _systemd_main_pid(system: bool = False) -> int | None:
@@ -1155,9 +1156,7 @@ def _wait_for_systemd_service_restart(
                 )
                 return False
             if not printed_runtime_wait:
-                print(
-                    f"⏳ {scope_label} service process started (PID {new_pid}); waiting for gateway runtime..."
-                )
+                print(f"⏳ {scope_label} service process started (PID {new_pid}); waiting for gateway runtime...")
                 printed_runtime_wait = True
 
         if active_state == "activating" and sub_state == "auto-restart":
@@ -1258,15 +1257,8 @@ def _parse_launchd_pid_from_list_output(output: str) -> int | None:
     or non-positive (crashed)."""
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith(('"PID"', "PID")):
-            parts = stripped.split("=", 1)
-            if len(parts) != 2:
-                continue
-            try:
-                pid = int(parts[1].strip().rstrip(";").strip('"'))
-            except ValueError:
-                return None
-            return pid if pid > 0 else None
+        if stripped.startswith(('"PID"', "PID")) and "=" in stripped:
+            return _positive_pid(stripped.split("=", 1)[1].strip().rstrip(";").strip('"'))
     return None
 
 
@@ -1275,11 +1267,7 @@ def _parse_launchd_pid_from_print_output(output: str) -> int | None:
     for line in output.splitlines():
         stripped = line.strip()
         if stripped.startswith("pid = "):
-            try:
-                pid = int(stripped[len("pid = "):].strip())
-            except ValueError:
-                return None
-            return pid if pid > 0 else None
+            return _positive_pid(stripped[len("pid = "):].strip())
     return None
 
 
@@ -1397,23 +1385,18 @@ def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
     if not snapshot.has_process_service_mismatch:
         return
     print()
+    pids_line = f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}"
     # Managed detached fallback (launchd exit-5 path) vs. a genuinely manual run.
     if _launchd_unsupported_marker_exists():
-        headline, *details = (
-            "⚠ Gateway is running as a detached fallback process — launchd cannot supervise it",
-            "  Auto-start at login and auto-restart on crash are NOT available.",
-            "  Stop it with: hermes gateway stop",
-        )
+        print("⚠ Gateway is running as a detached fallback process — launchd cannot supervise it")
+        print(pids_line)
+        print("  Auto-start at login and auto-restart on crash are NOT available.")
+        print("  Stop it with: hermes gateway stop")
     else:
-        headline, *details = (
-            "⚠ Gateway process is running for this profile, but the service is not active",
-            "  This is usually a manual foreground/tmux/nohup run, so `hermes gateway`",
-            "  can refuse to start another copy until this process stops.",
-        )
-    print(headline)
-    print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
-    for line in details:
-        print(line)
+        print("⚠ Gateway process is running for this profile, but the service is not active")
+        print(pids_line)
+        print("  This is usually a manual foreground/tmux/nohup run, so `hermes gateway`")
+        print("  can refuse to start another copy until this process stops.")
 
 
 def _print_other_profiles_gateway_status() -> None:
@@ -1764,14 +1747,11 @@ def _windows_scheduled_task_state(task_name: str) -> str | None:
     localizes its output in the local codepage; the ``State`` enum is stable across locales."""
     if not is_windows():
         return None
+    ps_cmd = f"$t = Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue; if ($t) {{ $t.State }} else {{ 'MISSING' }}"
     try:
         powershell = shutil.which("powershell") or shutil.which("pwsh")
         if powershell is None:
             return None
-        ps_cmd = (
-            f"$t = Get-ScheduledTask -TaskName '{task_name}' "
-            "-ErrorAction SilentlyContinue; if ($t) { $t.State } else { 'MISSING' }"
-        )
         result = subprocess.run(
             [powershell, "-NoProfile", "-Command", ps_cmd],
             capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10,
@@ -3750,10 +3730,8 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(new_plist, encoding="utf-8")
-        if not _launchd_bootstrap_and_kickstart(plist_path, label):
-            return
-        print("✓ Service started")
-        _clear_launchd_unsupported_marker()
+        if _launchd_bootstrap_and_kickstart(plist_path, label):
+            _launchd_ok("✓ Service started")
         return
 
     refresh_launchd_plist_if_needed()
@@ -3766,8 +3744,7 @@ def launchd_start():
         print("↻ launchd job was unloaded; reloading service definition")
         if not _launchd_bootstrap_and_kickstart(plist_path, label):
             return
-    print("✓ Service started")
-    _clear_launchd_unsupported_marker()
+    _launchd_ok("✓ Service started")
 
 
 def _launchctl_kickstart_current(label: str) -> None:
@@ -3783,6 +3760,12 @@ def _launchd_bootstrap_and_kickstart(plist_path: Path, label: str) -> bool:
         _launchd_degrade_or_raise(e, "launchctl")
         return False
     return True
+
+
+def _launchd_ok(message: str) -> None:
+    """Print a launchd success line and clear the unsupported marker (an OS fix recovers automatically)."""
+    print(message)
+    _clear_launchd_unsupported_marker()
 
 
 def launchd_stop():
@@ -3859,16 +3842,12 @@ def launchd_restart():
     try:
         pid = get_running_pid()
         if pid is not None and _request_gateway_self_restart(pid):
-            print("✓ Service restart requested")
-            _clear_launchd_unsupported_marker()
+            _launchd_ok("✓ Service restart requested")
             return
         if pid is not None and probe_gateway_loop_liveness(pid) == GATEWAY_LOOP_WEDGED:
             # Event loop provably dead: it can't process a graceful shutdown, so a full drain wait
             # only stalls the restart (and `hermes update`). Bounded SIGTERM → SIGKILL, ~10s.
-            print(
-                f"⚠ Gateway PID {pid} event loop is unresponsive — "
-                "skipping drain and forcing a bounded stop..."
-            )
+            print(f"⚠ Gateway PID {pid} event loop is unresponsive — " "skipping drain and forcing a bounded stop...")
             _escalate_wedged_gateway(pid)
             pid = None
         if pid is not None:
@@ -3881,15 +3860,13 @@ def launchd_restart():
                 # KeepAlive revives a planned exit, so do NOT kickstart (-k would kill the replacement) —
                 # but a clean exit doesn't prove supervision, so verify a replacement PID appears first.
                 if _wait_for_launchd_service_pid(label, pid, timeout=15.0, domain=domain):
-                    print("✓ Service restart requested")
-                    _clear_launchd_unsupported_marker()
+                    _launchd_ok("✓ Service restart requested")
                     return
                 print("⚠ launchd did not revive the gateway after its graceful exit — forcing restart")
             else:
                 print(f"⚠ Gateway drain timed out after {wait_budget:.0f}s — forcing launchd restart")
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
-        print("✓ Service restarted")
-        _clear_launchd_unsupported_marker()
+        _launchd_ok("✓ Service restarted")
     except subprocess.CalledProcessError as e:
         if not _launchd_error_indicates_unloaded(e):
             _launchd_degrade_or_raise(e, "launchctl kickstart")
@@ -3905,8 +3882,7 @@ def launchd_restart():
         except subprocess.CalledProcessError as e2:
             _launchd_degrade_or_raise(e2, "launchctl")
             return
-        print("✓ Service restarted")
-        _clear_launchd_unsupported_marker()
+        _launchd_ok("✓ Service restarted")
 
 
 # KeepAlive relaunches at most ~once per 10s, so a self-restart leaves the label pid-less that long.
