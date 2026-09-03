@@ -14,29 +14,23 @@ from tools.mcp_tool_common import _sanitize_error, _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-# Stateless (2026-07-28) servers reject a legacy ``initialize`` with
-# UnsupportedProtocolVersion (-32022) or plain method-not-found.
+# Stateless (2026-07-28) servers reject a legacy ``initialize`` with this or plain method-not-found.
 _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 
-def _jsonrpc_code(exc: BaseException):
-    """Structural ``MCPError.error.code`` (None when absent)."""
-    return getattr(getattr(exc, "error", None), "code", None)
-
-
-def _jsonrpc_matches(exc: BaseException, code, codes: tuple, markers: tuple) -> bool:
-    """Structural *code* in *codes*, else any *marker* in ``str(exc).lower()``. Never ``isinstance``
-    on SDK exception types: they arrive wrapped in ExceptionGroups and drift across generations."""
+def _jsonrpc_matches(exc: BaseException, codes: tuple, markers: tuple, code=None) -> bool:
+    """Structural ``MCPError.error.code`` (or *code*) in *codes*, else any *marker* in ``str(exc).lower()``. Never
+    ``isinstance`` on SDK exception types: they arrive wrapped in ExceptionGroups and drift across generations."""
+    code = getattr(getattr(exc, "error", None), "code", None) or code
     return code in codes or any(marker in str(exc).lower() for marker in markers)
 
 
 def _handshake_rejected_as_modern(exc: BaseException) -> bool:
     """True when a failed ``initialize`` signals a stateless-only (2026-07-28) server."""
     return _jsonrpc_matches(
-        exc, _jsonrpc_code(exc) or getattr(exc, "code", None),
-        (_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION, _core._JSONRPC_METHOD_NOT_FOUND),
+        exc, (_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION, _core._JSONRPC_METHOD_NOT_FOUND),
         ("unsupported protocol version", str(_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION)),
-    ) or _is_method_not_found_error(exc)
+        code=getattr(exc, "code", None)) or _is_method_not_found_error(exc)
 
 
 def _is_method_not_found_error(exc: BaseException) -> bool:
@@ -44,13 +38,12 @@ def _is_method_not_found_error(exc: BaseException) -> bool:
     substring fallback includes "Unknown method: <name>" — without it the ping→list_tools keepalive
     fallback never latches and reconnect-loops."""
     return _jsonrpc_matches(
-        exc, _jsonrpc_code(exc), (_core._JSONRPC_METHOD_NOT_FOUND,),
+        exc, (_core._JSONRPC_METHOD_NOT_FOUND,),
         (str(_core._JSONRPC_METHOD_NOT_FOUND), "method not found", "unknown method", "not found: ping"))
 
 
 class InvalidMcpUrlError(ValueError):
-    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup so we
-    fail fast instead of burning the reconnect-backoff loop."""
+    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup to fail fast."""
 
 
 class NonMcpEndpointError(ConnectionError):
@@ -93,11 +86,10 @@ def _classify_mcp_failure(exc: BaseException) -> str:
 
 
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
-    """The stripped URL if it is a valid http(s) URL; else InvalidMcpUrlError naming the server
-    (non-string, other scheme — stdio servers use ``command`` — or empty host)."""
+    """The stripped URL if valid http(s); else InvalidMcpUrlError naming the server (non-string, other scheme —
+    stdio servers use ``command`` — or empty host)."""
     def _bad(detail: str) -> InvalidMcpUrlError:
         return InvalidMcpUrlError(f"Invalid MCP URL for '{server_name}': {detail}")
-
     if not isinstance(url, str):
         raise _bad(f"expected a string, got {type(url).__name__}")
     stripped = url.strip()
@@ -133,13 +125,11 @@ def _resolve_client_cert(server_name: str, config: dict):
         if not os.path.isfile(expanded):
             raise FileNotFoundError(f"{prefix}{label} not found at {expanded!r}")
         return expanded
-
     if not isinstance(raw_cert, (list, tuple)):
         cert_path = _expand(raw_cert, "client_cert")
         return (cert_path, _expand(raw_key, "client_key")) if raw_key is not None else cert_path  # combined PEM
     if raw_key is not None:
-        raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR "
-                         f"client_cert + client_key, not both")
+        raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR client_cert + client_key, not both")
     if len(raw_cert) not in (2, 3):
         raise ValueError(f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})")
     pair = (_expand(raw_cert[0], "client_cert[0]"), _expand(raw_cert[1], "client_cert[1]"))
@@ -161,7 +151,6 @@ def _resolve_identity_header(server_name: str, config: dict):
     def _ignore(detail: str, *args):
         logger.warning("MCP server '%s': identity_header " + detail + " — ignoring", server_name, *args)
         return None
-
     if not isinstance(raw, dict):
         return _ignore("must be a mapping with 'name' and 'value'/'value_from' keys (got %s)", type(raw).__name__)
     name = raw.get("name")
@@ -210,7 +199,6 @@ def _make_redirect_header_stripper(original_url, *, strict: bool = False,
         for _name in configured_header_names if strict else ():
             while _name in headers:
                 del headers[_name]
-
     return _strip_on_cross_origin_redirect
 
 
@@ -236,7 +224,6 @@ def _format_connect_error(exc: BaseException) -> str:
         text = "" if getattr(current, "exceptions", None) else str(current).strip()
         messages = ([text] if text else []) + [m for child in _exc_children(current) for m in _flatten_messages(child)]
         return messages or [current.__class__.__name__]
-
     missing = _find_missing(exc)
     if not missing:
         return _sanitize_error("; ".join(list(dict.fromkeys(_flatten_messages(exc)))[:3]))
@@ -248,11 +235,6 @@ def _format_connect_error(exc: BaseException) -> str:
     return _sanitize_error(message)
 
 
-# Lazily-built caches so this module imports without the SDK OAuth module.
-_AUTH_ERROR_TYPES: tuple = ()
-_HTTP_STATUS_ERROR_TYPES: Optional[tuple] = None
-
-
 def _optional_types(module: str, *names: str) -> list:
     """``[module.name, ...]`` or ``[]`` when the module/attribute is unavailable."""
     try:
@@ -262,35 +244,33 @@ def _optional_types(module: str, *names: str) -> list:
         return []
 
 
-def _http_status_error_types() -> tuple:
-    """``HTTPStatusError`` from both httpx flavours: a 401 may come from the SDK's own stack
-    (``httpx2`` on mcp >= 2.0) or Hermes' pinned ``httpx``; the classes are unrelated."""
-    global _HTTP_STATUS_ERROR_TYPES
-    if _HTTP_STATUS_ERROR_TYPES is None:
-        sdk_mod = _core.sdk_httpx()
-        _HTTP_STATUS_ERROR_TYPES = tuple(dict.fromkeys(
-            ([sdk_mod.HTTPStatusError] if sdk_mod is not None else []) + _optional_types("httpx", "HTTPStatusError")))
-    return _HTTP_STATUS_ERROR_TYPES
+# Lazily-built ``(auth_types, http_status_types)`` so this module imports without the SDK OAuth module.
+_AUTH_ERROR_TYPES: Optional[tuple] = None
 
 
 def _get_auth_error_types() -> tuple:
-    """Cached MCP OAuth failure types: SDK ``OAuthFlowError``/``OAuthTokenError`` (+ legacy
-    ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and both ``HTTPStatusError`` flavours
-    (which still need the 401 check in :func:`_is_auth_error`)."""
+    """Cached ``(auth_types, http_status_types)``: SDK ``OAuthFlowError``/``OAuthTokenError`` (+ legacy
+    ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and ``HTTPStatusError`` from both httpx
+    flavours — a 401 may come from the SDK's own stack (``httpx2`` on mcp >= 2.0) or Hermes' pinned
+    ``httpx``; the classes are unrelated and still need the 401 check in :func:`_is_auth_error`."""
     global _AUTH_ERROR_TYPES
-    if not _AUTH_ERROR_TYPES:
-        _AUTH_ERROR_TYPES = (*_optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError"),
-                             *_optional_types("mcp.client.auth", "UnauthorizedError"),  # older SDKs
-                             *_optional_types("tools.mcp_oauth", "OAuthNonInteractiveError"),
-                             *_http_status_error_types())
+    if not (_AUTH_ERROR_TYPES and _AUTH_ERROR_TYPES[0]):  # retry while empty (SDK may import later)
+        sdk_mod = _core.sdk_httpx()
+        http_types = tuple(dict.fromkeys(
+            ([sdk_mod.HTTPStatusError] if sdk_mod is not None else []) + _optional_types("httpx", "HTTPStatusError")))
+        auth_types = (*_optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError"),
+                      *_optional_types("mcp.client.auth", "UnauthorizedError"),  # older SDKs
+                      *_optional_types("tools.mcp_oauth", "OAuthNonInteractiveError"), *http_types)
+        _AUTH_ERROR_TYPES = (auth_types, http_types)
     return _AUTH_ERROR_TYPES
 
 
 def _is_auth_error(exc: BaseException) -> bool:
     """True if ``exc`` indicates an MCP OAuth failure; ``HTTPStatusError`` counts only with status 401."""
-    if not isinstance(exc, _get_auth_error_types()):
+    auth_types, http_types = _get_auth_error_types()
+    if not isinstance(exc, auth_types):
         return False
-    return getattr(exc.response, "status_code", None) == 401 if isinstance(exc, _http_status_error_types()) else True
+    return getattr(exc.response, "status_code", None) == 401 if isinstance(exc, http_types) else True
 
 
 # Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).
@@ -299,18 +279,17 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "unknown session", "session terminated", "closedresourceerror", "closed resource",
     "transport is closed", "connection closed", "broken pipe", "end of file")
 
-# Node budget for ``_is_session_expired_error`` (the visited set breaks cycles; this bounds acyclic
-# blow-ups). Well above ``sys.getrecursionlimit()`` so deep task-group nesting is fully scanned.
+# Node budget for ``_is_session_expired_error`` (the visited set breaks cycles; this bounds acyclic blow-ups).
+# Well above ``sys.getrecursionlimit()`` so deep task-group nesting is fully scanned.
 _EXC_TRAVERSAL_MAX_NODES = 10_000
 
 
 def _is_session_expired_error(exc: BaseException) -> bool:
-    """True if ``exc`` looks like a transport session expiry (Streamable-HTTP servers GC session
-    state on idle TTL / restart / pod rotation while the OAuth token stays valid) — the fix is a
-    transport reconnect, not an OAuth refresh. Iterative walk over ``exceptions`` / ``__cause__`` /
-    ``__context__`` with a visited set AND a node budget; every reachable node is inspected so an
-    InterruptedError anywhere overrides transport markers, and the chain walk matters because SDK
-    wrappers raise a generic RuntimeError *from* a message-less ClosedResourceError."""
+    """True if ``exc`` looks like a transport session expiry (Streamable-HTTP servers GC session state on idle TTL /
+    restart / pod rotation while the OAuth token stays valid) — the fix is a transport reconnect, not an OAuth
+    refresh. Iterative walk over ``exceptions`` / ``__cause__`` / ``__context__`` with a visited set AND a node
+    budget; every reachable node is inspected so an InterruptedError anywhere overrides transport markers, and the
+    chain walk matters because SDK wrappers raise a generic RuntimeError *from* a message-less ClosedResourceError."""
     # AnyIO stream exceptions are often message-less, so type checks complement marker matching.
     transport_error_types = tuple(_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
     stack: "list[BaseException | None]" = [exc]
@@ -325,10 +304,9 @@ def _is_session_expired_error(exc: BaseException) -> bool:
         budget -= 1
         if isinstance(current, InterruptedError):
             return False
-        # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids
-        # false positives.
+        # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids false positives.
         msg = str(current).lower()
         found = found or isinstance(current, transport_error_types) or any(m in msg for m in _SESSION_EXPIRED_MARKERS)
-        stack.extend(getattr(current, "exceptions", ()))
-        stack.extend((getattr(current, "__cause__", None), getattr(current, "__context__", None)))
+        stack.extend((*getattr(current, "exceptions", ()), getattr(current, "__cause__", None),
+                      getattr(current, "__context__", None)))
     return found
