@@ -162,10 +162,8 @@ def _post_setup_camofox() -> None:
 
 _KITTENTTS_WHEEL_URL = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
 
-# Post-setup hooks that only pip-install a Python package. Fields: module (import probe; present → skip
-# install), label (status lines), installing (progress line), args (_pip_install args — keep in sync with
-# _RESTORABLE_PYTHON_TOOL_DEPENDENCIES), manual ("Run manually:" command on failure/timeout),
-# on_install (info lines only after a fresh install), always (info lines whenever the package is present).
+# pip-only post-setup hooks: module (import probe), label, installing (progress line), args (keep in sync with
+# _RESTORABLE_PYTHON_TOOL_DEPENDENCIES), manual (fallback command), on_install (fresh-install notes), always.
 _PIP_POST_SETUP_HOOKS: dict = {
     "faster_whisper": {
         "module": "faster_whisper", "label": "faster-whisper",

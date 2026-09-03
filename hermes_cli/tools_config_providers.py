@@ -81,10 +81,9 @@ def _plugin_provider_rows(
     return rows
 
 
-# Category -> (registry module, marker keys, _plugin_provider_rows kwargs). image/video ``*_plugin_name`` route
-# config writes + model pickers through the registry (video has no in-tree backend); all bundled web providers
-# are plugins (only firecrawl setup-flow rows stay hardcoded); ``browser_provider`` is the legacy key written to
-# ``browser.cloud_provider``; TTS rows render below the built-in rows and write ``tts.provider: <name>``.
+# Category -> (registry module, marker keys, _plugin_provider_rows kwargs). ``*_plugin_name`` markers route
+# config writes + model pickers through the registry; ``browser_provider`` is the legacy ``browser.cloud_provider``
+# key; TTS rows write ``tts.provider: <name>``.
 _PLUGIN_PROVIDER_ROW_SPECS = {
     "image_gen": ("agent.image_gen_registry", ("image_gen_plugin_name",), {"require_name": False}),
     "video_gen": ("agent.video_gen_registry", ("video_gen_plugin_name",), {"require_name": False}),
