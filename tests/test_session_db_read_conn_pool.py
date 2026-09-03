@@ -499,7 +499,8 @@ def test_idle_permits_are_reclaimed_from_a_peer_instance(db):
 def test_peak_is_bounded_across_many_database_files(tmp_path):
     """Read connections must be capped for the PROCESS, not just per file."""
     import hermes_state
-    from hermes_state import SessionDB, _READ_POOL_MAX, _READ_POOL_PROCESS_MAX
+    from hermes_state import SessionDB, _READ_POOL_MAX
+    from hermes_state_readpool import _READ_POOL_PROCESS_MAX
 
     n_files = (_READ_POOL_PROCESS_MAX // _READ_POOL_MAX) + 2
     dbs = []
@@ -548,7 +549,8 @@ def test_peak_is_bounded_across_many_database_files(tmp_path):
 @pytest.mark.requires_wal
 def test_idle_connections_are_reclaimed_across_database_files(tmp_path):
     """A quiet profile's idle connections must not starve the busy one."""
-    from hermes_state import SessionDB, _READ_POOL_MAX, _READ_POOL_PROCESS_MAX
+    from hermes_state import SessionDB, _READ_POOL_MAX
+    from hermes_state_readpool import _READ_POOL_PROCESS_MAX
 
     quiet = []
     try:
@@ -629,7 +631,8 @@ def test_duplicate_handles_on_one_path_are_reported(db, caplog):
     """Writer connections cannot be capped, so duplicates must be visible."""
     import logging
 
-    from hermes_state import SessionDB, _HANDLES_PER_PATH_WARN
+    from hermes_state import SessionDB
+    from hermes_state_readpool import _HANDLES_PER_PATH_WARN
 
     extra = []
     try:
