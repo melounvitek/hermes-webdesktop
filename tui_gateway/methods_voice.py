@@ -639,21 +639,22 @@ def _voice_toggle_mode(rid, params: dict) -> dict:
             pass
         except Exception as e:
             logger.warning("voice: stop_continuous failed during toggle off: %s", e)
-        os.environ["HERMES_VOICE_TTS"] = "0"  # TTS is toggled independently later; silence live speech
-        _tts_stream_stop(user_barge=False)
-        _tts_lease_async("tui:voice-tts", False)
+        _set_voice_tts(False)  # TTS is toggled independently later
     return _ok(rid, _voice_status_payload(stop_hint=stop_hint))
+
+
+def _set_voice_tts(on: bool) -> None:
+    """Flip TTS; off silences live speech. The lease pre-loads the engine (on) / releases it (off)."""
+    os.environ["HERMES_VOICE_TTS"] = "1" if on else "0"
+    if not on:
+        _tts_stream_stop(user_barge=False)
+    _tts_lease_async("tui:voice-tts", on)
 
 
 def _voice_toggle_tts(rid, params: dict) -> dict:
     if not _voice_mode_enabled():
         return _err(rid, 4014, "enable voice mode first: /voice on")
-    new_value = not _voice_tts_enabled()
-    os.environ["HERMES_VOICE_TTS"] = "1" if new_value else "0"
-    if not new_value:
-        _tts_stream_stop(user_barge=False)
-    # on → pre-load the engine so the first reply starts hot; off → release the lease.
-    _tts_lease_async("tui:voice-tts", new_value)
+    _set_voice_tts(not _voice_tts_enabled())
     return _ok(rid, _voice_status_payload())
 
 

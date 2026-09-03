@@ -556,20 +556,16 @@ def _(rid, params: dict) -> dict:
     confirm_message = _configure_model(profile_dir, params, applied)
     if any(isinstance(params.get(k), list) for k in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")):
         _configure_cfg_sections(profile_dir, params, applied)
-    result = {"ok": all(applied.values()) if applied else True, "applied": applied}
-    if confirm_message is not None:
-        # Same shape config.set returns, so clients reuse one confirm handler.
-        result["confirm_required"] = True
-        result["confirm_message"] = confirm_message
-    return _ok(rid, result)
+    # confirm_* is the shape config.set returns, so clients reuse one confirm handler.
+    return _ok(rid, {"ok": all(applied.values()) if applied else True, "applied": applied,
+                     **({"confirm_required": True, "confirm_message": confirm_message}
+                        if confirm_message is not None else {})})
 
 
 def _unlink_asset_files(assets_dir, asset) -> int:
     """Delete every ``<asset>.<ext>`` in ``assets_dir``; returns how many existed."""
     present = [t for t in (assets_dir / f"{asset}.{ext}" for ext in _ASSET_EXTS) if t.is_file()]
-    for target in present:
-        target.unlink()
-    return len(present)
+    return len([t.unlink() for t in present])
 
 
 @_profile_handler("profiles.set_asset", 5065)
@@ -588,8 +584,7 @@ def _(rid, params: dict) -> dict:
         return err
     assets_dir = profile_dir / "assets"
     if is_truthy_value(params.get("clear", False)):
-        removed = _unlink_asset_files(assets_dir, asset)
-        return _ok(rid, {"ok": True, "asset": asset, "size": 0, "removed": removed})
+        return _ok(rid, {"ok": True, "asset": asset, "size": 0, "removed": _unlink_asset_files(assets_dir, asset)})
     data = str(params.get("data") or "")
     if not data:
         return _err(rid, 4067, "data required (data URL or base64)")
@@ -605,10 +600,9 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4070, "unsupported image format (PNG/JPEG/WebP only)")
     assets_dir.mkdir(parents=True, exist_ok=True)
     _unlink_asset_files(assets_dir, asset)  # one canonical file per asset
-    target = assets_dir / f"{asset}.{ext}"
-    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp = assets_dir / f"{asset}.{ext}.tmp"
     tmp.write_bytes(blob)
-    tmp.replace(target)
+    tmp.replace(assets_dir / f"{asset}.{ext}")
     return _ok(rid, {"ok": True, "asset": asset, "size": len(blob)})
 
 
@@ -624,8 +618,8 @@ def _(rid, params: dict) -> dict:
         target = profile_dir / "assets" / f"{asset}.{ext}"
         if target.is_file():
             blob = target.read_bytes()
-            data = f"data:{mime};base64,{base64.b64encode(blob).decode('ascii')}"
-            return _ok(rid, {"found": True, "mime": mime, "size": len(blob), "data": data})
+            return _ok(rid, {"found": True, "mime": mime, "size": len(blob),
+                             "data": f"data:{mime};base64,{base64.b64encode(blob).decode('ascii')}"})
     return _ok(rid, {"found": False})
 
 
