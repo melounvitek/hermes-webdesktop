@@ -885,9 +885,8 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _daemon_start_worker(self) -> None:
         import traceback
-        log_dir = get_hermes_home() / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "hindsight-embed.log"
+        log_path = get_hermes_home() / "logs" / "hindsight-embed.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
         def _log(text: str, exc: bool = False) -> None:
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1046,16 +1045,9 @@ class HindsightMemoryProvider(MemoryProvider):
         metadata.update({name: value for name in _METADATA_ATTRS if (value := getattr(self, f"_{name}"))})
         return metadata
 
-    def _build_retain_kwargs(
-        self,
-        content: str,
-        *,
-        context: str | None = None,
-        metadata: Dict[str, str] | None = None,
-        tags: List[str] | None = None,
-        occurred_at: str | None = None,
-        update_mode: str | None = None,
-    ) -> Dict[str, Any]:
+    def _build_retain_kwargs(self, content: str, *, context: str | None = None,
+                             metadata: Dict[str, str] | None = None, tags: List[str] | None = None,
+                             occurred_at: str | None = None, update_mode: str | None = None) -> Dict[str, Any]:
         """Build one aretain_batch item. The server resolves occurred_start/end (incl.
         relative phrases in content) from the item timestamp: explicit occurred_at
         wins, else the configured event clock."""
@@ -1220,14 +1212,8 @@ class HindsightMemoryProvider(MemoryProvider):
 
     # -- session lifecycle -------------------------------------------------------
 
-    def on_session_switch(
-        self,
-        new_session_id: str,
-        *,
-        parent_session_id: str = "",
-        reset: bool = False,
-        **kwargs,
-    ) -> None:
+    def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "",
+                          reset: bool = False, **kwargs) -> None:
         """Rotate per-session state (/resume, /branch, /reset, /new, compression) so
         writes don't land in the previous session's document. Always: flush buffered
         turns under the OLD ids first (``retain_every_n_turns > 1`` would silently
@@ -1301,10 +1287,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # bounded join keeps shutdown predictable even if the daemon is wedged.
         writer = self._writer_thread
         if writer is not None and writer.is_alive():
-            try:
-                self._retain_queue.put(_WRITER_SENTINEL)
-            except Exception:
-                pass
+            self._retain_queue.put(_WRITER_SENTINEL)
             writer.join(timeout=10.0)
             if writer.is_alive():
                 logger.warning("Hindsight writer did not stop within 10s; abandoning %d pending retain(s)",

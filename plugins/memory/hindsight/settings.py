@@ -137,9 +137,8 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
     collapsed (``hermes-{user}`` -> ``hermes``). Empty/invalid template -> *fallback*."""
     if not template:
         return fallback
-    sanitized = {k: _sanitize_bank_segment(v) for k, v in placeholders.items()}
     try:
-        rendered = template.format(**sanitized)
+        rendered = template.format(**{k: _sanitize_bank_segment(v) for k, v in placeholders.items()})
     except (KeyError, IndexError) as exc:
         logger.warning("Invalid bank_id_template %r: %s — using fallback %r",
                        template, exc, fallback)
