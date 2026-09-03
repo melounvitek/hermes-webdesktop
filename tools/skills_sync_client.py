@@ -282,9 +282,10 @@ def read_sync_state() -> Dict[str, Any]:
 def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
     try:
-        from tools.skill_usage import _atomic_write
-        _atomic_write(_skills_dir() / ".sync_state", ".sync_state_",
-                      lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
+        from utils import atomic_write_text
+        atomic_write_text(_skills_dir() / ".sync_state",
+                          json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False),
+                          tmp_prefix=".sync_state_")
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
 
