@@ -692,16 +692,6 @@ class RelayRuntime:
         self._begin_operation()
         return RelayOperationLease(self)
 
-    def emit_mark(self, name: str, event: dict[str, Any], *, data: Any = None, metadata: Any = None) -> bool:
-        """Emit a mark parented to the Hermes session identified by ``event``."""
-        session = self.ensure_session(event)
-        if session is None:
-            return False
-        self.run_in_session(
-            session, self.relay.scope.event, name, handle=session.handle, data=data, metadata=metadata,
-        )
-        return True
-
     def apply_tool_request_intercepts(
         self, *, session_id: str, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1343,18 +1333,6 @@ def resolve_execution_context(session_id: str) -> tuple[RelayRuntime | None, Rel
     if session is None:
         session = runtime.ensure_session({"session_id": session_id})
     return runtime, session, None if session is None else session.handle
-
-
-def emit_mark(name: str, *, session_id: str, data: Any = None, metadata: Any = None) -> bool:
-    """Emit a fail-open Relay mark under a Hermes session."""
-    runtime = get_runtime(create=False)
-    if runtime is None:
-        return False
-    try:
-        return runtime.emit_mark(name, {"session_id": session_id}, data=data, metadata=metadata)
-    except Exception:
-        logger.warning("Hermes Relay mark failed: %s", name, exc_info=True)
-        return False
 
 
 def apply_tool_request_intercepts(*, session_id: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
