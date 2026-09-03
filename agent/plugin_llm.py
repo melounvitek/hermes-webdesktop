@@ -21,9 +21,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Uni
 logger = logging.getLogger(__name__)
 
 
-# -- public dataclasses -------------------------------------------------------
-
-
 @dataclass
 class PluginLlmTextInput:
     """Text block in a structured input list."""
@@ -89,9 +86,6 @@ class PluginLlmStructuredResult:
     audit: Dict[str, Any] = field(default_factory=dict)
 
 
-# -- trust gate ---------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class _TrustPolicy:
     """Resolved trust gate for one plugin's LLM access."""
@@ -111,10 +105,8 @@ class _TrustPolicy:
 
 
 # The ``allow_*_override`` config keys; each is a same-named ``_TrustPolicy`` field.
-_OVERRIDE_FLAGS = (
-    "allow_provider_override", "allow_model_override", "allow_agent_id_override",
-    "allow_profile_override", "allow_task_override",
-)
+_OVERRIDE_FLAGS = ("allow_provider_override", "allow_model_override", "allow_agent_id_override",
+                   "allow_profile_override", "allow_task_override")
 
 
 def _normalize_ref(raw: str) -> str:
@@ -135,19 +127,15 @@ def _resolve_trust_policy(plugin_id: str) -> _TrustPolicy:
     restrictive). Resolved per call so config edits apply without a restart."""
     if not plugin_id:
         return _TrustPolicy(plugin_id="")
-
     try:
         from hermes_cli.config import load_config_readonly
-        config = load_config_readonly() or {}
+        llm_cfg: Any = (load_config_readonly() or {}).get("plugins")
     except Exception:  # pragma: no cover — config IO failure
-        return _TrustPolicy(plugin_id=plugin_id)
-
-    llm_cfg: Any = config.get("plugins")
+        llm_cfg = None
     for key in ("entries", plugin_id, "llm"):
         llm_cfg = llm_cfg.get(key) if isinstance(llm_cfg, dict) else None
     if not isinstance(llm_cfg, dict):
         return _TrustPolicy(plugin_id=plugin_id)
-
     allowed_models, allow_any_model = _coerce_allowlist(llm_cfg.get("allowed_models"))
     allowed_providers, allow_any_provider = _coerce_allowlist(llm_cfg.get("allowed_providers"))
     return _TrustPolicy(
@@ -163,9 +151,7 @@ class PluginLlmTrustError(PermissionError):
 
 def _denied(plugin_id: str, what: str, flag: str) -> PluginLlmTrustError:
     return PluginLlmTrustError(
-        f"Plugin {plugin_id!r} cannot {what} "
-        f"(set plugins.entries.{plugin_id}.llm.{flag} to true to allow)."
-    )
+        f"Plugin {plugin_id!r} cannot {what} (set plugins.entries.{plugin_id}.llm.{flag} to true to allow).")
 
 
 def _gate_ref_override(policy: _TrustPolicy, kind: str, requested: str) -> str:
@@ -174,11 +160,8 @@ def _gate_ref_override(policy: _TrustPolicy, kind: str, requested: str) -> str:
         raise _denied(policy.plugin_id, f"override the {kind}", f"allow_{kind}_override")
     allowed = getattr(policy, f"allowed_{kind}s")
     if not getattr(policy, f"allow_any_{kind}") and allowed is not None and _normalize_ref(requested) not in allowed:
-        raise PluginLlmTrustError(
-            f"Plugin {policy.plugin_id!r} {kind} override "
-            f"{requested!r} is not in plugins.entries."
-            f"{policy.plugin_id}.llm.allowed_{kind}s."
-        )
+        raise PluginLlmTrustError(f"Plugin {policy.plugin_id!r} {kind} override {requested!r} is not in "
+                                  f"plugins.entries.{policy.plugin_id}.llm.allowed_{kind}s.")
     return requested.strip()
 
 
@@ -199,8 +182,7 @@ def _check_overrides(
     for kind, requested in (("agent_id", requested_agent_id), ("profile", requested_profile)):
         if requested and not getattr(policy, f"allow_{kind}_override"):
             raise _denied(policy.plugin_id, _FLAG_ONLY_OVERRIDES[kind], f"allow_{kind}_override")
-    final_profile = requested_profile.strip() if requested_profile else None
-    return final_provider, final_model, requested_agent_id, final_profile
+    return final_provider, final_model, requested_agent_id, requested_profile.strip() if requested_profile else None
 
 
 def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
@@ -214,10 +196,8 @@ def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
     builtin: set = set()
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
-        owned = {
-            e.get("key") for e in get_plugin_auxiliary_tasks()
-            if e.get("plugin") == plugin_id and isinstance(e.get("key"), str) and e.get("key")
-        }
+        owned = {e.get("key") for e in get_plugin_auxiliary_tasks()
+                 if e.get("plugin") == plugin_id and isinstance(e.get("key"), str) and e.get("key")}
     except Exception:  # pragma: no cover — registry unavailable
         pass
     try:
@@ -239,30 +219,21 @@ def _check_task(policy: _TrustPolicy, *, plugin_id: str, requested_task: Optiona
     task = (requested_task or "").strip()
     if not task or task.lower() == "auto":
         return None
-
     owned, builtin = _resolve_task_ownership(plugin_id)
     if task in owned or (task in builtin and policy.allow_task_override):
         return task
     if task in builtin:
-        logger.warning(
-            "plugin_llm task routing denied: plugin %r requested built-in "
-            "auxiliary task %r without plugins.entries.%s.llm.allow_task_override",
-            plugin_id, task, plugin_id,
-        )
+        logger.warning("plugin_llm task routing denied: plugin %r requested built-in "
+                       "auxiliary task %r without plugins.entries.%s.llm.allow_task_override", plugin_id, task, plugin_id)
         raise _denied(plugin_id, f"route through the built-in auxiliary task {task!r}", "allow_task_override")
-    logger.warning(
-        "plugin_llm task routing denied: plugin %r requested auxiliary task %r it did not register",
-        plugin_id, task,
-    )
+    logger.warning("plugin_llm task routing denied: plugin %r requested auxiliary task %r it did not register",
+                   plugin_id, task)
     raise PluginLlmTrustError(
         f"Plugin {plugin_id!r} cannot route through auxiliary task {task!r} — a "
         f"plugin may only pass a task key it registered itself via "
         f"ctx.register_auxiliary_task() (or a built-in key when plugins.entries."
         f"{plugin_id}.llm.allow_task_override is true)."
     )
-
-
-# -- input normalization ------------------------------------------------------
 
 
 def _normalize_input_block(block: PluginLlmInput) -> Dict[str, Any]:
@@ -280,17 +251,14 @@ def _normalize_input_block(block: PluginLlmInput) -> Dict[str, Any]:
         raise ValueError(f"Unsupported input block: {type(block).__name__}")
     kind = block.get("type")
     if kind == "text":
-        text = block.get("text")
-        if not isinstance(text, str):
+        if not isinstance(block.get("text"), str):
             raise ValueError("text input block requires 'text' string")
-        return {"type": "text", "text": text}
+        return {"type": "text", "text": block["text"]}
     if kind == "image":
         if "data" not in block and not block.get("url"):
             raise ValueError("image input block requires 'data' bytes or 'url'")
-        return {
-            "type": "image", "data": block.get("data"), "url": block.get("url"),
-            "mime_type": block.get("mime_type") or "image/png", "file_name": block.get("file_name") or "",
-        }
+        return {"type": "image", "data": block.get("data"), "url": block.get("url"),
+                "mime_type": block.get("mime_type") or "image/png", "file_name": block.get("file_name") or ""}
     raise ValueError(f"Unknown input block type: {kind!r}")
 
 
@@ -301,8 +269,7 @@ def _image_part(norm: Dict[str, Any]) -> Dict[str, Any]:
         data = norm.get("data") or b""
         if not isinstance(data, (bytes, bytearray)):
             raise ValueError("image input 'data' must be bytes")
-        b64 = base64.b64encode(data).decode("ascii")
-        url = f"data:{norm.get('mime_type') or 'image/png'};base64,{b64}"
+        url = f"data:{norm.get('mime_type') or 'image/png'};base64,{base64.b64encode(data).decode('ascii')}"
     return {"type": "image_url", "image_url": {"url": url}}
 
 
@@ -316,13 +283,10 @@ def _build_structured_messages(
     messages: List[Dict[str, Any]] = []
     sys_parts: List[str] = [system_prompt.strip()] if system_prompt else []
     if json_mode or json_schema is not None:
-        sys_parts.append(
-            "Respond with a single JSON object that matches the requested shape. "
-            "Do not include prose or markdown fences."
-        )
+        sys_parts.append("Respond with a single JSON object that matches the requested shape. "
+                         "Do not include prose or markdown fences.")
     if sys_parts:
         messages.append({"role": "system", "content": "\n\n".join(sys_parts)})
-
     header = instructions.strip()
     if schema_name:
         header = f"{header}\n\nSchema name: {schema_name}"
@@ -340,9 +304,6 @@ def _build_structured_messages(
     return messages
 
 
-# -- JSON parsing / response extraction --------------------------------------
-
-
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -352,20 +313,16 @@ def _strip_code_fences(text: str) -> str:
     return match.group(1).strip() if match else text.strip()
 
 
-def _parse_structured_text(
-    *, text: str, json_mode: bool, json_schema: Optional[Any]
-) -> tuple[Optional[Any], str]:
+def _parse_structured_text(*, text: str, json_mode: bool, json_schema: Optional[Any]) -> tuple[Optional[Any], str]:
     """``(parsed, content_type)``: ``"json"`` when parsing (and schema validation, if
     given) succeeded, ``"text"`` otherwise. Schema violations raise ``ValueError``;
     a missing ``jsonschema`` package skips validation with a debug log."""
     if not (json_mode or json_schema is not None) or not text:
         return None, "text"
-
     try:
         parsed = json.loads(_strip_code_fences(text))
     except (json.JSONDecodeError, ValueError):
         return None, "text"
-
     if json_schema is not None:
         try:
             import jsonschema  # type: ignore[import-untyped]
@@ -374,7 +331,6 @@ def _parse_structured_text(
             logger.debug("jsonschema unavailable; skipping schema validation")
         except jsonschema.ValidationError as exc:  # type: ignore[attr-defined]
             raise ValueError(f"Plugin LLM structured output did not match schema: {exc.message}") from exc
-
     return parsed, "json"
 
 
@@ -397,7 +353,6 @@ def _extract_usage(response: Any) -> PluginLlmUsage:
             except (TypeError, ValueError):
                 pass
         return 0
-
     inp, out = _g("prompt_tokens", "input_tokens"), _g("completion_tokens", "output_tokens")
     return PluginLlmUsage(
         input_tokens=inp, output_tokens=out, total_tokens=_g("total_tokens") or (inp + out),
@@ -413,11 +368,8 @@ def _extract_text(response: Any) -> str:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            texts = (
-                (part.get("text") if part.get("type") == "text" else None)
-                if isinstance(part, dict) else getattr(part, "text", None)
-                for part in content
-            )
+            texts = ((part.get("text") if part.get("type") == "text" else None)
+                     if isinstance(part, dict) else getattr(part, "text", None) for part in content)
             return "".join(t for t in texts if isinstance(t, str))
     except (AttributeError, IndexError, TypeError):
         pass
@@ -433,10 +385,8 @@ def _main_config_value(reader: str, default: str) -> str:
         return default
 
 
-def _resolve_attribution(
-    *, provider_override: Optional[str], model_override: Optional[str], response: Any,
-    route_info: Optional[Dict[str, str]] = None,
-) -> tuple[str, str]:
+def _resolve_attribution(*, provider_override: Optional[str], model_override: Optional[str], response: Any,
+                         route_info: Optional[Dict[str, str]] = None) -> tuple[str, str]:
     """``(provider, model)`` to record on the result.
 
     Provider: route selected by ``auxiliary_client`` > explicit override > current
@@ -448,9 +398,6 @@ def _resolve_attribution(
     if isinstance(response_model, str) and response_model.strip():
         return provider, response_model.strip()
     return provider, route_info.get("model") or model_override or _main_config_value("_read_main_model", "default")
-
-
-# -- PluginLlm facade ---------------------------------------------------------
 
 
 def _json_response_format(*, json_mode: bool, json_schema: Optional[Any]) -> Optional[Dict[str, Any]]:
@@ -473,10 +420,8 @@ def _structured_spec(
         raise ValueError(f"{name} requires non-empty instructions")
     if not input:
         raise ValueError(f"{name} requires at least one input block")
-    return dict(
-        instructions=instructions, inputs=list(input), system_prompt=system_prompt,
-        json_mode=json_mode, json_schema=json_schema, schema_name=schema_name,
-    )
+    return dict(instructions=instructions, inputs=list(input), system_prompt=system_prompt,
+                json_mode=json_mode, json_schema=json_schema, schema_name=schema_name)
 
 
 class PluginLlm:
@@ -497,8 +442,6 @@ class PluginLlm:
         self._policy_loader = policy_loader or _resolve_trust_policy
         self._sync_caller = sync_caller
         self._async_caller = async_caller
-
-    # -- public API -----------------------------------------------------------
 
     def complete(
         self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None, model: Optional[str] = None,
@@ -552,8 +495,6 @@ class PluginLlm:
         agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec)
         return self._finish("acomplete_structured", agent, kw, await self._invoke_async(kw), purpose, spec)
 
-    # -- shared core ----------------------------------------------------------
-
     def _gate(
         self, provider: Optional[str], model: Optional[str], agent_id: Optional[str], profile: Optional[str],
         task: Optional[str], messages: Optional[List[Dict[str, Any]]], temperature: Optional[float],
@@ -567,18 +508,15 @@ class PluginLlm:
         policy = self._policy_loader(self._plugin_id)
         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
-            policy, requested_provider=provider, requested_model=model,
-            requested_agent_id=agent_id, requested_profile=profile,
-        )
+            policy, requested_provider=provider, requested_model=model, requested_agent_id=agent_id,
+            requested_profile=profile)
         extra_body = None
         if spec is not None:
             messages = _build_structured_messages(**spec)
             extra_body = _json_response_format(json_mode=spec["json_mode"], json_schema=spec["json_schema"])
-        return eff_agent, dict(
-            messages=messages, provider_override=eff_provider, model_override=eff_model,
-            profile_override=eff_profile, temperature=temperature, max_tokens=max_tokens,
-            timeout=timeout, extra_body=extra_body, task=eff_task,
-        )
+        return eff_agent, dict(messages=messages, provider_override=eff_provider, model_override=eff_model,
+                               profile_override=eff_profile, temperature=temperature, max_tokens=max_tokens,
+                               timeout=timeout, extra_body=extra_body, task=eff_task)
 
     def _finish(
         self, name: str, agent_id: Optional[str], kw: Dict[str, Any], invoked: tuple[str, str, Any],
@@ -605,8 +543,6 @@ class PluginLlm:
         logger.info(fmt + "tokens=%d", *log_args, usage.total_tokens)
         return cls(**fields, audit=audit)
 
-    # -- host invocation ------------------------------------------------------
-
     @staticmethod
     def _host_kwargs(kw: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, str]]]:
         """Call kwargs → ``call_llm`` kwargs. The auth profile rides in
@@ -616,19 +552,14 @@ class PluginLlm:
         if kw["profile_override"]:
             merged_extra.setdefault("metadata", {})["auth_profile"] = kw["profile_override"]
         route_info: Optional[Dict[str, str]] = {} if kw["task"] else None
-        return dict(
-            task=kw["task"], provider=kw["provider_override"], model=kw["model_override"],
-            messages=kw["messages"], temperature=kw["temperature"], max_tokens=kw["max_tokens"],
-            timeout=kw["timeout"], extra_body=merged_extra or None, route_info=route_info,
-        ), route_info
+        return dict(task=kw["task"], provider=kw["provider_override"], model=kw["model_override"],
+                    messages=kw["messages"], temperature=kw["temperature"], max_tokens=kw["max_tokens"],
+                    timeout=kw["timeout"], extra_body=merged_extra or None, route_info=route_info), route_info
 
     @staticmethod
     def _attributed(kw: Dict[str, Any], response: Any, route_info: Optional[Dict[str, str]]) -> tuple[str, str, Any]:
-        provider, model = _resolve_attribution(
-            provider_override=kw["provider_override"], model_override=kw["model_override"],
-            response=response, route_info=route_info,
-        )
-        return provider, model, response
+        return (*_resolve_attribution(provider_override=kw["provider_override"], model_override=kw["model_override"],
+                                      response=response, route_info=route_info), response)
 
     def _invoke_sync(self, kw: Dict[str, Any]) -> tuple[str, str, Any]:
         """Host ``call_llm`` (lazy import: circular deps at plugin discovery) →
@@ -649,10 +580,8 @@ class PluginLlm:
         return self._attributed(kw, await async_call_llm(**call_kw), route_info)
 
 
-def make_plugin_llm_for_test(
-    *, plugin_id: str, policy: _TrustPolicy, sync_caller: Optional[Callable[..., Any]] = None,
-    async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
-) -> PluginLlm:
+def make_plugin_llm_for_test(*, plugin_id: str, policy: _TrustPolicy, sync_caller: Optional[Callable[..., Any]] = None,
+                             async_caller: Optional[Callable[..., Awaitable[Any]]] = None) -> PluginLlm:
     """:class:`PluginLlm` with an injected policy and caller (no config.yaml, no
     provider). Not part of the public plugin API."""
     return PluginLlm(plugin_id=plugin_id, policy_loader=lambda _pid: policy, sync_caller=sync_caller, async_caller=async_caller)
