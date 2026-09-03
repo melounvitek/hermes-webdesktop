@@ -31,12 +31,9 @@ def _classify_responses_issuer(
     ``invalid_encrypted_content``); stamping items lets replay drop foreign
     blobs after a mid-conversation model switch.
     """
-    if is_xai_responses:
-        return "xai_responses"
-    if is_github_responses:
-        return "github_responses"
-    if is_codex_backend:
-        return "codex_backend"
+    for flag, kind in ((is_xai_responses, "xai_responses"), (is_github_responses, "github_responses"), (is_codex_backend, "codex_backend")):
+        if flag:
+            return kind
     return f"other:{base_url}" if base_url else "other"
 
 
@@ -170,9 +167,8 @@ def _neutralize_harmony_structure(value: Any) -> Any:
 def _iter_content_parts(content: list) -> Iterator[tuple[str, Any]]:
     """Yield ``("text", str)`` / ``("image", part)`` for recognized chat parts."""
     for part in content:
-        if isinstance(part, str):
-            if part:
-                yield "text", part
+        if isinstance(part, str) and part:
+            yield "text", part
         elif isinstance(part, dict):
             ptype = _part_type(part)
             if ptype in _TEXT_PART_TYPES and _nonempty_str(part.get("text")):
@@ -232,19 +228,19 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        parts = list(_iter_content_parts(content))
-        text_bits = [payload for kind, payload in parts if kind == "text"]
-        image_count = len(parts) - len(text_bits)
-        summary = sep.join(text_bits).strip()
-        if image_count:
-            note = f"[{image_count} image{'s' if image_count != 1 else ''}]"
-            summary = f"{note} {summary}" if summary else note
-        return summary
-    try:
-        return str(content)
-    except Exception:
-        return ""
+    if not isinstance(content, list):
+        try:
+            return str(content)
+        except Exception:
+            return ""
+    parts = list(_iter_content_parts(content))
+    text_bits = [payload for kind, payload in parts if kind == "text"]
+    image_count = len(parts) - len(text_bits)
+    summary = sep.join(text_bits).strip()
+    if image_count:
+        note = f"[{image_count} image{'s' if image_count != 1 else ''}]"
+        summary = f"{note} {summary}" if summary else note
+    return summary
 
 
 # --- ID helpers ---------------------------------------------------------------
@@ -296,11 +292,11 @@ def _canonical_call_id_from_fc(response_item_id: Any) -> Optional[str]:
 def _split_responses_tool_id(raw_id: Any) -> tuple[Optional[str], Optional[str]]:
     """Split a stored tool id into (call_id, response_item_id)."""
     value = raw_id.strip() if isinstance(raw_id, str) else ""
-    if not value:
-        return None, None
     if "|" in value:
         call_id, response_item_id = value.split("|", 1)
         return call_id.strip() or None, response_item_id.strip() or None
+    if not value:
+        return None, None
     return (None, value) if value.startswith("fc_") else (value, None)
 
 
@@ -440,14 +436,13 @@ def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> 
         return []
     replayed: List[Dict[str, Any]] = []
     for raw_item in codex_message_items:
-        if not (
+        is_assistant_message = (
             isinstance(raw_item, dict) and raw_item.get("type") == "message"
             and raw_item.get("role") == "assistant" and isinstance(raw_item.get("content"), list)
-        ):
-            continue
+        )
         content = [
             {"type": "output_text", "text": _str_or_empty(part.get("text", ""))}
-            for part in raw_item["content"]
+            for part in (raw_item["content"] if is_assistant_message else [])
             if isinstance(part, dict) and str(part.get("type") or "").strip() in _OUTPUT_TEXT_TYPES
         ]
         if content:
@@ -571,13 +566,10 @@ def _chat_messages_to_responses_input(
         message_items = _replay_message_items(msg, is_github_responses=is_github_responses)
         emit(message_items, msg)
         if not message_items:
-            if content_parts:
-                emit([{"role": "assistant", "content": content_parts}], msg)
-            elif content_text.strip():
-                emit([{"role": "assistant", "content": content_text}], msg)
-            elif reasoning_items:
-                # Every reasoning item needs a following item (else missing_following_item).
-                emit([{"role": "assistant", "content": ""}], msg)
+            # Every reasoning item needs a following item (else missing_following_item), hence the "" fallback.
+            fallback = content_parts or (content_text if content_text.strip() else "" if reasoning_items else None)
+            if fallback is not None:
+                emit([{"role": "assistant", "content": fallback}], msg)
         emit(_replay_tool_call_items(msg, start_index=len(items)), msg)
     # Native server-side compaction renders nothing placed before a compaction
     # item, so pre-checkpoint history is dead upload weight and the user's
@@ -874,6 +866,13 @@ _PREFLIGHT_ALLOWED_KEYS = {
 }
 
 
+def _optional_dict(api_kwargs: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    value = api_kwargs.get(key)
+    if value is not None and not isinstance(value, dict):
+        raise ValueError(f"Codex Responses request '{key}' must be an object.")
+    return value
+
+
 def _preflight_codex_api_kwargs(
     api_kwargs: Any,
     *,
@@ -916,23 +915,18 @@ def _preflight_codex_api_kwargs(
         value = api_kwargs.get(key)
         if accept(value):
             normalized[key] = coerce(value) if coerce else value
-    extra_headers = api_kwargs.get("extra_headers")
+    extra_headers = _optional_dict(api_kwargs, "extra_headers")
     if extra_headers is not None:
-        if not isinstance(extra_headers, dict):
-            raise ValueError("Codex Responses request 'extra_headers' must be an object.")
         if not all(_nonblank(key) for key in extra_headers):
             raise ValueError("Codex Responses request 'extra_headers' keys must be non-empty strings.")
         normalized_headers = {key.strip(): str(value) for key, value in extra_headers.items() if value is not None}
         if normalized_headers:
             normalized["extra_headers"] = normalized_headers
-    extra_body = api_kwargs.get("extra_body")
-    if extra_body is not None:
-        if not isinstance(extra_body, dict):
-            raise ValueError("Codex Responses request 'extra_body' must be an object.")
-        # Verbatim: xAI carries ``prompt_cache_key`` as a body-level field, and
-        # the SDK serializes extra_body without per-field checks.
-        if extra_body:
-            normalized["extra_body"] = dict(extra_body)
+    # extra_body is verbatim: xAI carries ``prompt_cache_key`` as a body-level
+    # field, and the SDK serializes extra_body without per-field checks.
+    extra_body = _optional_dict(api_kwargs, "extra_body")
+    if extra_body:
+        normalized["extra_body"] = dict(extra_body)
     allowed_keys = set(_PREFLIGHT_ALLOWED_KEYS)
     if allow_stream:
         stream = api_kwargs.get("stream")
@@ -993,9 +987,7 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
     code_str, message_str = field("code"), field("message")
     if code_str and message_str:
         return f"{code_str}: {message_str}"
-    if message_str or code_str or error_obj:
-        return message_str or code_str or str(error_obj)
-    return f"Responses API returned status '{response_status}'"
+    return message_str or code_str or (str(error_obj) if error_obj else f"Responses API returned status '{response_status}'")
 
 
 # --- Full response normalization ----------------------------------------------
@@ -1048,9 +1040,7 @@ def _capture_reasoning_item(item: Any, issuer_kind: Optional[str]) -> Optional[D
     summary = getattr(item, "summary", None)
     if isinstance(summary, list):
         raw_item["summary"] = [
-            {"type": "summary_text", "text": text}
-            for text in (getattr(part, "text", None) for part in summary)
-            if isinstance(text, str)
+            {"type": "summary_text", "text": text} for text in (getattr(part, "text", None) for part in summary) if isinstance(text, str)
         ]
     return raw_item
 
@@ -1157,10 +1147,9 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
     scan.scan(output, issuer_kind)
     tool_calls, reasoning_parts = scan.tool_calls, scan.reasoning_parts
     final_text = "\n".join(scan.content_parts).strip()
-    if not final_text and hasattr(response, "output_text") and (scan.saw_final_answer_phase or not scan.saw_commentary_phase):
+    if not final_text and (scan.saw_final_answer_phase or not scan.saw_commentary_phase):
         out_text = getattr(response, "output_text", "")
-        if isinstance(out_text, str):
-            final_text = out_text.strip()
+        final_text = out_text.strip() if isinstance(out_text, str) else final_text
     # Tool-call leak recovery: gpt-5.x sometimes emits the intended
     # ``function_call`` as plain Harmony text (``to=functions.foo {json}``) with
     # no structured item. Treat as incomplete so the continuation path
