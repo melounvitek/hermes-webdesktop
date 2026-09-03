@@ -1,13 +1,11 @@
-"""Result caching for web_search / web_extract.
-
-Two caches, both TTL-bounded (default 20 min, ``web.cache_ttl_minutes``; disable with
-``web.cache_enabled: false``). Only successful responses cache.
-* **Search memo** — in-memory, per-process, single-flighted: concurrent identical queries share
-  one paid request. Limits are bucketed to 10/20/50/100 so near-identical requests share an entry.
+"""Result caching for web_search / web_extract; both caches TTL-bounded (default 20 min,
+``web.cache_ttl_minutes``; disable with ``web.cache_enabled: false``), only successful responses cache.
+* **Search memo** — in-memory, per-process, single-flighted: concurrent identical queries share one
+  paid request. Limits bucket to 10/20/50/100 so near-identical requests share an entry.
 * **Extract cache** — disk-backed under ``cache/web`` (cross-process) with a JSON sidecar index:
   URL digest → (file, fetched_at, title). Hits re-run the normal truncate pipeline.
-Lives here, not in generic tool dispatch, so hits sit *after* every safety check (secret-in-URL,
-SSRF, policy) and skip only the vendor call.
+Lives here, not in generic tool dispatch, so hits sit *after* every safety check (secret-in-URL, SSRF,
+policy) and skip only the vendor call.
 """
 
 import hashlib
@@ -86,11 +84,9 @@ def _deep_copy(response: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 class SearchMemo:
-    """TTL memo + single-flight coalescer for search responses.
-
-    Thread-safe: the parallel tool-dispatch pool and subagents share this process, so identical
-    queries genuinely race. Per-key locks make the losers wait for (and share) the winner's response.
-    """
+    """TTL memo + single-flight coalescer for search responses. Thread-safe: the parallel tool-dispatch pool
+    and subagents share this process, so identical queries genuinely race; per-key locks make the losers
+    wait for (and share) the winner's response."""
 
     def __init__(self) -> None:
         self._store: Dict[tuple, Tuple[float, dict]] = {}
@@ -181,8 +177,7 @@ def _cache_dir() -> Optional[Path]:
 
 
 def _index_path() -> Optional[Path]:
-    d = _cache_dir()
-    return (d / _INDEX_FILENAME) if d else None
+    return (d / _INDEX_FILENAME) if (d := _cache_dir()) else None
 
 
 def _load_index() -> dict:
@@ -215,18 +210,14 @@ def _save_index(index: dict) -> None:
 
 
 def _url_digest(url: str, format: Optional[str], provider: str = "") -> str:
-    # format AND provider are part of the key: an html extract is not a
-    # markdown one, and one backend's rendering is not another's.
+    # format AND provider are part of the key: html != markdown, and one backend's rendering is not another's.
     raw = f"{url}\n{format or 'markdown'}\n{provider or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional[Path]:
-    """Dedicated cache file per (url, format, provider).
-
-    Deliberately NOT the truncate-store file (keyed on URL alone), which
-    html/markdown or two providers' copies of one URL would overwrite.
-    """
+    """Dedicated cache file per (url, format, provider) — deliberately NOT the truncate-store file
+    (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
     d = _cache_dir()
     if d is None:
         return None
@@ -263,11 +254,10 @@ def _is_cache_exempt_host(url: str) -> bool:
 
 
 def _is_local_dev_url(url: str) -> bool:
-    """True for loopback/private/LAN URLs — never cached.
+    """True for loopback/private/LAN URLs — never cached: they are the user's own fast-changing dev servers.
 
-    Private-address pages are the user's own fast-changing dev servers; freshness is the point of
-    fetching them. Hostname heuristics only, no DNS: this is a freshness decision, not a security
-    boundary (SSRF enforcement lives in tools/url_safety.py, which blocks these by default anyway).
+    Hostname heuristics only, no DNS: this is a freshness decision, not a security boundary (SSRF
+    enforcement lives in tools/url_safety.py, which blocks these by default anyway).
     """
     try:
         host = _url_host(url).lower()
@@ -301,8 +291,7 @@ def extract_cache_get(url: str, format: Optional[str] = None, provider: str = ""
     if not entry or (time.time() - float(entry.get("fetched_at", 0))) >= ttl_seconds():
         return None
     try:
-        file_path = Path(entry["file"])
-        cache_root = _cache_dir()
+        file_path, cache_root = Path(entry["file"]), _cache_dir()
         # The index is plain JSON on disk; never let a tampered entry read outside cache/web.
         if cache_root is None or cache_root.resolve() not in file_path.resolve().parents:
             return None
@@ -314,11 +303,8 @@ def extract_cache_get(url: str, format: Optional[str] = None, provider: str = ""
 
 
 def extract_cache_put(url: str, content: str, title: str = "", format: Optional[str] = None, provider: str = "") -> None:
-    """Store one successful extraction's full clean text for TTL reuse.
-
-    Pages over the truncate-store ceiling are not cached: serving a capped copy
-    back as if whole would silently lose the tail.
-    """
+    """Store one successful extraction's full clean text for TTL reuse; pages over the truncate-store
+    ceiling are not cached (serving a capped copy back as if whole would silently lose the tail)."""
     if not content or not _cacheable(url):
         return
     try:

@@ -24,8 +24,8 @@ _EXTRACT_BACKENDS_HINT = "firecrawl, tavily, keenable, exa, or parallel."
 def _web_extract_url(value: Any) -> Optional[str]:
     """URL from a model-supplied extract item (str, or dict with ``url``/``href``); None if unusable.
 
-    Models sometimes forward a whole search result instead of its URL, hence the
-    dict form. Never stringify arbitrary objects into misleading fetch targets.
+    Models sometimes forward a whole search result instead of its URL, hence the dict form. Never
+    stringify arbitrary objects into misleading fetch targets.
     """
     if isinstance(value, dict):
         value = value.get("url") or value.get("href")
@@ -52,7 +52,6 @@ def _strict_selection_error(capability: str, backend: str) -> str:
     """
     from agent.web_search_registry import _disabled_web_plugin_for
     from tools.tool_backend_helpers import selection_error
-
     disabled_key = _disabled_web_plugin_for(capability=capability)
     if disabled_key:
         return _disabled_plugin_error(capability, disabled_key)
@@ -62,7 +61,6 @@ def _strict_selection_error(capability: str, backend: str) -> str:
 def _no_provider_error(capability: str, fallback: str) -> str:
     """Error when no provider resolved: point at a disabled bundled plugin if that is the real cause."""
     from agent.web_search_registry import _disabled_web_plugin_for
-
     disabled_key = _disabled_web_plugin_for(capability=capability)
     return _disabled_plugin_error(capability, disabled_key) if disabled_key else fallback
 
@@ -73,6 +71,11 @@ def _result_entry(url: str, error: Optional[str]) -> Dict[str, Any]:
 
 def _extract_error_json(error: str) -> str:
     return json.dumps({"success": False, "error": error}, ensure_ascii=False)
+
+
+def _refuse_all(error: str):
+    """Whole-call refusal tuple for ``_validate_extract_urls`` (exfiltration prevention)."""
+    return None, None, None, json.dumps({"success": False, "error": error})
 
 
 def _merge_in_order(
@@ -95,7 +98,6 @@ def _validate_extract_urls(urls: List[Any]):
     """
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
-
     normalized_urls: List[str] = []
     normalized_indices: List[int] = []
     invalid_urls: Dict[int, Dict[str, Any]] = {}
@@ -103,32 +105,22 @@ def _validate_extract_urls(urls: List[Any]):
         _url = _web_extract_url(item)
         if _url is None:
             invalid_urls[index] = _result_entry(
-                "",
-                f"Invalid URL item at index {index}: expected a URL string "
-                "or an object with a string 'url' or 'href' field",
+                "", f"Invalid URL item at index {index}: expected a URL string or an object with a string 'url' or 'href' field"
             )
             continue
         normalized_url = normalize_url_for_request(_url)
-        if any(
-            _PREFIX_RE.search(candidate)
-            for candidate in (_url, unquote(_url), normalized_url, unquote(normalized_url))
-        ):
-            return None, None, None, json.dumps({
-                "success": False,
-                "error": "Blocked: URL contains what appears to be an API key or token. "
-                         "Secrets must not be sent in URLs.",
-            })
+        if any(_PREFIX_RE.search(c) for c in (_url, unquote(_url), normalized_url, unquote(normalized_url))):
+            return _refuse_all(
+                "Blocked: URL contains what appears to be an API key or token. Secrets must not be sent in URLs."
+            )
         sensitive_query_key = sensitive_query_param_name(normalized_url)
         if sensitive_query_key:
-            return None, None, None, json.dumps({
-                "success": False,
-                "error": (
-                    "Blocked: URL contains a credential-like query parameter "
-                    f"({sensitive_query_key}). Web extract backends are third-party "
-                    "readers; remove the sensitive query parameter or use a local "
-                    "browser session when this access is explicitly required."
-                ),
-            })
+            return _refuse_all(
+                "Blocked: URL contains a credential-like query parameter "
+                f"({sensitive_query_key}). Web extract backends are third-party "
+                "readers; remove the sensitive query parameter or use a local "
+                "browser session when this access is explicitly required."
+            )
         normalized_urls.append(normalized_url)
         normalized_indices.append(index)
     return normalized_urls, normalized_indices, invalid_urls, None
@@ -137,12 +129,10 @@ def _validate_extract_urls(urls: List[Any]):
 def _resolve_extract_provider(backend: str):
     """Resolve the extract provider for *backend*; returns ``(provider, error_json)``.
 
-    A registered search-only backend is a typed error (never a silent switch). An unregistered
-    name with a stored web selection is a strict-selection error; with no selection, fall
-    through to the availability walk.
+    A registered search-only backend is a typed error (never a silent switch). An unregistered name with a
+    stored web selection is a strict-selection error; with no selection, fall through to the availability walk.
     """
     from agent.web_search_registry import get_active_extract_provider, get_provider as _wsp_get_provider
-
     provider = _wsp_get_provider(backend) if backend else None
     if provider is not None and provider.supports_extract():
         return provider, None
@@ -153,7 +143,6 @@ def _resolve_extract_provider(backend: str):
             "Set web.extract_backend to " + _EXTRACT_BACKENDS_HINT
         )
     from tools.tool_backend_helpers import selection_exists
-
     if backend and selection_exists("web"):
         return None, _extract_error_json(_strict_selection_error("extract", backend))
     provider = get_active_extract_provider()
@@ -167,12 +156,11 @@ def _resolve_extract_provider(backend: str):
 async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[str]) -> List[dict]:
     """Call ``provider.extract`` (async or sync-in-thread), with one-shot keyless rescue.
 
-    Rescue fires on a raised exception or when the WHOLE batch failed (backend
-    outage, not per-page problems). Rescued batches are never cached.
+    Rescue fires on a raised exception or when the WHOLE batch failed (backend outage, not per-page
+    problems). Rescued batches are never cached.
     """
     import inspect
     from tools.web_result_cache import extract_cache_put
-
     try:
         if inspect.iscoroutinefunction(provider.extract):
             results = await provider.extract(fetch_urls, format=format)
@@ -199,15 +187,13 @@ async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[st
 async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[str]) -> List[dict]:
     """Serve cache hits, fetch the rest, and merge back in ``safe_urls`` order.
 
-    The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate, SSRF gate, and
-    provider resolution, and is gated per-URL on the website policy — a hit skips only the vendor
-    call, never a control. Policy-blocked URLs are cache misses so dispatch handles them exactly
-    as without a cache. Keys include provider and format, so switching either within the TTL
-    never serves the other's content.
+    The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate, SSRF gate, and provider
+    resolution, and is gated per-URL on the website policy — a hit skips only the vendor call, never a control.
+    Policy-blocked URLs are cache misses so dispatch handles them exactly as without a cache. Keys include
+    provider and format, so switching either within the TTL never serves the other's content.
     """
     from tools.web_result_cache import extract_cache_get
     from tools.website_policy import check_website_access as _check_site
-
     cached_results: Dict[int, Dict[str, Any]] = {}
     fetch_urls: List[str] = []
     fetch_positions: List[int] = []

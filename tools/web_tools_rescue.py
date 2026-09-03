@@ -20,12 +20,10 @@ _RING_KEY_VARS = {
 def _keyless_rescue_enabled() -> bool:
     """``web.keyless_rescue`` (default on), implicitly off when the keyless tier is disabled."""
     from tools.web_tools import _load_web_config
-
     if not _load_web_config().get("keyless_rescue", True):
         return False
     try:
         from agent.web_search_registry import _keyless_tier_enabled
-
         return _keyless_tier_enabled()
     except Exception as exc:  # noqa: BLE001 — registry optional
         logger.debug("keyless rescue tier check failed: %s", exc)
@@ -42,15 +40,12 @@ def _rescue_eligible(provider) -> bool:
         return False
     try:
         from plugins.web.keyless_mcp import _KEYLESS_RING, use_keyless
-
         name = getattr(provider, "name", "")
-        if name in _KEYLESS_RING:
-            from agent.web_search_provider import get_provider_env
-
-            key_var = _RING_KEY_VARS.get(name, "")
-            api_key = get_provider_env(key_var) if key_var else ""
-            return not use_keyless(name, api_key)
-        return True
+        if name not in _KEYLESS_RING:
+            return True
+        from agent.web_search_provider import get_provider_env
+        key_var = _RING_KEY_VARS.get(name, "")
+        return not use_keyless(name, get_provider_env(key_var) if key_var else "")
     except Exception as exc:  # noqa: BLE001 — rescue is best-effort
         logger.debug("rescue eligibility check failed: %s", exc)
         return False
@@ -59,17 +54,14 @@ def _rescue_eligible(provider) -> bool:
 def _rescue_search(provider_name: str, original_error: str, query: str, limit: int) -> dict:
     """Rescue a failed search via the ring; annotate the result with the original failure."""
     from plugins.web.keyless_mcp import search_with_failover
-
     logger.warning("web_search backend '%s' failed (%s); one-shot keyless rescue", provider_name, (original_error or "")[:200])
     rescued = search_with_failover(provider_name, query, limit)
     if rescued.get("success"):
         data = rescued.setdefault("data", {})
         data["rescued_from"] = provider_name
         data["backend_error"] = (
-            f"Configured backend '{provider_name}' failed this call "
-            f"({(original_error or 'unknown error')[:300]}); result served "
-            "by the keyless free tier. The next call will use "
-            f"'{provider_name}' again."
+            f"Configured backend '{provider_name}' failed this call ({(original_error or 'unknown error')[:300]}); "
+            f"result served by the keyless free tier. The next call will use '{provider_name}' again."
         )
         return rescued
     # Ring also failed: the ORIGINAL error names the user's setup, so lead with it.
@@ -92,7 +84,6 @@ def _rescue_extract(provider_name: str, urls: list, results: list) -> list:
     list replaces the batch wholesale.
     """
     from plugins.web.keyless_mcp import extract_with_failover
-
     parity = len(results) == len(urls)
     rescue_idx = [i for i, r in enumerate(results) if not parity or not _policy_blocked_result(r)]
     if not rescue_idx:
@@ -108,11 +99,10 @@ def _rescue_extract(provider_name: str, urls: list, results: list) -> list:
     if rescued and all(r.get("error", "") for r in rescued):
         return results  # rescue also failed everywhere: keep original errors
     for r in rescued:
-        if not r.get("error"):
-            meta = r.setdefault("metadata", {})
-            if isinstance(meta, dict):
-                meta["rescued_from"] = provider_name
-                meta["backend_error"] = (original_error or "")[:300]
+        meta = None if r.get("error") else r.setdefault("metadata", {})
+        if isinstance(meta, dict):
+            meta["rescued_from"] = provider_name
+            meta["backend_error"] = (original_error or "")[:300]
     if parity and len(rescued) == len(rescue_idx):
         merged = list(results)
         for pos, i in enumerate(rescue_idx):

@@ -14,12 +14,11 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("tools.web_tools")
 
-# Per-page char budget sent to the model (override: web.extract_char_limit).
-# Larger pages are head+tail truncated and the full text stored on disk.
+# Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are
+# head+tail truncated and the full text stored on disk.
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
-
-# Ceiling on the full-text file written to cache/web so a multi-MB page can't
-# write unbounded bytes on every extract; the model only ever sees char_limit.
+# Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes
+# on every extract; the model only ever sees char_limit.
 MAX_STORED_TEXT_CHARS = 2_000_000
 
 _CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
@@ -36,7 +35,6 @@ def _clamp_char_limit(value: Any) -> int:
 def _get_extract_char_limit() -> int:
     """``web.extract_char_limit`` clamped to a sane range, else the default."""
     from tools.web_tools import _load_web_config  # lazy: tests patch tools.web_tools._load_web_config
-
     try:
         configured = _load_web_config().get("extract_char_limit")
         if configured is not None:
@@ -49,9 +47,8 @@ def _get_extract_char_limit() -> int:
 def convert_base64_images_to_links(text: str) -> str:
     """Replace inline base64 image blobs (token bombs) with ``[IMAGE: alt]`` placeholders.
 
-    Handles markdown images (alt text kept), parenthesised blobs, and bare
-    ``data:image/...;base64,`` payloads. Real http(s) markdown image links are
-    left untouched so the agent can ``web_extract`` / ``vision_analyze`` them.
+    Handles markdown images (alt text kept), parenthesised blobs, and bare ``data:image/...;base64,`` payloads.
+    Real http(s) markdown image links are left untouched so the agent can ``web_extract`` / ``vision_analyze`` them.
     """
     def _md_repl(m: "re.Match[str]") -> str:
         alt = (m.group("alt") or "").strip()
@@ -74,20 +71,15 @@ def _store_full_text(url: str, content: str) -> Optional[str]:
         import hashlib
         from hermes_constants import get_hermes_dir
         from tools.web_result_cache import _host_slug
-
         cache_dir = get_hermes_dir("cache/web", "web_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
-
-        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
-        path = cache_dir / f"{_host_slug(url)}-{digest}.md"
+        path = cache_dir / f"{_host_slug(url)}-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:10]}.md"
         if len(content) > MAX_STORED_TEXT_CHARS:
-            content = (
-                content[:MAX_STORED_TEXT_CHARS]
-                + f"\n\n[... stored copy truncated at {MAX_STORED_TEXT_CHARS:,} chars "
+            content = content[:MAX_STORED_TEXT_CHARS] + (
+                f"\n\n[... stored copy truncated at {MAX_STORED_TEXT_CHARS:,} chars "
                 f"of {len(content):,}; re-extract a more specific URL for the rest ...]"
             )
         from tools.spill_safety import write_text_exclusive
-
         # Deterministic name in a well-known dir: refuse symlinks (lstat-unlink + exclusive create);
         # same-URL re-extraction legitimately overwrites. Not private: cache/web is bind-mounted
         # into remote backends' container UID.
@@ -107,12 +99,9 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
     """
     if len(content) <= char_limit:
         return content, False
-
     head_budget = int(char_limit * 0.75)
     tail_budget = char_limit - head_budget
-
-    head = content[:head_budget]
-    tail = content[-tail_budget:]
+    head, tail = content[:head_budget], content[-tail_budget:]
     # Snap both cuts to line boundaries (head back, tail forward) so we never slice mid-line.
     nl = head.rfind("\n")
     if nl > head_budget * 0.5:
@@ -125,18 +114,15 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
     footer_lines = [
         "",
         "─" * 8 + " [TRUNCATED] " + "─" * 8,
-        f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
-        f"of {len(content):,} total clean characters.",
+        f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) of {len(content):,} total clean characters.",
     ]
     if stored_path:
         # read_file is 1-indexed; +2 lands on the first line after the shown head.
-        middle_start_line = head.count("\n") + 2
-        footer_lines.append(f"Full text saved to: {stored_path}")
-        footer_lines.append(
-            f'To read the omitted middle: read_file path="{stored_path}" '
-            f"offset={middle_start_line} limit=200  (the file is the complete page; "
-            f"raise/lower offset to page through it)."
-        )
+        footer_lines += [
+            f"Full text saved to: {stored_path}",
+            f'To read the omitted middle: read_file path="{stored_path}" offset={head.count(chr(10)) + 2} limit=200  '
+            "(the file is the complete page; raise/lower offset to page through it).",
+        ]
     else:
         footer_lines.append(
             "Full text could not be stored; re-run web_extract on a more "
@@ -182,10 +168,7 @@ def _trim_results(results: List[dict]) -> List[dict]:
     """Keep only url/title/content/error per entry (+ blocked_by_policy when present)."""
     return [
         {
-            "url": r.get("url", ""),
-            "title": r.get("title", ""),
-            "content": r.get("content", ""),
-            "error": r.get("error"),
+            "url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""), "error": r.get("error"),
             **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
         }
         for r in results
