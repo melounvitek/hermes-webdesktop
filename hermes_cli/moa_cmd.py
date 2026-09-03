@@ -12,7 +12,6 @@ from hermes_cli.moa_config import DEFAULT_MOA_PRESET_NAME, normalize_moa_config
 def _prompt_choice(title: str, rows: list[str], default: int = 0) -> int:
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         return curses_radiolist(title, rows, selected=default, cancel_returns=default)
     except Exception:
         for idx, row in enumerate(rows, start=1):
@@ -37,8 +36,7 @@ def _model_options() -> list[dict[str, Any]]:
         canonical_order=True,
         pricing=True,
         capabilities=True,
-        max_models=200,
-    )
+        max_models=200)
     providers = payload.get("providers") or []
     return [p for p in providers if p.get("slug") and str(p.get("slug")).strip().lower() != "moa" and p.get("models")]
 
@@ -142,8 +140,7 @@ _SUBCOMMANDS = {
     "ls": _cmd_list,
     "config": _cmd_configure,
     "configure": _cmd_configure,
-    "delete": _cmd_delete,
-}
+    "delete": _cmd_delete}
 
 
 def cmd_moa(args) -> None:
