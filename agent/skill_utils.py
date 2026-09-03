@@ -93,7 +93,6 @@ def yaml_load(content: str):
     if _yaml_load_fn is None:
         import functools
         import yaml
-
         _yaml_load_fn = functools.partial(yaml.load, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
     return _yaml_load_fn(content)
 
@@ -106,7 +105,6 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     end_match = re.search(r"\n---\s*\n", content[3:]) if content.startswith("---") else None
     if not end_match:
         return {}, content
-
     yaml_content = content[3 : end_match.start() + 3]
     body = content[end_match.end() + 3 :]
     frontmatter: Dict[str, Any] = {}
@@ -126,16 +124,13 @@ def skill_matches_platform_list(platforms: Any) -> bool:
     """Return True when *platforms* is compatible with the current OS."""
     if not platforms:
         return True
-    if not isinstance(platforms, list):
-        platforms = [platforms]
-    current = sys.platform
     running_in_termux = is_termux()
-    for platform in platforms:
+    for platform in platforms if isinstance(platforms, list) else [platforms]:
         normalized = str(platform).lower().strip()
         mapped = PLATFORM_MAP.get(normalized, normalized)
         # Termux is a Linux userland on Android: accept linux-tagged skills
         # whether sys.platform is "linux" (pre-3.13) or "android" (3.13+).
-        if current.startswith(mapped) or (running_in_termux and mapped in ("linux", "termux", "android")):
+        if sys.platform.startswith(mapped) or (running_in_termux and mapped in ("linux", "termux", "android")):
             return True
     return False
 
@@ -159,7 +154,6 @@ def _detect_kanban() -> bool:
     if os.getenv("HERMES_KANBAN_TASK") or os.getenv("HERMES_KANBAN_BOARD"):
         try:
             from agent.delegation_context import is_dispatcher_owned_worker_context
-
             owned = is_dispatcher_owned_worker_context()
         except Exception:
             owned = True
@@ -167,7 +161,6 @@ def _detect_kanban() -> bool:
             return True
     try:
         from tools.kanban_tools import _profile_has_kanban_toolset
-
         return bool(_profile_has_kanban_toolset())
     except Exception:
         return False
@@ -176,7 +169,6 @@ def _detect_kanban() -> bool:
 def _detect_docker() -> bool:
     try:
         from hermes_constants import is_container
-
         return is_container()
     except Exception:
         return False
@@ -239,7 +231,6 @@ def _load_raw_config() -> Dict[str, Any]:
     cached = _RAW_CONFIG_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
         return cached
-
     try:
         parsed = yaml_load(config_path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -247,7 +238,6 @@ def _load_raw_config() -> Dict[str, Any]:
         return {}
     if not isinstance(parsed, dict):
         return {}
-
     if cache_key is not None:
         _RAW_CONFIG_CACHE.clear()
         _RAW_CONFIG_CACHE[cache_key] = parsed
@@ -274,7 +264,6 @@ def _expand_path(entry: str) -> Path:
 def _home_relative(p: Path) -> Path:
     """Anchor a relative config path at HERMES_HOME; absolute paths pass through."""
     from hermes_constants import get_hermes_home
-
     return p if p.is_absolute() else get_hermes_home() / p
 
 
@@ -289,7 +278,6 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     skills_cfg = _skills_cfg()
     if skills_cfg is None:
         return set()
-
     from gateway.session_context import get_session_env
     resolved_platform = platform or os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM")
     disabled = _normalize_string_set(skills_cfg.get("disabled"))
@@ -354,7 +342,6 @@ def get_external_skills_dirs() -> List[Path]:
     skills_cfg = _skills_cfg()
     if skills_cfg is None:
         return []
-
     local_skills = get_skills_dir().resolve()
     result: List[Path] = []
     for entry in _config_str_list(skills_cfg.get("external_dirs")):
@@ -394,14 +381,12 @@ def display_skill_create_dir() -> str:
     """User-facing path where new skills are created (``~/`` shorthand when
     possible); tool schema descriptions and prompts follow ``skills.create_dir``."""
     from hermes_constants import display_hermes_home
-
     create_dir = get_skill_create_dir()
     if create_dir is None:
         return f"{display_hermes_home()}/skills/"
-    try:
+    if create_dir.is_relative_to(Path.home()):
         return "~/" + create_dir.relative_to(Path.home()).as_posix() + "/"
-    except ValueError:
-        return create_dir.as_posix() + "/"
+    return create_dir.as_posix() + "/"
 
 
 def get_all_skills_dirs() -> List[Path]:
@@ -433,7 +418,6 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     try:
         if start is None:
             from agent.runtime_cwd import scope_terminal_cwd
-
             env_cwd = scope_terminal_cwd()
             start = Path(env_cwd) if env_cwd else Path.cwd()
         cur = Path(start).resolve()
@@ -478,8 +462,7 @@ def _candidate_project_skills_dirs(root: Path) -> List[Path]:
     (HERMES_HOME itself may live inside a git checkout)."""
     local_skills = get_skills_dir().resolve()
     dirs: List[Path] = []
-    for sub in PROJECT_SKILLS_SUBDIRS:
-        cand = root / sub
+    for cand in (root / sub for sub in PROJECT_SKILLS_SUBDIRS):
         try:
             if cand.is_dir() and cand.resolve() != local_skills:
                 dirs.append(cand.resolve())
@@ -505,10 +488,8 @@ def get_project_skills_dirs() -> List[Path]:
 def get_untrusted_project_skills_root() -> Optional[Tuple[Path, int]]:
     """(root, skill_count) when cwd's project has skills but is NOT trusted, else None."""
     root = _current_project_root(trusted=False)
-    if root is None:
-        return None
     count = 0
-    for d in _candidate_project_skills_dirs(root):
+    for d in _candidate_project_skills_dirs(root) if root is not None else ():
         try:
             count += sum(1 for _ in iter_skill_index_files(d, "SKILL.md"))
         except OSError:
@@ -540,7 +521,6 @@ def is_quarantined_project_skill(skill_md) -> bool:
     try:
         from tools.skills_guard import scan_skill_cached
         from hermes_constants import get_hermes_home
-
         result, _prov = scan_skill_cached(
             skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=get_hermes_home() / "cache" / "project_skill_scans",
         )
@@ -567,11 +547,9 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     raw_identifier = (identifier or "").strip()
     if not raw_identifier:
         return raw_identifier
-
     identifier_path = Path(raw_identifier).expanduser()
     if not identifier_path.is_absolute():
         return raw_identifier.lstrip("/")
-
     # Resolve the primary root via tools.skills_tool at CALL time: tests patch
     # ``tools.skills_tool.SKILLS_DIR`` and skill_view() enforces ``_skills_dir()``
     # (which follows the live profile-scoped HERMES_HOME), so normalization
@@ -581,14 +559,12 @@ def normalize_skill_lookup_name(identifier: str) -> str:
         primary_root = _skills_tool._skills_dir()
     except Exception:
         primary_root = get_skills_dir()
-
     trusted_roots = [primary_root]
     for getter in (get_project_skills_dirs, get_external_skills_dirs):
         try:
             trusted_roots.extend(getter())
         except Exception:
             pass
-
     # Prefer the lexical path under a trusted root before resolving symlinks:
     # ~/.hermes/skills/<name> may be a symlink to a checkout elsewhere, and
     # resolving first would turn that trusted path into one skill_view rejects.
@@ -713,13 +689,12 @@ def resolve_skill_config_values(config_vars: List[Dict[str, Any]]) -> Dict[str, 
     config = _load_raw_config()
     resolved: Dict[str, Any] = {}
     for var in config_vars:
-        logical_key = var["key"]
-        value = _resolve_dotpath(config, f"{SKILL_CONFIG_PREFIX}.{logical_key}")
+        value = _resolve_dotpath(config, f"{SKILL_CONFIG_PREFIX}.{var['key']}")
         if value is None or (isinstance(value, str) and not value.strip()):
             value = var.get("default", "")
         if isinstance(value, str) and ("~" in value or "${" in value):
             value = os.path.expanduser(os.path.expandvars(value))
-        resolved[logical_key] = value
+        resolved[var["key"]] = value
     return resolved
 
 

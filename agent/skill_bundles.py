@@ -32,9 +32,7 @@ _bundles_cache_mtime: Optional[float] = None
 def _bundles_dir() -> Path:
     """Bundles directory: ``HERMES_BUNDLES_DIR`` override (tests) or ``<HERMES_HOME>/skill-bundles``."""
     override = os.environ.get("HERMES_BUNDLES_DIR")
-    if override:
-        return Path(override).expanduser()
-    return get_hermes_home() / "skill-bundles"
+    return Path(override).expanduser() if override else get_hermes_home() / "skill-bundles"
 
 
 def _iter_bundle_files() -> List[Path]:
@@ -63,10 +61,8 @@ def _load_bundle_file(path: Path) -> Optional[Dict[str, Any]]:
     except yaml.YAMLError as exc:
         logger.warning("Invalid YAML in bundle %s: %s", path, exc)
         return None
-
     def _skip(reason: str) -> None:
         logger.warning("Bundle %s %s; skipping", path, reason)
-
     if not isinstance(data, dict):
         return _skip("is not a mapping")
     name = str(data.get("name") or path.stem).strip()
@@ -135,10 +131,7 @@ def list_bundles() -> List[Dict[str, Any]]:
 
 
 def build_bundle_invocation_message(
-    cmd_key: str,
-    user_instruction: str = "",
-    task_id: str | None = None,
-    platform: str | None = None,
+    cmd_key: str, user_instruction: str = "", task_id: str | None = None, platform: str | None = None,
 ) -> Optional[Tuple[str, List[str], List[str]]]:
     """Build the user message for a bundle invocation: ``(message,
     loaded_skill_names, missing_skill_names)`` or ``None`` if the bundle wasn't
@@ -148,10 +141,8 @@ def build_bundle_invocation_message(
     info = get_skill_bundles().get(cmd_key)
     if not info:
         return None
-
     # Late import keeps skill_bundles cheap to import (no tools/* at import time).
     from agent.skill_commands import _disabled_skill_names, _load_skill_blocks, _load_skill_payload, _scaffold_header
-
     bundle_name = info["name"]
     loaded_names, missing, disabled, skill_blocks = _load_skill_blocks(
         [(skill_id or "").strip() for skill_id in info["skills"]],
@@ -162,7 +153,6 @@ def build_bundle_invocation_message(
     )
     if not skill_blocks:
         return None
-
     header = _scaffold_header(
         f'"{bundle_name}" skill bundle',
         loaded_names,
@@ -186,13 +176,7 @@ def bundle_path_for(name: str) -> Path:
     return _bundles_dir() / f"{slug}.yaml"
 
 
-def save_bundle(
-    name: str,
-    skills: List[str],
-    description: str = "",
-    instruction: str = "",
-    overwrite: bool = False,
-) -> Path:
+def save_bundle(name: str, skills: List[str], description: str = "", instruction: str = "", overwrite: bool = False) -> Path:
     """Write a bundle to disk and refresh the cache. Raises ``FileExistsError``
     if the target exists and not ``overwrite``; ``ValueError`` for unusable inputs."""
     name = (name or "").strip()
@@ -201,17 +185,12 @@ def save_bundle(
     cleaned_skills = [str(s).strip() for s in skills if str(s).strip()]
     if not cleaned_skills:
         raise ValueError("Bundle must reference at least one skill")
-
     path = bundle_path_for(name)
     if path.exists() and not overwrite:
         raise FileExistsError(f"Bundle already exists at {path}")
-
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any] = {"name": name, "skills": cleaned_skills}
-    if description:
-        payload["description"] = description
-    if instruction:
-        payload["instruction"] = instruction
+    payload.update({k: v for k, v in (("description", description), ("instruction", instruction)) if v})
     path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
     scan_bundles()
     return path

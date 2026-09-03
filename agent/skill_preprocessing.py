@@ -23,7 +23,6 @@ def load_skills_config() -> dict:
     """Load the ``skills`` section of config.yaml (best-effort)."""
     try:
         from hermes_cli.config import load_config_readonly
-
         skills_cfg = (load_config_readonly() or {}).get("skills")
         if isinstance(skills_cfg, dict):
             return skills_cfg
@@ -69,7 +68,6 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
         if isinstance(exc, RuntimeError) and "live-system guard: blocked os.kill" in str(exc):
             return f"[inline-shell timeout after {timeout}s: {command}]"
         return f"[inline-shell error: {exc}]"
-
     output = (completed.stdout or "").rstrip("\n") or (completed.stderr or "").rstrip("\n")
     if len(output) > _INLINE_SHELL_MAX_OUTPUT:
         output = output[:_INLINE_SHELL_MAX_OUTPUT] + "...[truncated]"
@@ -80,11 +78,9 @@ def expand_inline_shell(content: str, skill_dir: Path | None, timeout: int) -> s
     """Replace every !`cmd` snippet with its stdout, run with the skill dir as CWD."""
     if "!`" not in content:
         return content
-
     def _replace(match: re.Match) -> str:
         cmd = match.group(1).strip()
         return run_inline_shell(cmd, skill_dir, timeout) if cmd else ""
-
     return _INLINE_SHELL_RE.sub(_replace, content)
 
 

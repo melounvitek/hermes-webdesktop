@@ -56,8 +56,7 @@ SKILL_EXCERPT_JOINT = "\x1e"
 def slugify_skill_name(name: str) -> str:
     """Normalize a skill/bundle name to a ``/command`` slug (``Foo Bar`` -> ``foo-bar``);
     strips chars (``+``, ``/``) that would make invalid Telegram command names."""
-    cmd = name.lower().replace(" ", "-").replace("_", "-")
-    cmd = _SKILL_INVALID_CHARS.sub("", cmd)
+    cmd = _SKILL_INVALID_CHARS.sub("", name.lower().replace(" ", "-").replace("_", "-"))
     return _SKILL_MULTI_HYPHEN.sub("-", cmd).strip("-")
 
 
@@ -114,9 +113,7 @@ def _cut_after(message: str, marker: str, stop_marker: str, find) -> Optional[st
     marker_idx = find(marker)
     if marker_idx < 0:
         return None
-    text = message[marker_idx + len(marker):]
-    idx = text.find(stop_marker)
-    return (text[:idx] if idx >= 0 else text).strip() or None
+    return message[marker_idx + len(marker):].split(stop_marker, 1)[0].strip() or None
 
 
 def _resolve_skill_commands_platform() -> Optional[str]:
@@ -125,7 +122,6 @@ def _resolve_skill_commands_platform() -> Optional[str]:
     own ``skills.platform_disabled`` view."""
     try:
         from gateway.session_context import get_session_env
-
         resolved_platform = os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM")
     except Exception:
         resolved_platform = os.getenv("HERMES_PLATFORM")
@@ -136,7 +132,6 @@ def _resolve_skill_commands_home() -> str:
     """Effective Hermes home the scan is scoped to (profiles carry their own
     ``skills.external_dirs``, so a profile switch must invalidate the cache)."""
     from hermes_constants import get_hermes_home
-
     return str(get_hermes_home())
 
 
@@ -148,7 +143,6 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     try:
         from tools.skills_tool import _skills_dir, skill_view
         from agent.skill_utils import normalize_skill_lookup_name
-
         normalized = normalize_skill_lookup_name(raw_identifier)
         loaded_skill = json.loads(skill_view(normalized, task_id=task_id, preprocess=False))
     except Exception:
@@ -174,7 +168,6 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
     values so the agent needn't read config.yaml. Any failure leaves the message without it."""
     try:
         from agent.skill_utils import extract_skill_config_vars, parse_frontmatter, resolve_skill_config_values
-
         raw_content = str(loaded_skill.get("raw_content") or loaded_skill.get("content") or "")
         frontmatter, _ = parse_frontmatter(raw_content)
         resolved = resolve_skill_config_values(extract_skill_config_vars(frontmatter))
@@ -230,7 +223,6 @@ def _build_skill_message(
 ) -> str:
     """Format a loaded skill into a user/system message payload."""
     from tools.skills_tool import _skills_dir
-
     # Preprocess first so downstream blocks see the expanded content.
     content = preprocess_skill_content(
         str(loaded_skill.get("content") or ""), skill_dir, session_id, skills_cfg=_load_skills_config(),
@@ -245,7 +237,6 @@ def _build_skill_message(
             "`templates/config.yaml`) against that directory, then run them "
             "with the terminal tool using the absolute path.",
         ]
-
     _inject_skill_config(loaded_skill, parts)
     setup_note = _setup_note(loaded_skill)
     if setup_note:
@@ -322,7 +313,6 @@ _SCAN_SKIP_PARTS = {'.git', '.github', '.hub', '.archive'}
 def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: Dict[str, Dict[str, Any]], resolve_command) -> None:
     """Register one SKILL.md in *commands* (no-op when filtered or colliding)."""
     from tools.skills_tool import _parse_frontmatter, skill_matches_platform, skill_matches_environment
-
     if any(part in _SCAN_SKIP_PARTS for part in skill_md.parts):
         return
     frontmatter, body = _parse_frontmatter(skill_md.read_text(encoding='utf-8'))
@@ -382,7 +372,6 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
-
         # Precedence: project (through the quarantine chokepoint) > local > external.
         # Resolve the local dir at call time: import-time SKILLS_DIR is frozen to
         # the launch home, but a multiplexed profile scope may have changed it.
@@ -501,9 +490,7 @@ def split_stacked_skill_commands(rest: str) -> tuple[list[str], str]:
         stripped = remaining.lstrip()
         if not stripped.startswith("/"):
             break
-        parts = stripped.split(None, 1)
-        token = parts[0]
-        tail = parts[1] if len(parts) > 1 else ""
+        token, tail = (stripped.split(None, 1) + [""])[:2]
         cmd_key = resolve_skill_command_key(token.lstrip("/"))
         if cmd_key is None or cmd_key in keys:
             break
