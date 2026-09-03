@@ -91,11 +91,9 @@ def prefix_from_request(request) -> str:
 
 
 def _normalise_public_url(raw: Optional[str]) -> str:
-    """Cleaned ``scheme://netloc[/path]`` (trailing slash stripped so callers
-    can append paths) or ``""`` when empty/malformed/injection-suspect. Callers
-    treat ``""`` as "fall back to request reconstruction" — an explicit empty
-    value is indistinguishable from an unset env var.
-    """
+    """Cleaned ``scheme://netloc[/path]`` (trailing slash stripped) or ``""`` when
+    empty/malformed/injection-suspect; ``""`` means "fall back to request
+    reconstruction" (an explicit empty value equals an unset env var)."""
     url = raw.strip() if raw else ""
     if not url or any(c in url for c in _REJECT_CHARS):
         return ""
@@ -129,12 +127,9 @@ def _load_dashboard_section() -> dict:
 
 def resolve_public_url() -> str:
     """Operator-declared dashboard public URL, or ``""`` (reconstruct from request).
-
-    Precedence: ``HERMES_DASHBOARD_PUBLIC_URL`` env (empty-after-strip counts
-    as unset so a provisioned-but-blank secret cannot shadow config.yaml), then
-    ``dashboard.public_url``. A malformed value at either level warns and falls
-    through to the next, so a typo in one surface never disables the other.
-    """
+    Precedence: ``HERMES_DASHBOARD_PUBLIC_URL`` env (blank counts as unset so a
+    provisioned-but-blank secret cannot shadow config.yaml), then
+    ``dashboard.public_url``; a malformed value warns and falls through."""
     env_raw = os.environ.get("HERMES_DASHBOARD_PUBLIC_URL", "")
     env_clean = _normalise_public_url(env_raw)
     if env_clean:

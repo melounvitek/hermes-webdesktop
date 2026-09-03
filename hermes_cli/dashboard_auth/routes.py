@@ -62,11 +62,10 @@ def _prefix(request: Request) -> str:
 def _redirect_uri(request: Request) -> str:
     """Absolute ``/auth/callback`` URL handed to the IDP.
 
-    An operator-declared public URL (``HERMES_DASHBOARD_PUBLIC_URL`` /
-    ``dashboard.public_url``) is the complete authority — ``X-Forwarded-Prefix``
-    is ignored so an already-baked-in prefix is not doubled. Otherwise
-    ``url_for`` (honours ``X-Forwarded-Host/Proto`` under uvicorn
-    ``proxy_headers``) with the prefix prepended, which Starlette does not do.
+    An operator-declared public URL is the complete authority (``X-Forwarded-Prefix``
+    ignored so a baked-in prefix is not doubled); otherwise ``url_for`` (honours
+    ``X-Forwarded-Host/Proto`` under uvicorn ``proxy_headers``) with the prefix
+    prepended, which Starlette does not do.
     """
     public_url = _prefix_mod.resolve_public_url()
     if public_url:
@@ -80,21 +79,15 @@ def _redirect_uri(request: Request) -> str:
 
 
 def _provider_pkce_segments(cookie_payload: dict[str, str]) -> dict[str, str]:
-    """Parse a provider's flat ``state=…;verifier=…`` PKCE string into a dict.
-
-    The ONE place the provider's flat form is parsed; from here on the payload
-    is a dict down to :func:`set_pkce_cookie`'s base64url(JSON) encoding.
-    """
+    """Parse a provider's flat ``state=…;verifier=…`` PKCE string into a dict — the
+    ONE place the flat form is parsed; :func:`set_pkce_cookie` encodes the dict."""
     flat = cookie_payload.get("hermes_session_pkce", "")
     return dict(seg.split("=", 1) for seg in flat.split(";") if "=" in seg)
 
 
 def _validate_post_login_target(raw: str) -> str:
-    """Return ``raw`` (URL-decoded) if it is a safe same-origin path, else ``""``.
-
-    Re-validated at every hop (gate -> /login -> /auth/login -> cookie ->
-    callback) because a ``next=`` value can re-enter via a crafted URL.
-    """
+    """``raw`` (URL-decoded) if it is a safe same-origin path, else ``""``. Re-validated
+    at every hop because a ``next=`` value can re-enter via a crafted URL."""
     if not raw:
         return ""
     decoded = unquote(raw)
@@ -122,12 +115,9 @@ def _bearer_payload(session: Session) -> dict[str, Any]:
 
 def _finish_native_login(
     request: Request, *, broker_state: str, session: Session, provider: str) -> str:
-    """Mint the one-time loopback code for a pending native authorization.
-
-    Shared tail of ``/auth/callback`` and ``/auth/password-login``: returns the
-    desktop's ``redirect_uri?code=…&state=…``. No session cookies are set on
-    the native path — the desktop redeems the code at ``/auth/native/token``.
-    """
+    """Shared tail of ``/auth/callback`` and ``/auth/password-login``: mint the
+    one-time loopback code and return the desktop's ``redirect_uri?code=…&state=…``.
+    No session cookies on the native path — the desktop redeems at ``/auth/native/token``."""
     ip = _client_ip(request)
     try:
         pending = native_flow.get_pending(broker_state)
@@ -155,12 +145,9 @@ def _login_success(request: Request, session: Session, provider: str) -> None:
 
 
 def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkce: dict[str, str]):
-    """Run ``start_login`` and 302 to the IDP with the PKCE cookie set.
-
-    The PKCE cookie is the only server-controlled channel that survives the
-    IDP round trip (IDPs echo back only code+state), so it carries the
-    provider name plus ``extra_pkce`` (pre-validated ``next`` / native ``broker``).
-    """
+    """Run ``start_login`` and 302 to the IDP with the PKCE cookie set. That cookie
+    is the only server-controlled channel surviving the round trip (IDPs echo back
+    only code+state), so it carries the provider name plus ``extra_pkce``."""
     try:
         ls = p.start_login(redirect_uri=_redirect_uri(request))
     except ProviderError as e:
@@ -223,12 +210,9 @@ async def auth_login(request: Request, provider: str, next: str = ""):
 
 
 def _validate_loopback_redirect_uri(raw: str) -> str:
-    """Accept only ``http://127.0.0.1[:port]/…`` / ``http://[::1][:port]/…``.
-
-    Security boundary: /auth/native/authorize is public, so a non-loopback host
-    would turn the callback into an open redirect leaking a live authorization
-    code. ``localhost`` is rejected per RFC 8252 §8.3 (may resolve off-loopback).
-    """
+    """Accept only ``http://127.0.0.1[:port]/…`` / ``http://[::1][:port]/…``. Security
+    boundary: the route is public, so a non-loopback host would make the callback
+    an open redirect leaking a live code. ``localhost`` is rejected (RFC 8252 §8.3)."""
     if not raw:
         raise _http(400, "redirect_uri required")
     parsed = urlparse(raw)
@@ -240,14 +224,10 @@ def _validate_loopback_redirect_uri(raw: str) -> str:
 
 
 def _select_native_provider(provider: str):
-    """Resolve the provider for a native authorize request.
-
-    An empty ``provider`` auto-selects when exactly one brokerable (non-password)
-    session provider exists — password providers can never be the OAuth broker
-    target, so a normal OIDC+basic deployment must not fail with "Unknown
-    provider". With zero brokerable providers a lone password provider is still
-    selected so the caller can emit an explanatory 400 rather than a 404.
-    """
+    """Resolve the provider for a native authorize request. An empty ``provider``
+    auto-selects the single brokerable (non-password) session provider — so an
+    OIDC+basic deployment does not fail with "Unknown provider"; with none, a lone
+    password provider is still returned so the caller emits a 400 rather than 404."""
     if provider:
         return get_provider(provider)
     sess_providers = list_session_providers()
@@ -263,14 +243,10 @@ def _select_native_provider(provider: str):
 async def auth_native_authorize(
     request: Request, provider: str = "", code_challenge: str = "",
     code_challenge_method: str = "", redirect_uri: str = "", state: str = ""):
-    """Begin an RFC 8252 native-app login for the desktop app.
-
-    Stashes a pending broker authorization keyed by an opaque ``broker_state``
-    that rides in the gateway's own PKCE cookie, then runs the normal upstream
-    round trip; the desktop's challenge/state never touch the cookie. Password
-    providers are sent to the ``/login`` form (system browser => OS password
-    manager) and ``/auth/password-login`` completes the pending authorization.
-    """
+    """Begin an RFC 8252 native-app login: stash a pending broker authorization keyed
+    by an opaque ``broker_state`` riding in the gateway's own PKCE cookie (the
+    desktop's challenge/state never touch it), then run the normal upstream round
+    trip. Password providers go to the ``/login`` form instead."""
     if code_challenge_method.upper() != "S256":
         raise _http(400, "code_challenge_method must be S256")
     if not code_challenge:
@@ -370,10 +346,8 @@ _pw_attempts_lock = threading.Lock()
 
 
 def _password_rate_limited(ip: str) -> bool:
-    """True if ``ip`` exceeded the budget; records the attempt when allowed.
-
-    An empty IP shares one bucket — fail-safe toward throttling.
-    """
+    """True if ``ip`` exceeded the budget; records the attempt when allowed. An empty
+    IP shares one bucket — fail-safe toward throttling."""
     now = time.monotonic()
     cutoff = now - _PW_RATE_WINDOW_SEC
     with _pw_attempts_lock:
@@ -403,14 +377,12 @@ class _PasswordLoginBody(BaseModel):
 async def auth_password_login(request: Request, body: _PasswordLoginBody):
     """Authenticate a username/password against a password provider.
 
-    Returns JSON ``{"ok": true, "next": <path>}`` (the form POSTs via fetch,
-    which follows a 302 opaquely) and sets the session cookies. When the PKCE
-    cookie carries a native ``broker`` handle, ``next`` is instead the
-    desktop's loopback redirect and NO cookies are set.
-
-    Failure modes are deliberately generic (no username/provider oracle):
-    unknown or non-password provider -> 404; bad credentials -> 401; backing
-    store unreachable -> 503; too many attempts from this IP -> 429.
+    Returns ``{"ok": true, "next": <path>}`` (the form POSTs via fetch, which
+    follows a 302 opaquely) and sets the session cookies; with a native ``broker``
+    handle in the PKCE cookie, ``next`` is the desktop's loopback redirect and NO
+    cookies are set. Failures are deliberately generic (no username/provider
+    oracle): unknown/non-password provider 404, bad credentials 401, store
+    unreachable 503, rate limited 429.
     """
     ip = _client_ip(request)
     if _password_rate_limited(ip):
@@ -504,8 +476,7 @@ async def api_auth_me(request: Request):
 @router.post("/api/auth/ws-ticket", name="auth_ws_ticket")
 async def api_auth_ws_ticket(request: Request):
     """Mint a 30s single-use ticket for a WS upgrade (browsers cannot set
-    ``Authorization`` on the upgrade). One ticket per WS is the expected pattern.
-    """
+    ``Authorization`` on the upgrade); one ticket per WS."""
     sess = _require_session(request)
     from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_ticket
 
@@ -525,12 +496,9 @@ class _NativeTokenBody(BaseModel):
 
 @router.post("/auth/native/token", name="auth_native_token")
 async def auth_native_token(request: Request, body: _NativeTokenBody):
-    """Exchange a loopback gateway code + PKCE verifier for bearer tokens.
-
-    The code is consumed on every path (no verifier oracle, no replay); any
-    unknown/expired/redeemed code or PKCE mismatch is a generic 400. Tokens go
-    in the JSON body; no cookie is set.
-    """
+    """Exchange a loopback gateway code + PKCE verifier for bearer tokens. The code
+    is consumed on every path (no verifier oracle, no replay); any failure is a
+    generic 400. Tokens go in the JSON body; no cookie is set."""
     try:
         session = native_flow.redeem_code(code=body.code, code_verifier=body.code_verifier)
     except native_flow.CodeInvalid:
@@ -550,12 +518,9 @@ class _NativeRefreshBody(BaseModel):
 
 @router.post("/auth/native/refresh", name="auth_native_refresh")
 async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
-    """Rotate a desktop-held refresh token (mirrors the gate's ``_attempt_refresh``).
-
-    Tries each session provider (hinted one first) until one rotates the
-    token. Every provider rejecting the RT -> 401 ``session_expired`` (desktop
-    starts a fresh login); none rotated and one unreachable -> 503.
-    """
+    """Rotate a desktop-held refresh token (mirrors the gate's ``_attempt_refresh``):
+    every provider rejecting the RT -> 401 ``session_expired`` (desktop re-logs);
+    none rotated and one unreachable -> 503."""
     if not body.refresh_token:
         raise _http(400, "refresh_token required")
     try:

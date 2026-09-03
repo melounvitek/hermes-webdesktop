@@ -1,28 +1,24 @@
 """Cookie helpers for dashboard auth.
 
-Cookies (all HttpOnly, ``SameSite=Lax`` unless noted, Path = proxy prefix or /):
+All HttpOnly, ``SameSite=Lax`` unless noted, Path = proxy prefix or /:
   - hermes_session_at        access token; Max-Age = token TTL (~15 min)
-  - hermes_session_rt        rotating refresh token; written only when the
-                             provider returned one (AT-only sessions degrade
-                             gracefully), always cleared on logout/expiry
-  - hermes_session_provider  non-secret routing hint so a refresh token is
-                             not handed to the wrong provider when several
-                             auth plugins are enabled
+  - hermes_session_rt        rotating refresh token; written only when the provider
+                             returned one, always cleared on logout/expiry
+  - hermes_session_provider  non-secret routing hint so an RT is not handed to the
+                             wrong provider when several auth plugins are enabled
   - hermes_session_pkce      PKCE state + CSRF nonce + provider hint, 10 min.
-                             ``SameSite=None; Secure`` over HTTPS because it is
-                             set on the /auth/login 302 and must survive the
-                             cross-site redirect chain out to the IDP and back
-                             (Chromium drops Lax cookies set on such a 302,
+                             ``SameSite=None; Secure`` over HTTPS: it is set on the
+                             /auth/login 302 and must survive the cross-site redirect
+                             chain (Chromium drops Lax cookies set on such a 302,
                              crbug 40508226); plain HTTP falls back to Lax.
   - hermes_sso_attempt       one-shot auto-SSO loop-guard marker (60 s)
 
-``Secure`` is set only when the request arrived over HTTPS
-(``request.url.scheme``, which honours ``X-Forwarded-Proto`` only from a peer
-in uvicorn's ``forwarded_allow_ips``). Cookie-prefix hardening follows
-draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS
-with Path=/; ``__Secure-`` behind a proxy prefix (``__Host-`` forbids
-Path != /). Setters and readers BOTH resolve the name through
-:func:`_resolved_name` — a mismatch silently breaks sessions.
+``Secure`` only when ``request.url.scheme`` is https (honours ``X-Forwarded-Proto``
+only from uvicorn's ``forwarded_allow_ips``). Cookie-prefix hardening per
+draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with
+Path=/; ``__Secure-`` behind a proxy prefix (``__Host-`` forbids Path != /). Setters
+and readers BOTH resolve the name via :func:`_resolved_name` — a mismatch silently
+breaks sessions.
 """
 from __future__ import annotations
 
@@ -138,13 +134,9 @@ def _clear_cookie_variants(
     response.set_cookie(bare_name, "", max_age=0, **bare_attrs)
 
 
-def _lax_bare_attrs(prefix: str) -> dict:
-    return {"path": _cookie_path(prefix), "httponly": True, "samesite": "lax"}
-
-
 def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     """Delete the AT, RT and provider cookies (every name variant, active path)."""
-    bare_attrs = _lax_bare_attrs(prefix)
+    bare_attrs = _common_attrs(use_https=False, prefix=prefix)
     for name in (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE):
         _clear_cookie_variants(
             response, name, prefix=prefix, https_samesite="lax", bare_attrs=bare_attrs)
@@ -153,11 +145,10 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
 def encode_pkce_payload(parts: dict[str, str]) -> str:
     """Serialise PKCE segments to the wire value ``base64url(JSON)``, no padding.
 
-    The urlsafe alphabet is a strict subset of RFC 6265 cookie-octets (no
-    ``;``, ``"``, ``\\``), so http.cookies never quotes it (strict proxy hops
-    such as Go net/http reject the quoted form) and no segment value can
-    collide with a delimiter. Padding ``=`` would trigger quoting; the parser
-    restores it.
+    The urlsafe alphabet is a strict subset of RFC 6265 cookie-octets, so
+    http.cookies never quotes it (strict proxies such as Go net/http reject the
+    quoted form) and no value can collide with a delimiter. Padding ``=`` would
+    trigger quoting; the parser restores it.
     """
     raw = json.dumps(parts, separators=(",", ":"), sort_keys=True)
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
@@ -207,19 +198,16 @@ def read_pkce_cookie(request: Request) -> Optional[str]:
 
 def parse_pkce_payload(raw: str) -> dict[str, str]:
     """Decode a PKCE cookie value into its segment dict (inverse of
-    :func:`encode_pkce_payload`). EVERY reader must go through this — a reader
-    that interprets the raw wire value parses zero segments and silently
-    disables the check it feeds (provider dispatch, CSRF state, broker binding).
+    :func:`encode_pkce_payload`). EVERY reader must go through this — reading the
+    raw wire value parses zero segments and silently disables the check it feeds
+    (provider dispatch, CSRF state, broker binding).
 
-    Compatibility ladder for cookies minted by an older server during a rolling
-    upgrade (10-minute TTL), each rung unambiguous:
+    Compatibility ladder for cookies minted by an older server mid-upgrade:
       1. base64url(JSON) — current.
-      2. Oldest flat form with raw ``;`` delimiters — split WITHOUT unquoting
-         (the ``next`` segment carries its own URL-encoding; unquoting first
-         would turn a ``%3B`` inside it into a bogus delimiter).
-      3. URL-encoded flat form (``quote(payload, safe="")``) — unquote once, split.
-    A NEW cookie hitting an OLD server fails the state check and the user
-    simply retries; nothing is minted.
+      2. Flat form with raw ``;`` delimiters — split WITHOUT unquoting (the ``next``
+         segment carries its own URL-encoding; a ``%3B`` inside it is not a delimiter).
+      3. URL-encoded flat form — unquote once, split.
+    A NEW cookie hitting an OLD server fails the state check; the user retries.
     """
     if _B64URL_RE.match(raw):
         try:
@@ -249,7 +237,7 @@ def clear_sso_attempt_cookie(response: Response, *, prefix: str = "") -> None:
     later silent attempt."""
     _clear_cookie_variants(
         response, SSO_ATTEMPT_COOKIE, prefix=prefix, https_samesite="lax",
-        bare_attrs=_lax_bare_attrs(prefix))
+        bare_attrs=_common_attrs(use_https=False, prefix=prefix))
 
 
 def detect_https(request: Request) -> bool:

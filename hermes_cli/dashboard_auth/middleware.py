@@ -57,24 +57,17 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
 
 
 def _path_is_public(path: str) -> bool:
-    """True if ``path`` bypasses the gate.
-
-    :data:`PUBLIC_API_PATHS` (shared with the legacy middleware) is matched
-    exactly so ``/api/status`` never exposes ``/api/status/extension``;
-    :data:`_GATE_PUBLIC_PREFIXES` is prefix-matched.
-    """
+    """True if ``path`` bypasses the gate: :data:`PUBLIC_API_PATHS` (shared with the
+    legacy middleware) matched exactly so ``/api/status`` never exposes
+    ``/api/status/extension``; :data:`_GATE_PUBLIC_PREFIXES` prefix-matched."""
     return path in PUBLIC_API_PATHS or any(
         path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES)
 
 
 def _safe_next_target(request: Request) -> str:
-    """URL-encoded ``next`` value for the login redirect, or ``""``.
-
-    Only same-origin relative paths outside the auth flow and ``/api`` are
-    kept (see :func:`is_safe_next_path`); the query string is preserved. SPA
-    deep links that are dropped fall back to the SPA's own
-    ``sessionStorage["hermes.lastLocation"]``.
-    """
+    """URL-encoded ``next`` value for the login redirect, or ``""``. Only same-origin
+    paths outside the auth flow and ``/api`` are kept (query preserved); dropped
+    deep links fall back to the SPA's ``sessionStorage["hermes.lastLocation"]``."""
     path = request.url.path
     if not path or not is_safe_next_path(path):
         return ""
@@ -84,12 +77,9 @@ def _safe_next_target(request: Request) -> str:
 
 def _unauth_response(request: Request, *, reason: str) -> Response:
     """API routes -> 401 JSON with ``login_url``; HTML routes -> 302 -> /login.
-
-    fetch() follows a 302 opaquely into the cross-origin OAuth dance, so API
-    routes never get redirects; the SPA's global 401 handler navigates to
-    ``login_url`` when ``error`` is ``unauthenticated`` or ``session_expired``.
-    Both shapes carry ``next=`` and the active proxy prefix.
-    """
+    fetch() follows a 302 opaquely into the cross-origin OAuth dance, so API routes
+    never get redirects; the SPA's 401 handler navigates to ``login_url`` on
+    ``unauthenticated`` / ``session_expired``. Both carry ``next=`` and the prefix."""
     next_param = _safe_next_target(request)
     prefix = prefix_from_request(request)
     login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
@@ -106,13 +96,12 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
 def _auto_sso_response(request: Request) -> Response | None:
     """302 straight to ``/auth/login`` on an unauthenticated HTML load, or ``None``.
 
-    Only when: the request is a document load (not ``/api/*``); exactly one
-    interactive provider is registered and it is OAuth-style (a password
-    provider must render the form); and the one-shot loop-guard cookie is
-    absent. A present marker means the portal had no session for us last time
-    — clear it and fall back to ``/login`` rather than ping-pong. Removes the
-    interstitial click, not a security check: ``/auth/login`` runs the
-    unchanged PKCE flow.
+    Only for a document load (not ``/api/*``) when exactly one interactive
+    provider is registered and it is OAuth-style (a password provider must render
+    the form), and the one-shot loop-guard cookie is absent — a present marker
+    means the portal had no session last time: clear it and fall back to ``/login``
+    rather than ping-pong. Convenience, not a security check: ``/auth/login`` runs
+    the unchanged PKCE flow.
     """
     if request.url.path.startswith("/api/"):
         return None
@@ -139,11 +128,9 @@ def _auto_sso_response(request: Request) -> Response | None:
 def _verify_access_token(
     request: Request, *, access_token: str, provider_hint: str | None = None, audit: bool = True):
     """Run ``verify_session`` across the provider stack; Session or ``None``.
-
-    ``audit=False`` is the native-app bearer path (no cookie, no server-side
-    refresh — the desktop rotates via ``/auth/native/refresh``); same
-    503-on-outage semantics via :func:`scan_session_providers`.
-    """
+    ``audit=False`` is the native-app bearer path (no cookie, no server-side refresh
+    — the desktop rotates via ``/auth/native/refresh``); 503-on-outage semantics
+    come from :func:`scan_session_providers`."""
     def _audit_unreachable(provider):
         if audit:
             audit_log(
@@ -242,13 +229,10 @@ async def gated_auth_middleware(
 
 
 def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | None = None):
-    """Rotate an expired session via the refresh token; ``(Session, provider_name)`` or ``None``.
-
-    ``RefreshExpiredError`` rejects the token for that candidate only (Basic
-    raises it for foreign opaque tokens too), so remaining providers are
-    tried. If none succeeds and any raised ``ProviderError``, re-raises with
-    that provider's name so the caller returns 503 without clearing cookies.
-    """
+    """Rotate an expired session via the refresh token; ``(Session, provider_name)``
+    or ``None``. ``RefreshExpiredError`` rejects that candidate only (Basic raises it
+    for foreign opaque tokens too); if none succeeds and any raised ``ProviderError``
+    it is re-raised so the caller returns 503 without clearing cookies."""
     if not refresh_token:
         return None
 

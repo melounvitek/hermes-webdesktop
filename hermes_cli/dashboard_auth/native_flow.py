@@ -99,11 +99,8 @@ def register_pending(
     *, code_challenge: str, redirect_uri: str, client_state: str, client_ip: str = "",
     now: Optional[int] = None) -> str:
     """Stash a pending native authorization; return an opaque ``broker_state``.
-
-    ``code_challenge`` is the DESKTOP's cc_d (the verifier is never seen until
-    redemption). Raises ``NativeFlowError`` (fail closed) when the store is at
-    capacity or ``client_ip`` already holds ``_MAX_PENDING_PER_IP`` entries.
-    """
+    ``code_challenge`` is the DESKTOP's cc_d. Raises ``NativeFlowError`` (fail closed)
+    at store capacity or when ``client_ip`` holds ``_MAX_PENDING_PER_IP`` entries."""
     now = _now(now)
     broker_state = secrets.token_urlsafe(32)
     with _lock:
@@ -131,11 +128,9 @@ def get_pending(broker_state: str, *, now: Optional[int] = None) -> _Pending:
 
 
 def complete_pending(broker_state: str, *, session: Session, now: Optional[int] = None) -> str:
-    """Consume a pending authorization (single use) and mint a one-time gateway
-    code bound to the desktop's challenge + the verified ``session``.
-
-    Raises :class:`PendingNotFound` if the broker_state is unknown/expired.
-    """
+    """Consume a pending authorization (single use) and mint a one-time gateway code
+    bound to the desktop's challenge + ``session``; :class:`PendingNotFound` if
+    unknown/expired."""
     now = _now(now)
     with _lock:
         _gc_locked(now)
@@ -152,12 +147,9 @@ def complete_pending(broker_state: str, *, session: Session, now: Optional[int] 
 
 
 def redeem_code(*, code: str, code_verifier: str, now: Optional[int] = None) -> Session:
-    """Verify PKCE + consume a gateway code; return the bound :class:`Session`.
-
-    The entry is popped BEFORE the PKCE check so a wrong verifier cannot be
-    retried against the same code: on any failure the code is already consumed
-    (no oracle, no replay). Raises :class:`CodeInvalid`.
-    """
+    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. The
+    entry is popped BEFORE the PKCE check so a wrong verifier cannot be retried
+    (no oracle, no replay). Raises :class:`CodeInvalid`."""
     now = _now(now)
     with _lock:
         _gc_locked(now)
