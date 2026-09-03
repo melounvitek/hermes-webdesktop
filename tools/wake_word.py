@@ -294,23 +294,6 @@ def _describe_input_device(selector: int | str | None, sd=None) -> Dict[str, Any
     return details
 
 
-def _device_label(details: Dict[str, Any]) -> str:
-    selector = details.get("selector")
-    name = str(details.get("name") or "").strip()
-    label = name or ("system default" if selector is None else str(selector))
-    hostapi = str(details.get("hostapi") or "").strip()
-    return f"{label} ({hostapi})" if hostapi else label
-
-
-def _capture_sample_rate(details: Dict[str, Any]) -> int:
-    """Use the selected device's native rate when PortAudio reports one."""
-    rate = details.get("default_samplerate")
-    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
-        with suppress(OverflowError, ValueError):
-            return int(round(rate))
-    return SAMPLE_RATE
-
-
 def _resample_audio_frame(np, frame, output_length: int):
     """Convert one native-rate capture block to an exact engine frame."""
     source = np.asarray(frame, dtype=np.float64).reshape(-1)
@@ -338,8 +321,11 @@ def silent_audio_hint(details: Dict[str, Any]) -> str:
                 "Microphone, then toggle the wake word.")
     fix = ("Set wake_word.input_device to a different PortAudio input device"
            if sys.platform == "win32" else "Check the selected input device")
-    return (f"Microphone delivers only silence from {_device_label(details)}. "
-            f"{fix}, then toggle the wake word.")
+    selector = details.get("selector")
+    label = str(details.get("name") or "").strip() or ("system default" if selector is None else str(selector))
+    hostapi = str(details.get("hostapi") or "").strip()
+    label = f"{label} ({hostapi})" if hostapi else label
+    return f"Microphone delivers only silence from {label}. {fix}, then toggle the wake word."
 
 
 # ── Engines (implementations live in tools.wake_word_engines) ──
@@ -363,16 +349,14 @@ def _stt_ready() -> bool:
     return False
 
 
-_LAZY_TTS_FEATURES = {"edge": "tts.edge", "elevenlabs": "tts.elevenlabs", "mistral": "tts.mistral"}
-
-
 def _tts_ready() -> bool:
     """Can the configured TTS provider run (or install at first use)? PROBE, not an installer:
     ``check_tts_requirements`` lazily pip-installs the SDK, which froze wake.status polls for a whole
     pip run. Uninstalled deps count as ready iff lazy installs are allowed; pip is never touched here."""
     try:
         from tools.tts_tool import _get_provider, _load_tts_config, check_tts_requirements
-        feature = _LAZY_TTS_FEATURES.get(_get_provider(_load_tts_config()))
+        provider = _get_provider(_load_tts_config())
+        feature = f"tts.{provider}" if provider in ("edge", "elevenlabs", "mistral") else None
         if feature is not None:
             from tools import lazy_deps
             if not lazy_deps.is_available(feature):
@@ -579,7 +563,11 @@ class WakeWordDetector:
             logger.error("wake word: audio libraries unavailable: %s", e)
             raise
         details = self.input_device_details = _describe_input_device(self.input_device, sd)
-        cap = _Capture(np=np, rate=_capture_sample_rate(details))
+        # Capture at the device's native rate when PortAudio reports one; frames are resampled to the engine.
+        cap, rate = _Capture(np=np), details.get("default_samplerate")
+        if isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0:
+            with suppress(OverflowError, ValueError):
+                cap.rate = int(round(rate))
         cap.frame_length = max(1, int(round(frame_length * cap.rate / SAMPLE_RATE)))
         logger.info("wake word: opening microphone device=%s selector=%r hostapi=%s "
                     "default_rate=%s capture_rate=%d engine_rate=%d", details.get("name") or "system default",
