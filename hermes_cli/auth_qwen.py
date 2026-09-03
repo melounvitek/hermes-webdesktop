@@ -1,9 +1,7 @@
 """Qwen OAuth (qwen-cli token file) runtime credentials and status.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -19,7 +17,6 @@ from hermes_cli.auth_constants import (
     QWEN_OAUTH_TOKEN_URL, _FORM_JSON_HEADERS, _qwen_err, httpx,
 )
 
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
 _RERUN = "Re-run 'qwen auth qwen-oauth'."
@@ -105,12 +102,7 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
 
 
 def _mark_qwen_oauth_active(creds: Dict[str, Any]) -> None:
-    """Set active_provider to qwen-oauth in auth.json.
-
-    Qwen tokens live in the Qwen CLI credential file, so this writes only a minimal provider-state
-    entry (base_url for display) and sets active_provider so ``get_active_provider()`` and the
-    setup wizard's credential check detect the provider.
-    """
+    """Set active_provider to qwen-oauth with a minimal state entry (tokens stay in the Qwen CLI file)."""
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store, _save_provider_state
     with _auth_store_lock():
         auth_store = _load_auth_store()
@@ -146,9 +138,7 @@ def get_qwen_auth_status() -> Dict[str, Any]:
     from hermes_cli.auth import _qwen_cli_auth_path, resolve_qwen_runtime_credentials
     auth_path = _qwen_cli_auth_path()
     try:
-        # Validate the runtime credentials, including refresh when the cached CLI token is expired;
-        # otherwise stale tokens show up as "logged in" and `hermes model` walks users into a
-        # broken Qwen setup flow.
+        # Refresh-validate: otherwise stale CLI tokens read as "logged in" and break `hermes model`.
         creds = resolve_qwen_runtime_credentials(refresh_if_expiring=True)
         return {
             "logged_in": True, "auth_file": str(auth_path), "source": creds.get("source"),

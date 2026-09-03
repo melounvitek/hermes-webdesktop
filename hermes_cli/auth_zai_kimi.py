@@ -1,9 +1,7 @@
 """Kimi Code and Z.AI endpoint auto-detection, LM Studio base-URL normalization.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -13,13 +11,10 @@ import hashlib
 from typing import Dict, Optional
 from hermes_cli.auth_constants import httpx
 
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
-# Kimi Code (kimi.com/code) issues "sk-kimi-" keys that only work on api.kimi.com/coding; legacy
-# platform.moonshot.ai keys work on api.moonshot.ai/v1 (the old default). Intentionally NO /v1
-# suffix: the /coding endpoint speaks Anthropic Messages and the SDK appends "/v1/messages"
-# itself — "/coding/v1" would produce "/coding/v1/v1/messages" (a 404).
+# "sk-kimi-" keys only work on api.kimi.com/coding; legacy moonshot keys use the old default.
+# NO /v1 suffix: the anthropic SDK appends "/v1/messages" itself ("/coding/v1" would 404).
 KIMI_CODE_BASE_URL = "https://api.kimi.com/coding"
 
 
@@ -32,10 +27,9 @@ def _resolve_kimi_base_url(api_key: str, default_url: str, env_override: str) ->
     return default_url
 
 
-# Z.AI bills general vs coding plans, and global vs China endpoints, separately; a key that works
-# on one may return "Insufficient balance" on another, so we probe at setup time and store the
-# working endpoint. Each entry lists candidate models to try in order — newer coding-plan accounts
-# may only have access to recent models while older ones still use glm-4.7.
+# Z.AI bills general/coding plans and global/China endpoints separately ("Insufficient balance" on
+# the wrong one), so probe once and cache. Candidate models are tried in order: newer coding-plan
+# accounts may only have recent GLM slugs, older ones still glm-4.7.
 _ZAI_CODING_PROBE_MODELS = ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo", "glm-4.7"]
 ZAI_ENDPOINTS = [
     # (id, base_url, probe_models, label)
@@ -69,8 +63,7 @@ def _probe_single_zai_endpoint(api_key: str, endpoint: tuple, timeout: float) ->
 def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str, str]]:
     """Probe z.ai endpoints in parallel; first working one in ZAI_ENDPOINTS priority order, or None."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    # No `with` block: a context manager would join ALL probe threads on exit, defeating the early
-    # return below. shutdown(wait=False) lets surviving probes drain in the background.
+    # No `with`: it would join ALL probes on exit, defeating the early return below.
     pool = ThreadPoolExecutor(max_workers=len(ZAI_ENDPOINTS))
     try:
         futures = {pool.submit(_probe_single_zai_endpoint, api_key, ep, timeout): ep[0] for ep in ZAI_ENDPOINTS}
@@ -111,8 +104,7 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state, detect_zai_endpoint
     if env_override:
         return env_override
-    # No API key → don't probe (N×M HTTPS requests with an empty Bearer, all 401). Hit during
-    # auxiliary-client auto-detection for users with no Z.AI credentials at all — pure latency.
+    # No key -> don't probe (N×M 401s); auxiliary-client auto-detection hits this for everyone.
     if not api_key:
         return default_url
 
@@ -134,15 +126,13 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
         "model": detected.get("model", ""), "label": detected.get("label", ""),
         "key_hash": key_hash,
     }
-    # Persist failure (disk full, permissions, lock timeout) must not break resolution — detection
-    # already succeeded; worst case the next start re-probes.
+    # Persist failure must not break resolution; worst case the next start re-probes.
     try:
         with _auth_store_lock():
             auth_store = _load_auth_store()  # reload under lock to avoid overwriting concurrent changes
             state_under_lock = _load_provider_state(auth_store, "zai") or {}
             state_under_lock["detected_endpoint"] = detected_endpoint
-            # set_active=False: this runs from credential-pool env seeding for ANY user with a Z.AI
-            # key in env, and caching a probe result must not flip their active provider.
+            # set_active=False: runs from credential-pool env seeding; must not flip active provider.
             _store_provider_state(auth_store, "zai", state_under_lock, set_active=False)
             _save_auth_store(auth_store)
     except Exception as exc:

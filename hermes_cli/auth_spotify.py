@@ -1,9 +1,7 @@
 """Spotify OAuth (loopback PKCE) login, refresh and runtime credentials.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from hermes_cli.auth_constants import (
     _spotify_err, httpx,
 )
 
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
 _CALLBACK_HTML = "<html><body><h1>Spotify authorization {}.</h1>You can close this tab.</body></html>"
@@ -366,8 +363,7 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
         print(f"\nNo Client ID entered. See {SPOTIFY_DOCS_URL} for the full guide.")
         raise SystemExit("Spotify setup cancelled: empty Client ID.")
 
-    # Persist so subsequent `hermes auth spotify` runs skip the wizard. Only persist a non-default
-    # redirect URI, to avoid pinning users to a value the default might later change to.
+    # Persist so later runs skip the wizard; only pin a NON-default redirect URI.
     save_env_value("HERMES_SPOTIFY_CLIENT_ID", raw)
     if redirect_uri_hint and redirect_uri_hint != DEFAULT_SPOTIFY_REDIRECT_URI:
         save_env_value("HERMES_SPOTIFY_REDIRECT_URI", redirect_uri_hint)
@@ -380,8 +376,7 @@ def login_spotify_command(args) -> None:
     from hermes_cli.auth import _auth_store_lock, _can_open_graphical_browser, _is_remote_session, _load_auth_store, _print_loopback_ssh_hint, _save_auth_store, _store_provider_state, get_provider_auth_state
     existing_state = get_provider_auth_state("spotify") or {}
 
-    # Interactive wizard: if no client_id is configured anywhere, walk the user through creating
-    # the Spotify developer app instead of crashing with "HERMES_SPOTIFY_CLIENT_ID is required".
+    # No client_id anywhere -> wizard instead of "HERMES_SPOTIFY_CLIENT_ID is required".
     try:
         client_id = _spotify_client_id(getattr(args, "client_id", None), existing_state)
     except AuthError as exc:
