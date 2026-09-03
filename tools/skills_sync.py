@@ -65,8 +65,8 @@ def _rel_skills_posix(path: Path) -> str:
     return path.relative_to(_skills_dir()).as_posix()
 
 
-# Written by `hermes profile create --no-skills` / installer `--no-skills`: sync seeds
-# only essential skills. Mirrors hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (no CLI import here).
+# Written by `hermes profile create --no-skills` / installer `--no-skills`: sync seeds only
+# essential skills. Mirrors hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (no CLI import here).
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 
 
@@ -218,9 +218,8 @@ class _SyncState:
     suppressed: List[str] = field(default_factory=list)
     relocated: List[str] = field(default_factory=list)
     shadowed_by_external: List[str] = field(default_factory=list)
-    # Rename-recovery indexes are expensive on bind mounts: built lazily, only when needed.
-    active_index: Optional[Dict[str, List[Path]]] = None
-    hub_paths: Set[str] = field(default_factory=set)
+    active_index: Optional[Dict[str, List[Path]]] = None  # rename-recovery indexes are expensive on
+    hub_paths: Set[str] = field(default_factory=set)  # bind mounts: built lazily, only when needed
 
     def say(self, msg: str) -> None:
         if not self.quiet:
@@ -228,8 +227,8 @@ class _SyncState:
 
 
 def _recover_orphan_backup(dest: Path) -> None:
-    """If an interrupted update left the user's only copy in ``dest.bak`` with
-    dest gone, move it back so the skill isn't misread as user-deleted."""
+    """If an interrupted update left the user's only copy in ``dest.bak`` with dest gone, move it
+    back so the skill isn't misread as user-deleted."""
     orphan = dest.with_suffix(".bak")
     if not orphan.exists() or dest.exists():
         return
@@ -277,8 +276,7 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
 
 
 def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
-    """Replace ``dest`` with a fresh copy of ``skill_src`` via a ``.bak`` sibling,
-    restoring the original on failure."""
+    """Replace ``dest`` with a fresh copy of ``skill_src`` via a ``.bak`` sibling, restoring on failure."""
     backup = dest.with_suffix(".bak")
     if backup.exists():  # a stale .bak would make shutil.move() nest dest INSIDE it
         _rmtree_writable(backup)

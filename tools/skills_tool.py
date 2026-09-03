@@ -59,8 +59,7 @@ def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
     return (tuple(sig), frozenset(disabled), getattr(getattr(_skill_utils, "sys", None), "platform", ""))
 
 
-# All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
-HERMES_HOME = get_hermes_home()
+HERMES_HOME = get_hermes_home()  # all skills live in ~/.hermes/skills/ (seeded from bundled skills/)
 SKILLS_DIR = HERMES_HOME / "skills"
 _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
 
@@ -277,8 +276,6 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         return tool_error(str(e), success=False)
 
 
-# ── skill_view helpers ─────────────────────────────────────────────────────
-
 def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     """``plugin:skill`` dispatch: ``(result_json, None)`` when answered, else ``(None,
     local_category_name)`` to fall through to the flat-tree scan — categorized local skills
@@ -386,12 +383,9 @@ def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
     files: dict = {}
     for sub, globs, recursive, files_only in _LINKED_FILE_SPECS if skill_dir else ():
         base = skill_dir / sub
-        if not base.exists():
-            continue
         found = [
-            str(f.relative_to(skill_dir))
-            for g in globs for f in (base.rglob(g) if recursive else base.glob(g))
-            if not files_only or f.is_file()]
+            str(f.relative_to(skill_dir)) for g in globs if base.exists()
+            for f in (base.rglob(g) if recursive else base.glob(g)) if not files_only or f.is_file()]
         if found:
             files[sub] = found
     return files
@@ -404,12 +398,13 @@ def _org_provenance_header(skill_dir: Path, active_skills_dir: Path):
     if not is_org_mirror_path(skill_dir, active_skills_dir):
         return None, ""
     prov_org = org_id_of_path(skill_dir, active_skills_dir)
-    author = ts = ""
+    prov: dict = {}
     if prov_org:
         with suppress(Exception):
-            prov = json.loads(_read_skill_text(active_skills_dir / "_org" / prov_org / ORG_PROVENANCE_FILE))
-            author = str(prov.get("author_device") or prov.get("author_user_id") or "")
-            ts = str(prov.get("ts") or "")
+            loaded = json.loads(_read_skill_text(active_skills_dir / "_org" / prov_org / ORG_PROVENANCE_FILE))
+            prov = loaded if isinstance(loaded, dict) else {}
+    author = str(prov.get("author_device") or prov.get("author_user_id") or "")
+    ts = str(prov.get("ts") or "")
     header = (
         "> [!NOTE] ORG-SHARED SKILL — provenance\n"
         f"> This skill is shared by your organisation (org `{prov_org}`"
@@ -585,16 +580,15 @@ def skill_view(
         readiness, readiness_extras = _skill_readiness(frontmatter, skill_name)
         rendered_content = content if not preprocess else _preprocess_skill(
             content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
-        org_provenance = None
+        org_provenance, header = None, ""
         if skill_dir:
             try:
                 org_provenance, header = _org_provenance_header(skill_dir, active_skills_dir)
-                rendered_content = header + rendered_content
             except Exception:
                 logger.debug("Could not resolve org provenance for %s", skill_name, exc_info=True)
         result = {
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
-            "tags": tags, "related_skills": related_skills, "content": rendered_content, "path": rel_path,
+            "tags": tags, "related_skills": related_skills, "content": header + rendered_content, "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None, "org_provenance": org_provenance,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'" if linked_files else None,
@@ -603,8 +597,7 @@ def skill_view(
             "_source_path": str(skill_md),
             **readiness_extras}
         _mark_background_review_read(skill_md)
-        # agentskills.io optional fields
-        if frontmatter.get("compatibility"):
+        if frontmatter.get("compatibility"):  # agentskills.io optional fields
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
@@ -612,8 +605,6 @@ def skill_view(
     except Exception as e:
         return tool_error(str(e), success=False)
 
-
-# ── Registry ────────────────────────────────────────────────────────────────
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
@@ -650,12 +641,9 @@ SKILL_VIEW_SCHEMA = {
 }
 
 registry.register(
-    name="skills_list",
-    toolset="skills",
-    schema=SKILLS_LIST_SCHEMA,
+    name="skills_list", toolset="skills", schema=SKILLS_LIST_SCHEMA,
     handler=lambda args, **kw: skills_list(category=args.get("category"), task_id=kw.get("task_id")),
-    check_fn=check_skills_requirements,
-    emoji="📚")
+    check_fn=check_skills_requirements, emoji="📚")
 
 
 def _skill_view_with_bump(args, **kw):
@@ -681,9 +669,5 @@ def _skill_view_with_bump(args, **kw):
 
 
 registry.register(
-    name="skill_view",
-    toolset="skills",
-    schema=SKILL_VIEW_SCHEMA,
-    handler=_skill_view_with_bump,
-    check_fn=check_skills_requirements,
-    emoji="📚")
+    name="skill_view", toolset="skills", schema=SKILL_VIEW_SCHEMA, handler=_skill_view_with_bump,
+    check_fn=check_skills_requirements, emoji="📚")
