@@ -99,6 +99,7 @@ class LocalEditSnapshot:
 
 # Configurable tool preview length; set once at startup from display.tool_preview_length.
 _tool_preview_max_len: int = 0  # 0 = unlimited
+_friendly_tool_labels: bool = True
 
 
 def set_tool_preview_max_len(n: int) -> None:
@@ -110,6 +111,12 @@ def set_tool_preview_max_len(n: int) -> None:
 def get_tool_preview_max_len() -> int:
     """Return the configured max preview length (0 = unlimited)."""
     return _tool_preview_max_len
+
+
+def set_friendly_tool_labels(enabled: bool) -> None:
+    """Toggle friendly human-phrased tool labels (display.friendly_tool_labels)."""
+    global _friendly_tool_labels
+    _friendly_tool_labels = bool(enabled)
 
 
 def get_skin_tool_prefix() -> str:
@@ -378,16 +385,12 @@ def _browser_exec_step_label(args: dict, max_chars: int = 80) -> str | None:
 
 
 _PRIMARY_ARGS = {
-    "terminal": "command", "web_search": "query", "web_extract": "urls",
-    "read_file": "path", "write_file": "path", "patch": "path",
-    "search_files": "pattern", "browser_navigate": "url",
-    "browser_click": "ref", "browser_type": "text",
-    "image_generate": "prompt", "text_to_speech": "text",
-    "vision_analyze": "question",
-    "skill_view": "name", "skills_list": "category",
-    "cronjob_manage": "action",
-    "execute_code": "code", "browser_exec": "code", "delegate_task": "goal",
-    "clarify": "question", "skill_manage": "name",
+    "terminal": "command", "web_search": "query", "web_extract": "urls", "read_file": "path",
+    "write_file": "path", "patch": "path", "search_files": "pattern", "browser_navigate": "url",
+    "browser_click": "ref", "browser_type": "text", "image_generate": "prompt", "text_to_speech": "text",
+    "vision_analyze": "question", "skill_view": "name", "skills_list": "category", "cronjob_manage": "action",
+    "execute_code": "code", "browser_exec": "code", "delegate_task": "goal", "clarify": "question",
+    "skill_manage": "name",
 }
 _FALLBACK_PREVIEW_KEYS = ("query", "text", "command", "path", "name", "prompt", "code", "goal")
 
@@ -417,25 +420,18 @@ def _preview_delegate_task(args: dict, max_len: int) -> str | None:
         preview = f"{len(goals)} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
         return _truncate_preview(preview, max_len)
     goal = args.get("goal", "")
-    if goal is None:
-        return None
-    return _truncate_preview(_oneline(str(goal)), max_len) or None
+    return None if goal is None else _truncate_preview(_oneline(str(goal)), max_len) or None
 
 
 def _preview_process_manage(args: dict, _max_len: int) -> str | None:
-    action = args.get("action", "")
-    sid = args.get("session_id", "")
-    data = args.get("data", "")
-    timeout_val = args.get("timeout")
-    parts = [str(action) if action else ""]
-    if sid:
-        parts.append(str(sid)[:16])
-    if data:
-        parts.append(f'"{_oneline(str(data)[:20])}"')
-    if timeout_val and action == "wait":
-        parts.append(f"{timeout_val}s")
-    parts = [p for p in parts if p]
-    return " ".join(parts) if parts else None
+    action, sid, data, timeout_val = (args.get(k, d) for k, d in (("action", ""), ("session_id", ""), ("data", ""), ("timeout", None)))
+    parts = [
+        str(action) if action else "",
+        str(sid)[:16] if sid else "",
+        f'"{_oneline(str(data)[:20])}"' if data else "",
+        f"{timeout_val}s" if timeout_val and action == "wait" else "",
+    ]
+    return " ".join(p for p in parts if p) or None
 
 
 def _preview_todo_list(args: dict, _max_len: int) -> str:
@@ -448,9 +444,7 @@ def _preview_todo_list(args: dict, _max_len: int) -> str:
 def _preview_shell(key: str):
     def _build(args: dict, max_len: int) -> str | None:
         command = args.get(key)
-        if command is None:
-            return None
-        return _truncate_preview(summarize_shell_command(str(command)), max_len) or None
+        return None if command is None else _truncate_preview(summarize_shell_command(str(command)), max_len) or None
     return _build
 
 
@@ -492,17 +486,12 @@ def _preview_skill_view(args: dict, max_len: int) -> str | None:
 # Tool-specific preview builders: f(args, max_len) -> preview. Tools not listed
 # fall through to the primary-argument lookup in build_tool_preview.
 _PREVIEW_BUILDERS = {
-    "browser_exec": _preview_browser_exec,
-    "delegate_task": _preview_delegate_task,
-    "process_manage": _preview_process_manage,
-    "todo_list": _preview_todo_list,
-    "terminal": _preview_shell("command"),
-    "execute_code": _preview_shell("code"),
-    "read_file": _preview_read_file,
-    "session_search": lambda args, _m: f"recall: \"{_clip(_oneline(args.get('query', '')), 25)}\"",
-    "memory": _preview_memory,
-    "send_message": _preview_send_message,
+    "browser_exec": _preview_browser_exec, "delegate_task": _preview_delegate_task,
+    "process_manage": _preview_process_manage, "todo_list": _preview_todo_list,
+    "terminal": _preview_shell("command"), "execute_code": _preview_shell("code"),
+    "read_file": _preview_read_file, "memory": _preview_memory, "send_message": _preview_send_message,
     "skill_view": _preview_skill_view,
+    "session_search": lambda args, _m: f"recall: \"{_clip(_oneline(args.get('query', '')), 25)}\"",
 }
 
 
@@ -581,15 +570,6 @@ _TOOL_VERBS: dict[str, str] = {
 _TOOL_VERBS_NO_PREVIEW: frozenset[str] = frozenset({"skills_list", "session_search"})
 # Verbs joined to the preview with " for " (search-style phrasing).
 _TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files"})
-
-_friendly_tool_labels: bool = True
-
-
-def set_friendly_tool_labels(enabled: bool) -> None:
-    """Toggle friendly human-phrased tool labels (display.friendly_tool_labels)."""
-    global _friendly_tool_labels
-    _friendly_tool_labels = bool(enabled)
-
 
 def get_tool_verb(tool_name: str) -> str | None:
     """Friendly verb for a built-in tool, or None (labels disabled / no curated verb).
@@ -887,32 +867,21 @@ class KawaiiSpinner:
     """Animated spinner with kawaii faces for CLI feedback during tool execution."""
 
     SPINNERS = {
-        'dots': ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-        'bounce': ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'],
-        'grow': ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂'],
-        'arrows': ['←', '↖', '↑', '↗', '→', '↘', '↓', '↙'],
-        'star': ['✶', '✷', '✸', '✹', '✺', '✹', '✸', '✷'],
-        'moon': ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'],
-        'pulse': ['◜', '◠', '◝', '◞', '◡', '◟'],
-        'brain': ['🧠', '💭', '💡', '✨', '💫', '🌟', '💡', '💭'],
-        'sparkle': ['⁺', '˚', '*', '✧', '✦', '✧', '*', '˚'],
+        'dots': list('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'), 'bounce': list('⠁⠂⠄⡀⢀⠠⠐⠈'), 'grow': list('▁▂▃▄▅▆▇█▇▆▅▄▃▂'),
+        'arrows': list('←↖↑↗→↘↓↙'), 'star': list('✶✷✸✹✺✹✸✷'), 'moon': list('🌑🌒🌓🌔🌕🌖🌗🌘'),
+        'pulse': list('◜◠◝◞◡◟'), 'brain': list('🧠💭💡✨💫🌟💡💭'), 'sparkle': list('⁺˚*✧✦✧*˚'),
     }
-
     KAWAII_WAITING = [
-        "(｡◕‿◕｡)", "(◕‿◕✿)", "٩(◕‿◕｡)۶", "(✿◠‿◠)", "( ˘▽˘)っ",
-        "♪(´ε` )", "(◕ᴗ◕✿)", "ヾ(＾∇＾)", "(≧◡≦)", "(★ω★)",
+        "(｡◕‿◕｡)", "(◕‿◕✿)", "٩(◕‿◕｡)۶", "(✿◠‿◠)", "( ˘▽˘)っ", "♪(´ε` )", "(◕ᴗ◕✿)", "ヾ(＾∇＾)", "(≧◡≦)", "(★ω★)",
     ]
-
     KAWAII_THINKING = [
-        "(｡•́︿•̀｡)", "(◔_◔)", "(¬‿¬)", "( •_•)>⌐■-■", "(⌐■_■)",
-        "(´･_･`)", "◉_◉", "(°ロ°)", "( ˘⌣˘)♡", "ヽ(>∀<☆)☆",
+        "(｡•́︿•̀｡)", "(◔_◔)", "(¬‿¬)", "( •_•)>⌐■-■", "(⌐■_■)", "(´･_･`)", "◉_◉", "(°ロ°)", "( ˘⌣˘)♡", "ヽ(>∀<☆)☆",
         "٩(๑❛ᴗ❛๑)۶", "(⊙_⊙)", "(¬_¬)", "( ͡° ͜ʖ ͡°)", "ಠ_ಠ",
     ]
-
     THINKING_VERBS = [
-        "pondering", "contemplating", "musing", "cogitating", "ruminating",
-        "deliberating", "mulling", "reflecting", "processing", "reasoning",
-        "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
+        "pondering", "contemplating", "musing", "cogitating", "ruminating", "deliberating", "mulling",
+        "reflecting", "processing", "reasoning", "analyzing", "computing", "synthesizing", "formulating",
+        "brainstorming",
     ]
 
     @staticmethod
@@ -977,12 +946,9 @@ class KawaiiSpinner:
             return False
 
     def _is_patch_stdout_proxy(self) -> bool:
-        """True when stdout is prompt_toolkit's StdoutProxy.
-
-        StdoutProxy queues writes and injects newlines around each flush, so the
-        \\r overwrite never lands: each frame would land on its own line. The CLI
-        drives its own TUI spinner widget in that mode, so we stay silent.
-        """
+        """True when stdout is prompt_toolkit's StdoutProxy, which queues writes and
+        injects newlines around each flush so the \\r overwrite never lands; the CLI
+        drives its own TUI spinner widget in that mode, so we stay silent."""
         try:
             from prompt_toolkit.patch_stdout import StdoutProxy
             return isinstance(self._out, StdoutProxy)
@@ -990,16 +956,14 @@ class KawaiiSpinner:
             return False
 
     def _animate(self):
+        tty = self._is_tty
         # Non-TTY (Docker, systemd, pipe): log once instead of spamming frames.
-        if not self._is_tty:
+        if not tty:
             self._write(f"  [tool] {self.message}", flush=True)
-            while self.running:
-                time.sleep(0.5)
-            return
         # Under patch_stdout the \r animation would overdraw the TUI status bar.
-        if self._is_patch_stdout_proxy():
+        if not tty or self._is_patch_stdout_proxy():
             while self.running:
-                time.sleep(0.1)
+                time.sleep(0.5 if not tty else 0.1)
             return
         skin = _get_skin()
         wings = skin.get_spinner_wings() if skin else []
