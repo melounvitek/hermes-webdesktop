@@ -302,8 +302,7 @@ def note_turn_start(agent, turn_id: str):
             "turn %s starting while turn %s (started %.0fs ago) has not "
             "completed its turn-end persist (session=%s) — concurrent turns "
             "on one session; transcript writes may interleave", turn_id, prev,
-            time.time() - prev_started if prev_started else -1.0,
-            getattr(agent, "session_id", None) or "-",
+            time.time() - prev_started if prev_started else -1.0, getattr(agent, "session_id", None) or "-",
         )
         overlap = prev
     # Cross-agent leg: same session_id in flight under another agent object (busy guard is keyed by
@@ -872,18 +871,13 @@ def try_recover_primary_transport(
 ) -> bool:
     """Rebuild the primary client once and retry after ``max_retries`` exhaust on a transient
     transport error. Skipped for aggregators (OpenRouter, Nous) that manage retries server-side."""
-    if agent._fallback_activated:
-        return False
     error_type = type(api_error).__name__
-    if error_type not in _TRANSIENT_TRANSPORT_ERRORS:
+    if agent._fallback_activated or error_type not in _TRANSIENT_TRANSPORT_ERRORS or agent._is_openrouter_url():
         return False
-    if agent._is_openrouter_url():
-        return False
-    provider_lower = (agent.provider or "").strip().lower()
     # Portal OpenAI-wire traffic rides aggregator retry infra (skip), but Portal Claude on native
     # Messages holds a local Anthropic client that needs the rebuild.
     if (
-        provider_lower in {"nous", "nous-portal", "nousresearch"}
+        (agent.provider or "").strip().lower() in {"nous", "nous-portal", "nousresearch"}
         and getattr(agent, "api_mode", None) != "anthropic_messages"
     ):
         return False
@@ -901,9 +895,7 @@ def try_recover_primary_transport(
             from agent.moa_loop import build_moa_facade
             agent.client = build_moa_facade(agent, agent.model)
         else:
-            agent.client = agent._create_openai_client(
-                dict(rt["client_kwargs"]), reason="primary_recovery", shared=True
-            )
+            agent.client = agent._create_openai_client(dict(rt["client_kwargs"]), reason="primary_recovery", shared=True)
         wait_time = min(3 + retry_count, 8)
         agent._vprint(
             f"{agent.log_prefix}🔁 Transient {error_type} on {agent.provider} — "
@@ -914,8 +906,6 @@ def try_recover_primary_transport(
     except Exception as e:
         logger.warning("Primary transport recovery failed: %s", e)
         return False
-
-# ── End provider fallback ──────────────────────────────────────────────
 
 
 def _merge_user_content(prev_content: Any, cur_content: Any) -> Any:
@@ -952,16 +942,16 @@ def drop_thinking_only_and_merge_users(
     merges = 0
     for m in kept:
         prev = merged[-1] if merged else None
+        content = _UNMERGEABLE
         if prev is not None and prev.get("role") == "user" and m.get("role") == "user":
             content = _merge_user_content(prev.get("content", ""), m.get("content", ""))
-            if content is not _UNMERGEABLE:
-                # Copy ``prev`` so caller dicts are never mutated.
-                merged[-1] = {**prev, "content": content}
-                merges += 1
-                continue
-            # Unknown content shape: append separately (violates alternation, but safer than raising
-            # in a hot path).
-        merged.append(m)
+        if content is _UNMERGEABLE:
+            # Not a user pair, or an unknown content shape: append separately (the latter violates
+            # alternation, but is safer than raising in a hot path).
+            merged.append(m)
+        else:
+            merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
+            merges += 1
     if dropped == 0 and merges == 0:
         return messages
     _ra().logger.debug(
@@ -975,8 +965,7 @@ def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base
     """Reset-aware gate: skip a guaranteed-to-fail restore while the primary pool reports a
     future reset; fails open on any error/None. Returns ``(blocked, prefetched_pool, prefetched)``
     so the rebind step reuses the loaded pool (one auth.json read at most)."""
-    prefetched_pool = None
-    prefetched = False
+    prefetched_pool, prefetched = None, False
     try:
         pool = getattr(agent, "_credential_pool", None)
         if not matches_primary(pool):
