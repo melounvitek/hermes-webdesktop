@@ -199,20 +199,15 @@ class _ModelCatalog:
             row_base_url = str(row.get("api_url") or "").strip().rstrip("/").lower()
             if row.get("native_catalog_empty"):
                 self.empty_authoritative.add(raw_row_provider)
-            if (
-                not self._identity_resolved
-                and raw_row_provider in {"ollama", "custom:ollama"}
-                and self.current_base_url
-                and row_base_url == self.current_base_url
+            if not self._identity_resolved and raw_row_provider in {"ollama", "custom:ollama"} and (
+                self.current_base_url and row_base_url == self.current_base_url
             ):
                 self.current_choice_provider = "custom:ollama"
                 self._identity_resolved = True
-            if not row_provider:
+            row_models = row.get("models")
+            if not row_provider or not isinstance(row_models, (list, tuple)):
                 continue
             provider_name = str(row.get("name") or "").strip() or provider_label(row_provider)
-            row_models = row.get("models")
-            if not isinstance(row_models, (list, tuple)):
-                continue
             encoded_provider = (
                 "custom:ollama" if raw_row_provider == "ollama"
                 else raw_row_provider if raw_row_provider.startswith("custom:")
@@ -224,9 +219,8 @@ class _ModelCatalog:
                 rendered_model = str(model_entry or "").strip()
                 if not rendered_model:
                     continue
-                is_current = (
+                is_current = rendered_model == self.current_model and (
                     self.semantic(encoded_provider) == self.semantic(self.current_choice_provider)
-                    and rendered_model == self.current_model
                 )
                 self.add(
                     encoded_provider, rendered_model, f"{provider_name} · {rendered_model}",
@@ -242,12 +236,9 @@ class _ModelCatalog:
                 self.empty_authoritative.add(str(named_slug).strip().lower())
                 continue
             for named_model, named_desc in named_catalog:
-                named_parts = [f"Provider: {named_label}"]
-                if named_desc:
-                    named_parts.append(str(named_desc).strip())
-                if named_slug == normalized_provider and named_model == self.current_model:
-                    named_parts.append("current")
-                self.add(named_slug, named_model, named_model, " • ".join(part for part in named_parts if part))
+                is_current = named_slug == normalized_provider and named_model == self.current_model
+                parts = [f"Provider: {named_label}", str(named_desc or "").strip(), "current" if is_current else ""]
+                self.add(named_slug, named_model, named_model, " • ".join(part for part in parts if part))
 
 
 def build_model_state(model: str, provider: str, base_url: str) -> SessionModelState | None:
