@@ -35,7 +35,6 @@ def _ensure_browser_plugins_loaded() -> None:
     """Idempotently trigger plugin discovery (standalone scripts/tests may never import ``model_tools``)."""
     try:
         from hermes_cli.plugins import _ensure_plugins_discovered
-
         _ensure_plugins_discovered()
     except Exception as exc:
         _origin().logger.debug("Browser plugin discovery failed (non-fatal): %s", exc)
@@ -58,13 +57,11 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 _bt._cloud_provider_resolved = True
                 _bt._cached_cloud_provider_scope = scope
                 return _bt._cached_cloud_provider
-
             _bt._cached_cloud_provider = None
             _bt._cloud_provider_resolved = False
             resolved = _bt._resolve_cloud_provider_uncached()
             after_generation = _bt._browser_registry_generation(scope=scope)
-            if before_generation != after_generation:
-                # A force reload changed this profile's registry mid-resolution: discard and resolve again.
+            if before_generation != after_generation:  # force reload mid-resolution: discard, resolve again
                 continue
             if _bt._cloud_provider_resolved:
                 _bt._cached_cloud_provider_scope = scope
@@ -91,7 +88,6 @@ def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBro
             resolved = _bt._registry_get_browser_provider(provider_key)
         if resolved is None:
             from tools.tool_backend_helpers import selection_error
-
             raise ValueError(selection_error(
                 "browser", f"'{provider_key}'",
                 "no registered browser plugin has that name (install the corresponding plugin or fix the config key spelling)",
@@ -186,7 +182,6 @@ def _is_local_backend() -> bool:
         return False
     # Scope-aware: under gateway multiplexing the routed profile's terminal backend lives in the per-turn scope.
     from tools.terminal_scope import terminal_env
-
     return terminal_env("TERMINAL_ENV", "local").strip().lower() in ("local", "")
 
 
@@ -197,7 +192,6 @@ def _get_browser_engine() -> str:
     navigation but has no graphical renderer (no screenshots).
     """
     _bt = _origin()
-
     def compute() -> str:
         engine = _bt._browser_cfg("engine", "auto", lambda v: str(v).strip().lower() if v and str(v).strip() else "auto", "browser.engine from config")
         if engine == "auto":
@@ -208,18 +202,15 @@ def _get_browser_engine() -> str:
             _bt.logger.warning("Unknown browser engine %r (valid: %s), falling back to 'auto'", engine, ", ".join(sorted(_VALID_ENGINES)))
             engine = "auto"
         return engine
-
     return _memo(_bt, "_browser_engine_resolved", "_cached_browser_engine", compute)
 
 
 def _is_headed_mode() -> bool:
     """True when the browser should launch headed: ``browser.headed``, else ``AGENT_BROWSER_HEADED``; cached."""
     _bt = _origin()
-
     def compute() -> bool:
         headed = _bt._browser_cfg("headed", False, lambda v: False if v is None else str(v).strip().lower() in ("true", "1", "yes"), "browser.headed from config")
         return headed or os.environ.get("AGENT_BROWSER_HEADED", "").strip().lower() in ("true", "1", "yes")
-
     return _memo(_bt, "_headed_mode_resolved", "_cached_headed_mode", compute)
 
 

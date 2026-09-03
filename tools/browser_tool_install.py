@@ -115,20 +115,21 @@ def _find_agent_browser(*, validate: bool = True) -> str:
     _bt = _origin()
 
     def _not_found(cached: bool) -> FileNotFoundError:
-        return FileNotFoundError(f"agent-browser CLI not found{' (cached)' if cached else ''}. Install it with: {_bt._browser_install_hint()}\nOr ensure npx is available in your PATH.")
-
-    if _bt._agent_browser_resolved:
-        if _bt._cached_agent_browser is None:
-            raise _not_found(cached=True)
-        return _bt._cached_agent_browser
+        return FileNotFoundError(f"agent-browser CLI not found{' (cached)' if cached else ''}. Install it with: "
+                                 f"{_bt._browser_install_hint()}\nOr ensure npx is available in your PATH.")
 
     def _accept(candidate: str) -> str:
-        # Set resolved at each accept site (not before the search) so a concurrent reader never sees resolved=True with a None cache.
+        # Set resolved at each accept site (not before the search) so a concurrent reader never sees
+        # resolved=True with a None cache.
         if validate:
             _bt._cached_agent_browser = candidate
             _bt._agent_browser_resolved = True
         return candidate
 
+    if _bt._agent_browser_resolved:
+        if _bt._cached_agent_browser is None:
+            raise _not_found(cached=True)
+        return _bt._cached_agent_browser
     ok = _bt.agent_browser_runnable if validate else _bt._agent_browser_candidate_present
     extended_path = _bt._merge_browser_path("")
     for candidate in _bt._agent_browser_candidates(extended_path):
@@ -139,9 +140,7 @@ def _find_agent_browser(*, validate: bool = True) -> str:
         return _accept(_bt.NPX_AGENT_BROWSER_SENTINEL)
     if not validate:
         raise FileNotFoundError("agent-browser CLI not found")
-
-    # Nothing found — try lazy installation before giving up.
-    try:
+    try:  # Nothing found — try lazy installation before giving up.
         from hermes_cli.dep_ensure import ensure_dependency
         if ensure_dependency("browser"):
             home = _bt.get_hermes_home()
@@ -152,7 +151,6 @@ def _find_agent_browser(*, validate: bool = True) -> str:
                     return _accept(recheck)
     except Exception:
         pass
-
     _bt._agent_browser_resolved = True
     raise _not_found(cached=False)
 

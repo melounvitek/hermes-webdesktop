@@ -41,8 +41,7 @@ class LightpandaServer:
 
     @property
     def cdp_url(self) -> str:
-        # HTTP discovery URL; the browser-use harness resolves /json/version itself.
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://127.0.0.1:{self.port}"  # HTTP discovery URL; the harness resolves /json/version itself
 
     def is_alive(self) -> bool:
         return self.proc.poll() is None
