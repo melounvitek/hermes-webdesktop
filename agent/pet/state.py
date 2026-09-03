@@ -1,16 +1,9 @@
 """Map agent activity → a :class:`PetState`.
 
-This is the one place the "what is the agent doing right now?" → "which
-animation row?" decision lives.  Each surface feeds it the signals it already
-tracks:
-
-- CLI    — ``KawaiiSpinner`` waiting/thinking state + tool outcomes.
-- TUI    — gateway ``tool.start/complete`` + ``message.delta/complete`` events.
-- Desktop — the ``$busy``/``$awaitingResponse``/tool-event nanostores
-            (re-implemented in TS, but mirroring this priority order).
-
-Keeping the priority order here (and documenting it) lets the TypeScript
-mirror stay faithful without a second design.
+The one place the "what is the agent doing?" → "which animation row?" decision
+lives. CLI (spinner state + tool outcomes), TUI (gateway tool/message events)
+and Desktop (nanostores; re-implemented in TS mirroring this priority order)
+all feed it the signals they already track.
 """
 
 from __future__ import annotations
@@ -24,18 +17,13 @@ from agent.pet.constants import PetState
 def todos_all_done(todos: Iterable[Any] | None) -> bool:
     """True iff there's ≥1 todo and every one is completed/cancelled.
 
-    The "celebrate" beat (``JUMP``) fires when a plan finishes; this mirrors
-    the TUI's ``isTodoDone`` so the trigger is defined once across surfaces.
-    Accepts dicts (``{"status": ...}``) or objects with a ``status`` attr.
+    The "celebrate" beat (``JUMP``) fires when a plan finishes; mirrors the TUI's
+    ``isTodoDone``. Accepts dicts (``{"status": ...}``) or objects with ``status``.
     """
     items = list(todos or [])
-    if not items:
-        return False
-
-    def _status(t: Any) -> Any:
-        return t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
-
-    return all(_status(t) in ("completed", "cancelled") for t in items)
+    return bool(items) and all(
+        (t.get("status") if isinstance(t, dict) else getattr(t, "status", None)) in ("completed", "cancelled") for t in items
+    )
 
 
 def derive_pet_state(
@@ -56,11 +44,10 @@ def derive_pet_state(
     1. ``error``          → ``FAILED``  (a tool/turn just failed)
     2. ``celebrate``      → ``JUMP``    (explicit success beat, e.g. todos done)
     3. ``just_completed`` → ``WAVE``    (turn finished cleanly / greeting)
-    4. ``awaiting_input`` → ``WAITING`` (blocked on the user — a clarify/approval
-       prompt is open; this outranks the in-flight signals below because the turn
-       is paused on *you*, even though a tool is technically mid-call)
-    5. ``tool_running``   → ``RUN``     (a tool is executing)
-    6. ``reasoning``      → ``REVIEW``  (model is thinking / reading)
+    4. ``awaiting_input`` → ``WAITING`` (blocked on the user — outranks the in-flight
+       signals below because the turn is paused on *you*, even mid tool call)
+    5. ``tool_running``   → ``RUN``
+    6. ``reasoning``      → ``REVIEW``
     7. ``busy``           → ``RUN``     (turn in flight, unspecified work)
     8. otherwise          → ``IDLE``
     """

@@ -11,8 +11,10 @@ once, on the pet you keep) and gives each UI a natural preview/loading point.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,10 +65,8 @@ class HatchResult:
 
 
 def _unlink_quietly(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _harden_transparency(path: Path) -> Path:
@@ -160,9 +160,8 @@ def generate_base_drafts(
 
     results: dict[int, Path] = {}
     errors: list[str] = []
-    for index, path, err in _run_parallel(
-        _one, range(n), cancelled=cancelled, on_cancel_log="pet generate: cancelled — dropping remaining drafts"
-    ):
+    cancel_log = "pet generate: cancelled — dropping remaining drafts"
+    for index, path, err in _run_parallel(_one, range(n), cancelled=cancelled, on_cancel_log=cancel_log):
         if path is None:
             if err:
                 errors.append(err)
@@ -179,8 +178,6 @@ def generate_base_drafts(
         # Surface *why*: the most common failure reason is the representative cause.
         if not errors:
             raise GenerationError("image generation produced no usable drafts")
-        from collections import Counter
-
         raise GenerationError(_humanize_image_error(Counter(errors).most_common(1)[0][0]))
     return drafts
 
@@ -188,10 +185,53 @@ def generate_base_drafts(
 def _humanize_image_error(error: str) -> str:
     """Turn a raw provider error into a friendly, actionable sentence."""
     low = error.lower()
-    for needles, message in _IMAGE_ERROR_HINTS:
-        if any(s in low for s in needles):
-            return message
-    return error.splitlines()[0].strip()[:200]  # first line, sans provider envelope
+    hint = next((message for needles, message in _IMAGE_ERROR_HINTS if any(s in low for s in needles)), None)
+    return hint or error.splitlines()[0].strip()[:200]  # first line, sans provider envelope
+
+
+def _generate_row(spec: tuple[str, int, int], *, base: Path, label: str, style: str, slug: str, sprite, cancelled) -> tuple[str, list | None]:
+    """Generate + slice one animation row, retrying up to ``_ROW_GEN_ATTEMPTS`` times.
+
+    Self-healing: a roll whose poses touch (no gutters) slices badly, so
+    ``components`` (raises on touching poses) drives regeneration and only the
+    final attempt uses lenient ``auto`` slicing. Returns ``(state, None)`` when
+    cancelled or every attempt failed.
+    """
+    state, _row, count = spec
+    if cancelled():
+        return state, None
+    t0 = time.monotonic()
+    last_exc: Exception | None = None
+    for attempt in range(_ROW_GEN_ATTEMPTS):
+        if cancelled():
+            return state, None
+        strict = attempt < _ROW_GEN_ATTEMPTS - 1
+        strips: list[Path] = []
+        try:
+            strips = imagegen.generate(
+                prompts.build_row_prompt(state, count, label, style=style),
+                n=1,
+                reference_images=[base],
+                provider=sprite,
+                prefix=f"pet_row_{state}",
+                # Wider canvas: each frame gets real horizontal room and clean gutters.
+                aspect_ratio="landscape",
+            )
+            # fit=False keeps raw columns so normalize_cells registers the whole pet at once.
+            method = "components" if strict else "auto"
+            frames = atlas.extract_strip_frames(strips[0], count, method=method, fit=False)
+            logger.info("pet hatch %r: row %r ready in %.1fs (attempt %d)", slug, state, time.monotonic() - t0, attempt + 1)
+            return state, frames
+        except Exception as exc:  # noqa: BLE001 - retried; one bad row is tolerated
+            last_exc = exc
+            logger.warning("pet hatch %r: row %r attempt %d/%d failed: %s", slug, state, attempt + 1, _ROW_GEN_ATTEMPTS, exc)
+        finally:
+            # Strips are intermediates already decoded into memory; nothing
+            # prunes cache/images outside the gateway loop, so drop them now.
+            for strip in strips:
+                _unlink_quietly(Path(strip))
+    logger.warning("pet hatch %r: row %r gave up after %.1fs: %s", slug, state, time.monotonic() - t0, last_exc)
+    return state, None
 
 
 def hatch_pet(
@@ -227,63 +267,13 @@ def hatch_pet(
     logger.info("pet hatch %r: generating %d animation rows", slug, total_rows)
 
     def _gen_row(spec: tuple[str, int, int]) -> tuple[str, list | None]:
-        state, _row, count = spec
-        if cancelled():
-            return state, None
-        t0 = time.monotonic()
-        last_exc: Exception | None = None
-        # Self-healing: a roll whose poses touch (no gutters) slices badly, so
-        # ``components`` (raises on touching poses) drives regeneration and only
-        # the final attempt uses lenient ``auto`` slicing.
-        for attempt in range(_ROW_GEN_ATTEMPTS):
-            if cancelled():
-                return state, None
-            strict = attempt < _ROW_GEN_ATTEMPTS - 1
-            strips: list[Path] = []
-            try:
-                strips = imagegen.generate(
-                    prompts.build_row_prompt(state, count, label, style=style),
-                    n=1,
-                    reference_images=[base],
-                    provider=sprite,
-                    prefix=f"pet_row_{state}",
-                    # Wider canvas: each frame gets real horizontal room and clean gutters.
-                    aspect_ratio="landscape",
-                )
-                # fit=False keeps raw columns so normalize_cells registers the whole pet at once.
-                method = "components" if strict else "auto"
-                frames = atlas.extract_strip_frames(strips[0], count, method=method, fit=False)
-                logger.info(
-                    "pet hatch %r: row %r ready in %.1fs (attempt %d)",
-                    slug, state, time.monotonic() - t0, attempt + 1,
-                )
-                return state, frames
-            except Exception as exc:  # noqa: BLE001 - retried; one bad row is tolerated
-                last_exc = exc
-                logger.warning(
-                    "pet hatch %r: row %r attempt %d/%d failed: %s",
-                    slug, state, attempt + 1, _ROW_GEN_ATTEMPTS, exc,
-                )
-            finally:
-                # Strips are intermediates already decoded into memory; nothing
-                # prunes cache/images outside the gateway loop, so drop them now.
-                for strip in strips:
-                    _unlink_quietly(Path(strip))
-        logger.warning(
-            "pet hatch %r: row %r gave up after %.1fs: %s",
-            slug, state, time.monotonic() - t0, last_exc,
-        )
-        return state, None
+        return _generate_row(spec, base=base, label=label, style=style, slug=slug, sprite=sprite, cancelled=cancelled)
 
     # running-left is mirrored from running-right (consistent, one fewer generation).
     generated_specs = [spec for spec in atlas.ROW_SPECS if spec[0] != "running-left"]
+    cancel_log = f"pet hatch {slug!r}: cancelled — dropping remaining rows"
     done = 0
-    for state, frames in _run_parallel(
-        _gen_row,
-        generated_specs,
-        cancelled=cancelled,
-        on_cancel_log=f"pet hatch {slug!r}: cancelled — dropping remaining rows",
-    ):
+    for state, frames in _run_parallel(_gen_row, generated_specs, cancelled=cancelled, on_cancel_log=cancel_log):
         done += 1
         progress("row", f"{state}:{done}:{total_rows}")
         if frames:
@@ -319,24 +309,11 @@ def hatch_pet(
     if missing_required:
         raise GenerationError(f"missing required animation row(s): {', '.join(missing_required)}")
     if len(filled_states) < _MIN_FILLED_STATES:
-        raise GenerationError(
-            f"only {len(filled_states)}/{len(atlas.ROW_SPECS)} animation rows were usable; regenerate"
-        )
+        raise GenerationError(f"only {len(filled_states)}/{len(atlas.ROW_SPECS)} animation rows were usable; regenerate")
 
     from agent.pet import store
 
     progress("save", slug)
     logger.info("pet hatch %r: saving pet", slug)
-    pet = store.register_local_pet(
-        sheet,
-        slug=slug,
-        display_name=display_name or slug,
-        description=description,
-    )
-    return HatchResult(
-        slug=pet.slug,
-        display_name=pet.display_name,
-        spritesheet=pet.spritesheet,
-        states=validation["filled_states"],
-        validation=validation,
-    )
+    pet = store.register_local_pet(sheet, slug=slug, display_name=display_name or slug, description=description)
+    return HatchResult(pet.slug, pet.display_name, pet.spritesheet, validation["filled_states"], validation)

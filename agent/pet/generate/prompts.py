@@ -2,22 +2,17 @@
 
 Two prompt shapes: a *base* prompt (prompt-only, produces the canonical look the
 user picks between) and per-*state* *row* prompts (grounded on the chosen base,
-produce one horizontal strip of N poses). Prompts stay concise and
-sprite-production oriented; the identity lock and "one transparent row" framing
-matter more than flowery description.
-
-We generate the full petdex/Codex nine-state set (see
-:data:`agent.pet.generate.atlas.ROW_SPECS`) so a hatched pet is a valid
-``petdex submit`` spritesheet.
+produce one horizontal strip of N poses). The identity lock and "one transparent
+row" framing matter more than flowery description. We generate the full
+petdex/Codex nine-state set (:data:`agent.pet.generate.atlas.ROW_SPECS`) so a
+hatched pet is a valid ``petdex submit`` spritesheet.
 """
 
 from __future__ import annotations
 
-# What each petdex/Codex state should depict (kept short — these go straight into
-# the row prompt). Phrased to avoid the common sprite-gen failure modes (detached
-# effects, motion lines, shadows). Critical distinction: ``running`` is the
-# *working* state (in place), while ``running-right`` / ``running-left`` are the
-# actual directional walk/run cycles.
+# What each petdex/Codex state should depict. Phrased to avoid the common
+# sprite-gen failure modes (detached effects, motion lines, shadows). ``running``
+# is the *working* state (in place); ``running-right``/``-left`` are the walk cycles.
 STATE_ACTIONS: dict[str, str] = {
     "idle": "a calm idle loop: subtle breathing, a tiny blink or gentle bob, no big gestures",
     "running-right": (
@@ -78,9 +73,8 @@ def style_hint(style: str | None) -> str:
     return _STYLE_HINTS.get((style or "auto").strip().lower(), "")
 
 
-# Row strips are generated on the wider landscape canvas (see imagegen.generate /
-# orchestrate). The extra width is what lets each pose stay a healthy size AND
-# leave a real gutter — used here only to cite concrete pixel numbers.
+# Row strips are generated on the wider landscape canvas (imagegen.generate /
+# orchestrate); used here only to cite concrete pixel numbers.
 _ASSUMED_STRIP_WIDTH = 1536
 
 
@@ -88,23 +82,18 @@ def _spacing_spec(frame_count: int) -> tuple[int, int]:
     """(per-pose width px, gap px) for a row of *frame_count* poses.
 
     Pixel counts alone don't hold — the model fills each slot edge-to-edge with
-    the full wingspan, so neighbors touch even when bodies are spaced. The lever
-    that works is proportional containment on a wide canvas: give each pose its
-    own equal cell and keep the ENTIRE silhouette (wings/tail/halo included)
-    inside it. On the 1536px landscape strip ~70% occupancy still leaves a
-    generous gutter, so the pet stays a normal, good-looking size — no shrinking.
+    the full wingspan. The lever that works is proportional containment on a wide
+    canvas: each pose gets an equal cell and the ENTIRE silhouette stays inside it.
+    ~70% occupancy on the 1536px strip still leaves a generous gutter, no shrinking.
     """
     slots = max(1, frame_count)
     slot_w = _ASSUMED_STRIP_WIDTH / slots
-    pose_px = round(slot_w * 0.7)
-    gap_px = max(48, round(slot_w * 0.3))
-    return pose_px, gap_px
+    return round(slot_w * 0.7), max(48, round(slot_w * 0.3))
 
 
 # Per-draft nudges so the 4 base options are actually distinct — gpt-image returns
-# near-duplicates for a single prompt. We vary the *look* (palette, build,
-# expression, accents), NOT the pose, so the chosen base still grounds clean,
-# consistent animation rows.
+# near-duplicates for a single prompt. Vary the *look* (palette, build, expression,
+# accents), NOT the pose, so the chosen base still grounds consistent rows.
 BASE_VARIATIONS: tuple[str, ...] = (
     "",
     "a distinctly different colour palette and markings",
