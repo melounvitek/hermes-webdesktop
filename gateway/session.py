@@ -852,10 +852,7 @@ class AsyncSessionStore:
 
 
 class SessionStore(
-    SessionPersistenceMixin,
-    SessionRecoveryMixin,
-    SessionLifecycleMixin,
-    SessionTranscriptMixin,
+    SessionPersistenceMixin, SessionRecoveryMixin, SessionLifecycleMixin, SessionTranscriptMixin,
 ):
     """Session storage/retrieval: SQLite (SessionDB) for metadata and
     transcripts, legacy JSONL fallback when SQLite is unavailable."""
@@ -972,10 +969,7 @@ class SessionStore(
             return len(self._entries) > 1
 
     def get_or_create_session(
-        self,
-        source: SessionSource,
-        force_new: bool = False,
-        touch_activity: bool = True,
+        self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key.
 
@@ -1018,10 +1012,7 @@ class SessionStore(
                 self._inflight_sessions.pop(session_key, None)
 
     def _get_or_create_session_impl(
-        self,
-        source: SessionSource,
-        force_new: bool = False,
-        touch_activity: bool = True,
+        self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
     ) -> SessionEntry:
         """Perform one session routing transition for the single-flight owner.
 
@@ -1197,10 +1188,7 @@ class SessionStore(
         )
 
     def update_session(
-        self,
-        session_key: str,
-        last_prompt_tokens: int = None,
-        touch_activity: bool = True,
+        self, session_key: str, last_prompt_tokens: int = None, touch_activity: bool = True,
     ) -> None:
         """Update lightweight session metadata after an interaction.
 
@@ -1373,9 +1361,7 @@ class SessionStore(
 
 
 def build_session_context(
-    source: SessionSource,
-    config: GatewayConfig,
-    session_entry: Optional[SessionEntry] = None
+    source: SessionSource, config: GatewayConfig, session_entry: Optional[SessionEntry] = None
 ) -> SessionContext:
     """Build a full session context (for system prompt injection)."""
     connected = config.get_connected_platforms()

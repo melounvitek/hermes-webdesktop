@@ -389,10 +389,7 @@ class SessionPersistenceMixin:
         if entry.origin is not None:
             try:
                 recovered_entry = self._recover_session_from_db(
-                    session_key=key,
-                    source=entry.origin,
-                    now=_now(),
-                    raise_on_lookup_error=True,
+                    session_key=key, source=entry.origin, now=_now(), raise_on_lookup_error=True,
                 )
             except Exception as exc:
                 # Indeterminate: keep the only routing handle.

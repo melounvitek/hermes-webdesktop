@@ -68,10 +68,7 @@ class SessionRecoveryMixin:
             return "default"
 
     def _recovered_row_allowed_for_active_profile(
-        self,
-        *,
-        requested_session_key: str,
-        recovered: Dict[str, Any],
+        self, *, requested_session_key: str, recovered: Dict[str, Any],
     ) -> bool:
         """Prevent a gateway from reviving another profile's row.
 
@@ -146,12 +143,7 @@ class SessionRecoveryMixin:
         return origin.get("scope_id", origin.get("guild_id")) == source.scope_id
 
     def _create_entry_from_recovered_row(
-        self,
-        *,
-        row: Dict[str, Any],
-        session_key: str,
-        source: SessionSource,
-        now: datetime,
+        self, *, row: Dict[str, Any], session_key: str, source: SessionSource, now: datetime,
     ) -> SessionEntry:
         from gateway.session import SessionEntry
 
@@ -301,8 +293,7 @@ class SessionRecoveryMixin:
         if not self._recovered_row_matches_source_scope(recovered, source):
             return None, False
         if not self._recovered_row_allowed_for_active_profile(
-            requested_session_key=session_key,
-            recovered=recovered,
+            requested_session_key=session_key, recovered=recovered,
         ):
             logger.warning(
                 "Gateway session DB recovery ignored %s for %s because "

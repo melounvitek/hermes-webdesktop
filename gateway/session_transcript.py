@@ -87,10 +87,7 @@ class SessionTranscriptMixin:
         return True
 
     def advance_compression_session(
-        self,
-        session_key: str,
-        expected_session_id: str,
-        target_session_id: str,
+        self, session_key: str, expected_session_id: str, target_session_id: str,
     ) -> Optional[SessionEntry]:
         """CAS-advance one route along an already-verified compression lineage.
 
@@ -279,9 +276,7 @@ class SessionTranscriptMixin:
                 self._append_transcript_message(session_id, msg)
             except Exception as exc:
                 from hermes_state import (
-                    CompressionSessionClosedError,
-                    StateDbCorruptError,
-                    StateDbReplacedError,
+                    CompressionSessionClosedError, StateDbCorruptError, StateDbReplacedError,
                 )
 
                 if isinstance(exc, (StateDbReplacedError, StateDbCorruptError)):
@@ -537,11 +532,7 @@ class SessionTranscriptMixin:
             raise TranscriptReadError(session_id) from e
 
     def rewind_session(
-        self,
-        session_id: str,
-        n: int = 1,
-        *,
-        require_retryable_composite: bool = False,
+        self, session_id: str, n: int = 1, *, require_retryable_composite: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete (``active=0``), mirroring CLI ``/undo [N]``.
 
@@ -557,9 +548,7 @@ class SessionTranscriptMixin:
         with self._get_transcript_drain_lock():
             n = max(n, 1)
             from agent.context_compressor import (
-                retryable_user_text,
-                split_user_originated_turn,
-                user_originated_turn_view,
+                retryable_user_text, split_user_originated_turn, user_originated_turn_view,
             )
 
             try:

@@ -280,8 +280,7 @@ class SessionLifecycleMixin:
             started_at = entry.active_turn_started_at
             try:
                 marker_is_stale = (
-                    started_at is None
-                    or (max_age_seconds > 0 and now - started_at > max_age)
+                    started_at is None or (max_age_seconds > 0 and now - started_at > max_age)
                 )
             except TypeError:
                 # Mixed aware/naive timestamps: clear rather than risk an
