@@ -130,9 +130,7 @@ def resolve_startup_watchdog_timeout() -> float:
     except ValueError:
         logger.warning(
             "Ignoring non-numeric %s=%r; using default %.0fs",
-            ENV_STARTUP_WATCHDOG_TIMEOUT_S,
-            raw,
-            DEFAULT_STARTUP_WATCHDOG_TIMEOUT_S,
+            ENV_STARTUP_WATCHDOG_TIMEOUT_S, raw, DEFAULT_STARTUP_WATCHDOG_TIMEOUT_S,
         )
         return DEFAULT_STARTUP_WATCHDOG_TIMEOUT_S
     if value <= 0:
@@ -157,6 +155,14 @@ def _write_dump_record(record: Dict[str, Any]) -> None:
         lambda fh: fh.write(json.dumps(record, default=str) + "\n"),
         "Failed to write startup watchdog dump record",
     )
+
+
+def _log_quietly(level: str, msg: str, *args) -> None:
+    """Log at *level*; never raises (the wedged main thread may hold the logging lock)."""
+    try:
+        getattr(logger, level)(msg, *args)
+    except Exception:
+        pass
 
 
 def _mark_lifecycle_exit(exit_code: int) -> None:
@@ -269,29 +275,21 @@ class StartupWatchdogHandle:
         FIRST. ``os._exit`` is async-signal-safe and lock-free by design.
         """
         try:
-            escort = threading.Thread(
-                target=self._exit_escort,
-                daemon=True,
-                name="gateway-startup-watchdog-exit-escort",
-            )
-            escort.start()
+            threading.Thread(
+                target=self._exit_escort, daemon=True, name="gateway-startup-watchdog-exit-escort"
+            ).start()
         except Exception:
             pass
         elapsed = time.monotonic() - self.armed_at
-        try:
-            logger.critical(
-                "Gateway startup did not reach a live event loop within %.0fs "
-                "(elapsed %.0fs, %d extension(s)), holds no progress lease "
-                "and shows no CPU progress; dumping all thread stacks and "
-                "exiting with code %d so the service supervisor can restart "
-                "it (OOF-298).",
-                self.timeout_s,
-                elapsed,
-                self._extensions,
-                self.exit_code,
-            )
-        except Exception:
-            pass
+        _log_quietly(
+            "critical",
+            "Gateway startup did not reach a live event loop within %.0fs "
+            "(elapsed %.0fs, %d extension(s)), holds no progress lease "
+            "and shows no CPU progress; dumping all thread stacks and "
+            "exiting with code %d so the service supervisor can restart "
+            "it (OOF-298).",
+            self.timeout_s, elapsed, self._extensions, self.exit_code,
+        )
         _write_dump_record(
             {
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -320,9 +318,7 @@ class StartupWatchdogHandle:
         # regardless — NS-608 classification is best-effort; the respawn is not.
         try:
             ledger_thread = threading.Thread(
-                target=_mark_lifecycle_exit,
-                args=(self.exit_code,),
-                daemon=True,
+                target=_mark_lifecycle_exit, args=(self.exit_code,), daemon=True,
                 name="gateway-startup-watchdog-ledger",
             )
             ledger_thread.start()
@@ -383,46 +379,32 @@ class StartupWatchdogHandle:
             if lease_until > now:
                 if not self._extend_if_armed(max(lease_until, now + min(_POLL_SLICE_S, self.timeout_s))):
                     return
-                try:
-                    logger.warning(
-                        "Gateway startup exceeded %.0fs but phase %r holds a "
-                        "progress lease for another %.0fs — honoring it.",
-                        self.timeout_s,
-                        lease_phase or "unknown",
-                        lease_until - now,
-                    )
-                except Exception:
-                    pass
+                _log_quietly(
+                    "warning",
+                    "Gateway startup exceeded %.0fs but phase %r holds a "
+                    "progress lease for another %.0fs — honoring it.",
+                    self.timeout_s, lease_phase or "unknown", lease_until - now,
+                )
                 # Leased work may be I/O-bound; reset the CPU baseline so the
                 # post-lease window is judged on its own activity.
                 last_cpu = self._process_cpu_seconds()
                 continue
             cpu = self._process_cpu_seconds()
-            if (
-                cpu is not None
-                and last_cpu is not None
-                and (cpu - last_cpu) >= _CPU_PROGRESS_MIN_S
-                and self._extensions < _MAX_CPU_EXTENSIONS
-            ):
-                window_delta = cpu - last_cpu
+            window_delta = cpu - last_cpu if cpu is not None and last_cpu is not None else None
+            if window_delta is not None and window_delta >= _CPU_PROGRESS_MIN_S and self._extensions < _MAX_CPU_EXTENSIONS:
                 last_cpu = cpu
                 self._extensions += 1
                 if not self._extend_if_armed(time.monotonic() + self.timeout_s):
                     return
-                try:
-                    logger.warning(
-                        "Gateway startup exceeded %.0fs but is consuming CPU "
-                        "(%.1fs this window); extending the startup watchdog "
-                        "deadline (CPU-fallback extension %d of %d — phases "
-                        "doing long legitimate work should call "
-                        "report_startup_progress instead).",
-                        self.timeout_s,
-                        window_delta,
-                        self._extensions,
-                        _MAX_CPU_EXTENSIONS,
-                    )
-                except Exception:
-                    pass
+                _log_quietly(
+                    "warning",
+                    "Gateway startup exceeded %.0fs but is consuming CPU "
+                    "(%.1fs this window); extending the startup watchdog "
+                    "deadline (CPU-fallback extension %d of %d — phases "
+                    "doing long legitimate work should call "
+                    "report_startup_progress instead).",
+                    self.timeout_s, window_delta, self._extensions, _MAX_CPU_EXTENSIONS,
+                )
                 continue
             # No progress: claim the fire transition atomically so a disarm
             # racing this exact moment can still win if it gets there first.
