@@ -9,8 +9,7 @@ from tools.registry import tool_error
 from tools.session_search_tool_common import (
     _DISCOVER_SCAN_LIMIT, _DISCOVER_SEARCH_FIELDS, _HIDDEN_SESSION_SOURCES, _annotate_rebuild_status,
     _format_timestamp, _is_compacted_message, _is_compaction_summary, _order_for_recall, _quiet,
-    _resolve_lineage, _resolve_to_parent, _session_left_live_context, _session_link, _shape_message,
-)
+    _resolve_lineage, _resolve_to_parent, _session_left_live_context, _session_link, _shape_message)
 
 
 def _normalize_title_query(query: str) -> str:
@@ -33,8 +32,7 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
     if (
         current_lineage_root
         and lineage_root == current_lineage_root
-        and not _session_left_live_context(db, session_id)
-    ):
+        and not _session_left_live_context(db, session_id)):
         return None
 
     session_meta = _quiet(lambda: db.get_session(lineage_root) or db.get_session(session_id), None,
@@ -58,8 +56,7 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
         "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
         "messages_before": view.get("messages_before", 0),
         "messages_after": view.get("messages_after", max(len(messages) - 5, 0)),
-        "detail": "full", "_lineage_root": lineage_root,
-    }
+        "detail": "full", "_lineage_root": lineage_root}
     if lineage_root and lineage_root != session_id:
         entry["parent_session_id"] = lineage_root
     return entry
@@ -92,8 +89,7 @@ def _dedupe_by_lineage(db, raw_results, limit, seen_sessions, current_session_id
         if (
             current_lineage_root
             and resolved_sid == current_lineage_root
-            and not (is_ended_session or is_compacted_hit)
-        ):
+            and not (is_ended_session or is_compacted_hit)):
             continue
         if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
             continue
@@ -131,8 +127,7 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
         "messages": [_shape_message(m, anchor_id=msg_id, max_content_len=4000) for m in window_messages],
         "bookend_end": _bookend(view, "bookend_end") if full else [],
         "messages_before": view.get("messages_before", 0), "messages_after": view.get("messages_after", 0),
-        "detail": result_detail,
-    }
+        "detail": result_detail}
     if lineage_root and lineage_root != hit_sid:
         entry["parent_session_id"] = lineage_root
     return entry
@@ -148,8 +143,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     try:
         raw_results = db.search_messages(
             query=query, role_filter=role_list, exclude_sources=list(_HIDDEN_SESSION_SOURCES),
-            limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort, fields=_DISCOVER_SEARCH_FIELDS,
-        )
+            limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort, fields=_DISCOVER_SEARCH_FIELDS)
     except Exception as e:
         logging.error("FTS5 search failed: %s", e, exc_info=True)
         return tool_error(f"Search failed: {e}", success=False)
@@ -162,8 +156,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         return _discover_payload(db, query, detail, [], message=(
             "No matching sessions found. FTS5 ANDs all terms by default — "
             "broaden with OR (`alpha OR beta`), exact-match with quoted "
-            "phrases, exclude with NOT, or prefix-match with `deploy*`."
-        ))
+            "phrases, exclude with NOT, or prefix-match with `deploy*`."))
 
     seen_sessions: Dict[str, Dict[str, Any]] = {}
     results = []
@@ -188,5 +181,4 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
         "title/id/date. To read more around a compact result, scroll: "
-        "session_search(session_id=..., around_message_id=match_message_id)."
-    ))
+        "session_search(session_id=..., around_message_id=match_message_id)."))

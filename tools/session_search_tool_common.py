@@ -118,9 +118,9 @@ def _session_end_reason(db, session_id: str) -> Optional[str]:
         return None
     try:
         s = db.get_session(session_id)
-        return (s.get("end_reason") or None) if s else None
     except Exception:
         return None
+    return (s.get("end_reason") or None) if s else None
 
 
 def _session_left_live_context(db, session_id: str) -> bool:
@@ -176,8 +176,7 @@ def _annotate_rebuild_status(db, payload: Dict[str, Any]) -> None:
     payload["index_rebuild"] = {"percent": status["percent"], "note": (
         f"The search index is rebuilding in the background ({status['percent']}% done, "
         f"{status['indexed']:,} of {status['total']:,} messages). Results from older messages "
-        f"may be incomplete until it finishes."
-    )}
+        f"may be incomplete until it finishes.")}
 
 
 def _order_for_recall(raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

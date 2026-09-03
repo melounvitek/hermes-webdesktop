@@ -19,11 +19,9 @@ from tools.session_search_tool_common import (  # noqa: F401  (re-exports)
     _annotate_rebuild_status, _format_timestamp, _get_message_storage_state,
     _is_compacted_message, _is_compacted_state, _is_compaction_summary,
     _ok, _order_for_recall, _quiet, _resolve_lineage, _resolve_to_parent, _session_end_reason,
-    _session_left_live_context, _session_link, _session_meta_block, _shape_message,
-)
+    _session_left_live_context, _session_link, _session_meta_block, _shape_message)
 from tools.session_search_tool_discover import (  # noqa: F401  (re-exports)
-    _discover, _normalize_title_query, _title_match_result,
-)
+    _discover, _normalize_title_query, _title_match_result)
 
 
 def _resolve_profile_db(profile: str):
@@ -110,13 +108,10 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
         sessions = db.list_sessions_rich(
             limit=limit + 15,  # extra so we can skip current / compression roots
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
-            order_by_last_active=True,
-        )
+            order_by_last_active=True)
 
         current_root, has_compression_hop = (
-            _resolve_to_parent(db, current_session_id)
-            if current_session_id else (None, False)
-        )
+            _resolve_to_parent(db, current_session_id) if current_session_id else (None, False))
         results = []
         for s in sessions:
             sid = s.get("id", "")
@@ -131,8 +126,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
                 "session_id": sid, "link": _session_link(sid, link_profile), "title": s.get("title") or None,
                 "source": s.get("source", ""), "started_at": s.get("started_at", ""),
                 "last_active": s.get("last_active", ""), "message_count": s.get("message_count", 0),
-                "preview": s.get("preview", ""),
-            })
+                "preview": s.get("preview", "")})
             if len(results) >= limit:
                 break
         return _ok(mode="browse", results=results, count=len(results), message=(
@@ -165,10 +159,7 @@ def _anchor_in_live_context(db, anchor_state, anchor_session_id: str, current_se
         return False
     # Rewind/undo rows (active=0, compacted!=1) never count as out-of-context history.
     is_inactive_non_compacted = (
-        anchor_state is not None
-        and anchor_state["active"] == 0
-        and anchor_state["compacted"] != 1
-    )
+        anchor_state is not None and anchor_state["active"] == 0 and anchor_state["compacted"] != 1)
     return is_inactive_non_compacted or not _session_left_live_context(db, anchor_session_id)
 
 
@@ -205,8 +196,7 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
     owning_session_id = anchor_state.get("session_id") if anchor_state is not None else None
 
     if current_session_id and _anchor_in_live_context(
-        db, anchor_state, owning_session_id or session_id, current_session_id
-    ):
+        db, anchor_state, owning_session_id or session_id, current_session_id):
         return tool_error("scroll rejected: anchor lives in the current session lineage (already in your active context)", success=False)
 
     session_meta = _get_session_meta(db, session_id)
@@ -223,8 +213,7 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
     rebind_warning = None
     if not messages and owning_session_id and owning_session_id != session_id:
         rebind_view, rebind_warning = _rebind_to_owner(
-            db, session_id, owning_session_id, around_message_id, window
-        )
+            db, session_id, owning_session_id, around_message_id, window)
         if rebind_view is not None:
             view = rebind_view
             messages = view["window"]
@@ -243,8 +232,7 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
               "id; backward: the FIRST message's id (the boundary message repeats "
               "as an orientation marker). messages_before/messages_after < window "
               "means you've hit that end of the session."),
-        **({"warning": rebind_warning} if rebind_warning else {}),
-    )
+        **({"warning": rebind_warning} if rebind_warning else {}))
 
 
 def _read_with_profile_fallback(db, sid: str, profile: Optional[str]) -> str:
@@ -310,8 +298,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     detail_norm = "full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive"
     return _discover(
         db=db, query=query.strip(), role_filter=role_list, limit=limit, sort=sort_norm,
-        detail=detail_norm, current_session_id=current_session_id, link_profile=profile,
-    )
+        detail=detail_norm, current_session_id=current_session_id, link_profile=profile)
 
 
 def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=None,
@@ -465,18 +452,8 @@ registry.register(
     toolset="session_search",
     schema=SESSION_SEARCH_SCHEMA,
     handler=lambda args, **kw: session_search(
-        query=args.get("query") or "",
-        role_filter=args.get("role_filter"),
-        limit=args.get("limit", 3),
-        session_id=args.get("session_id"),
-        around_message_id=args.get("around_message_id"),
-        window=args.get("window", 5),
-        sort=args.get("sort"),
-        detail=args.get("detail", "adaptive"),
-        profile=args.get("profile"),
-        db=kw.get("db"),
-        current_session_id=kw.get("current_session_id"),
-    ),
+        query=args.get("query") or "", limit=args.get("limit", 3), window=args.get("window", 5),
+        detail=args.get("detail", "adaptive"), db=kw.get("db"), current_session_id=kw.get("current_session_id"),
+        **{k: args.get(k) for k in ("role_filter", "session_id", "around_message_id", "sort", "profile")}),
     check_fn=check_session_search_requirements,
-    emoji="🔍",
-)
+    emoji="🔍")

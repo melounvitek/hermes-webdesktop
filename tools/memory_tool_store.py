@@ -18,9 +18,7 @@ logger = logging.getLogger("tools.memory_tool")
 # agent/conversation_compression.py uses them to detect a leftover block for a
 # target whose entries have since been emptied — keep in lockstep.
 MEMORY_BLOCK_HEADERS = {
-    "memory": "MEMORY (your personal notes)",
-    "user": "USER PROFILE (who the user is)",
-}
+    "memory": "MEMORY (your personal notes)", "user": "USER PROFILE (who the user is)"}
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -53,8 +51,7 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
         "remediation": (
             "Open the .bak file, integrate the missing entries into the memory tool one at a time via "
             "memory(action=add, content=...), then remove or rewrite the original file to a clean state."
-        ),
-    }
+        )}
 
 
 def _read_failed_error(path: "Path") -> Dict[str, Any]:
@@ -64,8 +61,7 @@ def _read_failed_error(path: "Path") -> Dict[str, Any]:
         f"Refusing to write {path.name}: the file exists on disk but could not be read right now "
         f"(temporarily locked by another program, a permission change, invalid/corrupt text encoding, "
         f"or a filesystem error). Treating an unreadable file as empty and saving would wipe existing "
-        f"memory, so the write is refused. Nothing was changed — retry in a moment."
-    )}
+        f"memory, so the write is refused. Nothing was changed — retry in a moment.")}
 
 
 def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int], bool]:
@@ -122,8 +118,7 @@ class MemoryStore:
         return {"success": False, "done": True, "error": (
             f"Memory consolidation failed {self._consolidation_failures} times this turn. Stop retrying "
             "memory calls — leave memory unchanged for now and continue with your reply to the user. "
-            "The fact can be saved in a later turn."
-        )}
+            "The fact can be saved in a later turn.")}
 
     def load_from_disk(self):
         """Load MEMORY.md / USER.md and capture the frozen system-prompt snapshot.
@@ -174,20 +169,20 @@ class MemoryStore:
             yield
             return
         fd = open(lock_path, "a+", encoding="utf-8")
-        try:
+
+        def _flock(unlock: bool):
             if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
             else:
                 fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
+
+        try:
+            _flock(False)
             yield
         finally:
             try:
-                if fcntl:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                else:
-                    fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                _flock(True)
             except OSError:
                 pass
             fd.close()
@@ -221,10 +216,7 @@ class MemoryStore:
         return self.user_entries if target == "user" else self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
-        if target == "user":
-            self.user_entries = entries
-        else:
-            self.memory_entries = entries
+        setattr(self, "user_entries" if target == "user" else "memory_entries", entries)
 
     def _char_count(self, target: str) -> int:
         return len(ENTRY_DELIMITER.join(self._entries_for(target)))
@@ -252,8 +244,7 @@ class MemoryStore:
             return None, self._consolidation_failure({
                 "success": False,
                 "error": f"No entry matched '{old_text}'. Check current_entries below and retry with the exact text of the entry you want to {verb}.",
-                "current_entries": entries,
-            })
+                "current_entries": entries})
         return idx, None
 
     def _commit(self, target: str, entries: List[str], message: str) -> Dict[str, Any]:
@@ -285,8 +276,7 @@ class MemoryStore:
                     f"Memory at {self._char_count(target):,}/{limit:,} chars. Adding this entry "
                     f"({len(content)} chars) would exceed the limit. Consolidate now: use 'replace' to merge "
                     f"overlapping entries into shorter ones or 'remove' stale or less important entries (see "
-                    f"current_entries below), then retry this add — all in this turn."
-                ))
+                    f"current_entries below), then retry this add — all in this turn."))
             entries.append(content)
             return self._commit(target, entries, "Entry added.")
 
@@ -315,8 +305,7 @@ class MemoryStore:
                 return self._failure_with_entries(target, (
                     f"Replacement would put memory at {new_total:,}/{limit:,} chars. Shorten the new content, "
                     f"or 'remove' other stale or less important entries to make room (see current_entries "
-                    f"below), then retry — all in this turn."
-                ))
+                    f"below), then retry — all in this turn."))
             entries[idx] = new_content
             return self._commit(target, entries, "Entry replaced.")
 
@@ -406,8 +395,7 @@ class MemoryStore:
                 return self._failure_with_entries(target, (
                     f"After applying all {len(operations)} operations, memory would be at "
                     f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
-                    f"entries in the same batch (see current_entries below), then retry."
-                ))
+                    f"entries in the same batch (see current_entries below), then retry."))
             return self._commit(target, working, f"Applied {len(operations)} operation(s).")
 
     def format_for_system_prompt(self, target: str) -> Optional[str]:
