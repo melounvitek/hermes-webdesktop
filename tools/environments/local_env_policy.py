@@ -8,13 +8,12 @@ import os
 # Prefix a caller uses in ``extra_env`` to force a blocklisted var through.
 _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 
-# Hermes-managed AWS *inference* credentials for ``auth_type="aws_sdk"`` (Bedrock).
-# Deliberately only the Bedrock bearer token — an inference secret like
-# OPENAI_API_KEY that no aws/terraform/boto3 toolchain uses. The general AWS
-# credential chain stays inheritable on purpose: the local terminal is the user's
-# trusted operator shell (SECURITY.md §3.2), and env_passthrough can never
-# re-allow a blocklisted name (GHSA-rhgp-j443-p4rf), so blocking would be
-# unrecoverable for every aws/terraform user.
+# Hermes-managed AWS *inference* credentials for ``auth_type="aws_sdk"`` (Bedrock):
+# deliberately only the Bedrock bearer token, which no aws/terraform/boto3 toolchain
+# uses. The general AWS credential chain stays inheritable on purpose — the local
+# terminal is the user's trusted operator shell (SECURITY.md §3.2) and env_passthrough
+# can never re-allow a blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would
+# be unrecoverable for every aws/terraform user.
 _AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
 })
@@ -49,7 +48,6 @@ _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
 def _build_provider_env_blocklist() -> frozenset:
     """Derive the blocklist from provider, tool, and gateway config."""
     blocked: set[str] = set(_STATIC_PROVIDER_ENV_BLOCKLIST)
-
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
         for pconfig in PROVIDER_REGISTRY.values():
@@ -60,7 +58,6 @@ def _build_provider_env_blocklist() -> frozenset:
                 blocked.add(pconfig.base_url_env_var)
     except ImportError:
         pass
-
     try:
         from hermes_cli.config import OPTIONAL_ENV_VARS
         for name, metadata in OPTIONAL_ENV_VARS.items():
@@ -71,50 +68,44 @@ def _build_provider_env_blocklist() -> frozenset:
                 blocked.add(name)
     except ImportError:
         pass
-
-    # CLAUDE_CODE_OAUTH_TOKEN is owned by the user's Claude Code install, not a
-    # Hermes credential (subscription auth is not a Hermes provider path).
-    # Stripping it made agent-spawned ``claude`` CLIs fall through to the shared
-    # Keychain / ~/.claude credentials store and, on auth failure, wipe it —
-    # logging the user out. It arrives via the anthropic registry entry above.
+    # CLAUDE_CODE_OAUTH_TOKEN (arrives via the anthropic registry entry) is owned by
+    # the user's Claude Code install, not a Hermes credential. Stripping it made
+    # agent-spawned ``claude`` CLIs fall through to the shared Keychain / ~/.claude
+    # store and, on auth failure, wipe it — logging the user out.
     blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
-    # BUZZ_* is deliberately NOT discarded, even for Buzz-managed agents: this
-    # blocklist feeds every scrub surface (terminal, execute_code, the
-    # hermes_subprocess_env Tier-2 strip), so an import-time discard would leak
-    # BUZZ_PRIVATE_KEY into non-terminal children. The Buzz carve-out is a
-    # terminal-only, context-gated scrub-path exemption — see
-    # ``_is_terminal_first_party_env``.
+    # BUZZ_* is deliberately NOT discarded: this blocklist feeds every scrub surface
+    # (terminal, execute_code, hermes_subprocess_env Tier-2), so an import-time
+    # discard would leak BUZZ_PRIVATE_KEY into non-terminal children. The Buzz
+    # carve-out is a terminal-only, context-gated exemption
+    # (``_is_terminal_first_party_env``).
     return frozenset(blocked)
 
 
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 
-# First-party platform credentials (``BUZZ_*``, driving the platform-mandated
-# ``buzz`` CLI) carved out of the TERMINAL scrub only (``_make_run_env``,
+# First-party platform credentials (``BUZZ_*``, driving the platform-mandated ``buzz``
+# CLI) carved out of the TERMINAL scrub only (``_make_run_env``,
 # ``_sanitize_subprocess_env``); execute_code, hermes_subprocess_env, docker and
-# env_passthrough registration stay sealed, so GHSA-rhgp-j443-p4rf holds.
-# CONTEXT-GATED (``_buzz_terminal_context_active``): a Telegram/CLI/cron session
-# on a host that also runs a Buzz gateway must not get the signing key. Values
-# are used directly, never scope-resolved (UnscopedSecretError under multiplex),
-# and the snapshot treats them as profile-scoped so they never persist across
-# profiles. Prefix-based so future BUZZ_* names need no code change.
+# env_passthrough registration stay sealed (GHSA-rhgp-j443-p4rf). CONTEXT-GATED via
+# ``_buzz_terminal_context_active``: a Telegram/CLI/cron session on a host that also
+# runs a Buzz gateway must not get the signing key. Values are used directly, never
+# scope-resolved (UnscopedSecretError under multiplex), and the snapshot treats them
+# as profile-scoped. Prefix-based so future BUZZ_* names need no code change.
 _TERMINAL_FIRST_PARTY_ENV_PREFIXES = ("BUZZ_",)
 
 
 def _matches_terminal_first_party_prefix(name: str) -> bool:
-    """Pure name check (``BUZZ_*``), regardless of session context — the
-    snapshot exclusion must stay conservative even when the carve-out is inactive."""
+    """Pure name check (``BUZZ_*``), regardless of session context — the snapshot
+    exclusion must stay conservative even when the carve-out is inactive."""
     return name.startswith(_TERMINAL_FIRST_PARTY_ENV_PREFIXES)
 
 
 def _buzz_terminal_context_active() -> bool:
-    """True when this process/session operates as a Buzz agent.
-
-    Either signal suffices: ``BUZZ_MANAGED_AGENT`` in the process env (set only
-    by Buzz Desktop's buzz-acp harness), or the live session's platform is
-    ``buzz`` via the gateway ContextVar — authoritative under a concurrent
-    multi-session host, so a sibling Telegram session resolves its OWN platform.
-    """
+    """True when this process/session operates as a Buzz agent: ``BUZZ_MANAGED_AGENT``
+    in the process env (set only by Buzz Desktop's buzz-acp harness), or the live
+    session's platform is ``buzz`` via the gateway ContextVar — authoritative under
+    a concurrent multi-session host, so a sibling Telegram session resolves its OWN
+    platform."""
     if os.environ.get("BUZZ_MANAGED_AGENT"):
         return True
     try:
@@ -126,26 +117,25 @@ def _buzz_terminal_context_active() -> bool:
 
 
 def _is_terminal_first_party_env(name: str) -> bool:
-    """``name`` is a first-party platform credential (``BUZZ_*``) AND the
-    current process/session context entitles it to reach terminal children."""
+    """``name`` is a first-party platform credential (``BUZZ_*``) AND the current
+    process/session context entitles it to reach terminal children."""
     return _matches_terminal_first_party_prefix(name) and _buzz_terminal_context_active()
 
 
 # Active-venv markers that must NOT leak: a leaked VIRTUAL_ENV/CONDA_PREFIX makes
-# uv/poetry sync ANOTHER project's deps into the Hermes venv (clobbering it; the
-# venv stays reachable via PATH so stripping is safe), and PYTHONHOME redirects
-# any child interpreter's stdlib to the Hermes venv (version-mismatch crashes).
-# PYTHONPATH is handled separately — only Hermes-owned entries are removed.
+# uv/poetry sync ANOTHER project's deps into the Hermes venv (the venv stays
+# reachable via PATH so stripping is safe), and PYTHONHOME redirects any child
+# interpreter's stdlib to the Hermes venv (version-mismatch crashes). PYTHONPATH is
+# handled separately — only Hermes-owned entries are removed.
 _ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME")
 
 
 def _is_hermes_internal_secret(key: str) -> bool:
-    """True for Hermes-internal secrets injected under *dynamic* names the
-    static blocklist cannot enumerate: ``AUXILIARY_<TASK>_API_KEY``/``_BASE_URL``
-    (per-task side-LLM credentials) and ``GATEWAY_RELAY_*_SECRET``/``_KEY``/
-    ``_TOKEN`` (relay auth; non-secret routing hints stay visible). Single source
-    of truth for every spawn path, stripped regardless of env_passthrough
-    registration or ``inherit_credentials``."""
+    """True for Hermes-internal secrets injected under *dynamic* names the static
+    blocklist cannot enumerate: ``AUXILIARY_<TASK>_API_KEY``/``_BASE_URL`` (per-task
+    side-LLM credentials) and ``GATEWAY_RELAY_*_SECRET``/``_KEY``/``_TOKEN`` (relay
+    auth; non-secret routing hints stay visible). Stripped on every spawn path
+    regardless of env_passthrough registration or ``inherit_credentials``."""
     upper = key.upper()
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True
@@ -153,11 +143,9 @@ def _is_hermes_internal_secret(key: str) -> bool:
 
 
 def _plugin_terminal_env_strip_keys() -> frozenset:
-    """Credential env keys owned by plugin-registered terminal backends.
-
-    Computed at call time because plugins register after import. Tier-1:
-    stripped from every spawned subprocess unconditionally. Fail-soft to empty.
-    """
+    """Credential env keys owned by plugin-registered terminal backends (Tier-1:
+    stripped from every spawned subprocess). Computed at call time because plugins
+    register after import; fail-soft to empty."""
     try:
         from agent.terminal_env_registry import plugin_strip_env_keys
 
