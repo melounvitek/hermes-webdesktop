@@ -136,16 +136,11 @@ def strip_dangling_tool_call_tail(agent_history: List[Dict[str, Any]]) -> List[D
                 "its effect is UNKNOWN. Inspect current state before retrying.]",
                 "[Orphan recovery: this read-only tool did not complete and had no effect.]",
             )
-            recovered.append(make_tool_result_message(
-                name, content, _call_id(call), effect_disposition=disposition,
-            ))
+            recovered.append(make_tool_result_message(name, content, _call_id(call), effect_disposition=disposition))
         logger.warning("Recovered dangling side-effecting tool call(s) as UNKNOWN instead of erasing them")
         return recovered
 
-    logger.debug(
-        "Stripping dangling unanswered read-only assistant(tool_calls) tail (%d call(s))",
-        len(tool_calls),
-    )
+    logger.debug("Stripping dangling unanswered read-only assistant(tool_calls) tail (%d call(s))", len(tool_calls))
     return agent_history[:-1]
 
 

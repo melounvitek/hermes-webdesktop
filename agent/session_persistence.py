@@ -204,11 +204,7 @@ class SessionPersistenceMixin:
 
     _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
 
-    def _flush_messages_to_session_db(
-        self,
-        messages: List[Dict],
-        conversation_history: Optional[List[Dict]] = None,
-    ):
+    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None):
         """Serialize direct and turn-boundary session flushes per agent."""
         with getattr(self, "_session_persist_lock", None) or nullcontext():
             return self._flush_messages_to_session_db_unlocked(messages, conversation_history)
@@ -437,9 +433,7 @@ class SessionPersistenceMixin:
             return True
         except Exception as e:
             if self._db_flush_failed(e, batch_rows, _adoption_budget):
-                return self._flush_messages_to_session_db_unlocked(
-                    messages, conversation_history, _adoption_budget=0,
-                )
+                return self._flush_messages_to_session_db_unlocked(messages, conversation_history, _adoption_budget=0)
             return False
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:

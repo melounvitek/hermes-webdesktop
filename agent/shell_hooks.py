@@ -188,9 +188,7 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
                 continue
             already_allowlisted = _is_allowlisted(spec.event, spec.command)
 
-        if not already_allowlisted and not _prompt_and_record(
-            spec.event, spec.command, accept_hooks=effective_accept,
-        ):
+        if not already_allowlisted and not _prompt_and_record(spec.event, spec.command, accept_hooks=effective_accept):
             logger.warning(
                 "shell hook for %s (%s) not allowlisted — skipped. "
                 "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
