@@ -78,36 +78,31 @@ _COMPRESSION_INT_KEYS = (
 
 
 def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
-    """Update a live session's compressor from current config.yaml, preserving the agent object,
-    session identity, history and callbacks. Recomputes the trigger from the ratio threshold, then
-    applies ``compression.threshold_tokens`` so raising/lowering/clearing the cap lands next preflight.
+    """Update a live session's compressor from current config.yaml, preserving the agent object, session
+    identity, history and callbacks. Recomputes the trigger from the ratio threshold, then applies
+    ``compression.threshold_tokens`` so raising/lowering/clearing the cap lands next preflight.
 
     Every adopted key has UNSET semantics: a removed key restores the normalized default (or the
-    model-derived value) through the construction path's own derivation (ctor signature defaults,
-    Codex autoraise, deferred context-length re-inference). Acting only on PRESENT keys would leave
-    stale values active forever.
+    model-derived value) through the construction path's own derivation (ctor signature defaults, Codex
+    autoraise, deferred context-length re-inference). Acting only on PRESENT keys would leave stale
+    values active forever.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
-    compression_raw = cfg.get("compression")
-    compression = compression_raw if isinstance(compression_raw, dict) else {}
+    compression = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
 
     enabled_raw = compression.get("enabled", True)
     agent.compression_enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in {"true", "1", "yes"}
-
     agent.codex_responses_native_compaction = is_truthy_value(compression.get("codex_responses_native", False))
     native_threshold_raw = compression.get("codex_responses_compact_threshold", 200_000)
     try:
-        if isinstance(native_threshold_raw, bool):
-            raise ValueError
         native_threshold = int(native_threshold_raw)
-        if native_threshold <= 0:
+        if isinstance(native_threshold_raw, bool) or native_threshold <= 0:
             raise ValueError
     except (TypeError, ValueError):
         logger.warning("Invalid compression.codex_responses_compact_threshold=%r; using 200000.", native_threshold_raw)
         native_threshold = 200_000
     agent.codex_responses_compact_threshold = native_threshold
-
     # Absence restores the agent_init/config default (0 = disabled).
     with contextlib.suppress(TypeError, ValueError):
         agent.compression_idle_compact_after_seconds = max(0, int(compression.get("idle_compact_after_seconds", 0) or 0))
@@ -115,30 +110,22 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cc = getattr(agent, "context_compressor", None)
     if cc is None:
         return
-
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))
     mode = str(compression.get("tail_mode", default_tail) or default_tail).strip().lower()
     cc.tail_mode = mode if mode in ("legacy", "lean") else default_tail
-
     for key, fallback, min_value in _COMPRESSION_INT_KEYS:
         default = int(_compressor_ctor_default(key, fallback))
         raw = compression.get(key, default)
-        try:
-            value = default if raw is None else int(raw)
-        except (TypeError, ValueError):
-            continue
-        setattr(cc, key, max(min_value, value))
-
+        with contextlib.suppress(TypeError, ValueError):
+            setattr(cc, key, max(min_value, default if raw is None else int(raw)))
     with contextlib.suppress(TypeError, ValueError):
         ratio_raw = compression.get("target_ratio", _compressor_ctor_default("summary_target_ratio", 0.20))
         cc.summary_target_ratio = max(0.10, min(float(ratio_raw), 0.80))
-
     # Absent or invalid shape (agent_init treats both as empty): stale overrides must stop steering.
     raw_thresholds = compression.get("model_thresholds")
     cc.model_thresholds = {
-        str(k): float(v)
-        for k, v in raw_thresholds.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+        str(k): float(v) for k, v in raw_thresholds.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
     } if isinstance(raw_thresholds, dict) else {}
 
     # threshold: present value wins; absence derives via the agent_init resolution (default + autoraise).
@@ -171,15 +158,13 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
             with contextlib.suppress(Exception):
                 cc.context_length = new_ctx
     elif getattr(cc, "_config_context_length", None) is not None:
-        # model.context_length removed: drop the override and force re-inference from model metadata
-        # on next access (construction's deferred resolution); re-applies the small-context floor too.
-        cc._config_context_length = None
-        cc._resolved_context_length = None
+        # model.context_length removed: drop the override and force re-inference from model metadata on
+        # next access (construction's deferred resolution); re-applies the small-context floor too.
+        cc._config_context_length = cc._resolved_context_length = None
 
     cc.threshold_tokens_cap = cc._coerce_threshold_tokens_cap(compression.get("threshold_tokens"))
     # Invalidate the cached trigger so the next preflight re-derives from percent/window, then the cap.
-    cc._threshold_tokens = None
-    cc._tail_token_budget = None
+    cc._threshold_tokens = cc._tail_token_budget = None
 
 
 def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
