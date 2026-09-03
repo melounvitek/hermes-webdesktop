@@ -60,7 +60,7 @@ from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_state import (
     PluginState, _locked_plugin_state, _nested_plugin_mapping, _nested_plugin_value,
-    _plugin_relative_segments,
+    _plugin_relative_segments, _plugin_settings_entry,
 )
 
 
@@ -228,10 +228,8 @@ class PluginContext:
         legacy ``config`` subtree for migration compatibility)."""
         segments = self._segments(key)
         from hermes_cli.config import load_config_readonly
-        entry = _nested_plugin_value(
-            load_config_readonly() or {}, ("plugins", "entries", self.plugin_id), None
-        )
-        if not isinstance(entry, Mapping):
+        entry = _plugin_settings_entry(load_config_readonly() or {}, self.plugin_id)
+        if entry is None:
             return default
         missing = object()
         value = _nested_plugin_value(entry.get("settings"), segments, missing)
@@ -544,8 +542,7 @@ class PluginContext:
             cfg = load_config() or {}
         except Exception:
             return []
-        allowlist = ((cfg.get("plugins") or {}).get("entries") or {}).get(plugin_id) or {}
-        allowlist = allowlist.get("mcp_allowlist")
+        allowlist = (_plugin_settings_entry(cfg, plugin_id) or {}).get("mcp_allowlist")
         return [str(item) for item in allowlist] if isinstance(allowlist, list) else []
 
     def _tool_override_allowed(self, tool_name: str) -> bool:
@@ -607,8 +604,8 @@ class PluginContext:
             cfg = load_config_readonly() or {}
         except Exception:
             return False
-        return _nested_plugin_value(
-            cfg, ("plugins", "entries", self.plugin_id, "allow_gateway_injection"), False
+        return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get(
+            "allow_gateway_injection"
         ) is True
 
     @_serialized_replacement
