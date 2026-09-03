@@ -1,8 +1,7 @@
 """Shared curses-based UI components for Hermes CLI.
 
-Used by `hermes tools` and `hermes skills` for interactive checklists. Provides a curses multi-
-select with keyboard navigation, plus a text-based numbered fallback for terminals without curses
-support.
+Curses checklist / radiolist / single-select menus with keyboard navigation and fuzzy ``/``
+search, plus a numbered text fallback for terminals without curses.
 """
 import sys
 from contextvars import ContextVar, Token
@@ -12,8 +11,7 @@ from typing import Callable, List, Optional, Protocol, Sequence, Set, Tuple, Uni
 
 from hermes_cli.colors import Colors, color
 
-# Rich radiolist rows: (text, style). style is None | "yellow" | "dim".
-# Plain ``str`` items remain fully supported.
+# Rich radiolist rows: (text, style). style is None | "yellow" | "dim". Plain ``str`` works too.
 RadioItem = Union[str, Sequence[Tuple[str, Optional[str]]]]
 
 
@@ -42,16 +40,18 @@ class MenuNavigationEvent(str, Enum):
 class MenuNavigationHandler(Protocol):
     """Typed contract between shared menus and a scoped flow controller."""
 
-    def __call__(self, event: MenuNavigationEvent, value: object = None) -> MenuNavigationStart | None: ...
+    def __call__(
+        self, event: MenuNavigationEvent, value: object = None
+    ) -> MenuNavigationStart | None: ...
 
 
 _MENU_NAVIGATION_HANDLER: ContextVar[MenuNavigationHandler | None] = ContextVar(
-    "hermes_menu_navigation_handler", default=None
-)
+    "hermes_menu_navigation_handler", default=None)
 _NUMBERED_BACK_ENABLED: ContextVar[bool] = ContextVar("hermes_numbered_back_enabled", default=False)
 
 
-def set_menu_navigation_handler(handler: MenuNavigationHandler) -> Token[MenuNavigationHandler | None]:
+def set_menu_navigation_handler(
+    handler: MenuNavigationHandler) -> Token[MenuNavigationHandler | None]:
     """Scope setup-style cancel/back behavior to the current CLI invocation."""
     return _MENU_NAVIGATION_HANDLER.set(handler)
 
@@ -62,7 +62,6 @@ def reset_menu_navigation_handler(token: Token[MenuNavigationHandler | None]) ->
 
 
 def _notify_scoped_navigation(event: MenuNavigationEvent) -> None:
-    """Notify an active menu flow that a text fallback was interrupted (CANCEL) or requested BACK."""
     handler = _MENU_NAVIGATION_HANDLER.get()
     if handler is not None:
         handler(event)
@@ -77,10 +76,10 @@ _NAV_ABORT = object()
 
 
 def _read_numbered_choice(prompt_text: str) -> int | None | object:
-    """Read a numbered fallback choice as a 0-based index.
+    """Numbered-fallback choice as a 0-based index.
 
-    Returns ``None`` for empty input and ``_NAV_ABORT`` when the prompt was cancelled, backed out
-    of, interrupted, or given a non-integer (scoped navigation is notified for cancel/back).
+    ``None`` for empty input; ``_NAV_ABORT`` when cancelled, backed out of, interrupted, or
+    non-integer (scoped navigation is notified for cancel/back).
     """
     try:
         val = _read_numbered_input(prompt_text)
@@ -97,11 +96,10 @@ def _read_numbered_choice(prompt_text: str) -> int | None | object:
 
 
 def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
-    """Read a numbered fallback choice with setup navigation key bindings.
+    """Read a numbered fallback choice.
 
-    Ordinary numbered menus retain their historical ``input()`` behavior. During setup/model flows,
-    prompt_toolkit supplies portable Escape, Ctrl+C, and Left bindings on POSIX and native Windows
-    when curses is unavailable.
+    Plain ``input()`` outside setup flows. Inside a scoped flow, prompt_toolkit supplies
+    portable Escape / Ctrl+C / Left bindings on POSIX and native Windows.
     """
     if _MENU_NAVIGATION_HANDLER.get() is None:
         return input(prompt_text)
@@ -111,10 +109,8 @@ def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
 
-    # Setup can be invoked without importing the classic CLI, which normally
-    # installs Ghostty/Kitty CSI-u aliases at process startup.
+    # Setup may run without the classic CLI, which normally installs CSI-u aliases at startup.
     from hermes_cli.pt_input_extras import install_modify_other_keys_aliases
-
     install_modify_other_keys_aliases()
     bindings = KeyBindings()
 
@@ -134,9 +130,7 @@ def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
 
 def radio_item_plain(item: RadioItem) -> str:
     """Flatten a radiolist item to searchable/plain display text."""
-    if isinstance(item, str):
-        return item
-    return "".join(text for text, _style in item)
+    return item if isinstance(item, str) else "".join(text for text, _style in item)
 
 
 def _curses_style_attr(curses, style: Optional[str], *, is_cursor: bool):
@@ -149,9 +143,8 @@ def _curses_style_attr(curses, style: Optional[str], *, is_cursor: bool):
     if style == "dim":
         attr = curses.A_DIM
         if has_colors:
-            # Pair 3 is the dim-gray status color (extra_color_pairs).
             try:
-                attr |= curses.color_pair(3)
+                attr |= curses.color_pair(3)  # dim-gray status pair (extra_color_pairs)
             except curses.error:
                 pass
         return attr
@@ -161,7 +154,6 @@ def _curses_style_attr(curses, style: Optional[str], *, is_cursor: bool):
 def _addnstr(stdscr, y: int, x: int, text: str, n: int, attr) -> None:
     """``stdscr.addnstr`` that swallows ``curses.error`` (drawing past the screen edge)."""
     import curses
-
     try:
         stdscr.addnstr(y, x, text, n, attr)
     except curses.error:
@@ -169,23 +161,15 @@ def _addnstr(stdscr, y: int, x: int, text: str, n: int, attr) -> None:
 
 
 def _draw_title_and_hint(stdscr, title: str, hint: str, max_x: int, *, hint_row: int = 1) -> None:
-    """Draw the bold/yellow menu title on row 0 and the dim key hint on ``hint_row``."""
+    """Bold/yellow menu title on row 0, dim key hint on ``hint_row``."""
     import curses
-
     hattr = curses.A_BOLD | (curses.color_pair(2) if curses.has_colors() else 0)
     _addnstr(stdscr, 0, 0, title, max_x - 1, hattr)
     _addnstr(stdscr, hint_row, 0, hint, max_x - 1, curses.A_DIM)
 
 
-def _draw_plain_row(stdscr, y: int, line: str, max_x: int, *, is_cursor: bool) -> None:
-    """Draw a plain menu row, bold green when it is the cursor row."""
-    import curses
-
-    _addnstr(stdscr, y, 0, line, max_x - 1, _curses_style_attr(curses, None, is_cursor=is_cursor))
-
-
 def _draw_segments(stdscr, y: int, x: int, segments, max_x: int) -> None:
-    """Draw ``(text, attr)`` segments left to right from column ``x``, clipped at the screen edge."""
+    """Draw ``(text, attr)`` segments left to right from column ``x``, clipped at the edge."""
     col = x
     for text, attr in segments:
         remaining = max_x - 1 - col
@@ -199,7 +183,6 @@ def _draw_segments(stdscr, y: int, x: int, segments, max_x: int) -> None:
 def _draw_description_line(stdscr, y: int, text: str, max_x: int) -> None:
     """Draw a description line, highlighting ★ in yellow when colors exist."""
     import curses
-
     star_attr = curses.color_pair(2) if curses.has_colors() else curses.A_NORMAL
     segments = []
     for i, part in enumerate(text.split("★")):
@@ -210,54 +193,50 @@ def _draw_description_line(stdscr, y: int, text: str, max_x: int) -> None:
     _draw_segments(stdscr, y, 0, segments, max_x)
 
 
-def _draw_radio_item(stdscr, y: int, x: int, item: RadioItem, max_x: int, *, is_cursor: bool) -> None:
+def _draw_radio_item(
+    stdscr, y: int, x: int, item: RadioItem, max_x: int, *, is_cursor: bool) -> None:
     """Draw a plain or segmented radiolist item starting at column ``x``."""
     import curses
-
     if isinstance(item, str):
         attr = _curses_style_attr(curses, None, is_cursor=is_cursor)
         _addnstr(stdscr, y, x, item, max(0, max_x - 1 - x), attr)
         return
-
     _draw_segments(
         stdscr, y, x,
         ((text, _curses_style_attr(curses, style, is_cursor=is_cursor)) for text, style in item),
-        max_x,
-    )
+        max_x)
+
+
+def _draw_plain_row(stdscr, y: int, line: str, max_x: int, *, is_cursor: bool) -> None:
+    """Draw a plain menu row, bold green when it is the cursor row."""
+    import curses
+    _addnstr(stdscr, y, 0, line, max_x - 1, _curses_style_attr(curses, None, is_cursor=is_cursor))
 
 
 _WORD_BOUNDARY = frozenset("-_/. ")
 
 
 def _is_boundary(target: str, index: int) -> bool:
-    """True if position ``index`` in ``target`` starts a word.
-
-    Mirrors ``isBoundary`` in the TS scorer: start-of-string, after a separator char, or a
-    lower->upper camelCase transition.
-    """
+    """Mirrors ``isBoundary`` in the TS scorer: start, after a separator, or lower->Upper."""
     if index == 0:
         return True
     prev = target[index - 1]
     if prev in _WORD_BOUNDARY:
         return True
-    # camelCase / lower->upper transition (e.g. the `O` in `gptO`).
     cur = target[index]
     return prev == prev.lower() and cur != cur.lower() and cur == cur.upper()
 
 
 def _token_score(orig: str, lower: str, token: str) -> float | None:
-    """Score one token against a target. None if the token isn't a subsequence.
+    """Score one token against a target; None if not a subsequence.
 
-    Faithful port of ``fuzzyScore`` in ui-tui and web ``fuzzy.ts`` so all three surfaces rank
-    model ids identically: contiguous runs, word-boundary/first-char starts, prefixes and exact
-    matches outrank scattered hits. Matching runs against ``lower`` while boundary detection
-    uses ``orig`` so the camelCase rule works, exactly as in the TS scorer.
+    Faithful port of ``fuzzyScore`` in ui-tui / web ``fuzzy.ts`` so all surfaces rank model ids
+    identically. Matches run against ``lower``; boundary detection uses ``orig`` for camelCase.
     """
     score = 0.0
     prev = -1
     search_from = 0
     positions: list[int] = []
-
     for ch in token:
         idx = lower.find(ch, search_from)
         if idx < 0:
@@ -274,27 +253,15 @@ def _token_score(orig: str, lower: str, token: str) -> float | None:
             score += 5
         prev = idx
         search_from = idx + 1
-
-    # Prefix bonus: the token matched a contiguous prefix of the target.
     if positions and positions[0] == 0 and positions[-1] == len(positions) - 1:
-        score += 8
-
-    # Exact full match dominates everything else.
+        score += 8  # contiguous prefix
     if lower == token:
-        score += 20
-
-    # Slightly prefer shorter targets when scores are otherwise close.
-    score -= len(lower) * 0.01
-
-    return score
+        score += 20  # exact match dominates
+    return score - len(lower) * 0.01  # slightly prefer shorter targets
 
 
 def _fuzzy_score(label: str, query: str) -> float | None:
-    """Aggregate score for a multi-token query (AND). None if any token fails.
-
-    Mirrors ``fuzzyScoreMulti`` in the TS scorer: every whitespace-separated token must match; per-
-    token scores are summed.
-    """
+    """Multi-token AND score (``fuzzyScoreMulti``): sum of per-token scores, None if any fails."""
     lower = label.lower()
     total = 0.0
     for token in query.lower().split():
@@ -306,16 +273,11 @@ def _fuzzy_score(label: str, query: str) -> float | None:
 
 
 def _filter_indices(items: List[str], query: str) -> List[int]:
-    """Return item indices matching *query*, ranked best-first.
-
-    An empty query keeps every item in original order. Otherwise items are filtered to fuzzy matches
-    and sorted by score descending, ties broken by original index so equal-scoring rows keep their
-    catalog order.
-    """
+    """Item indices matching *query*, best-first; ties keep catalog order. Empty query = all."""
     q = query.strip()
     if not q:
         return list(range(len(items)))
-    scored = [(i, score) for i, label in enumerate(items) if (score := _fuzzy_score(label, q)) is not None]
+    scored = [(i, s) for i, label in enumerate(items) if (s := _fuzzy_score(label, q)) is not None]
     scored.sort(key=lambda pair: (-pair[1], pair[0]))
     return [i for i, _ in scored]
 
@@ -342,7 +304,8 @@ def _move_filtered_cursor(filtered: List[int], cursor: int, cursor_pos: int, del
     return filtered[(cursor_pos + delta) % len(filtered)] if filtered else cursor
 
 
-def _scroll_for_cursor(scroll_offset: int, cursor_pos: int, visible_rows: int, total_rows: int) -> int:
+def _scroll_for_cursor(
+    scroll_offset: int, cursor_pos: int, visible_rows: int, total_rows: int) -> int:
     """Clamp scroll offset so the cursor remains visible."""
     visible_rows = max(1, visible_rows)
     if cursor_pos < scroll_offset:
@@ -352,23 +315,20 @@ def _scroll_for_cursor(scroll_offset: int, cursor_pos: int, visible_rows: int, t
     return max(0, min(scroll_offset, max(0, total_rows - visible_rows)))
 
 
-def _handle_active_search_key(curses_mod, key: int, search: _SearchState) -> tuple[bool, bool, bool]:
-    """Handle a key while the search prompt is active."""
+def _handle_active_search_key(
+    curses_mod, key: int, search: _SearchState) -> tuple[bool, bool, bool]:
+    """Handle a key while the search prompt is active -> ``(handled, confirm, changed)``."""
     if not search.active:
         return False, False, False
-
     if key == 27:
-        # Esc stops search AND clears the query, restoring the full list (so a
-        # no-match filter can't strand the user on an empty list). Signals
-        # `changed` when there was a query so the driver resets scroll/cursor.
+        # Esc stops search AND clears the query so a no-match filter can't strand the user on
+        # an empty list; `changed` when there was a query so the driver resets scroll/cursor.
         had_query = bool(search.query)
         search.active = False
         search.query = ""
         return True, False, had_query
-
     if key in (curses_mod.KEY_ENTER, 10, 13):
         return True, True, False
-
     if key in (curses_mod.KEY_BACKSPACE, 127, 8):
         search.query = search.query[:-1]
     elif key == 21:  # Ctrl+U
@@ -381,11 +341,9 @@ def _handle_active_search_key(curses_mod, key: int, search: _SearchState) -> tup
 
 
 def flush_stdin() -> None:
-    """Flush any stray bytes from the stdin input buffer.
+    """Drain stray stdin bytes after ``curses.wrapper()`` and before the next ``input()``.
 
-    Must be called after ``curses.wrapper()`` returns, and before the next ``input()`` /
-    ``getpass.getpass()`` call. ``curses.endwin()`` restores the terminal but does NOT drain the OS
-    input buffer.
+    ``curses.endwin()`` restores the terminal but does NOT drain the OS input buffer.
     """
     try:
         if sys.stdin.isatty():
@@ -395,8 +353,7 @@ def flush_stdin() -> None:
         pass
 
 
-# Normalized menu actions returned by ``read_menu_key``.  Using sentinels keeps
-# every menu's key-handling branch identical and free of raw escape-byte logic.
+# Normalized menu actions returned by ``read_menu_key``.
 NAV_UP = "up"
 NAV_DOWN = "down"
 NAV_BACK = "back"
@@ -408,11 +365,10 @@ NAV_NONE = "none"
 
 
 def read_menu_key(stdscr) -> str:
-    """Read one keypress and normalize it to a menu action.
+    """Read one keypress and normalize it to a ``NAV_*`` action.
 
-    Returns one of the ``NAV_*`` constants. A lone ESC (no continuation byte within a short window)
-    is the only thing that maps to ``NAV_CANCEL`` via the escape path; ``q`` also cancels. Unknown
-    sequences map to ``NAV_NONE`` so the caller simply ignores them rather than misfiring.
+    A lone ESC (no continuation byte within a short window) and ``q`` cancel; unknown sequences
+    map to ``NAV_NONE`` so the caller ignores them rather than misfiring.
     """
     return _decode_menu_key(stdscr, stdscr.getch())
 
@@ -425,7 +381,7 @@ def _parse_int(value: str, default=0):
 
 
 def _parse_csi_u_key(raw: str) -> tuple[int, int, int] | None:
-    """Parse a Kitty/CSI-u key into ``(codepoint, modifier, event_type)``; None without a codepoint."""
+    """Kitty/CSI-u key -> ``(codepoint, modifier, event_type)``; None without a codepoint."""
     parts = raw.split(";")
     codepoint = _parse_int(parts[0].split(":", 1)[0])
     if not codepoint:
@@ -437,22 +393,19 @@ def _parse_csi_u_key(raw: str) -> tuple[int, int, int] | None:
 
 
 def _parse_csi_numbers(raw: str) -> list[int]:
-    """Parse semicolon-delimited CSI numbers for modifyOtherKeys."""
+    """Semicolon-delimited CSI numbers for modifyOtherKeys."""
     return [_parse_int(part.split(":", 1)[0]) for part in raw.split(";")]
+
+
+_ENHANCED_NAV = {10: NAV_SELECT, 13: NAV_SELECT, 27: NAV_CANCEL, 32: NAV_TOGGLE}
 
 
 def _enhanced_key_action(codepoint: int, modifier: int = 1) -> str:
     """Map CSI-u/modifyOtherKeys codepoints to setup menu actions."""
-    if codepoint in (10, 13):
-        return NAV_SELECT
-    if codepoint == 27:
-        return NAV_CANCEL
-    if codepoint == 32:
-        return NAV_TOGGLE
-
-    # CSI-u encodes Ctrl+C as codepoint `c` plus the Ctrl modifier. Lock-state
-    # bits may be added to the modifier, so inspect the Ctrl bit rather than
-    # matching only the canonical value 5.
+    if codepoint in _ENHANCED_NAV:
+        return _ENHANCED_NAV[codepoint]
+    # CSI-u encodes Ctrl+C as `c` plus the Ctrl modifier bit; lock-state bits may be added, so
+    # test the Ctrl bit rather than the canonical value 5.
     has_ctrl = bool((max(1, modifier) - 1) & 4)
     if codepoint == 3 or (codepoint in (ord("c"), ord("C")) and has_ctrl):
         return NAV_INTERRUPT
@@ -472,69 +425,100 @@ def _read_csi_tail(stdscr) -> tuple[str, int | None]:
     return "".join(raw), None
 
 
-_CSI_FINAL_NAV = {ord("A"): NAV_UP, ord("k"): NAV_UP, ord("B"): NAV_DOWN, ord("j"): NAV_DOWN, ord("D"): NAV_BACK}
+_CSI_FINAL_NAV = {
+    ord("A"): NAV_UP, ord("k"): NAV_UP, ord("B"): NAV_DOWN, ord("j"): NAV_DOWN, ord("D"): NAV_BACK}
 
 
-def _decode_menu_key(stdscr, key: int) -> str:
-    """Normalize an already-read keypress to a menu action.
-
-    Split out from ``read_menu_key`` so search-aware loops can peek the raw key (e.g. to catch
-    ``/``) before falling back to nav decoding.
-    """
-    import curses
-
-    if key in (curses.KEY_UP, ord("k")):
-        return NAV_UP
-    if key in (curses.KEY_DOWN, ord("j")):
-        return NAV_DOWN
-    if key == curses.KEY_LEFT:
-        return NAV_BACK
-    if key == 3:  # Ctrl+C in curses raw/cbreak mode.
-        return NAV_INTERRUPT
-    if key in (curses.KEY_ENTER, 10, 13):
-        return NAV_SELECT
-    if key == ord(" "):
-        return NAV_TOGGLE
-    if key == ord("q"):
-        return NAV_CANCEL
-
-    if key == 27:  # ESC — could be a lone ESC (cancel) or an escape sequence.
-        # Wait briefly for a continuation byte.  On slow PTYs (SSH/tmux) the
-        # bytes of an arrow key can arrive across separate reads, so a tiny
-        # timeout avoids misreading a split sequence as a bare ESC.
-        try:
-            stdscr.timeout(60)
-            nxt = stdscr.getch()
-            if nxt == -1:
-                return NAV_CANCEL  # genuine lone ESC
-
-            if nxt in (ord("["), ord("O")):  # CSI / SS3 introducer
-                raw_params, final = _read_csi_tail(stdscr)
-                if final in _CSI_FINAL_NAV:
-                    return _CSI_FINAL_NAV[final]
-                if final == ord("u"):
-                    enhanced = _parse_csi_u_key(raw_params)
-                    if enhanced is not None:
-                        codepoint, modifier, event_type = enhanced
-                        if event_type == 3:  # key release
-                            return NAV_NONE
-                        return _enhanced_key_action(codepoint, modifier)
-                if final == ord("~"):
-                    params = _parse_csi_numbers(raw_params)
-                    if len(params) >= 3 and params[0] == 27:
-                        return _enhanced_key_action(params[2], params[1])
+def _decode_escape_sequence(stdscr) -> str:
+    """Decode the bytes after an ESC: lone ESC cancels, CSI/SS3 sequences map to actions."""
+    nxt = stdscr.getch()
+    if nxt == -1:
+        return NAV_CANCEL  # genuine lone ESC
+    if nxt not in (ord("["), ord("O")):  # not a CSI / SS3 introducer — swallow
+        return NAV_NONE
+    raw_params, final = _read_csi_tail(stdscr)
+    if final in _CSI_FINAL_NAV:
+        return _CSI_FINAL_NAV[final]
+    if final == ord("u"):
+        enhanced = _parse_csi_u_key(raw_params)
+        if enhanced is not None:
+            codepoint, modifier, event_type = enhanced
+            if event_type == 3:  # key release
                 return NAV_NONE
-            # ESC followed by some other byte we don't handle — swallow it.
-            return NAV_NONE
-        finally:
-            stdscr.timeout(-1)  # restore blocking mode
-
+            return _enhanced_key_action(codepoint, modifier)
+    if final == ord("~"):
+        params = _parse_csi_numbers(raw_params)
+        if len(params) >= 3 and params[0] == 27:
+            return _enhanced_key_action(params[2], params[1])
     return NAV_NONE
 
 
-# Sentinel: an on_action reducer returns this to mean "keep looping" (the
-# keypress changed cursor/selection state but didn't resolve the menu).
+def _decode_menu_key(stdscr, key: int) -> str:
+    """Normalize an already-read keypress to a menu action (lets loops peek the raw key first)."""
+    import curses
+    plain = {
+        curses.KEY_UP: NAV_UP, ord("k"): NAV_UP, curses.KEY_DOWN: NAV_DOWN, ord("j"): NAV_DOWN,
+        curses.KEY_LEFT: NAV_BACK, 3: NAV_INTERRUPT,  # 3 = Ctrl+C in raw/cbreak mode
+        curses.KEY_ENTER: NAV_SELECT, 10: NAV_SELECT, 13: NAV_SELECT,
+        ord(" "): NAV_TOGGLE, ord("q"): NAV_CANCEL}
+    if key in plain:
+        return plain[key]
+    if key != 27:
+        return NAV_NONE
+    # ESC: wait briefly for a continuation byte. On slow PTYs (SSH/tmux) an arrow key's bytes
+    # can arrive across separate reads, so a tiny timeout avoids misreading it as a bare ESC.
+    try:
+        stdscr.timeout(60)
+        return _decode_escape_sequence(stdscr)
+    finally:
+        stdscr.timeout(-1)  # restore blocking mode
+
+
+# An on_action reducer returns this to keep looping (state changed, menu not resolved).
 _KEEP = object()
+
+# Sentinel from ``_route_key``: the key was consumed by the search prompt; redraw, no action.
+_CONSUMED = object()
+
+
+def _init_colors(curses, extra_color_pairs: bool) -> None:
+    curses.curs_set(0)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        if extra_color_pairs:
+            curses.init_pair(3, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
+
+
+def _route_key(curses, stdscr, key: int, search: _SearchState, use_search: bool):
+    """Turn a raw key into a ``NAV_*`` action, honoring an active ``/`` search prompt.
+
+    Returns ``(action, changed)``; ``action`` may be ``_CONSUMED`` (redraw only) or
+    ``NAV_SELECT`` for Enter inside the prompt; ``changed`` means the query changed.
+    """
+    if use_search and search.active and key == 27:
+        # Enhanced keys (Ghostty/Kitty) also start with ESC: decode the full sequence before
+        # treating a genuine Escape as "stop search".
+        action = _decode_menu_key(stdscr, key)
+        if action == NAV_CANCEL:
+            search.active = False
+            search.query = ""
+            return _CONSUMED, True
+        return (_CONSUMED if action == NAV_NONE else action), False
+    if use_search and search.active:
+        # Active search consumes query-editing keys; nav keys fall through.
+        handled, confirm, changed = _handle_active_search_key(curses, key, search)
+        if confirm:
+            return NAV_SELECT, changed
+        if handled:
+            return _CONSUMED, changed
+        return _decode_menu_key(stdscr, key), changed
+    if use_search and key == ord("/"):
+        search.active = True
+        return _CONSUMED, False
+    return _decode_menu_key(stdscr, key), False
 
 
 def _run_curses_menu(
@@ -550,18 +534,15 @@ def _run_curses_menu(
     fallback,
     cancel_value,
     searchable=False,
-    search_labels=None,
-):
+    search_labels=None):
     """Shared curses single-/multi-select event loop.
 
-    Owns the non-TTY guard, ``curses.wrapper`` setup, the per-frame clear/refresh cycle, scroll
-    math, key dispatch with cursor wrap, and the KeyboardInterrupt / curses-unavailable
-    fallback; per-menu behavior comes in as callbacks so rendering stays byte-identical to the
-    old hand-rolled loops. ``draw_row`` always receives the ORIGINAL item index (filtering
-    doesn't change rendering); ``on_action`` returns ``_KEEP`` to continue or any other value to
-    resolve the menu; a ``draw_footer`` row budget must be included in ``reserve_bottom``; with
-    ``searchable``, ``/`` filters over ``search_labels`` (length must equal ``item_count``) and
-    results are original indices.
+    Owns the non-TTY guard, ``curses.wrapper`` setup, clear/refresh cycle, scroll math, key
+    dispatch with cursor wrap, and the KeyboardInterrupt / curses-unavailable fallback.
+    ``draw_row`` always receives the ORIGINAL item index; ``on_action`` returns ``_KEEP`` to
+    continue or any other value to resolve; a ``draw_footer`` row budget must be included in
+    ``reserve_bottom``; with ``searchable``, ``/`` filters over ``search_labels`` (length ==
+    ``item_count``) and results are original indices.
     """
     navigation_handler = _MENU_NAVIGATION_HANDLER.get()
 
@@ -577,9 +558,8 @@ def _run_curses_menu(
         _notify(MenuNavigationEvent.RESOLVE, navigation_start.replay_value)
         return navigation_start.replay_value
 
-    # Non-TTY (piped/redirected stdin): curses and input() both hang or spin,
-    # so return the cancel value directly — matching the pre-refactor guard in
-    # each menu (the numbered fallback is only for curses errors on a real TTY).
+    # Non-TTY stdin: curses and input() both hang or spin, so return the cancel value directly
+    # (the numbered fallback is only for curses errors on a real TTY).
     if not sys.stdin.isatty():
         return cancel_value
 
@@ -611,14 +591,7 @@ def _run_curses_menu(
             return True
 
         def _draw(stdscr):
-            curses.curs_set(0)
-            if curses.has_colors():
-                curses.start_color()
-                curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_GREEN, -1)
-                curses.init_pair(2, curses.COLOR_YELLOW, -1)
-                if extra_color_pairs:
-                    curses.init_pair(3, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
+            _init_colors(curses, extra_color_pairs)
             cursor = initial_cursor
             scroll_offset = 0
             search = _SearchState()
@@ -626,72 +599,40 @@ def _run_curses_menu(
             while True:
                 stdscr.clear()
                 max_y, max_x = stdscr.getmaxyx()
-
-                filtered = _filter_indices(search_labels, search.query) if use_search else list(range(item_count))
+                filtered = (
+                    _filter_indices(search_labels, search.query) if use_search
+                    else list(range(item_count)))
                 cursor, cursor_pos = _reconcile_cursor(filtered, cursor)
-
-                items_start = draw_header(stdscr, max_y, max_x, search=search, back_enabled=allow_back)
-
+                items_start = draw_header(
+                    stdscr, max_y, max_x, search=search, back_enabled=allow_back)
                 visible_rows = max(1, max_y - items_start - reserve_bottom)
-                scroll_offset = _scroll_for_cursor(scroll_offset, cursor_pos, visible_rows, len(filtered))
-
+                scroll_offset = _scroll_for_cursor(
+                    scroll_offset, cursor_pos, visible_rows, len(filtered))
                 if use_search and search.query and not filtered:
                     _addnstr(stdscr, items_start, 0, "  No matches", max_x - 1, curses.A_DIM)
-
                 for draw_i, i in enumerate(filtered[scroll_offset : scroll_offset + visible_rows]):
                     y = draw_i + items_start
                     if y >= max_y - reserve_bottom:
                         break
                     draw_row(stdscr, y, i, i == cursor, max_x)
-
                 if draw_footer is not None:
                     draw_footer(stdscr, max_y, max_x)
-
                 stdscr.refresh()
 
-                key = stdscr.getch()
-                if use_search and search.active and key == 27:
-                    # Ghostty/Kitty enhanced keys also begin with ESC.
-                    # Decode the full sequence before treating a genuine
-                    # Escape as "stop search"; otherwise Enter/Left/Ctrl+C
-                    # lose their tail while the search prompt is active.
-                    action = _decode_menu_key(stdscr, key)
-                    if action == NAV_CANCEL:
-                        search.active = False
-                        search.query = ""
-                        scroll_offset = 0
-                        continue
-                    if action == NAV_NONE:
-                        continue
-                elif use_search and search.active:
-                    # Active search consumes query-editing keys; nav keys
-                    # fall through to be decoded below.
-                    handled, confirm, changed = _handle_active_search_key(curses, key, search)
-                    if changed:
-                        scroll_offset = 0
+                action, changed = _route_key(curses, stdscr, stdscr.getch(), search, use_search)
+                if changed:
+                    scroll_offset = 0
+                    if search.active:  # Esc-clear resets scroll only; the loop re-reconciles
                         cursor, cursor_pos = _reconcile_cursor(
-                            _filter_indices(search_labels, search.query), cursor
-                        )
-                    if confirm:
-                        if filtered and _resolve(on_action(NAV_SELECT, cursor)):
-                            return
-                        continue
-                    if handled:
-                        continue
-                    action = _decode_menu_key(stdscr, key)
-                elif use_search and key == ord("/"):
-                    search.active = True
+                            _filter_indices(search_labels, search.query), cursor)
+                if action is _CONSUMED:
                     continue
-                else:
-                    action = _decode_menu_key(stdscr, key)
-
                 if action == NAV_UP:
                     cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, -1)
                 elif action == NAV_DOWN:
                     cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, 1)
                 elif action in (NAV_SELECT, NAV_TOGGLE, NAV_CANCEL, NAV_INTERRUPT) or (
-                    action == NAV_BACK and allow_back
-                ):
+                    action == NAV_BACK and allow_back):
                     if action == NAV_SELECT and use_search and not filtered:
                         continue
                     if action in (NAV_CANCEL, NAV_INTERRUPT):
@@ -704,7 +645,6 @@ def _run_curses_menu(
         curses.wrapper(_draw)
         flush_stdin()
         return result_holder[0] if result_holder[0] is not _KEEP else cancel_value
-
     except KeyboardInterrupt:
         _notify(MenuNavigationEvent.CANCEL)
         return cancel_value
@@ -718,17 +658,14 @@ def curses_checklist(
     selected: Set[int],
     *,
     cancel_returns: Set[int] | None = None,
-    status_fn: Optional[Callable[[Set[int]], str]] = None,
-) -> Set[int]:
+    status_fn: Optional[Callable[[Set[int]], str]] = None) -> Set[int]:
     """Curses multi-select checklist. Returns set of selected indices.
 
     ``cancel_returns`` (default: the original *selected*) is returned on ESC/q.
-    ``status_fn(chosen)`` renders on the bottom row for live aggregate info such as token
-    estimates.
+    ``status_fn(chosen)`` renders on the bottom row for live aggregate info such as token estimates.
     """
     if cancel_returns is None:
         cancel_returns = set(selected)
-
     chosen = set(selected)
 
     def _draw_row(stdscr, y, i, is_cursor, max_x):
@@ -739,8 +676,7 @@ def curses_checklist(
     def _draw_footer(stdscr, max_y, max_x):
         import curses
         status_text = status_fn(chosen)
-        if status_text:
-            # Right-align on the bottom row
+        if status_text:  # right-aligned on the bottom row
             sx = max(0, max_x - len(status_text) - 1)
             sattr = curses.A_DIM | (curses.color_pair(3) if curses.has_colors() else 0)
             _addnstr(stdscr, max_y - 1, sx, status_text, max_x - sx - 1, sattr)
@@ -763,8 +699,7 @@ def curses_checklist(
         draw_footer=_draw_footer if status_fn else None,
         extra_color_pairs=bool(status_fn),
         fallback=lambda: _numbered_fallback(title, items, selected, cancel_returns, status_fn),
-        cancel_value=cancel_returns,
-    )
+        cancel_value=cancel_returns)
 
 
 def _search_hint(search, searchable: bool, confirm: str, cancel: str, back_enabled: bool) -> str:
@@ -797,49 +732,37 @@ def curses_radiolist(
     cancel_returns: int | None = None,
     description: str | None = None,
     searchable: bool = False,
-    search_labels: List[str] | None = None,
-) -> int:
+    search_labels: List[str] | None = None) -> int:
     """Curses single-select radio list. Returns the selected index.
 
-    Items are plain strings or ``(text, style)`` segment sequences
-    (``None``/``"yellow"``/``"dim"``); the cursor row is forced green, unselected rows honor
-    segment styles. ``description`` is shown between title and list so context survives the
-    curses screen clear. With ``searchable``, ``/`` filters over ``search_labels`` (default:
-    display labels) and the returned value is always the ORIGINAL item index, never a filtered
-    row position.
+    Items are plain strings or ``(text, style)`` segment sequences (``None``/``"yellow"``/
+    ``"dim"``); the cursor row is forced green. ``description`` is shown between title and list
+    so context survives the curses screen clear. With ``searchable``, ``/`` filters over
+    ``search_labels`` (default: display labels); the return value is always the ORIGINAL index.
     """
     if cancel_returns is None:
         cancel_returns = selected
-
     desc_lines = description.splitlines() if description else []
-
     plain_labels = [radio_item_plain(item) for item in items] if searchable else None
 
     def _draw_header(stdscr, max_y, max_x, search=None, back_enabled=False):
-        # Description lines — paint ★ yellow so the sale legend matches rows.
         row = 1
-        for dline in desc_lines[: max(0, max_y - 2)]:
+        for dline in desc_lines[: max(0, max_y - 2)]:  # ★ painted yellow to match rows
             _draw_description_line(stdscr, row, dline, max_x)
             row += 1
-
         hint = _search_hint(search, searchable, "ENTER/SPACE select", "ESC cancel", back_enabled)
         _draw_title_and_hint(stdscr, title, hint, max_x, hint_row=row)
-        # One blank row between the hint and the item list.
-        return row + 2
+        return row + 2  # one blank row between the hint and the item list
 
     def _draw_row(stdscr, y, i, is_cursor, max_x):
         radio = "\u25cf" if i == selected else "\u25cb"
         arrow = "\u2192" if is_cursor else " "
         prefix = f" {arrow} ({radio}) "
         _draw_plain_row(stdscr, y, prefix, max_x, is_cursor=is_cursor)
-        _draw_radio_item(
-            stdscr, y, len(prefix), items[i], max_x, is_cursor=is_cursor
-        )
+        _draw_radio_item(stdscr, y, len(prefix), items[i], max_x, is_cursor=is_cursor)
 
     def _on_action(action, cursor):
-        if action in (NAV_SELECT, NAV_TOGGLE):
-            return cursor
-        return cancel_returns  # NAV_CANCEL
+        return cursor if action in (NAV_SELECT, NAV_TOGGLE) else cancel_returns  # NAV_CANCEL
 
     return _run_curses_menu(
         initial_cursor=selected,
@@ -848,13 +771,16 @@ def curses_radiolist(
         draw_row=_draw_row,
         on_action=_on_action,
         reserve_bottom=1,
-        # Dim gray (pair 3) for unselected "was …" sale chrome.
-        extra_color_pairs=True,
+        extra_color_pairs=True,  # dim gray (pair 3) for unselected "was …" sale chrome
         fallback=lambda: _radio_numbered_fallback(title, items, selected, cancel_returns),
         cancel_value=cancel_returns,
         searchable=searchable,
-        search_labels=(list(search_labels) if search_labels is not None else plain_labels) if searchable else None,
-    )
+        search_labels=(
+            (list(search_labels) if search_labels is not None else plain_labels)
+            if searchable else None))
+
+
+_ANSI_STYLE = {"yellow": Colors.YELLOW, "dim": Colors.DIM}
 
 
 def format_radio_item_ansi(item: RadioItem) -> str:
@@ -862,23 +788,14 @@ def format_radio_item_ansi(item: RadioItem) -> str:
     if isinstance(item, str):
         return item
     return "".join(
-        color(text, _ANSI_STYLE[style]) if style in _ANSI_STYLE else text for text, style in item
-    )
-
-
-_ANSI_STYLE = {"yellow": Colors.YELLOW, "dim": Colors.DIM}
+        color(text, _ANSI_STYLE[style]) if style in _ANSI_STYLE else text for text, style in item)
 
 
 def _radio_numbered_fallback(
-    title: str,
-    items: List[RadioItem],
-    selected: int,
-    cancel_returns: int,
-) -> int:
+    title: str, items: List[RadioItem], selected: int, cancel_returns: int) -> int:
     """Text-based numbered fallback for radio selection."""
     print(color(f"\n  {title}", Colors.YELLOW))
     print(color("  Select by number, Enter to confirm.\n", Colors.DIM))
-
     for i, label in enumerate(items):
         marker = color("(\u25cf)", Colors.GREEN) if i == selected else "(\u25cb)"
         print(f"  {marker} {i + 1:>2}. {format_radio_item_ansi(label)}")
@@ -895,12 +812,11 @@ def curses_single_select(
     default_index: int = 0,
     *,
     cancel_label: str = "Cancel",
-    searchable: bool = False,
-) -> int | None:
+    searchable: bool = False) -> int | None:
     """Curses single-select menu. Returns selected index or None on cancel.
 
-    When ``searchable`` is true, ``/`` opens a type-to-filter prompt; the returned value is always
-    the original item index (or None for cancel).
+    With ``searchable``, ``/`` opens a type-to-filter prompt; the return value is always the
+    original item index (or None for cancel).
     """
     all_items = list(items) + [cancel_label]
     cancel_idx = len(items)
@@ -910,9 +826,7 @@ def curses_single_select(
         _draw_plain_row(stdscr, y, f" {arrow} {all_items[i]}", max_x, is_cursor=is_cursor)
 
     def _on_action(action, cursor):
-        if action == NAV_SELECT:
-            # Selecting the synthetic cancel row resolves to None, mirroring
-            # the old post-loop ``>= cancel_idx`` guard.
+        if action == NAV_SELECT:  # the synthetic cancel row resolves to None
             return None if cursor >= cancel_idx else cursor
         if action in (NAV_CANCEL, NAV_INTERRUPT):
             return None
@@ -928,15 +842,10 @@ def curses_single_select(
         fallback=lambda: _numbered_single_fallback(title, all_items, cancel_idx),
         cancel_value=None,
         searchable=searchable,
-        search_labels=list(all_items) if searchable else None,
-    )
+        search_labels=list(all_items) if searchable else None)
 
 
-def _numbered_single_fallback(
-    title: str,
-    items: List[str],
-    cancel_idx: int,
-) -> int | None:
+def _numbered_single_fallback(title: str, items: List[str], cancel_idx: int) -> int | None:
     """Text-based numbered fallback for single-select."""
     print(f"\n  {title}\n")
     for i, label in enumerate(items, 1):
@@ -951,13 +860,11 @@ def _numbered_fallback(
     items: List[str],
     selected: Set[int],
     cancel_returns: Set[int],
-    status_fn: Optional[Callable[[Set[int]], str]] = None,
-) -> Set[int]:
+    status_fn: Optional[Callable[[Set[int]], str]] = None) -> Set[int]:
     """Text-based toggle fallback for terminals without curses."""
     chosen = set(selected)
     print(color(f"\n  {title}", Colors.YELLOW))
     print(color("  Toggle by number, Enter to confirm.\n", Colors.DIM))
-
     while True:
         for i, label in enumerate(items):
             marker = color("[✓]", Colors.GREEN) if i in chosen else "[ ]"
