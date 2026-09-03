@@ -331,6 +331,8 @@ class ProcessSession:
                 self.termination_source = source
 
 
+# Watcher routing fields, in event-dict key order (``watcher_<key>`` on the session).
+_WATCHER_ROUTE_KEYS = ("platform", "chat_id", "user_id", "user_name", "thread_id", "message_id")
 # Session fields persisted verbatim in the crash-recovery checkpoint (plus
 # ``session_id``; ``command`` is redacted and ``owner_task_id`` defaulted on write).
 _CHECKPOINT_FIELDS = (
@@ -531,12 +533,7 @@ class ProcessRegistry:
             "task_id": session.task_id,
             "owner_task_id": session.owner_task_id or session.task_id,
             "command": session.command,
-            "platform": session.watcher_platform,
-            "chat_id": session.watcher_chat_id,
-            "user_id": session.watcher_user_id,
-            "user_name": session.watcher_user_name,
-            "thread_id": session.watcher_thread_id,
-            "message_id": session.watcher_message_id,
+            **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
         }
 
     @staticmethod
@@ -834,14 +831,8 @@ class ProcessRegistry:
         return session
 
     def spawn_local(
-        self,
-        command: str,
-        cwd: str = None,
-        task_id: str = "",
-        session_key: str = "",
-        env_vars: dict = None,
-        use_pty: bool = False,
-        owner_task_id: str = "",
+        self, command: str, cwd: str = None, task_id: str = "", session_key: str = "",
+        env_vars: dict = None, use_pty: bool = False, owner_task_id: str = "",
     ) -> ProcessSession:
         """Spawn a background process locally (TERMINAL_ENV=local; other backends use
         spawn_via_env()). ``use_pty`` requests a pseudo-terminal via ptyprocess/pywinpty
@@ -929,14 +920,8 @@ class ProcessRegistry:
         return session
 
     def spawn_via_env(
-        self,
-        env: Any,
-        command: str,
-        cwd: str = None,
-        task_id: str = "",
-        session_key: str = "",
-        timeout: int = 10,
-        owner_task_id: str = "",
+        self, env: Any, command: str, cwd: str = None, task_id: str = "", session_key: str = "",
+        timeout: int = 10, owner_task_id: str = "",
     ) -> ProcessSession:
         """Spawn a background process inside a non-local backend's sandbox.
 
@@ -1033,18 +1018,25 @@ class ProcessRegistry:
                 return
             stdout = proc.stdout
             raw_read = getattr(getattr(stdout, "buffer", None), "read1", None)
+
+            def _read_once():
+                """One 4 KiB read: decoded text ('' for a partial multibyte tail), None at EOF."""
+                if raw_read is None:
+                    # Mocked/alternate streams without a raw buffer: less "live".
+                    return stdout.read(4096) or None
+                raw = raw_read(4096)
+                return decoder.decode(raw) if raw else None
+
             # select() needs a real OS fd; mocked streams (tests, adapters) may lack
             # fileno() and use the blocking loop instead.
             fd = None
             if raw_read is not None and not _IS_WINDOWS:
-                fileno = getattr(stdout, "fileno", None)
                 try:
-                    candidate = fileno() if callable(fileno) else None
+                    candidate = stdout.fileno()
                 except Exception:
                     candidate = None
                 if isinstance(candidate, int) and candidate >= 0:
                     fd = candidate
-
             if fd is not None:
                 import select as _select
 
@@ -1055,10 +1047,9 @@ class ProcessRegistry:
                     except (ValueError, OSError):
                         break  # fd already closed
                     if ready:
-                        raw = raw_read(4096)
-                        if not raw:
+                        chunk = _read_once()
+                        if chunk is None:
                             break  # true EOF — all writers closed
-                        chunk = decoder.decode(raw)
                         if chunk:
                             _append_chunk(chunk)
                         idle_after_exit = 0
@@ -1070,20 +1061,9 @@ class ProcessRegistry:
                         if idle_after_exit >= 3:
                             break
             else:
-                while True:
-                    if raw_read is not None:
-                        raw = raw_read(4096)
-                        if not raw:
-                            break
-                        chunk = decoder.decode(raw)
-                        if not chunk:
-                            continue  # partial multibyte sequence — wait for more bytes
-                    else:
-                        # Mocked/alternate streams without a raw buffer: less "live".
-                        chunk = stdout.read(4096)
-                        if not chunk:
-                            break
-                    _append_chunk(chunk)
+                while (chunk := _read_once()) is not None:
+                    if chunk:
+                        _append_chunk(chunk)
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
         finally:
@@ -1241,11 +1221,7 @@ class ProcessRegistry:
         return not (session.watch_patterns and not session._watch_disabled and session._watch_hits > 0)
 
     def wait_for_pending_completions(
-        self,
-        task_id: Optional[str] = None,
-        *,
-        timeout: float | None = None,
-        poll_interval: float = 1.0,
+        self, task_id: Optional[str] = None, *, timeout: float | None = None, poll_interval: float = 1.0,
     ) -> dict:
         """Bounded linger for ``notify_on_complete`` background processes at one-shot exit.
 
@@ -1341,11 +1317,7 @@ class ProcessRegistry:
             return False
 
     def drain_notifications(
-        self,
-        session_key: str = "",
-        owns_event=None,
-        *,
-        skip_poll_observed: bool = True,
+        self, session_key: str = "", owns_event=None, *, skip_poll_observed: bool = True,
     ) -> "list[tuple[dict, str]]":
         """Pop all pending events and return ``(raw_event, formatted_text)`` pairs.
 
@@ -1660,11 +1632,7 @@ class ProcessRegistry:
         }
 
     def kill_process(
-        self,
-        session_id: str,
-        *,
-        source: str = "process.kill",
-        consume_output: bool = True,
+        self, session_id: str, *, source: str = "process.kill", consume_output: bool = True,
     ) -> dict:
         """Kill a background process and return its output snapshot.
 
@@ -1818,15 +1786,11 @@ class ProcessRegistry:
         reopened from the status stack. Errors when no UI close sink is wired."""
         sink = self.on_close
         if sink is None:
-            return {
-                "status": "error",
-                "error": "close_terminal is only available in the Hermes desktop app.",
-            }
+            return {"status": "error", "error": "close_terminal is only available in the Hermes desktop app."}
         # The session may already be finished (or pruned) — the tab can still
         # linger and be closed, so a missing session is not an error here.
-        session = self.get(session_id)
         try:
-            sink(session, session_id)
+            sink(self.get(session_id), session_id)
         except Exception as e:
             return {"status": "error", "error": str(e)}
         return {
@@ -1911,7 +1875,7 @@ class ProcessRegistry:
             return any(not s.exited and predicate(s) for s in self._running.values())
 
     def has_active_processes(self, task_id: str) -> bool:
-        """Check if there are active (running) processes for a task_id."""
+        """Whether any process for ``task_id`` is still running."""
         return self._any_running(lambda s: s.task_id == task_id)
 
     def has_active_for_session(self, session_key: str, max_active_age: Optional[float] = None) -> bool:
@@ -1944,12 +1908,8 @@ class ProcessRegistry:
         return self.kill_all(task_id, exclude_ids=frozenset(baseline_ids or ()), source=source, consume_output=True)
 
     def kill_all(
-        self,
-        task_id: Optional[str] = None,
-        *,
-        exclude_ids: frozenset = frozenset(),
-        source: str = "kill_all",
-        consume_output: bool = False,
+        self, task_id: Optional[str] = None, *, exclude_ids: frozenset = frozenset(),
+        source: str = "kill_all", consume_output: bool = False,
     ) -> int:
         """Kill all running processes, optionally filtered by task_id. Returns count killed."""
         with self._lock:
@@ -2078,12 +2038,7 @@ class ProcessRegistry:
                     "session_id": session.id,
                     "check_interval": session.watcher_interval,
                     "session_key": session.session_key,
-                    "platform": session.watcher_platform,
-                    "chat_id": session.watcher_chat_id,
-                    "user_id": session.watcher_user_id,
-                    "user_name": session.watcher_user_name,
-                    "thread_id": session.watcher_thread_id,
-                    "message_id": session.watcher_message_id,
+                    **{key: getattr(session, f"watcher_{key}") for key in _WATCHER_ROUTE_KEYS},
                     "notify_on_complete": session.notify_on_complete,
                     "parent_session_id": session.parent_session_id,
                 })
