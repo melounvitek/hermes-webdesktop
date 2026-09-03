@@ -308,9 +308,7 @@ _NIX_UPDATE_MSG = (
 
 def get_managed_update_command() -> Optional[str]:
     """Return the preferred upgrade command for a managed install."""
-    if get_managed_system() in _NIX_MANAGED_SYSTEMS:
-        return _NIX_UPDATE_MSG
-    return None
+    return _NIX_UPDATE_MSG if get_managed_system() in _NIX_MANAGED_SYSTEMS else None
 
 
 # "apt" is the Termux APT distribution identifier, not a generic Debian/Ubuntu signal; another
@@ -360,14 +358,11 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
 
     # A .git directory, or a ``gitdir:`` pointer file for worktrees.
     git_path = root / ".git"
-    if git_path.is_dir():
-        return "git"
-    if git_path.is_file():
-        try:
-            if git_path.read_text(encoding="utf-8").strip().startswith("gitdir:"):
-                return "git"
-        except OSError:
-            pass
+    try:
+        if git_path.is_dir() or git_path.read_text(encoding="utf-8").strip().startswith("gitdir:"):
+            return "git"
+    except OSError:
+        pass
     return "unknown"
 
 
@@ -403,10 +398,8 @@ def recommended_update_command() -> str:
     """Return the best update command for the current installation.
     Managed state wins over the code-scoped stamp: a managed install can carry a stale stamp
     naming an update path the managed guard refuses."""
-    managed_cmd = get_managed_update_command()
-    if managed_cmd:
-        return managed_cmd
-    return recommended_update_command_for_method(detect_install_method(get_project_root()))
+    return get_managed_update_command() or recommended_update_command_for_method(
+        detect_install_method(get_project_root()))
 
 
 # Shared by ``cmd_update`` and ``_cmd_update_check`` (hermes_cli/main.py) so the wording never
@@ -905,21 +898,12 @@ def _unset_nested(config, dotted_key: str) -> bool:
         return False
     parents, current, key = loc
     del current[key]
-
+    # ``parent[part] is current`` for every hop, so each now-empty dict container is dropped.
     for parent, part in reversed(parents):
         if current != {}:
             break
-        if isinstance(parent, list):
-            if 0 <= part < len(parent) and parent[part] == {}:
-                parent.pop(part)
-                current = parent
-                continue
-        elif isinstance(parent, dict) and parent.get(part) == {}:
-            del parent[part]
-            current = parent
-            continue
-        break
-
+        del parent[part]
+        current = parent
     return True
 
 
@@ -1000,12 +984,8 @@ def get_missing_skill_config_vars() -> List[Dict[str, Any]]:
         return []
 
     config = load_config()
-    missing: List[Dict[str, Any]] = []
-    for var in all_vars:
-        value = cfg_get(config, *f"{SKILL_CONFIG_PREFIX}.{var['key']}".split("."))
-        if value is None or (isinstance(value, str) and not value.strip()):
-            missing.append(var)
-    return missing
+    values = ((var, cfg_get(config, *f"{SKILL_CONFIG_PREFIX}.{var['key']}".split("."))) for var in all_vars)
+    return [var for var, v in values if v is None or (isinstance(v, str) and not v.strip())]
 
 
 def _coerce_config_version(value: Any) -> int:
@@ -1307,10 +1287,7 @@ def _persist_migration(config: Dict[str, Any]) -> None:
 
 def _prompt_and_save_env(name: str, info: Dict[str, Any], prompt: str, results: Dict[str, Any]) -> bool:
     """Prompt for one env var (masked when ``info['password']``), save it, record it; False if skipped."""
-    if info.get("password"):
-        value = masked_secret_prompt(prompt)
-    else:
-        value = line_input(prompt).strip()
+    value = masked_secret_prompt(prompt) if info.get("password") else line_input(prompt).strip()
     if not value:
         return False
     save_env_value(name, value)
@@ -1537,11 +1514,10 @@ def _deep_merge(base: dict, override: dict) -> dict:
     keeps sibling defaults), and ``None`` over a dict section is ignored."""
     result = base.copy()
     for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+        over_dict = isinstance(result.get(key), dict)
+        if over_dict and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
-        elif key in result and isinstance(result[key], dict) and value is None:
-            continue
-        else:
+        elif not (over_dict and value is None):
             result[key] = value
     return result
 
@@ -1673,11 +1649,7 @@ def _preserve_env_ref_templates(current, raw, loaded_expanded=None):
     """Restore raw ``${VAR}`` templates where the value is otherwise unchanged, so persisting a
     loaded (expanded) config never writes the plaintext secret back to ``config.yaml``."""
     if isinstance(current, str) and isinstance(raw, str) and _ENV_REF_RE.search(raw):
-        if current == raw:
-            return raw
-        if isinstance(loaded_expanded, str) and current == loaded_expanded:
-            return raw
-        if _expand_env_vars(raw) == current:
+        if current in (raw, loaded_expanded) or _expand_env_vars(raw) == current:
             return raw
         return current
 
@@ -2080,9 +2052,7 @@ TERMINAL_CONFIG_ENV_MAP = {
 
 
 def _terminal_env_value(value: Any) -> str:
-    if isinstance(value, (list, dict)):
-        return json.dumps(value)
-    return str(value)
+    return json.dumps(value) if isinstance(value, (list, dict)) else str(value)
 
 
 def _terminal_config_value_is_bridgeable(key: str, value: Any) -> bool:
@@ -2104,18 +2074,13 @@ def terminal_config_owned_env_vars(terminal_config: Any) -> Set[str]:
 
 def terminal_config_env_var_for_key(key: str) -> Optional[str]:
     """Return the env var mirrored by a ``terminal.*`` config key."""
-    prefix = "terminal."
-    if not key.startswith(prefix):
-        return None
-    return TERMINAL_CONFIG_ENV_MAP.get(key[len(prefix):])
+    return TERMINAL_CONFIG_ENV_MAP.get(key[len("terminal."):]) if key.startswith("terminal.") else None
 
 
 def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
     """Whether the remote SSH shell must expand *cwd* itself: ``~`` expanded on the Hermes host
     would name the host/container home instead of the SSH user's."""
-    if (backend or "").strip().lower() != "ssh":
-        return False
-    return cwd == "~" or cwd.startswith("~/")
+    return (backend or "").strip().lower() == "ssh" and (cwd == "~" or cwd.startswith("~/"))
 
 
 def apply_terminal_config_to_env(
@@ -2130,8 +2095,7 @@ def apply_terminal_config_to_env(
 
     raw_terminal_cfg = read_raw_config().get("terminal")
     file_has_terminal_config = isinstance(raw_terminal_cfg, dict)
-    if not file_has_terminal_config:
-        raw_terminal_cfg = {}
+    raw_terminal_cfg = raw_terminal_cfg if file_has_terminal_config else {}
     should_override = file_has_terminal_config if override is None else override
 
     cfg = config if config is not None else load_config_readonly()
@@ -2438,10 +2402,8 @@ def load_env() -> Dict[str, str]:
     except Exception:
         cache_key = None
 
-    if cache_key is not None and _env_cache is not None:
-        cached_key, cached_vars = _env_cache
-        if cached_key == cache_key:
-            return dict(cached_vars)
+    if cache_key is not None and _env_cache is not None and _env_cache[0] == cache_key:
+        return dict(_env_cache[1])
 
     env_vars: Dict[str, str] = {}
 
@@ -2506,8 +2468,7 @@ def _read_env_lines(env_path: Path) -> list:
     """Read ``.env`` lines, normalized. Explicit UTF-8 (Windows defaults to cp1252) with BOM
     tolerance (Notepad adds one)."""
     with open(env_path, encoding="utf-8-sig", errors="replace") as f:
-        lines = f.readlines()
-    return _sanitize_env_lines(lines)
+        return _sanitize_env_lines(f.readlines())
 
 
 def _write_env_lines(env_path: Path, lines: list, *, preserve_mode: bool) -> None:
@@ -2647,14 +2608,10 @@ def save_env_value(key: str, value: str):
     lines = _read_env_lines(env_path) if env_path.exists() else []
     serialized_value = _quote_env_value(value)
 
-    found = False
-    for i, line in enumerate(lines):
-        if _env_line_defines_key(line, key):
-            lines[i] = f"{key}={serialized_value}\n"
-            found = True
-            break
-
-    if not found:
+    idx = next((i for i, line in enumerate(lines) if _env_line_defines_key(line, key)), None)
+    if idx is not None:
+        lines[idx] = f"{key}={serialized_value}\n"
+    else:
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
         lines.append(f"{key}={serialized_value}\n")
@@ -3199,9 +3156,7 @@ def build_cron_model_impact(
 
     seen_ids: Set[str] = set()
     for job in jobs:
-        if not isinstance(job, dict):
-            continue
-        if not is_job_runnable(job) or job.get("no_agent"):
+        if not isinstance(job, dict) or not is_job_runnable(job) or job.get("no_agent"):
             continue
         job_id = _valid_cron_impact_job_id(job.get("id"))
         if not job_id or job_id in seen_ids:
