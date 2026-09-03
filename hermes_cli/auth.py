@@ -1142,8 +1142,7 @@ def _keyless_provider_has_explicit_config(normalized: str) -> bool:
 _EXPLICIT_CONFIG_CHECKS: Tuple[Tuple[Callable[[str], bool], bool], ...] = (
     (_active_provider_is, True), (_config_selects_provider, True),
     (_explicit_env_credentials_present, False), (_explicit_pool_entry_present, True),
-    (_keyless_provider_has_explicit_config, True),
-)
+    (_keyless_provider_has_explicit_config, True))
 
 
 def is_provider_explicitly_configured(provider_id: str) -> bool:
