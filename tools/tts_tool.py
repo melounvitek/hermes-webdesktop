@@ -61,8 +61,8 @@ from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by test
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
     AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
-    _pack_audio_files_for_delivery, _repair_ogg_container, _resolve_audio_delivery_profile,
-    _sniff_audio_container, _split_oversized_sentence, _split_text_for_tts, _wrap_pcm_as_wav,
+    _pack_audio_files_for_delivery, _remove_quietly, _repair_ogg_container,
+    _resolve_audio_delivery_profile, _sniff_audio_container, _split_oversized_sentence, _split_text_for_tts, _wrap_pcm_as_wav,
 )
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
     DEFAULT_ELEVENLABS_MODEL_ID, DEFAULT_ELEVENLABS_VOICE_ID, DEFAULT_GEMINI_TTS_MODEL,
@@ -139,16 +139,9 @@ def _package_installed(name: str) -> bool:
         return False
 
 
-def _check_neutts_available() -> bool:
-    return _package_installed("neutts")
-
-
-def _check_kittentts_available() -> bool:
-    return _package_installed("kittentts")
-
-
-def _check_piper_available() -> bool:
-    return _package_installed("piper")
+def _check_neutts_available() -> bool: return _package_installed("neutts")
+def _check_kittentts_available() -> bool: return _package_installed("kittentts")
+def _check_piper_available() -> bool: return _package_installed("piper")
 
 
 # --- Defaults / config ---
@@ -366,6 +359,12 @@ def _resolve_output_base(
     return file_path, None
 
 
+def _media_tag(paths: List[str], voice_compatible: bool) -> str:
+    """``MEDIA:<path>`` lines; the ``[[audio_as_voice]]`` marker asks the platform for a voice bubble."""
+    media_tag = "\n".join(f"MEDIA:{path}" for path in paths)
+    return f"[[audio_as_voice]]\n{media_tag}" if voice_compatible else media_tag
+
+
 def _tool_failure(prefix: str, provider: str, exc: BaseException) -> str:
     """Log and wrap a synthesis failure as the standard error envelope (traceback except for config errors)."""
     error_msg = f"{prefix} ({provider}): {exc}"
@@ -403,16 +402,9 @@ def _text_to_speech_single(
         file_str = _repair_ogg_container(file_str)
         file_str, voice_compatible = _finalize_voice_delivery(file_str, provider, command_provider_config, want_opus)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{os.path.getsize(file_str):,}", provider)
-
-        media_tag = f"MEDIA:{file_str}"
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
         return json.dumps({
-            "success": True,
-            "file_path": file_str,
-            "media_tag": media_tag,
-            "provider": provider,
-            "voice_compatible": voice_compatible,
+            "success": True, "file_path": file_str, "media_tag": _media_tag([file_str], voice_compatible),
+            "provider": provider, "voice_compatible": voice_compatible,
         }, ensure_ascii=False)
     except ValueError as e:
         return _tool_failure("TTS configuration error", provider, e)
@@ -510,23 +502,14 @@ def text_to_speech_tool(
         )
         for path in final_paths:
             logger.info("TTS audio saved: %s (%s bytes, provider: %s)", path, f"{os.path.getsize(path):,}", provider)
-        media_tag = "\n".join(f"MEDIA:{path}" for path in final_paths)
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
-
         return json.dumps({
-            "success": True,
-            "file_path": final_paths[0],
-            "file_paths": final_paths,
-            "media_tag": media_tag,
-            "provider": chunk_results[0].get("provider", provider),
-            "voice_compatible": voice_compatible,
-            "chunk_count": len(chunks),
-            "delivery_file_count": len(final_paths),
+            "success": True, "file_path": final_paths[0], "file_paths": final_paths,
+            "media_tag": _media_tag(final_paths, voice_compatible),
+            "provider": chunk_results[0].get("provider", provider), "voice_compatible": voice_compatible,
+            "chunk_count": len(chunks), "delivery_file_count": len(final_paths),
             "combined_chunks": bool(combined_chunks),
             "delivery_profile": {
-                "platform": delivery_profile.platform,
-                "max_file_bytes": delivery_profile.max_file_bytes,
+                "platform": delivery_profile.platform, "max_file_bytes": delivery_profile.max_file_bytes,
                 "target_file_bytes": delivery_profile.target_file_bytes,
             },
         }, ensure_ascii=False)
@@ -540,10 +523,7 @@ def text_to_speech_tool(
         final_absolute = {os.path.abspath(path) for path in final_paths}
         for artifact in generated_artifacts:
             if os.path.abspath(artifact) not in final_absolute:
-                try:
-                    os.unlink(artifact)
-                except OSError:
-                    pass
+                _remove_quietly(artifact)
 
 
 # --- check_fn ---
@@ -551,9 +531,9 @@ def text_to_speech_tool(
 def _minimax_requirements() -> bool:
     try:
         _resolve_minimax_tts_runtime(_load_tts_config())
+        return True
     except ValueError:
         return False
-    return True
 
 
 def _xai_requirements() -> bool:

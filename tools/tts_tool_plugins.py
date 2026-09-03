@@ -62,11 +62,8 @@ def _dispatch_to_plugin_provider(text: str, output_path: str, provider: str, tts
     # voice/model/speed/format are optional per the TTSProvider.synthesize contract;
     # providers fall back to their own defaults on None.
     cfg = tts_config if isinstance(tts_config, dict) else {}
-    voice = cfg.get("voice")
-    model = cfg.get("model")
-    speed = cfg.get("speed")
+    voice, model, speed = cfg.get("voice"), cfg.get("model"), cfg.get("speed")
     fmt = cfg.get("output_format", DEFAULT_COMMAND_TTS_OUTPUT_FORMAT)
-
     logger.info("Generating speech with plugin TTS provider '%s'...", key)
     written = plugin_provider.synthesize(
         text, output_path,

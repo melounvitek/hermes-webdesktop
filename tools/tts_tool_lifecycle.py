@@ -23,20 +23,13 @@ from tools.tts_command_provider import (
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
 )
+from tools.tts_tool_delivery import _origin
 from tools.tts_tool_local import (
     _LOCAL_TTS_MODEL_CACHES, _load_kittentts_model_for_config, _load_piper_voice_for_config,
 )
 from tools.tts_tool_plugins import _lookup_plugin_provider
 
 logger = logging.getLogger("tools.tts_tool")
-
-
-def _origin():
-    """``tools.tts_tool``, resolved per call so monkeypatched seams there still apply."""
-    from tools import tts_tool
-
-    return tts_tool
-
 
 _tts_lease_lock = threading.Lock()
 _tts_leases: set = set()

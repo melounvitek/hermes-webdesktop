@@ -11,6 +11,7 @@ module are resolved through :func:`_origin` at call time.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
@@ -20,22 +21,9 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Iterable, Iterator, List, Optional
 
+from tools.tts_tool_delivery import _origin, _remove_quietly as _unlink_quietly
+
 logger = logging.getLogger("tools.tts_tool")
-
-
-def _origin():
-    from tools import tts_tool
-
-    return tts_tool
-
-
-def _unlink_quietly(path: Optional[str]) -> None:
-    if path:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
 
 def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event, *, pad_tail: bool = True) -> Iterator[bytes]:
     """Yield int16-aligned byte chunks; a dangling odd byte is padded at the end (or dropped)."""
@@ -75,10 +63,8 @@ def _play_via_tempfile(audio_iter: Iterable[bytes], stop_evt: threading.Event, s
         logger.warning("Temp-file TTS fallback failed: %s", exc)
     finally:
         if tmp is not None:
-            try:
+            with contextlib.suppress(Exception):
                 tmp.close()  # idempotent; ensures close on early error
-            except Exception:
-                pass
         _unlink_quietly(tmp_path)
 
 
@@ -195,17 +181,6 @@ class _StreamerPlayback:
             logger.warning("sounddevice OutputStream failed: %s", exc)
         return None
 
-    def _reinit_output_stream(self):
-        """Close the broken PortAudio stream and try to create a fresh one."""
-        self.close_output_stream()
-        try:
-            self.output_stream = self._create_output_stream()
-            logger.info("TTS: PortAudio output stream reinitialized after error")
-        except Exception as exc:
-            logger.warning("TTS: PortAudio stream reinit failed: %s", exc)
-            self.output_stream = None
-        return self.output_stream
-
     def close_output_stream(self) -> None:
         """Always release the device so a later stream can open it."""
         if self.output_stream is not None:
@@ -262,17 +237,25 @@ class _StreamerPlayback:
         self._current_stream.write(self._np.frombuffer(buf, dtype="<i2").reshape(-1, 1))
 
     def _recover_stream(self) -> bool:
-        """Reinit the PortAudio stream after a failed write; False once ``_MAX_REINIT`` is exhausted."""
-        if self._reinit_count < self._MAX_REINIT:
-            self._reinit_count += 1
-            self._current_stream = self._reinit_output_stream()
-            return self._current_stream is not None
-        logger.warning(
-            "TTS: PortAudio reinit exhausted after %d attempts, falling back to tempfile for remaining sentences",
-            self._MAX_REINIT,
-        )
-        self._current_stream = None
-        return False
+        """Close the broken PortAudio stream and open a fresh one after a failed write; False once
+        ``_MAX_REINIT`` is exhausted (remaining sentences go through temp files)."""
+        if self._reinit_count >= self._MAX_REINIT:
+            logger.warning(
+                "TTS: PortAudio reinit exhausted after %d attempts, falling back to tempfile for remaining sentences",
+                self._MAX_REINIT,
+            )
+            self._current_stream = None
+            return False
+        self._reinit_count += 1
+        self.close_output_stream()
+        try:
+            self.output_stream = self._create_output_stream()
+            logger.info("TTS: PortAudio output stream reinitialized after error")
+        except Exception as exc:
+            logger.warning("TTS: PortAudio stream reinit failed: %s", exc)
+            self.output_stream = None
+        self._current_stream = self.output_stream
+        return self._current_stream is not None
 
     def _play_sentence_via_stream(self, chunk_queue) -> None:
         """Write one sentence's PCM to PortAudio; after an unrecoverable write failure the rest is dropped."""
@@ -302,8 +285,7 @@ class _StreamerPlayback:
         try:
             from tools.voice_mode import mark_audio_output_active
         except Exception:
-            def mark_audio_output_active(_active):
-                return None
+            mark_audio_output_active = lambda _active: None  # noqa: E731
 
         self._np = _np
         self._reinit_count = 0

@@ -32,6 +32,20 @@ from tools.tts_command_provider import (
 
 logger = logging.getLogger("tools.tts_tool")
 
+
+def _origin():
+    """``tools.tts_tool``, resolved per call so seams monkeypatched there still apply."""
+    from tools import tts_tool
+
+    return tts_tool
+
+
+def _section(tts_config: Any, key: str) -> Dict[str, Any]:
+    """``tts.<key>`` as a dict (``null``/non-dict sections read as empty)."""
+    section = tts_config.get(key) if isinstance(tts_config, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
 # Final fallback when provider isn't recognised at all.
 FALLBACK_MAX_TEXT_LENGTH = 4000
 
@@ -79,9 +93,7 @@ def _resolve_max_text_length(provider: Optional[str], tts_config: Optional[Dict[
         return FALLBACK_MAX_TEXT_LENGTH
     key = provider.lower().strip()
     cfg = tts_config or {}
-    prov_cfg = cfg.get(key)
-    if not isinstance(prov_cfg, dict):
-        prov_cfg = {}
+    prov_cfg = _section(cfg, key)
     override = _positive_int(prov_cfg.get("max_text_length"))
     if override:
         return override
@@ -240,11 +252,13 @@ def _ffmpeg_run(
     )
 
 
-def _remove_quietly(path) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+def _remove_quietly(path: Optional[str]) -> None:
+    """Best-effort unlink (missing/locked files are ignored); None is a no-op."""
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _wav_sidecar_path(output_path: str) -> str:

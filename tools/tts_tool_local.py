@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
 
-from tools.tts_tool_delivery import _finalize_wav_output, _wav_sidecar_path
+from tools.tts_tool_delivery import _finalize_wav_output, _origin, _section, _wav_sidecar_path
 
 logger = logging.getLogger("tools.tts_tool")
 
@@ -23,13 +23,6 @@ DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-nano-0.8-int8"  # 25MB
 DEFAULT_KITTENTTS_VOICE = "Jasper"
 DEFAULT_PIPER_VOICE = "en_US-lessac-medium"  # balanced size/quality
 _NEUTTS_SAMPLES = Path(__file__).parent / "neutts_samples"
-
-
-def _origin():
-    from tools import tts_tool
-
-    return tts_tool
-
 
 # --- Bounded model caches ---
 # Each cached entry is a whole loaded model (tens of MB); an unbounded dict would pin one
@@ -56,10 +49,6 @@ def _tts_cache_get_or_load(cache: Dict[str, Any], key: str, load: Callable[[], A
     while len(cache) > _TTS_MODEL_CACHE_MAX:
         cache.pop(next(iter(cache)), None)
     return value
-
-
-def _section(tts_config: Any, key: str) -> Dict[str, Any]:
-    return (tts_config.get(key) or {}) if isinstance(tts_config, dict) else {}
 
 
 def _run_helper(cmd: list, timeout: int) -> subprocess.CompletedProcess:

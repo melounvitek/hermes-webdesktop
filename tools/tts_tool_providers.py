@@ -20,18 +20,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-from tools.tts_tool_delivery import _wrap_pcm_as_wav, _write_wav_bytes_as
+from tools.tts_tool_delivery import _origin, _section, _wrap_pcm_as_wav, _write_wav_bytes_as
 from tools.xai_http import hermes_xai_user_agent
 
 logger = logging.getLogger("tools.tts_tool")
-
-
-def _origin():
-    """``tools.tts_tool``, resolved per call so monkeypatched seams there still apply."""
-    from tools import tts_tool
-
-    return tts_tool
-
 
 DEFAULT_EDGE_VOICE = "en-US-AriaNeural"
 DEFAULT_ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam
@@ -71,18 +63,12 @@ _FALSE_WORDS = {"0", "false", "no", "off", "disabled"}
 
 def _config_bool(value: Any, default: bool = False) -> bool:
     """Coerce common YAML/env bool spellings without treating random strings as true."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, (bool, int, float)):
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in _TRUE_WORDS:
-            return True
-        if normalized in _FALSE_WORDS:
-            return False
+        if normalized in _TRUE_WORDS or normalized in _FALSE_WORDS:
+            return normalized in _TRUE_WORDS
     return default
 
 
@@ -92,12 +78,6 @@ def _tts_response_format_from_path(output_path: str) -> str:
         if output_path.endswith(ext):
             return fmt
     return "mp3"
-
-
-def _section(tts_config: Dict[str, Any], key: str) -> Dict[str, Any]:
-    """``tts.<key>`` as a dict (``null``/non-dict sections read as empty)."""
-    section = tts_config.get(key) if isinstance(tts_config, dict) else None
-    return section if isinstance(section, dict) else {}
 
 
 def _require_key(env_var: str, provider_id: str, hint: str) -> str:
@@ -157,18 +137,21 @@ def _read_tts_response_bytes(response: Any, *, label: str, limit: Optional[int] 
         _close_response(response)
 
 
-def _read_tts_response_json(response: Any, *, label: str, limit: Optional[int] = None) -> Dict[str, Any]:
-    raw = _read_tts_response_bytes(response, label=label, limit=limit)
+def _parse_json_body(response: Any, raw: bytes) -> Dict[str, Any]:
+    """JSON from the already-read *raw* body. Unit-test doubles often only provide ``.json()``;
+    real ``requests`` responses took the streaming path, so production never buffers eagerly."""
     if raw:
         return json.loads(raw.decode("utf-8"))
-    # Unit-test doubles often only provide `.json()`; real requests.Response
-    # objects took the streaming path above, so production never buffers eagerly.
     if not _response_has_explicit_stream(response):
         json_reader = getattr(response, "json", None)
         if callable(json_reader):
             parsed = json_reader()
             return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _read_tts_response_json(response: Any, *, label: str, limit: Optional[int] = None) -> Dict[str, Any]:
+    return _parse_json_body(response, _read_tts_response_bytes(response, label=label, limit=limit))
 
 
 def _write_bytes(output_path: str, audio_bytes: bytes) -> str:
@@ -654,15 +637,10 @@ def _gemini_error_detail(response: Any) -> str:
     """Best-effort ``error.message`` from a non-200 Gemini reply, else the first 300 body chars."""
     raw_body = _read_tts_response_bytes(response, label="Gemini TTS")
     try:
-        if raw_body:
-            err = json.loads(raw_body.decode("utf-8")).get("error", {})
-        elif not _response_has_explicit_stream(response) and callable(getattr(response, "json", None)):
-            err = response.json().get("error", {})
-        else:
-            err = {}
-        return err.get("message") or raw_body.decode("utf-8", errors="replace")[:300]
+        message = _parse_json_body(response, raw_body).get("error", {}).get("message")
     except Exception:
-        return raw_body.decode("utf-8", errors="replace")[:300]
+        message = None
+    return message or raw_body.decode("utf-8", errors="replace")[:300]
 
 
 def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
@@ -706,13 +684,12 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     headers = {"Content-Type": "application/json"}
     if urlparse(base_url).hostname == "generativelanguage.googleapis.com":
         try:
-            import hermes_cli as _hermes_cli
+            import hermes_cli
 
-            _hermes_version = str(_hermes_cli.__version__)
+            version = str(hermes_cli.__version__)
         except Exception:
-            _hermes_version = "0.0.0"
-        # Gemini partner-integration guidance: identify the client.
-        headers["X-Goog-Api-Client"] = f"hermes-agent/{_hermes_version}"
+            version = "0.0.0"
+        headers["X-Goog-Api-Client"] = f"hermes-agent/{version}"  # partner-integration guidance
 
     response = _post_json(f"{base_url}/models/{model}:generateContent", payload, headers, params={"key": api_key})
     if response.status_code != 200:

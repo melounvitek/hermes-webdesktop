@@ -17,17 +17,10 @@ from urllib.parse import urljoin
 from tools.tool_backend_helpers import (
     NOUS_MANAGED_PROVIDER, nous_tool_gateway_unavailable_message, selection_error,
 )
+from tools.tts_tool_delivery import _origin, _section
 from tools.tts_tool_providers import _tts_response_format_from_path
 
 logger = logging.getLogger("tools.tts_tool")
-
-
-def _origin():
-    """``tools.tts_tool``, resolved per call so monkeypatched seams there still apply."""
-    from tools import tts_tool
-
-    return tts_tool
-
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts"
 # The managed OpenAI audio gateway only proxies these; anything else is 400 "Unsupported".
@@ -45,19 +38,13 @@ def _managed_openai_audio_route() -> Optional[tuple]:
     return gateway.nous_user_token, urljoin(f"{gateway.gateway_origin.rstrip('/')}/", "v1"), True
 
 
-def _openai_section(tts_config: Any, key: str) -> Dict[str, Any]:
-    """``tts.<key>`` as a dict (``tts.openai: null`` in YAML yields None — coalesce so .get() is safe)."""
-    section = tts_config.get(key) if isinstance(tts_config, dict) else None
-    return section if isinstance(section, dict) else {}
-
-
 def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
     """``(api_key, base_url, is_managed)`` for the OpenAI audio client (``is_managed`` = the restricted
     Nous proxy, so callers coerce the request). Strict on the stored ``tts`` selection: ``"nous"``
     → managed ONLY (error if unavailable); any other → direct credentials ONLY (``tts.openai.api_key``
     then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``); unset → config key → env key → managed."""
     origin = _origin()
-    openai_cfg = _openai_section(origin._load_tts_config(), "openai")
+    openai_cfg = _section(origin._load_tts_config(), "openai")
     direct_base = openai_cfg.get("base_url") or DEFAULT_OPENAI_BASE_URL
     selected = origin.read_selection("tts")
 
@@ -98,16 +85,10 @@ def _has_openai_audio_backend() -> bool:
 
 
 def _generate_openai_tts(
-    text: str,
-    output_path: str,
-    tts_config: Dict[str, Any],
-    *,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    model: Optional[str] = None,
-    voice: Optional[str] = None,
-    speed: Optional[float] = None,
-    instructions: Optional[str] = None) -> str:
+    text: str, output_path: str, tts_config: Dict[str, Any], *, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, model: Optional[str] = None, voice: Optional[str] = None,
+    speed: Optional[float] = None, instructions: Optional[str] = None,
+) -> str:
     """Generate audio via the OpenAI ``audio.speech.create`` SDK shape.
 
     Explicit kwargs let OpenAI-compatible backends (DeepInfra) supply credentials/model/voice
@@ -120,7 +101,7 @@ def _generate_openai_tts(
     if api_key is None:
         api_key, fallback_base, is_managed = _origin()._resolve_openai_audio_client_config()
 
-    oai_config = _openai_section(tts_config, "openai")
+    oai_config = _section(tts_config, "openai")
     if model is None:
         model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
     if voice is None:
@@ -178,7 +159,7 @@ def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, A
     if not api_key:
         raise ValueError("DEEPINFRA_API_KEY not set. Run `hermes setup` to configure, or set the env var directly.")
 
-    di_config = _openai_section(tts_config, "deepinfra")
+    di_config = _section(tts_config, "deepinfra")
     from hermes_cli.models import deepinfra_base_url, deepinfra_model_ids
 
     model = di_config.get("model")
@@ -192,12 +173,7 @@ def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, A
             )
         model = candidates[0]
     return _origin()._generate_openai_tts(
-        text,
-        output_path,
-        tts_config,
-        api_key=api_key,
-        base_url=deepinfra_base_url(di_config),
-        model=model,
-        voice=di_config.get("voice", DEFAULT_DEEPINFRA_TTS_VOICE),
+        text, output_path, tts_config, api_key=api_key, base_url=deepinfra_base_url(di_config),
+        model=model, voice=di_config.get("voice", DEFAULT_DEEPINFRA_TTS_VOICE),
         speed=float(di_config.get("speed", tts_config.get("speed", 1.0))),
     )
