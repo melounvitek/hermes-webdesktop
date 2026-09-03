@@ -219,9 +219,11 @@ def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cac
     _AUX_VISION_ROUTE_CACHE.clear()
 
 def _noop_stub(name: str, *params: str, result: Any = None):
-    # Recording stub: positional args are folded in under *params* (declared params default to None).
+    # Recording stub: positional args are folded in under *params* (declared params default to None). ``result`` may
+    # be a factory of the recorded kwargs; None -> a trivial ok ActionResult.
     def method(self, *pos, **kw):
-        return self._record(name, {**dict.fromkeys(params), **dict(zip(params, pos)), **kw}, result)
+        self.calls.append((name, call := {**dict.fromkeys(params), **dict(zip(params, pos)), **kw}))
+        return result(call) if callable(result) else ActionResult(ok=True, action=name) if result is None else result
     return method
 
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
@@ -234,20 +236,12 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def stop(self) -> None: pass
     def is_available(self) -> bool: return True
 
-    def _record(self, name: str, kw: Dict[str, Any], result: Any = None) -> Any:
-        self.calls.append((name, kw))
-        return ActionResult(ok=True, action=name) if result is None else result
-
-    def capture(self, mode="som", app=None, pid=None, window_id=None) -> CaptureResult:
-        return self._record("capture", {"mode": mode, "app": app, "pid": pid, "window_id": window_id},
-                            CaptureResult(mode=mode, width=1024, height=768, png_b64=None, elements=[],
-                                          app=app or "", window_title=""))
-
+    capture = _noop_stub("capture", "mode", "app", "pid", "window_id", result=lambda kw: CaptureResult(
+        mode=kw["mode"] or "som", width=1024, height=768, png_b64=None, elements=[], app=kw["app"] or "", window_title=""))
     click, drag, scroll = _noop_stub("click"), _noop_stub("drag"), _noop_stub("scroll")
     type_text, key, set_value = _noop_stub("type", "text"), _noop_stub("key", "keys"), _noop_stub("set_value", "value", "element")
     list_apps, list_windows = _noop_stub("list_apps", result=[]), _noop_stub("list_windows", result=[])
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        return self._record("focus_app", {"app": app, "raise": raise_window})
+    focus_app = _noop_stub("focus_app", "app", "raise_window")
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
