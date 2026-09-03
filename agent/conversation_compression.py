@@ -4189,33 +4189,24 @@ def _commit_compaction(
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).
                 from agent.context_compressor import (
                     PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY,
+                    stamp_db_persisted_markers,
                 )
 
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
-                _tail_count = sum(
-                    1 for m in compressed if id(m) in _tail_tagged_ids
-                )
                 agent._session_db.archive_and_compact(
                     agent.session_id,
                     compressed,
-                    model_config_patch={
-                        PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None,
-                    },
+                    model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
                     watermark=lease.watermark,
                     lock_holder=lease.holder,
-                    tail_count=_tail_count,
+                    tail_count=sum(1 for m in compressed if id(m) in _tail_tagged_ids),
                 )
                 split_status = "in_place_committed"
                 # compress() returned marker-swept copies; stamp them as persisted or the next
-                # flush re-INSERTs the whole compacted transcript, doubling the live set.
-                from agent.context_compressor import (
-                    stamp_db_persisted_markers,
-                )
-
+                # flush re-INSERTs the whole compacted transcript, doubling the live set. Reset
+                # the flush identity set so next turn diffs against the COMPACTED transcript.
                 stamp_db_persisted_markers(compressed)
-                # Reset flush identity set so next turn diffs against the COMPACTED transcript:
-                # only genuinely new messages append (no summary dup, no resurrected turns).
                 agent._flushed_db_message_ids = set()
                 # Rotation-independent signal; the gateway reads this (not an id diff) to
                 # re-baseline transcript handling.
@@ -4246,31 +4237,24 @@ def _commit_compaction(
                 agent._flushed_db_message_session_id = agent.session_id
             session_commit_succeeded = True
         except Exception as e:
-            if (
-                not in_place
-                and old_session_id
-                and agent.session_id == old_session_id
-            ):
-                # Atomic publication failed (including lease loss): keep the
-                # parent live and discard the stale compacted snapshot.
-                old_session_id = None
-                # _db_flush_scan_prefix is intentionally NOT cleared: the scan is identity-based
-                # and the deepcopy replaces every row. A failed parent flush clears its own; the
-                # snapshot path leaves the live list untouched. Recheck both before adding one.
-                messages[:] = copy.deepcopy(messages_before_compression)
-                compressed = messages
-                made_progress = False
-                # Only the runway rolls back: the full snapshot restore is for pre-commit
-                # cancels (telemetry keeps failed values).
-                _restore_prune_rearm_tokens(agent.context_compressor, attempt_snapshot)
-            elif (
+            # Rotation: atomic publication failed (including lease loss) — keep the parent
+            # live and discard the stale compacted snapshot. In-place: archive_and_compact is
+            # atomic so old rows stay active, but marker-swept `compressed` would re-INSERT on
+            # top of them (doubling each try); gate on split_status (set right after commit).
+            # Either way the deepcopy keeps markers/identity and only the prune runway rolls
+            # back (the full snapshot restore is for pre-commit cancels; telemetry keeps the
+            # failed values). _db_flush_scan_prefix is intentionally NOT cleared: the scan is
+            # identity-based and the deepcopy replaces every row.
+            rotation_rollback = (
+                not in_place and old_session_id and agent.session_id == old_session_id
+            )
+            if rotation_rollback or (
                 in_place
                 and split_status != "in_place_committed"
                 and messages_before_compression is not None
             ):
-                # In-place rollback: archive_and_compact is atomic so old rows stay active, but
-                # marker-swept `compressed` would re-INSERT on top of them (doubling each try).
-                # Gate on split_status (set right after commit); deepcopy keeps markers/identity
+                if rotation_rollback:
+                    old_session_id = None
                 messages[:] = copy.deepcopy(messages_before_compression)
                 compressed = messages
                 made_progress = False
