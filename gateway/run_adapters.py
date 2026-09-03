@@ -145,11 +145,9 @@ class GatewayAdapterLifecycleMixin:
         override = self._env_timeout_override("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT")
         if override is not None:
             return override
-        if platform == Platform.TELEGRAM:
-            if initial:
-                return _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT
-            return _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT
-        return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+        if platform != Platform.TELEGRAM:
+            return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+        return _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT if initial else _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT
 
     async def _connect_adapter_with_timeout(
         self, adapter, platform, *, is_reconnect: bool = False, initial: bool = False

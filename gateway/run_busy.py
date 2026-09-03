@@ -691,16 +691,9 @@ class GatewayBusySessionMixin:
         """Slash handlers dispatched only on the idle path (busy dispatch has its own allowlist)."""
         return self._command_handler_table(self._IDLE_COMMANDS)
 
-    # busy_handler key (hermes_cli/commands.py CommandDef) → mid-run variant method name.
+    # busy_handler key (hermes_cli/commands.py CommandDef) → mid-run variant ``_busy_<key>_command``.
     _BUSY_SPECIAL_HANDLERS: Dict[str, str] = {
-        "start": "_busy_start_command",
-        "stop": "_busy_stop_command",
-        "new": "_busy_new_command",
-        "queue": "_busy_queue_command",
-        "steer": "_busy_steer_command",
-        "egress": "_busy_egress_command",
-        "goal": "_busy_goal_command",
-        "loop": "_busy_loop_command",
+        k: f"_busy_{k}_command" for k in ("start", "stop", "new", "queue", "steer", "egress", "goal", "loop")
     }
 
     async def _dispatch_busy_slash_command(self, event: MessageEvent, cmd_def, quick_key: str, source):
@@ -712,7 +705,6 @@ class GatewayBusySessionMixin:
         name = cmd_def.name
         policy = getattr(cmd_def, "busy_policy", "reject")
         handler_key = getattr(cmd_def, "busy_handler", None)
-
         if handler_key:
             special = self._BUSY_SPECIAL_HANDLERS.get(handler_key)
             if special is not None:
@@ -720,7 +712,6 @@ class GatewayBusySessionMixin:
             reject_text = self._BUSY_REJECT_TEXT.get(handler_key)
             if reject_text is not None:
                 return reject_text
-
         if policy in ("dispatch", "interrupt_then_dispatch"):
             plain = self._gateway_plain_command_handlers().get(name)
             if plain is not None:
