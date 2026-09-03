@@ -1,8 +1,7 @@
 """Process Registry -- in-memory registry for background processes spawned via
-terminal(background=true): rolling 200KB output buffer, poll/log/wait/kill, crash
-recovery via a JSON checkpoint, and session-scoped tracking for gateway reset
-protection. Nothing runs on the host unless TERMINAL_ENV=local; other backends run
-the command inside their sandbox through the environment interface.
+terminal(background=true): rolling 200KB output buffer, poll/log/wait/kill, JSON
+checkpoint for crash recovery, session-scoped tracking for gateway reset protection.
+Nothing runs on the host unless TERMINAL_ENV=local; other backends run in their sandbox.
 """
 
 import codecs
@@ -95,13 +94,13 @@ def _worker_memory_max_bytes() -> int:
                 override, _MIN_WORKER_MEMORY_MAX_BYTES // (1024 * 1024))
     candidates: List[int] = []
     with suppress(OSError, ValueError):
-        for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
-            if line.startswith("0::"):
-                relative = line.partition("::")[2].lstrip("/")
-                raw_limit = (Path("/sys/fs/cgroup") / relative / "memory.max").read_text(encoding="utf-8").strip()
-                if raw_limit.isdigit() and int(raw_limit) >= _MIN_WORKER_MEMORY_MAX_BYTES:
-                    candidates.append(int(raw_limit))
-                break
+        lines = Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
+        v2 = next((ln for ln in lines if ln.startswith("0::")), None)
+        if v2 is not None:
+            relative = v2.partition("::")[2].lstrip("/")
+            raw_limit = (Path("/sys/fs/cgroup") / relative / "memory.max").read_text(encoding="utf-8").strip()
+            if raw_limit.isdigit() and int(raw_limit) >= _MIN_WORKER_MEMORY_MAX_BYTES:
+                candidates.append(int(raw_limit))
     with suppress(OSError, ValueError, TypeError):
         physical_bytes = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
         candidates.append(min(_WORKER_MEMORY_MAX_CAP_BYTES, max(_MIN_WORKER_MEMORY_MAX_BYTES, physical_bytes // 2)))
@@ -126,9 +125,8 @@ def _systemd_scope_cached() -> Optional[bool]:
     expires after ``_SYSTEMD_SCOPE_FAILURE_TTL_SECONDS`` so a D-Bus blip isn't sticky."""
     if _SYSTEMD_SCOPE_AVAILABLE is True:
         return True
-    if _SYSTEMD_SCOPE_AVAILABLE is False and time.monotonic() - _SYSTEMD_SCOPE_PROBED_AT < _SYSTEMD_SCOPE_FAILURE_TTL_SECONDS:
-        return False
-    return None
+    stale = time.monotonic() - _SYSTEMD_SCOPE_PROBED_AT >= _SYSTEMD_SCOPE_FAILURE_TTL_SECONDS
+    return None if _SYSTEMD_SCOPE_AVAILABLE is None or stale else False
 
 
 def _systemd_run_user_scope_available() -> bool:
@@ -627,36 +625,37 @@ class ProcessRegistry:
     @staticmethod
     def _config_value(section: str, key: str, fallback):
         """``config.yaml`` value for ``section.key``, else the DEFAULT_CONFIG value.
-
         Raises if config is unreadable; callers wrap with their own hard fallback so
-        registry code paths never crash on a broken config file.
-        """
+        registry code paths never crash on a broken config file."""
         from hermes_cli.config import DEFAULT_CONFIG, cfg_get, read_raw_config
 
         val = cfg_get(read_raw_config(), section, key)
         return DEFAULT_CONFIG[section][key] if val is None else val
 
     @staticmethod
-    def _daemon_term_grace_seconds() -> float:
-        """Grace (s) between SIGTERM and escalated SIGKILL, floored at 0 (0 disables
-        escalation): ``terminal.daemon_term_grace_seconds``; 2.0 if config is unreadable."""
+    def _config_seconds(key: str, fallback: float) -> float:
+        """``terminal.<key>`` as a non-negative float (0 disables); *fallback* if unreadable."""
         try:
-            return max(float(ProcessRegistry._config_value("terminal", "daemon_term_grace_seconds", 2.0)), 0.0)
+            return max(float(ProcessRegistry._config_value("terminal", key, fallback)), 0.0)
         except Exception:
-            return 2.0
+            return fallback
+
+    @staticmethod
+    def _daemon_term_grace_seconds() -> float:
+        """Grace (s) between SIGTERM and escalated SIGKILL; 0 disables escalation."""
+        return ProcessRegistry._config_seconds("daemon_term_grace_seconds", 2.0)
 
     @classmethod
     def _terminate_host_pid(cls, pid: int, expected_start: Optional[int] = None) -> None:
         """Terminate a host-visible PID and its descendants.
 
-        ``expected_start`` (kernel start time at spawn) is re-validated first: a
-        mismatch or dead PID means the number was recycled onto a stranger and we
-        refuse to touch it — a leaked orphan beats tree-killing someone's browser.
-        POSIX: psutil SIGTERMs children before the parent so subprocess trees aren't
-        reparented to init and survive; survivors are SIGKILLed after
-        ``terminal.daemon_term_grace_seconds``. Windows: ``taskkill /PID <pid> /T /F``
-        (psutil is unusable there — stale PPID links miss orphans and ``terminate()``
-        is a single-handle ``TerminateProcess()``); bare ``os.kill`` is the fallback.
+        ``expected_start`` (kernel start time at spawn) is re-validated first: a mismatch
+        or dead PID means the number was recycled onto a stranger and we refuse to touch
+        it — a leaked orphan beats tree-killing someone's browser. POSIX: psutil SIGTERMs
+        children before the parent (so trees aren't reparented to init and survive), then
+        SIGKILLs survivors after ``terminal.daemon_term_grace_seconds``. Windows:
+        ``taskkill /T /F`` (psutil's stale PPID links miss orphans there); ``os.kill``
+        is the fallback.
         """
         if expected_start is not None and not cls._host_pid_is_ours(pid, expected_start):
             logger.warning(
@@ -670,9 +669,9 @@ class ProcessRegistry:
         if _IS_WINDOWS:
             try:
                 subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
-                    creationflags=windows_hide_flags(), stdin=subprocess.DEVNULL)
+                    ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=10, creationflags=windows_hide_flags(),
+                    stdin=subprocess.DEVNULL)
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
                 _sigterm_quietly()
             return
@@ -840,26 +839,29 @@ class ProcessRegistry:
         try:
             self._track_started(session, self._reader_loop, f"proc-reader-{session.id}")
         except Exception:
-            # Post-Popen setup failed — kill the orphaned subprocess (and any setsid
-            # descendants) before re-raising so nothing leaks untracked.
-            with suppress(Exception):
-                if session.systemd_unit:
-                    # Scope teardown is the authoritative cleanup for the worker cgroup
-                    # (never killpg here); the wrapper PID is terminated as fallback.
-                    _stop_systemd_unit(session.systemd_unit)
-                    self._terminate_host_pid(proc.pid, session.host_start_time)
-                elif not _IS_WINDOWS:
-                    try:
-                        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-                        os.killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
-                    except (ProcessLookupError, PermissionError, OSError):
-                        proc.kill()
-                else:
-                    proc.kill()
-            with suppress(Exception):
-                proc.wait(timeout=5)
+            self._reap_untracked(session, proc)
             raise
         return session
+
+    def _reap_untracked(self, session: ProcessSession, proc: subprocess.Popen) -> None:
+        """Post-Popen setup failed: kill the orphaned subprocess (and any setsid
+        descendants) so nothing leaks untracked."""
+        with suppress(Exception):
+            if session.systemd_unit:
+                # Scope teardown is the authoritative cleanup for the worker cgroup
+                # (never killpg here); the wrapper PID is terminated as fallback.
+                _stop_systemd_unit(session.systemd_unit)
+                self._terminate_host_pid(proc.pid, session.host_start_time)
+            elif not _IS_WINDOWS:
+                try:
+                    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+                    os.killpg(os.getpgid(proc.pid), kill_signal)  # windows-footgun: ok - guarded by _IS_WINDOWS above
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.kill()
+            else:
+                proc.kill()
+        with suppress(Exception):
+            proc.wait(timeout=5)
 
     def spawn_via_env(
         self, env: Any, command: str, cwd: str = None, task_id: str = "", session_key: str = "",
@@ -905,14 +907,13 @@ class ProcessRegistry:
     def _reader_loop(self, session: ProcessSession):
         """Background thread: read stdout from a local Popen process.
 
-        Uses ``buffer.read1(4096)`` not ``TextIOWrapper.read(4096)``: on pipes the
-        latter blocks until EOF, landing "live" output in one burst at exit.
-        Orphaned-pipe guard: a backgrounded grandchild (``node server.js &``) inherits
-        our pipe's write end, so EOF never arrives while it lives — a blocking read
-        would park this thread and ``notify_on_complete`` never fire. On POSIX we
-        ``select()`` with a short interval and stop draining shortly after the direct
-        child exits (mirrors ``environments/base.py::_wait_for_process``); Windows
-        pipes lack select(), so the lazy ``_reconcile_local_exit`` is the safety net.
+        ``buffer.read1(4096)`` not ``TextIOWrapper.read(4096)``: on pipes the latter
+        blocks until EOF, landing "live" output in one burst at exit. Orphaned-pipe
+        guard: a backgrounded grandchild (``node server.js &``) inherits our pipe's write
+        end so EOF never arrives while it lives, which would park this thread and never
+        fire ``notify_on_complete``; on POSIX we ``select()`` and stop draining shortly
+        after the direct child exits (mirrors ``environments/base.py::_wait_for_process``).
+        Windows pipes lack select(), so the lazy ``_reconcile_local_exit`` is the net.
         """
         first_chunk = True
         # A multibyte UTF-8 char split across read1() chunks would become U+FFFD with
@@ -1117,16 +1118,14 @@ class ProcessRegistry:
     ) -> dict:
         """Bounded linger for ``notify_on_complete`` background processes at one-shot exit.
 
-        A one-shot CLI run (``hermes -q/-Q/-z``) exits when its turn ends; any background
-        process it spawned still holds a stdout pipe owned by the dying parent and dies
-        of SIGPIPE seconds later (Bot Mode handoff replies were the visible casualty).
-        Only ``notify_on_complete`` processes carry a completion contract — servers/
-        daemons/watchers aren't the parent's to wait for.
-
-        ``task_id=None`` waits on every tracked process. ``timeout=None`` reads
-        ``terminal.oneshot_completion_wait_seconds``; ``<= 0`` disables. Each
-        ``poll_interval`` pass re-reconciles child state so an orphaned-pipe exit can't
-        wedge the linger. Returns ``{"waited", "completed", "timed_out"}`` id lists.
+        A one-shot CLI run (``hermes -q/-Q/-z``) exits when its turn ends; a background
+        process it spawned still holds a stdout pipe owned by the dying parent and dies of
+        SIGPIPE seconds later (Bot Mode handoff replies were the visible casualty). Only
+        ``notify_on_complete`` processes carry a completion contract — servers/daemons/
+        watchers aren't the parent's to wait for. ``task_id=None`` waits on every tracked
+        process; ``timeout=None`` reads ``terminal.oneshot_completion_wait_seconds`` (``<= 0``
+        disables). Each pass re-reconciles child state so an orphaned-pipe exit can't wedge
+        the linger. Returns ``{"waited", "completed", "timed_out"}`` id lists.
         """
         if timeout is None:
             timeout = self._oneshot_completion_wait_seconds()
@@ -1181,12 +1180,8 @@ class ProcessRegistry:
 
     @staticmethod
     def _oneshot_completion_wait_seconds() -> float:
-        """Linger (s) for one-shot exits with pending notify_on_complete processes:
-        ``terminal.oneshot_completion_wait_seconds`` (0 disables), 600 if unreadable."""
-        try:
-            return max(float(ProcessRegistry._config_value("terminal", "oneshot_completion_wait_seconds", 600.0)), 0.0)
-        except Exception:
-            return 600.0
+        """Linger (s) for one-shot exits with pending notify_on_complete processes; 0 disables."""
+        return ProcessRegistry._config_seconds("oneshot_completion_wait_seconds", 600.0)
 
     def _drain_should_skip(self, session_id: str, *, skip_poll_observed: bool = True) -> bool:
         """Skip a completion the CLI agent already has this turn — consumed via wait/log
@@ -1224,14 +1219,13 @@ class ProcessRegistry:
     ) -> "list[tuple[dict, str]]":
         """Pop all pending events and return ``(raw_event, formatted_text)`` pairs.
 
-        Skips completions per ``_drain_should_skip`` (gateway/TUI callers pass
-        ``skip_poll_observed=False``). Routing: async-delegation events always need
-        ownership proof; ordinary events need it once they carry ``session_key`` or
-        ``origin_ui_session_id``. ``owns_event(evt)`` (strongest; the TUI passes a
-        compression-chain-aware check) consumes ONLY on True; ``session_key`` uses
-        plain equality. Non-owned routed events are re-queued for their owner. With no
-        filter every event is consumed (legacy single-session), except restored
-        delegation payloads, which stay fail-closed.
+        Skips completions per ``_drain_should_skip`` (gateway/TUI pass
+        ``skip_poll_observed=False``). Routing (``_owns_event``): async-delegation events
+        always need ownership proof, ordinary events once they carry ``session_key`` or
+        ``origin_ui_session_id``; ``owns_event(evt)`` (strongest; the TUI passes a
+        compression-chain-aware check) consumes ONLY on True, ``session_key`` uses plain
+        equality; non-owned events are re-queued for their owner. No filter consumes
+        everything (legacy single-session) except restored delegation payloads (fail-closed).
         """
         results: "list[tuple[dict, str]]" = []
         requeue: "list[dict]" = []
@@ -1250,7 +1244,8 @@ class ProcessRegistry:
             # Routing happened first so a foreign session cannot drop the owner's
             # event via its own consumed/observed state.
             _evt_sid = evt.get("session_id", "")
-            if evt.get("type") == "completion" and self._drain_should_skip(_evt_sid, skip_poll_observed=skip_poll_observed):
+            if evt.get("type") == "completion" and self._drain_should_skip(
+                _evt_sid, skip_poll_observed=skip_poll_observed):
                 continue
             # Subagent-owned process notifications are suppressed by default — the
             # child's delegation result is the deliverable. Judge ownership on
@@ -1326,7 +1321,6 @@ class ProcessRegistry:
         if rc is None:
             return  # Direct child still running — reader block is legitimate.
         # Best-effort non-blocking drain of whatever the reader hasn't consumed.
-        drained = ""
         stdout = getattr(proc, "stdout", None)
         if stdout is not None and not _IS_WINDOWS:
             try:
@@ -1337,7 +1331,7 @@ class ProcessRegistry:
                 try:
                     chunk = stdout.read()
                     if chunk:
-                        drained = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+                        session.append_output(chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace"))
                 except (BlockingIOError, OSError, ValueError):
                     pass
                 finally:
@@ -1345,8 +1339,6 @@ class ProcessRegistry:
                         fcntl.fcntl(fd, fcntl.F_SETFL, flags)
             except Exception as e:
                 logger.debug("Non-blocking drain failed for %s: %s", session.id, e)
-        if drained:
-            session.append_output(drained)
         with session._lock:
             session.mark_exited(rc)
         logger.info(
@@ -1378,16 +1370,15 @@ class ProcessRegistry:
             "output_preview": output_preview,
         }
         if session.exited:
-            result["exit_code"] = session.exit_code
-            result["completion_reason"] = session.completion_reason
-            result["termination_source"] = session.termination_source
+            result.update(
+                exit_code=session.exit_code, completion_reason=session.completion_reason,
+                termination_source=session.termination_source)
             # Read-only: record in _poll_observed (CLI inline dedup) but NOT in
             # _completion_consumed, or a status check would suppress the watcher's
             # autonomous delivery turn. See __init__.
             self._poll_observed.add(session_id)
         if session.detached:
-            result["detached"] = True
-            result["note"] = "Process recovered after restart -- output history unavailable"
+            result.update(detached=True, note="Process recovered after restart -- output history unavailable")
         return result
 
     def read_log(self, session_id: str, offset: int | None = None, limit: int = 200) -> dict:
@@ -1433,16 +1424,15 @@ class ProcessRegistry:
             max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
         except (ValueError, TypeError):
             max_timeout = 180
-        timeout_note = None
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:
             return {"status": "error", "error": f"timeout must be positive (got {timeout})"}
+        timeout_note = None
+        effective_timeout = timeout or max_timeout
         if timeout and timeout > max_timeout:
             effective_timeout = max_timeout
             timeout_note = f"Requested wait of {timeout}s was clamped to configured limit of {max_timeout}s"
-        else:
-            effective_timeout = timeout or max_timeout
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
@@ -1479,7 +1469,8 @@ class ProcessRegistry:
             # this result as an error.
             "process_running": True,
         }
-        base_note = f"Wait window of {effective_timeout}s elapsed — the process is still running. This is not an error."
+        base_note = (
+            f"Wait window of {effective_timeout}s elapsed — the process is still running. This is not an error.")
         if session.started_at:
             base_note += f" Uptime: {int(time.time() - session.started_at)}s."
         base_note += (
@@ -1712,8 +1703,7 @@ class ProcessRegistry:
                 entry["session_scoped"] = True
             # Trigger metadata for goal-loop judges (a watcher may never exit).
             if s.watch_patterns and not s._watch_disabled:
-                entry["watch_patterns"] = list(s.watch_patterns)
-                entry["watch_hit"] = s._watch_hits > 0
+                entry.update(watch_patterns=list(s.watch_patterns), watch_hit=s._watch_hits > 0)
             if s.notify_on_complete:
                 entry["notify_on_complete"] = True
             if s.exited:
@@ -1853,8 +1843,7 @@ class ProcessRegistry:
             # Alive AND the same process: across a restart the kernel may have
             # recycled the PID onto a stranger, and adopting it would let a later
             # kill tree-kill e.g. a browser.
-            recorded_start = entry.get("host_start_time")
-            if not self._host_pid_is_ours(pid, recorded_start):
+            if not self._host_pid_is_ours(pid, entry.get("host_start_time")):
                 if self._is_host_pid_alive(pid):
                     logger.info(
                         "Not recovering session %s: pid %d is alive but its "
