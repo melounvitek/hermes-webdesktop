@@ -531,13 +531,6 @@ def _is_local_path_reference(value: str) -> bool:
     return value.startswith(("/", "./", "../", "~/", ".\\", "..\\", "~\\")) or "/" in value or "\\" in value
 
 
-def _path_from_file_uri(uri: str) -> Path | str:
-    parsed = urlparse(uri)
-    if parsed.netloc not in {"", "localhost"}:
-        return f"Unsupported non-local file URI: {uri}"
-    return Path(url2pathname(parsed.path)).expanduser()
-
-
 def _clean_config_value(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -1684,26 +1677,20 @@ class OpenVikingMemoryProvider(MemoryProvider):
     # -- typed settings ------------------------------------------------------
 
     @staticmethod
-    def _parse_bool(value: Any) -> Optional[bool]:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        return None
-
-    @staticmethod
-    def _parse_number(value: Any, *, integer: bool) -> Optional[float | int]:
+    def _parse_setting_value(value: Any, kind: str) -> Optional[bool | int | float]:
+        """Parse per schema ``kind`` (boolean / integer / number); None when invalid."""
+        if kind == "boolean":
+            if isinstance(value, bool):
+                return value
+            normalized = value.strip().lower() if isinstance(value, str) else None
+            return True if normalized in {"1", "true", "yes", "on"} else False if normalized in {"0", "false", "no", "off"} else None
         try:
             if isinstance(value, bool):
                 return None
             numeric = float(value)
-            if not math.isfinite(numeric) or (integer and not numeric.is_integer()):
+            if not math.isfinite(numeric) or (kind == "integer" and not numeric.is_integer()):
                 return None
-            return int(numeric) if integer else numeric
+            return int(numeric) if kind == "integer" else numeric
         except (TypeError, ValueError, OverflowError):
             return None
 
@@ -1718,10 +1705,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             value, source = env_value, spec["env_var"]
         else:
             value, source = provider_config.get(key, default), f"memory.openviking.{key}"
-        if spec["type"] == "boolean":
-            parsed = cls._parse_bool(value)
-        else:
-            parsed = cls._parse_number(value, integer=(spec["type"] == "integer"))
+        parsed = cls._parse_setting_value(value, spec["type"])
         if parsed is None:
             warning_key = (source, repr(value))
             with _INVALID_SETTING_WARNINGS_LOCK:
@@ -1846,36 +1830,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 return resolved
         return str(getattr(active, "_user", "") or getattr(self, "_user", "") or "default").strip() or "default"
 
-    def _read_session_start_memory_parts(self, *, client: Optional[_VikingClient] = None, deadline: float, request_timeout: float) -> Dict[str, Any]:
-        """{profile, preferences, entities, uris}; profile is None when the profile read failed
-        for any reason other than absence (404/410), and {} without a client."""
-        active_client = client or self._client
-        if not active_client:
-            return {}
-        empty = {"profile": None, "preferences": [], "entities": []}
-
-        def budgeted_get(path: str, params: dict) -> Any:
-            return active_client.get(path, params=params, timeout=self._remaining_recall_timeout(deadline, request_timeout))
-
-        try:
-            user = self._user_space(active_client, timeout=self._remaining_recall_timeout(deadline, request_timeout))
-        except Exception:
-            return empty
-        uris = tuple(f"viking://user/{user}/{suffix}" for suffix in _SESSION_START_SUFFIXES)
-        try:
-            profile = self._extract_text_content(budgeted_get("/api/v1/content/read", {"uri": uris[0]}))
-        except Exception as e:
-            if _status_code_from_error(e) not in {404, 410}:
-                return empty
-            profile = ""
-        listings = []
-        for uri in uris[1:]:
-            try:
-                listings.append(self._extract_memory_listing(budgeted_get("/api/v1/fs/ls", {"uri": uri, **_SESSION_START_LIST_PARAMS})))
-            except Exception:
-                listings.append([])
-        return {"profile": profile, "preferences": listings[0], "entities": listings[1], "uris": uris}
-
     @staticmethod
     def _assemble_session_start_memory_block(profile: str, preference_lines: List[str], entity_lines: List[str],
                                              profile_uri: str = "viking://user/default/memories/profile.md") -> str:
@@ -1942,23 +1896,44 @@ class OpenVikingMemoryProvider(MemoryProvider):
         return cls._assemble_session_start_memory_block(profile_text, preference_lines, entity_lines, profile_uri=profile_uri)
 
     def _session_start_memory_context(self, session_id: str) -> str:
+        """Once per session: profile + preferences/entities listings. Skipped (not latched) when
+        the profile read fails for any reason other than absence (404/410) or no client is set."""
         session_key = session_id or self._session_id or "__openviking_default_session__"
         if session_key in self._profile_prefetched_sessions:
             return ""
         try:
+            client = self._client
+            if not client:
+                return ""
             cfg = self._recall_config()
-            raw_parts = self._read_session_start_memory_parts(
-                deadline=time.monotonic() + cfg["timeout_seconds"], request_timeout=cfg["request_timeout_seconds"],
-            )
+            deadline, request_timeout = time.monotonic() + cfg["timeout_seconds"], cfg["request_timeout_seconds"]
+
+            def budgeted_get(path: str, params: dict) -> Any:
+                return client.get(path, params=params, timeout=self._remaining_recall_timeout(deadline, request_timeout))
+
+            try:
+                user = self._user_space(client, timeout=self._remaining_recall_timeout(deadline, request_timeout))
+            except Exception:
+                return ""
+            uris = tuple(f"viking://user/{user}/{suffix}" for suffix in _SESSION_START_SUFFIXES)
+            try:
+                profile = self._extract_text_content(budgeted_get("/api/v1/content/read", {"uri": uris[0]}))
+            except Exception as e:
+                if _status_code_from_error(e) not in {404, 410}:
+                    return ""
+                profile = ""
+            listings = []
+            for uri in uris[1:]:
+                try:
+                    listings.append(self._extract_memory_listing(budgeted_get("/api/v1/fs/ls", {"uri": uri, **_SESSION_START_LIST_PARAMS})))
+                except Exception:
+                    listings.append([])
         except Exception as e:
             logger.debug("OpenViking session-start memory prefetch failed: %s", e)
             return ""
-        if raw_parts.get("profile") is None:
-            return ""
         self._profile_prefetched_sessions.add(session_key)
         return self._build_session_start_memory_block(
-            profile=raw_parts["profile"], preferences=raw_parts.get("preferences") or [], entities=raw_parts.get("entities") or [],
-            token_budget=self._profile_token_budget(), uris=raw_parts["uris"],
+            profile=profile, preferences=listings[0], entities=listings[1], token_budget=self._profile_token_budget(), uris=uris,
         )
 
     # -- recall ranking ------------------------------------------------------
@@ -1979,18 +1954,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         return str(item.get("uri") or "").strip()
 
     @classmethod
-    def _dedupe_key(cls, item: Dict[str, Any]) -> str:
-        """Same abstract+category collapses to one hit, except events/cases which stay URI-distinct."""
-        uri = str(item.get("uri") or "").strip()
-        category = str(item.get("category") or "").strip().lower() or "unknown"
-        abstract = " ".join(cls._recall_abstract(item).lower().split())
-        if abstract and "/events/" not in uri.lower() and "/cases/" not in uri.lower():
-            return f"abstract:{category}:{abstract}"
-        return f"uri:{uri}"
-
-    @classmethod
     def _select_recall_candidates(cls, items: List[Dict[str, Any]], query: str, *, limit: int, score_threshold: float) -> List[Dict[str, Any]]:
-        """Threshold + dedupe (uri, then abstract key), ranked by score + L2 leaf boost + query-token overlap."""
+        """Threshold + dedupe (uri, then abstract+category — events/cases stay URI-distinct),
+        ranked by score + L2 leaf boost + query-token overlap."""
         tokens = ["".join(ch for ch in raw if ch.isalnum()) for raw in query.lower().replace("_", " ").split()]
         tokens = [token for token in tokens if len(token) >= 2][:8]
 
@@ -2005,7 +1971,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
             uri = str(item.get("uri") or "").strip()
             if not uri or uri in seen_uri or cls._clamp_score(item.get("score")) < score_threshold:
                 continue
-            key = cls._dedupe_key(item)
+            abstract = " ".join(cls._recall_abstract(item).lower().split())
+            if abstract and "/events/" not in uri.lower() and "/cases/" not in uri.lower():
+                key = f"abstract:{str(item.get('category') or '').strip().lower() or 'unknown'}:{abstract}"
+            else:
+                key = f"uri:{uri}"
             if key in seen_key:
                 continue
             seen_uri.add(uri)
@@ -2014,32 +1984,24 @@ class OpenVikingMemoryProvider(MemoryProvider):
         filtered.sort(key=rank, reverse=True)
         return filtered[:limit]
 
-    def _resolve_recall_content(self, client: _VikingClient, item: Dict[str, Any], *, prefer_abstract: bool,
-                                deadline: float, request_timeout: float, read_state: Dict[str, int], full_read_limit: int) -> str:
-        abstract = self._recall_abstract(item)
-        has_explicit_summary = any(isinstance(item.get(key), str) and item.get(key).strip() for key in _RECALL_SUMMARY_KEYS)
-        if prefer_abstract and has_explicit_summary:
-            return abstract
-        uri = str(item.get("uri") or "")
-        if uri and (item.get("level") == 2 or not has_explicit_summary) and read_state["full_reads"] < full_read_limit:
-            try:
-                timeout = self._remaining_recall_timeout(deadline, request_timeout)
-                read_state["full_reads"] += 1
-                content = self._extract_text_content(client.get("/api/v1/content/read", params={"uri": uri}, timeout=timeout), strict=True)
-                if content:
-                    return content
-            except Exception as e:
-                logger.debug("OpenViking prefetch full read failed for %s: %s", uri, e)
-        return abstract
-
     def _build_prefetch_entries(self, client: _VikingClient, items: List[Dict[str, Any]], *, prefer_abstract: bool,
                                 max_injected_chars: int, deadline: float, request_timeout: float, full_read_limit: int) -> List[str]:
+        """One entry per item: abstract, or a full L2 read (budgeted by ``full_read_limit``) for
+        leaf hits / items without an explicit summary; total size capped by ``max_injected_chars``."""
         entries: List[str] = []
         total_chars = 0
-        read_state = {"full_reads": 0}
+        full_reads = 0
         for item in items:
-            content = self._resolve_recall_content(client, item, prefer_abstract=prefer_abstract, deadline=deadline,
-                                                   request_timeout=request_timeout, read_state=read_state, full_read_limit=full_read_limit)
+            content = self._recall_abstract(item)
+            has_explicit_summary = any(isinstance(item.get(key), str) and item.get(key).strip() for key in _RECALL_SUMMARY_KEYS)
+            uri = str(item.get("uri") or "")
+            if not (prefer_abstract and has_explicit_summary) and uri and (item.get("level") == 2 or not has_explicit_summary) and full_reads < full_read_limit:
+                try:
+                    timeout = self._remaining_recall_timeout(deadline, request_timeout)
+                    full_reads += 1
+                    content = self._extract_text_content(client.get("/api/v1/content/read", params={"uri": uri}, timeout=timeout), strict=True) or content
+                except Exception as e:
+                    logger.debug("OpenViking prefetch full read failed for %s: %s", uri, e)
             if not content:
                 continue
             category = str(item.get("category") or "").strip() or "memory"
@@ -2371,17 +2333,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return []
         sessions: List[tuple[str, str]] = []
         for path in sorted(directory.glob("*.json")):
-            sid = owner_run_id = ""
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    sid = str(raw.get("session_id") or "").strip()
-                    owner_run_id = str(raw.get("owner_run_id") or "").strip()
             except Exception:
-                sid = ""
-            sid = sid or unquote(path.stem).strip()
+                raw = None
+            raw = raw if isinstance(raw, dict) else {}
+            sid = str(raw.get("session_id") or "").strip() or unquote(path.stem).strip()
             if sid:
-                sessions.append((sid, owner_run_id))
+                sessions.append((sid, str(raw.get("owner_run_id") or "").strip()))
         return sessions
 
     def _claim_deferred_sid(self, sid: str, *, release: bool = False) -> bool:
@@ -2807,9 +2766,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if url.startswith(_REMOTE_RESOURCE_PREFIXES):
             pass
         elif parsed_url.scheme == "file":
-            source_path = _path_from_file_uri(url)
-            if isinstance(source_path, str):
-                return tool_error(source_path)
+            if parsed_url.netloc not in {"", "localhost"}:
+                return tool_error(f"Unsupported non-local file URI: {url}")
+            source_path = Path(url2pathname(parsed_url.path)).expanduser()
         elif not parsed_url.scheme or _is_windows_absolute_path(url):
             source_path = Path(url).expanduser()
 
