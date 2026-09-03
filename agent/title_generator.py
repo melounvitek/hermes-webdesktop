@@ -22,11 +22,9 @@ logger = logging.getLogger(__name__)
 
 # (task_name, exception) -> None; surfaces auxiliary failures so silent drops don't pile up as NULL titles.
 FailureCallback = Callable[[str, BaseException], None]
-
 # (title, source) -> None; source is the persisted provenance (``derived`` / ``llm``). Consumers paying a
 # rate-limited remote rename per title (Discord thread, Telegram topic) should act on ``llm`` only.
 TitleCallback = Callable[[str, str], None]
-
 # () -> bool, called right before the LLM request; False skips (e.g. the user switched models and
 # the request would reload one the runtime already evicted).
 RuntimeValidator = Callable[[], bool]
@@ -68,12 +66,7 @@ _TITLE_RESPONSE_FORMAT = {
     "json_schema": {
         "name": "session_title",
         "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {"title": {"type": "string"}},
-            "required": ["title"],
-            "additionalProperties": False,
-        },
+        "schema": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"], "additionalProperties": False},
     },
 }
 
@@ -81,20 +74,13 @@ _TITLE_RESPONSE_FORMAT = {
 # RECOGNIZED_CONTROL_WRAPPERS): stripped, titling continues on what remains.
 _CONTROL_WRAPPERS = tuple(
     (f"<{tag}>", f"</{tag}>")
-    for tag in (
-        "command-message", "command-name", "command-args", "local-command-caveat",
-        "local-command-stderr", "local-command-stdout", "task-notification",
-        "system-reminder", "ide_opened_file", "ide_selection",
-    )
+    for tag in ("command-message", "command-name", "command-args", "local-command-caveat", "local-command-stderr",
+                "local-command-stdout", "task-notification", "system-reminder", "ide_opened_file", "ide_selection")
 )
 
 # Hermes' own machine-authored openers: a compaction handoff or resumed session must not be titled after them.
 _MACHINE_PREFIXES = (
-    "[CONTEXT COMPACTION",
-    LEGACY_SUMMARY_PREFIX,
-    "[Runtime note:",
-    "[System note:",
-    "[SYSTEM]",
+    "[CONTEXT COMPACTION", LEGACY_SUMMARY_PREFIX, "[Runtime note:", "[System note:", "[SYSTEM]",
     # tui_gateway.server._MODEL_SWITCH_MARKER_PREFIX (keep in sync); persisted as role="user" because
     # strict providers reject a non-first system message.
     "[System: The active model for this chat has changed to ",
@@ -175,8 +161,6 @@ def is_titleable_user_message(user_message: str) -> bool:
 def derive_title(user_message: str) -> Optional[str]:
     """Instant title: first meaningful line trimmed to a word boundary. No model, never fails."""
     line = " ".join(_first_line(_summarize_user_message(user_message)).split())
-    if not line:
-        return None
     if len(line) > MAX_DERIVED_TITLE_CHARS:
         cut = line[:MAX_DERIVED_TITLE_CHARS]
         space = cut.rfind(" ")
@@ -226,11 +210,9 @@ def _extract_title_text(content: str) -> str:
 def _clean_title(text: str) -> Optional[str]:
     """Normalize a model-produced title, or None when nothing usable remains."""
     title = _strip_title_prefix(" ".join((text or "").split()).strip("\"'").strip()).rstrip(".!,;:")
-    if not title:
-        return None
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
-    return title
+    return title or None
 
 
 def _safe_callback(callback: Optional[Callable], args: tuple, log_fmt: str, label: str) -> None:
@@ -263,7 +245,6 @@ def generate_title(
     if not _auto_title_enabled():
         logger.debug("Auto-title skipped: auxiliary.title_generation.enabled=false")
         return None
-
     if runtime_validator is not None:
         try:
             if not runtime_validator():
@@ -272,16 +253,13 @@ def generate_title(
         except Exception:
             # Fail open: a broken validator must not disable titling.
             logger.debug("Title runtime validator raised; proceeding", exc_info=True)
-
     user_snippet = _summarize_user_message(user_message)[:MAX_TITLE_INPUT_CHARS]
     if not user_snippet.strip():
         return None
-
     language = _title_language()
     language_rule = _LANGUAGE_RULE_PINNED.format(language=language) if language else _LANGUAGE_RULE_MATCH_USER
     # str.replace, not str.format: the prompt embeds literal JSON braces.
     prompt = _TITLE_PROMPT_TEMPLATE.replace("__LANGUAGE_RULE__", language_rule)
-
     try:
         response = call_llm(
             task="title_generation",
@@ -332,8 +310,7 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
                 return candidate
             logger.debug("Skipping %s title: a higher-authority title already holds session %s", source, session_id)
             return None
-        # Older store without provenance support.
-        legacy_fn = getattr(session_db, "set_auto_title_if_empty", None)
+        legacy_fn = getattr(session_db, "set_auto_title_if_empty", None)  # older store without provenance
         if legacy_fn is not None:
             return candidate if legacy_fn(session_id, candidate) else None
         if session_db.set_session_title(session_id, candidate) is False:
@@ -352,20 +329,13 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
         return _set(deduped)
 
 
-def apply_instant_title(
-    session_db,
-    session_id: str,
-    user_message: str,
-    title_callback: Optional[TitleCallback] = None,
-) -> Optional[str]:
+def apply_instant_title(session_db, session_id: str, user_message: str, title_callback: Optional[TitleCallback] = None) -> Optional[str]:
     """Write the derived title synchronously (cheap enough to run inline). Returns the title
     written, or None (no usable text, or a title of at least ``derived`` authority exists). Never raises."""
     if not session_db or not session_id:
         return None
     try:
-        if not is_titleable_user_message(user_message):
-            return None
-        title = derive_title(user_message)
+        title = derive_title(user_message) if is_titleable_user_message(user_message) else None
         if not title:
             return None
         persisted = _persist_session_title(session_db, session_id, title, source="derived", dedupe=False)
@@ -394,7 +364,6 @@ def auto_title_session(
         # A derived title is expected here — upgrading it is the point.
         if not session_db or not session_id or _has_upgraded_title(session_db, session_id):
             return
-
         # This daemon thread starts AFTER the turn's ambient conversation context was reset;
         # republish it so the title call carries the same Portal ``conversation=`` tag
         # (root-of-lineage) and bills usage to this session.
@@ -406,10 +375,8 @@ def auto_title_session(
             conversation_id = session_db.get_conversation_root(session_id) or session_id
         set_conversation_context(conversation_id)
         set_accounting_context(session_db, session_id)
-
         title = generate_title(
-            user_message, failure_callback=failure_callback,
-            main_runtime=main_runtime, runtime_validator=runtime_validator,
+            user_message, failure_callback=failure_callback, main_runtime=main_runtime, runtime_validator=runtime_validator,
         )
         source = "llm"
         if not title:
@@ -418,7 +385,6 @@ def auto_title_session(
             title, source = derive_title(user_message), "derived"
             if not title:
                 return
-
         try:
             persisted = _persist_session_title(session_db, session_id, title, source=source)
             if persisted is None:
@@ -468,30 +434,22 @@ def maybe_auto_title(
     Call at the START of a turn, before the model is invoked."""
     if not session_db or not session_id or not user_message:
         return
-
     # History may be pre- or post-message. Skip only when BOTH past the opening turn AND already named:
     # count alone left a machinery-opened session nameless; title alone never titles on an old store.
     user_msg_count = sum(1 for m in (conversation_history or []) if _is_real_user_turn(m))
     if user_msg_count > 1 and not _session_is_untitled(session_db, session_id):
         return
-
     if not is_titleable_user_message(user_message):
         return
-
     # Config read after the cheap guards so the file isn't touched every turn.
     if not _auto_title_enabled():
         logger.debug("Auto-title skipped: auxiliary.title_generation.enabled=false")
         return
-
     apply_instant_title(session_db, session_id, user_message, title_callback)
-
     threading.Thread(
         target=auto_title_session,
         args=(session_db, session_id, user_message),
-        kwargs=dict(
-            failure_callback=failure_callback, main_runtime=main_runtime,
-            title_callback=title_callback, runtime_validator=runtime_validator,
-        ),
+        kwargs=dict(failure_callback=failure_callback, main_runtime=main_runtime, title_callback=title_callback, runtime_validator=runtime_validator),
         daemon=True,
         name="auto-title",
     ).start()

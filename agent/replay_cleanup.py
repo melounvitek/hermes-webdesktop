@@ -18,6 +18,16 @@ from agent.turn_context import drop_stale_api_content
 
 logger = logging.getLogger(__name__)
 
+# Orphan-recovery notices: (side-effecting, read-only) for an interrupted block vs a dangling tail.
+_INTERRUPTED_NOTICES = (
+    "[Orphan recovery: interrupted side-effecting tool may have executed; its effect is UNKNOWN. Inspect state before retrying.]",
+    "[Orphan recovery: interrupted read-only tool did not complete.]",
+)
+_DANGLING_NOTICES = (
+    "[Orphan recovery: this tool may have executed before Hermes stopped; its effect is UNKNOWN. Inspect current state before retrying.]",
+    "[Orphan recovery: this read-only tool did not complete and had no effect.]",
+)
+
 
 def is_interrupted_tool_result(content: Any) -> bool:
     """Return True if a tool result indicates the tool was interrupted."""
@@ -26,9 +36,7 @@ def is_interrupted_tool_result(content: Any) -> bool:
     lowered = content.lower()
     if "[command interrupted]" in lowered:
         return True
-    if "exit_code" in lowered and ("130" in lowered or "-1" in lowered):
-        return "interrupt" in lowered
-    return False
+    return "exit_code" in lowered and ("130" in lowered or "-1" in lowered) and "interrupt" in lowered
 
 
 def _call_name(call: Dict[str, Any]) -> str:
@@ -43,11 +51,11 @@ def _any_side_effecting(calls: List[Dict[str, Any]]) -> bool:
     return any(tool_may_have_side_effect(_call_name(call)) for call in calls)
 
 
-def _orphan_recovery(name: str, unknown_text: str, none_text: str) -> tuple:
+def _orphan_recovery(name: str, notices: tuple) -> tuple:
     """(effect_disposition, content) for an interrupted/dangling call named ``name``."""
     if tool_may_have_side_effect(name):
-        return "unknown", unknown_text
-    return "none", none_text
+        return "unknown", notices[0]
+    return "none", notices[1]
 
 
 def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -56,7 +64,6 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
     interrupted results rewritten as orphan-recovery notices, since the effect may have happened."""
     if not agent_history:
         return agent_history
-
     cleaned: List[Dict[str, Any]] = []
     i = 0
     n = len(agent_history)
@@ -64,10 +71,9 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
         msg = agent_history[i]
         if msg.get("role") == "assistant" and "tool_calls" in msg:
             j = i + 1
-            tool_results: List[Dict[str, Any]] = []
             while j < n and agent_history[j].get("role") == "tool":
-                tool_results.append(agent_history[j])
                 j += 1
+            tool_results = agent_history[i + 1:j]
             if tool_results and any(is_interrupted_tool_result(m.get("content", "")) for m in tool_results):
                 calls = msg.get("tool_calls") or []
                 if _any_side_effecting(calls):
@@ -79,28 +85,20 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
                             continue
                         recovered = dict(tool_result)
                         name = call_names.get(str(tool_result.get("tool_call_id") or ""), "")
-                        recovered["effect_disposition"], recovered["content"] = _orphan_recovery(
-                            name,
-                            "[Orphan recovery: interrupted side-effecting tool may have "
-                            "executed; its effect is UNKNOWN. Inspect state before retrying.]",
-                            "[Orphan recovery: interrupted read-only tool did not complete.]",
-                        )
+                        recovered["effect_disposition"], recovered["content"] = _orphan_recovery(name, _INTERRUPTED_NOTICES)
                         cleaned.append(recovered)
                 else:
                     logger.debug(
-                        "Stripping interrupted read-only assistant→tool replay block "
-                        "(indices %d–%d, tool_results=%d)",
+                        "Stripping interrupted read-only assistant→tool replay block (indices %d–%d, tool_results=%d)",
                         i, j - 1, len(tool_results),
                     )
                 i = j
                 continue
         if msg.get("role") == "tool" and is_interrupted_tool_result(msg.get("content", "")):
             logger.debug("Stripping orphan interrupted tool result from replay history")
-            i += 1
-            continue
-        cleaned.append(msg)
+        else:
+            cleaned.append(msg)
         i += 1
-
     return cleaned
 
 
@@ -111,26 +109,18 @@ def strip_dangling_tool_call_tail(agent_history: List[Dict[str, Any]]) -> List[D
     ones get synthetic UNKNOWN-effect results."""
     if not agent_history:
         return agent_history
-
     last = agent_history[-1]
     if not (isinstance(last, dict) and last.get("role") == "assistant" and last.get("tool_calls")):
         return agent_history
-
     tool_calls = last.get("tool_calls") or []
     if _any_side_effecting(tool_calls):
         recovered = list(agent_history)
         for call in tool_calls:
-            name = str((call.get("function") or {}).get("name") or "unknown")
-            disposition, content = _orphan_recovery(
-                name,
-                "[Orphan recovery: this tool may have executed before Hermes stopped; "
-                "its effect is UNKNOWN. Inspect current state before retrying.]",
-                "[Orphan recovery: this read-only tool did not complete and had no effect.]",
-            )
+            name = _call_name(call) or "unknown"
+            disposition, content = _orphan_recovery(name, _DANGLING_NOTICES)
             recovered.append(make_tool_result_message(name, content, _call_id(call), effect_disposition=disposition))
         logger.warning("Recovered dangling side-effecting tool call(s) as UNKNOWN instead of erasing them")
         return recovered
-
     logger.debug("Stripping dangling unanswered read-only assistant(tool_calls) tail (%d call(s))", len(tool_calls))
     return agent_history[:-1]
 
@@ -149,20 +139,11 @@ def sanitize_replay_history(agent_history: List[Dict[str, Any]]) -> List[Dict[st
 _DANGEROUS_CONFIRMATION_EXPIRY_SECONDS = 60.0
 
 # Confirmation phrases that unlock destructive host actions; case-insensitive substring match so
-# trailing punctuation / extra context still matches.
+# trailing punctuation / extra context still matches. Includes i18n variants from the original incident.
 _DANGEROUS_CONFIRMATION_PATTERNS: tuple = (
-    "confirm forced restart",
-    "confirm forced reboot",
-    "confirm shutdown",
-    "confirm reboot",
-    "confirm power off",
-    "yes, delete everything",
-    "confirm wipe",
-    "confirm factory reset",
-    # i18n variants observed in the original incident
-    "確認強制重開機",
-    "確認強制重開",
-    "確認重啟",
+    "confirm forced restart", "confirm forced reboot", "confirm shutdown", "confirm reboot", "confirm power off",
+    "yes, delete everything", "confirm wipe", "confirm factory reset",
+    "確認強制重開機", "確認強制重開", "確認重啟",
 )
 
 # Redacting in place (rather than deleting the message) preserves strict user/assistant role
@@ -193,26 +174,20 @@ def strip_stale_dangerous_confirmations(
     without a timestamp (legacy transcripts, test scaffolding) are left untouched."""
     if not agent_history:
         return agent_history
-
     cleaned: List[Dict[str, Any]] = []
     for msg in agent_history:
         ts = msg.get("timestamp") if isinstance(msg, dict) and msg.get("role") == "user" else None
-        if (
-            ts is not None
-            and is_dangerous_confirmation(msg.get("content", ""))
-            and (now - float(ts)) > expiry_seconds
-        ):
-            logger.debug(
-                "Redacting stale dangerous-confirmation text in user "
-                "message (age=%.1fs, expiry=%.1fs): %r",
-                now - float(ts), expiry_seconds, (msg.get("content") or "")[:80],
-            )
-            redacted = dict(msg)
-            redacted["content"] = _EXPIRED_CONFIRMATION_SENTINEL
-            # The api_content sidecar carries the exact bytes previously sent — the confirmation
-            # itself; replaying it would undo the redaction.
-            drop_stale_api_content(redacted)
-            cleaned.append(redacted)
+        if ts is None or not is_dangerous_confirmation(msg.get("content", "")) or (now - float(ts)) <= expiry_seconds:
+            cleaned.append(msg)
             continue
-        cleaned.append(msg)
+        logger.debug(
+            "Redacting stale dangerous-confirmation text in user message (age=%.1fs, expiry=%.1fs): %r",
+            now - float(ts), expiry_seconds, (msg.get("content") or "")[:80],
+        )
+        redacted = dict(msg)
+        redacted["content"] = _EXPIRED_CONFIRMATION_SENTINEL
+        # The api_content sidecar carries the exact bytes previously sent — the confirmation
+        # itself; replaying it would undo the redaction.
+        drop_stale_api_content(redacted)
+        cleaned.append(redacted)
     return cleaned
