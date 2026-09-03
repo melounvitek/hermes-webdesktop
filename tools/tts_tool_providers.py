@@ -533,8 +533,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
         payload = {"model": model, "text": text, "voice_id": voice_id}
 
     response = _post_json(base_url, payload, {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {runtime.api_key}",
+        "Content-Type": "application/json", "Authorization": f"Bearer {runtime.api_key}"
     })
 
     if is_t2a_v2:
