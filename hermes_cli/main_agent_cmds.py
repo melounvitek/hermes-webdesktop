@@ -10,67 +10,76 @@ avoids an import cycle).
 import sys
 
 
+def _cmd_memory_off():
+    from hermes_cli.config import load_config, save_config
+
+    config = load_config()
+    if not isinstance(config.get("memory"), dict):
+        config["memory"] = {}
+    config["memory"]["provider"] = ""
+    save_config(config)
+    print("\n  ✓ Memory provider: built-in only")
+    print("  Saved to config.yaml\n")
+
+
+def _cmd_memory_reset(args):
+    from hermes_constants import get_hermes_home, display_hermes_home
+
+    mem_dir = get_hermes_home() / "memories"
+    target = getattr(args, "target", "all")
+    files_to_reset = []
+    if target in {"all", "memory"}:
+        files_to_reset.append(("MEMORY.md", "agent notes"))
+    if target in {"all", "user"}:
+        files_to_reset.append(("USER.md", "user profile"))
+
+    existing = [(f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()]
+    if not existing:
+        print(f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n")
+        return
+
+    print("\n  This will permanently erase the following memory files:")
+    for f, desc in existing:
+        size = (mem_dir / f).stat().st_size
+        print(f"    ◆ {f} ({desc}) — {size:,} bytes")
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input("\n  Type 'yes' to confirm: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.\n")
+            return
+        if answer != "yes":
+            print("  Cancelled.\n")
+            return
+
+    for f, desc in existing:
+        (mem_dir / f).unlink()
+        print(f"  ✓ Deleted {f} ({desc})")
+
+    print("\n  Memory reset complete. New sessions will start with a blank slate.")
+    print(f"  Files were in: {display_hermes_home()}/memories/\n")
+
+
 def cmd_memory(args):
     sub = getattr(args, "memory_command", None)
     if sub == "off":
-        from hermes_cli.config import load_config, save_config
-
-        config = load_config()
-        if not isinstance(config.get("memory"), dict):
-            config["memory"] = {}
-        config["memory"]["provider"] = ""
-        save_config(config)
-        print("\n  ✓ Memory provider: built-in only")
-        print("  Saved to config.yaml\n")
+        _cmd_memory_off()
     elif sub == "reset":
-        from hermes_constants import get_hermes_home, display_hermes_home
-
-        mem_dir = get_hermes_home() / "memories"
-        target = getattr(args, "target", "all")
-        files_to_reset = []
-        if target in {"all", "memory"}:
-            files_to_reset.append(("MEMORY.md", "agent notes"))
-        if target in {"all", "user"}:
-            files_to_reset.append(("USER.md", "user profile"))
-
-        # Check what exists
-        existing = [
-            (f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()
-        ]
-        if not existing:
-            print(
-                f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n"
-            )
-            return
-
-        print("\n  This will permanently erase the following memory files:")
-        for f, desc in existing:
-            path = mem_dir / f
-            size = path.stat().st_size
-            print(f"    ◆ {f} ({desc}) — {size:,} bytes")
-
-        if not getattr(args, "yes", False):
-            try:
-                answer = input("\n  Type 'yes' to confirm: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("\n  Cancelled.\n")
-                return
-            if answer != "yes":
-                print("  Cancelled.\n")
-                return
-
-        for f, desc in existing:
-            (mem_dir / f).unlink()
-            print(f"  ✓ Deleted {f} ({desc})")
-
-        print(
-            "\n  Memory reset complete. New sessions will start with a blank slate."
-        )
-        print(f"  Files were in: {display_hermes_home()}/memories/\n")
+        _cmd_memory_reset(args)
     else:
         from hermes_cli.memory_setup import memory_command
 
         memory_command(args)
+
+
+# (args attribute, acp flag) — forwarded in this order.
+_ACP_FLAGS = (
+    ("acp_version", "--version"),
+    ("check", "--check"),
+    ("setup", "--setup"),
+    ("setup_browser", "--setup-browser"),
+    ("assume_yes", "--yes"))
 
 
 def cmd_acp(args):
@@ -78,18 +87,7 @@ def cmd_acp(args):
     try:
         from acp_adapter.entry import main as acp_main
 
-        acp_argv = []
-        if getattr(args, "acp_version", False):
-            acp_argv.append("--version")
-        if getattr(args, "check", False):
-            acp_argv.append("--check")
-        if getattr(args, "setup", False):
-            acp_argv.append("--setup")
-        if getattr(args, "setup_browser", False):
-            acp_argv.append("--setup-browser")
-        if getattr(args, "assume_yes", False):
-            acp_argv.append("--yes")
-        acp_main(acp_argv)
+        acp_main([flag for attr, flag in _ACP_FLAGS if getattr(args, attr, False)])
     except ImportError:
         print("ACP dependencies not installed.", file=sys.stderr)
         print("Install them with:  pip install -e '.[acp]'", file=sys.stderr)
@@ -134,24 +132,22 @@ def cmd_insights(args):
                 pass
 
 
+def _dict_or_empty(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def cmd_monitoring(args):
     """Gateway monitoring status: health & diagnostics export posture."""
     from hermes_cli.config import load_config
 
     action = getattr(args, "monitoring_action", None) or "status"
-    config = load_config()
-    mon_raw = config.get("monitoring")
-    mon: dict = mon_raw if isinstance(mon_raw, dict) else {}
+    mon = _dict_or_empty(load_config().get("monitoring"))
 
     if action == "status":
         from agent.monitoring import otlp_exporter
 
-        gh_raw = mon.get("gateway_health_export")
-        gh: dict = gh_raw if isinstance(gh_raw, dict) else {}
-        export_raw = mon.get("export")
-        export_cfg: dict = export_raw if isinstance(export_raw, dict) else {}
-        otlp_raw = export_cfg.get("otlp")
-        otlp: dict = otlp_raw if isinstance(otlp_raw, dict) else {}
+        gh = _dict_or_empty(mon.get("gateway_health_export"))
+        otlp = _dict_or_empty(_dict_or_empty(mon.get("export")).get("otlp"))
 
         print("Gateway monitoring")
         print(f"  Health export:  {'enabled' if gh.get('enabled') else 'disabled'} "
@@ -180,14 +176,14 @@ def cmd_monitoring(args):
 
 
 def cmd_skills(args):
-    # Route 'config' action to skills_config module
     from hermes_cli.main import _require_tty
-    if getattr(args, "skills_action", None) == "config":
+    action = getattr(args, "skills_action", None)
+    if action == "config":
         _require_tty("skills config")
         from hermes_cli.skills_config import skills_command as skills_config_command
 
         skills_config_command(args)
-    elif getattr(args, "skills_action", None) in ("trust", "untrust"):
+    elif action in ("trust", "untrust"):
         _cmd_skills_trust(args)
     else:
         from hermes_cli.skills_hub import skills_command
@@ -196,11 +192,10 @@ def cmd_skills(args):
 
 
 def _cmd_skills_trust(args):
-    """``hermes skills trust [path]`` / ``hermes skills untrust [path]``.
+    """``hermes skills trust|untrust [path]`` — manage ``skills.trusted_project_dirs``.
 
-    Manages ``skills.trusted_project_dirs`` in config.yaml. With no path,
-    operates on the project root enclosing the current directory (nearest
-    ancestor with ``.git``).
+    With no path, operates on the project root enclosing the current directory
+    (nearest ancestor with ``.git``).
     """
     from pathlib import Path
 
@@ -208,8 +203,7 @@ def _cmd_skills_trust(args):
         PROJECT_SKILLS_SUBDIRS,
         _candidate_project_skills_dirs,
         find_project_root,
-        iter_skill_index_files,
-    )
+        iter_skill_index_files)
     from hermes_cli.config import load_config, save_config
 
     action = args.skills_action
@@ -224,8 +218,7 @@ def _cmd_skills_trust(args):
         if root is None:
             print(
                 "Not inside a git checkout. Run from a project directory or "
-                "pass the project root path explicitly."
-            )
+                "pass the project root path explicitly.")
             return
 
     config = load_config()
@@ -236,8 +229,11 @@ def _cmd_skills_trust(args):
     trusted = [str(t) for t in trusted]
     root_str = str(root)
 
+    def _same(t: str) -> bool:
+        return str(Path(t).expanduser().resolve()) == root_str
+
     if action == "untrust":
-        kept = [t for t in trusted if str(Path(t).expanduser().resolve()) != root_str]
+        kept = [t for t in trusted if not _same(t)]
         if len(kept) == len(trusted):
             print(f"{root} was not trusted.")
             return
@@ -247,8 +243,7 @@ def _cmd_skills_trust(args):
         print("Project skills from this repo will no longer load.")
         return
 
-    # trust
-    if any(str(Path(t).expanduser().resolve()) == root_str for t in trusted):
+    if any(_same(t) for t in trusted):
         print(f"Already trusted: {root}")
     else:
         trusted.append(root_str)
@@ -257,14 +252,13 @@ def _cmd_skills_trust(args):
         print(f"Trusted: {root}")
 
     # Show what this unlocks
-    count = 0
-    for d in _candidate_project_skills_dirs(root):
-        count += sum(1 for _ in iter_skill_index_files(d, "SKILL.md"))
+    count = sum(
+        sum(1 for _ in iter_skill_index_files(d, "SKILL.md"))
+        for d in _candidate_project_skills_dirs(root))
     if count:
         print(
             f"{count} project skill(s) will load in sessions started inside "
-            "this repo (they take precedence over same-named profile skills)."
-        )
+            "this repo (they take precedence over same-named profile skills).")
     else:
         subdirs = " or ".join(PROJECT_SKILLS_SUBDIRS)
         print(f"No project skills found yet — add them under {subdirs}.")
