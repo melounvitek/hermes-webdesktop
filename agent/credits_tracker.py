@@ -237,10 +237,9 @@ def evaluate_credits_notices(
     return (to_show, to_clear)
 
 
-# Header contract: (field, header, kind[, default]). Each *-micros balance has a *-usd
-# twin holding the server's formatted USD string. micros: required int >= 0 ("signed":
-# may be negative). usd: required ^-?\d+\.\d{2}$. bool: optional "true"/"false" STRING.
-# Not in the table: subscription-limit-* (PAIRED/optional), tool-pool-micros (optional),
+# Header contract: (field, header, kind[, default]). micros: required int >= 0 ("signed": may be
+# negative); usd: the server's formatted string, ^-?\d+\.\d{2}$; bool: optional "true"/"false" STRING.
+# Handled inline below: subscription-limit-* (PAIRED/optional), tool-pool-micros (optional),
 # denominator-kind ("subscription_cap" | "none"), disabled-reason (omitted when null).
 _HEADER_FIELDS: tuple[tuple, ...] = (
     ("remaining_micros", "x-nous-credits-remaining-micros", "micros"),

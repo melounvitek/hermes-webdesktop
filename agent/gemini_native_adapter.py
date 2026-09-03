@@ -1,11 +1,8 @@
-"""OpenAI-compatible facade over Google AI Studio's native Gemini API.
-
-The ``gemini`` provider keeps ``api_mode='chat_completions'`` so the agent loop
-stays OpenAI-shaped; this shim converts ``messages[]``/``tools[]`` requests into
-``models/{model}:generateContent`` payloads and converts responses back. Google's
-OpenAI-compat endpoint is brittle for the multi-turn tool loop (auth churn,
-tool-call replay quirks, thought-signature requirements); native is canonical.
-"""
+"""OpenAI-compatible facade over Google AI Studio's native Gemini API: the ``gemini``
+provider keeps ``api_mode='chat_completions'`` so the agent loop stays OpenAI-shaped,
+and this shim converts ``messages[]``/``tools[]`` into ``models/{model}:generateContent``
+payloads and responses back. Google's OpenAI-compat endpoint is brittle for the
+multi-turn tool loop (auth churn, tool-call replay, thought signatures); native is canonical."""
 
 from __future__ import annotations
 
@@ -149,8 +146,7 @@ class GeminiAPIError(Exception):
 
     def __init__(
         self, message: str, *, code: str = "gemini_api_error", status_code: Optional[int] = None,
-        response: Optional[httpx.Response] = None, retry_after: Optional[float] = None,
-        details: Optional[Dict[str, Any]] = None,
+        response: Optional[httpx.Response] = None, retry_after: Optional[float] = None, details: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(message)
         self.code, self.status_code, self.response = code, status_code, response
@@ -220,8 +216,8 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any], include_ids: bool 
     except json.JSONDecodeError:
         args = {"_raw": args_raw}
     call: Dict[str, Any] = {"name": str(fn.get("name") or ""), "args": args if isinstance(args, dict) else {"_value": args}}
-    if include_ids and _tool_call_id(tool_call):
-        call["id"] = _tool_call_id(tool_call)
+    if include_ids and (call_id := _tool_call_id(tool_call)):
+        call["id"] = call_id
     return {"functionCall": call, "thoughtSignature": _tool_call_extra_signature(tool_call) or _SKIP_SIGNATURE}
 
 
@@ -629,8 +625,8 @@ class GeminiNativeClient:
     """Minimal OpenAI-SDK-compatible facade (``client.chat.completions.create(**kwargs)``)
     over Gemini's native REST API."""
 
-    # Declared for agent/auxiliary_client.py: already a complete client, never re-dispatched through
-    # a wire adapter. (No HERMES_SKIP_ASYNC_WRAP — the async path has a real conversion, AsyncGeminiNativeClient.)
+    # For agent/auxiliary_client.py: a complete client, never re-dispatched through a wire adapter.
+    # (No HERMES_SKIP_ASYNC_WRAP — the async path has a real conversion, AsyncGeminiNativeClient.)
     HERMES_SKIP_TRANSPORT_WRAP = True
 
     def __init__(
@@ -658,10 +654,8 @@ class GeminiNativeClient:
             pass
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,
-            "User-Agent": f"{_API_CLIENT} (gemini-native)", "X-Goog-Api-Client": _API_CLIENT, **self._default_headers,
-        }
+        return {"Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,
+                "User-Agent": f"{_API_CLIENT} (gemini-native)", "X-Goog-Api-Client": _API_CLIENT, **self._default_headers}
 
     @staticmethod
     def _advance_stream_iterator(iterator: Iterator[_GeminiStreamChunk]) -> tuple[bool, Optional[_GeminiStreamChunk]]:
@@ -721,17 +715,14 @@ class AsyncGeminiNativeClient:
 
     async def _create_chat_completion(self, **kwargs: Any) -> Any:
         result = await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)
-        if not kwargs.get("stream"):
-            return result
+        return self._async_stream(result) if kwargs.get("stream") else result
 
-        async def _async_stream() -> Any:
-            while True:
-                done, chunk = await asyncio.to_thread(self._sync._advance_stream_iterator, result)
-                if done:
-                    return
-                yield chunk
-
-        return _async_stream()
+    async def _async_stream(self, iterator: Iterator[_GeminiStreamChunk]) -> Any:
+        while True:
+            done, chunk = await asyncio.to_thread(self._sync._advance_stream_iterator, iterator)
+            if done:
+                return
+            yield chunk
 
     async def close(self) -> None:
         await asyncio.to_thread(self._sync.close)

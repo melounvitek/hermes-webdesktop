@@ -6,6 +6,7 @@ as one prompt, collects text chunks, and returns the minimal OpenAI-client shape
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -82,13 +83,10 @@ def _resolve_args() -> list[str]:
 
 
 def _acp_supported(command: str, args: list[str]) -> bool | None:
-    """Tri-state probe: does ``command`` accept ``--acp``? A CLI without the flag
-    (older releases, Claude Code v2.x) exits 1 with ``unknown option '--acp'`` and the
-    parent would wait the full child timeout for stdout that never arrives.
-    True = help advertises --acp; False = help ran cleanly without it (caller
-    fast-fails); None = inconclusive (binary missing / --help failed → normal spawn
-    error). Only probes when ``--acp`` is among ``args`` — a custom transport is the
-    operator's business."""
+    """Tri-state ``--acp`` probe (a CLI without the flag exits 1 and the parent would wait the
+    full child timeout for stdout that never arrives). True = help advertises --acp; False =
+    help ran cleanly without it (caller fast-fails); None = inconclusive (binary missing /
+    --help failed → normal spawn error). Skipped when ``--acp`` is not in ``args`` (custom transport)."""
     if "--acp" not in args:
         return True
     if (cached := _ACP_PROBE_CACHE.get(command)) is not None:
@@ -112,8 +110,7 @@ def _resolve_home_dir() -> str:
     """Stable HOME for child ACP processes; /tmp as a last resort so the child never starts HOME-less."""
     if home := os.environ.get("HOME", "").strip():
         return home
-    expanded = os.path.expanduser("~")
-    if expanded and expanded != "~":
+    if (expanded := os.path.expanduser("~")) and expanded != "~":
         return expanded
     try:
         import pwd
@@ -276,8 +273,8 @@ class CopilotACPClient:
 
     def __init__(
         self, *, api_key: str | None = None, base_url: str | None = None, default_headers: dict[str, str] | None = None,
-        acp_command: str | None = None, acp_args: list[str] | None = None, acp_cwd: str | None = None,
-        command: str | None = None, args: list[str] | None = None, **_: Any,
+        acp_command: str | None = None, acp_args: list[str] | None = None, acp_cwd: str | None = None, command: str | None = None,
+        args: list[str] | None = None, **_: Any,
     ):
         self.api_key = api_key or "copilot-acp"
         self.base_url = base_url or ACP_MARKER_BASE_URL
@@ -300,10 +297,8 @@ class CopilotACPClient:
             proc.terminate()
             proc.wait(timeout=2)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
     def _create_chat_completion(
         self, *, model: str | None = None, messages: list[dict[str, Any]] | None = None, timeout: float | None = None,
