@@ -29,9 +29,8 @@ def _load_fal_client() -> Any:
 
 
 from tools.debug_helpers import DebugSession
-from tools.fal_common import (  # noqa: F401 — _normalize_fal_queue_url_format re-exported for tests
-    _ManagedFalSyncClient, _extract_http_status, _normalize_fal_queue_url_format)
-from tools.image_generation_catalog import (  # noqa: F401 — re-exported (plugins/tests/tools_config)
+from tools.fal_common import _ManagedFalSyncClient, _extract_http_status, _normalize_fal_queue_url_format
+from tools.image_generation_catalog import (
     DEFAULT_ASPECT_RATIO, DEFAULT_MODEL, FAL_MODELS, UPSCALER_CREATIVITY, UPSCALER_DEFAULT_PROMPT,
     UPSCALER_FACTOR, UPSCALER_GUIDANCE_SCALE, UPSCALER_MODEL, UPSCALER_NEGATIVE_PROMPT,
     UPSCALER_NUM_INFERENCE_STEPS, UPSCALER_RESEMBLANCE, UPSCALER_SAFETY_CHECKER, VALID_ASPECT_RATIOS,

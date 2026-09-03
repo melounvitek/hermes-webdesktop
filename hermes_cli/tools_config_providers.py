@@ -479,8 +479,8 @@ def _detect_active_provider_index(providers: list, config: dict, *, force_fresh:
 
 
 def _fal_model_catalog():
-    """Lazy-load the FAL model catalog from the tool module."""
-    from tools.image_generation_tool import FAL_MODELS, DEFAULT_MODEL
+    """Lazy-load the FAL model catalog."""
+    from tools.image_generation_catalog import FAL_MODELS, DEFAULT_MODEL
     return FAL_MODELS, DEFAULT_MODEL
 
 

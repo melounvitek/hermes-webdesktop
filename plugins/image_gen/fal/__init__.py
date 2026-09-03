@@ -38,12 +38,12 @@ class FalImageGenProvider(StaticImageGenProvider):
             return False
 
     def list_models(self) -> List[Dict[str, Any]]:
-        import tools.image_generation_tool as _it
-        return catalog_rows(_it.FAL_MODELS)
+        from tools.image_generation_catalog import FAL_MODELS
+        return catalog_rows(FAL_MODELS)
 
     def default_model(self) -> Optional[str]:
-        import tools.image_generation_tool as _it
-        return _it.DEFAULT_MODEL
+        from tools.image_generation_catalog import DEFAULT_MODEL
+        return DEFAULT_MODEL
 
     def capabilities(self) -> Dict[str, Any]:
         # Image-to-image depends on the selected model (``edit_endpoint``); upscale works for any.
