@@ -7,7 +7,6 @@ thread-safely onto the loop.
 """
 
 import asyncio
-import json
 import logging
 from collections import deque
 from typing import Any, Callable, Deque, Dict
@@ -15,7 +14,7 @@ from typing import Any, Callable, Deque, Dict
 import acp
 from acp.schema import AgentPlanUpdate, PlanEntry
 
-from .tools import _json_loads_maybe, build_tool_complete, build_tool_start, make_tool_call_id
+from .tools import _json_loads_maybe, build_tool_complete, build_tool_start, coerce_tool_args, make_tool_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +88,7 @@ def make_tool_progress_cb(
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:
         if event_type != "tool.started":
             return
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except (json.JSONDecodeError, TypeError):
-                args = {"raw": args}
-        if not isinstance(args, dict):
-            args = {}
-
+        args = coerce_tool_args(args)
         tc_id = make_tool_call_id()
         queue = _upgrade_queue(tool_call_ids, name)
         if queue is None:

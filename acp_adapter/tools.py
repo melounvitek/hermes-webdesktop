@@ -122,6 +122,17 @@ def _structured(text_fallback: bool = False):
     return deco
 
 
+def coerce_tool_args(raw: Any) -> Args:
+    """Tool-call arguments as a dict: JSON strings are decoded (undecodable -> ``{"raw": ...}``),
+    anything else non-dict becomes ``{}``."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {"raw": raw}
+    return raw if isinstance(raw, dict) else {}
+
+
 def _args_json(arguments: Any) -> str:
     try:
         return json.dumps(arguments, indent=2, default=str)

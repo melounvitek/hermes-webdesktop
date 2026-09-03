@@ -80,10 +80,9 @@ def _load_env() -> None:
     hermes_home = get_hermes_home()
     loaded = load_hermes_dotenv(hermes_home=hermes_home)
     log = logging.getLogger(__name__)
-    if loaded:
-        for env_file in loaded:
-            log.info("Loaded env from %s", env_file)
-    else:
+    for env_file in loaded or ():
+        log.info("Loaded env from %s", env_file)
+    if not loaded:
         log.info("No .env found at %s, using system env", hermes_home / ".env")
 
 
@@ -164,12 +163,9 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
 def main(argv: list[str] | None = None) -> None:
     """Entry point: load env, configure logging, run the ACP agent."""
     args = _parse_args(argv)
-    if args.version:
-        return _print_version()
-    if args.check:
-        return _run_check()
-    if args.setup:
-        return _run_setup()
+    for flag, action in (("version", _print_version), ("check", _run_check), ("setup", _run_setup)):
+        if getattr(args, flag):
+            return action()
     if args.setup_browser:
         rc = _run_setup_browser(assume_yes=args.assume_yes)
         if rc != 0:

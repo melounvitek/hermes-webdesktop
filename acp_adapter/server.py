@@ -6,7 +6,6 @@ import asyncio
 from datetime import datetime, timezone
 import contextlib
 import contextvars
-import json
 import logging
 import os
 from collections import Counter, defaultdict, deque
@@ -37,7 +36,7 @@ from acp_adapter.model_catalog import (  # noqa: F401  (ACP_MAX_MODELS_PER_PROVI
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
-from acp_adapter.tools import build_tool_complete, build_tool_start
+from acp_adapter.tools import build_tool_complete, build_tool_start, coerce_tool_args
 from agent.context_compressor import (COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor)
 from agent.interrupt_compat import request_hard_interrupt
 from tools.approval import (reset_hermes_interactive_context, set_hermes_interactive_context)
@@ -116,36 +115,18 @@ def _history_summary_meta(message: dict[str, Any], text: str) -> dict[str, Any] 
     return None
 
 
+# role -> (chunk class, session_update tag) for history replay.
 _HISTORY_CHUNK_TYPES = {
     "user": (UserMessageChunk, "user_message_chunk"),
     "assistant": (AgentMessageChunk, "agent_message_chunk"),
 }
 
 
-def _history_message_update(
-    *, role: str, text: str, field_meta: dict[str, Any] | None = None
-) -> UserMessageChunk | AgentMessageChunk | None:
-    """ACP history replay update for a user/assistant message."""
-    spec = _HISTORY_CHUNK_TYPES.get(role)
-    if spec is None:
-        return None
-    cls, session_update = spec
-    return cls(session_update=session_update, content=TextContentBlock(type="text", text=text), field_meta=field_meta)
-
-
 def _history_tool_call_name_args(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Extract function name/arguments from an OpenAI-style tool_call."""
     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
     name = str(function.get("name") or tool_call.get("name") or "unknown_tool")
-    raw_args = function.get("arguments") or tool_call.get("arguments") or tool_call.get("args") or {}
-    if isinstance(raw_args, str):
-        try:
-            raw_args = json.loads(raw_args)
-        except Exception:
-            raw_args = {"raw": raw_args}
-    if not isinstance(raw_args, dict):
-        raw_args = {}
-    return name, raw_args
+    return name, coerce_tool_args(function.get("arguments") or tool_call.get("arguments") or tool_call.get("args") or {})
 
 
 def _mcp_server_config(server: McpServerStdio | McpServerHttp | McpServerSse) -> dict:
@@ -181,6 +162,12 @@ def _bind_guarded(stack: contextlib.ExitStack, label: str, setup: Callable[[], C
 
 def _attach_interrupted_prompt(interrupted_prompt: str, guidance: str) -> str:
     return f"{interrupted_prompt}\n\nUser correction/guidance after interrupt: {guidance}"
+
+
+def _queue_prompt(state: SessionState, text: str) -> int:
+    with state.runtime_lock:
+        state.queued_prompts.append(text)
+        return len(state.queued_prompts)
 
 
 def _take_interrupted_prompt(state: SessionState) -> tuple[bool, str]:
@@ -589,10 +576,11 @@ class HermesACPAgent(acp.Agent):
             text = _flatten_history_text(message.get("content"))
             if not text:
                 return True
-            update = _history_message_update(
-                role=role, text=text, field_meta=_history_summary_meta(message, text)
-            )
-            return update is None or await send(update)
+            cls, session_update = _HISTORY_CHUNK_TYPES[role]
+            return await send(cls(
+                session_update=session_update, content=TextContentBlock(type="text", text=text),
+                field_meta=_history_summary_meta(message, text),
+            ))
 
         for message in state.history:
             role = str(message.get("role") or "")
@@ -702,19 +690,20 @@ class HermesACPAgent(acp.Agent):
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self.session_manager.get_session(session_id)
-        if state and state.cancel_event:
-            with state.runtime_lock:
-                if state.is_running and state.current_prompt_text:
-                    state.interrupted_prompt_text = state.current_prompt_text
-                # Cancel + hard-stop under the lock so no other prompt mistakes this turn for
-                # redirectable work.
-                state.cancel_event.set()
-                try:
-                    if state.agent:
-                        request_hard_interrupt(state.agent)
-                except Exception:
-                    logger.debug("Failed to interrupt ACP session %s", session_id, exc_info=True)
-            logger.info("Cancelled session %s", session_id)
+        if not (state and state.cancel_event):
+            return
+        with state.runtime_lock:
+            if state.is_running and state.current_prompt_text:
+                state.interrupted_prompt_text = state.current_prompt_text
+            # Cancel + hard-stop under the lock so no other prompt mistakes this turn for
+            # redirectable work.
+            state.cancel_event.set()
+            try:
+                if state.agent:
+                    request_hard_interrupt(state.agent)
+            except Exception:
+                logger.debug("Failed to interrupt ACP session %s", session_id, exc_info=True)
+        logger.info("Cancelled session %s", session_id)
 
     async def fork_session(
         self, cwd: str, session_id: str, mcp_servers: list | None = None, **kwargs: Any
@@ -817,9 +806,7 @@ class HermesACPAgent(acp.Agent):
 
         if redirected:
             return "Redirected the active turn with your correction."
-        if queued_depth is not None:
-            return f"Queued for the next turn. ({queued_depth} queued)"
-        return None
+        return None if queued_depth is None else f"Queued for the next turn. ({queued_depth} queued)"
 
     def _run_agent_turn(
         self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
@@ -1054,9 +1041,7 @@ class HermesACPAgent(acp.Agent):
                 total_tokens=result.get("total_tokens", 0), thought_tokens=result.get("reasoning_tokens"),
                 cached_read_tokens=result.get("cache_read_tokens"),
             )
-
         await self._send_usage_update(state)
-
         return PromptResponse(stop_reason="cancelled" if cancelled else "end_turn", usage=usage)
 
     # ---- Slash commands (headless) -------------------------------------------
@@ -1183,12 +1168,11 @@ class HermesACPAgent(acp.Agent):
             lines.append(f"Model: {model}")
         lines.append(f"Provider: {provider}")
 
-        if approx_tokens > 0:
-            if context_length > 0:
-                usage_pct = (approx_tokens / context_length) * 100
-                lines.append(f"Context usage: ~{approx_tokens:,} / {context_length:,} tokens ({usage_pct:.1f}%)")
-            else:
-                lines.append(f"Context usage: ~{approx_tokens:,} tokens")
+        if approx_tokens > 0 and context_length > 0:
+            usage_pct = (approx_tokens / context_length) * 100
+            lines.append(f"Context usage: ~{approx_tokens:,} / {context_length:,} tokens ({usage_pct:.1f}%)")
+        elif approx_tokens > 0:
+            lines.append(f"Context usage: ~{approx_tokens:,} tokens")
 
         if threshold_tokens > 0:
             if approx_tokens > 0:
@@ -1217,18 +1201,15 @@ class HermesACPAgent(acp.Agent):
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
         state.history.clear()
-        reset_failed = False
         try:
             reset_session_state = getattr(state.agent, "reset_session_state", None)
             if callable(reset_session_state):
                 reset_session_state()
         except Exception:
-            reset_failed = True
             logger.warning("ACP session state reset failed for %s", state.session_id, exc_info=True)
+            return "Conversation history cleared. Agent session state reset failed; see logs."
         finally:
             self.session_manager.save_session(state.session_id)
-        if reset_failed:
-            return "Conversation history cleared. Agent session state reset failed; see logs."
         return "Conversation history cleared."
 
     def _cmd_compress(self, args: str, state: SessionState) -> str:
@@ -1270,11 +1251,6 @@ class HermesACPAgent(acp.Agent):
         except Exception as e:
             return f"Compression failed: {e}"
 
-    def _queue_prompt(self, state: SessionState, text: str) -> int:
-        with state.runtime_lock:
-            state.queued_prompts.append(text)
-            return len(state.queued_prompts)
-
     def _cmd_steer(self, args: str, state: SessionState) -> str:
         steer_text = args.strip()
         if not steer_text:
@@ -1289,15 +1265,13 @@ class HermesACPAgent(acp.Agent):
                 logger.warning("ACP steer failed for session %s: %s", state.session_id, exc)
                 return f"⚠️ Steer failed: {exc}"
 
-        depth = self._queue_prompt(state, steer_text)
-        return f"No active turn — queued for the next turn. ({depth} queued)"
+        return f"No active turn — queued for the next turn. ({_queue_prompt(state, steer_text)} queued)"
 
     def _cmd_queue(self, args: str, state: SessionState) -> str:
         queued_text = args.strip()
         if not queued_text:
             return "Usage: /queue <prompt>"
-        depth = self._queue_prompt(state, queued_text)
-        return f"Queued for the next turn. ({depth} queued)"
+        return f"Queued for the next turn. ({_queue_prompt(state, queued_text)} queued)"
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
         return f"Hermes Agent v{HERMES_VERSION}"
