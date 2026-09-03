@@ -1,7 +1,4 @@
 """Gateway platform command derivations (Telegram / Discord / Slack) from ``COMMAND_REGISTRY``.
-
-:mod:`hermes_cli.commands` lazily re-exports every name here, so
-``from hermes_cli.commands import telegram_menu_commands`` keeps working.
 """
 
 from __future__ import annotations

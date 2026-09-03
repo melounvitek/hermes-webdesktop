@@ -4,8 +4,8 @@ Tokens live in ~/.hermes/auth.json, NOT ~/.codex/: Hermes keeps its own Codex OA
 separate from the Codex CLI / VS Code extension so one app's refresh-token rotation cannot
 invalidate the other's session.
 
-Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
-inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
+Split out of ``hermes_cli/auth.py``; origin helpers are imported lazily inside each function
+so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations

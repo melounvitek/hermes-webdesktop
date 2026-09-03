@@ -1,5 +1,5 @@
 """Configuration-file checks for hermes doctor: .env, config.yaml validation, drift, deprecations.
-Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching)."""
+Split out of ``hermes_cli/doctor.py``."""
 
 from __future__ import annotations
 

@@ -883,7 +883,7 @@ def _auto_continue_freshness_window() -> float:
     """Auto-continue freshness window in seconds (non-positive disables the gate).
 
     Thin wrapper over ``gateway.session`` kept so ``gateway.run`` imports/test patches keep working."""
-    from gateway.session import auto_continue_freshness_window
+    from gateway.session_lifecycle import auto_continue_freshness_window
     return auto_continue_freshness_window()
 
 
@@ -1498,11 +1498,9 @@ _ensure_ssl_certs()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home, get_hermes_home_override
-from utils import atomic_json_write  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
 _hermes_home = get_hermes_home()
 
 # Load ~/.hermes/.env first: user-managed env files must override stale shell exports on restart.
-from dotenv import load_dotenv  # noqa: F401  # backward-compat for tests that monkeypatch this symbol
 from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
@@ -2018,10 +2016,7 @@ from gateway.session import (
 # rationale); ``thread_id`` goes in ``route_metadata`` so the anchorless cron send bypasses the
 # DeliveryRouter's private-chat reply-anchor requirement. Compute the routed metadata ONCE so both the text
 # send (via DeliveryRouter) and the media send agree.
-from gateway.delivery import (
-    DeliveryRouter,
-    resolve_delivery_transport,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
-)
+from gateway.delivery import DeliveryRouter
 from gateway.turn_lease import SessionTurnLeaseRegistry
 from gateway.session_state import SessionState, legacy_dict_property, legacy_lease_token_property
 from gateway.authz_mixin import GatewayAuthorizationMixin
@@ -2040,21 +2035,14 @@ from gateway.run_notifications import GatewayNotificationsMixin
 from gateway.run_inbound import GatewayInboundMixin
 from gateway.run_goals import GatewayGoalsMixin
 from gateway.run_agent_cache import GatewayAgentCacheMixin
-from gateway.run_turn_runner import TurnRunner  # noqa: F401  (re-exported; run.py callers + tests)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     _reply_anchor_for_event,
-    merge_pending_message_event,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
-    )
-from gateway.shutdown_watchdog import (
-    _arm_loop_floor_timer,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
-    start_loop_liveness_watchdog,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
 )
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
-    DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
     DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT,
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT)
@@ -2141,8 +2129,6 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     # Sidecar notes staged but never consumed (turn aborted before run_sync) must not leak into a
     # future conversation's first user message — session keys are source-derived and REUSED.
     "_pending_turn_sidecar_notes")
-
-from gateway.run_common import _UNSET  # noqa: F401  (def-time sentinel shared with run_* mixins)
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -5360,7 +5346,7 @@ def main():
     def _arm_watchdog() -> None:
         # Armed before config load / DB opens so a pre-loop deadlock is respawned by the supervisor instead
         # of wedging as a live-PID zombie. GatewayRunner disarms it.
-        from gateway.startup_watchdog import arm_startup_watchdog
+        from hermes_startup_watchdog import arm_startup_watchdog
         arm_startup_watchdog()
 
     def _utf8_stdio() -> None:

@@ -1,7 +1,7 @@
 """Nous Portal OAuth: device-code login, refresh, shared-store mirroring, JWT selection, status.
 
-Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
-inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
+Split out of ``hermes_cli/auth.py``; origin helpers are imported lazily inside each function
+so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations

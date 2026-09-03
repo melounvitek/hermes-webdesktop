@@ -1,7 +1,7 @@
 """MiniMax OAuth (user-code grant) login, refresh and runtime credentials.
 
-Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
-lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
+Split out of ``hermes_cli/auth.py``; origin helpers are imported lazily per function so
+``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations

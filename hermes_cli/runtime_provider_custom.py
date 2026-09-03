@@ -1,6 +1,6 @@
 """Custom-provider resolution: ``providers:`` / ``custom_providers:`` lookup, identity recovery,
 custom credential pools, and the named-custom runtime builder. Extracted from
-:mod:`hermes_cli.runtime_provider` (every name re-exported there); origin-internal collaborators
+:mod:`hermes_cli.runtime_provider`; origin-internal collaborators
 (``load_config``, ``_get_model_config``, ``load_pool``, ``has_usable_secret``, …) are looked up on
 the origin module AT CALL TIME via :func:`_rp` so ``monkeypatch.setattr(runtime_provider, name, …)``
 keeps working for moved bodies."""

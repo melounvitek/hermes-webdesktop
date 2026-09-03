@@ -5,7 +5,7 @@ from hermes_cli.config import cfg_get, load_config, save_config
 from hermes_cli.colors import Colors, color
 from hermes_cli.platforms import PLATFORMS as _PLATFORMS
 
-# Backward-compatible {key: label} view for callers using ``PLATFORMS.items()`` / ``.get(key)``.
+# {key: label} view of the messaging platforms (``PLATFORMS.items()`` / ``.get(key)`` below).
 PLATFORMS = {k: info.label for k, info in _PLATFORMS.items() if k != "api_server"}
 
 
