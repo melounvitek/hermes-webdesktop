@@ -68,7 +68,6 @@ def _join_worker_for_relay_teardown(worker, *, label: str) -> None:
     """
     try:
         from agent import relay_runtime
-
         runtime = relay_runtime.get_runtime(create=False)
         if runtime is None or not runtime.managed_execution_enabled():
             return
@@ -222,7 +221,6 @@ def _provider_stream_error_from_json_decode_error(error: json.JSONDecodeError, *
     ``event: error`` the SDK raises from ``sse.json()`` before yielding a chunk,
     but ``JSONDecodeError.doc`` still carries the provider's original message."""
     from agent.redact import redact_sensitive_text
-
     raw_text = str(getattr(error, "doc", "") or "").strip()
     safe_text = redact_sensitive_text(_sanitize_surrogates(raw_text), force=True)
     safe_text = safe_text[:_PROVIDER_STREAM_ERROR_TEXT_LIMIT]
@@ -584,7 +582,6 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
     only). First non-None wins; None for unknown models.
     """
     from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
-
     if not model_id or not isinstance(model_id, str):
         return None
     name = model_id.strip().lower()
@@ -701,7 +698,6 @@ def _managed_local_load_notice(agent, api_kwargs: dict) -> "Optional[str]":
         from urllib.parse import urlparse
         from hermes_cli.local_runtime.load_progress import get_loading_progress, get_prefill_progress
         from hermes_cli.local_runtime.supervisor import state_path
-
         state = json.loads(state_path().read_text(encoding="utf-8"))
         managed = urlparse(str(state.get("base_url", ""))).netloc.lower()
         if not managed or urlparse(base).netloc.lower() != managed:
@@ -1356,7 +1352,6 @@ def _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api):
     try:
         import copy as _copy_xai
         from agent.transports.chat_completions import _rename_tool_search_bridge_for_xai
-
         has_bridge = any(
             (t.get("function") or {}).get("name") == "tool_search" for t in tools_for_api if isinstance(t, dict)
         )
@@ -1408,7 +1403,6 @@ def _build_bedrock_kwargs(agent, api_messages, tools_for_api):
 def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id):
     from agent.codex_responses_adapter import classify_responses_route
     from agent.native_compaction import native_compaction_context_management
-
     is_codex_backend, is_xai_responses, is_github_responses = classify_responses_route(agent)
     # Native server-side compaction (gpt-5.6 on direct OpenAI / ChatGPT Codex routes
     # only) — None on every other route/model, leaving the request unchanged.
@@ -1421,7 +1415,6 @@ def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, re
         try:
             import copy as _copy
             from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
-
             tools_for_api = _copy.deepcopy(tools_for_api)
             tools_for_api, _ = strip_pattern_and_format(tools_for_api)
             tools_for_api, _ = strip_slash_enum(tools_for_api)
@@ -2324,7 +2317,6 @@ _SSE_CONN_PHRASES = ("connection lost", "connection reset", "connection closed",
 
 def _is_sse_connection_error(exc: BaseException) -> bool:
     from openai import APIError as _APIError
-
     if not isinstance(exc, _APIError) or getattr(exc, "status_code", None):
         return False
     err_lower = str(exc).lower()
@@ -2457,7 +2449,6 @@ class _BedrockStream:
         try:
             from agent import relay_llm
             from agent.bedrock_adapter import stream_converse_with_callbacks
-
             intercepted_events = []
             writer_token = {"value": None}
 
@@ -2876,7 +2867,6 @@ class _StreamingCall:
                 (self._route_suppressed_text if tool_calls_acc else self._emit_text)(text)
 
         from agent import relay_llm
-
         stream = self._set_managed_stream(relay_llm.stream(self.api_kwargs, _open_stream,
             **_relay_stream_identity(self.agent, "provider"), finalizer=_relay_final_response,
             on_stream_created=self._chat_stream_created,
@@ -3082,7 +3072,6 @@ class _StreamingCall:
 
         from agent import relay_llm
         from agent.anthropic_adapter import sanitize_anthropic_kwargs
-
         accumulator = relay_llm.AnthropicStreamAccumulator()
 
         def _open_anthropic_stream(next_api_kwargs: dict[str, Any]):
