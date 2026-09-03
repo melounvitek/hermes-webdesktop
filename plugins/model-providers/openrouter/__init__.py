@@ -46,11 +46,22 @@ class OpenRouterProfile(ProviderProfile):
     """OpenRouter aggregator — provider preferences, reasoning config passthrough."""
 
     @staticmethod
-    def _clamp_reasoning_to_catalog(cfg: dict[str, Any], model: str | None) -> dict[str, Any]:
-        """Clamp ``cfg["effort"]`` to the nearest LOWER catalog-advertised level. No-op when the
-        catalog is unreachable, the model is unlisted, or no supported_efforts list is published."""
+    def _clamp_reasoning_to_catalog(cfg: dict[str, Any], model: str | None) -> dict[str, Any] | None:
+        """Clamp ``cfg["effort"]`` to the model's catalog-advertised levels.
+
+        Returns None when the config is a disable and the catalog marks the
+        route reasoning-mandatory (the caller omits the field).
+
+        OpenRouter's /v1/models entries publish ``reasoning.supported_efforts``
+        per model (ported from PrimeIntellect-ai/prime-agent#1258). Sending an
+        unsupported effort (e.g. ``ultra`` to a route that stops at ``high``)
+        yields provider 4xx errors; clamp to the nearest LOWER supported level
+        instead. No-op when the catalog is unreachable, the model is unlisted,
+        or no supported_efforts list is published (None = all levels accepted).
+        """
         effort = cfg.get("effort")
-        if not effort or cfg.get("enabled") is False:
+        disabled = cfg.get("enabled") is False or effort == "none"
+        if not effort and not disabled:
             return cfg
         try:
             from hermes_cli.models import clamp_reasoning_effort_to_supported, openrouter_model_reasoning_capabilities
@@ -58,7 +69,14 @@ class OpenRouterProfile(ProviderProfile):
             caps = openrouter_model_reasoning_capabilities(model)
             if not caps or not caps.get("supports_reasoning"):
                 return cfg
-            clamped = clamp_reasoning_effort_to_supported(effort, caps.get("supported_efforts"))
+            # A reasoning-mandatory route 400s on a disable ("Reasoning is
+            # mandatory for this endpoint and cannot be disabled") — omit
+            # the field and let the model think, same as the Nous profile.
+            if disabled:
+                return None if caps.get("mandatory") else cfg
+            clamped = clamp_reasoning_effort_to_supported(
+                effort, caps.get("supported_efforts")
+            )
         except Exception:
             return cfg
         if clamped and clamped != effort:
@@ -126,7 +144,11 @@ class OpenRouterProfile(ProviderProfile):
                 if cfg.get("enabled", True) is not False and effort and effort != "none":
                     top_level["verbosity"] = effort
             elif reasoning_config is not None:
-                extra_body["reasoning"] = self._clamp_reasoning_to_catalog(dict(reasoning_config), model)
+                clamped = self._clamp_reasoning_to_catalog(
+                    dict(reasoning_config), model
+                )
+                if clamped is not None:
+                    extra_body["reasoning"] = clamped
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
         # xAI's prompt cache is pinned per backend server via this header.

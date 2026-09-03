@@ -60,6 +60,7 @@ from hermes_cli.models_reasoning_caps import (  # noqa: F401  (re-exported; test
     nous_model_reasoning_capabilities,
     openrouter_model_reasoning_capabilities,
     parse_openrouter_reasoning_capabilities,
+    refresh_reasoning_caps_async,
     warm_nous_reasoning_caps_async,
     warm_openrouter_reasoning_caps_async)
 from hermes_cli.models_local import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)

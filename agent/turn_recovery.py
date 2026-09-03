@@ -511,6 +511,26 @@ def recover_after_classification(
             "messages with image parts found; surfacing original error."
         )
 
+    # Reasoning-mandatory route (Nous Portal / OpenRouter, e.g. GLM-5.3) 400s on
+    # ``reasoning: {enabled: false}``. The catalog guard in the provider profile normally swallows
+    # the disable, but a process that warmed its caps cache before the route flipped keeps sending
+    # it. One-shot: never send a disable again this session (the wire builder omits it → upstream
+    # default thinking), queue a catalog refresh so the guard is right next time, retry.
+    if (
+        classified.reason == FailoverReason.reasoning_mandatory
+        and not _retry.reasoning_mandatory_retry_attempted
+    ):
+        _retry.reasoning_mandatory_retry_attempted = True
+        agent._reasoning_disable_rejected = True
+        try:
+            from hermes_cli.models import refresh_reasoning_caps_async
+            refresh_reasoning_caps_async(agent.provider)
+        except Exception:
+            pass
+        _vlines(agent, f"⚠️  {agent.model} requires reasoning — thinking stays on for this session, retrying...")
+        logger.warning("%sReasoning-mandatory recovery: dropping reasoning disable for %s", agent.log_prefix, agent.model)
+        return True, recovered_with_pool
+
     # Provider rejected the image bytes; shrinking can't help, so strip image parts.
     # Strip ONLY the per-call copy: replacing msg["content"] on the shallow api_messages
     # rows keeps canonical history's images (transient rejection must not erase history).

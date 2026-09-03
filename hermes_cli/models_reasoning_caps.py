@@ -224,6 +224,20 @@ def _warm_caps_async(src: _CapsSource) -> None:
     _warm_reasoning_caps_async(lambda: _fetch_caps(src, force=True))
 
 
+def refresh_reasoning_caps_async(provider: Optional[str]) -> None:
+    """Force a background re-fetch of *provider*'s reasoning-capability catalog.
+
+    The in-memory cache is otherwise held for the process lifetime, so a route that flips to
+    reasoning-mandatory mid-process (GLM-5.3-flash, Sep 2026) keeps being sent disables it now
+    rejects. Called from the conversation loop's reasoning_mandatory recovery so the profile guard
+    is right again on the next request; no-op for providers without a catalog.
+    """
+    src = {"nous": _NOUS_CAPS, "nous-portal": _NOUS_CAPS, "nousresearch": _NOUS_CAPS,
+           "openrouter": _OPENROUTER_CAPS}.get(str(provider or "").strip().lower())
+    if src is not None:
+        _warm_reasoning_caps_async(lambda: _fetch_caps(src, force=True))
+
+
 _OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1/models"
 
 _OPENROUTER_CAPS = _CapsSource(
