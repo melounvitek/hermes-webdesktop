@@ -192,30 +192,25 @@ def _refresh_payload_access_token(
     *invalid_json*'s message is formatted with the JSON error. *strict_str* rejects non-string
     access tokens; otherwise they are ``str()``-coerced.
     """
+    def _err(message: str, code: str, relogin: bool = relogin_required) -> AuthError:
+        return AuthError(message, provider=provider, code=code, relogin_required=relogin)
+
     try:
         payload = response.json()
     except Exception as exc:
-        raise AuthError(
-            invalid_json[0].format(exc=exc), provider=provider, code=invalid_json[1],
-            relogin_required=(
-                relogin_required if invalid_json_relogin is None else invalid_json_relogin),
-        ) from exc
+        relogin = relogin_required if invalid_json_relogin is None else invalid_json_relogin
+        raise _err(invalid_json[0].format(exc=exc), invalid_json[1], relogin) from exc
     if not isinstance(payload, dict):
-        if invalid_response is None:
-            payload = {}
-        else:
-            raise AuthError(
-                invalid_response[0], provider=provider, code=invalid_response[1],
-                relogin_required=relogin_required)
+        if invalid_response is not None:
+            raise _err(*invalid_response)
+        payload = {}
     access = payload.get("access_token")
     if strict_str:
         access = access.strip() if isinstance(access, str) else ""
     else:
         access = _stripped(access)
     if not access:
-        raise AuthError(
-            missing_access[0], provider=provider, code=missing_access[1],
-            relogin_required=relogin_required)
+        raise _err(*missing_access)
     return payload, access
 
 
@@ -301,7 +296,6 @@ def refresh_codex_oauth_pure(
     if not _nonempty_str(refresh_token):
         raise _codex_err(
             _MISSING_REFRESH_TOKEN_MSG, "codex_auth_missing_refresh_token", relogin=True)
-
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
     with _codex_http_client(
         timeout=timeout,
@@ -313,7 +307,6 @@ def refresh_codex_oauth_pure(
             data={
                 "grant_type": "refresh_token", "refresh_token": refresh_token,
                 "client_id": CODEX_OAUTH_CLIENT_ID})
-
     if response.status_code == 429:
         # Quota exhaustion on the token endpoint: the refresh token is still valid and re-auth
         # cannot lift a quota cap, so classify distinctly from auth failures ("retry later").
@@ -321,7 +314,6 @@ def refresh_codex_oauth_pure(
             _parse_retry_after_seconds(getattr(response, "headers", None)))
     if response.status_code != 200:
         raise _codex_refresh_failure_error(response)
-
     refresh_payload, refreshed_access = _refresh_payload_access_token(
         response, provider="openai-codex",
         invalid_json=("Codex token refresh returned invalid JSON.", "codex_refresh_invalid_json"),
@@ -415,7 +407,6 @@ def resolve_codex_runtime_credentials(
                 str(getattr(exc, "code", None) or "auth_error"))
             if imported:
                 data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
-
     if data is None:
         pool_token = _pool_codex_access_token()
         if pool_token:
@@ -442,7 +433,6 @@ def resolve_codex_runtime_credentials(
         if read_error is not None:
             raise read_error
         raise _codex_err(_NO_CREDENTIALS_MSG, "codex_auth_missing", relogin=True)
-
     tokens = dict(data["tokens"])
     access_token = _stripped(tokens.get("access_token"))
     refresh_timeout_seconds = env_float("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS", 20)
@@ -526,7 +516,6 @@ def _probe_codex_quota_restored(
             return cached[1]
         # Reserve the slot immediately so concurrent selectors don't stampede the endpoint.
         _codex_quota_probe_cache[cache_key] = (now, None)
-
     result: Optional[bool] = None
     try:
         headers = {
@@ -554,7 +543,6 @@ def _probe_codex_quota_restored(
     except Exception:
         logger.debug("Codex quota probe failed", exc_info=True)
         result = None
-
     with _codex_quota_probe_lock:
         _codex_quota_probe_cache[cache_key] = (now, result)
     return result
@@ -660,7 +648,6 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
         _offer_existing_oauth_credentials, _print_login_success, _prompt_yes_no, _save_codex_tokens,
         _update_config_for_provider, resolve_codex_runtime_credentials)
     del args, pconfig  # kept for parity with other provider login helpers
-
     if not force_new_login:
         if _offer_existing_oauth_credentials(
             "openai-codex", resolve=resolve_codex_runtime_credentials,
@@ -728,14 +715,12 @@ def _codex_request_device_code(issuer: str, client_id: str) -> Dict[str, Any]:
             delay = max(1, min(int(retry_after if retry_after is not None else 2 ** attempt), 60))
             print(f"OpenAI is rate-limiting login requests (429); retrying in {delay}s...")
             time.sleep(delay)
-
     if resp is not None and resp.status_code == 429:
         raise _codex_login_rate_limited_error(resp)
     if resp is None or resp.status_code != 200:
         status = resp.status_code if resp is not None else "unknown"
         raise _codex_err(
             f"Device code request returned status {status}.", "device_code_request_error")
-
     device_data = resp.json()
     device_data["interval"] = max(3, int(device_data.get("interval", "5")))
     if not device_data.get("user_code", "") or not device_data.get("device_auth_id", ""):
@@ -767,7 +752,6 @@ def _codex_poll_authorization_code(
     except KeyboardInterrupt:
         print("\nLogin cancelled.")
         raise SystemExit(130)
-
     if code_resp is None:
         raise _codex_err("Login timed out after 15 minutes.", "device_code_timeout")
     return code_resp
@@ -817,7 +801,6 @@ def _codex_device_code_login() -> Dict[str, Any]:
     print("  2. Enter this code:")
     print(f"     \033[94m{user_code}\033[0m\n")
     print("Waiting for sign-in... (press Ctrl+C to cancel)")
-
     code_resp = _codex_poll_authorization_code(
         issuer, device_auth_id=device_data["device_auth_id"], user_code=user_code,
         poll_interval=device_data["interval"])

@@ -67,7 +67,6 @@ def strip_cloned_single_use_oauth_grants(profile_dir: Path) -> Dict[str, Any]:
                 stripped["files"].append(name)
         except OSError:
             logger.debug("Could not remove cloned %s from %s", name, profile_dir, exc_info=True)
-
     auth_path = profile_dir / "auth.json"
     if not auth_path.is_file():
         return stripped
@@ -77,7 +76,6 @@ def strip_cloned_single_use_oauth_grants(profile_dir: Path) -> Dict[str, Any]:
         return stripped
     if not isinstance(store, dict):
         return stripped
-
     changed = False
     pool = store.get("credential_pool")
     if isinstance(pool, dict):
@@ -165,7 +163,6 @@ def _oauth_freshness(entry: Dict[str, Any]) -> float:
     the live copy; ``last_refresh`` and the JWT ``exp`` claim are fallbacks.
     """
     from agent.credential_pool import _parse_absolute_timestamp
-
     best = 0.0
     for key in ("expires_at_ms", "expires_at", "last_refresh"):
         ts = _parse_absolute_timestamp(entry.get(key))
@@ -516,7 +513,6 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
                     singleton_row.get("expires_at_ms"), target=root_singleton)
             if run.profile_changed and profile_path.exists():
                 _save_auth_store(profile_store, target_path=profile_path)
-
     message = run.notice(profile_home.name)
     logger.info(message)
     _oauth_heal_notices.append(message)
