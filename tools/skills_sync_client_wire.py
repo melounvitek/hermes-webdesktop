@@ -71,10 +71,8 @@ def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
         value = json.loads(data.decode("utf-8"))
     except Exception:
         return None
-    if (
-        not isinstance(value, dict) or value.get("type") != SYNC_MANIFEST_TYPE
-        or value.get("version") != SYNC_MANIFEST_VERSION or not isinstance(value.get("skills"), list)
-    ):
+    if (not isinstance(value, dict) or value.get("type") != SYNC_MANIFEST_TYPE
+            or value.get("version") != SYNC_MANIFEST_VERSION or not isinstance(value.get("skills"), list)):
         return None
     out: Dict[str, bool] = {}
     for raw in value["skills"]:
@@ -236,9 +234,7 @@ class SyncClient:
         if r.status_code in ok:
             return r
         msg = (errors or {}).get(r.status_code)
-        if callable(msg):
-            msg = msg(r)
-        raise SyncError(msg or f"{op} failed: {r.status_code}", status=r.status_code)
+        raise SyncError((msg(r) if callable(msg) else msg) or f"{op} failed: {r.status_code}", status=r.status_code)
 
     def capabilities(self) -> Dict[str, Any]:
         """GET capabilities (no auth required)."""
@@ -254,9 +250,8 @@ class SyncClient:
 
     def get_object(self, obj_hash: str, *, org_scope: bool = False) -> Tuple[str, bytes]:
         """GET objects/:hash -> ``(kind, bytes)``; kind from the object-type header, blob default."""
-        r = self._request(
-            "GET", f"org/objects/{obj_hash}" if org_scope else f"objects/{obj_hash}", "get_object",
-            errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"})
+        r = self._request("GET", f"{'org/' if org_scope else ''}objects/{obj_hash}", "get_object",
+                          errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"})
         return r.headers.get("X-HSP-Object-Type") or KIND_BLOB, r.content
 
     def _get_json_of_kind(self, obj_hash: str, expected: str, org_scope: bool) -> Dict[str, Any]:
@@ -276,18 +271,15 @@ class SyncClient:
         bytes; no base64-in-JSON). The server rehashes and 422s the whole batch on mismatch; known
         hashes are no-ops. ``org_scope`` adds ``?scope=org`` (required before an org CAS/propose)."""
         files = [(h, (kind, data, "application/octet-stream")) for h, (kind, data) in objects.items()]
-        r = self._request(
-            "POST", "objects", "put_objects", ok=(200, 201), files=files,
-            params={"scope": "org"} if org_scope else None,
-            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"})
-        return _body(r)
+        return _body(self._request(
+            "POST", "objects", "put_objects", ok=(200, 201), files=files, params={"scope": "org"} if org_scope else None,
+            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"}))
 
     def cas_ref(self, name: str, from_hash: Optional[str], to_hash: str) -> Dict[str, Any]:
         """POST refs/:name -- atomic CAS; SyncConflict on 409. A member's CAS on an org HEAD becomes a
         proposal (202) -> ``{"proposal_pending": True, ...}``: success-shaped, never present as live."""
-        r = self._request(
-            "POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409), json={"from": from_hash, "to": to_hash},
-            errors={403: "forbidden (403) -- owner/permission"})
+        r = self._request("POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409),
+                          json={"from": from_hash, "to": to_hash}, errors={403: "forbidden (403) -- owner/permission"})
         if r.status_code == 202:
             return {"proposal_pending": True, **_body(r)}
         if r.status_code == 409:  # "" actual = the ref does not exist server-side (-> None)
@@ -319,7 +311,6 @@ def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: b
         for e in entries:
             if e.get("kind") == KIND_TREE:
                 _walk(e["hash"], f"{prefix}/{e['name']}" if prefix else e["name"])
-
     _walk(root_tree_hash, "")
     return result
 
@@ -351,8 +342,7 @@ def materialize_tree(client: SyncClient, tree_hash: str, dest: Path, *, org_scop
         if not name or "/" in name or name in (".", ".."):
             logger.warning("skills_sync_client: skipping unsafe tree entry %r", name)
             continue
-        target = dest / name
-        kind = entry.get("kind")
+        target, kind = dest / name, entry.get("kind")
         if kind == KIND_TREE:
             materialize_tree(client, entry["hash"], target, org_scope=org_scope)
         elif kind == KIND_BLOB:
