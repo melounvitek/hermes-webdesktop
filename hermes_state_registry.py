@@ -75,6 +75,17 @@ def _teardown(db: "SessionDB") -> None:
         logger.debug("Error closing shared SessionDB", exc_info=True)
 
 
+def _db_path_of(db: "SessionDB") -> Optional[Path]:
+    """``Path(db.db_path)`` or None when absent/unconvertible."""
+    path = getattr(db, "db_path", None)
+    if path is None:
+        return None
+    try:
+        return Path(path)
+    except (TypeError, ValueError):
+        return None
+
+
 def _finish_opening(path: Path, opening: threading.Event) -> None:
     """Drop the per-path construction marker and wake waiters (caller holds _lock)."""
     if _opening.get(path) is opening:
@@ -162,12 +173,8 @@ def release(db: "SessionDB") -> bool:
     with _lock:
         generation = _retired.get(key)
         if generation is None:
-            path = getattr(db, "db_path", None)
+            path = _db_path_of(db)
             if path is None:
-                return False
-            try:
-                path = Path(path)
-            except (TypeError, ValueError):
                 return False
             generation = _generations.get(path)
             if generation is None or generation.db is not db:
@@ -179,12 +186,9 @@ def release(db: "SessionDB") -> bool:
             if generation.retired:
                 _retired.pop(key, None)
             else:
-                path = getattr(db, "db_path", None)
+                path = _db_path_of(db)
                 if path is not None:
-                    try:
-                        _generations.pop(Path(path), None)
-                    except (TypeError, ValueError):
-                        pass
+                    _generations.pop(path, None)
     # Teardown OUTSIDE the lock: stopping the token writer, WAL checkpoint and read-pool
     # drain must not block acquisition for every other state.db.
     if needs_teardown:

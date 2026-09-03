@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Sequence
 
 from hermes_constants import get_hermes_home
 from hermes_startup_watchdog import report_startup_progress
+from utils import safe_json_loads
 from hermes_state_common import (
     DEFERRED_INDEX_SQL, FTS_CJK_STALE_KEY, FTS_REBUILD_DEFERRAL_KEY, FTS_STALE_KEY, FTS_SQL,
     FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL,
@@ -356,12 +357,12 @@ class SessionSchemaMixin:
             row = cursor.execute(
                 "SELECT value FROM state_meta WHERE key = ? LIMIT 1", (FTS_REBUILD_DEFERRAL_KEY,),
             ).fetchone()
-            if row:
-                parsed = json.loads(row[0])
-                if isinstance(parsed, dict):
-                    record = parsed
-        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
-            record = {}
+        except sqlite3.Error:
+            row = None
+        if row:
+            parsed = safe_json_loads(row[0])
+            if isinstance(parsed, dict):
+                record = parsed
         try:
             first_seen = float(record.get("first_seen", now))
             attempts = int(record.get("attempts", 0)) + 1
@@ -570,17 +571,11 @@ class SessionSchemaMixin:
             from hermes_constants import get_hermes_home as _home
             cache_path = _home() / "cache" / "schema_columns.json"
             blob = json.loads(cache_path.read_text(encoding="utf-8"))
-            if (
-                isinstance(blob, dict)
-                and blob.get("schema_hash") == schema_hash
-                and isinstance(blob.get("tables"), dict)
+            tables = blob.get("tables") if isinstance(blob, dict) and blob.get("schema_hash") == schema_hash else None
+            if isinstance(tables, dict) and all(
+                isinstance(cols, dict) and all(isinstance(v, str) for v in cols.values()) for cols in tables.values()
             ):
-                tables = blob["tables"]
-                if all(
-                    isinstance(cols, dict) and all(isinstance(v, str) for v in cols.values())
-                    for cols in tables.values()
-                ):
-                    return tables
+                return tables
         except Exception:
             pass  # missing/corrupt cache → recompute below
 

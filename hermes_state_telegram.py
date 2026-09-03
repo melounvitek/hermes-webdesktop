@@ -103,17 +103,18 @@ class SessionTelegramTopicsMixin:
 
     def _topic_read_one(self, sql: str, params, default=None):
         """``fetchone`` that treats an unmigrated table as *default*."""
-        try:
-            return self._read_one(sql, params)
-        except sqlite3.OperationalError:
-            return default
+        return self._topic_read(self._read_one, sql, params, default)
 
     def _topic_read_all(self, sql: str, params) -> list:
         """``fetchall`` that treats an unmigrated table as no rows."""
+        return self._topic_read(self._read_all, sql, params, [])
+
+    @staticmethod
+    def _topic_read(reader, sql: str, params, default):
         try:
-            return self._read_all(sql, params)
+            return reader(sql, params)
         except sqlite3.OperationalError:
-            return []
+            return default
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in. Deliberately NOT
