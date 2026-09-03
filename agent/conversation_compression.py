@@ -150,11 +150,8 @@ def is_compaction_progress_status(text: str | None) -> bool:
     if body == COMPACTION_DONE_STATUS:
         return False
     lowered = body.lower()
-    if "compaction complete" in lowered:
-        return False
-    # Failure-class overflow warning mentions compression but is a blocked
-    # notice, not progress — keep it lifecycle so chat gateways stay loud.
-    if "compression is currently blocked" in lowered:
+    # The failure-class overflow warning mentions compression but is a blocked notice, not progress.
+    if "compaction complete" in lowered or "compression is currently blocked" in lowered:
         return False
     return "compact" in lowered or "compress" in lowered or "context reduced to" in lowered
 
@@ -457,14 +454,11 @@ class CompressionCommitFence:
         after blocking until an already-started commit fully completed.
         """
         with self._lock:
-            if self._commit_started:
-                if cancel_event is not None:
-                    cancel_event.set()
-                return False
-            self._cancelled = True
+            if not self._commit_started:
+                self._cancelled = True
             if cancel_event is not None:
                 cancel_event.set()
-            return True
+            return not self._commit_started
 
     def try_cancel_before_commit(self) -> Optional[bool]:
         """Non-blocking form of :meth:`cancel_before_commit`.
@@ -1063,9 +1057,7 @@ def run_compress_context_with_progress_timeout(
         )
 
     def _resolve_fallback_prompt() -> str:
-        if callable(system_prompt_fallback):
-            return system_prompt_fallback()
-        return system_prompt_fallback
+        return system_prompt_fallback() if callable(system_prompt_fallback) else system_prompt_fallback
 
     ceiling = max(float(total_ceiling_seconds), float(idle_timeout_seconds))
     idle = float(idle_timeout_seconds)
@@ -1274,10 +1266,7 @@ def _emit_compression_attempt_telemetry(
 
 def _existing_system_prompt(agent: Any, system_message: str) -> str:
     """Cached system prompt, or a fresh build when nothing is cached (abort paths)."""
-    existing = getattr(agent, "_cached_system_prompt", None)
-    if not existing:
-        existing = agent._build_system_prompt(system_message)
-    return existing
+    return getattr(agent, "_cached_system_prompt", None) or agent._build_system_prompt(system_message)
 
 
 def _emit_aborted_attempt_telemetry(agent: Any, started_at: float, failure_class: str | None) -> None:
@@ -1581,8 +1570,7 @@ def _supported_compression_kwargs(
         # shape when the callable has no inspectable signature.
         return {"current_tokens": current_tokens}
 
-    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    if accepts_kwargs:
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return candidates
     return {name: value for name, value in candidates.items() if name in parameters}
 
@@ -1670,9 +1658,7 @@ def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, An
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        if role not in {"user", "assistant"}:
-            continue
-        if message.get(COMPRESSED_SUMMARY_METADATA_KEY):
+        if role not in {"user", "assistant"} or message.get(COMPRESSED_SUMMARY_METADATA_KEY):
             continue
         if role == "assistant" and message.get("tool_calls"):
             content = message.get("content")
@@ -1990,9 +1976,7 @@ def _is_real_user_message(message: Any) -> bool:
     if any(message.get(flag) for flag in _SYNTHETIC_USER_FLAGS):
         return False
     text = _message_text(message).strip()
-    if not text:
-        return False
-    if text.startswith(_SYNTHETIC_USER_PREFIXES):
+    if not text or text.startswith(_SYNTHETIC_USER_PREFIXES):
         return False
     from agent.context_compressor import ContextCompressor
     return not ContextCompressor._is_synthetic_compression_user_turn(message)
@@ -2053,12 +2037,9 @@ def _compressed_has_busy_steer(messages: list) -> bool:
 
     Only tool rows count, so a summary merely quoting the marker text is not mistaken for live intent.
     """
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        if _message_contains_busy_steer(msg):
-            return True
-    return False
+    return any(
+        isinstance(msg, dict) and msg.get("role") == "tool" and _message_contains_busy_steer(msg) for msg in messages
+    )
 
 
 def _strip_stale_todo_snapshot(content: Any) -> Any:
@@ -2153,17 +2134,11 @@ def _merge_anchor_into_user_message(target: dict, anchor: dict) -> None:
     anchor_content = anchor.get("content")
     target_content = target.get("content")
     if isinstance(anchor_content, list) or isinstance(target_content, list):
-        anchor_parts = (
-            list(anchor_content)
-            if isinstance(anchor_content, list)
-            else [{"type": "text", "text": str(anchor_content or "")}]
-        )
-        target_parts = (
-            list(target_content)
-            if isinstance(target_content, list)
-            else [{"type": "text", "text": str(target_content or "")}]
-        )
-        _replace_message_content(target, anchor_parts + target_parts)
+
+        def _parts(content: Any) -> list:
+            return list(content) if isinstance(content, list) else [{"type": "text", "text": str(content or "")}]
+
+        _replace_message_content(target, _parts(anchor_content) + _parts(target_content))
     else:
         merged = f"{anchor_content or ''}\n\n{target_content or ''}".strip()
         _replace_message_content(target, merged)
@@ -2231,11 +2206,12 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
 
 def _messages_match_scoped_identity(left: Any, right: Any) -> bool:
     """Compare the live turn identity we care about for rotation stamping."""
-    if not isinstance(left, dict) or not isinstance(right, dict):
-        return False
-    if left.get("role") != right.get("role"):
-        return False
-    if left.get("content") != right.get("content"):
+    if (
+        not isinstance(left, dict)
+        or not isinstance(right, dict)
+        or left.get("role") != right.get("role")
+        or left.get("content") != right.get("content")
+    ):
         return False
     left_timestamp = left.get("timestamp")
     right_timestamp = right.get("timestamp")
@@ -2495,10 +2471,8 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
                 # A captured watermark makes the commit safe against later rows on BOTH commit
                 # paths; tell the fence so a host may keep this attempt's admission.
                 if commit_fence is not None:
-                    try:
+                    with contextlib.suppress(AttributeError):  # test doubles without the method
                         commit_fence.mark_commit_watermark_fenced()
-                    except AttributeError:
-                        pass  # test doubles without the method
             except Exception as _wm_err:
                 logger.warning(
                     "compression watermark capture failed for session=%s (%s) — concurrent appends this cycle "
@@ -3118,11 +3092,7 @@ def _publish_rotated_compaction(
     if compressed_user_turn_outcome in {"inserted", "merged"}:
         # Stamp the anchor source row itself, not the (drifted, possibly out-of-range)
         # persist index; don't match the HANDOFF row — for `merged` it is a superset.
-        _compressed_anchor_source = None
-        for _reversed_message in reversed(messages):
-            if _is_real_user_message(_reversed_message):
-                _compressed_anchor_source = _reversed_message
-                break
+        _compressed_anchor_source = next((m for m in reversed(messages) if _is_real_user_message(m)), None)
         if isinstance(_compressed_anchor_source, dict):
             _compressed_anchor_source[_DB_PERSISTED_MARKER] = True
             _session_messages = getattr(agent, "_session_messages", None)
@@ -3209,9 +3179,7 @@ def _finish_compaction_boundary(
     if _old_sid and session_commit_succeeded:
         with _swallow("failed to clear archived compression parent's activity labels (ignored)", exc_info=True):
             _labels_db = getattr(agent, "_session_db", None)
-            _clear_labels = getattr(
-                type(_labels_db) if _labels_db is not None else None, "clear_session_activity_labels", None
-            )
+            _clear_labels = getattr(type(_labels_db), "clear_session_activity_labels", None)
             if callable(_clear_labels):
                 _clear_labels(_labels_db, _old_sid)
 
@@ -3678,10 +3646,9 @@ def _route_codex_compaction(
     force: bool,
 ) -> Tuple[list, str]:
     """Codex owns the real thread: run its own compact under the commit fence bracket."""
-    if commit_fence is not None:
-        if not commit_fence.begin_commit(getattr(agent, "_hard_interrupt_requested", None)):
-            attempt.restore_compressor(agent.context_compressor)
-            return messages, _existing_system_prompt(agent, system_message)
+    if commit_fence is not None and not commit_fence.begin_commit(getattr(agent, "_hard_interrupt_requested", None)):
+        attempt.restore_compressor(agent.context_compressor)
+        return messages, _existing_system_prompt(agent, system_message)
     try:
         return _compress_context_via_codex_app_server(
             agent, messages, system_message, approx_tokens=approx_tokens, task_id=task_id, force=force
@@ -3789,8 +3756,7 @@ def compress_context(
         # Durable cooldown read failed under a built-in compressor: force=True could
         # clear an unknown newer row before cancellation could restore it. Abort.
         lease.release()
-        existing_prompt = _existing_system_prompt(agent, system_message)
-        return messages, existing_prompt
+        return messages, _existing_system_prompt(agent, system_message)
 
     # Another path may have compacted this session in place since construction;
     # re-read breaker state under the lock, not the bind_session_state() snapshot.
@@ -4027,11 +3993,7 @@ def _compress_context_via_codex_app_server(
 # runs after a confirmed provider rejection, so the alternative is failure.
 _IMAGE_SHRINK_TARGET_BYTES = 4 * 1024 * 1024
 _IMAGE_SUFFIX_BY_MIME = {
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
+    "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/jpeg": ".jpg", "image/jpg": ".jpg",
     "image/bmp": ".bmp",
 }
 

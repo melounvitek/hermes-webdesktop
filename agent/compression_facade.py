@@ -22,8 +22,7 @@ def _timeout_fallback_prompt(agent, system_message: str) -> str:
     Resolved lazily by the timeout wrapper: an eager rebuild would raise before
     compress_context runs when ``_cached_system_prompt`` is unset and the builder fails.
     """
-    cached = getattr(agent, "_cached_system_prompt", None)
-    if cached:
+    if cached := getattr(agent, "_cached_system_prompt", None):
         return cached
     try:
         return agent._build_system_prompt(system_message)
@@ -62,18 +61,13 @@ def _report_compression_timeout(
         except Exception:
             logger.debug("compress_context timeout activity touch failed", exc_info=True)
     # Same timeout cooldown ladder as summary-LLM timeouts: avoid re-burning the full idle budget every turn.
-    compressor = getattr(agent, "context_compressor", None)
-    record = getattr(compressor, "record_timeout_failure", None) if compressor is not None else None
+    record = getattr(getattr(agent, "context_compressor", None), "record_timeout_failure", None)
     if callable(record):
         try:
-            record(
-                (
-                    "host compress_context total ceiling exhausted"
-                    if total_exhausted
-                    else "host compress_context timeout (no summary progress)"
-                ),
-                failure_kind="ceiling_exhausted" if total_exhausted else "stalled",
-            )
+            if total_exhausted:
+                record("host compress_context total ceiling exhausted", failure_kind="ceiling_exhausted")
+            else:
+                record("host compress_context timeout (no summary progress)", failure_kind="stalled")
         except Exception:
             logger.debug("failed to record compress_context timeout cooldown", exc_info=True)
     emit = getattr(agent, "_emit_warning", None)
@@ -135,15 +129,12 @@ def _run_under_progress_timeout(
     def _snapshot_worker(fence=None):
         snapshot = copy.deepcopy(messages)
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
-        if result_msgs is snapshot:
-            return messages, result_prompt
-        return result_msgs, result_prompt
+        return (messages if result_msgs is snapshot else result_msgs), result_prompt
 
     timeout_cause = {"total_exhausted": False, "progress_observed": False}
 
     def _on_timeout_cause(total_exhausted, progress_observed):
-        timeout_cause["total_exhausted"] = total_exhausted
-        timeout_cause["progress_observed"] = progress_observed
+        timeout_cause.update(total_exhausted=total_exhausted, progress_observed=progress_observed)
 
     def _on_timeout(idle, waited, since_progress):
         _report_compression_timeout(
@@ -273,12 +264,9 @@ class CompressionFacadeMixin:
             # Callers that already own a progress-aware wait (gateway session
             # hygiene) pass commit_fence and must not be double-wrapped.
             direct_path = commit_fence is not None
-            idle_timeout = total_ceiling = None
             if not direct_path:
                 idle_timeout, total_ceiling = resolve_context_compression_timeouts()
-                if idle_timeout <= 0:
-                    direct_path = True
-
+                direct_path = idle_timeout <= 0
             if direct_path:
                 result = _run(active_fence)
             else:
