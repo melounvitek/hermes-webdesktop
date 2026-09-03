@@ -900,7 +900,6 @@ class GatewayAdapterLifecycleMixin:
         with _profile_runtime_scope(profile_home, hydrate_secrets=False):
             profile_runtime_cfg = _load_gateway_runtime_config()
             from hermes_cli.plugins import discover_plugins
-
             discover_plugins()
 
             # Register this profile's shell hooks / outbound webhooks: start() registers before any
@@ -996,7 +995,6 @@ class GatewayAdapterLifecycleMixin:
     ) -> int:
         """Create+connect one profile's adapters under its runtime scope."""
         from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
-
         profile_cfg = await self._load_secondary_profile_config(profile_name, profile_home)
         multiplex = getattr(self.config, "multiplex_profiles", False)
         profile_map = self._profile_adapters.setdefault(profile_name, {})
@@ -1140,7 +1138,6 @@ class GatewayAdapterLifecycleMixin:
         from hermes_cli.profiles import get_profile_dir
         from hermes_cli.env_loader import hydrate_profile_secret_sources
         from gateway.config import load_gateway_config
-
         profile_home = get_profile_dir(profile_name)
         # Hydrate external secret sources off-loop so they cannot starve heartbeats.
         await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
@@ -1417,12 +1414,8 @@ class GatewayAdapterLifecycleMixin:
         """Authorize and publish one normalized adapter event to plugin hooks."""
         try:
             from hermes_cli.lifecycle import has_hook, invoke_hook
-
-            if not has_hook("gateway_platform_event"):
-                return
-            if not self._is_user_authorized_for_source(source):
-                return
-            invoke_hook("gateway_platform_event", **event)
+            if has_hook("gateway_platform_event") and self._is_user_authorized_for_source(source):
+                invoke_hook("gateway_platform_event", **event)
         except Exception:
             # Observer failures must never break the adapter's update loop.
             logger.debug("gateway_platform_event hook dispatch failed", exc_info=True)
@@ -1465,22 +1458,17 @@ class GatewayAdapterLifecycleMixin:
         """Return the exclusive credential resource claimed by an adapter."""
         from gateway.run import GatewayRunner
         fingerprint = GatewayRunner._adapter_credential_fingerprint(adapter)
-        if fingerprint is None:
-            return None
-        return (platform, fingerprint)
+        return None if fingerprint is None else (platform, fingerprint)
 
     @staticmethod
     def _adapter_listener_claim(platform: Platform, adapter: Any) -> Optional[tuple]:
         """Exclusive listener claim (Photon sidecar bind+port): distinct credentials still cannot
         share a port, so the later adapter is rejected before connect() disturbs the first."""
-        if getattr(platform, "value", None) != "photon":
-            return None
         bind = getattr(adapter, "_sidecar_bind", None)
-        port = getattr(adapter, "_sidecar_port", None)
-        if not isinstance(bind, str) or not bind.strip():
+        if getattr(platform, "value", None) != "photon" or not isinstance(bind, str) or not bind.strip():
             return None
         try:
-            port = int(port)
+            port = int(getattr(adapter, "_sidecar_port", None))
         except (TypeError, ValueError):
             return None
         return ("listener", "photon", bind.strip().lower(), port)
@@ -1489,30 +1477,22 @@ class GatewayAdapterLifecycleMixin:
     def _adapter_credential_fingerprint(adapter: Any) -> Optional[str]:
         """Salted, log-safe hash of an adapter's credential; None when none is discoverable
         (conflict detection is then skipped)."""
-        token = None
-        for attr in (
-            "token", "bot_token", "_token", "api_token", "_bot_token",
-            "_project_secret",  # Photon/Spectrum: project credentials, not a bot token
-            "_app_id",  # Feishu/Lark app_id — stable, log-safe, already the _app_lock_identity
-            "_client_id", "_bot_id",  # Teams / WeCom app-style id pairs
-        ):
-            val = getattr(adapter, attr, None)
+        # Many adapters (e.g. Discord) keep the token on `config`; without that fallback the
+        # same-token check is silently skipped and every profile polls the same bot.
+        candidates = [
+            (adapter, attr) for attr in (
+                "token", "bot_token", "_token", "api_token", "_bot_token",
+                "_project_secret",  # Photon/Spectrum: project credentials, not a bot token
+                "_app_id",  # Feishu/Lark app_id — stable, log-safe, already the _app_lock_identity
+                "_client_id", "_bot_id",  # Teams / WeCom app-style id pairs
+            )
+        ] + [(getattr(adapter, "config", None), attr) for attr in ("token", "bot_token")]
+        for obj, attr in candidates:
+            val = getattr(obj, attr, None)
             if isinstance(val, str) and val.strip():
-                token = val.strip()
-                break
-        # Many adapters (e.g. Discord) keep the token on `config`; without this the same-token check
-        # is silently skipped and every profile polls the same bot — a race over which one answers.
-        if not token:
-            cfg = getattr(adapter, "config", None)
-            for attr in ("token", "bot_token"):
-                val = getattr(cfg, attr, None)
-                if isinstance(val, str) and val.strip():
-                    token = val.strip()
-                    break
-        if not token:
-            return None
-        import hashlib
-        return hashlib.sha256(("hermes-mux:" + token).encode("utf-8")).hexdigest()[:16]
+                import hashlib
+                return hashlib.sha256(("hermes-mux:" + val.strip()).encode("utf-8")).hexdigest()[:16]
+        return None
 
     def _create_adapter(self, platform: Platform, config: Any) -> Optional[BasePlatformAdapter]:
         """Create an adapter bound to this runner (every lifecycle path goes through here so

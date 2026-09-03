@@ -149,7 +149,6 @@ class GatewayBusySessionMixin:
         """Return the configured active chat session cap, if enabled."""
         try:
             from hermes_cli.active_sessions import resolve_max_concurrent_sessions
-
             return resolve_max_concurrent_sessions(getattr(self, "config", None))
         except Exception:
             return None
@@ -163,7 +162,6 @@ class GatewayBusySessionMixin:
         if active_count < max_sessions:
             return None
         from hermes_cli.active_sessions import active_session_limit_message
-
         return active_session_limit_message(active_count, max_sessions)
 
     def _claim_active_session_slot(
@@ -177,7 +175,6 @@ class GatewayBusySessionMixin:
             return None, limit_message
         try:
             from hermes_cli.active_sessions import try_acquire_active_session
-
             platform = source.platform.value if source and source.platform else "gateway"
             return try_acquire_active_session(
                 session_id=session_key,
@@ -772,7 +769,6 @@ class GatewayBusySessionMixin:
         """`/pause [reason]` engages the global emergency stop; `/pause off` lifts it (the estop gate
         lets slash commands through while paused so messaging-only operators are never locked out)."""
         from agent import estop
-
         args = (event.get_command_args() or "").strip()
         if args.lower() in {"off", "resume", "stop", "disengage"}:
             if estop.disengage():
@@ -796,7 +792,6 @@ class GatewayBusySessionMixin:
 
     async def _busy_egress_command(self, event: MessageEvent, quick_key: str, source):
         from hermes_cli.proxy_cli import format_status_text
-
         return format_status_text()
 
     async def _busy_stop_command(self, event: MessageEvent, quick_key: str, source):
@@ -904,7 +899,6 @@ class GatewayBusySessionMixin:
         """Denial message if ``source`` cannot run ``canonical_cmd``, else None (both dispatch paths
         use it so an in-flight agent can't bypass admin gating; no ``allow_admin_from`` → None)."""
         from gateway.slash_access import policy_for_source as _policy_for_source
-
         if not canonical_cmd:
             return None
         policy = _policy_for_source(self.config, source)
@@ -1005,7 +999,6 @@ class GatewayBusySessionMixin:
         from gateway.run import _command_origin_for_source
         try:
             from hermes_cli.suggestions_cmd import handle_suggestions_command
-
             return handle_suggestions_command(
                 (event.get_command_args() or "").strip(),
                 origin=_command_origin_for_source(event.source), surface="gateway",
@@ -1019,7 +1012,6 @@ class GatewayBusySessionMixin:
         from gateway.run import _command_origin_for_source
         try:
             from hermes_cli.blueprint_cmd import handle_blueprint_command
-
             return handle_blueprint_command(
                 (event.get_command_args() or "").strip(),
                 origin=_command_origin_for_source(event.source), surface="gateway",
@@ -1027,7 +1019,6 @@ class GatewayBusySessionMixin:
         except Exception as e:
             logger.debug("blueprint command failed: %s", e)
             from hermes_cli.blueprint_cmd import BlueprintCommandResult
-
             return BlueprintCommandResult(f"Cron blueprint command failed: {e}")
 
     async def _maybe_confirm_destructive_slash(
@@ -1122,7 +1113,6 @@ class GatewayBusySessionMixin:
         "cancel" and its return is sent as a message. Returns None if buttons rendered, else the
         text-fallback message (which IS the ack)."""
         from tools import slash_confirm as _slash_confirm_mod
-
         source = event.source
         session_key = self._session_key_for_source(source)
         # object.__new__ test runners lack the counter; fall back to a local one.
