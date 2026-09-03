@@ -115,6 +115,9 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     } if isinstance(raw_thresholds, dict) else {}
 
     # threshold: present value wins; absence derives via the agent_init resolution (default + autoraise).
+    # resolve_model_threshold returns ``pct`` unchanged when model_thresholds is empty.
+    from agent.context_compressor import resolve_model_threshold
+
     pct: float | None = None
     if "threshold" in compression:
         with contextlib.suppress(TypeError, ValueError):
@@ -122,12 +125,7 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     if pct is None:
         pct = _derived_default_threshold_percent(agent, compression)
     cc._config_threshold_percent = cc._configured_threshold_percent = pct
-    base = pct
-    if cc.model_thresholds:
-        from agent.context_compressor import resolve_model_threshold
-
-        base = resolve_model_threshold(getattr(agent, "model", "") or "", cc.model_thresholds, pct)
-    cc._base_threshold_percent = base
+    base = cc._base_threshold_percent = resolve_model_threshold(getattr(agent, "model", "") or "", cc.model_thresholds, pct)
     try:
         cc.threshold_percent = cc._effective_threshold_percent(cc.context_length, base)
     except Exception:
@@ -135,14 +133,11 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
 
     raw_ctx = model_cfg.get("context_length")
     if raw_ctx is not None:
-        try:
-            new_ctx = int(raw_ctx)
-        except (TypeError, ValueError):
-            new_ctx = 0
-        if new_ctx > 0:
-            cc._config_context_length = new_ctx
-            with contextlib.suppress(Exception):
-                cc.context_length = new_ctx
+        with contextlib.suppress(TypeError, ValueError):
+            if (new_ctx := int(raw_ctx)) > 0:
+                cc._config_context_length = new_ctx
+                with contextlib.suppress(Exception):
+                    cc.context_length = new_ctx
     elif getattr(cc, "_config_context_length", None) is not None:
         # model.context_length removed: drop the override and force re-inference from model metadata on
         # next access (construction's deferred resolution); re-applies the small-context floor too.
