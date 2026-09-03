@@ -77,10 +77,34 @@ def _task_parent_handle(session: _MetricsSession, task_id: str) -> Any:
     return session.relay_session.handle
 
 
+def _scope_handle(session: _MetricsSession, task: _TaskRun | None) -> Any:
+    return task.handle if task is not None else session.relay_session.handle
+
+
 def _sole(items: Any) -> Any:
     """The single distinct element of ``items`` (identity-deduplicated), else None."""
     unique = {id(item): item for item in items}
     return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def _identities_compatible(candidate: tuple[str, str, str], observed: tuple[str, str, str]) -> bool:
+    """Match partial hook context without crossing known call boundaries."""
+    if not observed[2] or candidate[2] != observed[2]:
+        return False
+    return all(
+        not left or not right or left == right
+        for left, right in zip(candidate[:2], observed[:2], strict=True)
+    )
+
+
+def _compatible_tool_call_keys(
+    session: _MetricsSession, task_id: str, identity: tuple[str, str, str]
+) -> list[tuple[str, str, str, str]]:
+    return [
+        key
+        for key in session.tool_calls
+        if key[0] == task_id and _identities_compatible(key[1:], identity)
+    ]
 
 
 @dataclass
@@ -188,16 +212,10 @@ class _Runtime:
         self, session: _MetricsSession, task: _TaskRun | None, name: str, data: dict[str, str]
     ) -> None:
         """Emit one Relay mark under the task scope when given, else the session scope."""
-        handle = task.handle if task is not None else session.relay_session.handle
         self._run_scoped(
             session, task, self.relay.scope.event, name,
-            handle=handle, data=data, metadata=self._event_metadata(),
+            handle=_scope_handle(session, task), data=data, metadata=self._event_metadata(),
         )
-
-    def _run_in_session(
-        self, session: _MetricsSession, callback: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Any:
-        return self.host.run_in_session(session.relay_session, callback, *args, **kwargs)
 
     def start_task(self, event: dict[str, Any]) -> _TaskRun | None:
         """Open one Relay function scope for a Hermes task run."""
@@ -296,8 +314,7 @@ class _Runtime:
                     task.retry_count += 1
             handle = self._run_scoped(
                 session, task, self.relay.llm.call, MODEL_CALL_SCOPE, self.relay.LLMRequest({}, {}),
-                handle=task.handle if task is not None else session.relay_session.handle,
-                metadata=self._event_metadata(),
+                handle=_scope_handle(session, task), metadata=self._event_metadata(),
                 model_name=MODEL_CALL_PROFILE_MODEL,
             )
             session.model_calls[model_call_key] = _ModelCall(handle, task_id, fields)
@@ -355,7 +372,7 @@ class _Runtime:
                 identity = self._tool_call_identity(event)
                 tool_call = session.tool_calls.get((task.task_id, *identity))
                 if tool_call is None:
-                    key = _sole(self._compatible_tool_call_keys(session, task.task_id, identity))
+                    key = _sole(_compatible_tool_call_keys(session, task.task_id, identity))
                     tool_call = session.tool_calls[key] if key is not None else None
                 if tool_call is not None:
                     tool_call.approval_outcome = outcome
@@ -382,13 +399,11 @@ class _Runtime:
                 tool_call = session.tool_calls.pop((task_id, *identity), None)
                 if tool_call is None:
                     if any(
-                        self._tool_call_identities_are_compatible(completed, observed_identity)
+                        _identities_compatible(completed, observed_identity)
                         for completed in task.completed_tool_call_ids
                     ):
                         return
-                    matching_keys = self._compatible_tool_call_keys(
-                        session, task_id, observed_identity
-                    )
+                    matching_keys = _compatible_tool_call_keys(session, task_id, observed_identity)
                     if len(matching_keys) > 1:
                         # Partial context cannot safely choose between concurrent calls
                         # that reused the provider-local ID.
@@ -553,7 +568,7 @@ class _Runtime:
         """Run under the task context when the call belongs to a task, else the session."""
         if task is not None:
             return self._run_in_task(task, callback, *args, **kwargs)
-        return self._run_in_session(session, callback, *args, **kwargs)
+        return self.host.run_in_session(session.relay_session, callback, *args, **kwargs)
 
     def _flush_and_export(self, failure_message: str) -> None:
         """Flush the Relay subscriber, then export; a failed flush skips the export."""
@@ -610,28 +625,6 @@ class _Runtime:
     def _tool_call_identity(event: dict[str, Any]) -> tuple[str, str, str]:
         """Identify one provider-local tool call without exporting its IDs."""
         return _text(event, "api_request_id"), _text(event, "turn_id"), _text(event, "tool_call_id")
-
-    @staticmethod
-    def _tool_call_identities_are_compatible(
-        candidate: tuple[str, str, str], observed: tuple[str, str, str]
-    ) -> bool:
-        """Match partial hook context without crossing known call boundaries."""
-        if not observed[2] or candidate[2] != observed[2]:
-            return False
-        return all(
-            not left or not right or left == right
-            for left, right in zip(candidate[:2], observed[:2], strict=True)
-        )
-
-    @classmethod
-    def _compatible_tool_call_keys(
-        cls, session: _MetricsSession, task_id: str, identity: tuple[str, str, str]
-    ) -> list[tuple[str, str, str, str]]:
-        return [
-            key
-            for key in session.tool_calls
-            if key[0] == task_id and cls._tool_call_identities_are_compatible(key[1:], identity)
-        ]
 
     @staticmethod
     def _event_matches_task_turn(task: _TaskRun, event: dict[str, Any]) -> bool:
