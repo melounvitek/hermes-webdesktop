@@ -131,8 +131,7 @@ def _identifier(value: Any, *, field: str) -> str:
 
 
 def _positive_int(value: Any, *, field: str) -> int:
-    return bounded_int(
-        value, error=HostedRoomPeerError, message=f"{field} must be a positive integer", low=1)
+    return bounded_int(value, error=HostedRoomPeerError, message=f"{field} must be a positive integer", low=1)
 
 
 def _digest(value: Any, *, field: str) -> str:
@@ -191,8 +190,8 @@ def _parse_endpoint(endpoint: Any) -> tuple[str | None, str | None, TransportSec
 
 
 _CATALOG_FIELDS = {
-    "installation_id", "protocol_versions", "link_modes", "persistent_process", "text",
-    "attachments", "execution_policy", "catalog_digest"}
+    "installation_id", "protocol_versions", "link_modes", "persistent_process", "text", "attachments",
+    "execution_policy", "catalog_digest"}
 
 
 @dataclass(frozen=True)
@@ -229,9 +228,8 @@ class GatewayRoomCatalog:
             endpoint_url, endpoint_reason, transport_security = _parse_endpoint(value["endpoint"])
         catalog = cls(
             installation_id=installation_id, protocol_versions=versions, link_modes=links,
-            persistent_process=value["persistent_process"], text=value["text"],
-            attachments=value["attachments"], execution_policy=policy,
-            catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
+            persistent_process=value["persistent_process"], text=value["text"], attachments=value["attachments"],
+            execution_policy=policy, catalog_digest=_digest(value["catalog_digest"], field="catalog_digest"),
             endpoint_url=endpoint_url, endpoint_reason=endpoint_reason, transport_security=transport_security)
         unsigned = catalog.as_mapping()
         del unsigned["catalog_digest"]
@@ -244,9 +242,9 @@ class GatewayRoomCatalog:
         """Canonical catalog mapping; ``endpoint`` appears only when advertised."""
         value = {
             "installation_id": self.installation_id, "protocol_versions": list(self.protocol_versions),
-            "link_modes": list(self.link_modes), "persistent_process": self.persistent_process,
-            "text": self.text, "attachments": self.attachments,
-            "execution_policy": self.execution_policy.as_mapping(), "catalog_digest": self.catalog_digest}
+            "link_modes": list(self.link_modes), "persistent_process": self.persistent_process, "text": self.text,
+            "attachments": self.attachments, "execution_policy": self.execution_policy.as_mapping(),
+            "catalog_digest": self.catalog_digest}
         if self.endpoint_url is not None or self.endpoint_reason is not None:
             value["endpoint"] = self.endpoint_mapping()
         return value
@@ -380,12 +378,10 @@ def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
 # Validator per dispatch field, in validation order. ``prompt`` and
 # ``prompt_digest`` are checked together against each other in from_mapping.
 _DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
-    protocol_version=_positive_int, room_id=_identifier, home_install_id=_identifier,
-    authority_gateway_id=_identifier, authority_epoch=_positive_int, member_id=_identifier,
-    target_install_id=_identifier, target_profile=_identifier, task_id=_identifier,
-    execution_generation=_positive_int, source_event_seq=_positive_int, cancellation_scope_id=_identifier,
-    capability_digest=_digest, execution_policy_digest=_digest, trace_id=_identifier,
-)
+    protocol_version=_positive_int, room_id=_identifier, home_install_id=_identifier, authority_gateway_id=_identifier,
+    authority_epoch=_positive_int, member_id=_identifier, target_install_id=_identifier, target_profile=_identifier,
+    task_id=_identifier, execution_generation=_positive_int, source_event_seq=_positive_int,
+    cancellation_scope_id=_identifier, capability_digest=_digest, execution_policy_digest=_digest, trace_id=_identifier)
 
 
 @dataclass(frozen=True)
@@ -433,8 +429,8 @@ class HostedMemberDispatch:
 # Grant scope fields, in issue-time validation order; each is validated with
 # the same checker as the matching dispatch field (``grant_id`` is an identifier).
 _GRANT_SCOPE = (
-    "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
-    "member_id", "target_install_id", "target_profile")
+    "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id",
+    "target_install_id", "target_profile")
 _GRANT_FIELDS = frozenset({
     "version", *_GRANT_SCOPE, "execution_policy_digest", "permissions", "issued_at", "expires_at"})
 _GRANT_REFRESH_FIELDS = _GRANT_FIELDS | {"status_expires_at"}
@@ -446,9 +442,9 @@ MAX_STATUS_GRANT_TTL_SECONDS = 30 * 24 * 60 * 60
 def issue_room_grant(
     secret: bytes, *, grant_id: str, room_id: str, home_install_id: str, authority_gateway_id: str,
     authority_epoch: int, member_id: str, target_install_id: str, target_profile: str,
-    execution_policy_digest: str | None = None,
-    permissions: Iterable[str] = ("approve", "dispatch", "status", "stop"), issued_at: float | None = None,
-    ttl_seconds: float = 3600, status_ttl_seconds: float | None = None, status_expires_at: float | None = None) -> str:
+    execution_policy_digest: str | None = None, permissions: Iterable[str] = ("approve", "dispatch", "status", "stop"),
+    issued_at: float | None = None, ttl_seconds: float = 3600, status_ttl_seconds: float | None = None,
+    status_expires_at: float | None = None) -> str:
     """Issue a target-verifiable bearer grant scoped to one room member."""
     if len(secret) < 32:
         raise HostedRoomGrantError("room grant secret must be at least 32 bytes")
@@ -467,16 +463,15 @@ def issue_room_grant(
         raise HostedRoomGrantError("room grant permissions are invalid")
     scope = {
         "grant_id": grant_id, "room_id": room_id, "home_install_id": home_install_id,
-        "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch,
-        "member_id": member_id, "target_install_id": target_install_id, "target_profile": target_profile}
+        "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch, "member_id": member_id,
+        "target_install_id": target_install_id, "target_profile": target_profile}
     payload = {
         "version": PROTOCOL_VERSION,
         **{name: _DISPATCH_FIELDS.get(name, _identifier)(scope[name], field=name) for name in _GRANT_SCOPE},
         "execution_policy_digest": _digest(
             execution_policy_digest
-            or execution_policy_mapping(target_profile=target_profile)["policy_digest"],
-            field="execution_policy_digest"),
-        "permissions": list(allowed), "issued_at": now, "expires_at": now + float(ttl_seconds),
+            or execution_policy_mapping(target_profile=target_profile)["policy_digest"], field="execution_policy_digest"
+        ), "permissions": list(allowed), "issued_at": now, "expires_at": now + float(ttl_seconds),
         "status_expires_at": bounded_status_expiry}
     encoded = _canonical_json(payload)
     signature = hmac.new(secret, encoded, hashlib.sha256).digest()
@@ -487,8 +482,8 @@ def issue_room_grant(
 
 
 def verify_room_grant(
-    secret: bytes, token: str, dispatch: HostedMemberDispatch, *, permission: str = "dispatch",
-    now: float | None = None) -> dict[str, Any]:
+    secret: bytes, token: str, dispatch: HostedMemberDispatch, *, permission: str = "dispatch", now: float | None = None
+) -> dict[str, Any]:
     """Verify one room grant against exact recipient dispatch coordinates."""
     payload = decode_room_grant(secret, token, permission=permission, now=now)
     if payload["version"] != dispatch.protocol_version:

@@ -18,24 +18,21 @@ from typing import Any, Mapping
 
 from gateway import hosted_rooms
 from gateway.hosted_room_peer import (
-    GatewayRoomCatalog,
-    HostedRoomPeerError,
-    TransportSecurity,
-    validate_room_link_url)
-from gateway.hosted_rooms_common import compact_json, exact_fields
+    GatewayRoomCatalog, HostedRoomPeerError, TransportSecurity, validate_room_link_url)
+from gateway.hosted_rooms_common import compact_json, exact_fields, identifier
 
 
 MAX_LINKS = 512
 MAX_GRANT_CHARS = 16 * 1024
 _LEGACY_FIELDS = {
-    "room_id", "member_id", "target_url", "target_profile", "grant", "catalog",
-    "cancellation_scope_id", "trace_id", "updated_at"}
+    "room_id", "member_id", "target_url", "target_profile", "grant", "catalog", "cancellation_scope_id", "trace_id",
+    "updated_at"}
 _OPTIONAL_FIELDS = {"transport_security", "status"}
 # SQLite record columns that map 1:1 onto mapping fields, in record order
 # (``catalog_json`` is the serialized ``catalog``).
 _RECORD_FIELDS = (
-    "room_id", "member_id", "target_url", "target_profile", "grant", "cancellation_scope_id",
-    "trace_id", "transport_security", "status", "updated_at")
+    "room_id", "member_id", "target_url", "target_profile", "grant", "cancellation_scope_id", "trace_id",
+    "transport_security", "status", "updated_at")
 _STATUSES = {"ready", "unavailable", "needs_reauthorization"}
 
 
@@ -109,10 +106,9 @@ _link_fields = partial(
 
 
 def _short_string(value: Any, field: str) -> str:
-    normalized = str(value or "").strip()
-    if not normalized or len(normalized) > 256:
-        raise HostedRoomPeerError(f"{field} is invalid")
-    return normalized
+    return identifier(
+        str(value or ""), label=field, error=HostedRoomPeerError, max_chars=256, pattern=None,
+        invalid=f"{field} is invalid")
 
 
 def _link_rows(db_path: Path | str) -> list[dict[str, Any]]:
@@ -156,11 +152,10 @@ def mark_room_link_status(db_path: Path | str, *, room_id: str, member_id: str, 
 
 
 def make_stored_link(
-    *, room_id: str, member_id: str, target_url: str, target_profile: str, grant: str,
-    catalog: GatewayRoomCatalog, cancellation_scope_id: str, trace_id: str) -> StoredRoomLink:
+    *, room_id: str, member_id: str, target_url: str, target_profile: str, grant: str, catalog: GatewayRoomCatalog,
+    cancellation_scope_id: str, trace_id: str) -> StoredRoomLink:
     target_url, transport_security = validate_room_link_url(target_url)
     return StoredRoomLink.from_mapping({
         "room_id": room_id, "member_id": member_id, "target_url": target_url, "target_profile": target_profile,
         "grant": grant, "catalog": catalog.as_mapping(), "cancellation_scope_id": cancellation_scope_id,
-        "trace_id": trace_id, "transport_security": transport_security, "status": "ready", "updated_at": time.time(),
-    })
+        "trace_id": trace_id, "transport_security": transport_security, "status": "ready", "updated_at": time.time()})

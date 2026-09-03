@@ -44,9 +44,8 @@ non_negative_int = partial(bounded_int, low=0)
 
 
 def exact_fields(
-    value: Any, *, label: str, required: frozenset[str] | set[str],
-    optional: frozenset[str] | set[str] = frozenset(), error: type[Exception], not_object: str | None = None,
-    missing_fmt: str = "{label} is missing fields: {fields}",
+    value: Any, *, label: str, required: frozenset[str] | set[str], optional: frozenset[str] | set[str] = frozenset(),
+    error: type[Exception], not_object: str | None = None, missing_fmt: str = "{label} is missing fields: {fields}",
     unknown_fmt: str = "{label} has unknown fields: {fields}") -> Mapping[str, Any]:
     """Require exactly ``required`` (+ any ``optional``) keys; formats name the offenders sorted."""
     if not isinstance(value, Mapping):

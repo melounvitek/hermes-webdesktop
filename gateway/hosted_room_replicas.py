@@ -17,18 +17,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from gateway.hosted_rooms import (
-    MAX_ACTOR_ID_CHARS,
-    HostedRoomError,
-    RoomConflictError,
-    _actor_json,
-    _connect,
-    _payload_json,
-    _room_id,
-    _transaction,
-    _validate_identifier,
-    _validate_members,
-    _validate_room_name,
-    local_authority_gateway_id)
+    MAX_ACTOR_ID_CHARS, HostedRoomError, RoomConflictError, _actor_json, _connect, _payload_json, _room_id,
+    _transaction, _validate_identifier, _validate_members, _validate_room_name, local_authority_gateway_id)
 from gateway.hosted_rooms_common import bounded_int, clock, utf8_len
 
 MAX_REPLICA_ROOMS = 256
@@ -50,8 +40,7 @@ class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries a
 
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replicas (
+    conn.execute("""CREATE TABLE IF NOT EXISTS hosted_room_replicas (
             room_id TEXT PRIMARY KEY, name TEXT NOT NULL, members_json TEXT NOT NULL,
             authority_gateway_id TEXT NOT NULL,
             authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1),
@@ -60,8 +49,7 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
             created_at REAL NOT NULL, updated_at REAL NOT NULL
         )"""
     )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replica_events (
+    conn.execute("""CREATE TABLE IF NOT EXISTS hosted_room_replica_events (
             room_id TEXT NOT NULL, seq INTEGER NOT NULL CHECK (seq >= 1), event_id TEXT NOT NULL,
             kind TEXT NOT NULL, actor_json TEXT NOT NULL, authority_epoch INTEGER,
             payload_json TEXT NOT NULL, created_at REAL NOT NULL,
@@ -134,8 +122,7 @@ def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 def _replica_row_state(conn: sqlite3.Connection, room_id: str) -> tuple[sqlite3.Row | None, int, int, int]:
     """Return (row, stored_epoch, last_seq, stored_bytes); a new room is admitted only under the room cap."""
-    row = conn.execute(
-        """SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
+    row = conn.execute("""SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
              FROM hosted_room_replicas WHERE room_id=?""", (room_id,)).fetchone()
     if row is None:
         count = conn.execute("SELECT COUNT(*) FROM hosted_room_replicas").fetchone()[0]
@@ -151,14 +138,12 @@ def _store_replica(
     """INSERT the replica row for a new room, else UPDATE it (event_bytes accumulates)."""
     values = (room_name, members_json, authority["gateway_id"], authority["epoch"], new_last, max(latest_seq, new_last))
     if is_new:
-        conn.execute(
-            """INSERT INTO hosted_room_replicas (room_id, name, members_json,
+        conn.execute("""INSERT INTO hosted_room_replicas (room_id, name, members_json,
                 authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes,
                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (room_id, *values, added_bytes, now, now))
     else:
-        conn.execute(
-            """UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
+        conn.execute("""UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
                 authority_epoch=?, last_seq=?, latest_seq=?, event_bytes=event_bytes+?,
                 updated_at=? WHERE room_id=?""", (*values, added_bytes, now, room_id))
 
@@ -203,8 +188,7 @@ def ingest_page(
             authority=authority, new_last=new_last, latest_seq=latest_seq, added_bytes=added_bytes, now=now)
     return {
         "room_id": room_id, "stored_seq": new_last, "ingested": len(new_events), "authority": authority,
-        "caught_up": new_last >= max(latest_seq, new_last),
-    }
+        "caught_up": new_last >= max(latest_seq, new_last)}
 
 
 def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
@@ -218,8 +202,7 @@ def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
         "room_id": row["room_id"], "name": row["name"], "members": json.loads(row["members_json"]),
         "authority": {"gateway_id": row["authority_gateway_id"], "epoch": int(row["authority_epoch"])},
         "last_seq": int(row["last_seq"]), "latest_seq": int(row["latest_seq"]), "event_bytes": int(row["event_bytes"]),
-        "created_at": float(row["created_at"]), "updated_at": float(row["updated_at"]),
-    }
+        "created_at": float(row["created_at"]), "updated_at": float(row["updated_at"])}
 
 
 def promote_replica(
@@ -255,35 +238,31 @@ def promote_replica(
         claim_event_id = f"system:authority-claimed:{target_epoch}"
         claim_actor_json, claim_payload_json = _control_event_json({
             "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
-            "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason,
-        })
+            "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason})
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
 
-        conn.execute(
-            """INSERT INTO hosted_rooms
+        conn.execute("""INSERT INTO hosted_rooms
                (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, event_bytes,
                 revision, created_at, updated_at, disbanded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
             (
-                room_id, replica["name"], replica["members_json"], local_gateway, target_epoch,
-                claim_seq + 1, int(replica["event_bytes"]) + claim_bytes, now, now))
+                room_id, replica["name"], replica["members_json"], local_gateway, target_epoch, claim_seq + 1,
+                int(replica["event_bytes"]) + claim_bytes, now, now))
         conn.execute(
             f"""INSERT INTO hosted_room_events {_EVENT_COLUMNS}
                SELECT room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at
-                 FROM hosted_room_replica_events WHERE room_id=?""",
-            (room_id,))
+                 FROM hosted_room_replica_events WHERE room_id=?""", (room_id,))
         conn.execute(
             _INSERT_ROOM_EVENT,
             (
-                room_id, claim_seq, claim_event_id, "authority.claimed",
-                claim_actor_json, target_epoch, claim_payload_json, now))
+                room_id, claim_seq, claim_event_id, "authority.claimed", claim_actor_json, target_epoch,
+                claim_payload_json, now))
         conn.execute("DELETE FROM hosted_room_replica_events WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM hosted_room_replicas WHERE room_id=?", (room_id,))
     return {
         "room_id": room_id, "authority_gateway_id": local_gateway, "authority_epoch": target_epoch,
         "previous_gateway_id": previous_gateway, "previous_epoch": previous_epoch, "claim_seq": claim_seq,
-        "latest_seq": claim_seq,
-    }
+        "latest_seq": claim_seq}
 
 
 def demote_room(
@@ -303,8 +282,7 @@ def demote_room(
     local_gateway = local_authority_gateway_id()
 
     with _transaction(db_path, immediate=True) as conn:
-        row = conn.execute(
-            """SELECT authority_gateway_id, authority_epoch, next_seq
+        row = conn.execute("""SELECT authority_gateway_id, authority_epoch, next_seq
                  FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             raise ReplicaError("room not found in the local authoritative store")
@@ -313,27 +291,23 @@ def demote_room(
         if current_gateway == observed_gateway_id and current_epoch == observed_epoch:
             return {
                 "room_id": room_id, "authority_gateway_id": current_gateway, "authority_epoch": current_epoch,
-                "idempotent": True,
-            }
+                "idempotent": True}
         if observed_epoch <= current_epoch:
             raise ReplicaEpochRegressionError("observed epoch does not supersede the stored authority")
         if current_gateway != local_gateway:
             raise ReplicaError("room is not locally authoritative; nothing to demote")
         lost_actor_json, lost_payload_json = _control_event_json({
-            "previous_gateway_id": current_gateway,
-            "authority_gateway_id": observed_gateway_id,
+            "previous_gateway_id": current_gateway, "authority_gateway_id": observed_gateway_id,
             "authority_epoch": observed_epoch})
         conn.execute(
             _INSERT_ROOM_EVENT,
             (
-                room_id, int(row["next_seq"]), f"system:authority-lost:{observed_epoch}",
-                "authority.lost", lost_actor_json, observed_epoch, lost_payload_json, now))
-        conn.execute(
-            """UPDATE hosted_rooms
+                room_id, int(row["next_seq"]), f"system:authority-lost:{observed_epoch}", "authority.lost",
+                lost_actor_json, observed_epoch, lost_payload_json, now))
+        conn.execute("""UPDATE hosted_rooms
                   SET authority_gateway_id=?, authority_epoch=?, next_seq=next_seq+1, revision=revision+1, updated_at=?
                 WHERE room_id=?""",
             (observed_gateway_id, observed_epoch, now, room_id))
     return {
         "room_id": room_id, "authority_gateway_id": observed_gateway_id, "authority_epoch": observed_epoch,
-        "idempotent": False,
-    }
+        "idempotent": False}
