@@ -2833,16 +2833,12 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return True
         # Anti-thrash back-off must not be permanent: after _ANTI_THRASH_RECOVERY_SECONDS blocked, allow ONE
         # probe by dropping counters to 1 strike (persisted). Deadline is armed lazily and persisted on the row.
-        if (
-            self._ineffective_compression_count >= 2
-            or self._fallback_compression_streak >= 2
-        ):
+        if self._ineffective_compression_count >= 2 or self._fallback_compression_streak >= 2:
             # Wall clock: the deadline is persisted so a rebuilt compressor resumes the SAME window.
             _now = time.time()
             if self._anti_thrash_recovery_deadline <= 0.0 or (
                 # Clock jumped backwards: never wait longer than one window from now.
-                self._anti_thrash_recovery_deadline - _now
-                > self._ANTI_THRASH_RECOVERY_SECONDS
+                self._anti_thrash_recovery_deadline - _now > self._ANTI_THRASH_RECOVERY_SECONDS
             ):
                 self._set_anti_thrash_recovery_deadline(_now + self._ANTI_THRASH_RECOVERY_SECONDS)
             elif _now >= self._anti_thrash_recovery_deadline:
@@ -2875,6 +2871,32 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._set_anti_thrash_recovery_deadline(0.0)
         return False
 
+    def _walk_tail_budget(
+        self, messages: List[Dict[str, Any]], head_end: int, ceiling: int, min_tail: int,
+        *, cut_at_break: bool,
+    ) -> tuple[int, int]:
+        """Accumulate message tokens newest-first until ``ceiling`` (once ``min_tail`` rows are kept).
+
+        Returns ``(cut_idx, accumulated)``; ``cut_idx`` is the first protected index. On the budget
+        break the cut stays at the last accepted row, or moves onto the breaking row when
+        ``cut_at_break``. Only the newest assistant turn's thinking is charged (#73624) unless the
+        route echoes stale thinking every turn — must agree with the preflight estimate (#84371).
+        """
+        n = len(messages)
+        newest_asst_idx = _last_assistant_index(messages)
+        charge_all_thinking = self._stale_thinking_on_wire()
+        accumulated = 0
+        cut = n  # start from beyond the end
+        for i in range(n - 1, head_end - 1, -1):
+            msg_tokens = _estimate_msg_budget_tokens(
+                messages[i], charge_stale_thinking=(charge_all_thinking or i == newest_asst_idx),
+            )
+            if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
+                return (i if cut_at_break else cut), accumulated
+            accumulated += msg_tokens
+            cut = i
+        return cut, accumulated
+
     def _prune_boundary(
         self, result: List[Dict[str, Any]], protect_tail_count: int, protect_tail_tokens: int | None,
     ) -> int:
@@ -2882,21 +2904,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if protect_tail_tokens is None or protect_tail_tokens <= 0:
             return len(result) - protect_tail_count
         # Token-budget walk; cap the message-count floor like tail-cut so a bulky recent run stays prunable.
-        accumulated = 0
-        boundary = len(result)
         min_protect = min(protect_tail_count, len(result), _MAX_TAIL_MESSAGE_FLOOR)
-        # Charge thinking on the newest turn only (parity with tail-cut and the estimator).
-        _newest_asst_idx = _last_assistant_index(result)
-        _charge_all_thinking = self._stale_thinking_on_wire()
-        for i in range(len(result) - 1, -1, -1):
-            msg_tokens = _estimate_msg_budget_tokens(
-                result[i], charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
-            )
-            if accumulated + msg_tokens > protect_tail_tokens and (len(result) - i) >= min_protect:
-                boundary = i
-                break
-            accumulated += msg_tokens
-            boundary = i
+        boundary, _ = self._walk_tail_budget(result, 0, protect_tail_tokens, min_protect, cut_at_break=True)
         # Apply the floor in count-space: `max` in index-space would invert (smaller index = MORE protected).
         return len(result) - max(len(result) - boundary, min_protect)
 
@@ -4474,35 +4483,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         compressible_tail_cap = max(3, available_tail - 2)
         min_tail = min(min_tail_floor, compressible_tail_cap, available_tail) if available_tail > 1 else 0
         soft_ceiling = int(token_budget * 1.5)
-
-        # Only the newest assistant turn's thinking ships (#73624), except echo-back providers
-        # replay it every turn; must agree with the preflight trigger's estimate (#84371).
-        _newest_asst_idx = _last_assistant_index(messages)
-        _charge_all_thinking = self._stale_thinking_on_wire()
-
-        def _walk_back(ceiling: int, *, cut_at_break: bool) -> tuple[int, int]:
-            """Accumulate newest-first until ``ceiling`` (once past ``min_tail``).
-
-            Returns ``(cut_idx, accumulated)``. On the budget break the soft walk keeps the cut
-            at the last accepted row; the raw re-cut moves it onto the breaking row.
-            """
-            accumulated = 0
-            cut = n  # start from beyond the end
-            for i in range(n - 1, head_end - 1, -1):
-                msg_tokens = _estimate_msg_budget_tokens(
-                    messages[i], charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
-                )
-                if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
-                    return (i if cut_at_break else cut), accumulated
-                accumulated += msg_tokens
-                cut = i
-            return cut, accumulated
-
-        cut_idx, accumulated = _walk_back(soft_ceiling, cut_at_break=False)
+        cut_idx, accumulated = self._walk_tail_budget(messages, head_end, soft_ceiling, min_tail, cut_at_break=False)
         # Whole transcript fits soft_ceiling: re-cut with the raw budget so a worthwhile middle
         # exists (else #40803 loop).
         if cut_idx <= head_end and 0 < accumulated <= soft_ceiling:
-            cut_idx, _ = _walk_back(token_budget, cut_at_break=True)
+            cut_idx, _ = self._walk_tail_budget(messages, head_end, token_budget, min_tail, cut_at_break=True)
 
         fallback_cut = n - min_tail
         cut_idx = min(cut_idx, fallback_cut)
@@ -4526,9 +4511,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # engines skip __init__.
         _min_tail_users = getattr(self, "min_tail_user_messages", 1)
         if isinstance(_min_tail_users, int) and not isinstance(_min_tail_users, bool) and _min_tail_users > 1:
-            cut_idx = self._ensure_last_n_user_messages_in_tail(
-                messages, cut_idx, head_end, _min_tail_users,
-            )
+            cut_idx = self._ensure_last_n_user_messages_in_tail(messages, cut_idx, head_end, _min_tail_users)
 
         # Floor guarantees progress (>= 1 message claimed); re-align FORWARD only so a raised cut
         # can't split a tool group (backward would give the floor's message back).
