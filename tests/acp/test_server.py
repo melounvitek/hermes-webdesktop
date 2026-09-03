@@ -36,8 +36,8 @@ from acp.schema import (
     UserMessageChunk,
 )
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID
+from acp_adapter.model_catalog import ACP_MAX_MODELS_PER_PROVIDER
 from acp_adapter.server import (
-    ACP_MAX_MODELS_PER_PROVIDER,
     HermesACPAgent,
     HERMES_VERSION,
 )
