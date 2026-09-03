@@ -327,8 +327,7 @@ def _model_flow_named_custom(config, provider_info):
     explicit_catalog = _models_config_is_allowlist(cfg_models, _entry_models_discovered(provider_info))
     configured_models = _configured_model_ids(cfg_models)
 
-    print(f"  Provider: {name}")
-    print(f"  URL:      {base_url}")
+    _say(f"  Provider: {name}", f"  URL:      {base_url}")
     if saved_model:
         print(f"  Current:  {saved_model}")
     print()
@@ -403,5 +402,4 @@ def _model_flow_named_custom(config, provider_info):
         # Save model name to the custom_providers entry for next time
         _save_custom_provider(base_url, config_api_key, model_name, api_mode=api_mode)
 
-    print(f"\n✅ Model set to: {model_name}")
-    print(f"   Provider: {name} ({base_url})")
+    _say(f"\n✅ Model set to: {model_name}", f"   Provider: {name} ({base_url})")

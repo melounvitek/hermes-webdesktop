@@ -225,8 +225,8 @@ def _aux_config_menu() -> None:
             return
         if key == "__reset__":
             n = _reset_aux_to_auto()
-            print(f"Reset {n} auxiliary task(s) to auto." if n else "All auxiliary tasks were already set to auto.")
-            print()
+            _say(f"Reset {n} auxiliary task(s) to auto." if n else "All auxiliary tasks were already set to auto.",
+                 "")
             continue
         _aux_select_for_task(key)
 

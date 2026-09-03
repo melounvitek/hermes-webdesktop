@@ -177,8 +177,8 @@ def _model_flow_bedrock(config, current_model=""):
         _say("  ⚠ No AWS credentials detected via environment variables.",
              "  Bedrock will use boto3's default credential chain (IMDS, SSO, etc.)", "")
     auth_var = resolve_aws_auth_env_var()
-    print(f"  AWS credentials: {auth_var} ✓" if auth_var else "  AWS credentials: boto3 default chain (instance role / SSO)")
-    print()
+    _say(f"  AWS credentials: {auth_var} ✓" if auth_var else "  AWS credentials: boto3 default chain (instance role / SSO)",
+         "")
 
     # 2. Region selection
     current_region = resolve_bedrock_region()
