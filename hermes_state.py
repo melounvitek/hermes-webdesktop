@@ -827,16 +827,14 @@ class SessionDB(
         # A reopen resolves the PATH again: a replaced file would be written through
         # stale WAL/shm assumptions; a quarantined handle must never hand a fresh
         # connection (and its close-time checkpoint) to a damaged file.
-        if self._db_replaced or self._db_file_was_replaced():
-            self._halt_db_replaced()
+        self._halt_if_db_replaced()
         if self._db_corrupt:
             raise self._corrupt_error(
                 f"state.db connection for {self.db_path} is quarantined after "
                 f"structural corruption; refusing to reopen for a {context} "
                 "after close(). "
             )
-        if self._db_wal_generation_lost or self._wal_generation_was_lost():
-            self._halt_deleted_wal_generation()
+        self._halt_if_wal_generation_lost()
         logger.warning(
             "state.db connection for %s was closed while a %s was still in "
             "flight — reopening (teardown/worker race, #94736)", self.db_path, context,
@@ -1037,24 +1035,23 @@ class SessionDB(
     def _db_file_was_replaced(self) -> bool:
         """True when the path no longer names the file this instance opened."""
         recorded = self._db_file_identity
-        if recorded is not None:
-            current = _stat_db_file_identity(self.db_path)
-            if current is None or current != recorded:
-                return True
+        if recorded is not None and _stat_db_file_identity(self.db_path) != recorded:
+            return True
         recorded_app = int(self._db_file_application_id or 0)
-        if recorded_app:
-            disk_app = _read_sqlite_application_id(self.db_path)
-            # Header 0 = WAL not yet checkpointed, not a replace; any real
-            # replacement (a copied Hermes DB minted its own id) is nonzero.
-            if disk_app and disk_app != recorded_app:
-                return True
-        return False
+        if not recorded_app:
+            return False
+        # Header 0 = WAL not yet checkpointed, not a replace; any real replacement
+        # (a copied Hermes DB minted its own id) is nonzero.
+        disk_app = _read_sqlite_application_id(self.db_path)
+        return bool(disk_app and disk_app != recorded_app)
 
-    def _halt_db_replaced(self) -> None:
-        """Stop writes and raise; do not run in-file repair on a new generation."""
-        self._db_replaced = True
-        logger.error(_STATE_DB_REPLACED_MSG)
-        raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
+    def _halt_if_db_replaced(self) -> None:
+        """Stop writes and raise when the file was replaced; never run in-file
+        repair on a new generation."""
+        if self._db_replaced or self._db_file_was_replaced():
+            self._db_replaced = True
+            logger.error(_STATE_DB_REPLACED_MSG)
+            raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
 
     def _wal_generation_was_lost(self) -> bool:
         """True when the WAL/SHM generation this handle opened is gone. Recorded
@@ -1083,20 +1080,21 @@ class SessionDB(
             self._db_sidecar_identity = current_identity
         return False
 
-    def _halt_deleted_wal_generation(self) -> None:
-        """Stop writes; do not mint or keep committing on a split WAL."""
-        self._db_wal_generation_lost = True
-        logger.error(_DELETED_WAL_GENERATION_MSG)
-        raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
+    def _halt_if_wal_generation_lost(self) -> None:
+        """Stop writes when the WAL/SHM generation is gone; never mint or keep
+        committing on a split WAL."""
+        if self._db_wal_generation_lost or self._wal_generation_was_lost():
+            self._db_wal_generation_lost = True
+            logger.error(_DELETED_WAL_GENERATION_MSG)
+            raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
 
     def _halt_if_db_generation_changed(self) -> None:
         """Halt (logging) when the file or its WAL generation is no longer ours."""
-        if self._db_replaced or self._db_file_was_replaced():
-            self._halt_db_replaced()
-        if self._db_wal_generation_lost or self._wal_generation_was_lost():
-            self._halt_deleted_wal_generation()
+        self._halt_if_db_replaced()
+        self._halt_if_wal_generation_lost()
 
     def _raise_if_db_replaced(self) -> None:
+        """Sticky-flag fast path (no log spam on every write), then the live probe."""
         if self._db_replaced:
             raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
         if self._db_wal_generation_lost:
@@ -1362,9 +1360,8 @@ class SessionDB(
     # ── Meta key/value (scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:
-        """Read state_meta[key]. On self._lock, not _read_ctx: fts_rebuild_step
-        reads progress before its write transaction, and a read-only WAL
-        connection would not see uncommitted meta writes."""
+        """Read state_meta[key] on self._lock (not _read_ctx): fts_rebuild_step reads
+        progress before its write transaction and a WAL reader would not see it."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT value FROM state_meta WHERE key = ?", (key,)
@@ -1372,8 +1369,8 @@ class SessionDB(
         return None if row is None else row[0]
 
     def set_meta(self, key: str, value: str, *, cursor: Optional[sqlite3.Cursor] = None) -> None:
-        """Upsert state_meta[key]. With ``cursor`` the write is inline (_init_schema
-        already holds a transaction; _execute_write would nest BEGIN IMMEDIATE and deadlock)."""
+        """Upsert state_meta[key]; with ``cursor`` the write is inline (the caller
+        already holds a transaction — nesting BEGIN IMMEDIATE would deadlock)."""
         sql = (
             "INSERT INTO state_meta (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -1384,10 +1381,8 @@ class SessionDB(
             self._write_sql(sql, (key, value))
 
     def retag_kanban_worker_sessions(self, workspaces_root: str) -> int:
-        """Retag legacy kanban worker rows (spawned without HERMES_SESSION_SOURCE)
-        from ``cli`` to ``kanban``, identified by cwd under the board's workspaces
-        root — a path only the dispatcher runs sessions in. Gated once per root
-        via state_meta. Returns rows retagged."""
+        """Retag legacy kanban worker rows from ``cli`` to ``kanban`` by cwd under the
+        board's workspaces root; gated once per root via state_meta. Returns rows retagged."""
         prefix = str(workspaces_root).rstrip("/\\")
         if not prefix:
             return 0
