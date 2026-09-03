@@ -109,10 +109,8 @@ class NousPortalAccountInfo:
 
     def tool_gateway_entitled_for(self, category: str) -> bool:
         """Paid users are entitled everywhere; pool users only where ``coverage[category]`` is true."""
-        if self.paid_service_access is True:
-            return True
         ta = self.tool_access
-        return bool(ta and ta.enabled and ta.coverage.get(category) is True)
+        return self.paid_service_access is True or bool(ta and ta.enabled and ta.coverage.get(category) is True)
 
 
 def nous_portal_billing_url(account_info: Optional[NousPortalAccountInfo] = None) -> str:
@@ -123,7 +121,7 @@ def nous_portal_billing_url(account_info: Optional[NousPortalAccountInfo] = None
         DEFAULT_NOUS_PORTAL_URL = "https://portal.nousresearch.com"
 
     base = account_info.portal_base_url if account_info is not None else None
-    if not isinstance(base, str) or not base.strip():
+    if not _nonblank(base):
         base = DEFAULT_NOUS_PORTAL_URL
     return f"{base.rstrip('/')}/billing"
 
@@ -137,7 +135,7 @@ def nous_portal_topup_url(account_info: Optional[NousPortalAccountInfo] = None) 
     """
     base = nous_portal_billing_url(account_info)[: -len("/billing")]
     slug = getattr(account_info, "org_slug", None) if account_info is not None else None
-    if isinstance(slug, str) and slug.strip():
+    if _nonblank(slug):
         from urllib.parse import quote
 
         return f"{base}/orgs/{quote(slug.strip(), safe='')}/billing?topup=open"
@@ -145,11 +143,8 @@ def nous_portal_topup_url(account_info: Optional[NousPortalAccountInfo] = None) 
 
 
 def format_nous_portal_entitlement_message(
-    account_info: Optional[NousPortalAccountInfo],
-    *,
-    capability: str = "this feature",
-    include_refresh_hint: bool = True,
-    coverage_category: Optional[str] = None,
+    account_info: Optional[NousPortalAccountInfo], *, capability: str = "this feature",
+    include_refresh_hint: bool = True, coverage_category: Optional[str] = None,
 ) -> Optional[str]:
     """User-facing guidance for a missing Nous tool-gateway entitlement; ``None`` when entitled.
 
@@ -226,11 +221,7 @@ def format_nous_portal_entitlement_message(
     )
 
 
-def _no_paid_access_message(
-    account_info: NousPortalAccountInfo,
-    capability: str,
-    billing_url: str,
-) -> str:
+def _no_paid_access_message(account_info: NousPortalAccountInfo, capability: str, billing_url: str) -> str:
     access = account_info.paid_service_access_info or NousPaidServiceAccessInfo()
     has_active_subscription = access.has_active_subscription
     active_subscription_is_paid = access.active_subscription_is_paid
