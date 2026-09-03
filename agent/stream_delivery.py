@@ -171,19 +171,14 @@ class StreamDeliveryMixin:
         if not isinstance(assistant_msg, dict):
             return
         commentary_parts = self._extract_codex_interim_visible_parts(assistant_msg)
-        undelivered_parts: List[str] = []
-        pending_keys: set[str] = set()
+        # Dedup within this message and against earlier deliveries, first occurrence wins.
+        pending: dict[str, str] = {}
         for part in commentary_parts:
             key = self._normalize_interim_visible_text(part)
-            if not key or key in pending_keys or self._interim_text_was_delivered(part):
-                continue
-            pending_keys.add(key)
-            undelivered_parts.append(part)
-        visible = (
-            "\n\n".join(undelivered_parts).strip()
-            if commentary_parts
-            else self._interim_assistant_visible_text(assistant_msg)
-        )
+            if key and key not in pending and not self._interim_text_was_delivered(part):
+                pending[key] = part
+        undelivered_parts = list(pending.values())
+        visible = "\n\n".join(undelivered_parts).strip() if commentary_parts else self._interim_assistant_visible_text(assistant_msg)
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
         already_streamed = self._interim_content_was_streamed(visible)
@@ -267,12 +262,12 @@ class StreamDeliveryMixin:
             self._stream_needs_break = False
             text = "\n\n" + text
         if isinstance(text, str):
-            # Stateful scrubbers: per-delta regex stripping destroyed downstream state machines
-            # when a tag was split across deltas ('<think>' sent alone); memory-context spans
-            # split across chunks must not leak to the UI. Legacy callers lack the attributes.
+            # Stateful scrubbers: per-delta regex stripping destroyed downstream state machines when a
+            # tag was split across deltas; memory-context spans split across chunks must not leak to
+            # the UI. Legacy callers lack the scrubber attributes and get the whole-string fallbacks.
             think_scrubber = getattr(self, "_stream_think_scrubber", None)
-            text = think_scrubber.feed(text or "") if think_scrubber is not None else self._strip_think_blocks(text or "")
             scrubber = getattr(self, "_stream_context_scrubber", None)
+            text = think_scrubber.feed(text) if think_scrubber is not None else self._strip_think_blocks(text)
             text = scrubber.feed(text) if scrubber is not None else sanitize_context(text)
             # Only strip leading newlines on the first delta — mid-stream "\n" is legitimate markdown.
             if not prepended_break and not getattr(self, "_current_streamed_assistant_text", ""):
