@@ -534,10 +534,7 @@ def _scan_gateway_pids(
     pids: list[int] = []
     # Strict matcher shared with gateway.status: requires a real ``gateway run`` argv, so
     # ``gateway status``/``dashboard`` siblings and ``python -m tui_gateway`` don't match.
-    from gateway.status import (
-        looks_like_gateway_command_line,
-        looks_like_gateway_runtime_command_line,
-    )
+    from gateway.status import looks_like_gateway_command_line, looks_like_gateway_runtime_command_line
     current_home = str(get_hermes_home().resolve())
     # Forward slashes on both sides of the HERMES_HOME= match (mirrors gateway.status).
     current_home_lc = current_home.lower().replace("\\", "/")
@@ -558,10 +555,7 @@ def _scan_gateway_pids(
         # env (invisible to wmic/CIM), so only a non-matching explicit HERMES_HOME= disqualifies.
         if "--profile " in command_lc or " -p " in command_lc:
             return False
-        return not (
-            "hermes_home=" in command_lc
-            and f"hermes_home={current_home_lc}" not in command_lc
-        )
+        return not ("hermes_home=" in command_lc and f"hermes_home={current_home_lc}" not in command_lc)
 
     def _matches_gateway_runtime(command: str) -> bool:
         if looks_like_gateway_command_line(command):
@@ -569,9 +563,7 @@ def _scan_gateway_pids(
         return include_restart_managers and looks_like_gateway_runtime_command_line(command)
 
     def _consider(pid: int, command: str) -> None:
-        if _matches_gateway_runtime(command) and (
-            all_profiles or _matches_current_profile(command)
-        ):
+        if _matches_gateway_runtime(command) and (all_profiles or _matches_current_profile(command)):
             _append_unique_pid(pids, pid, exclude_pids)
 
     try:
@@ -993,9 +985,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         try:
             from hermes_cli.gateway_windows import (windowless_gateway_restart_spec)
 
-            run_argv, respawn_cwd, respawn_env_overlay = (
-                windowless_gateway_restart_spec(list(run_argv))
-            )
+            run_argv, respawn_cwd, respawn_env_overlay = windowless_gateway_restart_spec(list(run_argv))
         except Exception:
             # Fall back to the original argv: a visible window beats a failed respawn.
             respawn_cwd = ""
@@ -1385,11 +1375,7 @@ def _systemd_error_indicates_start_limit(exc: subprocess.CalledProcessError) -> 
             value = value.decode(errors="replace")
         parts.append(str(value))
     text = "\n".join(parts).lower()
-    return (
-        "start-limit-hit" in text
-        or "start request repeated too quickly" in text
-        or "start-limit" in text
-    )
+    return "start-limit-hit" in text or "start request repeated too quickly" in text or "start-limit" in text
 
 
 def _systemd_service_is_start_limited(system: bool = False) -> bool:
@@ -2384,9 +2370,7 @@ def _journalctl_cmd(system: bool = False) -> list[str]:
     return ["journalctl"] if system else ["journalctl", "--user"]
 
 
-def _run_systemctl(
-    args: list[str], *, system: bool = False, **kwargs
-) -> subprocess.CompletedProcess:
+def _run_systemctl(args: list[str], *, system: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """Run systemctl; raise RuntimeError (not raw FileNotFoundError) if missing, for callers bypassing
     ``supports_systemd_services()``."""
     try:
@@ -2481,10 +2465,7 @@ def print_legacy_unit_warning() -> None:
     print_info("    hermes gateway migrate-legacy")
 
 
-def remove_legacy_hermes_units(
-    interactive: bool = True,
-    dry_run: bool = False,
-) -> tuple[int, list[Path]]:
+def remove_legacy_hermes_units(interactive: bool = True, dry_run: bool = False) -> tuple[int, list[Path]]:
     """Stop, disable, and remove legacy gateway units found by ``_find_legacy_hermes_units()``.
 
     ``interactive=False`` skips the prompt (caller already confirmed); ``dry_run`` only lists.
@@ -2962,11 +2943,7 @@ def _hermes_home_for_target_user(target_home_dir: str) -> str:
     """Remap the current HERMES_HOME (root's, under sudo) to the target user's equivalent:
     ``/root/.hermes[/profiles/x]`` → ``/home/alice/.hermes[/profiles/x]``; custom paths kept as-is."""
     current_hermes_raw = os.environ.get("HERMES_HOME", "").strip()
-    current_hermes = (
-        Path(current_hermes_raw).expanduser()
-        if current_hermes_raw
-        else get_hermes_home()
-    )
+    current_hermes = Path(current_hermes_raw).expanduser() if current_hermes_raw else get_hermes_home()
     # Keep custom paths lexical: resolving a non-existent path can rewrite it through
     # host-specific mappings and bake a different HERMES_HOME into the unit.
     current_default = Path.home() / ".hermes"
@@ -3386,10 +3363,7 @@ def _ensure_linger_enabled() -> None:
 def _select_systemd_scope(system: bool = False) -> bool:
     if system:
         return True
-    return (
-        get_systemd_unit_path(system=True).exists()
-        and not get_systemd_unit_path(system=False).exists()
-    )
+    return get_systemd_unit_path(system=True).exists() and not get_systemd_unit_path(system=False).exists()
 
 
 def _system_scope_wizard_would_need_root(system: bool = False) -> bool:
@@ -4001,11 +3975,7 @@ def _gateway_run_command() -> list[str]:
     return cmd
 
 
-def _timestamped_stderr_gateway_command(
-    error_log: Path,
-    *,
-    external_supervisor: bool = False,
-) -> list[str]:
+def _timestamped_stderr_gateway_command(error_log: Path, *, external_supervisor: bool = False) -> list[str]:
     """Wrap gateway run so raw stderr lines are timestamped before file write.
 
     ``external_supervisor=True`` (launchd ProgramArguments only) adds ``--external-supervisor`` so
@@ -4070,10 +4040,7 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
         print("  Stop it with: hermes gateway stop")
         return True
     print_error("Failed to start the gateway as a background process.")
-    print(
-        f"  Try manually: nohup hermes gateway run --replace "
-        f"> {_dhh()}/logs/gateway.log 2>&1 &"
-    )
+    print(f"  Try manually: nohup hermes gateway run --replace > {_dhh()}/logs/gateway.log 2>&1 &")
     if exit_on_failure:
         sys.exit(1)
     return False
@@ -4559,10 +4526,7 @@ def launchd_restart():
             # Announce BEFORE waiting: it can last the full budget and streams into surfaces with
             # no other feedback (desktop updater), where silence reads as "update stuck".
             wait_budget = _get_restart_exit_wait_budget()
-            print(
-                f"→ Stopping gateway (PID {pid}) — draining in-flight runs "
-                f"(up to {wait_budget:.0f}s)..."
-            )
+            print(f"→ Stopping gateway (PID {pid}) — draining in-flight runs (up to {wait_budget:.0f}s)...")
             if _graceful_restart_via_sigusr1(pid, wait_budget):
                 # Planned-restart exit. When launchd supervises, KeepAlive revives it — do NOT
                 # kickstart (-k would kill the replacement and restart twice). But a clean exit
@@ -4721,10 +4685,7 @@ def _truthy_env(value: str | None) -> bool:
 
 
 def _is_official_docker_checkout() -> bool:
-    return (
-        str(PROJECT_ROOT) == "/opt/hermes"
-        and (PROJECT_ROOT / "docker" / "entrypoint.sh").is_file()
-    )
+    return str(PROJECT_ROOT) == "/opt/hermes" and (PROJECT_ROOT / "docker" / "entrypoint.sh").is_file()
 
 
 def _running_under_gateway_supervisor() -> bool:
@@ -5112,10 +5073,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     except (ValueError, OSError):
         _stdin_is_tty = False
     _console_window_attached = _windows_console_window_attached()
-    _gateway_detached = (
-        os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+    _gateway_detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower() in {"1", "true", "yes", "on"}
     _breakaway = _windows_gateway_breakaway_state()
     _absorb = _windows_gateway_should_absorb_console_controls()
     if _absorb:
@@ -5458,11 +5416,7 @@ def _platform_status(platform: dict) -> str:
 def _runtime_health_lines() -> list[str]:
     """Summarize the latest persisted gateway runtime health state."""
     try:
-        from gateway.status import (
-            read_runtime_status,
-            runtime_status_is_stale,
-            runtime_status_pid_is_live,
-        )
+        from gateway.status import read_runtime_status, runtime_status_is_stale, runtime_status_pid_is_live
     except Exception:
         return []
 
@@ -6227,11 +6181,7 @@ def gateway_setup():
     # handles plugin check_fn and dual states like WhatsApp's "enabled, not paired".
     def _is_progress(status: str) -> bool:
         s = status.lower()
-        return not (
-            s == "not configured"
-            or s.startswith("partially")
-            or s.startswith("plugin disabled")
-        )
+        return not (s == "not configured" or s.startswith("partially") or s.startswith("plugin disabled"))
 
     any_configured = any(_is_progress(_platform_status(p)) for p in _all_platforms())
 
