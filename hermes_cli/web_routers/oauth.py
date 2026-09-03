@@ -107,6 +107,14 @@ def _start_poller(target, sid: str) -> None:
     threading.Thread(target=target, args=(sid,), daemon=True, name=f"oauth-poll-{sid[:6]}").start()
 
 
+def _device_code_started(sid: str, user_code, verification_url, expires_in: int, poll_interval: int) -> Dict[str, Any]:
+    """The /start response shape shared by every device-code flow."""
+    return {
+        "session_id": sid, "flow": "device_code", "user_code": user_code,
+        "verification_url": verification_url, "expires_in": expires_in, "poll_interval": poll_interval,
+    }
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow.
 
@@ -359,11 +367,10 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
         client_id=client_id, scope=effective_scope,
     )
     _start_poller(_nous_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data["verification_uri_complete"]),
-        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]), str(device_data["verification_uri_complete"]),
+        int(device_data["expires_in"]), int(device_data["interval"]),
+    )
 
 
 async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -385,11 +392,9 @@ async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=s.get("error_message") or "device-auth failed")
     if not s.get("user_code"):
         raise HTTPException(status_code=504, detail="device-auth timed out before returning a user code")
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": s["user_code"],
-        "verification_url": s["verification_url"], "expires_in": int(s.get("expires_in") or 900),
-        "poll_interval": int(s.get("interval") or 5),
-    }
+    return _device_code_started(
+        sid, s["user_code"], s["verification_url"], int(s.get("expires_in") or 900), int(s.get("interval") or 5)
+    )
 
 
 async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -433,11 +438,10 @@ async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
         expires_in_seconds = expired_in_raw
     sess["expires_at"] = expires_at_ts
     _start_poller(_minimax_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data["verification_uri"]), "expires_in": expires_in_seconds,
-        "poll_interval": max(2, (sess["interval_ms"] or 2000) // 1000),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]), str(device_data["verification_uri"]), expires_in_seconds,
+        max(2, (sess["interval_ms"] or 2000) // 1000),
+    )
 
 
 async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -455,11 +459,11 @@ async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
         expires_at=time.time() + int(device_data["expires_in"]),
     )
     _start_poller(_xai_device_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data.get("verification_uri_complete") or device_data["verification_uri"]),
-        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]),
+        str(device_data.get("verification_uri_complete") or device_data["verification_uri"]),
+        int(device_data["expires_in"]), int(device_data["interval"]),
+    )
 
 
 _DEVICE_CODE_STARTERS = {
