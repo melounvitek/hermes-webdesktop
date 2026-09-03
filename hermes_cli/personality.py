@@ -101,9 +101,7 @@ def resolve_personality(value: Any, cfg: Optional[Dict[str, Any]] = None) -> Tup
     personalities = available_personalities(cfg)
     if name not in personalities:
         names = ", ".join(f"`{n}`" for n in sorted(personalities))
-        raise ValueError(
-            f"Unknown personality: `{str(value).strip()}`.\n\nAvailable: `none`, {names}"
-        )
+        raise ValueError(f"Unknown personality: `{str(value).strip()}`.\n\nAvailable: `none`, {names}")
     return name, render_personality_prompt(personalities[name])
 
 

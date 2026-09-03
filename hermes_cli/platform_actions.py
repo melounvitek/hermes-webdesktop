@@ -7,7 +7,7 @@ Every verb returns a structured result dict — ``{"ok": True, ...}`` on success
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +90,7 @@ class PlatformActions:
             return plugin_capability_granted(self._plugin_id, CAPABILITY_ID)
         except Exception:
             # Ground rule: failure to read consent state = not granted.
-            logger.debug(
-                "platform_actions capability check failed for %s",
-                self._plugin_id, exc_info=True,
-            )
+            logger.debug("platform_actions capability check failed for %s", self._plugin_id, exc_info=True)
             return False
 
     def _resolve_adapter(self, platform: str):

@@ -102,10 +102,7 @@ def summarize_compress_preview(
             f"({len(tail)} message(s)) verbatim."
         )
     elif partial:
-        lines.append(
-            "Boundary: 'here' split would keep everything — "
-            "falling back to full compression."
-        )
+        lines.append("Boundary: 'here' split would keep everything — falling back to full compression.")
     if focus_topic:
         lines.append(f'Focus topic: "{focus_topic}"')
     lines.append("Run the command again without --preview to apply.")
