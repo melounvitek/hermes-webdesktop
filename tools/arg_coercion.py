@@ -2,8 +2,8 @@
 
 Models emit "42" for integers, "true" for booleans, JSON-encoded strings for
 arrays/objects (also nested inside containers), and bare scalars where an array
-is expected. Coercion is schema-guided and conservative: originals are kept
-whenever a repair is not unambiguous.
+is expected (wrapped in a one-element list). Coercion is schema-guided and
+conservative: originals are kept whenever a repair is not unambiguous.
 """
 
 import json
@@ -18,20 +18,12 @@ logger = logging.getLogger("model_tools")
 
 
 def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Coerce string-typed args to their JSON-Schema types; originals kept on failure.
-
-    Models emit "42" for integers, "true" for booleans, JSON-encoded strings for
-    arrays/objects (also nested inside containers), and bare scalars where an
-    array is expected (wrapped in a one-element list).
-    """
+    """Coerce string-typed args to their JSON-Schema types; originals kept on failure."""
     if not args or not isinstance(args, dict):
         return args
 
     schema = registry.get_schema(tool_name)
-    if not schema:
-        return args
-
-    properties = (schema.get("parameters") or {}).get("properties")
+    properties = ((schema or {}).get("parameters") or {}).get("properties")
     if not properties:
         return args
 
@@ -48,43 +40,33 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if not prop_schema:
             continue
         expected = prop_schema.get("type")
+        is_container = isinstance(value, (list, tuple))
 
         # Bare non-list value for an array schema. Strings go through
         # _coerce_value first so a JSON-encoded array is parsed and a nullable
         # "null" becomes None (not ["null"]). None itself is preserved: the tool's
         # own default handling decides between "omit" and "empty list".
-        if expected == "array" and value is not None and not isinstance(value, (list, tuple)):
+        if expected == "array" and value is not None and not is_container:
             if isinstance(value, str):
                 coerced = _coerce_value(value, expected, schema=prop_schema)
                 if coerced is not value:
                     args[key] = coerced
                     continue
                 if value.strip().startswith("["):
-                    logger.warning(
-                        "coerce_tool_args: %s.%s looks like a JSON array string "
-                        "but could not be parsed — model may have emitted a "
-                        "JSON-encoded string instead of a native array. "
-                        "Falling back to single-element list.",
-                        tool_name, key,
-                    )
+                    logger.warning("coerce_tool_args: %s.%s looks like a JSON array string "
+                                   "but could not be parsed — model may have emitted a "
+                                   "JSON-encoded string instead of a native array. "
+                                   "Falling back to single-element list.", tool_name, key)
                 args[key] = [value]
-                logger.info(
-                    "coerce_tool_args: wrapped bare string in list for %s.%s",
-                    tool_name, key,
-                )
+                logger.info("coerce_tool_args: wrapped bare string in list for %s.%s", tool_name, key)
                 continue
             args[key] = [value]
-            logger.info(
-                "coerce_tool_args: wrapped bare %s in list for %s.%s",
-                type(value).__name__, tool_name, key,
-            )
+            logger.info("coerce_tool_args: wrapped bare %s in list for %s.%s", type(value).__name__, tool_name, key)
             continue
 
         if not isinstance(value, str):
             # Native container: still normalize JSON-encoded elements/sub-fields.
-            if (expected == "array" and isinstance(value, (list, tuple))) or (
-                expected == "object" and isinstance(value, dict)
-            ):
+            if (expected == "array" and is_container) or (expected == "object" and isinstance(value, dict)):
                 args[key] = _normalize_json_strings_for_schema(value, prop_schema)
             continue
         if not expected and not _schema_allows_null(prop_schema):
@@ -105,13 +87,8 @@ def _schema_accepts_kind(schema: Any, kind: str) -> bool:
     t = schema.get("type")
     if t == kind or (isinstance(t, list) and kind in t):
         return True
-    for union_key in ("anyOf", "oneOf", "allOf"):
-        branches = schema.get(union_key)
-        if isinstance(branches, list) and any(
-            _schema_accepts_kind(b, kind) for b in branches
-        ):
-            return True
-    return False
+    return any(isinstance(branches := schema.get(union_key), list) and any(_schema_accepts_kind(b, kind) for b in branches)
+               for union_key in ("anyOf", "oneOf", "allOf"))
 
 
 def _normalize_json_strings_for_schema(value: Any, schema: Any) -> Any:
@@ -128,46 +105,32 @@ def _normalize_json_strings_for_schema(value: Any, schema: Any) -> Any:
         trimmed = value.strip()
         expects_array = _schema_accepts_kind(schema, "array")
         expects_object = _schema_accepts_kind(schema, "object")
-        if (expects_array and trimmed.startswith("[")) or (
-            expects_object and trimmed.startswith("{")
-        ):
-            try:
-                parsed = json.loads(trimmed)
-            except (ValueError, TypeError):
-                return value
-            if (isinstance(parsed, list) and expects_array) or (isinstance(parsed, dict) and expects_object):
-                value = parsed
-            else:
-                return value
-        else:
+        if not ((expects_array and trimmed.startswith("[")) or (expects_object and trimmed.startswith("{"))):
             return value
+        try:
+            parsed = json.loads(trimmed)
+        except (ValueError, TypeError):
+            return value
+        if not ((isinstance(parsed, list) and expects_array) or (isinstance(parsed, dict) and expects_object)):
+            return value
+        value = parsed
 
     if isinstance(value, list):
         items_schema = schema.get("items")
         if not isinstance(items_schema, dict):
             return value
-        changed = False
-        out = []
-        for item in value:
-            nxt = _normalize_json_strings_for_schema(item, items_schema)
-            changed = changed or (nxt is not item)
-            out.append(nxt)
-        return out if changed else value
+        out = [_normalize_json_strings_for_schema(item, items_schema) for item in value]
+        return out if any(n is not o for n, o in zip(out, value)) else value
 
     if isinstance(value, dict):
         props = schema.get("properties")
         if not isinstance(props, dict):
             return value
-        changed = False
         out = dict(value)
         for k, prop_schema in props.items():
-            if k not in value or not isinstance(prop_schema, dict):
-                continue
-            nxt = _normalize_json_strings_for_schema(value[k], prop_schema)
-            if nxt is not value[k]:
-                out[k] = nxt
-                changed = True
-        return out if changed else value
+            if k in value and isinstance(prop_schema, dict):
+                out[k] = _normalize_json_strings_for_schema(value[k], prop_schema)
+        return out if any(out[k] is not v for k, v in value.items()) else value
 
     return value
 
@@ -178,23 +141,12 @@ def _coerce_value(value: str, expected_type, schema: dict | None = None):
         return None
 
     if isinstance(expected_type, list):
-        for t in expected_type:
-            result = _coerce_value(value, t, schema=schema)
-            if result is not value:
-                return result
-        return value
+        return next((r for t in expected_type if (r := _coerce_value(value, t, schema=schema)) is not value), value)
 
-    if expected_type in {"integer", "number"}:
-        return _coerce_number(value, integer_only=(expected_type == "integer"))
-    if expected_type == "boolean":
-        return _coerce_boolean(value)
-    if expected_type == "array":
-        return _coerce_json(value, list)
-    if expected_type == "object":
-        return _coerce_json(value, dict)
-    if expected_type == "null" and value.strip().lower() == "null":
-        return None
-    return value
+    coercer = _SCALAR_COERCERS.get(expected_type)
+    if coercer is not None:
+        return coercer(value)
+    return None if expected_type == "null" and value.strip().lower() == "null" else value
 
 
 def _schema_allows_null(schema: dict | None) -> bool:
@@ -206,37 +158,24 @@ def _schema_allows_null(schema: dict | None) -> bool:
         return True
     if schema.get("nullable") is True:
         return True
-    for union_key in ("anyOf", "oneOf"):
-        variants = schema.get(union_key)
-        if isinstance(variants, list) and any(
-            isinstance(v, dict) and v.get("type") == "null" for v in variants
-        ):
-            return True
-    return False
+    return any(isinstance(variants := schema.get(union_key), list)
+               and any(isinstance(v, dict) and v.get("type") == "null" for v in variants)
+               for union_key in ("anyOf", "oneOf"))
 
 
 def _coerce_json(value: str, expected_python_type: type):
     """json.loads *value* when the schema expects array/object; original string on mismatch."""
+    name = expected_python_type.__name__
     try:
         parsed = json.loads(value)
     except (ValueError, TypeError) as exc:
-        logger.warning(
-            "coerce_tool_args: failed to parse string as JSON for expected type %s: %s",
-            expected_python_type.__name__,
-            exc,
-        )
+        logger.warning("coerce_tool_args: failed to parse string as JSON for expected type %s: %s", name, exc)
         return value
     if isinstance(parsed, expected_python_type):
-        logger.debug(
-            "coerce_tool_args: coerced string to %s via json.loads",
-            expected_python_type.__name__,
-        )
+        logger.debug("coerce_tool_args: coerced string to %s via json.loads", name)
         return parsed
-    logger.warning(
-        "coerce_tool_args: JSON-parsed value is %s, expected %s — skipping coercion",
-        type(parsed).__name__,
-        expected_python_type.__name__,
-    )
+    logger.warning("coerce_tool_args: JSON-parsed value is %s, expected %s — skipping coercion",
+                   type(parsed).__name__, name)
     return value
 
 
@@ -246,20 +185,21 @@ def _coerce_number(value: str, integer_only: bool = False):
         f = float(value)
     except (ValueError, OverflowError):
         return value
-    if f != f or f == float("inf") or f == float("-inf"):
+    if f != f or f in (float("inf"), float("-inf")):
         return value  # not JSON-serializable
-    if f == int(f):
-        return int(f)
-    if integer_only:
-        return value
-    return f
+    return int(f) if f == int(f) else value if integer_only else f
 
 
 def _coerce_boolean(value: str):
     """Parse "true"/"false" (case-insensitive); original string otherwise."""
-    low = value.strip().lower()
-    if low == "true":
-        return True
-    if low == "false":
-        return False
-    return value
+    return {"true": True, "false": False}.get(value.strip().lower(), value)
+
+
+# JSON-Schema scalar/container type -> coercer; "null" and unions are handled in _coerce_value.
+_SCALAR_COERCERS = {
+    "integer": lambda v: _coerce_number(v, integer_only=True),
+    "number": _coerce_number,
+    "boolean": _coerce_boolean,
+    "array": lambda v: _coerce_json(v, list),
+    "object": lambda v: _coerce_json(v, dict),
+}
