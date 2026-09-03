@@ -17,14 +17,15 @@ logger = logging.getLogger("tools.skills_sync")
 
 
 def _ss():
+    """Live ``tools.skills_sync`` module (imported lazily: it re-exports this module)."""
     from tools import skills_sync
 
     return skills_sync
 
 
 def _content_hash(directory: Path) -> str:
-    """Same hash style the skills hub lock uses; hashing is provenance metadata
-    only, so fall back to the local MD5 if guard deps are unavailable."""
+    """Hub-lock hash style; provenance metadata only, so fall back to the local MD5
+    if guard deps are unavailable."""
     try:
         from tools.skills_guard import content_hash
 
@@ -34,7 +35,7 @@ def _content_hash(directory: Path) -> str:
 
 
 def _safe_rel_install_path(path: Path, base: Path) -> str:
-    """Return a normalized relative POSIX path, rejecting traversal/absolute paths."""
+    """Normalized relative POSIX path; rejects traversal/absolute paths."""
     posix = path.relative_to(base).as_posix()
     pure = PurePosixPath(posix)
     parts = [part for part in pure.parts if part not in {"", "."}]
@@ -80,11 +81,8 @@ def _write_hub_lock(lock_path: Path, data: dict) -> None:
 def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterator[Tuple[Path, Path, str]]:
     """Yield ``(skill_md, src, install_path)`` for every safe official optional skill."""
     for skill_md in sorted(optional_dir.rglob("SKILL.md")):
-        if root_relative:
-            excluded = is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir)
-        else:
-            excluded = is_excluded_skill_path(skill_md)
-        if excluded:
+        if (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir) if root_relative
+                else is_excluded_skill_path(skill_md)):
             continue
         try:
             yield skill_md, skill_md.parent, _safe_rel_install_path(skill_md.parent, optional_dir)
@@ -109,13 +107,14 @@ def _optional_skill_index() -> Dict[str, Tuple[str, str, Path]]:
 
 def _move_to_restore_backup(path: Path, backup_root: Path) -> str:
     """Move an existing skill directory into a restore backup, preserving rel path."""
-    rel = path.relative_to(_ss()._skills_dir())
+    ss = _ss()
+    rel = path.relative_to(ss._skills_dir())
     target = backup_root / rel
     suffix = 0
     while target.exists():
         suffix += 1
         target = (backup_root / rel).with_name(f"{rel.name}-{suffix}")
-    _ss()._move_dir(path, target)
+    ss._move_dir(path, target)
     return rel.as_posix()
 
 
@@ -136,19 +135,14 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     only backfills exact-match provenance; ``restore=True`` also backs up matching
     active copies and copies the official source into its canonical path."""
     ss = _ss()
-
-    def _fail(message: str) -> dict:
-        return {"ok": False, "message": message, "restored": [], "backfilled": [], "backed_up": []}
-
     index = _optional_skill_index()
-    if not index:
-        return _fail("No official optional skills directory found.")
-    if name in {"all", "*"}:
+    if index and name in {"all", "*"}:
         targets = sorted(set(index.values()), key=lambda item: item[1])
     elif name in index:
         targets = [index[name]]
     else:
-        return _fail(f"Official optional skill not found: {name}")
+        message = f"Official optional skill not found: {name}" if index else "No official optional skills directory found."
+        return {"ok": False, "message": message, "restored": [], "backfilled": [], "backed_up": []}
 
     restored: List[str] = []
     backed_up: List[str] = []

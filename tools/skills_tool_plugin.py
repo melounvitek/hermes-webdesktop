@@ -8,6 +8,7 @@ origin module (``_is_skill_disabled``, ``_parse_frontmatter``,
 
 import json
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -65,14 +66,9 @@ def _available_skill_files(skill_dir: Path) -> Dict[str, List[str]]:
 
 
 def _serve_skill_file(
-    skill_root: Path,
-    file_path: str,
-    label: str,
-    *,
-    hint: str | None = None,
-    list_available: bool = False,
-    read_error_prefix: bool = False,
-    mark_read: bool = False) -> str:
+    skill_root: Path, file_path: str, label: str, *, hint: str | None = None,
+    list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False,
+) -> str:
     """Serve one linked file from a skill directory as a skill_view JSON result.
 
     ``hint`` decorates traversal/containment errors and ``list_available`` adds the
@@ -84,16 +80,14 @@ def _serve_skill_file(
     if has_traversal_component(file_path):
         return _fail("Path traversal ('..') is not allowed.", **extra)
     target = skill_root / file_path
-    path_error = validate_within_dir(target, skill_root)
-    if path_error:
+    if path_error := validate_within_dir(target, skill_root):
         return _fail(path_error, **extra)
     # is_file(), not exists(): a bare directory must take the not-found branch.
     if not target.is_file():
         not_found = f"File '{file_path}' not found in skill '{label}'."
         if list_available:
             return _fail(
-                not_found,
-                available_files=_available_skill_files(skill_root),
+                not_found, available_files=_available_skill_files(skill_root),
                 hint="Use one of the available file paths listed above")
         return _fail(not_found)
     try:
@@ -135,13 +129,9 @@ def _preprocess_skill(content: str, skill_dir, session_id, debug_msg: str, *args
 
 
 def _serve_plugin_skill(
-    skill_md: Path,
-    namespace: str,
-    bare: str,
-    file_path: str | None = None,
-    *,
-    preprocess: bool = True,
-    session_id: str | None = None) -> str:
+    skill_md: Path, namespace: str, bare: str, file_path: str | None = None, *,
+    preprocess: bool = True, session_id: str | None = None,
+) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from tools import skills_tool as _st
@@ -154,10 +144,8 @@ def _serve_plugin_skill(
     except Exception as e:
         return _fail(f"Failed to read skill '{qualified_name}': {e}")
     parsed_frontmatter: Dict[str, Any] = {}
-    try:
+    with suppress(Exception):
         parsed_frontmatter, _ = _st._parse_frontmatter(content)
-    except Exception:
-        pass
     if _st._is_skill_disabled(qualified_name):
         return _fail(f"Skill '{qualified_name}' is disabled.")
     if not _st.skill_matches_platform(parsed_frontmatter):
@@ -169,8 +157,7 @@ def _serve_plugin_skill(
 
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
-            "Plugin skill '%s:%s' contains patterns that may indicate prompt injection",
-            namespace, bare)
+            "Plugin skill '%s:%s' contains patterns that may indicate prompt injection", namespace, bare)
     try:  # bundle-context banner: sibling skills of the same plugin
         siblings = [s for s in get_plugin_manager().list_plugin_skills(namespace) if s != bare]
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin."
@@ -184,8 +171,7 @@ def _serve_plugin_skill(
     rendered_content = content
     if preprocess:
         rendered_content = _preprocess_skill(
-            content, skill_md.parent, session_id,
-            "Could not preprocess plugin skill %s:%s", namespace, bare)
+            content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s", namespace, bare)
     return _json({
         "success": True,
         "name": qualified_name,
