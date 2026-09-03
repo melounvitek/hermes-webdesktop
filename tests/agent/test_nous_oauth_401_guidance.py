@@ -1,5 +1,6 @@
 """Tests for the Nous OAuth 401 actionable-guidance branch in
-``agent.turn_recovery.nonretryable_client_error_result`` (the run_conversation terminal branch).
+``agent.turn_recovery._print_nonretryable_auth_guidance`` (called from the
+``nonretryable_client_error_result`` terminal branch).
 
 Source-inspection style (matches ``test_gemini_fast_fallback.py``): we assert
 that the guidance strings exist in the function body so that the user-facing
@@ -23,7 +24,7 @@ def test_nous_provider_is_in_oauth_401_set():
     """The provider-set gate that selects OAuth-specific guidance must
     include ``nous`` alongside ``openai-codex`` and ``xai-oauth``.
     """
-    source = inspect.getsource(turn_recovery.nonretryable_client_error_result)
+    source = inspect.getsource(turn_recovery._print_nonretryable_auth_guidance)
 
     # Be flexible about set element ordering — assert all three are listed
     # near each other in the gating expression.
@@ -36,13 +37,13 @@ def test_nous_provider_is_in_oauth_401_set():
     needle = "provider in {\"openai-codex\", \"xai-oauth\", \"nous\"}"
     assert needle in source, (
         "Expected nous to be co-gated with the other OAuth providers in the "
-        "actionable-401-guidance branch of nonretryable_client_error_result."
+        "actionable-401-guidance branch of _print_nonretryable_auth_guidance."
     )
 
 
 def test_nous_401_guidance_strings_present():
     """User-facing remediation strings for Nous OAuth 401s must exist."""
-    source = inspect.getsource(turn_recovery.nonretryable_client_error_result)
+    source = inspect.getsource(turn_recovery._print_nonretryable_auth_guidance)
 
     # Must tell the user it's an OAuth token problem, NOT an API key problem
     # (Nous Portal has no API key path — auth_type=oauth_device_code only).
