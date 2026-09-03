@@ -33,10 +33,7 @@ class SseDoneTracker:
         if not chunk:
             return
         self._buf.extend(chunk)
-        while True:
-            nl = self._buf.find(b"\n")
-            if nl < 0:
-                break
+        while (nl := self._buf.find(b"\n")) >= 0:
             line = bytes(self._buf[:nl])
             del self._buf[: nl + 1]
             self._consume_line(line)

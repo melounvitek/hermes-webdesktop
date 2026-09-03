@@ -543,13 +543,10 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
         return None
     try:
         from agent.secret_sources import bitwarden as bw
-        access_token = os.environ.get(bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"), "").strip()
+        token_env = bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN")
+        access_token = os.environ.get(token_env, "").strip()
         if not access_token:
-            console.print(
-                f"  [red]✗ --from-bitwarden requested but "
-                f"{bw_cfg.get('access_token_env', 'BWS_ACCESS_TOKEN')} "
-                "is not set in the environment.[/red]"
-            )
+            console.print(f"  [red]✗ --from-bitwarden requested but {token_env} is not set in the environment.[/red]")
             return None
         secrets, _ = bw.fetch_bitwarden_secrets(
             access_token=access_token, project_id=bw_cfg.get("project_id", ""), cache_ttl_seconds=0, use_cache=False
@@ -574,10 +571,7 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
 
 def _load_env_file_into_environ() -> int:
     """Backfill known provider keys from ``~/.hermes/.env`` into ``os.environ``; returns the count.
-
-    Only fills names not already set (an exported value always wins) and only known provider
-    names, so unrelated secrets are never slurped into the process.
-    """
+    Never overrides an exported value; only known provider names, so unrelated secrets stay out."""
     try:
         file_env = load_env()
     except Exception:  # noqa: BLE001 — best-effort convenience, never fatal
@@ -630,10 +624,8 @@ def _prompt(text: str) -> str:
 
 
 def _status_rows(proxy_cfg: dict, status, *, yn, dim) -> list[tuple[str, str]]:
-    """``(label, value)`` pairs shared by the rich ``status`` table and the plain-text variant.
-
-    ``yn`` renders booleans; ``dim`` wraps placeholder text for missing values.
-    """
+    """``(label, value)`` rows shared by the rich ``status`` table and the plain-text variant;
+    ``yn`` renders booleans, ``dim`` wraps placeholder text for missing values."""
     return [
         ("Enabled", yn(bool(proxy_cfg.get("enabled")))),
         ("Binary", str(status.binary_path or dim("(missing)"))),
