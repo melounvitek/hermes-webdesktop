@@ -225,8 +225,8 @@ def _toolset_label(ts_key: str) -> str:
 # need no config or use the TOOLSET_ENV_REQUIREMENTS fallback.
 
 def _key(key: str, prompt: str, url: str = "", **extra) -> dict:
-    """One ``env_vars`` entry for a TOOL_CATEGORIES provider row."""
-    return {"key": key, "prompt": prompt, **({"url": url} if url else {}), **extra}
+    """One ``env_vars`` entry for a TOOL_CATEGORIES provider row (key order matters for the GUI JSON)."""
+    return {"key": key, "prompt": prompt, **extra, **({"url": url} if url else {})}
 
 
 _OPENAI_VOICE_KEY = _key("VOICE_TOOLS_OPENAI_KEY", "OpenAI API key", "https://platform.openai.com/api-keys")
