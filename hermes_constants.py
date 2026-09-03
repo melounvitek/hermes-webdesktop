@@ -11,7 +11,6 @@ import sys
 from contextvars import ContextVar, Token
 from pathlib import Path
 
-
 _profile_fallback_warned: bool = False
 _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar("_HERMES_HOME_OVERRIDE", default=_UNSET)
@@ -52,7 +51,7 @@ def _get_platform_default_hermes_home() -> Path:
 
 
 def _warn_profile_fallback_once() -> None:
-    """Warn once when HERMES_HOME is unset but a non-default profile is sticky-active (fallback is wrong)."""
+    """Warn once when HERMES_HOME is unset but a non-default profile is sticky-active: the fallback is wrong."""
     global _profile_fallback_warned
     if _profile_fallback_warned:
         return
@@ -121,10 +120,9 @@ def get_default_hermes_root() -> Path:
     global _default_hermes_root_memo
     native_home = _get_platform_default_hermes_home()
     env_home = os.environ.get("HERMES_HOME", "")
-    if _default_hermes_root_memo is not None:
-        memo_native, memo_env, memo_result = _default_hermes_root_memo
-        if memo_native == str(native_home) and memo_env == env_home:
-            return memo_result
+    memo = _default_hermes_root_memo
+    if memo is not None and memo[:2] == (str(native_home), env_home):
+        return memo[2]
     result = native_home
     if env_home:
         env_path = Path(env_home)
@@ -261,10 +259,7 @@ def iter_hermes_node_dirs(home: Path | None = None) -> list[Path]:
 
 
 _WINDOWS_NODE_SHIMS = {
-    "npm": ["npm.cmd", "npm.exe", "npm"],
-    "npx": ["npx.cmd", "npx.exe", "npx"],
-    "node": ["node.exe", "node"],
-}
+    "npm": ["npm.cmd", "npm.exe", "npm"], "npx": ["npx.cmd", "npx.exe", "npx"], "node": ["node.exe", "node"]}
 
 
 def _candidate_node_command_names(command: str) -> list[str]:
@@ -447,11 +442,10 @@ def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            zip_path = tmp_path / zip_name
-            zip_path.write_bytes(zip_bytes)
+            (tmp_path / zip_name).write_bytes(zip_bytes)
             extract_dir = tmp_path / "extract"
             extract_dir.mkdir()
-            with zipfile.ZipFile(zip_path) as archive:
+            with zipfile.ZipFile(tmp_path / zip_name) as archive:
                 archive.extractall(extract_dir)
             extracted = next(extract_dir.glob("node-v*"), None)
             if extracted is None or not extracted.is_dir():
@@ -530,10 +524,7 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     staged = _stage_windows_node_zip(home, node_arch)
     if staged is None:
         return False
-    swapped = _swap_node_tree(target, staged)
-    if not swapped:
-        return swapped
-    return node_tool_runnable(str(target / "node.exe"))
+    return _swap_node_tree(target, staged) and node_tool_runnable(str(target / "node.exe"))
 
 
 def _run_node_bootstrap(func: str, *, timeout: int, **extra_env: str) -> bool:
@@ -565,7 +556,7 @@ def bootstrap_hermes_managed_node() -> str | None:
     if sys.platform == "win32":
         ok = _heal_managed_node_windows()
     else:
-        # HERMES_NODE_SKIP_LINKS=1 keeps node/npm/npx out of ~/.local/bin (never shadow the user's toolchain).
+        # HERMES_NODE_SKIP_LINKS=1 keeps node/npm/npx out of ~/.local/bin: never shadow the user toolchain.
         ok = _run_node_bootstrap("_nb_install_bundled_node", timeout=600, HERMES_NODE_SKIP_LINKS="1")
     if not ok:
         return None
@@ -800,10 +791,8 @@ def get_real_home(env: dict[str, str] | None = None) -> str:
     return "/tmp"
 
 
-_HOME_MODE_ALIASES = {
-    "isolated": "profile", "profile_home": "profile", "profile-home": "profile",
-    "host": "real", "user": "real", "real_home": "real", "real-home": "real",
-}
+_HOME_MODE_ALIASES = {"isolated": "profile", "profile_home": "profile", "profile-home": "profile",
+                      "host": "real", "user": "real", "real_home": "real", "real-home": "real"}
 
 
 def get_subprocess_home(env: dict[str, str] | None = None) -> str | None:
@@ -901,7 +890,7 @@ def _canonical_model_variants(model: str) -> list[str]:
 def resolve_per_model_reasoning_effort(model: str, overrides: dict | None) -> dict | None:
     """Per-model reasoning_effort override with spelling tolerance; first non-None parse wins.
 
-    Order: exact → dots↔dashes → provider stripped → aggregator stripped → known prefixes prepended.
+    Order: exact → dots↔dashes → provider stripped → aggregator stripped → known prefixes added.
     """
     if not overrides or not isinstance(overrides, dict) or not model:
         return None
@@ -926,8 +915,7 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
         if isinstance(model_cfg, dict):
             model_cfg = model_cfg.get("default") or model_cfg.get("model") or ""
         model = model_cfg.strip() if isinstance(model_cfg, str) else ""
-    overrides = agent_cfg.get("reasoning_overrides") or {}
-    per_model = resolve_per_model_reasoning_effort(model, overrides)
+    per_model = resolve_per_model_reasoning_effort(model, agent_cfg.get("reasoning_overrides") or {})
     if per_model is not None:
         return per_model
 
@@ -1117,9 +1105,8 @@ def is_first_party_module(name: str | None) -> bool:
 def partial_update_hint(exc: BaseException) -> list[str]:
     """Recovery guidance lines when *exc* looks like a half-updated tree, else ``[]``."""
     # A missing third-party dep (bad venv, missing extra) is a different problem.
-    if not isinstance(exc, ImportError) or isinstance(exc, ModuleNotFoundError):
-        return []
-    if not is_first_party_module(getattr(exc, "name", None)):
+    if (not isinstance(exc, ImportError) or isinstance(exc, ModuleNotFoundError)
+            or not is_first_party_module(getattr(exc, "name", None))):
         return []
     return [
         "",
