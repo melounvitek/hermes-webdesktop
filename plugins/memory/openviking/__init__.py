@@ -482,16 +482,6 @@ def _is_windows_absolute_path(value: str) -> bool:
     return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in {"/", "\\"}
 
 
-def _memory_segment_index(parts: List[str]) -> Optional[int]:
-    """Index of the ``memories`` segment for the user / user-uid / peer / uid-peer layouts."""
-    if not parts or parts[0] != "user":
-        return None
-    for idx, needs_peer_at in ((1, None), (2, None), (3, 1), (4, 2)):
-        if len(parts) > idx and parts[idx] == "memories" and (needs_peer_at is None or parts[needs_peer_at] == "peers"):
-            return idx
-    return None
-
-
 def _validate_forget_memory_uri(raw_uri: Any) -> tuple[Optional[str], Optional[str]]:
     uri = raw_uri.strip() if isinstance(raw_uri, str) else ""
     if not uri:
@@ -504,7 +494,9 @@ def _validate_forget_memory_uri(raw_uri: Any) -> tuple[Optional[str], Optional[s
     if uri.endswith("/") or not uri.endswith(".md"):
         return None, "viking_forget only deletes concrete .md memory files"
     parts = [part for part in uri[len("viking://") :].split("/") if part]
-    memories_idx = _memory_segment_index(parts)
+    # ``memories`` segment index for the user / user-uid / peer / uid-peer layouts.
+    memories_idx = next((idx for idx, peer_at in ((1, None), (2, None), (3, 1), (4, 2))
+                         if parts[:1] == ["user"] and len(parts) > idx and parts[idx] == "memories" and (peer_at is None or parts[peer_at] == "peers")), None)
     if memories_idx is None or len(parts) < memories_idx + 2:
         return None, "viking_forget only deletes user memory file URIs"
     if uri.rsplit("/", 1)[-1] in _GENERATED_MEMORY_SUMMARY_FILENAMES:
@@ -1691,17 +1683,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
     @classmethod
     def _extract_memory_listing(cls, resp: Any) -> List[Dict[str, str]]:
         result = cls._unwrap_result(resp)
-        if not isinstance(result, list):
-            return []
-        entries: List[Dict[str, str]] = []
-        for raw in result:
-            if not isinstance(raw, dict) or raw.get("isDir"):
-                continue
-            name = str(raw.get("rel_path") or raw.get("name") or "").strip()
-            if name.endswith(".md"):
-                entries.append({"name": name, "abstract": " ".join(str(raw.get("abstract") or "").split())[:200]})
-        entries.sort(key=lambda entry: entry["name"])
-        return entries
+        entries = [{"name": name, "abstract": " ".join(str(raw.get("abstract") or "").split())[:200]}
+                   for raw in (result if isinstance(result, list) else []) if isinstance(raw, dict) and not raw.get("isDir")
+                   if (name := str(raw.get("rel_path") or raw.get("name") or "").strip()).endswith(".md")]
+        return sorted(entries, key=lambda entry: entry["name"])
 
     @staticmethod
     def _token_units(content: str) -> int:
@@ -1733,22 +1718,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         def _head_only() -> str:
             marker = "\n... [profile truncated]"
-            marker_units = cls._token_units(marker)
-            if marker_units >= max_units:
-                return cls._take_tokens(content, max_units)
-            head = cls._take_tokens(content, max_units - marker_units).rstrip()
+            head = cls._take_tokens(content, max_units - cls._token_units(marker)).rstrip()
             return f"{head}{marker}" if head else cls._take_tokens(content, max_units)
 
         lines = content.split("\n")
-        head_line_count = 8
-        if len(lines) <= head_line_count + 4:
-            return _head_only()
         marker = "\n... [profile middle elided] ...\n"
         remaining = max_units - cls._token_units(marker)
-        if remaining <= 0:
+        if len(lines) <= 12 or remaining <= 0:  # fewer than 8 head + 4 tail lines: no middle to elide
             return _head_only()
-        head = cls._take_tokens("\n".join(lines[:head_line_count]), remaining // 2).rstrip()
-        tail = cls._take_tokens("\n".join(lines[head_line_count:]), remaining - cls._token_units(head), from_end=True).lstrip()
+        head = cls._take_tokens("\n".join(lines[:8]), remaining // 2).rstrip()
+        tail = cls._take_tokens("\n".join(lines[8:]), remaining - cls._token_units(head), from_end=True).lstrip()
         return f"{head}{marker}{tail}" if tail else _head_only()
 
     def _user_space(self, client=None, *, timeout: Optional[float] = None) -> str:
@@ -1763,13 +1742,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
         cached = getattr(self, "_user_space_cache", None)
         if active is not None and cached is not None and cached[0] == snapshot:
             return cached[1]
-        if active is not None:
-            resolved = _resolve_user_space(active, timeout=timeout)
-            if resolved:
-                # Publish only if the snapshot hasn't changed under us.
-                if snapshot is not None and snapshot is getattr(self, "_conn_snapshot", None):
-                    self._user_space_cache = (snapshot, resolved)
-                return resolved
+        if active is not None and (resolved := _resolve_user_space(active, timeout=timeout)):
+            if snapshot is not None and snapshot is getattr(self, "_conn_snapshot", None):  # unchanged under us
+                self._user_space_cache = (snapshot, resolved)
+            return resolved
         return str(getattr(active, "_user", "") or getattr(self, "_user", "") or "default").strip() or "default"
 
     @staticmethod
@@ -2567,11 +2543,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             max_len = max(200, min(max_len, limit))
         if len(content) > max_len:
             content = content[:max_len] + "\n\n[... truncated, use a more specific URI or full level]"
-
-        payload = {"uri": uri, "resolved_uri": resolved_uri, "level": level, "content": content}
-        if used_fallback:
-            payload["fallback"] = "content/read"
-        return payload
+        return {"uri": uri, "resolved_uri": resolved_uri, "level": level, "content": content, **({"fallback": "content/read"} if used_fallback else {})}
 
     def _tool_read(self, args: dict) -> str:
         level = args.get("level", "overview")
@@ -2642,17 +2614,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return failure(f"Memory message submission failed for session {session_id}: {e}", stage="message", message_status="unknown")
         try:
             commit = self._unwrap_result(client.post(f"/api/v1/sessions/{session_id}/commit", {"keep_recent_count": 0}))
-            commit = commit if isinstance(commit, dict) else {}
-            result: Dict[str, Any] = {
-                "status": "submitted", "session_id": session_id, "session_uri": session_uri, "message_status": "accepted",
-                "extraction_status": str(commit.get("status") or "accepted"),
-                "message": "Memory source submitted to OpenViking session extraction. OpenViking may add, merge, or skip the final memory.",
-            }
-            result.update({key: commit[key] for key in ("task_id", "trace_id") if commit.get(key)})
-            return json.dumps(result)
         except Exception as e:
             logger.error("OpenViking remember commit failed for %s: %s", session_id, e)
             return failure(f"Memory message was accepted, but commit failed for session {session_id}: {e}", stage="commit", message_status="accepted")
+        commit = commit if isinstance(commit, dict) else {}
+        return json.dumps({
+            "status": "submitted", "session_id": session_id, "session_uri": session_uri, "message_status": "accepted",
+            "extraction_status": str(commit.get("status") or "accepted"),
+            "message": "Memory source submitted to OpenViking session extraction. OpenViking may add, merge, or skip the final memory.",
+            **{key: commit[key] for key in ("task_id", "trace_id") if commit.get(key)},
+        })
 
     def _tool_forget(self, args: dict) -> str:
         uri, error = _validate_forget_memory_uri(args.get("uri"))
