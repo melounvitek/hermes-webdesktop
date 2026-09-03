@@ -1,10 +1,10 @@
 """Single source of truth for the agent working directory.
 
-`TERMINAL_CWD` is the runtime carrier for the configured working directory
-(`terminal.cwd` is bridged to it once at gateway/cron startup; the local CLI
-leaves it unset and relies on the launch dir). Reading it in one place keeps the
-system prompt, tool surfaces, and context-file discovery agreeing on where the
-agent lives. Multi-session gateways can pin a logical cwd via `_SESSION_CWD`.
+`TERMINAL_CWD` is the runtime carrier for the configured working directory (`terminal.cwd`
+is bridged to it once at gateway/cron startup; the local CLI leaves it unset and relies on
+the launch dir). Reading it in one place keeps the system prompt, tool surfaces, and
+context-file discovery agreeing on where the agent lives. Multi-session gateways can pin a
+logical cwd via `_SESSION_CWD`.
 """
 
 import logging
@@ -19,9 +19,9 @@ _UNSET: Any = object()
 
 _SESSION_CWD: ContextVar = ContextVar("HERMES_SESSION_CWD", default=_UNSET)
 
-# The package/source root (<root>/agent/runtime_cwd.py). A backend launched from
-# or self-spawned into this tree (desktop default) must never let an os.getcwd()
-# fallback inject this repo's contributor AGENTS.md as project context.
+# The package/source root (<root>/agent/runtime_cwd.py). A backend launched from or
+# self-spawned into this tree (desktop default) must never let an os.getcwd() fallback
+# inject this repo's contributor AGENTS.md as project context.
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -44,20 +44,12 @@ def clear_session_cwd() -> None:
     _SESSION_CWD.set("")
 
 
-def _session_cwd_override() -> str:
-    value = _SESSION_CWD.get()
-    if value is _UNSET:
-        return ""
-    return str(value).strip()
+def scope_terminal_cwd() -> str:
+    """Scope-aware TERMINAL_CWD value (may be empty) — every cwd consumer reads through this.
 
-
-def _terminal_cwd_env() -> str:
-    """Scope-aware TERMINAL_CWD read (tools.terminal_scope.terminal_env).
-
-    Under gateway multiplexing the per-turn terminal scope carries the active
-    profile's cwd; the process-global env var may hold another profile's. Only
-    an ImportError falls back: an active refusal scope must raise, not silently
-    resolve the launch profile's cwd.
+    Under gateway multiplexing the per-turn terminal scope carries the active profile's cwd;
+    the process-global env var may hold another profile's. Only an ImportError falls back: an
+    active refusal scope must raise, not silently resolve the launch profile's cwd.
     """
     try:
         from tools.terminal_scope import terminal_env
@@ -66,22 +58,14 @@ def _terminal_cwd_env() -> str:
     return terminal_env("TERMINAL_CWD", "")
 
 
-def scope_terminal_cwd() -> str:
-    """Public wrapper — the scope-aware TERMINAL_CWD value (may be empty).
-
-    Shared by agent_init / skill_utils / code_execution_tool so every cwd consumer
-    reads through the per-turn terminal scope under gateway multiplexing.
-    """
-    return _terminal_cwd_env()
-
-
 def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
     """Session override, then TERMINAL_CWD; each validated as a real directory.
 
     ``override_is_final``: a set-but-missing session override yields None
     instead of falling through to TERMINAL_CWD.
     """
-    override = _session_cwd_override()
+    override = _SESSION_CWD.get()
+    override = "" if override is _UNSET else str(override).strip()
     if override:
         p = Path(override).expanduser()
         if p.is_dir():
@@ -89,7 +73,7 @@ def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
         logger.warning("configured working directory does not exist: %s", override)
         if override_is_final:
             return None
-    raw = _terminal_cwd_env().strip()
+    raw = scope_terminal_cwd().strip()
     if raw:
         p = Path(raw).expanduser()
         if p.is_dir():
@@ -108,10 +92,9 @@ def resolve_agent_cwd() -> Path:
 def resolve_context_cwd() -> Path | None:
     """Configured cwd for context-file discovery, or None for "no configured cwd".
 
-    None makes build_context_files_prompt fall back to the launch dir (correct
-    for a local CLI launched inside a real project). A configured path is
-    validated here; an existing one is honored verbatim — including the Hermes
-    source tree itself, a legitimate workspace when developing Hermes
+    None makes build_context_files_prompt fall back to the launch dir (correct for a local CLI
+    launched inside a real project). An existing configured path is honored verbatim —
+    including the Hermes source tree itself, a legitimate workspace when developing Hermes
     (fallback-directory policy lives in build_context_files_prompt).
     """
     return _resolve_configured_cwd(override_is_final=True)

@@ -16,24 +16,21 @@ from typing import Any, Optional
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
 
-# Z.AI Coding Plan's GLM-5.2 endpoint often returns 429 code 1305 ("service
-# may be temporarily overloaded"). Short retries hammer the same window, so
-# after a few normal retries the wait widens progressively. Cap stays
-# interactive-friendly: a TUI message should fail visibly in minutes.
+# Z.AI Coding Plan's GLM-5.2 endpoint often returns 429 code 1305 ("service may be
+# temporarily overloaded"). Short retries hammer the same window, so after
+# ``_ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS`` normal retries the wait widens progressively;
+# the cap stays interactive-friendly (a TUI message should fail visibly in minutes).
+# The short count is shared by ``adaptive_rate_limit_backoff`` and
+# ``zai_coding_overload_retry_ceiling`` so the two cannot silently desync.
 _ZAI_CODING_OVERLOAD_LONG_BACKOFF = (30.0, 60.0, 90.0, 120.0)
-
-# Short retries before the long tier. Shared by ``adaptive_rate_limit_backoff``
-# (walks the long table from attempt ``short_attempts + 1``) and
-# ``zai_coding_overload_retry_ceiling`` (sizes the loop so every long entry is
-# reachable) so the two cannot silently desync.
 _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS = 3
 
 
 def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
-    """Parse a ``Retry-After`` value (numeric / HTTP-date / number) or a headers
-    mapping into seconds. Both casings are tried for plain dicts (real header
-    containers are already case-insensitive). Float clamped at 0.0, or None
-    when absent / unparseable.
+    """Parse a ``Retry-After`` value (numeric / HTTP-date) or a headers mapping into seconds.
+
+    Both casings are tried for plain dicts (real header containers are already
+    case-insensitive). Clamped at 0.0; None when absent / unparseable.
     """
     raw = value_or_headers
     if raw is not None and not isinstance(raw, (str, int, float)):
@@ -119,28 +116,21 @@ def adaptive_rate_limit_backoff(
 ) -> tuple[float, str | None]:
     """Provider-aware rate-limit backoff → ``(wait_seconds, reason_label)``.
 
-    Most providers get ``default_wait`` unchanged. Z.AI Coding GLM-5.2
-    overloads keep ``short_attempts`` short retries, then 30→60→90→120s
-    (capped) with light jitter. ``attempt`` is 1-based like the loop's log.
+    Most providers get ``default_wait`` unchanged. Z.AI Coding GLM-5.2 overloads keep
+    ``short_attempts`` short retries, then 30→60→90→120s (capped) with light jitter so long
+    waits stay readable. ``attempt`` is 1-based like the loop's log.
     """
     if not is_zai_coding_overload_error(base_url=base_url, model=model, error=error):
         return default_wait, None
     if attempt <= short_attempts:
         return default_wait, "zai_coding_overload_short"
-
     idx = min(attempt - short_attempts - 1, len(_ZAI_CODING_OVERLOAD_LONG_BACKOFF) - 1)
     base_delay = _ZAI_CODING_OVERLOAD_LONG_BACKOFF[idx]
-    # Smaller jitter keeps long waits readable while still de-synchronizing.
-    wait = jittered_backoff(1, base_delay=base_delay, max_delay=base_delay, jitter_ratio=0.2)
-    return wait, "zai_coding_overload_long"
+    return jittered_backoff(1, base_delay=base_delay, max_delay=base_delay, jitter_ratio=0.2), "zai_coding_overload_long"
 
 
 def zai_coding_overload_retry_ceiling(short_attempts: int = _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS) -> int:
-    """Retry-loop ceiling for the full Z.AI overload schedule.
-
-    The loop gives up when ``retry_count >= ceiling`` *before* computing the
-    attempt's backoff, so the ceiling must sit one past the last long entry
-    or the long tier never runs (the default ``api_max_retries`` of 3 equals
-    ``short_attempts``).
-    """
+    """Retry-loop ceiling for the full Z.AI overload schedule: one past the last long entry,
+    because the loop gives up when ``retry_count >= ceiling`` BEFORE computing the attempt's
+    backoff (the default ``api_max_retries`` of 3 equals ``short_attempts``)."""
     return short_attempts + len(_ZAI_CODING_OVERLOAD_LONG_BACKOFF) + 1

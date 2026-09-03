@@ -9,21 +9,17 @@ import ssl
 from pathlib import Path
 
 from agent.errors import SSLConfigurationError
+from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
 _CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-_SKIP_VALUES = {"1", "true", "yes", "on"}
 _REPAIR_HINT = (
     "Repair: run `hermes doctor --fix` (auto-reinstalls certifi), or "
     "manually: python -m pip install --force-reinstall certifi openai httpx\n"
     "If you configured a custom corporate CA bundle, fix or unset the "
     "broken CA bundle environment variable."
 )
-
-
-def _skip_ssl_guard_enabled() -> bool:
-    return os.getenv("HERMES_SKIP_SSL_GUARD", "").strip().lower() in _SKIP_VALUES
 
 
 def _ssl_err(message: str) -> SSLConfigurationError:
@@ -58,7 +54,7 @@ def verify_ca_bundle() -> None:
     Raises SSLConfigurationError when an explicit CA-bundle env var points at a
     bad path or certifi's bundled ``cacert.pem`` is missing/corrupt.
     """
-    if _skip_ssl_guard_enabled():
+    if is_truthy_value(os.getenv("HERMES_SKIP_SSL_GUARD", "")):
         logger.debug("SSL CA bundle guard skipped via HERMES_SKIP_SSL_GUARD")
         return
     for env_var in _CA_BUNDLE_ENV_VARS:

@@ -11,12 +11,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
-
-
-def _coerce_insecure(ssl_verify: Any) -> bool:
-    if ssl_verify is False:
-        return True
-    return isinstance(ssl_verify, str) and ssl_verify.strip().lower() in {"false", "0", "no", "off"}
+_INSECURE_STRINGS = {"false", "0", "no", "off"}
 
 
 def resolve_httpx_verify(
@@ -27,7 +22,7 @@ def resolve_httpx_verify(
 ) -> bool | ssl.SSLContext:
     """Resolve httpx ``verify``: ``ssl_verify: false`` > explicit ``ca_bundle`` >
     CA-bundle env vars > ``True`` (certifi default). ``base_url`` only feeds the warning."""
-    if _coerce_insecure(ssl_verify):
+    if ssl_verify is False or (isinstance(ssl_verify, str) and ssl_verify.strip().lower() in _INSECURE_STRINGS):
         logger.warning(
             "TLS certificate verification DISABLED (ssl_verify: false) for %s — "
             "this is intended for local development only and is unsafe on any "
@@ -36,11 +31,9 @@ def resolve_httpx_verify(
         )
         return False
 
-    effective_ca = (ca_bundle or "").strip()
-    for env_var in _CA_BUNDLE_ENV_VARS:
-        if effective_ca:
-            break
-        effective_ca = os.getenv(env_var, "").strip()
+    effective_ca = (ca_bundle or "").strip() or next(
+        (v for v in (os.getenv(var, "").strip() for var in _CA_BUNDLE_ENV_VARS) if v), "",
+    )
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):
