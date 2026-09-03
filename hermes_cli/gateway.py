@@ -4963,7 +4963,6 @@ def _systemd_unit_installed() -> bool:
 
 
 def _is_service_installed() -> bool:
-    """Check if the gateway is installed as a system service."""
     return _installed_service_kind() is not None
 
 
@@ -5027,7 +5026,6 @@ def _setup_weixin():
         print_info("  Cancelled.")
         return
 
-    import asyncio
     try:
         credentials = asyncio.run(qr_login(str(get_hermes_home())))
     except KeyboardInterrupt:
@@ -5044,20 +5042,18 @@ def _setup_weixin():
 
     account_id = credentials.get("account_id", "")
     user_id = credentials.get("user_id", "")
-    base_url = credentials.get("base_url", "")
-
     save_env_value("WEIXIN_ACCOUNT_ID", account_id)
     save_env_value("WEIXIN_TOKEN", credentials.get("token", ""))
-    if base_url:
-        save_env_value("WEIXIN_BASE_URL", base_url)
+    if credentials.get("base_url", ""):
+        save_env_value("WEIXIN_BASE_URL", credentials.get("base_url", ""))
     save_env_value(
         "WEIXIN_CDN_BASE_URL", get_env_value("WEIXIN_CDN_BASE_URL") or "https://novac2c.cdn.weixin.qq.com/c2c"
     )
 
     print()
     access_choices = [
-        "Use DM pairing approval (recommended)", "Allow all direct messages",
-        "Only allow listed user IDs", "Disable direct messages",
+        "Use DM pairing approval (recommended)", "Allow all direct messages", "Only allow listed user IDs",
+        "Disable direct messages",
     ]
     access_idx = prompt_choice("  How should direct messages be authorized?", access_choices, 0)
     if access_idx == 2:
@@ -5111,10 +5107,7 @@ def _setup_qqbot():
         return
 
     print()
-    method_choices = [
-        "Scan QR code to add bot automatically (recommended)",
-        "Enter existing App ID and App Secret manually",
-    ]
+    method_choices = ["Scan QR code to add bot automatically (recommended)", "Enter existing App ID and App Secret manually"]
     credentials = None
     if prompt_choice("  How would you like to set up QQ Bot?", method_choices, 0) == 0:
         try:
@@ -5150,10 +5143,7 @@ def _setup_qqbot():
     user_openid = credentials.get("user_openid", "")
 
     print()
-    access_choices = [
-        "Use DM pairing approval (recommended)", "Allow all direct messages",
-        "Only allow listed user OpenIDs",
-    ]
+    access_choices = ["Use DM pairing approval (recommended)", "Allow all direct messages", "Only allow listed user OpenIDs"]
     access_idx = prompt_choice("  How should direct messages be authorized?", access_choices, 0)
     if access_idx == 0:
         save_env_value("QQ_ALLOW_ALL_USERS", "false")
@@ -5682,11 +5672,10 @@ def _stop_installed_service(system: bool) -> bool:
     if kind is None:
         return False
     # SystemScopeRequiresRootError is a RuntimeError and must propagate from systemd_stop.
-    swallow = (subprocess.CalledProcessError, RuntimeError) if kind == "windows" else subprocess.CalledProcessError
     try:
         _service_call(kind, "stop", system)
         return True
-    except swallow:
+    except (subprocess.CalledProcessError, *((RuntimeError,) if kind == "windows" else ())):
         return False
 
 
