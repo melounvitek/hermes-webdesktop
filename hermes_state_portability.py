@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from agent.skill_commands import SKILL_SCAFFOLD_SQL_LIKE
+from utils import safe_json_loads
 from hermes_state_common import SCHEMA_SQL, _PREVIEW_RAW_SUBQUERY_SQL, _shape_preview, _sql_session_last_active
 
 # Pre-split logger identity so log filtering/capture is unchanged.
@@ -141,8 +142,11 @@ class SessionPortabilityMixin:
 
     def _get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
         """One session with the ``list_sessions_rich`` enriched columns, or None.
-        ``compact_rows=True`` omits the ``system_prompt`` blob."""
+        ``compact_rows=True`` omits the ``system_prompt`` blob. Public alias:
+        :meth:`get_session_rich_row` (web server hydration)."""
         return self._get_session_rich_rows_batch([session_id], compact_rows=compact_rows).get(session_id)
+
+    get_session_rich_row = _get_session_rich_row
 
     def _get_session_rich_rows_batch(self, session_ids, compact_rows: bool = False) -> Dict[str, Dict[str, Any]]:
         """Enriched rows for many sessions in one query, keyed by id; missing ids are absent
@@ -166,10 +170,6 @@ class SessionPortabilityMixin:
             prompt_select=None if compact_rows else f", {_PROMPT_RESOLVED_SQL}",
         )
         return {s["id"]: s for s in self._rich_rows(query, ids)}
-
-    def get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
-        """Public wrapper for :meth:`_get_session_rich_row` (web server hydration)."""
-        return self._get_session_rich_row(session_id, compact_rows=compact_rows)
 
     def list_skill_scaffolded_sessions(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Titled sessions whose first user turn was a ``/skill`` invocation (their titles
@@ -313,6 +313,13 @@ class SessionPortabilityMixin:
         raise ValueError(f"{field} must be a string")
 
     @staticmethod
+    def _import_int_or_none(value: Any, field: str) -> Optional[int]:
+        try:
+            return None if value is None else int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be an integer") from exc
+
+    @staticmethod
     def _import_json_object_or_none(value: Any, field: str) -> Optional[str]:
         if value is None:
             return None
@@ -334,30 +341,14 @@ class SessionPortabilityMixin:
     @staticmethod
     def _coerce_or(value: Any, cast, default):
         """``cast(value)``; *default* for None or an unparsable value."""
-        if value is None:
-            return default
         try:
-            return cast(value)
+            return default if value is None else cast(value)
         except (TypeError, ValueError):
             return default
 
     @staticmethod
-    def _import_int_or_none(value: Any, field: str) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field} must be an integer") from exc
-
-    @staticmethod
     def _reasoning_json_value(value: Any) -> Any:
-        if not isinstance(value, str):
-            return value
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return value
+        return safe_json_loads(value, default=value) if isinstance(value, str) else value
 
     @staticmethod
     def _import_error(index: int, session_id: str, error: str) -> Dict[str, Any]:
