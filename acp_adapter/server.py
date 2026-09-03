@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import base64
 import contextlib
 import contextvars
 import json
@@ -12,28 +11,29 @@ import logging
 import os
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Deque, Optional
-from urllib.parse import unquote, urlparse
 
 import acp
 from acp.schema import (
-    AgentCapabilities, AgentMessageChunk, AudioContentBlock, AuthenticateResponse, AvailableCommand,
-    AvailableCommandsUpdate, BlobResourceContents, ClientCapabilities, EmbeddedResourceContentBlock,
-    ForkSessionResponse, ImageContentBlock, Implementation, InitializeResponse, ListSessionsResponse,
+    AgentCapabilities, AgentMessageChunk, AuthenticateResponse, AvailableCommand, AvailableCommandsUpdate,
+    ClientCapabilities, ForkSessionResponse, Implementation, InitializeResponse, ListSessionsResponse,
     LoadSessionResponse, McpServerHttp, McpServerSse, McpServerStdio, ModelInfo, NewSessionResponse,
-    PromptCapabilities, PromptResponse, ResourceContentBlock, ResumeSessionResponse, SessionCapabilities,
-    SessionForkCapabilities, SessionInfo, SessionInfoUpdate, SessionListCapabilities, SessionMode,
-    SessionModeState, SessionModelState, SessionResumeCapabilities, SetSessionConfigOptionResponse,
-    SetSessionModeResponse, SetSessionModelResponse, TextContentBlock, TextResourceContents,
-    UnstructuredCommandInput, Usage, UsageUpdate, UserMessageChunk,
+    PromptCapabilities, PromptResponse, ResumeSessionResponse, SessionCapabilities, SessionForkCapabilities,
+    SessionInfo, SessionInfoUpdate, SessionListCapabilities, SessionMode, SessionModeState, SessionModelState,
+    SessionResumeCapabilities, SetSessionConfigOptionResponse, SetSessionModeResponse, SetSessionModelResponse,
+    TextContentBlock, UnstructuredCommandInput, Usage, UsageUpdate, UserMessageChunk,
 )
 
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
+from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
 from acp_adapter.events import (
     _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb,
     make_tool_progress_cb,
+)
+from acp_adapter.model_catalog import (
+    ACP_MAX_MODELS_PER_PROVIDER, _ModelCatalog, _choice_provider, _empty_catalog_applies, encode_model_choice,
+    _named_custom_provider_catalogs,
 )
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
@@ -45,101 +45,6 @@ from tools.approval import (reset_hermes_interactive_context, set_hermes_interac
 
 logger = logging.getLogger(__name__)
 
-PromptBlock = (
-    TextContentBlock
-    | ImageContentBlock
-    | AudioContentBlock
-    | ResourceContentBlock
-    | EmbeddedResourceContentBlock
-)
-
-
-def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, str]]]]:
-    """``(slug, label, [(model_id, description), ...])`` for named endpoints (v12 ``providers:``
-    and legacy ``custom_providers:``), which canonical provider enumeration never lists.
-
-    Models = the entry's declared models, refreshed from the live ``/models`` listing when a
-    credential exists and ``discover_models`` isn't disabled; declared models survive a failed
-    discovery (some endpoints have no ``/models`` route). Slugs use the ``custom:<name>`` shape
-    ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip.
-    """
-    try:
-        from hermes_cli.config import (get_compatible_custom_providers, is_provider_enabled, load_config)
-        from hermes_cli.model_switch import (
-            _NativePickerModelList, _declared_model_ids, _entry_models_discovered, _fetch_picker_live_models,
-            _models_config_is_allowlist,
-        )
-        from hermes_cli.model_switch_providers import _discover_flag
-        from hermes_cli.models import should_use_ollama_native_catalog
-        from hermes_cli.providers import custom_provider_slug
-    except ImportError:
-        return []
-
-    try:
-        cfg = load_config()
-        entries = get_compatible_custom_providers(cfg)
-    except Exception:
-        logger.debug("Could not load named custom providers", exc_info=True)
-        return []
-
-    # ``get_compatible_custom_providers`` drops ``enabled``; read disabled keys from raw config.
-    raw_providers = cfg.get("providers") if isinstance(cfg, dict) else None
-    disabled_keys = {
-        str(key).strip().lower()
-        for key, raw in (raw_providers.items() if isinstance(raw_providers, dict) else ())
-        if isinstance(raw, dict) and not is_provider_enabled(raw)
-    }
-
-    def _entry_catalog(entry: dict) -> tuple[str, str, list[tuple[str, str]]] | None:
-        provider_key = str(entry.get("provider_key", "") or "").strip()
-        name = str(entry.get("name", "") or "").strip()
-        base_url = str(entry.get("base_url", "") or "").strip()
-        if provider_key.lower() in disabled_keys or not name or not base_url:
-            return None
-        slug = custom_provider_slug(name, provider_key)
-
-        api_key = str(entry.get("api_key", "") or "").strip()
-        if not api_key:
-            key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
-            api_key = os.environ.get(key_env, "").strip() if key_env else ""
-
-        declared: list[str] = []
-        models_cfg = entry.get("models")
-        for mid in [str(entry.get("model", "") or "").strip(), *_declared_model_ids(models_cfg)]:
-            if mid and mid not in declared:
-                declared.append(mid)
-
-        native_headers = entry.get("extra_headers") or None
-        is_ollama_key = provider_key.lower() in {"ollama", "custom:ollama"}
-        is_native_ollama = should_use_ollama_native_catalog(
-            provider_key if is_ollama_key else "custom", base_url, headers=native_headers
-        )
-        if not api_key and not declared and not is_native_ollama:
-            return None  # nothing to discover with and nothing declared: not addressable
-
-        model_ids = list(declared)
-        live = None
-        if _discover_flag(entry) and (api_key or is_native_ollama):
-            try:
-                live = _fetch_picker_live_models(
-                    api_key, base_url, provider_key if is_native_ollama and is_ollama_key else "custom",
-                    _models_config_is_allowlist(models_cfg, _entry_models_discovered(entry)),
-                    headers=native_headers, timeout=1.5, api_mode=entry.get("api_mode"),
-                )
-            except Exception:
-                live = None
-            if isinstance(live, _NativePickerModelList):
-                model_ids = list(live)
-            elif live is not None:
-                model_ids = declared + [m for m in live if m not in declared]
-
-        if not model_ids and not isinstance(live, _NativePickerModelList):
-            return None
-        return slug, name, [(mid, "") for mid in model_ids]
-
-    catalogs = [_entry_catalog(entry) for entry in entries if isinstance(entry, dict)]
-    return [c for c in catalogs if c is not None]
-
 try:
     from hermes_cli import __version__ as HERMES_VERSION
 except Exception:
@@ -150,309 +55,6 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
 
 # ListSessionsRequest has no client-side limit; clients paginate via `cursor`/`next_cursor`.
 _LIST_SESSIONS_PAGE_SIZE = 50
-# Per-provider row cap (clients render all `availableModels` in one dropdown; mirrors the
-# MoA picker cap). Not a total cap; the current model is always kept via the fallback insert.
-ACP_MAX_MODELS_PER_PROVIDER = 200
-_MAX_ACP_RESOURCE_BYTES = 512 * 1024
-_TEXT_RESOURCE_MIME_TYPES = {
-    "application/json",
-    "application/javascript",
-    "application/typescript",
-    "application/xml",
-    "application/x-yaml",
-    "application/yaml",
-    "application/toml",
-    "application/sql",
-}
-
-
-def _resource_display_name(uri: str, name: str | None = None, title: str | None = None) -> str:
-    """Human-readable attachment name for prompt context."""
-    raw_name = (name or "").strip()
-    raw_title = (title or "").strip()
-    if raw_title and raw_name and raw_title != raw_name:
-        return f"{raw_title} ({raw_name})"
-    if raw_title or raw_name:
-        return raw_title or raw_name
-    parsed = urlparse(uri)
-    candidate = parsed.path if parsed.scheme else uri
-    return Path(unquote(candidate)).name or uri or "resource"
-
-
-def _mime_main(mime_type: str | None) -> str:
-    return (mime_type or "").split(";", 1)[0].strip().lower()
-
-
-def _is_text_resource(mime_type: str | None) -> bool:
-    mime = _mime_main(mime_type)
-    return mime.startswith("text/") or mime in _TEXT_RESOURCE_MIME_TYPES
-
-
-def _is_image_resource(mime_type: str | None) -> bool:
-    return _mime_main(mime_type).startswith("image/")
-
-
-_IMAGE_SUFFIX_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".svg": "image/svg+xml",
-}
-
-
-def _path_from_file_uri(uri: str) -> Path | None:
-    """Local file URI/path from an ACP client -> readable Path (None for non-file URIs).
-    Windows drive forms (Zed via wsl.exe) become ``/mnt/<drive>/...``."""
-    raw = (uri or "").strip()
-    if not raw:
-        return None
-
-    parsed = urlparse(raw)
-    if parsed.scheme and parsed.scheme != "file":
-        return None
-
-    if parsed.scheme == "file" and parsed.netloc and parsed.netloc not in {"", "localhost"}:
-        return None
-    path_text = unquote(parsed.path or "") if parsed.scheme == "file" else unquote(raw)
-
-    # file:///C:/Users/... or C:\Users\...
-    if len(path_text) >= 3 and path_text[0] == "/" and path_text[2] == ":" and path_text[1].isalpha():
-        drive, rest = path_text[1], path_text[3:]
-    elif len(path_text) >= 2 and path_text[1] == ":" and path_text[0].isalpha():
-        drive, rest = path_text[0], path_text[2:]
-    else:
-        return Path(path_text)
-    return Path("/mnt") / drive.lower() / rest.lstrip("/\\").replace("\\", "/")
-
-
-def _decode_text_bytes(data: bytes, mime_type: str | None) -> str | None:
-    """Decode resource bytes if they are probably text; return None for binary."""
-    if b"\x00" in data and not _is_text_resource(mime_type):
-        return None
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
-def _format_resource_text(
-    *, uri: str, body: str, name: str | None = None, title: str | None = None, note: str | None = None
-) -> str:
-    display = _resource_display_name(uri, name=name, title=title)
-    header = f"[Attached file: {display}]"
-    if note:
-        header += f" ({note})"
-    return f"{header}\nURI: {uri}\n\n{body}"
-
-
-def _text_parts(**kwargs: Any) -> list[dict[str, Any]]:
-    """Single OpenAI text part wrapping ``_format_resource_text(**kwargs)``."""
-    return [{"type": "text", "text": _format_resource_text(**kwargs)}]
-
-
-def _image_parts(uri: str, display: str, data: bytes, mime: str) -> list[dict[str, Any]]:
-    """Text header + image_url data URL so vision models can see the attachment."""
-    return [
-        {"type": "text", "text": f"[Attached image: {display}]" + (f"\nURI: {uri}" if uri else "")},
-        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}},
-    ]
-
-
-def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]:
-    """ACP resource_link -> OpenAI content parts: images become a text header + image_url,
-    everything else a single text part with the inlined body (or a binary-omit note)."""
-    uri = str(getattr(block, "uri", "") or "").strip()
-    if not uri:
-        return []
-
-    name = str(getattr(block, "name", "") or "").strip() or None
-    title = str(getattr(block, "title", "") or "").strip() or None
-    mime_type = str(getattr(block, "mime_type", "") or "").strip() or None
-    path = _path_from_file_uri(uri)
-    ident = dict(uri=uri, name=name, title=title)
-
-    if path is None:
-        return _text_parts(
-            **ident, body="[Resource link only; Hermes cannot read non-file ACP resource URIs directly.]"
-        )
-
-    image_mime = mime_type if _is_image_resource(mime_type) else _IMAGE_SUFFIX_MIME.get(path.suffix.lower())
-    if image_mime and _is_image_resource(image_mime):
-        try:
-            size = path.stat().st_size
-            if size > _MAX_ACP_RESOURCE_BYTES:
-                return _text_parts(
-                    **ident, body=f"[Image too large to inline: {size} bytes, cap={_MAX_ACP_RESOURCE_BYTES}]"
-                )
-            with path.open("rb") as fh:
-                data = fh.read()
-        except OSError as exc:
-            logger.warning("ACP image resource read failed: %s", uri, exc_info=True)
-            return _text_parts(**ident, body=f"[Could not read attached image: {exc}]")
-        return _image_parts(uri, _resource_display_name(uri, name=name, title=title), data, image_mime)
-
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            data = fh.read(min(size, _MAX_ACP_RESOURCE_BYTES))
-        text = _decode_text_bytes(data, mime_type)
-        if text is None:
-            return _text_parts(**ident, body=f"[Binary file omitted: {size} bytes, mime={mime_type or 'unknown'}]")
-        note = f"truncated to {_MAX_ACP_RESOURCE_BYTES} of {size} bytes" if size > _MAX_ACP_RESOURCE_BYTES else None
-        return _text_parts(**ident, body=text, note=note)
-    except OSError as exc:
-        logger.warning("ACP resource read failed: %s", uri, exc_info=True)
-        return _text_parts(**ident, body=f"[Could not read attached file: {exc}]")
-
-
-def _embedded_resource_to_parts(block: EmbeddedResourceContentBlock) -> list[dict[str, Any]]:
-    resource = getattr(block, "resource", None)
-    if resource is None:
-        return []
-
-    uri = str(getattr(resource, "uri", "") or "").strip()
-    mime_type = str(getattr(resource, "mime_type", "") or "").strip() or None
-
-    if isinstance(resource, TextResourceContents):
-        return _text_parts(uri=uri, body=resource.text)
-
-    if isinstance(resource, BlobResourceContents):
-        blob = resource.blob or ""
-        try:
-            data = base64.b64decode(blob, validate=True)
-        except Exception:
-            data = blob.encode("utf-8", errors="replace")
-
-        if _is_image_resource(mime_type):
-            if len(data) > _MAX_ACP_RESOURCE_BYTES:
-                return _text_parts(
-                    uri=uri,
-                    body=f"[Embedded image too large to inline: {len(data)} bytes, cap={_MAX_ACP_RESOURCE_BYTES}]",
-                )
-            return _image_parts(uri, _resource_display_name(uri), data, mime_type or "image/png")
-
-        text = _decode_text_bytes(data[:_MAX_ACP_RESOURCE_BYTES], mime_type)
-        if text is None:
-            body = f"[Binary embedded file omitted: {len(data)} bytes, mime={mime_type or 'unknown'}]"
-        else:
-            body = text
-            if len(data) > _MAX_ACP_RESOURCE_BYTES:
-                body += f"\n\n[Truncated to {_MAX_ACP_RESOURCE_BYTES} of {len(data)} bytes]"
-        return _text_parts(uri=uri, body=body)
-
-    text = getattr(resource, "text", None)
-    if text:
-        return _text_parts(uri=uri, body=str(text))
-    return []
-
-
-def _extract_text(prompt: list[PromptBlock]) -> str:
-    """Extract plain text from ACP content blocks for display/commands."""
-    return "\n".join(str(block.text) for block in prompt if hasattr(block, "text"))
-
-
-def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | None:
-    """Convert an ACP image content block to OpenAI-style multimodal content."""
-    data = str(getattr(block, "data", "") or "").strip()
-    uri = str(getattr(block, "uri", "") or "").strip()
-    mime_type = str(getattr(block, "mime_type", "") or "image/png").strip() or "image/png"
-
-    if data:
-        url = data if data.startswith("data:") else f"data:{mime_type};base64,{data}"
-    elif uri:
-        url = uri
-    else:
-        return None
-
-    return {"type": "image_url", "image_url": {"url": url}}
-
-
-def _append_parts(parts: list, text_parts: list[str], new_parts: list[dict[str, Any]]) -> None:
-    for part in new_parts:
-        parts.append(part)
-        if part.get("type") == "text":
-            text_parts.append(part["text"])
-
-
-def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | list[dict[str, Any]]:
-    """Convert ACP prompt blocks into a Hermes/OpenAI-compatible user content payload."""
-    parts: list[dict[str, Any]] = []
-    text_parts: list[str] = []
-
-    for block in prompt:
-        if isinstance(block, TextContentBlock):
-            if block.text:
-                parts.append({"type": "text", "text": block.text})
-                text_parts.append(block.text)
-        elif isinstance(block, ImageContentBlock):
-            image_part = _image_block_to_openai_part(block)
-            if image_part is not None:
-                parts.append(image_part)
-        elif isinstance(block, ResourceContentBlock):
-            _append_parts(parts, text_parts, _resource_link_to_parts(block))
-        elif isinstance(block, EmbeddedResourceContentBlock):
-            _append_parts(parts, text_parts, _embedded_resource_to_parts(block))
-
-    if not parts:
-        return _extract_text(prompt)
-
-    # Pure text stays a string (slash commands, text-only providers); structured only for media.
-    if all(part.get("type") == "text" for part in parts):
-        return "\n".join(text_parts)
-
-    return parts
-
-
-def _semantic_provider(provider_id: str, normalize_provider: Callable[[str], str]) -> str:
-    raw = str(provider_id or "").strip().lower()
-    if raw in {"ollama", "custom:ollama"}:
-        return "ollama"
-    if raw.startswith("custom:"):
-        return raw
-    return normalize_provider(raw)
-
-
-def _empty_catalog_applies(
-    provider_id: str, empty_authoritative: set[str], normalize_provider: Callable[[str], str]
-) -> bool:
-    """True when a named endpoint with an authoritative-empty catalog owns ``provider_id``."""
-    raw = str(provider_id or "").strip().lower()
-    normalized = normalize_provider(raw)
-    if normalized == "custom":
-        return any(
-            candidate == raw
-            or f"custom:{candidate}" == raw
-            or (raw == "custom" and candidate == "custom")
-            for candidate in empty_authoritative
-        )
-    return any(
-        candidate == raw
-        or candidate == f"custom:{normalized}"
-        or candidate == f"custom:{raw}"
-        or normalize_provider(candidate) == normalized
-        for candidate in empty_authoritative
-    )
-
-
-def _choice_provider(model_id: str) -> str:
-    """Provider prefix of an encoded choice id; longest configured ``custom:`` slug wins."""
-    parts = model_id.split(":")
-    if parts[:1] == ["custom"] and len(parts) > 1:
-        from hermes_cli.models import _configured_custom_provider_ids
-
-        lowered = model_id.lower()
-        for candidate in sorted(
-            (p for p in _configured_custom_provider_ids() if p.startswith("custom:")), key=len, reverse=True,
-        ):
-            if lowered.startswith(candidate + ":"):
-                return candidate
-        return "custom"
-    return parts[0]
 
 
 def _estimate_tokens(history: list, agent: Any, system_prompt: str | None = None, tools: Any = None) -> int:
@@ -592,99 +194,6 @@ def _take_interrupted_prompt(state: SessionState) -> tuple[bool, str]:
 
 
 @dataclass
-class _ModelCatalog:
-    """Deduplicated ACP model rows from the inventory + named endpoints.
-
-    Dedupes on the encoded choice id AND a semantic ``provider:model`` id (``ollama`` ==
-    ``custom:ollama``). A bare/``custom`` current provider whose base_url matches an ollama
-    inventory row is resolved to ``custom:ollama``.
-    """
-
-    normalize_provider: Callable[[str], str]
-    current_model: str
-    current_choice_provider: str
-    current_base_url: str
-    models: list[ModelInfo] = field(default_factory=list)
-    seen_ids: set[str] = field(default_factory=set)
-    seen_semantic_ids: set[str] = field(default_factory=set)
-    empty_authoritative: set[str] = field(default_factory=set)
-
-    def __post_init__(self) -> None:
-        if self.current_choice_provider == "ollama":
-            self.current_choice_provider = "custom:ollama"
-        self._identity_resolved = self.current_choice_provider not in {"", "custom"}
-
-    def semantic(self, provider_id: str) -> str:
-        return _semantic_provider(provider_id, self.normalize_provider)
-
-    def add(self, provider_id: str, model_id: str, name: str, description: str) -> None:
-        choice_id = HermesACPAgent._encode_model_choice(provider_id, model_id)
-        semantic_id = f"{self.semantic(provider_id)}:{model_id}"
-        if not choice_id or choice_id in self.seen_ids or semantic_id in self.seen_semantic_ids:
-            return
-        self.models.append(ModelInfo(model_id=choice_id, name=name, description=description))
-        self.seen_ids.add(choice_id)
-        self.seen_semantic_ids.add(semantic_id)
-
-    def add_inventory_rows(self, rows: list, provider_label: Callable[[str], str]) -> None:
-        for row in rows:
-            raw_row_provider = str(row.get("slug") or "").strip().lower()
-            row_provider = self.normalize_provider(raw_row_provider)
-            row_base_url = str(row.get("api_url") or "").strip().rstrip("/").lower()
-            if row.get("native_catalog_empty"):
-                self.empty_authoritative.add(raw_row_provider)
-            if (
-                not self._identity_resolved
-                and raw_row_provider in {"ollama", "custom:ollama"}
-                and self.current_base_url
-                and row_base_url == self.current_base_url
-            ):
-                self.current_choice_provider = "custom:ollama"
-                self._identity_resolved = True
-            if not row_provider:
-                continue
-            provider_name = str(row.get("name") or "").strip() or provider_label(row_provider)
-            row_models = row.get("models")
-            if not isinstance(row_models, (list, tuple)):
-                continue
-            encoded_provider = (
-                "custom:ollama" if raw_row_provider == "ollama"
-                else raw_row_provider if raw_row_provider.startswith("custom:")
-                else row_provider
-            )
-            for model_entry in row_models:
-                if isinstance(model_entry, dict):
-                    model_entry = model_entry.get("id") or model_entry.get("model") or model_entry.get("name")
-                rendered_model = str(model_entry or "").strip()
-                if not rendered_model:
-                    continue
-                is_current = (
-                    self.semantic(encoded_provider) == self.semantic(self.current_choice_provider)
-                    and rendered_model == self.current_model
-                )
-                self.add(
-                    encoded_provider, rendered_model, f"{provider_name} · {rendered_model}",
-                    f"Provider: {provider_name}" + (" • current" if is_current else ""),
-                )
-
-    def add_named_catalogs(self, catalogs: list, normalized_provider: str) -> None:
-        """Named user-defined endpoints (providers: / custom_providers:) are invisible
-        to canonical enumeration — append them like the TUI /model picker. An empty
-        catalog marks that slug authoritative-empty."""
-        for named_slug, named_label, named_catalog in catalogs:
-            if not named_catalog:
-                self.empty_authoritative.add(str(named_slug).strip().lower())
-                continue
-            for named_model, named_desc in named_catalog:
-                named_parts = [f"Provider: {named_label}"]
-                if named_desc:
-                    named_parts.append(str(named_desc).strip())
-                if named_slug == normalized_provider and named_model == self.current_model:
-                    named_parts.append("current")
-                self.add(named_slug, named_model, named_model, " • ".join(part for part in named_parts if part))
-
-
-@dataclass
 class _TurnCallbacks:
     """Per-turn ACP streaming callbacks; all None when no client is connected."""
 
@@ -787,15 +296,6 @@ class HermesACPAgent(acp.Agent):
         policy = self._MODE_TO_EDIT_APPROVAL_POLICY.get(mode, self._EDIT_APPROVAL_POLICY_DEFAULT)
         return policy, state.cwd
 
-    @staticmethod
-    def _encode_model_choice(provider: str | None, model: str | None) -> str:
-        """``provider:model`` so ACP clients keep provider context."""
-        raw_model = str(model or "").strip()
-        if not raw_model:
-            return ""
-        raw_provider = str(provider or "").strip().lower()
-        return f"{raw_provider}:{raw_model}" if raw_provider else raw_model
-
     def _build_model_state(self, state: SessionState) -> SessionModelState | None:
         """Authenticated providers + models, from the shared Hermes inventory (same substrate
         as ``hermes model``/TUI/dashboard) so the selector isn't just the current curated list."""
@@ -836,7 +336,7 @@ class HermesACPAgent(acp.Agent):
             current_is_empty = empty_applies(cat.current_choice_provider)
             if current_is_empty:
                 available_models = [m for m in available_models if " • current" not in str(m.description or "")]
-            current_model_id = "" if current_is_empty else self._encode_model_choice(cat.current_choice_provider, model)
+            current_model_id = "" if current_is_empty else encode_model_choice(cat.current_choice_provider, model)
             if current_model_id and current_model_id not in {item.model_id for item in available_models}:
                 provider_name = provider_label(normalized_provider)
                 available_models.insert(0, ModelInfo(
@@ -859,7 +359,7 @@ class HermesACPAgent(acp.Agent):
         if not model:
             return None
 
-        fallback_choice = self._encode_model_choice(provider, model)
+        fallback_choice = encode_model_choice(provider, model)
         return SessionModelState(
             available_models=[ModelInfo(model_id=fallback_choice, name=model)], current_model_id=fallback_choice
         )
