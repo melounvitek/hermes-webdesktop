@@ -7,6 +7,7 @@ import time
 import importlib.util
 import subprocess  # noqa: F401 — re-exported for tests that monkeypatch status.subprocess to guard against regressions
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -32,9 +33,9 @@ def _section(title: str) -> None:
     print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
 
 
-def _row(name: str, ok: bool, text: str, width: int = 12) -> None:
+def _row(name: str, ok: bool, text: str, width: int = 12, sep: str = "  ") -> None:
     """Print one ``name  ✓/✗ text`` status row."""
-    print(f"  {name:<{width}}  {check_mark(ok)} {text}")
+    print(f"  {name:<{width}}{sep}{check_mark(ok)} {text}")
 
 
 def _detail(label: str, value) -> None:
@@ -50,6 +51,10 @@ def _kv(label: str, value) -> None:
 def _kv_flag(label: str, ok, on: str, off: str) -> None:
     """``_kv`` with a ✓/✗ mark followed by ``on`` or ``off`` text."""
     _kv(label, f"{check_mark(bool(ok))} {on if ok else off}")
+
+
+def _configured(ok) -> str:
+    return "configured" if ok else "not configured"
 
 
 def _first_env_value(names) -> str:
@@ -126,29 +131,24 @@ _PLATFORMS = {  # name -> (token env var, home-channel env var or None)
     "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL")}
 
 # Gateway manager label when the runtime snapshot is unavailable, keyed by platform.
-_GATEWAY_FALLBACK = {"linux": ("unknown", "systemd/manual"), "darwin": ("unknown", "launchd")}
+_GATEWAY_FALLBACK = {"termux": ("unknown", "Termux / manual process"), "linux": ("unknown", "systemd/manual"),
+                     "darwin": ("unknown", "launchd")}
 
 
-class _StatusContext:
-    """Shared by section renderers: config, --deep, and the Nous login facts Auth Providers
-    derives for the later Nous Tool Gateway section."""
-
-    def __init__(self, deep: bool):
-        self.deep, self.config = deep, {}
-        self.nous_logged_in = self.nous_inference_present = False
-        self.nous_account_info = None
+def _banner(lines, *styles) -> None:
+    """Blank line, then each line in ``styles``."""
+    print()
+    for line in lines:
+        print(color(line, *styles))
 
 
 def _render_header(ctx):
-    print()
-    for line in ("┌─────────────────────────────────────────────────────────┐",
-                 "│                 ⚕ Hermes Agent Status                  │",
-                 "└─────────────────────────────────────────────────────────┘"):
-        print(color(line, Colors.CYAN))
+    _banner(("┌─────────────────────────────────────────────────────────┐",
+             "│                 ⚕ Hermes Agent Status                  │",
+             "└─────────────────────────────────────────────────────────┘"), Colors.CYAN)
     paused = _estop_status_line()
     if paused:
-        print()
-        print(color(paused, Colors.YELLOW, Colors.BOLD))
+        _banner((paused,), Colors.YELLOW, Colors.BOLD)
 
 
 def _render_environment(ctx):
@@ -209,7 +209,7 @@ def _render_platforms(ctx):
     for name, (token_var, home_var) in _PLATFORMS.items():
         has_token = bool(os.getenv(token_var, ""))
         home_channel = os.getenv(home_var, "") if home_var else ""
-        _row(name, has_token, ("configured" if has_token else "not configured") + (f" (home: {home_channel})" if home_channel else ""))
+        _row(name, has_token, _configured(has_token) + (f" (home: {home_channel})" if home_channel else ""))
 
     try:  # Plugin-registered platforms
         from gateway.platform_registry import platform_registry
@@ -220,7 +220,7 @@ def _render_platforms(ctx):
                 configured = bool(entry.check_fn())
             except Exception:
                 configured = False
-            _row(entry.label, configured, f"{'configured' if configured else 'not configured'} (plugin)")
+            _row(entry.label, configured, f"{_configured(configured)} (plugin)")
     except Exception:
         pass
 
@@ -243,11 +243,8 @@ def _render_gateway(ctx):
         elif snapshot.service_installed and not snapshot.service_running:
             _kv("Service:", "installed but stopped")
     except Exception:
-        if _is_termux():
-            status_text, manager = "unknown", "Termux / manual process"
-        else:
-            platform = "linux" if sys.platform.startswith("linux") else sys.platform
-            status_text, manager = _GATEWAY_FALLBACK.get(platform, ("N/A", "(not supported on this platform)"))
+        platform = "termux" if _is_termux() else "linux" if sys.platform.startswith("linux") else sys.platform
+        status_text, manager = _GATEWAY_FALLBACK.get(platform, ("N/A", "(not supported on this platform)"))
         _kv("Status:", color(status_text, Colors.DIM))
         _kv("Manager:", manager)
 
@@ -276,7 +273,6 @@ def _render_sessions(ctx):
     _section("Sessions")
     # Gateway session count: state.db is the source of truth; fall back to sessions.json for
     # pre-migration installs.
-    gateway_rows = []
     try:
         from hermes_state import SessionDB
         db = SessionDB()
@@ -293,17 +289,15 @@ def _render_sessions(ctx):
         if freshest > 0:
             from hermes_cli.timefmt import relative_time
             print(f"  Last activity:{relative_time(freshest):>13}")
+    elif not (sessions_file := get_hermes_home() / "sessions" / "sessions.json").exists():
+        _kv("Active:", 0)
     else:
-        sessions_file = get_hermes_home() / "sessions" / "sessions.json"
-        if sessions_file.exists():
-            try:
-                data = _load_json(sessions_file)
-                entries = [k for k in data if not str(k).startswith("_")] if isinstance(data, dict) else []
-                _kv("Active:", f"{len(entries)} session(s)")
-            except Exception:
-                _kv("Active:", "(error reading sessions file)")
-        else:
-            _kv("Active:", 0)
+        try:
+            data = _load_json(sessions_file)
+            entries = [k for k in data if not str(k).startswith("_")] if isinstance(data, dict) else []
+            _kv("Active:", f"{len(entries)} session(s)")
+        except Exception:
+            _kv("Active:", "(error reading sessions file)")
 
     # Slot usage, only when max_concurrent_sessions is set. The cap is shared across CLI,
     # desktop/TUI and the messaging gateway, so the surface that gets rejected is rarely the one
@@ -351,9 +345,8 @@ def _render_deep(ctx):
 
 
 def _render_footer(ctx):
-    print()
-    for line in ("─" * 60, "  Run 'hermes doctor' for detailed diagnostics", "  Run 'hermes setup' to configure"):
-        print(color(line, Colors.DIM))
+    _banner(("─" * 60, "  Run 'hermes doctor' for detailed diagnostics", "  Run 'hermes setup' to configure"),
+            Colors.DIM)
     print()
 
 
@@ -366,6 +359,9 @@ _SECTIONS = (
 
 def show_status(args):
     """Show status of all Hermes Agent components."""
-    ctx = _StatusContext(deep=getattr(args, 'deep', False))
+    # Shared by section renderers: config, --deep, and the Nous login facts Auth Providers derives
+    # for the later Nous Tool Gateway section.
+    ctx = SimpleNamespace(deep=getattr(args, 'deep', False), config={}, nous_logged_in=False,
+                          nous_inference_present=False, nous_account_info=None)
     for render in _SECTIONS:
         render(ctx)

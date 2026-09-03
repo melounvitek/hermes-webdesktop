@@ -94,15 +94,21 @@ _APIKEY_PROVIDERS = {
     "DeepInfra":        ("DEEPINFRA_API_KEY",)}
 
 
+# Nous Tool Gateway per-feature state: first matching (predicate(feature, nous_auth), text(feature)).
+_FEATURE_STATES = (
+    (lambda f, _: f.managed_by_nous, lambda f: "active via Nous subscription"),
+    (lambda f, _: f.active, lambda f: f"active via {f.current_provider or 'configured provider'}"),
+    (lambda f, auth: f.included_by_default and auth, lambda f: "included by subscription, not currently selected"),
+    (lambda f, auth: f.key == "modal" and auth, lambda f: "available via subscription (optional)"))
+
+
 def _render_api_keys(ctx):
     _status._section("API Keys")
-    for name, env_ref in _API_KEYS.items():
-        value = _status._first_env_value(env_ref)
-        _status._row(name, bool(value), _status.redact_key(value))
-    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     from hermes_cli.auth import get_anthropic_key
-    anthropic_value = get_anthropic_key()
-    _status._row("Anthropic", bool(anthropic_value), _status.redact_key(anthropic_value))
+    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
+    for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
+        value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
+        _status._row(name, bool(value), _status.redact_key(value))
 
 
 def _render_auth_providers(ctx):
@@ -162,18 +168,9 @@ def _render_nous_gateway(ctx):
         print("  Nous Portal   ✓ managed tools available" if features.nous_auth_present
               else "  Nous Portal   ✗ not logged in")
         for f in features.items():
-            if f.managed_by_nous:
-                state = "active via Nous subscription"
-            elif f.active:
-                state = f"active via {f.current_provider or 'configured provider'}"
-            elif f.included_by_default and features.nous_auth_present:
-                state = "included by subscription, not currently selected"
-            elif f.key == "modal" and features.nous_auth_present:
-                state = "available via subscription (optional)"
-            else:
-                state = "not configured"
-            mark = _status.check_mark(f.available or f.active or f.managed_by_nous)
-            print(f"  {f.label:<15} {mark} {state}")
+            state = next((text(f) for match, text in _FEATURE_STATES if match(f, features.nous_auth_present)),
+                         "not configured")
+            _status._row(f.label, f.available or f.active or f.managed_by_nous, state, 15, " ")
     elif ctx.nous_logged_in or ctx.nous_inference_present:
         # Nous OAuth without entitlement, or an opaque inference key without Portal account
         # information, cannot enable the Tool Gateway.
@@ -189,8 +186,7 @@ def _render_apikey_providers(ctx):
     _status._section("API-Key Providers")
     for pname, env_vars in _APIKEY_PROVIDERS.items():
         configured = bool(_status._first_env_value(env_vars))
-        state = "configured" if configured else "not configured (run: hermes model)"
-        print(f"  {pname:<16} {_status.check_mark(configured)} {state}")
+        _status._row(pname, configured, "configured" if configured else "not configured (run: hermes model)", 16, " ")
 
     # LM Studio reachability: probe only when it is the active provider so users with foreign
     # configs see no noise. Auth rejection vs. a silent empty list is the common support case.
@@ -206,7 +202,7 @@ def _render_apikey_providers(ctx):
             msg = f"reachable ({len(models)} model(s)) at {base}" if ok else f"unreachable at {base}"
         except AuthError:
             ok, msg = False, "auth rejected — set LM_API_KEY"
-        print(f"  {'LM Studio':<16} {_status.check_mark(ok)} {msg}")
+        _status._row("LM Studio", ok, msg, 16, " ")
 
 
 import hermes_cli.status as _status  # noqa: E402  (bottom: hermes_cli.status imports this module)
