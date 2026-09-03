@@ -128,24 +128,19 @@ class HostedRoomRuntime:
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
         if (
-            isinstance(max_concurrent_rooms, bool)
-            or not isinstance(max_concurrent_rooms, int)
-            or max_concurrent_rooms < 1):
+            not isinstance(max_concurrent_rooms, int)
+            or isinstance(max_concurrent_rooms, bool)
+            or max_concurrent_rooms < 1
+        ):
             raise ValueError("max_concurrent_rooms must be a positive integer")
-        if not (
-            unavailable_retry_min_seconds > 0
-            and unavailable_retry_max_seconds >= unavailable_retry_min_seconds):
+        if not 0 < unavailable_retry_min_seconds <= unavailable_retry_max_seconds:
             raise ValueError("unavailable retry bounds are invalid")
         if rpc is None and transport_resolver is None:
             raise ValueError("rpc or transport_resolver is required")
         self.db_path = Path(db_path)
-        self.rpc = rpc
-        self.transport_resolver = transport_resolver
-        self.turn_lock = turn_lock
-        self.prepare_room = prepare_room
-        self.publish_terminal = publish_terminal
-        self.pending_action = pending_action
-        self.clock = clock
+        self.rpc, self.transport_resolver, self.turn_lock = rpc, transport_resolver, turn_lock
+        self.prepare_room, self.publish_terminal = prepare_room, publish_terminal
+        self.pending_action, self.clock = pending_action, clock
         self.lease_ttl_seconds = float(lease_ttl_seconds)
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.active_poll_interval_seconds = float(active_poll_interval_seconds)
@@ -155,15 +150,12 @@ class HostedRoomRuntime:
         self.unavailable_retry_min_seconds = float(unavailable_retry_min_seconds)
         self.unavailable_retry_max_seconds = float(unavailable_retry_max_seconds)
         self.process_generation = process_generation or uuid.uuid4().hex
-        self._rooms_provider: Callable[[], Iterable[HostedRoomBinding]]
-        if callable(rooms):
-            self._rooms_provider = cast(Callable[[], Iterable[HostedRoomBinding]], rooms)
-        else:
-            room_bindings = tuple(rooms)
-            self._rooms_provider = lambda: room_bindings
+        self._rooms_provider: Callable[[], Iterable[HostedRoomBinding]] = (
+            cast(Callable[[], Iterable[HostedRoomBinding]], rooms)
+            if callable(rooms)
+            else (lambda bindings=tuple(rooms): bindings))
 
-        self._stop = threading.Event()
-        self._wake = threading.Event()
+        self._stop, self._wake = threading.Event(), threading.Event()
         self._thread: threading.Thread | None = None
         self._room_threads: dict[str, threading.Thread] = {}
         self._rooms_needing_reschedule: set[str] = set()
@@ -175,9 +167,8 @@ class HostedRoomRuntime:
         self._blocked_rooms: set[str] = set()
         self._status_lock = threading.Lock()
         self._current_tasks: dict[str, state.TaskIdentity] = {}
-        self._room_schedule_cursor = 0
+        self._room_schedule_cursor, self._cycles = 0, 0
         self._last_error: str | None = None
-        self._cycles = 0
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -322,9 +313,8 @@ class HostedRoomRuntime:
         task: Mapping[str, Any], lease: state.DriverLease, *, publish: bool = True, **extra: Any,
     ) -> dict[str, Any]:
         """Run one lease-fenced state transition on ``task``; ``extra`` may override fences."""
-        result = op(
-            self.db_path, task["identity"], lease, **{**_fences(task), "clock": self.clock, **extra}
-        )
+        kwargs = {**_fences(task), "clock": self.clock, **extra}
+        result = op(self.db_path, task["identity"], lease, **kwargs)
         return self._publish(binding, result) if publish and binding is not None else result
 
     def _requeue(
@@ -381,11 +371,8 @@ class HostedRoomRuntime:
         Callers must use the returned id (not the stored one) for every
         subsequent history/info probe; resume may hand back a different id.
         """
-        session = transport.resolve_exact(
-            profile=profile, title=room_session_title(room_id), source=ROOM_SESSION_SOURCE)
-        if session is None:
-            return None
-        return _session_id(transport.resume(**_session_kw(profile, _session_id(session))))
+        session = self._resolve_or_create(transport, profile, room_id, create=False)
+        return None if session is None else _session_id(session)
 
     def _open_session(
         self, binding: HostedRoomBinding, task: Mapping[str, Any], *, peer_only: bool = False
@@ -468,9 +455,8 @@ class HostedRoomRuntime:
         approval = info.get("pending_approval") or info.get("approval")
         action = None
         if isinstance(approval, Mapping):
-            safe_approval = dict(approval)
-            choices = [c for c in safe_approval.get("choices") or () if c in {"once", "deny"}]
-            safe_approval["choices"] = choices or ["once", "deny"]
+            choices = [c for c in approval.get("choices") or () if c in {"once", "deny"}]
+            safe_approval = {**approval, "choices": choices or ["once", "deny"]}
             action = {
                 "kind": "approval",
                 "task_id": task["identity"].task_id,
@@ -528,7 +514,6 @@ class HostedRoomRuntime:
                     return
                 self._run_room_once(binding)
             return
-
         with self._status_lock:
             self._room_threads = {
                 room_id: thread
@@ -538,13 +523,11 @@ class HostedRoomRuntime:
             active_rooms = set(self._room_threads)
         if available <= 0:
             return
-
         bindings = tuple(self._rooms_provider())
         if not bindings:
             return
         start = self._room_schedule_cursor % len(bindings)
         self._room_schedule_cursor = (start + 1) % len(bindings)
-
         for binding in bindings[start:] + bindings[:start]:
             if self._stop.is_set() or available <= 0:
                 return
@@ -564,11 +547,10 @@ class HostedRoomRuntime:
             self._process_room(binding)
         except state.LeaseHeldError:
             return
-        except (state.RoomUnavailableError, state.StaleLeaseError) as exc:
-            self._drop_lease(binding.room_id)
-            self._set_blocked(binding.room_id, False)
-            self._record_error(f"room {binding.room_id}: {exc}")
         except Exception as exc:
+            if isinstance(exc, (state.RoomUnavailableError, state.StaleLeaseError)):
+                self._drop_lease(binding.room_id)
+                self._set_blocked(binding.room_id, False)
             self._record_error(f"room {binding.room_id}: {exc}")
         finally:
             current = threading.current_thread()
@@ -600,7 +582,6 @@ class HostedRoomRuntime:
             return
         if self._reconcile_indeterminate(binding, lease):
             return
-
         for task in state.list_tasks(self.db_path, room_id=binding.room_id, status="queued"):
             if self._stop.is_set() or self._route_retry_is_deferred(task):
                 return
@@ -625,12 +606,8 @@ class HostedRoomRuntime:
     def _defer_unavailable_route(self, task: Mapping[str, Any]) -> float:
         key = self._route_retry_key(task)
         previous = self._unavailable_route_retries.get(key)
-        delay = (
-            self.unavailable_retry_min_seconds
-            if previous is None
-            else min(
-                self.unavailable_retry_max_seconds,
-                max(self.unavailable_retry_min_seconds, previous["delay"] * 2)))
+        lo, hi = self.unavailable_retry_min_seconds, self.unavailable_retry_max_seconds
+        delay = lo if previous is None else min(hi, max(lo, previous["delay"] * 2))
         self._unavailable_route_retries[key] = {
             "delay": delay, "next_attempt_at": self.clock() + delay}
         return delay
@@ -677,11 +654,9 @@ class HostedRoomRuntime:
 
     def _release_idle_leases(self) -> None:
         for room_id, lease in tuple(self._leases.items()):
-            try:
+            with suppress(state.DriverStateError):
                 state.release_lease(self.db_path, lease, clock=self.clock)
-            except state.DriverStateError:
-                continue
-            self._drop_lease(room_id)
+                self._drop_lease(room_id)
 
     # ------------------------------------------------------------------ attempt execution
     def _execute_attempt(
@@ -802,16 +777,13 @@ class HostedRoomRuntime:
                 self._wake.wait(self.active_poll_interval_seconds)
                 self._wake.clear()
                 continue
-
             if time.monotonic() >= deadline_monotonic:
                 self._expire_attempt_deadline(binding, task, lease)
                 return None
-
             lease = self._renew_lease_if_needed(binding, lease)
             receipt = self._terminal_from_history(transport, profile, session_id, task)
             if receipt is not None:
                 return receipt
-
             info = transport.info(**_session_kw(profile, session_id))
             self._report_pending_action(task, session_id=session_id, info=info)
             remaining = max(0.0, deadline_monotonic - time.monotonic())
@@ -849,7 +821,6 @@ class HostedRoomRuntime:
                 expected_cancel_generation=int(task["cancel_generation"]), clock=self.clock)
         elif task["status"] != "stopping":
             return
-
         # A user Stop that won the race keeps its own cancellation semantics.
         if not self._is_deadline_stop(task):
             return
@@ -1004,12 +975,14 @@ class HostedRoomRuntime:
         return self.rpc
 
     def _resolve_or_create(
-        self, transport: InternalSessionRPC, profile: str, room_id: str) -> Mapping[str, Any]:
+        self, transport: InternalSessionRPC, profile: str, room_id: str, *, create: bool = True
+    ) -> Mapping[str, Any] | None:
+        """Resolve + resume the canonical room session; create it (or return None) when absent."""
         coords = {
             "profile": profile, "title": room_session_title(room_id), "source": ROOM_SESSION_SOURCE}
         session = transport.resolve_exact(**coords)
         if session is None:
-            return transport.create(**coords)
+            return transport.create(**coords) if create else None
         return transport.resume(**_session_kw(profile, _session_id(session)))
 
     def _settle_failure_if_current(self, attempt: state.TaskAttempt, exc: Exception) -> None:

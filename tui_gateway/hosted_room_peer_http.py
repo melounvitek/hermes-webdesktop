@@ -252,18 +252,17 @@ class PeerRunsHTTPClient:
         self, *, room_id: str, home_install_id: str, authority_gateway_id: str,
         authority_epoch: int, member_id: str, target_install_id: str, target_profile: str) -> None:
         """Fence every in-memory and durable receipt to one room authority."""
-        scope = {
-            "room_id": str(room_id or ""),
-            "home_install_id": str(home_install_id or ""),
-            "authority_gateway_id": str(authority_gateway_id or ""),
-            "authority_epoch": int(authority_epoch or 0),
-            "member_id": str(member_id or ""),
-            "target_install_id": str(target_install_id or ""),
-            "target_profile": str(target_profile or "")}
-        if not all(value for key, value in scope.items() if key != "authority_epoch"):
+        epoch = int(authority_epoch or 0)
+        names = [
+            str(value or "")
+            for value in (
+                room_id, home_install_id, authority_gateway_id, member_id, target_install_id,
+                target_profile)]
+        if not all(names):
             raise PeerRunsHTTPError("peer room receipt scope is incomplete")
-        if scope["authority_epoch"] < 1:
+        if epoch < 1:
             raise PeerRunsHTTPError("peer room receipt authority epoch is invalid")
+        scope = dict(zip(_RECEIPT_SCOPE_FIELDS, names[:3] + [epoch] + names[3:]))
         if self._room_scope == scope:
             return
         self._room_scope = scope
@@ -283,11 +282,9 @@ class PeerRunsHTTPClient:
             return record
         from gateway import hosted_rooms
 
+        identity = {"task_id": task_id, "execution_generation": execution_generation}
         return hosted_rooms.remote_run_receipt(
-            self.receipt_db_path,
-            record={
-                **self._room_scope, "task_id": task_id, "execution_generation": execution_generation
-            })
+            self.receipt_db_path, record={**self._room_scope, **identity})
 
     def bind_observation(self, *, task_id: str, execution_generation: int) -> None:
         """Pin history/status reads to one exact logical task attempt."""
@@ -417,8 +414,7 @@ class PeerRunsHTTPClient:
             return self._accepted(
                 checked, run_id=str(existing["run_id"]),
                 session_id=str(existing["session_id"]), replayed=True)
-        key = (checked.task_id, checked.execution_generation)
-        now = self.clock()
+        key, now = (checked.task_id, checked.execution_generation), self.clock()
         backoff = self._recovery_backoff.get(key)
         if backoff is not None and now < float(backoff["next_attempt_at"]):
             raise PeerRunsHTTPError(
@@ -520,8 +516,7 @@ class PeerRunsHTTPClient:
         return status.get("status") in _TERMINAL_RUN_STATES
 
     def _poll_receipt(self, record: Mapping[str, Any], *, grant: str) -> dict[str, Any]:
-        run_id = str(record["run_id"])
-        now = self.clock()
+        run_id, now = str(record["run_id"]), self.clock()
         cached = self._status_cache.get(run_id)
         if cached is not None:
             status = cached["status"]

@@ -188,11 +188,10 @@ class PeerHostedRoomTransport(InternalSessionRPC):
         bind_scope = getattr(self.client, "bind_room_scope", None)
         if callable(bind_scope):
             bind_scope(
-                room_id=self.binding.room_id, home_install_id=self.route.home_install_id,
-                authority_gateway_id=self.binding.gateway_id,
-                authority_epoch=self.binding.authority_epoch, member_id=self.route.member_id,
-                target_install_id=self.route.target_install_id,
-                target_profile=self.route.target_profile)
+                room_id=binding.room_id, home_install_id=route.home_install_id,
+                authority_gateway_id=binding.gateway_id, authority_epoch=binding.authority_epoch,
+                member_id=route.member_id, target_install_id=route.target_install_id,
+                target_profile=route.target_profile)
 
     def _validate_coordinates(self, *, profile: str, source: str, title: str | None = None) -> None:
         if source != ROOM_SESSION_SOURCE:
