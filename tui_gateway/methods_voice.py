@@ -572,10 +572,8 @@ def _(rid, params: dict) -> dict:
         # Effective capture: prefer the *armed* detector over config/auto, else with capture:auto
         # a bare status probe reports "local" and the desktop never reattaches the PCM feeder.
         frame = detector_frame_info()
-        if owned_by_caller and frame.get("external_audio"):
-            capture = "client"
-        elif owned_by_caller and listening:
-            capture = "local"
+        if owned_by_caller and (frame.get("external_audio") or listening):
+            capture = "client" if frame.get("external_audio") else "local"
         else:
             capture = probe_capture or reqs.get("capture") or str(cfg.get("capture") or "auto")
         # `enabled` is config truth (clients re-arm after a voice turn from it); `audio_silent` =
@@ -608,8 +606,7 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"fed": False, "reason": "empty"})
     if len(pcm) > 64000:  # soft cap: 2s of 16 kHz int16 mono
         return _err(rid, 4001, "pcm frame too large")
-    sr = params.get("sample_rate")
-    if sr is not None and int(sr) not in (0, 16000):
+    if params.get("sample_rate") is not None and int(params["sample_rate"]) not in (0, 16000):
         return _err(rid, 4001, "wake.feed only accepts 16 kHz PCM")
     try:
         from tools.wake_word import feed_audio
@@ -627,9 +624,7 @@ def _voice_toggle_status(rid, params: dict) -> dict:
     try:
         from tools.voice_mode import check_voice_requirements
         reqs = check_voice_requirements()
-        payload.update(available=bool(reqs.get("available")),
-                       audio_available=bool(reqs.get("audio_available")),
-                       stt_available=bool(reqs.get("stt_available")),
+        payload.update({k: bool(reqs.get(k)) for k in ("available", "audio_available", "stt_available")},
                        details=reqs.get("details") or "")
     except Exception as e:
         # Optional transcription deps — /voice status must always answer.
@@ -713,51 +708,12 @@ def _vr_on_status(state):
         _resume_voice_wake()
 
 
-def _voice_record_start(transport) -> dict:
-    """Start the VAD-bounded capture; returns the result payload. If the wake detector handed over
-    the mic, a terminal capture event (or a failed start) resumes it."""
-    global _voice_wake_owner
-    from hermes_cli.voice import start_continuous
-    # Busy probe holds the no-speech counter during long agent turns.
-    # Safe to re-register every start; older wrappers lack the setter.
-    with contextlib.suppress(Exception):
-        from hermes_cli.voice import set_voice_busy_probe
-        set_voice_busy_probe(_any_session_running)
-    # Shape-safe: malformed voice YAML falls back to documented defaults.
-    # max_recording_seconds: explicit numeric <= 0 disables the cap (0.0).
-    voice_cfg = _voice_cfg_dict()
-    max_rec = _voice_cfg_number(voice_cfg.get("max_recording_seconds"), 120.0)
-    try:
-        from tools.wake_word import pause_listening
-        wake_paused = pause_listening(owner=transport)
-    except Exception:
-        wake_paused = False
-    if wake_paused:
-        with _voice_sid_lock:
-            _voice_wake_owner = transport
-    try:
-        started = start_continuous(
-            on_transcript=lambda t: _vr_transcript({"text": t}), on_status=_vr_on_status,
-            on_silent_limit=lambda: _vr_transcript({"no_speech_limit": True}),
-            silence_threshold=_voice_cfg_number(voice_cfg.get("silence_threshold"), 200),
-            silence_duration=_voice_cfg_number(voice_cfg.get("silence_duration"), 3.0),
-            auto_restart=False, max_recording_seconds=max_rec if max_rec > 0 else 0.0,
-            on_stop_phrase=_vr_on_stop_phrase)
-    except Exception:
-        if wake_paused:
-            _resume_voice_wake()
-        raise
-    if started is False:
-        _resume_voice_wake()
-        return {"status": "busy"}
-    return {"status": "recording"}
-
-
 @method("voice.record")
 def _(rid, params: dict) -> dict:
     """VAD-bounded push-to-talk. ``start`` emits ``voice.transcript`` when silence stops the
     capture; ``stop`` forces transcription. Three silent captures emit ``no_speech_limit``."""
     action = params.get("action", "start")
+    wake_paused = False
     if action not in {"start", "stop"}:
         return _err(rid, 4019, f"unknown voice action: {action}")
     transport = _caller_transport()
@@ -765,7 +721,7 @@ def _(rid, params: dict) -> dict:
     if wake_owner is not None and wake_owner is not transport:
         return _ok(rid, {"status": "busy", "reason": "wake_owned"})
     try:
-        global _voice_event_sid
+        global _voice_event_sid, _voice_wake_owner
         if action == "start" and not _voice_mode_enabled():
             return _err(rid, 4015, "voice mode is off — enable with /voice on")
         with _voice_sid_lock:
@@ -775,9 +731,38 @@ def _(rid, params: dict) -> dict:
             stop_continuous(force_transcribe=True)
             _resume_voice_wake()
             return _ok(rid, {"status": "stopped"})
-        return _ok(rid, _voice_record_start(transport))
+        from hermes_cli.voice import start_continuous
+        # Busy probe holds the no-speech counter during long agent turns.
+        # Safe to re-register every start; older wrappers lack the setter.
+        with contextlib.suppress(Exception):
+            from hermes_cli.voice import set_voice_busy_probe
+            set_voice_busy_probe(_any_session_running)
+        # Shape-safe: malformed voice YAML falls back to documented defaults.
+        # max_recording_seconds: explicit numeric <= 0 disables the cap (0.0).
+        voice_cfg = _voice_cfg_dict()
+        max_rec = _voice_cfg_number(voice_cfg.get("max_recording_seconds"), 120.0)
+        # Hand the mic to STT if the wake detector holds it; a terminal capture event resumes it.
+        try:
+            from tools.wake_word import pause_listening
+            wake_paused = pause_listening(owner=transport)
+        except Exception:
+            wake_paused = False
+        if wake_paused:
+            with _voice_sid_lock:
+                _voice_wake_owner = transport
+        started = start_continuous(
+            on_transcript=lambda t: _vr_transcript({"text": t}), on_status=_vr_on_status,
+            on_silent_limit=lambda: _vr_transcript({"no_speech_limit": True}),
+            silence_threshold=_voice_cfg_number(voice_cfg.get("silence_threshold"), 200),
+            silence_duration=_voice_cfg_number(voice_cfg.get("silence_duration"), 3.0),
+            auto_restart=False, max_recording_seconds=max_rec if max_rec > 0 else 0.0,
+            on_stop_phrase=_vr_on_stop_phrase)
+        if started is False:
+            _resume_voice_wake()
+            return _ok(rid, {"status": "busy"})
+        return _ok(rid, {"status": "recording"})
     except Exception as e:
-        if action == "stop":
+        if wake_paused or action == "stop":
             _resume_voice_wake()
         if isinstance(e, ImportError):
             return _err(rid, 5025, "voice module not available — install audio dependencies")

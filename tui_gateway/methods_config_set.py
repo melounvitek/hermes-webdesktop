@@ -360,24 +360,26 @@ def _set_thinking_mode(rid, params, key, value, session):
     return _kv(rid, key, nv)
 
 
-# on/off/toggle display booleans: key -> (display field, on words, off words).
+def _toggle_setter(rid, key, value, raw, aliases: dict, flipped, cfg_key: str, report=lambda v: v):
+    """``""``/``toggle`` -> ``flipped``, an alias word -> its value, else 4002; writes ``cfg_key``."""
+    nv = flipped if raw in {"", "toggle"} else aliases.get(raw)
+    if nv is None:
+        return _err(rid, 4002, f"unknown {key} value: {value}")
+    _write_config_key(cfg_key, nv)
+    return _kv(rid, key, report(nv))
+
+
+# on/off/toggle display booleans: key -> (display field, accepted word -> bool).
 _DISPLAY_BOOLS = {
-    "density": ("tui_compact", {"on"}, {"off"}),
-    "battery": ("battery", {"on", "true", "yes"}, {"off", "false", "no"})}
+    "density": ("tui_compact", {"on": True, "off": False}),
+    "battery": ("battery", {"on": True, "true": True, "yes": True, "off": False, "false": False, "no": False})}
 
 
 def _set_display_bool(rid, params, key, value, session):
-    cfg_key, on_words, off_words = _DISPLAY_BOOLS[key]
-    raw = _word(value)
+    cfg_key, words = _DISPLAY_BOOLS[key]
     cur_b = bool(_display_cfg().get(cfg_key, False))
-    if raw in {"", "toggle"}:
-        nv_b = not cur_b
-    elif raw in on_words or raw in off_words:
-        nv_b = raw in on_words
-    else:
-        return _err(rid, 4002, f"unknown {key} value: {value}")
-    _write_config_key(f"display.{cfg_key}", nv_b)
-    return _kv(rid, key, "on" if nv_b else "off")
+    return _toggle_setter(rid, key, value, _word(value), words, not cur_b, f"display.{cfg_key}",
+                          lambda v: "on" if v else "off")
 
 
 def _set_theme(rid, params, key, value, session):
@@ -390,29 +392,16 @@ def _set_theme(rid, params, key, value, session):
 
 
 def _set_statusbar(rid, params, key, value, session):
-    raw = _word(value)
     current = _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))
-    if raw in {"", "toggle"}:
-        nv = "top" if current == "off" else "off"
-    elif raw == "on" or raw in _STATUSBAR_MODES:
-        nv = "top" if raw == "on" else raw
-    else:
-        return _err(rid, 4002, f"unknown statusbar value: {value}")
-    _write_config_key("display.tui_statusbar", nv)
-    return _kv(rid, key, nv)
+    return _toggle_setter(rid, key, value, _word(value), {"on": "top", **{m: m for m in _STATUSBAR_MODES}},
+                          "top" if current == "off" else "off", "display.tui_statusbar")
 
 
 def _set_mouse(rid, params, key, value, session):
-    raw = _raw_word(value)  # 0/False reach the alias map as themselves (-> 'off'), not toggle
+    # _raw_word: falsy non-strings (0, False) reach the alias map as themselves (-> 'off'), not toggle.
     current = _display_mouse_tracking(_display_cfg())
-    if raw in {"", "toggle"}:
-        nv = "all" if current == "off" else "off"
-    elif raw in _MOUSE_TRACKING_ALIASES:
-        nv = _MOUSE_TRACKING_ALIASES[raw]
-    else:
-        return _err(rid, 4002, f"unknown mouse value: {value}")
-    _write_config_key("display.mouse_tracking", nv)
-    return _kv(rid, key, nv)
+    return _toggle_setter(rid, key, value, _raw_word(value), _MOUSE_TRACKING_ALIASES,
+                          "all" if current == "off" else "off", "display.mouse_tracking")
 
 
 def _set_indicator(rid, params, key, value, session):
