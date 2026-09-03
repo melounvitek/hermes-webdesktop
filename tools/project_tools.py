@@ -157,8 +157,7 @@ registry.register(
             "this chat into it — pass path to anchor it to a repo/folder (the "
             "chat's workspace moves there, the sidebar follows). switch: move "
             "this chat into an existing project by name/slug/id — the "
-            "intentional way to move the session, not `cd`. list: all "
-            "projects + which is active."
+            "intentional way to move the session, not `cd`. list: all projects + which is active."
         ),
         "parameters": {
             "type": "object",

@@ -317,8 +317,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
     if isinstance(node, str):
         if node in _BARE_TYPE_NAMES:
             logger.debug(
-                "schema_sanitizer[%s]: replacing bare-string schema %r "
-                "with {'type': %r}",
+                "schema_sanitizer[%s]: replacing bare-string schema %r with {'type': %r}",
                 path, node, node)
             return _empty_object() if node == "object" else {"type": node}
         logger.debug(

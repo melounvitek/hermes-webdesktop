@@ -316,8 +316,7 @@ def _run_check_fn_uncached(fn: Callable, *, unresolved_scope: bool = False) -> b
             # No traceback so this cannot be mistaken for a crashed check_fn.
             logger.debug(
                 "check_fn %s hit the multiplex fail-closed path with no "
-                "profile secret scope active; dependent tools re-probe on "
-                "the first scoped turn",
+                "profile secret scope active; dependent tools re-probe on the first scoped turn",
                 _fn_label(fn))
         else:
             # The scope resolved but the read still failed closed: a genuinely lost scope.
@@ -806,10 +805,8 @@ class ToolRegistry:
                     and not self._plugin_override_allowed(caller_scope, caller_owner)):
                     logger.error(
                         "Tool deregistration REJECTED: plugin %r attempted to "
-                        "remove tool %r (toolset %r) it does not own, without "
-                        "operator opt-in. Set "
-                        "plugins.entries.%s.allow_tool_override: true in "
-                        "config.yaml to allow it.",
+                        "remove tool %r (toolset %r) it does not own, without operator opt-in. Set "
+                        "plugins.entries.%s.allow_tool_override: true in config.yaml to allow it.",
                         caller_mod, name, entry.toolset, caller_mod)
                     raise PermissionError(
                         f"Plugin module {caller_mod!r} cannot deregister tool "
