@@ -152,8 +152,7 @@ def _resolve_matrix_bang_command(name: str) -> str | None:
         logger.debug("Matrix: is_gateway_known_command failed for %r", name, exc_info=True)
     try:
         from agent.skill_commands import get_skill_commands
-        skill_commands = get_skill_commands() or {}
-        # Skill command keys are slash-prefixed ("/arxiv").
+        skill_commands = get_skill_commands() or {}  # keys are slash-prefixed ("/arxiv")
         for candidate in candidates:
             if f"/{candidate}" in skill_commands:
                 return candidate
@@ -682,20 +681,16 @@ class _CryptoStateStore:
         return (await self.get_encryption_info(room_id)) is not None
 
     async def get_encryption_info(self, room_id: str):
-        info = None
-        if hasattr(self._ss, "get_encryption_info"):
-            info = await self._ss.get_encryption_info(room_id)
+        info = await self._ss.get_encryption_info(room_id) if hasattr(self._ss, "get_encryption_info") else None
         if info is not None:
             return info
         if room_id in self._enc_info_cache:
             return self._enc_info_cache[room_id]
-        client = self._client
-        if client is None:
+        if self._client is None:
             return None
         try:
-            from mautrix.types import (
-                EventType as _ET, RoomEncryptionStateEventContent as _Enc, RoomID as _RID)
-            raw = await client.get_state_event(_RID(room_id), _ET.ROOM_ENCRYPTION)
+            from mautrix.types import EventType as _ET, RoomEncryptionStateEventContent as _Enc, RoomID as _RID
+            raw = await self._client.get_state_event(_RID(room_id), _ET.ROOM_ENCRYPTION)
         except Exception as exc:
             logger.debug("Matrix: homeserver encryption-info query failed for %s: %s", room_id, exc)
             return None
@@ -1745,8 +1740,7 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception as exc:
                 if self._closing:
                     return
-                err_str = str(exc).lower()
-                if any(k in err_str for k in ("401", "403", "unauthorized", "forbidden")):
+                if any(k in str(exc).lower() for k in ("401", "403", "unauthorized", "forbidden")):
                     logger.error("Matrix: permanent auth error: %s — stopping sync", exc)
                     return
                 logger.warning("Matrix: sync error: %s — retrying in 5s", exc)
@@ -2011,7 +2005,6 @@ class MatrixAdapter(BasePlatformAdapter):
         if url and not str(url).startswith("mxc://"):
             logger.warning("[Matrix] Rejecting inbound media %s with non-MXC URL", event_id)
             return
-        http_url = self._mxc_to_http(url) if url else ""
         content_info = source_content.get("info", {})
         if not isinstance(content_info, dict):
             content_info = {}
@@ -2031,7 +2024,6 @@ class MatrixAdapter(BasePlatformAdapter):
             if url and not str(url).startswith("mxc://"):
                 logger.warning("[Matrix] Rejecting inbound encrypted media %s with non-MXC URL", event_id)
                 return
-            http_url = self._mxc_to_http(url) if url else ""
         is_encrypted_media = bool(file_content and isinstance(file_content, dict) and file_content.get("url"))
         msg_type, media_type, is_voice_message = self._classify_inbound_media(msgtype, event_mimetype, source_content)
         # Cache locally so downstream tools get a real file path.
@@ -2043,8 +2035,9 @@ class MatrixAdapter(BasePlatformAdapter):
                     is_voice_message, body)
             except Exception as e:
                 logger.warning("[Matrix] Failed to cache media: %s", e)
-        allow_http_fallback = bool(http_url) and not is_encrypted_media
-        media_urls = [cached_path] if cached_path else ([http_url] if allow_http_fallback else None)
+        # Unencrypted media may fall back to the HTTP download URL when caching failed.
+        http_url = self._mxc_to_http(url) if url and not is_encrypted_media else ""
+        media_urls = [cached_path] if cached_path else ([http_url] if http_url else None)
         msg_event = await self._build_inbound_event(
             room_id, sender, event_id, body, source_content, relates_to, message_type=msg_type,
             media_urls=media_urls, media_types=[media_type] if media_urls else None, media_msgtype=msgtype)
@@ -2073,11 +2066,9 @@ class MatrixAdapter(BasePlatformAdapter):
             return None
         if encrypted_file is not None:
             from mautrix.crypto.attachments import decrypt_attachment
-            hashes_value = encrypted_file.get("hashes")
+            hashes_value, key_value = encrypted_file.get("hashes"), encrypted_file.get("key")
             hash_value = hashes_value.get("sha256") if isinstance(hashes_value, dict) else None
-            key_value = encrypted_file.get("key")
-            if isinstance(key_value, dict):
-                key_value = key_value.get("k")
+            key_value = key_value.get("k") if isinstance(key_value, dict) else key_value
             iv_value = encrypted_file.get("iv")
             if not (key_value and hash_value and iv_value):
                 logger.warning("[Matrix] Encrypted media event missing decryption metadata for %s", event_id)
@@ -2110,10 +2101,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _join_room_by_id(self, room_id: str) -> bool:
         """Join a room by ID and refresh local caches on success."""
-        if not room_id:
-            return False
-        if room_id in self._joined_rooms:
-            return True
+        if not room_id or room_id in self._joined_rooms:
+            return bool(room_id)
         try:
             await self._client.join_room(RoomID(room_id))
             self._joined_rooms.add(room_id)
@@ -2372,7 +2361,7 @@ class MatrixAdapter(BasePlatformAdapter):
             room_id, target_event_id, "This model picker has expired. Run `/model` again to choose a model.")
 
     async def _redact_bot_approval_reactions(self, room_id: str, prompt: Any) -> None:
-        """Redact the bot's seeded approval reactions, leaving only the user's reaction."""
+        """Redact the bot's seeded approval reactions (delayed), leaving only the user's reaction."""
         for emoji, evt_id in prompt.bot_reaction_events.items():
             self._schedule_reaction_redaction(room_id, evt_id, "approval resolved")
             logger.debug("Matrix: scheduled bot reaction redaction %s (%s)", emoji, evt_id)
@@ -2418,8 +2407,7 @@ class MatrixAdapter(BasePlatformAdapter):
         if not self._client:
             return False
         try:
-            room = RoomID(room_id)
-            event = EventID(event_id)
+            room, event = RoomID(room_id), EventID(event_id)
             if hasattr(self._client, "set_fully_read_marker"):
                 await self._client.set_fully_read_marker(room, event, event)
             elif hasattr(self._client, "send_receipt"):
@@ -2590,9 +2578,7 @@ class MatrixAdapter(BasePlatformAdapter):
             return None
         if hasattr(resp, "content") and (not require_dict or isinstance(resp.content, dict)):
             return resp.content
-        if isinstance(resp, dict):
-            return resp
-        return None
+        return resp if isinstance(resp, dict) else None
 
     async def _refresh_dm_cache(self) -> None:
         """Refresh the DM room cache from m.direct account data."""
@@ -2601,10 +2587,7 @@ class MatrixAdapter(BasePlatformAdapter):
         dm_data = await self._fetch_m_direct(log_failure=True)
         if dm_data is None:
             return
-        dm_room_ids: Set[str] = set()
-        for rooms in dm_data.values():
-            if isinstance(rooms, list):
-                dm_room_ids.update(str(r) for r in rooms if isinstance(r, str))
+        dm_room_ids = {str(r) for rooms in dm_data.values() if isinstance(rooms, list) for r in rooms if isinstance(r, str)}
         self._dm_rooms = {rid: (rid in dm_room_ids) for rid in self._joined_rooms}
         self._invalidate_room_identities()
 
@@ -2616,8 +2599,7 @@ class MatrixAdapter(BasePlatformAdapter):
             return
         dm_data: Dict[str, list] = await self._fetch_m_direct(require_dict=True) or {}
         rooms_for_user = dm_data.get(inviter, [])
-        if not isinstance(rooms_for_user, list):
-            rooms_for_user = []
+        rooms_for_user = rooms_for_user if isinstance(rooms_for_user, list) else []
         if room_id not in rooms_for_user:
             rooms_for_user.append(room_id)
             dm_data[inviter] = rooms_for_user
@@ -2896,9 +2878,10 @@ def interactive_setup() -> None:
         print_info("Matrix: already configured")
         if not prompt_yes_no("Reconfigure Matrix?", False):
             return
-    print_info("Works with any Matrix homeserver (Synapse, Conduit, Dendrite, or matrix.org).")
-    print_info("   1. Create a bot user on your homeserver, or use your own account")
-    print_info("   2. Get an access token from Element, or provide user ID + password")
+    for line in ("Works with any Matrix homeserver (Synapse, Conduit, Dendrite, or matrix.org).",
+                 "   1. Create a bot user on your homeserver, or use your own account",
+                 "   2. Get an access token from Element, or provide user ID + password"):
+        print_info(line)
     def _ask(key: str, question: str, **kw) -> str:
         value = prompt(question, **kw)
         if value:
@@ -2940,10 +2923,11 @@ def interactive_setup() -> None:
             print_success("Matrix allowlist configured")
         else:
             print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
-        print_info("📬 Home Room: where Hermes delivers cron job results and notifications.")
-        print_info("   Room IDs look like !abc123:server (shown in Element room settings)")
-        print_info("   You can also set this later by typing /set-home in a Matrix room.")
-        print_info("Leave blank to clear a previously saved home room (cron / notifications).")
+        for line in ("📬 Home Room: where Hermes delivers cron job results and notifications.",
+                     "   Room IDs look like !abc123:server (shown in Element room settings)",
+                     "   You can also set this later by typing /set-home in a Matrix room.",
+                     "Leave blank to clear a previously saved home room (cron / notifications)."):
+            print_info(line)
         home_room = prompt("Home room ID (leave empty to set later with /set-home)").strip()
         if home_room:
             save_env_value("MATRIX_HOME_ROOM", home_room)
