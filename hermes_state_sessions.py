@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.session_activity import (
-    ActivityProvenance, bound_activity_description, build_activity_snapshot,
-    normalize_activity_provenance,
+    ActivityProvenance, bound_activity_description, build_activity_snapshot, normalize_activity_provenance,
 )
 from hermes_state_common import (
     _LISTABLE_CHILD_SQL, _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS,
@@ -102,25 +101,18 @@ def _session_filter_where(
     where: List[str] = []
     params: List[Any] = []
     if exclude_children:
-        where.append(_LISTABLE_CHILD_SQL)
-        where.append(f"{_delegate_from_json('s.model_config')} IS NULL")
+        where += [_LISTABLE_CHILD_SQL, f"{_delegate_from_json('s.model_config')} IS NULL"]
     include_sources = [source] if source else list(sources or [])
-    if include_sources:
-        where.append(f"s.source IN ({_session_ids_placeholders(include_sources)})")
-        params.extend(include_sources)
-    if session_key:
-        where.append("s.session_key = ?")
-        params.append(session_key)
-    if exclude_sources:
-        where.append(f"s.source NOT IN ({_session_ids_placeholders(exclude_sources)})")
-        params.extend(exclude_sources)
-    if cwd_prefix:
-        clause, clause_params = _cwd_prefix_clause(cwd_prefix)
-        where.append(clause)
-        params.extend(clause_params)
-    if min_message_count > 0:
-        where.append("s.message_count >= ?")
-        params.append(min_message_count)
+    for clause, values in (
+        (f"s.source IN ({_session_ids_placeholders(include_sources)})", include_sources),
+        ("s.session_key = ?", [session_key] if session_key else []),
+        (f"s.source NOT IN ({_session_ids_placeholders(exclude_sources or ())})", exclude_sources or []),
+        (_cwd_prefix_clause(cwd_prefix) if cwd_prefix else ("", [])),
+        ("s.message_count >= ?", [min_message_count] if min_message_count > 0 else []),
+    ):
+        if values:
+            where.append(clause)
+            params.extend(values)
     if archived_only:
         where.append("s.archived = 1")
     elif not include_archived:
@@ -141,8 +133,7 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
         ph = _session_ids_placeholders(frontier)
         cursor = conn.execute(
             f"SELECT id FROM sessions WHERE {df} IN ({ph}) "
-            f"OR (parent_session_id IN ({ph}) AND {df} IS NOT NULL)",
-            frontier + frontier,
+            f"OR (parent_session_id IN ({ph}) AND {df} IS NOT NULL)", frontier + frontier,
         )
         frontier = [row["id"] for row in cursor.fetchall() if row["id"] not in found]
         found.update(frontier)
@@ -171,9 +162,7 @@ SESSION_STATUS_EMPTY = "empty"
 _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
 
 
-def classify_session_status(
-    role: Optional[str], has_tool_calls: bool, finish_reason: Optional[str],
-) -> str:
+def classify_session_status(role: Optional[str], has_tool_calls: bool, finish_reason: Optional[str]) -> str:
     """Error finish → ``error``; assistant with pending tool_calls or a trailing
     user/tool row → ``interrupted``; otherwise ``complete`` (benign default:
     pickers must not alarm on unknown shapes)."""
@@ -229,8 +218,6 @@ _INHERIT_PARENT_ROUTING_SQL = (
 class SessionSessionsMixin:
     """Session rows: create/inherit, lifecycle flags, model_config, listing, deletion."""
 
-    _PROFILE_DIR_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-
     def _own_profile_name(self) -> Optional[str]:
         """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db``
         → default, ``<root>/profiles/<name>/state.db`` → name); path-based because a
@@ -242,7 +229,7 @@ class SessionSessionsMixin:
             parent = Path(self.db_path).resolve().parent
             if parent == root:
                 return "default"
-            if parent.parent == root / "profiles" and self._PROFILE_DIR_RE.match(parent.name):
+            if parent.parent == root / "profiles" and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", parent.name):
                 return parent.name
         except Exception:
             logger.debug("own-profile derivation failed", exc_info=True)
@@ -339,8 +326,13 @@ class SessionSessionsMixin:
         self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
-        """Create a new session record. Returns the session_id."""
+        """Create (upsert) a session record. Returns the session_id."""
         self._insert_session_row(session_id, source, **kwargs)
+        return session_id
+
+    def ensure_session(self, session_id: str, source: str = "unknown", model: str = None, **kwargs) -> str:
+        """Ensure a session row exists (upsert). Accepts optional kwargs."""
+        self._insert_session_row(session_id, source, model=model, **kwargs)
         return session_id
 
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
@@ -348,8 +340,7 @@ class SessionSessionsMixin:
         if not session_id:
             return
         self._write_sql(
-            "UPDATE sessions SET expiry_finalized = ? WHERE id = ?",
-            (1 if finalized else 0, session_id),
+            "UPDATE sessions SET expiry_finalized = ? WHERE id = ?", (1 if finalized else 0, session_id),
         )
 
     def find_session_by_origin(
@@ -372,8 +363,7 @@ class SessionSessionsMixin:
         if thread_id is not None:
             query += " AND COALESCE(thread_id, '') = ?"
             params.append(str(thread_id))
-        query += " ORDER BY started_at DESC"
-        rows = [dict(r) for r in self._read_all(query, params)]
+        rows = [dict(r) for r in self._read_all(query + " ORDER BY started_at DESC", params)]
         if not rows:
             return None
         if user_id:
@@ -426,8 +416,7 @@ class SessionSessionsMixin:
             conn.execute(
                 "UPDATE sessions AS child SET model_config = json_set("
                 "COALESCE(child.model_config, '{}'), '$._reset_from', child.parent_session_id) "
-                "WHERE child.parent_session_id = ? "
-                "AND json_extract(COALESCE(child.model_config, '{}'), "
+                "WHERE child.parent_session_id = ? AND json_extract(COALESCE(child.model_config, '{}'), "
                 "                 '$._reset_from') IS NULL "
                 f"AND {_legacy_reset_child_sql('child', _session_ids_placeholders(_RESET_END_REASONS))}",
                 (session_id, *_RESET_END_REASONS),
@@ -449,8 +438,7 @@ class SessionSessionsMixin:
         # generation advances here too — same transaction, only when written.
         try:
             return bool(self._execute_write(lambda conn: self._end_and_bump(
-                conn,
-                "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND (ended_at IS NULL "
+                conn, "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND (ended_at IS NULL "
                 f"OR end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))",
                 (now, reason, session_id), session_id, reason,
             )))
@@ -597,9 +585,7 @@ class SessionSessionsMixin:
         payload = json.dumps(list(tool_names)) if tool_names is not None else None
         self._write_sql("UPDATE sessions SET tool_names = ? WHERE id = ?", (payload, session_id))
 
-    def update_session_model(
-        self, session_id: str, model: str, provider: Optional[str] = None
-    ) -> None:
+    def update_session_model(self, session_id: str, model: str, provider: Optional[str] = None) -> None:
         """Set the model after a mid-session /model switch (unconditionally), null
         system_prompt so stale Model:/Provider: footers rebuild, and drop any
         Browser runtime lock (lineage markers survive). *provider* is merged into
@@ -613,8 +599,7 @@ class SessionSessionsMixin:
         if provider:
             patch["provider"] = provider
         self._write_model_config_patch(
-            session_id, patch,
-            "UPDATE sessions SET model = ?, model_config = ?, "
+            session_id, patch, "UPDATE sessions SET model = ?, model_config = ?, "
             "system_prompt = NULL, system_prompt_hash = NULL WHERE id = ?",
             lambda merged: (model, merged, session_id),
         )
@@ -702,13 +687,6 @@ class SessionSessionsMixin:
         """Persisted YOLO flag; False on any parse failure (resume must never
         enable the bypass by accident)."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
-
-    def ensure_session(
-        self, session_id: str, source: str = "unknown", model: str = None, **kwargs,
-    ) -> str:
-        """Ensure a session row exists (upsert). Accepts optional kwargs."""
-        self._insert_session_row(session_id, source, model=model, **kwargs)
-        return session_id
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
@@ -954,10 +932,9 @@ class SessionSessionsMixin:
         self, source: str = None, sources: List[str] = None, exclude_sources: List[str] = None,
         cwd_prefix: str = None, limit: int = 20, offset: int = 0, include_children: bool = False,
         min_message_count: int = 0, project_compression_tips: bool = True,
-        order_by_last_active: bool = False, include_archived: bool = False,
-        archived_only: bool = False, id_query: str = None, search_query: str = None,
-        compact_rows: bool = False, include_pinned: bool = False, session_key: str = None,
-        include_hidden: bool = False,
+        order_by_last_active: bool = False, include_archived: bool = False, archived_only: bool = False,
+        id_query: str = None, search_query: str = None, compact_rows: bool = False,
+        include_pinned: bool = False, session_key: str = None, include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query.
         ``order_by_last_active`` sorts by the chain TIP via a recursive CTE (the only
@@ -965,19 +942,17 @@ class SessionSessionsMixin:
         pins the page missed, still obeying the other filters."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
-            exclude_children=not include_children, source=source, sources=sources,
-            session_key=session_key, exclude_sources=exclude_sources, cwd_prefix=cwd_prefix,
-            min_message_count=min_message_count, archived_only=archived_only,
-            include_archived=include_archived,
+            exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
+            exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
+            archived_only=archived_only, include_archived=include_archived,
         )
         if not include_hidden:
             where_clauses.append("s.hidden = 0")
         where_sql = _where_sql(where_clauses)
         base_where_params = list(params)  # pinned back-fill reuses the WHERE before LIMIT/OFFSET
-        prompt_select, prompt_join = ("", "") if compact_rows else (
-            ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved",
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash",
-        )
+        prompt_select, prompt_join = (
+            "", "",
+        ) if compact_rows else(", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved", "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash",)
         _sel = self._compact_session_cols() if compact_rows else "s.*"
         if order_by_last_active:
             # The CTE walks compression-continuation edges forward from the admitted
@@ -1188,8 +1163,7 @@ class SessionSessionsMixin:
             rows = conn.execute(
                 "SELECT COALESCE(NULLIF(s.source, ''), 'cli') AS source, COUNT(*) AS count "
                 f"FROM sessions s{_where_sql(where_clauses, ' ')} "
-                "GROUP BY COALESCE(NULLIF(s.source, ''), 'cli') ORDER BY count DESC",
-                params,
+                "GROUP BY COALESCE(NULLIF(s.source, ''), 'cli') ORDER BY count DESC", params,
             ).fetchall()
         return {str(row["source"]): int(row["count"] or 0) for row in rows}
 
@@ -1374,15 +1348,14 @@ class SessionSessionsMixin:
         Never raises: {"skipped", "archived", "error"?}."""
         result: Dict[str, Any] = {"skipped": False, "archived": 0}
         try:
-            last_raw = self.get_meta("last_auto_archive")
             now = time.time()
-            if last_raw:
-                try:
-                    if now - float(last_raw) < min_interval_hours * 3600:
-                        result["skipped"] = True
-                        return result
-                except (TypeError, ValueError):
-                    pass  # corrupt meta; treat as no prior run
+            try:
+                last = float(self.get_meta("last_auto_archive") or 0.0)
+            except (TypeError, ValueError):
+                last = 0.0  # corrupt meta; treat as no prior run
+            if last and now - last < min_interval_hours * 3600:
+                result["skipped"] = True
+                return result
             archived = result["archived"] = self.archive_stale_sessions(idle_days, exclude_pinned=exclude_pinned)
             # Record even a zero-archive run so we don't re-sweep every call.
             self.set_meta("last_auto_archive", str(now))
