@@ -35,14 +35,6 @@ class SkillNode:
     related: list[str] = field(default_factory=list)
 
 
-def _frontmatter(text: str) -> dict[str, Any]:
-    try:
-        from agent.skill_utils import parse_frontmatter
-        return parse_frontmatter(text)[0] or {}
-    except Exception:
-        return {}
-
-
 def _fm_field(fm: dict[str, Any], key: str) -> Any:
     """Top-level ``key`` or ``metadata.hermes.<key>``; tolerant of the string-valued
     frontmatter that ``parse_frontmatter``'s malformed-YAML fallback produces."""
@@ -55,17 +47,8 @@ def _fm_field(fm: dict[str, Any], key: str) -> Any:
 
 def _related(fm: dict[str, Any]) -> list[str]:
     raw = _fm_field(fm, "related_skills")
-    if isinstance(raw, str):
-        raw = raw.strip("[]").split(",")
+    raw = raw.strip("[]").split(",") if isinstance(raw, str) else raw
     return [str(r).strip() for r in raw if str(r).strip()] if isinstance(raw, list) else []
-
-
-def _category(fm: dict[str, Any], skill_md: Path) -> str:
-    cat = _fm_field(fm, "category")
-    if cat:
-        return str(cat)
-    parts = skill_md.parts  # …/skills/<category>/<skill>/SKILL.md
-    return parts[-3] if len(parts) >= 3 else "general"
 
 
 def _load_usage() -> dict[str, dict[str, Any]]:
@@ -82,26 +65,17 @@ def _load_usage() -> dict[str, dict[str, Any]]:
 def _to_int_ts(value: Any) -> Optional[int]:
     """Epoch seconds from a number, numeric string, or ISO timestamp; None otherwise."""
     try:
-        if value is None:
+        if value is None or not (s := str(value).strip()):
             return None
         if isinstance(value, (int, float)):
             return int(value)
-        s = str(value).strip()
-        if not s:
-            return None
         try:
             return int(float(s))
         except ValueError:
             parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return int(parsed.timestamp())
+            return int((parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)).timestamp())
     except Exception:
         return None
-
-
-def _usage_timestamp(rec: dict[str, Any]) -> Optional[int]:
-    return next((ts for ts in (_to_int_ts(rec.get(k)) for k in _USAGE_TS_KEYS) if ts is not None), None)
 
 
 def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNode]:
@@ -112,16 +86,22 @@ def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNod
             if _SKIP_PARTS.intersection(skill_md.parts):
                 continue
             try:
-                fm = _frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+                text = skill_md.read_text(encoding="utf-8")[:4000]
             except OSError:
                 continue
+            try:
+                from agent.skill_utils import parse_frontmatter
+                fm = parse_frontmatter(text)[0] or {}
+            except Exception:
+                fm = {}
             name = str(fm.get("name") or skill_md.parent.name).strip()
             if not name or name in nodes:
                 continue
-            rec = usage.get(name, {})
+            rec, cat, parts = usage.get(name, {}), _fm_field(fm, "category"), skill_md.parts  # …/skills/<category>/<skill>/SKILL.md
+            usage_ts = next((ts for ts in (_to_int_ts(rec.get(k)) for k in _USAGE_TS_KEYS) if ts is not None), None)
             nodes[name] = SkillNode(
-                name=name, category=_category(fm, skill_md), source=source,
-                timestamp=_usage_timestamp(rec) or _to_int_ts(skill_md.stat().st_mtime),
+                name=name, category=str(cat) if cat else parts[-3] if len(parts) >= 3 else "general", source=source,
+                timestamp=usage_ts or _to_int_ts(skill_md.stat().st_mtime),
                 use_count=int(rec.get("use_count", 0) or 0), state=str(rec.get("state", "active") or "active"),
                 created_by=rec.get("created_by"), pinned=bool(rec.get("pinned", False)), related=_related(fm),
             )
@@ -131,24 +111,15 @@ def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNod
 def build_edges(nodes: dict[str, SkillNode]) -> list[tuple[str, str]]:
     """Undirected related_skills edges where BOTH endpoints exist (deduped, first-seen order)."""
     return list(dict.fromkeys(
-        (min(node.name, target), max(node.name, target))
-        for node in nodes.values()
-        for target in node.related
-        if target in nodes and target != node.name
+        (min(node.name, target), max(node.name, target)) for node in nodes.values() for target in node.related if target in nodes and target != node.name
     ))
 
 
 def density_stats(nodes: dict[str, SkillNode], edges: list[tuple[str, str]]) -> dict[str, Any]:
-    linked = {x for edge in edges for x in edge}
-    cats = Counter(n.category for n in nodes.values())
-    n = len(nodes) or 1
+    linked, cats, n = {x for edge in edges for x in edge}, Counter(x.category for x in nodes.values()), len(nodes) or 1
     return {
-        "nodes": len(nodes),
-        "related_edges": len(edges),
-        "edges_per_node": round(len(edges) / n, 3),
-        "linked_nodes": len(linked),
-        "isolated_pct": round(100 * (n - len(linked)) / n, 1),
-        "categories": len(cats),
+        "nodes": len(nodes), "related_edges": len(edges), "edges_per_node": round(len(edges) / n, 3),
+        "linked_nodes": len(linked), "isolated_pct": round(100 * (n - len(linked)) / n, 1), "categories": len(cats),
         "agent_created": sum(1 for x in nodes.values() if x.created_by == "agent"),
         "used": sum(1 for x in nodes.values() if x.use_count > 0),
         "top_categories": sorted(cats.items(), key=lambda kv: -kv[1])[:8],
@@ -163,23 +134,20 @@ def _memory_cards() -> list[dict[str, Any]]:
     for fname, source in (("MEMORY.md", "memory"), ("USER.md", "profile")):
         path = base / fname
         try:
-            text = path.read_text(encoding="utf-8").strip()
-            file_ts = _to_int_ts(path.stat().st_mtime)
+            text, file_ts = path.read_text(encoding="utf-8").strip(), _to_int_ts(path.stat().st_mtime)
         except OSError:
             continue
         for chunk_idx, chunk in enumerate(c.strip() for c in text.split("\n§\n")):
-            if not chunk:
-                continue
-            first = chunk.splitlines()[0].strip().lstrip("# ").strip()
-            cards.append({
-                "source": source, "timestamp": file_ts + chunk_idx if file_ts is not None else None,
-                "title": (first[:80] + "…") if len(first) > 80 else first, "body": chunk[:1200],
-            })
+            if chunk:
+                first = chunk.splitlines()[0].strip().lstrip("# ").strip()
+                cards.append({
+                    "source": source, "timestamp": file_ts + chunk_idx if file_ts is not None else None,
+                    "title": (first[:80] + "…") if len(first) > 80 else first, "body": chunk[:1200],
+                })
     return cards
 
 
-def _tokenize(text: str) -> set[str]:
-    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}
+def _tokenize(text: str) -> set[str]: return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}  # noqa: E704
 
 
 def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNode]) -> list[tuple[str, str]]:
@@ -189,32 +157,24 @@ def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNo
     for idx, card in enumerate(memory_cards):
         text = f"{card.get('title', '')}\n{card.get('body', '')}".lower()
         text_tokens = _tokenize(text)
-        scored = [
-            (score, name) for name, tokens, name_lower in skill_meta
-            if (score := (6 if name_lower in text else 0) + len(tokens & text_tokens)) > 0
-        ]
-        scored.sort(key=lambda x: (-x[0], x[1]))
+        scored = sorted(
+            ((score, name) for name, tokens, name_lower in skill_meta if (score := (6 if name_lower in text else 0) + len(tokens & text_tokens)) > 0),
+            key=lambda x: (-x[0], x[1]),
+        )
         edges.extend((f"memory:{card['source']}:{idx}", name) for _, name in scored[:4])
     return edges
-
-
-def _skill_roots() -> list[tuple[str, Path]]:
-    repo = Path(__file__).resolve().parent.parent
-    return [("base", repo / "skills"), ("profile", get_hermes_home() / "skills")]
 
 
 def build_learning_graph() -> dict[str, Any]:
     """Full payload for the desktop learning panel: non-base skills with real
     learning signal (agent-created or used) plus memory chunks as graph nodes."""
+    roots = [("base", Path(__file__).resolve().parent.parent / "skills"), ("profile", get_hermes_home() / "skills")]
     learned_skills = {
-        name: node
-        for name, node in build_skill_nodes(_skill_roots()).items()
+        name: node for name, node in build_skill_nodes(roots).items()
         if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
     }
-    skill_edges = build_edges(learned_skills)
-    memory_cards = _memory_cards()
+    skill_edges, memory_cards = build_edges(learned_skills), _memory_cards()
     memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
-
     clusters = Counter(node.category for node in learned_skills.values())
     if memory_cards:
         clusters["memory"] = len(memory_cards)
@@ -233,7 +193,6 @@ def build_learning_graph() -> dict[str, Any]:
         }
         for i, card in enumerate(memory_cards)
     ]
-
     return {
         "nodes": graph_nodes,
         "edges": [{"source": a, "target": b} for a, b in skill_edges + memory_edges],
@@ -241,8 +200,6 @@ def build_learning_graph() -> dict[str, Any]:
         "memory": memory_cards,
         "stats": {
             **density_stats(learned_skills, skill_edges),
-            "memory_nodes": len(memory_cards),
-            "memory_skill_edges": len(memory_edges),
-            "learned_skills": len(learned_skills),
+            "memory_nodes": len(memory_cards), "memory_skill_edges": len(memory_edges), "learned_skills": len(learned_skills),
         },
     }
