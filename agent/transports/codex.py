@@ -57,21 +57,19 @@ def _merge_extra_headers(kwargs: dict[str, Any], **headers: str) -> None:
     kwargs["extra_headers"] = merged
 
 
-# Client-side ``web_search`` on xAI Responses collides with Grok's native
-# server-side tool (incomplete hang / HTTP 400); it goes on the wire under this
-# alias and is mapped back in normalize_response.
+# Client-side ``web_search`` on xAI Responses collides with Grok's native tool
+# (incomplete hang / HTTP 400); it goes on the wire under this alias.
 _XAI_CLIENT_WEB_SEARCH_ALIAS = "hermes_web_search"
 
 # OpenCode /v1/responses rejects client tools using these names (HTTP 400
-# "custom function name 'X' is reserved"); xAI rejects ``tool_search``
-# (reserved for Grok's native Tool Search). Aliased as hermes_<name>.
+# "custom function name 'X' is reserved"); xAI reserves ``tool_search`` for
+# Grok's native Tool Search. Aliased as hermes_<name>.
 _OPENCODE_RESERVED_TOOL_NAMES = ("web_search", "search_files")
 _XAI_RESERVED_TOOL_NAMES = ("tool_search",)
 _RESERVED_TOOL_ALIAS_PREFIX = "hermes_"
 
 # Reverse map used ONLY when normalize_response runs on a transport that never
-# built a request; real requests carry request-local ``_last_wire_aliases`` so a
-# genuine tool named ``hermes_tool_search`` is never silently rewritten.
+# built a request; real requests carry request-local ``_last_wire_aliases``.
 _LEGACY_ALIAS_FALLBACK = {
     f"{_RESERVED_TOOL_ALIAS_PREFIX}{name}": name
     for name in (*_OPENCODE_RESERVED_TOOL_NAMES, *_XAI_RESERVED_TOOL_NAMES)
@@ -101,12 +99,10 @@ def _alias_reserved_tools(
     name_of: Callable[[dict], Any] = lambda t: t.get("name"),
     rename: Callable[[dict, str], dict] = lambda t, alias: {**t, "name": alias},
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Alias provider-reserved function names on the wire.
+    """Alias provider-reserved function names on the wire; returns ``(tools, {alias: original_name})``.
 
-    Returns ``(rewritten_tools, {alias: original_name})``. An alias that is
-    already taken by a real tool gets a ``_2``/``_3`` suffix rather than
-    duplicating a wire name. ``name_of``/``rename`` adapt the tool shape
-    (Responses ``{name}`` by default; chat_completions passes ``function.name``).
+    An alias already taken by a real tool gets a ``_2``/``_3`` suffix. ``name_of``/``rename``
+    adapt the tool shape (Responses ``{name}`` by default; chat_completions passes ``function.name``).
     """
     rewritten: list[dict[str, Any]] = []
     alias_map: dict[str, str] = {}
@@ -130,9 +126,7 @@ def _alias_reserved_tools(
 def _xai_prefers_native_web_search() -> bool:
     """True when xAI Responses should use Grok's native ``web_search`` built-in.
 
-    Resolves via the web-search registry (config ``web.search_backend`` /
-    ``web.backend``), falling back to the legacy ``_get_search_backend`` probe.
-    Fails closed to native (True) on any error.
+    Web-search registry first, then the legacy ``_get_search_backend`` probe; fails closed to native (True).
     """
     try:
         from agent.web_search_registry import get_active_search_provider
@@ -149,12 +143,10 @@ def _xai_prefers_native_web_search() -> bool:
 
 
 def _alias_wire_tools(response_tools: Any, params: dict[str, Any], is_xai_responses: bool) -> tuple[Any, dict[str, str]]:
-    """Apply provider-reserved tool-name aliasing; returns ``(tools, {alias: original})``.
+    """Apply provider-reserved tool-name aliasing; returns ``(tools, {alias: original})`` for THIS request.
 
-    The alias map is wire provenance for THIS request — normalize_response
-    reverses only these. xAI: a client function named ``web_search`` collides
-    with Grok's native search; native mode swaps it 1:1 for the built-in,
-    client mode keeps Hermes dispatch under an alias.
+    xAI: a client ``web_search`` collides with Grok's native search — native mode
+    swaps it 1:1 for the built-in, client mode keeps Hermes dispatch under an alias.
     """
     wire_aliases: dict[str, str] = {}
 
@@ -179,11 +171,9 @@ def _alias_wire_tools(response_tools: Any, params: dict[str, Any], is_xai_respon
 
 
 def _resolve_reasoning(model: str, params: dict[str, Any]) -> tuple[Any, bool]:
-    """``(effort, enabled)`` for the request, effort clamped to the endpoint's vocabulary.
+    """``(effort, enabled)`` for the request, effort clamped (never escalated) to the endpoint's vocabulary.
 
-    Wire vocabularies live in agent.reasoning_effort; clamp_effort picks the
-    nearest weaker supported level and never escalates. A profile-declared
-    ``()`` means "no reasoning parameters accepted" (such backends 400 on any
+    A profile-declared ``()`` means "no reasoning parameters accepted" (400 on any
     reasoning field) and disables reasoning outright.
     """
     reasoning_effort, reasoning_enabled = "medium", True
@@ -239,8 +229,7 @@ def _default_prompt_cache_retention_for_request(model: str, base_url: Any) -> Op
 def _content_cache_key(instructions: str, tools: Optional[list[dict[str, Any]]], scope_id: str = "") -> Optional[str]:
     """``pck_<sha256[:24]>`` of (scope_id, instructions, name-sorted tools), or None if nothing static.
 
-    The key is a routing hint only. ``scope_id`` keeps unrelated sessions off one
-    bucket while letting timestamped cron fires of one job share a warm prefix.
+    Routing hint only; ``scope_id`` keeps unrelated sessions off one bucket.
     """
     if not instructions and not tools:
         return None
@@ -258,9 +247,8 @@ def _content_cache_key(instructions: str, tools: Optional[list[dict[str, Any]]],
 def _profile_declared_efforts(provider: Any, model: Optional[str], base_url: Any = None) -> Optional[tuple]:
     """Provider-profile-declared reasoning-effort vocabulary, or None (fail-open).
 
-    Resolves by provider name, then by endpoint host (a custom provider pointed
-    at a known host gets that host's vocabulary). Lazy import: provider plugins
-    import this transport during registry discovery.
+    Resolves by provider name, then by endpoint host. Lazy import: provider
+    plugins import this transport during registry discovery.
     """
     try:
         from providers import get_provider_profile
@@ -294,11 +282,9 @@ def _is_azure_foundry_responses(params: dict[str, Any]) -> bool:
 def _is_post_tool_replay(messages: Optional[list[dict[str, Any]]]) -> bool:
     """True when ``messages`` end on a tool-result run issued by the preceding assistant turn.
 
-    Azure Foundry rejects only this post-tool follow-up shape when encrypted
-    reasoning is replayed, so the check is on the *trailing* messages (a whole-
-    history scan would make suppression sticky). Call ids are resolved the same
-    way ``_chat_messages_to_responses_input`` does (``call_id``, ``id``,
-    composite ``call_x|fc_y``, bare ``fc_`` item ids).
+    Azure Foundry rejects only this post-tool shape when encrypted reasoning is
+    replayed, so only the *trailing* messages are checked (a whole-history scan
+    would make suppression sticky). Call ids resolve like ``_chat_messages_to_responses_input``.
     """
     from agent.codex_responses_adapter import _canonical_call_id_from_fc, _split_responses_tool_id
 
@@ -339,8 +325,8 @@ def _is_post_tool_replay(messages: Optional[list[dict[str, Any]]]) -> bool:
 def _native_compaction_active(context_management: Any) -> bool:
     """True only when the caller's eligibility gate produced a non-empty payload.
 
-    Every native-compaction wire effect hangs off this one predicate, so a
-    persisted checkpoint cannot keep reshaping requests after the gate closes.
+    Every native-compaction wire effect hangs off this predicate, so a persisted
+    checkpoint cannot keep reshaping requests after the gate closes.
     """
     return isinstance(context_management, list) and bool(context_management)
 
@@ -358,11 +344,9 @@ class ResponsesApiTransport(ProviderTransport):
     # Codex response.status -> OpenAI finish_reason (caller checks incomplete_details).
     _STOP_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "stop", "cancelled": "stop"}
 
-    # Issuer kind of the most recent build_kwargs/convert_messages call; fallback
-    # for normalize_response so captured reasoning items are stamped correctly.
+    # Issuer kind of the most recent build_kwargs/convert_messages call (normalize_response fallback).
     _last_issuer_kind: Optional[str] = None
-    # ``{wire_alias: original_name}`` of the most recent build_kwargs call. None
-    # = no request built (use legacy map); {} = no aliases sent, no reverse rewrite.
+    # ``{wire_alias: original}`` of the most recent build_kwargs. None = no request built (legacy map).
     _last_wire_aliases: Optional[dict[str, str]] = None
 
     @property
@@ -404,12 +388,11 @@ class ResponsesApiTransport(ProviderTransport):
     ) -> dict[str, Any]:
         """Build Responses API kwargs (calls convert_messages/convert_tools internally).
 
-        params: instructions, reasoning_config ({effort, enabled}), session_id
-        (transcript id; Codex ``session_id`` header; cache-scope fallback),
-        cache_scope_id (rotation-stable logical scope, preferred for the cache
-        key / xAI conv header), max_tokens, timeout, request_overrides, provider,
-        base_url, is_github_responses, is_codex_backend, is_xai_responses,
-        github_reasoning_extra, context_management, replay_encrypted_reasoning.
+        params: instructions, reasoning_config ({effort, enabled}), session_id (transcript id;
+        Codex header; cache-scope fallback), cache_scope_id (rotation-stable scope for the
+        cache key / xAI conv header), max_tokens, timeout, request_overrides, provider, base_url,
+        is_github_responses, is_codex_backend, is_xai_responses, github_reasoning_extra,
+        context_management, replay_encrypted_reasoning.
         """
         from run_agent import DEFAULT_AGENT_IDENTITY
 
@@ -423,13 +406,11 @@ class ResponsesApiTransport(ProviderTransport):
         is_github_responses = params.get("is_github_responses") is True
         is_codex_backend = params.get("is_codex_backend") is True
         is_xai_responses = params.get("is_xai_responses") is True
-        # Foundry 400s on encrypted-reasoning replay only in the post-tool
-        # follow-up turn; suppress replay for exactly that shape.
+        # Foundry 400s on encrypted-reasoning replay only in the post-tool follow-up turn.
         replay_encrypted_reasoning = bool(params.get("replay_encrypted_reasoning", True)) and not (
             _is_azure_foundry_responses(params) and _is_post_tool_replay(payload_messages)
         )
-        # Single source of truth: the same predicate decides whether
-        # context_management goes out AND whether the converter may replay a checkpoint.
+        # One predicate decides whether context_management goes out AND whether the converter may replay a checkpoint.
         context_management = params.get("context_management")
         native_compaction_active = _native_compaction_active(context_management)
 
@@ -449,8 +430,7 @@ class ResponsesApiTransport(ProviderTransport):
             ),
             "store": False,
         }
-        # ``tools`` MUST be omitted when empty: the openai SDK iterates it without
-        # a None guard before any HTTP request.
+        # ``tools`` MUST be omitted when empty: the openai SDK iterates it without a None guard.
         if response_tools:
             kwargs["tools"] = response_tools
             kwargs["tool_choice"] = "auto"
@@ -459,10 +439,8 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["context_management"] = context_management
 
         session_id = params.get("session_id")
-        # Cache key is content-addressed (instructions + tools) within a logical
-        # scope — cache_scope_id survives compression rotation, and the cron
-        # per-fire timestamp is stripped. session_id itself stays untouched for
-        # transcript isolation (Codex ``session_id`` header below).
+        # Content-addressed (instructions + tools) within a logical scope that survives
+        # compression rotation; session_id itself stays untouched for transcript isolation.
         _cache_scope = _cache_scope_from_session_id(params.get("cache_scope_id") or session_id)
         cache_key = _content_cache_key(instructions, response_tools, _cache_scope) or _cache_scope
         # xAI takes prompt_cache_key in extra_body (below); GitHub Models opts out entirely.
@@ -496,8 +474,7 @@ class ResponsesApiTransport(ProviderTransport):
 
         _bound_prompt_cache_key_field(kwargs)
 
-        # Older xAI models reject ``service_tier`` (HTTP 400); only Grok 4.6
-        # accepts Priority Processing.
+        # Older xAI models reject ``service_tier`` (HTTP 400); only Grok 4.6 accepts Priority Processing.
         if is_xai_responses:
             from agent.model_metadata import is_grok_46_family
 
@@ -512,9 +489,8 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs.pop("timeout", None)
 
         if is_codex_backend:
-            # Codex rejects body-level extra_headers, but the SDK kwarg maps to
-            # HTTP headers. ``session_id`` = raw physical id (transcript identity);
-            # ``x-client-request-id`` mirrors the body cache key so both agree.
+            # SDK kwarg -> HTTP headers. ``session_id`` = raw physical id (transcript
+            # identity); ``x-client-request-id`` mirrors the body cache key so both agree.
             final_cache_key = kwargs.get("prompt_cache_key") or _bounded_prompt_cache_key(_cache_scope)
             headers = {}
             if session_id:
@@ -527,12 +503,10 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["max_output_tokens"] = params["max_tokens"]
 
         if is_xai_responses and session_id:
-            # Scoped like the body key so cron's per-fire timestamp doesn't pin
-            # each fire to a different xAI backend server.
+            # Scoped like the body key so cron fires don't each pin a different xAI backend server.
             _merge_extra_headers(kwargs, **{"x-grok-conv-id": _cache_scope})
-            # xAI reads prompt_cache_key from the body; sent via extra_body so it
-            # survives SDK builds whose Responses.stream() dropped the typed kwarg.
-            # An explicit request_overrides value (top-level kwarg) wins.
+            # xAI reads prompt_cache_key from the body; extra_body survives SDK builds whose
+            # Responses.stream() dropped the typed kwarg. An explicit request_overrides value wins.
             existing_extra_body = kwargs.get("extra_body")
             kwargs["extra_body"] = dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
             kwargs["extra_body"].setdefault("prompt_cache_key", kwargs.get("prompt_cache_key", cache_key))
@@ -544,10 +518,9 @@ class ResponsesApiTransport(ProviderTransport):
         """Normalize Codex Responses API response to NormalizedResponse."""
         from agent.codex_responses_adapter import _normalize_codex_response
 
-        # Explicit issuer if the caller knows it, else the stash from the paired
-        # build_kwargs/convert_messages call.
-        issuer_kind = kwargs.get("issuer_kind") or self._last_issuer_kind
-        msg, finish_reason = _normalize_codex_response(response, issuer_kind=issuer_kind)
+        msg, finish_reason = _normalize_codex_response(
+            response, issuer_kind=kwargs.get("issuer_kind") or self._last_issuer_kind
+        )
 
         tool_calls = None
         if msg and msg.tool_calls:
@@ -559,8 +532,7 @@ class ResponsesApiTransport(ProviderTransport):
                 }
                 has_fn = hasattr(tc, "function")
                 name = tc.function.name if has_fn else getattr(tc, "name", "")
-                # Undo only aliases THIS request emitted; the legacy map applies
-                # solely to normalize-only call sites that never built a request.
+                # Undo only aliases THIS request emitted; the legacy map is for normalize-only call sites.
                 if alias_map is None:
                     name = _LEGACY_ALIAS_FALLBACK.get(name, name)
                 elif name in alias_map:
@@ -571,17 +543,13 @@ class ResponsesApiTransport(ProviderTransport):
                     provider_data=provider_data or None,
                 ))
 
-        provider_data = {}
-        if msg:
-            for key in ("codex_reasoning_items", "codex_message_items", "reasoning_details"):
-                value = getattr(msg, key, None)
-                if value:
-                    provider_data[key] = value
-
+        provider_data = {
+            key: getattr(msg, key, None)
+            for key in ("codex_reasoning_items", "codex_message_items", "reasoning_details")
+            if msg and getattr(msg, key, None)
+        }
         return NormalizedResponse(
-            content=msg.content if msg else None,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            content=msg.content if msg else None, tool_calls=tool_calls, finish_reason=finish_reason or "stop",
             reasoning=getattr(msg, "reasoning", None) if msg else None,
             usage=None,  # Codex usage is extracted separately in normalize_usage()
             provider_data=provider_data or None,
@@ -590,9 +558,8 @@ class ResponsesApiTransport(ProviderTransport):
     def validate_response(self, response: Any) -> bool:
         """True if response.output is a non-empty list, or a terminal content_filter refusal.
 
-        A status=incomplete / reason=content_filter response with no output is a
-        provider refusal signal that must reach normalization, not a retry.
-        Does NOT check output_text fallback — the caller handles that.
+        An incomplete/content_filter response with no output must reach normalization,
+        not a retry. Does NOT check output_text fallback — the caller handles that.
         """
         if response is None:
             return False
@@ -610,8 +577,7 @@ class ResponsesApiTransport(ProviderTransport):
     ) -> dict:
         """Validate and sanitize Codex API kwargs before the call.
 
-        ``sanitize_harmony_tokens`` is enabled only for the ChatGPT Codex
-        backend, which rejects literal reserved Harmony wire tokens in text.
+        ``sanitize_harmony_tokens`` is for the ChatGPT Codex backend only (rejects literal Harmony tokens).
         """
         from agent.codex_responses_adapter import _preflight_codex_api_kwargs
 

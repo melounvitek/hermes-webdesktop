@@ -18,9 +18,8 @@ from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
-# xAI reserves ``tool_search`` for its server-side tool and rejects client
-# declarations of it (HTTP 400); alias it on the wire and map back in
-# normalize_response. Value matches the Codex-side alias.
+# xAI reserves ``tool_search`` for its server-side tool (HTTP 400 on client
+# declarations); aliased on the wire, mapped back in normalize_response.
 _XAI_TOOL_SEARCH_ALIAS = "hermes_tool_search"
 
 # Persistence-only / cross-transport message keys that strict OpenAI-compatible
@@ -68,10 +67,9 @@ def _add_prompt_cache_key(
     """Add a content-addressed ``prompt_cache_key`` only for a capable endpoint.
 
     ``cache_scope_id`` (compression-lineage root) beats ``session_id`` so the key
-    survives context-compression session rotation. A caller-supplied key is
-    authoritative but is bounded to OpenAI's 64-char wire cap in place. Shares the
-    Responses transport's hash + scope normalization so equivalent prefixes hit
-    one bucket across modes.
+    survives compression rotation. A caller-supplied key is authoritative but is
+    bounded to OpenAI's 64-char cap in place. Shares the Responses transport's hash
+    so equivalent prefixes hit one bucket across modes.
     """
     from agent.transports.codex import (
         _bound_prompt_cache_key_field, _cache_scope_from_session_id, _content_cache_key
@@ -105,8 +103,7 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
     if not isinstance(reasoning_config, dict):
         return None
     normalized_model = (model or "").strip().lower().removeprefix("google/")
-    # ``thinking_config`` is Gemini-only; Gemma/PaLM on the same provider reject
-    # the field with HTTP 400 even as ``{"includeThoughts": False}``.
+    # Gemini-only; Gemma/PaLM on the same provider 400 on the field even as ``{"includeThoughts": False}``.
     if not normalized_model.startswith("gemini"):
         return None
     effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()
@@ -162,8 +159,7 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
 def _is_openai_api_base_url(base_url: Any) -> bool:
     """True only for the exact api.openai.com host (implies ``prompt_cache_key`` support).
 
-    Not a substring match: Azure / strict OpenAI-compat endpoints may reject the
-    field and must stay opt-in via ``supports_prompt_cache_key``.
+    Not a substring match: Azure / strict compat endpoints stay opt-in via ``supports_prompt_cache_key``.
     """
     try:
         return (urlparse(str(base_url or "").strip()).hostname or "").lower() == "api.openai.com"
@@ -174,8 +170,7 @@ def _is_openai_api_base_url(base_url: Any) -> bool:
 def _model_consumes_thought_signature(model: Any) -> bool:
     """True for Gemini-family targets, which require tool-call ``extra_content`` (thought_signature) replay.
 
-    Every other strict provider rejects a request containing it, so it is kept
-    only for Gemini targets and stripped otherwise (incl. stale inherited copies).
+    Every other strict provider rejects it, so it is stripped for non-Gemini targets.
     """
     m = str(model or "").lower()
     return "gemini" in m or "gemma" in m
@@ -207,8 +202,7 @@ def _apply_max_tokens(api_kwargs: dict, model: str, reasoning_config: Any, param
 def _base_kwargs(model: str, sanitized: list, tools: Any, params: dict, profile: Any = None) -> dict[str, Any]:
     """Shared ``{model, messages[, temperature][, timeout][, tools]}`` scaffold for both build paths.
 
-    ``temperature`` is profile-path only: a profile's ``fixed_temperature`` wins
-    over the caller's, and ``OMIT_TEMPERATURE`` sends none at all.
+    ``temperature`` is profile-path only: ``fixed_temperature`` beats the caller's; ``OMIT_TEMPERATURE`` sends none.
     """
     api_kwargs: dict[str, Any] = {"model": model, "messages": sanitized}
     if profile is not None:
@@ -240,9 +234,9 @@ def _finish_kwargs(api_kwargs: dict[str, Any], sanitized: list, params: dict, *,
 def _sanitize_message(msg: Any, strip_extra_content: bool) -> dict | None:
     """Sanitized copy of ``msg``, or None when nothing needs stripping.
 
-    Drops persistence sidecars, ``_``-prefixed Hermes scaffolding markers, tool-call
-    ``call_id``/``response_item_id`` (and ``extra_content`` unless a Gemini target),
-    and an assistant ``tool_calls: []`` / ``null`` (strict providers reject both).
+    Drops persistence sidecars, ``_``-prefixed scaffolding markers, tool-call ``call_id`` /
+    ``response_item_id`` (and ``extra_content`` unless Gemini), and an assistant
+    ``tool_calls: []`` / ``null`` (strict providers reject both).
     """
     if not isinstance(msg, dict):
         return None
@@ -272,9 +266,8 @@ def _sanitize_message(msg: Any, strip_extra_content: bool) -> dict | None:
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'."""
 
-    # Wire-alias provenance of the most recent request: ``{alias: original}``.
-    # ``None`` = no request recorded (normalize-only call sites) -> fall back to
-    # the static alias; ``{}`` = last request emitted no aliases.
+    # ``{alias: original}`` of the most recent request. ``None`` = no request recorded
+    # (normalize-only call sites) -> static alias; ``{}`` = no aliases emitted.
     _last_wire_aliases: dict[str, str] | None = None
 
     @property
@@ -301,9 +294,8 @@ class ChatCompletionsTransport(ProviderTransport):
     ) -> dict[str, Any]:
         """Build chat.completions.create() kwargs.
 
-        With ``provider_profile`` every quirk comes from the profile
-        (_build_kwargs_from_profile). The legacy flag path below (is_kimi,
-        is_openrouter, is_lmstudio, ...) is only reached for unregistered providers.
+        With ``provider_profile`` every quirk comes from the profile; the legacy flag
+        path below (is_kimi, is_openrouter, ...) is only reached for unregistered providers.
         """
         sanitized = self.convert_messages(messages, model=model)
         _profile = params.get("provider_profile")
@@ -443,9 +435,8 @@ class ChatCompletionsTransport(ProviderTransport):
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:
         """Normalize an OpenAI ChatCompletion.
 
-        Gemini ``extra_content`` rides on ToolCall.provider_data; ``reasoning_content``
-        (DeepSeek/Moonshot) and ``reasoning_details`` (OpenRouter) are kept apart in
-        provider_data because downstream reads them distinctly.
+        Gemini ``extra_content`` rides on ToolCall.provider_data; ``reasoning_content`` and
+        ``reasoning_details`` stay distinct in provider_data because downstream reads them so.
         """
         choice = response.choices[0]
         msg = getattr(choice, "message", None)
@@ -463,8 +454,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 # Match Relay's codec: skip absent function/name, keep an explicit blank name.
                 if tc_function is None or function_name is None:
                     continue
-                # Reverse only aliases THIS request emitted; a real tool named
-                # ``hermes_tool_search`` dispatches as itself when none were.
+                # Reverse only aliases THIS request emitted; a real ``hermes_tool_search`` tool stays itself.
                 if _alias_map is None:
                     if function_name == _XAI_TOOL_SEARCH_ALIAS:
                         function_name = "tool_search"
@@ -507,8 +497,7 @@ class ChatCompletionsTransport(ProviderTransport):
         if getattr(msg, "reasoning_details", None):
             provider_data["reasoning_details"] = msg.reasoning_details
 
-        # OpenAI structured refusal: ``message.refusal`` set, ``content`` empty.
-        # Proxies fronting Anthropic/Bedrock surface Claude refusals this way; without
+        # OpenAI structured refusal (``message.refusal`` set, ``content`` empty); without
         # promotion the loop retries a deterministic refusal as an empty response.
         content = getattr(msg, "content", None)
         refusal = getattr(msg, "refusal", None)
@@ -516,8 +505,7 @@ class ChatCompletionsTransport(ProviderTransport):
             refusal = model_extra.get("refusal")
         if isinstance(refusal, str) and refusal.strip():
             provider_data["refusal"] = refusal
-            # Promote to a terminal ``content_filter`` only when the refusal is the
-            # sole payload — real text or tool calls alongside it is a usable turn.
+            # Terminal ``content_filter`` only when the refusal is the sole payload.
             if not (isinstance(content, str) and content.strip()) and not tool_calls:
                 content = refusal
                 if finish_reason in (None, "stop"):
