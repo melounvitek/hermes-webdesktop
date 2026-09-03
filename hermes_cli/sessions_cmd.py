@@ -426,8 +426,7 @@ def _export_trace(db, args, filters):
     else:
         candidates = db.list_prune_candidates(**filters)
         if args.dry_run:
-            _print_dry_run_preview(candidates, filters)
-            return
+            return _print_dry_run_preview(candidates, filters)
         ids = [row["id"] for row in candidates]
 
     def _render_trace(sid):
@@ -450,10 +449,9 @@ def _export_trace(db, args, filters):
             exported = 0
             for sid in ids:
                 jsonl = _render_trace(sid)
-                if not jsonl:
-                    continue
-                (out_dir / f"{sid}.trace.jsonl").write_text(jsonl, encoding="utf-8")
-                exported += 1
+                if jsonl:
+                    (out_dir / f"{sid}.trace.jsonl").write_text(jsonl, encoding="utf-8")
+                    exported += 1
             print(f"Exported {exported} session trace(s) to {out_dir}")
     except TraceRedactionError:
         print("Redaction failed; refusing to export unredacted trace content.")
@@ -468,7 +466,7 @@ def _export_markdown(db, args, filters, redact):
     output_dir = _export_dir(args.output)
 
     def _export_one(session_id: str, *, include_lineage: bool = False):
-        data = (db.export_session_lineage(session_id) if include_lineage else db.export_session(session_id))
+        data = db.export_session_lineage(session_id) if include_lineage else db.export_session(session_id)
         if not data:
             return None, None
         data = redact(data)
@@ -488,15 +486,12 @@ def _export_markdown(db, args, filters, redact):
         return _export_markdown_single(db, args, _export_one, output_dir, lineage_is_logical)
 
     if not filters:
-        print(
-            "Refusing bulk export without a filter. Pass --session-id or "
-            "at least one filter (e.g. --older-than 90, --source telegram)."
-        )
+        print("Refusing bulk export without a filter. Pass --session-id or "
+              "at least one filter (e.g. --older-than 90, --source telegram).")
         return
     candidates = db.list_prune_candidates(**filters)
     if args.dry_run:
-        _print_dry_run_preview(candidates, filters)
-        return
+        return _print_dry_run_preview(candidates, filters)
     exported = 0
     for row in candidates:
         try:
@@ -516,10 +511,9 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
     if not resolved_session_id:
         _not_found(args.session_id)
         return
-    delete_target_ids = [resolved_session_id]
-    if args.delete_after_verified:
-        delete_target_ids = db.get_session_delete_targets(resolved_session_id)
-
+    delete_target_ids = (
+        db.get_session_delete_targets(resolved_session_id) if args.delete_after_verified else [resolved_session_id]
+    )
     exported_items = []
     for target_id in delete_target_ids:
         try:
@@ -546,14 +540,14 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
         if not ok:
             print(f"Export verification failed; not deleting session '{data.get('id')}': {reason}")
             return
-    if db.delete_session(resolved_session_id, sessions_dir=_sessions_dir(), expected_delete_ids=delete_target_ids):
-        delegate_count = len(delete_target_ids) - 1
-        delegate_suffix = (
-            f" and {delegate_count} delegate session{'' if delegate_count == 1 else 's'}" if delegate_count else ""
-        )
-        print(f"Deleted exported session '{resolved_session_id}'{delegate_suffix}.")
-    else:
+    if not db.delete_session(
+        resolved_session_id, sessions_dir=_sessions_dir(), expected_delete_ids=delete_target_ids
+    ):
         print(f"Exported, but session '{resolved_session_id}' was not deleted because its delegate set changed.")
+        return
+    delegates = len(delete_target_ids) - 1
+    delegate_suffix = f" and {delegates} delegate session{'' if delegates == 1 else 's'}" if delegates else ""
+    print(f"Deleted exported session '{resolved_session_id}'{delegate_suffix}.")
 
 
 # -- delete / prune / archive -------------------------------------------------
@@ -646,30 +640,27 @@ def _note_pinned_skipped(db, filters, action):
 
 
 def _cmd_prune_or_archive(db, args, action):
-    if action == "prune" and getattr(args, "never_active", False):
+    prune = action == "prune"
+    if prune and getattr(args, "never_active", False):
         return _prune_never_active_keyed(db, args)
-
     from hermes_cli.session_filters import build_prune_filters, describe_filters, format_epoch
     # Bare `prune` keeps the historical "older than 90 days" default. ANY filter — including --source —
     # suppresses the implicit cutoff (`prune --source cron` matches ALL cron sessions); the preview +
     # confirmation below is the safety net.
-    if action == "prune" and not _any_filter_args(args):
+    if prune and not _any_filter_args(args):
         args.older_than = "90"
-
     try:
         filters = build_prune_filters(args)
     except ValueError as e:
         print(f"Error: {e}")
         return 1
-
-    if action == "archive" and not any(v for k, v in filters.items() if k != "older_than_days"):
+    if not prune and not any(v for k, v in filters.items() if k != "older_than_days"):
         print("Refusing to archive every ended session: pass at least one "
               "filter (e.g. --newer-than 5h, --source cli, --title codex).")
         return
 
     # Prune skips archived rows unless --include-archived; archive only targets not-yet-archived rows.
-    filters["archived"] = None if action == "prune" and getattr(args, "include_archived", False) else False
-
+    filters["archived"] = None if prune and getattr(args, "include_archived", False) else False
     filters["include_pinned"] = getattr(args, "include_pinned", False)
     if not filters["include_pinned"]:
         _note_pinned_skipped(db, filters, action)
@@ -677,25 +668,22 @@ def _cmd_prune_or_archive(db, args, action):
     candidates = db.list_prune_candidates(**filters)
     # Archive expands each row to its compression lineage (may include open continuations), so a
     # direct-open count would misdescribe its effect.
-    skipped_open = db.count_open_prune_matches(**filters) if action == "prune" else 0
+    skipped_open = db.count_open_prune_matches(**filters) if prune else 0
     if skipped_open:
         print(
             f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
             "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
             "to remove one explicitly."
         )
-    verb = "Delete" if action == "prune" else "Archive"
     if not candidates:
         print(f"No sessions match ({describe_filters(filters)}).")
         return
-
     # Candidates are oldest-activity-first; show the span so a long-lived but recently used
     # conversation cannot look old merely by creation date.
     _span = (
         f"oldest activity {format_epoch(candidates[0].get('last_active'))}, "
         f"newest activity {format_epoch(candidates[-1].get('last_active'))}"
     )
-
     if args.dry_run or not args.yes:
         shown = candidates if args.dry_run else candidates[:15]
         print(f"{len(candidates)} session(s) match ({describe_filters(filters)}; {_span}):")
@@ -709,14 +697,13 @@ def _cmd_prune_or_archive(db, args, action):
         if len(candidates) > len(shown):
             print(f"  … and {len(candidates) - len(shown)} more")
         if args.dry_run:
-            print(f"Dry run — nothing {'deleted' if action == 'prune' else 'archived'}.")
+            print(f"Dry run — nothing {'deleted' if prune else 'archived'}.")
             return
-
+    verb = "Delete" if prune else "Archive"
     if not args.yes and not _confirm_prompt(f"{verb} these {len(candidates)} session(s) ({_span})? [y/N] "):
         print("Cancelled.")
         return
-
-    if action == "prune":
+    if prune:
         print(f"Pruned {db.prune_sessions(sessions_dir=_sessions_dir(), **filters)} session(s).")
     else:
         print(f"Archived {db.archive_sessions(**filters)} session(s). They're hidden from listings "
