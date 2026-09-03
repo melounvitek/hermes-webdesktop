@@ -120,12 +120,9 @@ def _resolve_openrouter_runtime(
     rp = _rp()
     model_cfg = rp._get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
-    cfg_provider = model_cfg.get("provider") if isinstance(model_cfg.get("provider"), str) else ""
-    cfg_api_key = next(
-        (v.strip() for v in (model_cfg.get("api_key"), model_cfg.get("api")) if isinstance(v, str) and v.strip()), ""
-    )
+    cfg_provider = (model_cfg.get("provider") if isinstance(model_cfg.get("provider"), str) else "").strip().lower()
+    cfg_api_key = next((v.strip() for v in (model_cfg.get("api_key"), model_cfg.get("api")) if isinstance(v, str) and v.strip()), "")
     requested_norm = (requested_provider or "").strip().lower()
-    cfg_provider = cfg_provider.strip().lower()
     # Aliases resolving to "custom" (ollama, vllm, …) follow bare-custom trust + routing rules.
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
         requested_norm = "custom"
@@ -135,29 +132,20 @@ def _resolve_openrouter_runtime(
         (requested_norm == "auto" and cfg_provider in ("", "auto"))
         or (requested_norm == "custom" and rp._config_base_url_trustworthy_for_bare_custom(cfg_base_url, cfg_provider))
     )
-    base_url = (
-        (explicit_base_url or "").strip()
-        or env_custom_base_url
-        or (cfg_base_url.strip() if use_config_base_url else "")
-        or env_openrouter_base_url
-        or OPENROUTER_BASE_URL
-    ).rstrip("/")
+    base_url = ((explicit_base_url or "").strip() or env_custom_base_url or (cfg_base_url.strip() if use_config_base_url else "")
+                or env_openrouter_base_url or OPENROUTER_BASE_URL).rstrip("/")
     is_openrouter_url = base_url_host_matches(base_url, "openrouter.ai")
     # Explicitly-configured OpenRouter mirrors (OPENROUTER_BASE_URL + provider=openrouter) still
     # count as OpenRouter for key selection.
     is_openrouter_context = is_openrouter_url or (
-        requested_norm == "openrouter"
-        and (env_openrouter_base_url or base_url == env_openrouter_base_url)
+        requested_norm == "openrouter" and (env_openrouter_base_url or base_url == env_openrouter_base_url)
         and base_url == (env_openrouter_base_url or "").rstrip("/")
     )
     if is_openrouter_context:
         candidates = [explicit_api_key, rp._getenv("OPENROUTER_API_KEY"), rp._getenv("OPENAI_API_KEY")]
     else:
-        candidates = [
-            explicit_api_key,
-            (cfg_api_key if use_config_base_url else ""),
-            *rp._host_gated_env_key_candidates(base_url, ollama=True),
-        ]
+        candidates = [explicit_api_key, (cfg_api_key if use_config_base_url else ""),
+                      *rp._host_gated_env_key_candidates(base_url, ollama=True)]
     api_key = next((str(c or "").strip() for c in candidates if rp.has_usable_secret(c)), "")
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
     cfg_api_mode = rp._parse_api_mode(model_cfg.get("api_mode"))
@@ -166,11 +154,7 @@ def _resolve_openrouter_runtime(
         return rp._runtime("openrouter", cfg_api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
                            api_key, source=source)
     if base_url:
-        # provider_name makes pool lookup prefer name match over base_url (fixes credential
-        # mix-ups when multiple custom providers share a base_url).
-        pool_result = rp._try_resolve_from_custom_pool(
-            base_url, "custom", cfg_api_mode, provider_name=requested_provider if requested_norm != "custom" else None
-        )
+        pool_result = rp._try_resolve_from_custom_pool(base_url, "custom", cfg_api_mode, provider_name=None)
         if pool_result:
             return pool_result
     # Local no-auth servers get a placeholder key — the OpenAI SDK requires a non-empty string.

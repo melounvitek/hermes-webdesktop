@@ -332,9 +332,7 @@ def _user_pdef(pid: str, name: str, base_url: str, key_env: str, transport: str 
 
 def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[ProviderDef]:
     """Resolve a provider from the user's config.yaml ``providers:`` section."""
-    if not user_config or not isinstance(user_config, dict):
-        return None
-    entry = user_config.get(name)
+    entry = user_config.get(name) if isinstance(user_config, dict) and user_config else None
     if not isinstance(entry, dict):
         return None
     return _user_pdef(name, entry.get("name", "") or name,
@@ -372,10 +370,8 @@ def resolve_custom_provider(name: str, custom_providers: Optional[List[Dict[str,
     """Resolve a provider from the user's config.yaml ``custom_providers`` list. A stored bare
     ``"custom"`` (corrupt state from a prior model-switch bug) falls back to the first valid entry
     so existing configs self-heal."""
-    if not custom_providers or not isinstance(custom_providers, list):
-        return None
     requested = (name or "").strip().lower()
-    if not requested:
+    if not requested or not custom_providers or not isinstance(custom_providers, list):
         return None
     first_valid: Optional[ProviderDef] = None
     for entry in custom_providers:

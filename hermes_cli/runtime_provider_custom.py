@@ -134,10 +134,8 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
         base_url = _entry_url(entry)
         if not base_url:
             continue
-        result: Dict[str, Any] = {
-            "name": entry.get("name", ep_name), "base_url": base_url.strip(),
-            "api_key": api_key or _clean(entry.get("api_key", "")), "model": entry.get("default_model", ""),
-        }
+        result: Dict[str, Any] = {"name": entry.get("name", ep_name), "base_url": base_url.strip(),
+                                  "api_key": api_key or _clean(entry.get("api_key", "")), "model": entry.get("default_model", "")}
         # Command that PRINTS a short-lived credential; wrapped in a per-request token provider.
         key_cmd = _clean(entry.get("key_cmd", ""))
         if key_cmd:
@@ -155,9 +153,7 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
 def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Optional[Dict[str, Any]]:
     """Scan the legacy ``custom_providers:`` list for ``requested_norm``."""
     for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name, base_url = entry.get("name"), entry.get("base_url")
+        name, base_url = (entry.get("name"), entry.get("base_url")) if isinstance(entry, dict) else (None, None)
         if not isinstance(name, str) or not isinstance(base_url, str):
             continue
         provider_key = _clean(entry.get("provider_key", ""))
@@ -180,21 +176,16 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     rp = _rp()
     config = rp.load_config()
     providers = config.get("providers")
-    if isinstance(providers, dict):
-        found = _match_new_style_provider(requested_norm, providers)
-        if found:
-            return found
+    found = _match_new_style_provider(requested_norm, providers) if isinstance(providers, dict) else None
+    if found:
+        return found
     if isinstance(config.get("custom_providers"), dict):
-        logger.warning(
-            "custom_providers in config.yaml is a dict, not a list. "
-            "Each entry must be prefixed with '-' in YAML. "
-            "Run 'hermes doctor' for details."
-        )
+        logger.warning("custom_providers in config.yaml is a dict, not a list. "
+                       "Each entry must be prefixed with '-' in YAML. "
+                       "Run 'hermes doctor' for details.")
         return None
     custom_providers = rp.get_compatible_custom_providers(config)
-    if not custom_providers:
-        return None
-    return _match_legacy_custom_provider(requested_norm, custom_providers)
+    return _match_legacy_custom_provider(requested_norm, custom_providers) if custom_providers else None
 
 
 def has_named_custom_provider(requested_provider: str) -> bool:
@@ -227,9 +218,7 @@ def _find_custom_identity(matches: Callable[[Dict[str, Any]], bool]) -> Optional
     except Exception:
         custom_providers = None
     for entry in custom_providers or []:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
+        name = entry.get("name") if isinstance(entry, dict) else None
         if isinstance(name, str) and name.strip() and matches(entry):
             return custom_provider_slug(name, str(entry.get("provider_key", "") or ""))
     return None
@@ -264,10 +253,8 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
         if isinstance(models, dict):
             return any(str(mid).strip().lower() == target for mid in models)
         if isinstance(models, list):
-            return any(
-                _model_id_matches(item.get("id") or item.get("name") if isinstance(item, dict) else item, target)
-                for item in models
-            )
+            return any(_model_id_matches(item.get("id") or item.get("name") if isinstance(item, dict) else item, target)
+                       for item in models)
         return False
 
     return _find_custom_identity(_entry_serves_model)
@@ -283,14 +270,10 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
     (3) the configured provider (arg, ``model.provider``, ``HERMES_INFERENCE_PROVIDER``) when it
     names a real entry."""
     rp = _rp()
-    if base_url:
-        identity = find_custom_provider_identity(base_url)
-        if identity:
-            return identity
-    if model:
-        identity = find_custom_provider_identity_by_model(model)
-        if identity:
-            return identity
+    identity = (find_custom_provider_identity(base_url) if base_url else None) or (
+        find_custom_provider_identity_by_model(model) if model else None)
+    if identity:
+        return identity
     candidate = str(config_provider or "").strip()
     if not candidate:
         try:
@@ -357,12 +340,8 @@ def _try_resolve_from_custom_pool(
     for pool_key in candidates:
         try:
             pool = rp.load_pool(pool_key)
-            if not pool.has_credentials():
-                continue
-            entry = pool.select()
-            if entry is None:
-                continue
-            pool_api_key = rp._pool_entry_api_key(entry)
+            entry = pool.select() if pool.has_credentials() else None
+            pool_api_key = rp._pool_entry_api_key(entry) if entry is not None else ""
             if not pool_api_key:
                 continue
             if not rp.has_usable_secret(pool_api_key) and rp._loopback_hostname(base_url_hostname(base_url)):
@@ -399,7 +378,7 @@ def _apply_custom_provider_extras(custom_provider: Dict[str, Any], target_model:
         result["extra_headers"] = dict(custom_provider["extra_headers"])
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
-        result["request_overrides"] = {**dict(result.get("request_overrides") or {}), **request_overrides}
+        result["request_overrides"] = {**(result.get("request_overrides") or {}), **request_overrides}
 
 
 def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
@@ -422,16 +401,12 @@ def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optiona
     except Exception:  # noqa: BLE001
         enabled = False
     if enabled:
-        raise ValueError(
-            "The local model server isn't running. It may still be "
-            "starting — try again in a moment, or check Settings → "
-            "Providers → Local models."
-        )
-    raise ValueError(
-        "The local model server is turned off. Turn it back on in "
-        "Settings → Providers → Local models, or switch to another "
-        "model."
-    )
+        raise ValueError("The local model server isn't running. It may still be "
+                         "starting — try again in a moment, or check Settings → "
+                         "Providers → Local models.")
+    raise ValueError("The local model server is turned off. Turn it back on in "
+                     "Settings → Providers → Local models, or switch to another "
+                     "model.")
 
 
 def _custom_runtime(rp, base_url: str, api_key: Any, api_mode: Optional[str], **extra: Any) -> Dict[str, Any]:
@@ -528,9 +503,7 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     family = _opencode_family_for_custom(requested_provider, base_url)
     if family is not None and not custom_provider.get("api_mode"):
         from hermes_cli.models import normalize_opencode_base_url, opencode_model_api_mode
-        effective_model = str(
-            target_model or custom_provider.get("model") or rp._get_model_config().get("default") or ""
-        ).strip()
+        effective_model = str(target_model or custom_provider.get("model") or rp._get_model_config().get("default") or "").strip()
         if effective_model:
             result["api_mode"] = opencode_model_api_mode(family, effective_model)
         result["base_url"] = normalize_opencode_base_url(family, result["api_mode"], result["base_url"])
