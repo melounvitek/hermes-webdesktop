@@ -551,13 +551,10 @@ class RelayRuntime:
         ``timeout`` bounds the native call on the daemon executor (``TimeoutError`` on
         breach); ``None`` runs synchronously. Lifecycle ops gating turn/session completion
         pass ``_SCOPE_OP_TIMEOUT``: a wedged pipeline must cost one span, never the agent."""
-        self._begin_operation()
-        try:
+        with self._operation():
             return self._run_in_session_untracked(
                 session, callback, *args, allow_closing=allow_closing, timeout=timeout, **kwargs
             )
-        finally:
-            self._end_operation()
 
     def _run_in_session_untracked(
         self, session: RelaySession, callback: Callable[..., Any], *args: Any,
@@ -596,21 +593,15 @@ class RelayRuntime:
         allow_closing: bool = False, **kwargs: Any,
     ) -> Any:
         """Create and await an operation inside the session's saved context."""
-        self._begin_operation()
-        try:
+        with self._operation():
             context = self._session_context(session, allow_closing=allow_closing)
 
             async def invoke() -> Any:
                 self.relay.get_scope_stack()
                 result = callback(*args, **kwargs)
-                if inspect.isawaitable(result):
-                    return await result
-                return result
+                return await result if inspect.isawaitable(result) else result
 
-            task = context.run(asyncio.create_task, invoke())
-            return await task
-        finally:
-            self._end_operation()
+            return await context.run(asyncio.create_task, invoke())
 
     def _begin_operation(self) -> None:
         """Admit one Relay call while keeping process plugins alive."""
@@ -625,6 +616,15 @@ class RelayRuntime:
             self._active_operations -= 1
             if self._active_operations == 0:
                 self._operations_idle.set()
+
+    @contextlib.contextmanager
+    def _operation(self):
+        """``_begin_operation`` / ``_end_operation`` around one tracked Relay call."""
+        self._begin_operation()
+        try:
+            yield
+        finally:
+            self._end_operation()
 
     def acquire_operation_lease(self) -> RelayOperationLease:
         """Retain plugin lifetime for work that outlives one Relay await."""
@@ -729,7 +729,7 @@ class RelayRuntime:
         # publications and can deadlock an asyncio loop; final plugin teardown flushes once.
         with self._sessions_lock:
             if self._sessions.get(session_id) is session:
-                self._sessions.pop(session_id, None)
+                del self._sessions[session_id]
             self._forget_subagent(session_id)
         if failure:
             logger.warning("Hermes Relay session %s closed with errors: %s", session_id, failure)
