@@ -20,6 +20,7 @@ from agent.i18n import t
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, _prefix_within_utf16_limit, utf16_len
 from gateway.session import SessionSource
+from utils import is_truthy_value
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
     from gateway.run import GatewayRunner, TurnRunner  # noqa: F401
@@ -31,6 +32,10 @@ _TOPIC_RESTORE_STEPS = (
     "1. Create or open a topic. To create a new one, open All Messages and send any message there.",
     "2. Send /topic <session-id> inside that topic.",
 )
+
+
+def _collapse_title(title: str) -> str:
+    return re.sub(r"\s+", " ", str(title or "")).strip() or "Hermes Chat"
 
 
 class GatewayTopicThreadsMixin:
@@ -45,8 +50,7 @@ class GatewayTopicThreadsMixin:
         Use the profile stamped on the routed event (``source.profile``), never the process-global
         active profile — under multiplex that mis-attributes topic state across bots sharing state.db.
         """
-        name = str(getattr(source, "profile", None) or "").strip()
-        return name if name else "default"
+        return str(getattr(source, "profile", None) or "").strip() or "default"
 
     def _sync_session_db(self):
         """The sync SessionDB handle, or None. Only for callers that provably run off-loop
@@ -60,9 +64,7 @@ class GatewayTopicThreadsMixin:
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
-        if not self._is_telegram_dm(source):
-            return False
-        session_db = self._sync_session_db()
+        session_db = self._sync_session_db() if self._is_telegram_dm(source) else None
         if session_db is None:
             return False
         try:
@@ -79,24 +81,24 @@ class GatewayTopicThreadsMixin:
 
     def _is_telegram_topic_root_lobby(self, source: SessionSource) -> bool:
         """True for the main Telegram DM (or General topic) when topic mode has made it a lobby."""
-        if not self._is_telegram_dm(source) or not self._telegram_topic_mode_enabled(source):
-            return False
-        return str(source.thread_id or "") in self._TELEGRAM_GENERAL_TOPIC_IDS
+        return (
+            self._is_telegram_dm(source) and self._telegram_topic_mode_enabled(source)
+            and str(source.thread_id or "") in self._TELEGRAM_GENERAL_TOPIC_IDS
+        )
 
     def _is_telegram_topic_lane(self, source: SessionSource) -> bool:
         """True for a user-created Telegram private-chat topic lane."""
-        if not self._is_telegram_dm(source) or not self._telegram_topic_mode_enabled(source):
-            return False
         tid = str(source.thread_id or "")
-        return bool(tid) and tid not in self._TELEGRAM_GENERAL_TOPIC_IDS
+        return (
+            self._is_telegram_dm(source) and self._telegram_topic_mode_enabled(source)
+            and bool(tid) and tid not in self._TELEGRAM_GENERAL_TOPIC_IDS
+        )
 
     def _telegram_topic_cooldown_key(self, source: SessionSource) -> Optional[str]:
         """Cooldown key (profile, chat_id): profiles sharing a Telegram private chat_id under
         multiplex must not suppress each other's lobby reminders / capability hints."""
         chat_id = str(source.chat_id or "")
-        if not chat_id:
-            return None
-        return f"{self._telegram_topic_profile_name(source)}:{chat_id}"
+        return f"{self._telegram_topic_profile_name(source)}:{chat_id}" if chat_id else None
 
     def _telegram_cooldown_elapsed(self, source: SessionSource, attr: str, cooldown_s: float) -> bool:
         """Per-(profile, chat) debounce: True (and stamp now) when the window has elapsed."""
@@ -146,14 +148,12 @@ class GatewayTopicThreadsMixin:
         )
 
     def _telegram_topic_new_header(self, source: SessionSource) -> Optional[str]:
-        if not self._is_telegram_topic_lane(source):
-            return None
         return (
             "Started a new Hermes session in this topic.\n\n"
             "Tip: for parallel work, open All Messages and send a message there "
             "to create a separate topic instead of using /new here. /new replaces "
             "the session attached to the current topic."
-        )
+        ) if self._is_telegram_topic_lane(source) else None
 
     def _telegram_topic_help_text(self) -> str:
         return (
@@ -192,12 +192,8 @@ class GatewayTopicThreadsMixin:
         )
 
     def _sync_telegram_topic_binding(self, source: SessionSource, session_entry, *, reason: str) -> None:
-        """Update the topic binding to point at ``session_entry.session_id``.
-
-        Topic lanes persist (chat_id, thread_id) -> session_id so reopening a topic resumes the
-        right session. When compression rotates the id mid-turn a stale binding reloads the
-        oversized parent next message, retriggering preflight compression — sometimes in a loop.
-        """
+        """Update the topic binding to ``session_entry.session_id``: a stale binding after a mid-turn
+        compression rotation reloads the oversized parent next message, retriggering compression."""
         if not self._is_telegram_topic_lane(source):
             return
         try:
@@ -206,18 +202,11 @@ class GatewayTopicThreadsMixin:
             logger.debug("telegram topic binding refresh failed (%s)", reason, exc_info=True)
 
     def _recover_telegram_topic_thread_id(self, source: SessionSource) -> Optional[str]:
-        """Pin DM-topic routing to the user's last-active topic.
-
-        Telegram can omit ``message_thread_id`` or surface General (``1``) for topic-mode DM
-        replies; in those lobby-shaped cases keep the conversation on the user's most-recent bound
-        topic. Do not rewrite a non-lobby, previously-unbound thread id: a brand-new DM topic is
-        also "unknown" until its first inbound message is recorded, and rewriting would send its
-        answer into an older lane. Returns None to leave the source alone.
-        """
+        """Pin lobby-shaped topic-mode DM replies (missing ``message_thread_id`` or General) to the
+        user's most-recent bound topic. Never rewrite a non-lobby, unbound thread id: a brand-new DM
+        topic is also "unknown" until its first message is recorded. None = leave the source alone."""
         if (
-            not self._is_telegram_dm(source)
-            or not source.chat_id
-            or not source.user_id
+            not self._is_telegram_dm(source) or not source.chat_id or not source.user_id
             or not self._telegram_topic_mode_enabled(source)
         ):
             return None
@@ -259,7 +248,7 @@ class GatewayTopicThreadsMixin:
                 return getattr(me, name)
             api_kwargs = getattr(me, "api_kwargs", None)
             if isinstance(api_kwargs, dict) and name in api_kwargs:
-                return api_kwargs.get(name)
+                return api_kwargs[name]
             return me.get(name) if isinstance(me, dict) else None
 
         return {
@@ -324,22 +313,14 @@ class GatewayTopicThreadsMixin:
 
     def _sanitize_telegram_topic_title(self, title: str) -> str:
         """Bot API-safe forum topic name: names are 1-128 chars; keep room for multi-byte titles."""
-        cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
-        if not cleaned:
-            return "Hermes Chat"
-        if len(cleaned) > 120:
-            cleaned = cleaned[:117].rstrip() + "..."
-        return cleaned
+        cleaned = _collapse_title(title)
+        return cleaned if len(cleaned) <= 120 else cleaned[:117].rstrip() + "..."
 
     def _sanitize_discord_thread_title(self, title: str) -> str:
         """Discord-safe thread title: the 100-char cap is measured in UTF-16 code units (emoji count
         double), so truncate with the UTF-16 helpers rather than Python code-point slices."""
-        cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
-        if not cleaned:
-            return "Hermes Chat"
-        if utf16_len(cleaned) > 80:
-            cleaned = _prefix_within_utf16_limit(cleaned, 77).rstrip() + "..."
-        return cleaned
+        cleaned = _collapse_title(title)
+        return cleaned if utf16_len(cleaned) <= 80 else _prefix_within_utf16_limit(cleaned, 77).rstrip() + "..."
 
     # ── Discord auto-thread lanes ───────────────────────────────────────────────────────────
 
@@ -368,21 +349,20 @@ class GatewayTopicThreadsMixin:
         )
 
     def _relay_auto_thread_info(self, source: SessionSource) -> Optional[Tuple[str, str]]:
-        """(thread_id, initial_name) when the RELAY connector auto-threaded our reply to this
-        source's chat — the title-turn sibling of _is_discord_auto_thread_lane.
+        """(thread_id, initial_name) when the RELAY connector auto-threaded our reply — the title-turn
+        sibling of _is_discord_auto_thread_lane (whose markers only exist from turn 2 on; the title
+        turn's source is the PARENT channel event).
 
-        The marker check only matches events ARRIVING IN an auto-created thread (turn 2+); the
-        auto-title fires on the FIRST exchange, whose source is the PARENT channel event with no
-        markers. Preferred: the connector's ``prospective_thread_id`` stamp (anchor message id ==
-        the thread it will create) — per-message, so it names the EXACT thread even when several
-        auto-threads spawn from one channel; the connector's created-name guard enforces
-        no-clobber. Fallback: the per-chat send-result thread_id/auto_thread_name cache (older
-        connectors), which only ever renamed the FIRST thread.
+        Preferred: the connector's per-message ``prospective_thread_id`` stamp (anchor message id ==
+        the thread it will create), exact even when several auto-threads spawn from one channel;
+        the connector's created-name guard enforces no-clobber. Fallback: the per-chat send-result
+        cache (older connectors), which only ever renamed the FIRST thread.
         """
         from gateway.run import _as_thread_info
-        if source.platform != Platform.DISCORD or not source.chat_id:
-            return None
-        if not getattr(source, "delivered_via_upstream_relay", False):
+        if (
+            source.platform != Platform.DISCORD or not source.chat_id
+            or not getattr(source, "delivered_via_upstream_relay", False)
+        ):
             return None
         prospective = getattr(source, "prospective_thread_id", None)
         if prospective:
@@ -398,13 +378,9 @@ class GatewayTopicThreadsMixin:
             return None
 
     async def _await_relay_auto_thread_info(self, source: SessionSource) -> Optional[Tuple[str, str]]:
-        """``_relay_auto_thread_info``, waited out until this turn delivers.
-
-        The legacy send-result path can only answer once the reply is sent, and the caller asks
-        at title time — one turn early. The adapter answers on the send either way, so the
-        timeout is only a backstop for a turn that never sends at all; the turn's own inactivity
-        limit is exactly how long that turn could still be alive.
-        """
+        """``_relay_auto_thread_info``, waited out until this turn delivers (the legacy send-result
+        path can only answer once the reply is sent; the caller asks at title time, one turn early).
+        The timeout is only a backstop for a turn that never sends: the turn's own inactivity limit."""
         from gateway.run import _as_thread_info, _float_env
         # The connector-stamped prospective id is known at ingest, so most sessions answer here.
         known = self._relay_auto_thread_info(source)
@@ -424,21 +400,17 @@ class GatewayTopicThreadsMixin:
         self, source: SessionSource, session_id: str, title: str,
         relay_info: Optional[Tuple[str, str]] = None,
     ) -> None:
-        """Best-effort semantic rename of a newly auto-created Discord thread.
-
-        ``relay_info`` is the (thread_id, initial_name) pair from the relay connector's send-
-        result feedback — supplied on the title turn, where the source is the parent-channel
-        event and carries no auto-thread markers (see _relay_auto_thread_info).
-        """
+        """Best-effort semantic rename of a newly auto-created Discord thread. ``relay_info`` is the
+        connector's (thread_id, initial_name) feedback, supplied on the title turn where the source
+        is the parent-channel event without auto-thread markers (see _relay_auto_thread_info)."""
         if relay_info is None and not await asyncio.to_thread(self._is_discord_auto_thread_lane, source):
             # Relay title turn with no feedback captured at schedule time: the title comes off the
             # user's opening message, so it beats the delivery that produces the connector's
-            # send-result feedback by the whole length of the turn.
+            # send-result feedback by the whole length of the turn. None here = a true miss.
             if not self._is_relay_discord_channel_lane(source):
                 return
             relay_info = await self._await_relay_auto_thread_info(source)
             if relay_info is None:
-                # True miss: the connector did not auto-thread this reply.
                 return
         adapter = self._adapter_for_source(source) if getattr(self, "adapters", None) else None
         rename_thread = getattr(adapter, "rename_thread", None)
@@ -466,14 +438,10 @@ class GatewayTopicThreadsMixin:
         )
         try:
             renamed = await rename_thread(target_thread_id, thread_name, **rename_kwargs)
-            logger.info(
-                "discord auto-thread rename result: thread=%s applied=%s",
-                target_thread_id, bool(renamed),
-            )
+            logger.info("discord auto-thread rename result: thread=%s applied=%s", target_thread_id, bool(renamed))
         except TypeError:
             logger.warning(
-                "Discord semantic thread rename raised TypeError (adapter=%s)",
-                type(adapter).__name__, exc_info=True,
+                "Discord semantic thread rename raised TypeError (adapter=%s)", type(adapter).__name__, exc_info=True,
             )
         except Exception:
             logger.debug("Failed to rename Discord auto-thread for generated session title", exc_info=True)
@@ -499,8 +467,6 @@ class GatewayTopicThreadsMixin:
         future = safe_schedule_threadsafe(
             make_coro(copied_source), loop, logger=logger, log_message=f"{label} failed to schedule",
         )
-        if future is None:
-            return
 
         def _log_rename_failure(fut) -> None:
             try:
@@ -508,13 +474,14 @@ class GatewayTopicThreadsMixin:
             except Exception:
                 logger.debug("%s failed", label, exc_info=True)
 
-        future.add_done_callback(_log_rename_failure)
+        if future is not None:
+            future.add_done_callback(_log_rename_failure)
 
     def _schedule_discord_semantic_thread_rename(self, source: SessionSource, session_id: str, title: str) -> None:
         """Schedule Discord auto-thread rename from the auto-title background thread."""
-        relay_info = None
         if not title:
             return
+        relay_info = None
         if not self._is_discord_auto_thread_lane(source):
             # Relay title turn: the source is the PARENT channel event (thread didn't exist at
             # ingest). The auto-title races the delivery that fills the send-result cache, so a
@@ -533,9 +500,7 @@ class GatewayTopicThreadsMixin:
 
     def _schedule_telegram_topic_title_rename(self, source: SessionSource, session_id: str, title: str) -> None:
         """Schedule a topic rename from the auto-title background thread."""
-        if not title or not self._is_telegram_topic_lane(source):
-            return
-        if self._telegram_topic_auto_rename_disabled(source):
+        if not title or not self._is_telegram_topic_lane(source) or self._telegram_topic_auto_rename_disabled(source):
             return
         self._schedule_rename_from_title_thread(
             source,
@@ -549,12 +514,7 @@ class GatewayTopicThreadsMixin:
         platform_cfg = config.platforms.get(source.platform) if config and getattr(config, "platforms", None) else None
         if platform_cfg is None:
             return False
-        value = (getattr(platform_cfg, "extra", None) or {}).get("disable_topic_auto_rename")
-        if value is None:
-            return False
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
+        return is_truthy_value((getattr(platform_cfg, "extra", None) or {}).get("disable_topic_auto_rename"))
 
     async def _rename_telegram_topic_for_session_title(self, source: SessionSource, session_id: str, title: str) -> None:
         """Best-effort rename of a Telegram DM topic when Hermes auto-titles a session."""
@@ -566,18 +526,17 @@ class GatewayTopicThreadsMixin:
             return
         # Skip operator-declared topics (extra.dm_topics): fixed names chosen by the operator;
         # auto-renaming would silently mutate operator config. Check the class, not the instance —
-        # getattr() on a MagicMock auto-creates attributes, so every test double would match.
+        # getattr() on a MagicMock auto-creates attributes, so every test double would match. Only
+        # dict-shaped returns count; a bare MagicMock or other sentinel shouldn't.
         adapter = self._adapter_for_source(source)
-        if adapter is not None:
-            get_info = getattr(type(adapter), "_get_dm_topic_info", None)
-            if callable(get_info):
-                try:
-                    operator_topic = get_info(adapter, str(source.chat_id), str(source.thread_id))
-                except Exception:
-                    operator_topic = None
-                # Only dict-shaped returns count; a bare MagicMock or other sentinel shouldn't.
-                if isinstance(operator_topic, dict):
-                    return
+        get_info = getattr(type(adapter), "_get_dm_topic_info", None) if adapter is not None else None
+        if callable(get_info):
+            try:
+                operator_topic = get_info(adapter, str(source.chat_id), str(source.thread_id))
+            except Exception:
+                operator_topic = None
+            if isinstance(operator_topic, dict):
+                return
         session_db = getattr(self, "_session_db", None)
         if session_db is not None:
             try:
@@ -639,11 +598,10 @@ class GatewayTopicThreadsMixin:
             return f"Failed to disable topic mode: {exc}"
         # Reset per-profile+chat debounce state so the next activation doesn't see a stale cooldown.
         cooldown_key = self._telegram_topic_cooldown_key(source)
-        if cooldown_key:
-            for attr in ("_telegram_lobby_reminder_ts", "_telegram_capability_hint_ts"):
-                store = getattr(self, attr, None)
-                if isinstance(store, dict):
-                    store.pop(cooldown_key, None)
+        for attr in ("_telegram_lobby_reminder_ts", "_telegram_capability_hint_ts") if cooldown_key else ():
+            store = getattr(self, attr, None)
+            if isinstance(store, dict):
+                store.pop(cooldown_key, None)
         return (
             "Multi-session topic mode is now OFF for this chat.\n\n"
             "Existing topics in Telegram aren't removed — they'll just stop "
@@ -732,6 +690,4 @@ class GatewayTopicThreadsMixin:
         except Exception:
             last_assistant = None
         response = f"Session restored: {title}"
-        if last_assistant:
-            response += f"\n\nLast Hermes message:\n{last_assistant}"
-        return response
+        return response + (f"\n\nLast Hermes message:\n{last_assistant}" if last_assistant else "")
