@@ -1109,15 +1109,13 @@ def _index_tool_calls(messages: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[st
     skipped_tool_ids: set[str] = set()
     for message in messages:
         if message.get("role") == "tool":
-            tool_id = str(message.get("tool_call_id") or message.get("id") or "")
-            if tool_id:
+            if tool_id := str(message.get("tool_call_id") or message.get("id") or ""):
                 completed_tool_ids.add(tool_id)
                 if _is_openviking_recall_tool_name(message.get("name")):
                     skipped_tool_ids.add(tool_id)
         elif message.get("role") == "assistant":
             for tool_call in message.get("tool_calls") or []:
-                tool_id = _tool_call_id(tool_call) if isinstance(tool_call, dict) else ""
-                if tool_id:
+                if isinstance(tool_call, dict) and (tool_id := _tool_call_id(tool_call)):
                     tool_name = _tool_call_name(tool_call)
                     tool_calls_by_id[tool_id] = {"tool_name": tool_name, "tool_input": _tool_call_input(tool_call)}
                     if _is_openviking_recall_tool_name(tool_name):
@@ -1265,11 +1263,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
         from hermes_cli.config import load_config, save_config
 
         config = load_config()
-        memory_config = config.get("memory")
-        if not isinstance(memory_config, dict):
-            memory_config = config["memory"] = {}
-        provider_config = memory_config.get("openviking")
-        memory_config["openviking"] = {**(provider_config if isinstance(provider_config, dict) else {}), **normalized}
+        if not isinstance(config.get("memory"), dict):
+            config["memory"] = {}
+        provider_config = config["memory"].get("openviking")
+        config["memory"]["openviking"] = {**(provider_config if isinstance(provider_config, dict) else {}), **normalized}
         save_config(config)
 
     def get_status_config(self, provider_config: dict) -> dict:
@@ -1286,8 +1283,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return display
         display["endpoint"] = settings.get("endpoint") or _DEFAULT_ENDPOINT
         display.update({key: settings[key] for key in ("agent", "account", "user") if settings.get(key)})
-        env_overrides = [key for key in _OPENVIKING_ENV_KEYS if key in os.environ]
-        if env_overrides:
+        if env_overrides := [key for key in _OPENVIKING_ENV_KEYS if key in os.environ]:
             display["env_overrides"] = ", ".join(env_overrides)
         return display
 
@@ -1302,10 +1298,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if self._runtime_start_thread and self._runtime_start_thread.is_alive():
             return
         self._runtime_start_thread = threading.Thread(
-            target=self._finish_runtime_openviking_start,
-            kwargs={"endpoint": endpoint, "status_callback": status_callback, "warning_callback": warning_callback},
-            daemon=True, name="openviking-runtime-start",
-        )
+            target=self._finish_runtime_openviking_start, daemon=True, name="openviking-runtime-start",
+            kwargs={"endpoint": endpoint, "status_callback": status_callback, "warning_callback": warning_callback})
         self._runtime_start_thread.start()
 
     def _settings_tuple(self, endpoint: Optional[str] = None) -> tuple:
@@ -1339,11 +1333,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 healthy = client.health()
                 if stale():
                     return
+                warning_message = "" if healthy else f"OpenViking server at {endpoint} is still not reachable after auto-start. {_RETRY_LATER}"
                 if healthy:
                     self._publish_client(client, endpoint)
-                    warning_message = ""
-                else:
-                    warning_message = f"OpenViking server at {endpoint} is still not reachable after auto-start. {_RETRY_LATER}"
             except ImportError:
                 logger.warning(_HTTPX_MISSING)
                 return
@@ -1361,11 +1353,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         endpoint = self._endpoint
         self._client = None
         if not _is_local_openviking_url(endpoint):
-            _emit_runtime(
-                f"Remote OpenViking server at {endpoint} is not reachable. {_RETRY_LATER} "
-                "Check the configured endpoint and network connectivity.",
-                warning_callback,
-            )
+            _emit_runtime(f"Remote OpenViking server at {endpoint} is not reachable. {_RETRY_LATER} "
+                          "Check the configured endpoint and network connectivity.", warning_callback)
             return
 
         with self._runtime_start_lock:
@@ -1564,8 +1553,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         base_payload = {"query": query, "limit": limit, "score_threshold": 0, "context_type": context_type}
         if session_id:
             try:
-                timeout = cls._remaining_recall_timeout(deadline, request_timeout)
-                return client.post("/api/v1/search/search", {**base_payload, "session_id": session_id}, timeout=timeout)
+                return client.post("/api/v1/search/search", {**base_payload, "session_id": session_id},
+                                   timeout=cls._remaining_recall_timeout(deadline, request_timeout))
             except TimeoutError:
                 raise
             except Exception as e:
@@ -1576,26 +1565,26 @@ class OpenVikingMemoryProvider(MemoryProvider):
         query_text = (query or "").strip()
         if len(query_text) < _RECALL_QUERY_MIN_CHARS:
             return ""
-        if client is None and self._env_refresh_enabled:
-            client = self._ensure_client()
-        elif client is None and self._client is not None:
-            try:  # legacy/hand-wired path: no env baseline yet
-                client = self._new_client()
-            except Exception as e:
-                logger.debug("OpenViking prefetch client build failed: %s", e)
-                return ""
+        try:
+            if client is None:
+                if self._env_refresh_enabled:
+                    client = self._ensure_client()
+                elif self._client is not None:
+                    client = self._new_client()  # legacy/hand-wired path: no env baseline yet
+        except Exception as e:
+            logger.debug("OpenViking prefetch client build failed: %s", e)
+            return ""
         if client is None:
             return ""
 
         try:
             cfg = self._recall_config()
             deadline = time.monotonic() + cfg["timeout_seconds"]
-            resp = self._post_prefetch_search(
+            result = self._unwrap_result(self._post_prefetch_search(
                 client, query_text, session_id, limit=max(cfg["limit"] * 4, 20),
                 context_type=["memory", "resource"] if cfg["resources"] else "memory",
                 deadline=deadline, request_timeout=cfg["request_timeout_seconds"],
-            )
-            result = self._unwrap_result(resp)
+            ))
             if not isinstance(result, dict):
                 return ""
             candidates = [item for ctx_type in ("memories", "resources") for item in (result.get(ctx_type, []) or []) if isinstance(item, dict)]
@@ -1995,13 +1984,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 for tool_call in message.get("tool_calls") or []:
                     if not isinstance(tool_call, dict):
                         continue
-                    tool_id = _tool_call_id(tool_call)
-                    tool_name = _tool_call_name(tool_call)
+                    tool_id, tool_name = _tool_call_id(tool_call), _tool_call_name(tool_call)
                     if tool_id in skipped_tool_ids or tool_id in completed_tool_ids or _is_openviking_recall_tool_name(tool_name):
                         continue
                     # Pre-scan caches non-empty ids; parse again for the uncached empty-id case.
-                    prior_call = tool_calls_by_id.get(tool_id) if tool_id else None
-                    tool_input = prior_call["tool_input"] if prior_call is not None else _tool_call_input(tool_call)
+                    tool_input = tool_calls_by_id[tool_id]["tool_input"] if tool_id in tool_calls_by_id else _tool_call_input(tool_call)
                     parts.append(_tool_part(tool_id, tool_name, tool_input, "pending"))
             if parts:
                 emit(role, parts)
@@ -2018,13 +2005,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not user_content:
             return
 
-        turn_messages = self._extract_current_turn_messages(messages, user_content, assistant_content) if messages is not None else []
-        if turn_messages:
-            turn_messages = [dict(message) for message in turn_messages]
-            for message in turn_messages:
-                if message.get("role") == "user":
-                    message["content"] = user_content
-                    break
+        turn_messages = [dict(m) for m in (self._extract_current_turn_messages(messages, user_content, assistant_content) if messages is not None else [])]
+        for message in turn_messages:
+            if message.get("role") == "user":
+                message["content"] = user_content  # first user message carries the skill-stripped text
+                break
         batch_messages = self._messages_to_openviking_batch(turn_messages, assistant_peer_id=self._agent)
         if env_var_enabled(_SYNC_TRACE_ENV):
             logger.info(
@@ -2497,15 +2482,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
         query = args.get("query", "")
         if not query:
             return tool_error("query is required")
-        payload: Dict[str, Any] = {"query": query}
-        if args.get("scope"):
-            payload["target_uri"] = args["scope"]
-        if args.get("limit"):
-            payload["limit"] = args["limit"]
-        endpoint = "/api/v1/search/search" if args.get("mode", "auto") == "deep" else "/api/v1/search/find"
-        if endpoint == "/api/v1/search/search" and self._session_id:
+        payload: Dict[str, Any] = {"query": query, **({"target_uri": args["scope"]} if args.get("scope") else {}), **({"limit": args["limit"]} if args.get("limit") else {})}
+        deep = args.get("mode", "auto") == "deep"
+        if deep and self._session_id:
             payload["session_id"] = self._session_id
-        result = self._client.post(endpoint, payload).get("result", {})
+        result = self._client.post("/api/v1/search/search" if deep else "/api/v1/search/find", payload).get("result", {})
 
         scored_entries = []
         for ctx_type in ("memories", "resources", "skills"):
@@ -2576,12 +2557,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if action in {"list", "tree"}:
             raw_entries = (result.get("entries") or result.get("items") or result.get("children") or []) if isinstance(result, dict) else result
             if isinstance(raw_entries, list):
-                entries = [{
-                    "name": e.get("rel_path") or e.get("name") or (e.get("uri", "").rsplit("/", 1)[-1] if e.get("uri", "") else ""),
-                    "uri": e.get("uri", ""),
-                    "type": "dir" if (e.get("isDir") or e.get("is_dir") or e.get("type") == "dir") else "file",
-                    "abstract": e.get("abstract", ""),
-                } for e in raw_entries[:50]]
+                entries = [{"name": e.get("rel_path") or e.get("name") or (e.get("uri") or "").rsplit("/", 1)[-1], "uri": e.get("uri", ""),
+                            "type": "dir" if (e.get("isDir") or e.get("is_dir") or e.get("type") == "dir") else "file", "abstract": e.get("abstract", "")}
+                           for e in raw_entries[:50]]
                 return json.dumps({"path": path, "entries": entries}, ensure_ascii=False)
         return json.dumps(result, ensure_ascii=False)
 
