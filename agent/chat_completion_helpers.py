@@ -3343,120 +3343,115 @@ def _stream_codex_passthrough(agent, api_kwargs: dict, on_first_delta):
         agent._codex_on_first_delta = None
 
 
-def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
-    """Bedrock Converse: boto3 ``converse_stream()`` on a worker thread with
-    real-time delta callbacks, polled by an interrupt / stale-event watchdog
+class _BedrockStream:
+    """Bedrock Converse streaming: boto3 ``converse_stream()`` on a worker thread
+    with real-time delta callbacks, polled by an interrupt / stale-event watchdog
     (same UX as the Anthropic and chat_completions streams)."""
-    result = {"response": None, "error": None}
-    first_delta_fired = {"done": False}
-    deltas_were_sent = {"yes": False}
-    # Liveness for the boto3 worker: ``for event in event_stream`` has NO
-    # read timeout, so on_event stamps every Bedrock event and the poll loop
-    # trips a watchdog when the gap exceeds the stale timeout.
-    _bedrock_started_at = time.time()
-    _bedrock_last_event = {"t": _bedrock_started_at}
-    _bedrock_response_started = {"yes": False}
-    # Read (not popped): the worker's own pop inside _bedrock_call must
-    # still resolve the same region.
-    _bedrock_region = api_kwargs.get("__bedrock_region__", "us-east-1")
-    # Same patience budget as the OpenAI/Anthropic stale detector.
-    _bedrock_stale_timeout = _derive_stream_stale_timeout(agent, api_kwargs)
 
-    # Cross-turn stale-stream circuit breaker (#58962), as on the OpenAI/
-    # Anthropic path.
-    _check_stale_giveup(agent)
+    def __init__(self, agent, api_kwargs: dict, on_first_delta):
+        self.agent = agent
+        self.api_kwargs = api_kwargs
+        self.on_first_delta = on_first_delta
+        self.result = {"response": None, "error": None}
+        self.first_delta_fired = False
+        self.response_started = False
+        # Liveness for the boto3 worker: ``for event in event_stream`` has NO
+        # read timeout, so on_event stamps every Bedrock event and the poll loop
+        # trips a watchdog when the gap exceeds the stale timeout.
+        self.started_at = time.time()
+        self.last_event = self.started_at
+        # Read (not popped): the worker's own pop inside _open_stream must
+        # still resolve the same region.
+        self.region = api_kwargs.get("__bedrock_region__", "us-east-1")
+        # Same patience budget as the OpenAI/Anthropic stale detector.
+        self.stale_timeout = _derive_stream_stale_timeout(agent, api_kwargs)
 
-    def _fire_first():
-        if not first_delta_fired["done"] and on_first_delta:
-            first_delta_fired["done"] = True
+    def _model(self) -> str:
+        return self.api_kwargs.get("modelId", "unknown")
+
+    def _fire_first(self):
+        self.response_started = True
+        if not self.first_delta_fired and self.on_first_delta:
+            self.first_delta_fired = True
             try:
-                on_first_delta()
+                self.on_first_delta()
             except Exception:
                 pass
 
-    def _bedrock_call():
+    def _on_text(self, text):
+        self._fire_first()
+        self.agent._fire_stream_delta(text)
+
+    def _on_tool(self, name):
+        self._fire_first()
+        self.agent._fire_tool_gen_started(name)
+
+    def _on_reasoning(self, text):
+        self._fire_first()
+        self.agent._fire_reasoning_delta(text)
+
+    def _open_stream(self, next_api_kwargs: dict[str, Any]):
+        from agent.bedrock_adapter import (
+            _get_bedrock_runtime_client,
+            invalidate_runtime_client,
+            is_stale_connection_error,
+            is_streaming_access_denied_error,
+            normalize_converse_response,
+            recover_from_cache_point_rejection,
+        )
+
+        final_kwargs = dict(next_api_kwargs)
+        region = final_kwargs.pop("__bedrock_region__", "us-east-1")
+        final_kwargs.pop("__bedrock_converse__", None)
+        client = _get_bedrock_runtime_client(region)
+        try:
+            raw_response = client.converse_stream(**final_kwargs)
+        except Exception as _bedrock_exc:
+            # Some families refuse a cachePoint block in one section (Nova:
+            # toolConfig.tools, #97281): drop it and reopen inside the same
+            # Relay attempt.
+            _retry_kwargs = recover_from_cache_point_rejection(_bedrock_exc, final_kwargs)
+            if _retry_kwargs is not None:
+                return client.converse_stream(**_retry_kwargs).get("stream", [])
+            # InvokeModel-only IAM policies cannot stream; fall back inside the
+            # same Relay attempt (one lifecycle boundary).
+            if is_streaming_access_denied_error(_bedrock_exc):
+                self.agent._disable_streaming = True
+                self.agent._safe_print(
+                    "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream — "
+                    "falling back to non-streaming InvokeModel.\n"
+                    "   Grant that action to restore streaming output.\n"
+                )
+                logger.info(
+                    "bedrock: converse_stream denied by IAM (%s) — "
+                    "using non-streaming converse() for this session.",
+                    type(_bedrock_exc).__name__,
+                )
+                return normalize_converse_response(client.converse(**final_kwargs))
+            if is_stale_connection_error(_bedrock_exc):
+                invalidate_runtime_client(region)
+            raise
+        return raw_response.get("stream", [])
+
+    def _worker(self):
+        agent = self.agent
         stream = None
         try:
             from agent import relay_llm
-            from agent.bedrock_adapter import (
-                _get_bedrock_runtime_client,
-                invalidate_runtime_client,
-                is_stale_connection_error,
-                is_streaming_access_denied_error,
-                normalize_converse_response,
-                recover_from_cache_point_rejection,
-                stream_converse_with_callbacks,
-            )
+            from agent.bedrock_adapter import stream_converse_with_callbacks
+
             intercepted_events = []
             writer_token = {"value": None}
 
-            def _open_bedrock_stream(next_api_kwargs: dict[str, Any]):
-                final_kwargs = dict(next_api_kwargs)
-                region = final_kwargs.pop("__bedrock_region__", "us-east-1")
-                final_kwargs.pop("__bedrock_converse__", None)
-                client = _get_bedrock_runtime_client(region)
-                try:
-                    raw_response = client.converse_stream(**final_kwargs)
-                except Exception as _bedrock_exc:
-                    # Some families refuse a cachePoint block in one section
-                    # (Nova: toolConfig.tools, #97281): drop it and reopen
-                    # inside the same Relay attempt.
-                    _retry_kwargs = recover_from_cache_point_rejection(
-                        _bedrock_exc, final_kwargs
-                    )
-                    if _retry_kwargs is not None:
-                        return client.converse_stream(**_retry_kwargs).get(
-                            "stream", []
-                        )
-                    # InvokeModel-only IAM policies cannot stream; fall back
-                    # inside the same Relay attempt (one lifecycle boundary).
-                    if is_streaming_access_denied_error(_bedrock_exc):
-                        agent._disable_streaming = True
-                        agent._safe_print(
-                            "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream — "
-                            "falling back to non-streaming InvokeModel.\n"
-                            "   Grant that action to restore streaming output.\n"
-                        )
-                        logger.info(
-                            "bedrock: converse_stream denied by IAM (%s) — "
-                            "using non-streaming converse() for this session.",
-                            type(_bedrock_exc).__name__,
-                        )
-                        return normalize_converse_response(
-                            client.converse(**final_kwargs)
-                        )
-                    if is_stale_connection_error(_bedrock_exc):
-                        invalidate_runtime_client(region)
-                    raise
-                return raw_response.get("stream", [])
-
-            def _on_text(text):
-                _bedrock_response_started["yes"] = True
-                _fire_first()
-                agent._fire_stream_delta(text)
-                deltas_were_sent["yes"] = True
-
-            def _on_tool(name):
-                _bedrock_response_started["yes"] = True
-                _fire_first()
-                agent._fire_tool_gen_started(name)
-
-            def _on_reasoning(text):
-                _bedrock_response_started["yes"] = True
-                _fire_first()
-                agent._fire_reasoning_delta(text)
-
-            def _finalize_bedrock_stream():
-                return stream_converse_with_callbacks(
-                    {"stream": list(intercepted_events)}
-                )
-
-            def _bedrock_stream_created(_stream: Any) -> None:
+            def _stream_created(_stream: Any) -> None:
                 writer_token["value"] = claim_stream_writer(agent)
 
-            def _accept_bedrock_event(_event: Any) -> bool:
+            def _accept_event(_event: Any) -> bool:
                 token = writer_token["value"]
                 return token is None or stream_writer_is_current(agent, token)
+
+            def _stamp_event() -> None:
+                self.last_event = time.time()
 
             try:
                 from agent.plugin_stream_hooks import has_reasoning_stream_observer_hooks
@@ -3467,14 +3462,16 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
                 plugin_reasoning_observer = False
 
             stream = relay_llm.stream(
-                dict(api_kwargs),
-                _open_bedrock_stream,
+                dict(self.api_kwargs),
+                self._open_stream,
                 **_relay_stream_identity(agent, "bedrock"),
-                finalizer=_finalize_bedrock_stream,
-                on_stream_created=_bedrock_stream_created,
+                finalizer=lambda: stream_converse_with_callbacks(
+                    {"stream": list(intercepted_events)}
+                ),
+                on_stream_created=_stream_created,
                 on_chunk=intercepted_events.append,
                 chunk_adapter=lambda chunk: chunk,
-                accept_chunk=_accept_bedrock_event,
+                accept_chunk=_accept_event,
                 completed_response_predicate=lambda response: bool(
                     getattr(response, "choices", None)
                 ),
@@ -3483,96 +3480,101 @@ def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
             )
             streamed_response = stream_converse_with_callbacks(
                 {"stream": stream},
-                on_text_delta=_on_text if agent._has_stream_consumers() else None,
-                on_tool_start=_on_tool,
-                on_reasoning_delta=_on_reasoning
+                on_text_delta=self._on_text if agent._has_stream_consumers() else None,
+                on_tool_start=self._on_tool,
+                on_reasoning_delta=self._on_reasoning
                 if agent.reasoning_callback or agent.stream_delta_callback or plugin_reasoning_observer
                 else None,
                 on_interrupt_check=lambda: agent._interrupt_requested,
-                on_event=lambda: _bedrock_last_event.__setitem__("t", time.time()),
+                on_event=_stamp_event,
             )
-            result["response"] = stream.final_response or streamed_response
+            self.result["response"] = stream.final_response or streamed_response
         except Exception as e:
-            result["error"] = e
+            self.result["error"] = e
         finally:
             if stream is not None:
                 stream.close()
 
-    _emit_stream_start(agent)
-    try:
-        t = threading.Thread(
-            target=_context_thread_target(_bedrock_call), daemon=True
+    def _raise_if_interrupted(self, message: str, worker=None) -> None:
+        if not self.agent._interrupt_requested:
+            return
+        _record_interrupted_provider_wait(
+            self.agent,
+            time.time() - self.started_at,
+            response_started=self.response_started,
         )
-        t.start()
-        while t.is_alive():
-            t.join(timeout=0.3)
-            if agent._interrupt_requested:
-                _record_interrupted_provider_wait(
-                    agent,
-                    time.time() - _bedrock_started_at,
-                    response_started=_bedrock_response_started["yes"],
-                )
-                # Let the worker unwind Relay scopes before raising (#81521).
-                _join_worker_for_relay_teardown(t, label="Bedrock streaming")
-                raise InterruptedError("Agent interrupted during Bedrock API call")
-            # Liveness watchdog: no event past the stale timeout = wedged
-            # stream (the worker would block in the event loop forever).
-            _stale_elapsed = time.time() - _bedrock_last_event["t"]
-            if _stale_elapsed > _bedrock_stale_timeout:
-                logger.warning(
-                    "Bedrock stream stale for %.0fs (threshold %.0fs) — no events "
-                    "received. region=%s model=%s. Aborting call.",
-                    _stale_elapsed, _bedrock_stale_timeout,
-                    _bedrock_region, api_kwargs.get("modelId", "unknown"),
-                )
-                agent._buffer_status(
-                    f"⚠️ No events from Bedrock for {int(_stale_elapsed)}s "
-                    f"(model: {api_kwargs.get('modelId', 'unknown')}). Aborting..."
-                )
-                _bump_stale_streak(agent)
-                # Evict the region's cached client so the NEXT call gets a
-                # fresh pool. This does NOT abort the in-flight botocore
-                # EventStream (no external cancellation exists); the daemon
-                # worker keeps reading until its socket errors, so THIS call
-                # ends via the TimeoutError below and the streak escalates.
-                try:
-                    from agent.bedrock_adapter import invalidate_runtime_client
-                    invalidate_runtime_client(_bedrock_region)
-                except Exception as _inval_exc:
-                    logger.debug(
-                        "bedrock: stale client eviction failed: %s", _inval_exc
-                    )
-                _bedrock_last_event["t"] = time.time()
-                # Raises RuntimeError past HERMES_STREAM_STALE_GIVEUP; otherwise
-                # end THIS call with a TimeoutError (break — we cannot abort the
-                # worker) and let the streak carry forward.
-                _check_stale_giveup(agent)
-                result["error"] = TimeoutError(
-                    f"Bedrock stream produced no events for {int(_stale_elapsed)}s "
-                    f"(threshold {int(_bedrock_stale_timeout)}s) — aborting stalled "
-                    f"stream so the retry/fallback path can recover."
-                )
-                break
-        # The Bedrock callback returns a PARTIAL response on interrupt without
-        # raising (on_interrupt_check), so the in-loop raise may never fire.
-        # Re-check so /stop is not swallowed (#59999 area).
-        if agent._interrupt_requested:
-            _record_interrupted_provider_wait(
-                agent,
-                time.time() - _bedrock_started_at,
-                response_started=_bedrock_response_started["yes"],
-            )
-            raise InterruptedError("Agent interrupted during Bedrock API call (post-worker)")
-        if result["error"] is not None:
-            raise result["error"]
-        # Success clears the cross-turn breaker (#58962).
-        if result["response"] is not None:
-            _reset_stale_streak(agent)
-        _emit_stream_end(agent, final_text=_stream_final_text(result["response"]), finished=True, error=None)
-        return result["response"]
-    except Exception as exc:
-        _emit_stream_end(agent, final_text="", finished=False, error=str(exc))
-        raise
+        if worker is not None:
+            # Let the worker unwind Relay scopes before raising (#81521).
+            _join_worker_for_relay_teardown(worker, label="Bedrock streaming")
+        raise InterruptedError(message)
+
+    def _on_stale(self, stale_elapsed: float) -> None:
+        """No event past the stale timeout = wedged stream (the worker would
+        block in the event loop forever)."""
+        agent = self.agent
+        logger.warning(
+            "Bedrock stream stale for %.0fs (threshold %.0fs) — no events "
+            "received. region=%s model=%s. Aborting call.",
+            stale_elapsed, self.stale_timeout, self.region, self._model(),
+        )
+        agent._buffer_status(
+            f"⚠️ No events from Bedrock for {int(stale_elapsed)}s "
+            f"(model: {self._model()}). Aborting..."
+        )
+        _bump_stale_streak(agent)
+        # Evict the region's cached client so the NEXT call gets a fresh pool.
+        # This does NOT abort the in-flight botocore EventStream (no external
+        # cancellation exists); the daemon worker keeps reading until its
+        # socket errors, so THIS call ends via the TimeoutError below.
+        try:
+            from agent.bedrock_adapter import invalidate_runtime_client
+            invalidate_runtime_client(self.region)
+        except Exception as _inval_exc:
+            logger.debug("bedrock: stale client eviction failed: %s", _inval_exc)
+        self.last_event = time.time()
+        # Raises RuntimeError past HERMES_STREAM_STALE_GIVEUP; otherwise end
+        # THIS call with a TimeoutError and let the streak carry forward.
+        _check_stale_giveup(agent)
+        self.result["error"] = TimeoutError(
+            f"Bedrock stream produced no events for {int(stale_elapsed)}s "
+            f"(threshold {int(self.stale_timeout)}s) — aborting stalled "
+            f"stream so the retry/fallback path can recover."
+        )
+
+    def run(self):
+        agent = self.agent
+        # Cross-turn stale-stream circuit breaker (#58962), as on the OpenAI/
+        # Anthropic path.
+        _check_stale_giveup(agent)
+        _emit_stream_start(agent)
+        try:
+            t = threading.Thread(target=_context_thread_target(self._worker), daemon=True)
+            t.start()
+            while t.is_alive():
+                t.join(timeout=0.3)
+                self._raise_if_interrupted("Agent interrupted during Bedrock API call", worker=t)
+                stale_elapsed = time.time() - self.last_event
+                if stale_elapsed > self.stale_timeout:
+                    self._on_stale(stale_elapsed)
+                    break
+            # The Bedrock callback returns a PARTIAL response on interrupt
+            # without raising (on_interrupt_check), so the in-loop raise may
+            # never fire. Re-check so /stop is not swallowed (#59999 area).
+            self._raise_if_interrupted("Agent interrupted during Bedrock API call (post-worker)")
+            if self.result["error"] is not None:
+                raise self.result["error"]
+            # Success clears the cross-turn breaker (#58962).
+            if self.result["response"] is not None:
+                _reset_stale_streak(agent)
+            _emit_stream_end(agent, final_text=_stream_final_text(self.result["response"]), finished=True, error=None)
+            return self.result["response"]
+        except Exception as exc:
+            _emit_stream_end(agent, final_text="", finished=False, error=str(exc))
+            raise
+
+
+def _stream_bedrock_converse(agent, api_kwargs: dict, on_first_delta):
+    return _BedrockStream(agent, api_kwargs, on_first_delta).run()
 
 
 class _ToolCallAccumulator:
