@@ -27,8 +27,7 @@ _TOPIC_TABLES = (
     (
         "telegram_dm_topic_mode",
         "profile_name, chat_id, user_id, enabled, activated_at, updated_at, "
-        "has_topics_enabled, allows_users_to_create_topics, "
-        "capability_checked_at, intro_message_id, pinned_message_id",
+        "has_topics_enabled, allows_users_to_create_topics, capability_checked_at, intro_message_id, pinned_message_id",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -46,8 +45,7 @@ _TOPIC_TABLES = (
     ),
     (
         "telegram_dm_topic_bindings",
-        "profile_name, chat_id, thread_id, user_id, session_key, "
-        "session_id, managed_mode, linked_at, updated_at",
+        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -158,9 +156,8 @@ class SessionTelegramTopicsMixin:
         self._execute_write(_do)
 
     def enable_telegram_topic_mode(
-        self, *, chat_id: str, user_id: str, profile_name: str = "default",
-        has_topics_enabled: Optional[bool] = None,
-        allows_users_to_create_topics: Optional[bool] = None,
+        self, *, chat_id: str, user_id: str, profile_name: str="default", has_topics_enabled: Optional[bool]=None,
+        allows_users_to_create_topics: Optional[bool]=None,
     ) -> None:
         """Enable Telegram DM topic mode for one private chat/user. Owns the explicit topic
         migration; SessionDB startup must not create these tables."""
@@ -214,9 +211,7 @@ class SessionTelegramTopicsMixin:
                 return
         self._execute_write(_do)
 
-    def is_telegram_topic_mode_enabled(
-        self, *, chat_id: str, user_id: str, profile_name: str = "default"
-    ) -> bool:
+    def is_telegram_topic_mode_enabled(self, *, chat_id: str, user_id: str, profile_name: str = "default") -> bool:
         """Return whether Telegram DM topic mode is enabled for this chat/user."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         row = self._topic_read_one(
@@ -248,8 +243,7 @@ class SessionTelegramTopicsMixin:
         """All bindings for one chat, newest first ([] when the table is absent)."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         rows = self._topic_read_all(
-            "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? "
-            "ORDER BY updated_at DESC",
+            "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? ORDER BY updated_at DESC",
             (profile_name, str(chat_id)),
         )
         return [dict(row) for row in rows]
@@ -265,9 +259,7 @@ class SessionTelegramTopicsMixin:
         )
         return dict(row) if row else None
 
-    def delete_telegram_topic_binding(
-        self, *, chat_id: str, thread_id: str, profile_name: str = "default"
-    ) -> int:
+    def delete_telegram_topic_binding(self, *, chat_id: str, thread_id: str, profile_name: str = "default") -> int:
         """Remove the binding row for one (chat, thread) pair. Called when the Bot API confirms
         a topic was deleted externally (``Thread not found`` after the same-thread retry
         failed); otherwise ``gateway.run._recover_telegram_topic_thread_id`` keeps

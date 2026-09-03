@@ -120,8 +120,7 @@ class SessionTitlesMixin:
             # CAS on the values just read (``IS`` is NULL-safe): a concurrent write between
             # the SELECT and here loses instead of being overwritten.
             cursor = conn.execute(
-                "UPDATE sessions SET title = ?, title_source = ? "
-                "WHERE id = ? AND title IS ? AND title_source IS ?",
+                "UPDATE sessions SET title = ?, title_source = ? WHERE id = ? AND title IS ? AND title_source IS ?",
                 (title, source if title else None, session_id, current["title"], current["title_source"]),
             )
             return cursor.rowcount

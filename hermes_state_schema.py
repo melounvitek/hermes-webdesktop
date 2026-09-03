@@ -114,8 +114,7 @@ _TITLE_UNIQUE_INDEX_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL"
 )
 _STALE_KEY_UPSERT_SQL = (
-    "INSERT INTO state_meta (key, value) VALUES (?, '1') "
-    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    "INSERT INTO state_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
 )
 _CLEAR_REBUILD_MARKERS_SQL = "DELETE FROM state_meta WHERE key IN ('fts_rebuild_high_water', 'fts_rebuild_progress')"
 
@@ -165,9 +164,7 @@ class SessionSchemaMixin:
         (the legacy column stays a read fallback; next init resumes), whereas propagating
         left the version below 25 and re-ran this on every open (gateway crash loop)."""
         try:
-            rows = cursor.execute(
-                "SELECT id, system_prompt FROM sessions WHERE system_prompt IS NOT NULL"
-            ).fetchall()
+            rows = cursor.execute("SELECT id, system_prompt FROM sessions WHERE system_prompt IS NOT NULL").fetchall()
         except sqlite3.OperationalError:
             return
         for session_id, prompt in rows:
@@ -180,8 +177,7 @@ class SessionSchemaMixin:
             except sqlite3.OperationalError as exc:
                 logger.warning(
                     "v25 prompt dedupe paused after contention (%s); "
-                    "unmigrated rows keep the legacy inline prompt and the "
-                    "next schema init resumes the migration.",
+                    "unmigrated rows keep the legacy inline prompt and the next schema init resumes the migration.",
                     exc,
                 )
                 return
@@ -212,8 +208,7 @@ class SessionSchemaMixin:
             return False  # "name IN ()" is a SQLite syntax error
         placeholders = ",".join("?" for _ in names)
         row = cursor.execute(
-            f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})",
-            tuple(names),
+            f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})", tuple(names),
         ).fetchone()
         return int(row[0]) < len(names)
 
@@ -237,8 +232,7 @@ class SessionSchemaMixin:
             update_names += ("messages_fts_cjk_update",)
         placeholders = ", ".join("?" for _ in update_names)
         rows = cursor.execute(
-            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})",
-            update_names,
+            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})", update_names,
         ).fetchall()
         to_drop = [name for name, sql in rows if self._fts_update_trigger_needs_narrowing(sql)]
         if not to_drop:
@@ -265,9 +259,7 @@ class SessionSchemaMixin:
                     "CJK FTS UPDATE trigger missing or still broad after "
                     "UPDATE OF migration; marked stale and unavailable"
                 )
-        logger.info(
-            "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop),
-        )
+        logger.info("Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop))
         return len(to_drop)
 
     def _cjk_update_trigger_is_narrowed(self, cursor: sqlite3.Cursor) -> bool:
@@ -373,8 +365,7 @@ class SessionSchemaMixin:
             "holder_pids": sorted({pid for pid, _path in foreign_holders if pid > 0}),
         }
         cursor.execute(
-            "INSERT INTO state_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO state_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (FTS_REBUILD_DEFERRAL_KEY, json.dumps(diagnostic, sort_keys=True)),
         )
         if attempts >= _FTS_HOLDER_ESCALATE_ATTEMPTS and now - first_seen >= _FTS_HOLDER_ESCALATE_SECONDS:
@@ -402,8 +393,7 @@ class SessionSchemaMixin:
             return False
         logger.warning(
             "Deferred stale state.db FTS rebuild while foreign processes "
-            "hold the database or WAL sidecars (%s); canonical writes and "
-            "LIKE search remain available (deferral %d).",
+            "hold the database or WAL sidecars (%s); canonical writes and LIKE search remain available (deferral %d).",
             foreign_holders,
             attempts,
         )
@@ -462,8 +452,7 @@ class SessionSchemaMixin:
                 return recovered
         except Exception:  # noqa: BLE001 - background retry must never raise
             logger.warning(
-                "In-process retry of the deferred stale state.db FTS rebuild failed; will retry later.",
-                exc_info=True,
+                "In-process retry of the deferred stale state.db FTS rebuild failed; will retry later.", exc_info=True,
             )
             return False
 
@@ -527,9 +516,7 @@ class SessionSchemaMixin:
         self._fts_stale = False
         self._fts_enabled = True
         self._trigram_available = include_trigram
-        logger.warning(
-            "Rebuilt stale state.db FTS indexes from canonical messages and restored sync triggers."
-        )
+        logger.warning("Rebuilt stale state.db FTS indexes from canonical messages and restored sync triggers.")
         return True
 
     # ── Declarative column reconciliation ──────────────────────────────────
@@ -616,8 +603,7 @@ class SessionSchemaMixin:
                         raise
                     # Anything else permanently strands the store behind SCHEMA_SQL — be loud.
                     logger.warning(
-                        "reconcile %s.%s failed; store remains behind "
-                        "SCHEMA_SQL: %s", table_name, col_name, exc,
+                        "reconcile %s.%s failed; store remains behind SCHEMA_SQL: %s", table_name, col_name, exc,
                     )
 
     @staticmethod
@@ -653,8 +639,7 @@ class SessionSchemaMixin:
         if pk_cols is None or pk_cols == ["scope", "session_key"]:
             return
         logger.info(
-            "gateway_routing has legacy primary key %r; rebuilding with composite (scope, session_key) key",
-            pk_cols,
+            "gateway_routing has legacy primary key %r; rebuilding with composite (scope, session_key) key", pk_cols,
         )
         self._rebuild_table(
             cursor, "gateway_routing", "gateway_routing_legacy_pk",
@@ -683,8 +668,7 @@ class SessionSchemaMixin:
         if pk_cols is None or "task" in pk_cols:
             return
         logger.info(
-            "session_model_usage has legacy primary key %r (missing task); "
-            "rebuilding with composite 6-column key",
+            "session_model_usage has legacy primary key %r (missing task); rebuilding with composite 6-column key",
             sorted(pk_cols),
         )
         cursor.execute("PRAGMA foreign_keys=OFF")
@@ -799,8 +783,7 @@ class SessionSchemaMixin:
                 )
                 cursor.execute(
                     "UPDATE sessions SET model_config = json_set("
-                    "COALESCE(model_config, '{}'), '$._delegate_from', '__orphaned__') "
-                    "WHERE parent_session_id IS NULL "
+                    "COALESCE(model_config, '{}'), '$._delegate_from', '__orphaned__') WHERE parent_session_id IS NULL "
                     "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
                     "AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL "
                     "AND title IS NULL AND message_count <= 25 AND EXISTS (SELECT 1 FROM messages m "
@@ -962,8 +945,7 @@ class SessionSchemaMixin:
                 return
         logger.warning(
             "Deferred startup FTS rebuild: another process holds the "
-            "rebuild authority for this state.db; detaching FTS sync "
-            "until the stale-index recovery path rebuilds it."
+            "rebuild authority for this state.db; detaching FTS sync until the stale-index recovery path rebuilds it."
         )
         cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_STALE_KEY,))
         self._drop_all_fts_triggers(cursor)

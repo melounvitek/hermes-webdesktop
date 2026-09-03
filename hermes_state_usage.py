@@ -274,13 +274,11 @@ class SessionUsageMixin:
             pass  # never fatal at interpreter shutdown
 
     def update_token_counts(
-        self, session_id: str, input_tokens: int = 0, output_tokens: int = 0, model: str = None,
-        cache_read_tokens: int = 0, cache_write_tokens: int = 0, reasoning_tokens: int = 0,
-        estimated_cost_usd: Optional[float] = None, actual_cost_usd: Optional[float] = None,
-        cost_status: Optional[str] = None, cost_source: Optional[str] = None,
-        pricing_version: Optional[str] = None, billing_provider: Optional[str] = None,
-        billing_base_url: Optional[str] = None, billing_mode: Optional[str] = None,
-        api_call_count: int = 0, absolute: bool = False,
+        self, session_id: str, input_tokens: int=0, output_tokens: int=0, model: str=None, cache_read_tokens: int=0,
+        cache_write_tokens: int=0, reasoning_tokens: int=0, estimated_cost_usd: Optional[float]=None,
+        actual_cost_usd: Optional[float]=None, cost_status: Optional[str]=None, cost_source: Optional[str]=None,
+        pricing_version: Optional[str]=None, billing_provider: Optional[str]=None, billing_base_url: Optional[str]=None,
+        billing_mode: Optional[str]=None, api_call_count: int=0, absolute: bool=False,
     ) -> None:
         """Update token counters and backfill model if unset. *absolute*=False increments
         (per-API-call deltas, CLI path); *absolute*=True sets directly (gateway path,
@@ -335,12 +333,11 @@ class SessionUsageMixin:
         self._execute_write(_do)
 
     def _record_model_usage(
-        self, conn, session_id: str, *, model: Optional[str] = None, billing_provider: Optional[str] = None,
-        billing_base_url: Optional[str] = None, billing_mode: Optional[str] = None, input_tokens: int = 0,
-        output_tokens: int = 0, cache_read_tokens: int = 0, cache_write_tokens: int = 0,
-        reasoning_tokens: int = 0, estimated_cost_usd: Optional[float] = None,
-        actual_cost_usd: Optional[float] = None, cost_status: Optional[str] = None,
-        cost_source: Optional[str] = None, api_call_count: int = 0, task: str = "",
+        self, conn, session_id: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
+        billing_base_url: Optional[str]=None, billing_mode: Optional[str]=None, input_tokens: int=0,
+        output_tokens: int=0, cache_read_tokens: int=0, cache_write_tokens: int=0, reasoning_tokens: int=0,
+        estimated_cost_usd: Optional[float]=None, actual_cost_usd: Optional[float]=None,
+        cost_status: Optional[str]=None, cost_source: Optional[str]=None, api_call_count: int=0, task: str="",
     ) -> None:
         """Accumulate a per-API-call usage delta into session_model_usage, inside the caller's
         write txn after the ``sessions`` UPDATE. A missing model/provider falls back to
@@ -348,8 +345,7 @@ class SessionUsageMixin:
         main-loop route (vision on gemini while the main loop runs anthropic): missing
         info stays 'unknown'/empty."""
         row = conn.execute(
-            "SELECT model, billing_provider, billing_base_url, billing_mode "
-            "FROM sessions WHERE id = ?", (session_id,),
+            "SELECT model, billing_provider, billing_base_url, billing_mode FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
         sess = dict(row) if (row is not None and not task) else {}
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
@@ -366,11 +362,10 @@ class SessionUsageMixin:
                 cost_status, cost_source, now, now))
 
     def record_auxiliary_usage(
-        self, session_id: str, task: str, *, model: Optional[str] = None,
-        billing_provider: Optional[str] = None, billing_base_url: Optional[str] = None,
-        input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
-        cache_write_tokens: int = 0, reasoning_tokens: int = 0,
-        estimated_cost_usd: Optional[float] = None, api_call_count: int = 1,
+        self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
+        billing_base_url: Optional[str]=None, input_tokens: int=0, output_tokens: int=0, cache_read_tokens: int=0,
+        cache_write_tokens: int=0, reasoning_tokens: int=0, estimated_cost_usd: Optional[float]=None,
+        api_call_count: int=1,
     ) -> None:
         """Record an auxiliary LLM call's usage (vision, compression, title generation, ...)
         as a per-(model, provider, task) delta in ``session_model_usage`` WITHOUT touching

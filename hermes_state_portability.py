@@ -17,9 +17,8 @@ from hermes_state_common import SCHEMA_SQL, _PREVIEW_RAW_SUBQUERY_SQL, _shape_pr
 logger = logging.getLogger("hermes_state")
 
 _IMPORT_SESSION_TEXT_FIELDS = (
-    "source", "user_id", "model", "system_prompt", "end_reason", "cwd",
-    "git_branch", "git_repo_root", "billing_provider", "billing_base_url",
-    "billing_mode", "cost_status", "cost_source", "pricing_version", "title",
+    "source", "user_id", "model", "system_prompt", "end_reason", "cwd", "git_branch", "git_repo_root",
+    "billing_provider", "billing_base_url", "billing_mode", "cost_status", "cost_source", "pricing_version", "title",
 )
 # ``role`` is validated separately (non-empty string).
 _IMPORT_MESSAGE_TEXT_FIELDS = (
@@ -51,13 +50,11 @@ _IMPORT_SESSION_INSERT_SQL = """INSERT INTO sessions (
                        )"""
 # Columns copied verbatim from the payload; typed columns are converted below.
 _IMPORT_PASSTHROUGH_COLS = (
-    "user_id", "model", "model_config", "end_reason", "cwd", "git_branch", "git_repo_root",
-    "billing_provider", "billing_base_url", "billing_mode", "cost_status", "cost_source",
-    "pricing_version", "title",
+    "user_id", "model", "model_config", "end_reason", "cwd", "git_branch", "git_repo_root", "billing_provider",
+    "billing_base_url", "billing_mode", "cost_status", "cost_source", "pricing_version", "title",
 )
 _IMPORT_INT_COLS = (
-    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
-    "api_call_count",
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "api_call_count",
 )
 _IMPORT_FLOAT_COLS = ("ended_at", "estimated_cost_usd", "actual_cost_usd")
 
@@ -165,8 +162,7 @@ class SessionPortabilityMixin:
         # Same read-your-writes guarantee as list_sessions_rich.
         self.flush_token_counts()
         query = _rich_select(
-            self._compact_session_cols() if compact_rows else "s.*",
-            f"s.id IN ({','.join('?' for _ in ids)})",
+            self._compact_session_cols() if compact_rows else "s.*", f"s.id IN ({','.join('?' for _ in ids)})",
             prompt_select=None if compact_rows else f", {_PROMPT_RESOLVED_SQL}",
         )
         return {s["id"]: s for s in self._rich_rows(query, ids)}
@@ -222,9 +218,7 @@ class SessionPortabilityMixin:
         """Export all sessions (with messages) as dicts, e.g. for JSONL backup."""
         return [self._with_messages(s) for s in self.search_sessions(source=source, limit=100000)]
 
-    def adopt_session_lineage_from(
-        self, donor_db: Any, session_id: str, *, retire_donor: bool = True
-    ) -> Dict[str, Any]:
+    def adopt_session_lineage_from(self, donor_db: Any, session_id: str, *, retire_donor: bool = True) -> Dict[str, Any]:
         """Adopt *session_id*'s full compression lineage from *donor_db* (stranded-bot-session
         heal: a profile bot's rows accumulated in the DEFAULT profile's state.db before the
         desktop routed session RPCs by target session). Pure composition
@@ -272,9 +266,7 @@ class SessionPortabilityMixin:
 
         donor_retired = False
         if adopted and retire_donor and not donor_ahead:
-            donor_retired = all(
-                self._retire_donor_segment(donor_db, seg["id"]) for seg in segments if seg.get("id")
-            )
+            donor_retired = all(self._retire_donor_segment(donor_db, seg["id"]) for seg in segments if seg.get("id"))
         return {**result, "adopted": adopted, "donor_retired": donor_retired}
 
     def _retire_donor_segment(self, donor_db: Any, seg_id: str) -> bool:
