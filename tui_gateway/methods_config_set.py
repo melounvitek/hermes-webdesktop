@@ -63,9 +63,32 @@ def _cfgset_await_agent(session, rid):
     return _err(rid, 5032, "agent initialization failed") if session.get("agent") is None else None
 
 
-def _cfgset_model_ok(rid, key, value, warning, confirm_required, confirm_message, scope, **extra):
-    return _kv(rid, key, value, warning=warning, confirm_required=confirm_required,
+def _cfgset_model_ok(rid, key, value, warning="", confirm_message="", scope="session", **extra):
+    """Model-switch envelope; ``confirm_required`` follows ``confirm_message`` (canonical; ``warning``
+    is its legacy alias on the deferred path)."""
+    return _kv(rid, key, value, warning=warning, confirm_required=bool(confirm_message),
                confirm_message=confirm_message, scope=scope, **extra)
+
+
+def _stash_pending_model_switch(rid, key, value, session, confirmed, parsed):
+    """No live swap while a turn streams (agent.switch_model() mutates fields the worker thread
+    reads every iteration): stash the pick for the NEXT turn start. Selection guards run HERE (the
+    only moment a confirm round-trip is possible; an unconfirmed stashed pick is dropped at turn
+    start) — on a warning nothing is stashed."""
+    try:
+        pending_model = parsed.model_input
+    except Exception:
+        pending_model = str(value)
+    pending_provider = (getattr(parsed, "explicit_provider", "") or "").strip()
+    if not confirmed:
+        pending_warning = _pending_switch_selection_warning(pending_model, pending_provider)
+        if pending_warning is not None:
+            return _cfgset_model_ok(rid, key, pending_model, pending_warning, pending_warning, deferred=False)
+    # display_*: _session_info shows the user's pick while pending, not the live old model.
+    session["pending_model_switch"] = {
+        "raw": value, "confirm_expensive_model": confirmed,
+        "display_model": pending_model, "display_provider": pending_provider}
+    return _cfgset_model_ok(rid, key, pending_model, deferred=True)
 
 
 def _cfgset_guarded(fn):
@@ -89,29 +112,9 @@ def _set_model(rid, params, key, value, session):
     if session:
         from hermes_cli.model_switch import parse_model_switch_args
         sid = params.get("session_id", "")
-        # No live swap while a turn streams (agent.switch_model() mutates fields the worker
-        # thread reads every iteration): stash the pick for the NEXT turn start.
-        if session.get("running"):
-            parsed = parse_model_switch_args(value)
-            try:
-                pending_model = parsed.model_input
-            except Exception:
-                pending_model = str(value)
-            pending_provider = (getattr(parsed, "explicit_provider", "") or "").strip()
-            # Selection guards run HERE (the only moment a confirm round-trip is possible; an
-            # unconfirmed stashed pick is dropped at turn start). On a warning nothing is stashed.
-            # `confirm_message` is canonical, `warning` its legacy alias.
-            if not confirmed:
-                pending_warning = _pending_switch_selection_warning(pending_model, pending_provider)
-                if pending_warning is not None:
-                    return _cfgset_model_ok(rid, key, pending_model, pending_warning, True,
-                                            pending_warning, "session", deferred=False)
-            # display_*: _session_info shows the user's pick while pending, not the live old model.
-            session["pending_model_switch"] = {
-                "raw": value, "confirm_expensive_model": confirmed,
-                "display_model": pending_model, "display_provider": pending_provider}
-            return _cfgset_model_ok(rid, key, pending_model, "", False, "", "session", deferred=True)
         parsed_flags = parse_model_switch_args(value)
+        if session.get("running"):
+            return _stash_pending_model_switch(rid, key, value, session, confirmed, parsed_flags)
         explicit_provider = parsed_flags.explicit_provider
         failed_agent_init = session.get("agent") is None and session.get("agent_error") is not None
         failed_ready = session.get("agent_ready") if failed_agent_init else None
@@ -138,9 +141,9 @@ def _set_model(rid, params, key, value, session):
                 _persist_live_session_runtime(session)
     else:
         result = _apply_model_switch("", {"agent": None}, value, confirm_expensive_model=confirmed)
-    return _cfgset_model_ok(
-        rid, key, result["value"], result["warning"], result.get("confirm_required", False),
-        result.get("confirm_message", ""), result.get("scope", "session"))
+    return _kv(rid, key, result["value"], warning=result["warning"],
+               confirm_required=result.get("confirm_required", False),
+               confirm_message=result.get("confirm_message", ""), scope=result.get("scope", "session"))
 
 
 _FAST_WORDS = {"fast": "fast", "on": "fast", "normal": "normal", "off": "normal",
