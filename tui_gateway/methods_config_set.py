@@ -361,40 +361,35 @@ def _set_details_section(rid, params, key, value, session):
     return _kv(rid, key, nv)
 
 
-def _toggle_setter(rid, key, value, raw, aliases: dict, flipped, cfg_key: str, report=lambda v: v):
-    """``""``/``toggle`` -> ``flipped``, an alias word -> its value, else 4002; writes ``cfg_key``."""
-    nv = flipped if raw in {"", "toggle"} else aliases.get(raw)
+def _toggle_setters() -> dict:
+    """key -> (normaliser, cfg key, alias word -> value, flipped(current), report). ``""``/``toggle``
+    flips the current value; an alias word maps directly; anything else is 4002. Built per call:
+    the specs reference server.py globals (rebound at install)."""
+    def on_off(v):
+        return "on" if v else "off"
+    return {
+        # density/battery are on/off/toggle booleans on display.<field>.
+        "density": (_word, "display.tui_compact", {"on": True, "off": False},
+                    lambda: not bool(_display_cfg().get("tui_compact", False)), on_off),
+        "battery": (_word, "display.battery",
+                    {"on": True, "true": True, "yes": True, "off": False, "false": False, "no": False},
+                    lambda: not bool(_display_cfg().get("battery", False)), on_off),
+        "statusbar": (_word, "display.tui_statusbar", {"on": "top", **{m: m for m in _STATUSBAR_MODES}},
+                      lambda: "top" if _coerce_statusbar(_display_cfg().get("tui_statusbar", "top")) == "off" else "off",
+                      lambda v: v),
+        # _raw_word: falsy non-strings (0, False) reach the alias map as themselves (-> 'off'), not toggle.
+        "mouse": (_raw_word, "display.mouse_tracking", _MOUSE_TRACKING_ALIASES,
+                  lambda: "all" if _display_mouse_tracking(_display_cfg()) == "off" else "off", lambda v: v)}
+
+
+def _set_toggle(rid, params, key, value, session):
+    norm, cfg_key, aliases, flipped, report = _toggle_setters()[key]
+    raw = norm(value)
+    nv = flipped() if raw in {"", "toggle"} else aliases.get(raw)
     if nv is None:
         return _err(rid, 4002, f"unknown {key} value: {value}")
     _write_config_key(cfg_key, nv)
     return _kv(rid, key, report(nv))
-
-
-# on/off/toggle display booleans: key -> (display field, accepted word -> bool).
-_DISPLAY_BOOLS = {
-    "density": ("tui_compact", {"on": True, "off": False}),
-    "battery": ("battery", {"on": True, "true": True, "yes": True, "off": False, "false": False,
-                            "no": False})}
-
-
-def _set_display_bool(rid, params, key, value, session):
-    cfg_key, words = _DISPLAY_BOOLS[key]
-    cur_b = bool(_display_cfg().get(cfg_key, False))
-    return _toggle_setter(rid, key, value, _word(value), words, not cur_b, f"display.{cfg_key}",
-                          lambda v: "on" if v else "off")
-
-
-def _set_statusbar(rid, params, key, value, session):
-    current = _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))
-    return _toggle_setter(rid, key, value, _word(value), {"on": "top", **{m: m for m in _STATUSBAR_MODES}},
-                          "top" if current == "off" else "off", "display.tui_statusbar")
-
-
-def _set_mouse(rid, params, key, value, session):
-    # _raw_word: falsy non-strings (0, False) reach the alias map as themselves (-> 'off'), not toggle.
-    current = _display_mouse_tracking(_display_cfg())
-    return _toggle_setter(rid, key, value, _raw_word(value), _MOUSE_TRACKING_ALIASES,
-                          "all" if current == "off" else "off", "display.mouse_tracking")
 
 
 def _set_cwd(rid, params, key, value, session):
@@ -454,8 +449,8 @@ _CONFIG_SETTERS = {
     "model": _set_model, "fast": _set_fast, "busy": _set_busy, "verbose": _set_verbose, "focus": _set_focus,
     "approval_mode": _set_approval_mode, "approvals.mode": _set_word, "yolo": _set_yolo,
     "reasoning": _set_reasoning, "details_mode": _set_word, "thinking_mode": _set_word,
-    "density": _set_display_bool, "battery": _set_display_bool, "theme": _set_word,
-    "statusbar": _set_statusbar, "mouse": _set_mouse, "indicator": _set_word,
+    "density": _set_toggle, "battery": _set_toggle, "theme": _set_word,
+    "statusbar": _set_toggle, "mouse": _set_toggle, "indicator": _set_word,
     "cwd": _set_cwd, "terminal.cwd": _set_cwd, "workdir": _set_cwd,
     "prompt": _set_prompt, "personality": _set_personality, "skin": _set_skin}
 
