@@ -1,8 +1,9 @@
-"""MCP server dashboard helpers: create-payload normalisation, env redaction/summary, and the dashboard-driven MCP OAuth worker.
+"""MCP dashboard helpers: create-payload normalisation, env redaction/summary, dashboard-driven MCP OAuth worker.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``, which re-imports every externally used
+name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
+Wraps the same config layer the CLI uses (hermes_cli.mcp_config); stdio ``env``
+secrets are redacted on read.
 """
 
 import threading
@@ -15,38 +16,14 @@ from hermes_cli.config import redact_key
 from hermes_cli.web_models import MCPServerCreate
 
 
-# ---------------------------------------------------------------------------
-# Automation Blueprints — parameterized automation blueprints. The dashboard renders the
-# slot schema as a form; submitting instantiates a real cron job via the same
-# create_job path. See cron/blueprint_catalog.py for the single source of truth.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# MCP server endpoints — list / add / remove / test.
-#
-# Wraps the same config data layer the CLI uses (hermes_cli.mcp_config), so
-# servers managed here show up under `hermes mcp list` and vice versa.  Secrets
-# in stdio `env` blocks are redacted on read; the agent picks them up from
-# config.yaml at session start exactly as with CLI-added servers.
-# ---------------------------------------------------------------------------
-
-
-def _normalize_mcp_server_create(
-    body: MCPServerCreate,
-) -> tuple[str, Dict[str, Any], Optional[str]]:
+def _normalize_mcp_server_create(body: MCPServerCreate) -> tuple[str, Dict[str, Any], Optional[str]]:
     """Validate a Dashboard MCP create request and build its safe config.
 
-    The returned config never contains the submitted Bearer token. Callers
-    persist the token with the shared Bearer helper only after they enter the
-    intended profile scope. Keeping this conversion shared makes the
-    standalone MCP page and the Profile Builder enforce the same
-    transport/auth contract.
+    The returned config never contains the Bearer token; callers persist it via
+    the shared Bearer helper once inside the intended profile scope. Shared by
+    the MCP page and the Profile Builder so both enforce one transport/auth contract.
     """
-    from hermes_cli.mcp_config import (
-        _bearer_auth_headers,
-        _strip_bearer_prefix,
-    )
+    from hermes_cli.mcp_config import _bearer_auth_headers, _strip_bearer_prefix
     from hermes_cli.mcp_security import validate_mcp_server_entry
 
     name = (body.name or "").strip()
@@ -56,11 +33,7 @@ def _normalize_mcp_server_create(
     url = (body.url or "").strip()
     command = (body.command or "").strip()
     auth = (body.auth or "none").strip().lower()
-    bearer_token = (
-        body.bearer_token.get_secret_value()
-        if body.bearer_token is not None
-        else None
-    )
+    bearer_token = body.bearer_token.get_secret_value() if body.bearer_token is not None else None
 
     if bool(url) == bool(command):
         raise ValueError("Provide exactly one of URL (HTTP/SSE) or command (stdio)")
@@ -72,9 +45,7 @@ def _normalize_mcp_server_create(
         if body.args:
             raise ValueError("Arguments are only supported for stdio MCP servers")
         if body.env:
-            raise ValueError(
-                "Environment variables are only supported for stdio MCP servers"
-            )
+            raise ValueError("Environment variables are only supported for stdio MCP servers")
         if auth == "header":
             normalized = _strip_bearer_prefix(bearer_token) if bearer_token else ""
             if not normalized or normalized.lower() == "bearer":
@@ -88,9 +59,7 @@ def _normalize_mcp_server_create(
             server_config["auth"] = "oauth"
     else:
         if auth != "none" or body.bearer_token is not None:
-            raise ValueError(
-                "HTTP authentication is not supported for stdio MCP servers"
-            )
+            raise ValueError("HTTP authentication is not supported for stdio MCP servers")
         server_config["command"] = command
         if body.args:
             server_config["args"] = list(body.args)
@@ -118,9 +87,7 @@ def _mcp_server_summary(name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     transport = "http" if cfg.get("url") else ("stdio" if cfg.get("command") else "unknown")
     auth = cfg.get("auth")
     headers = cfg.get("headers") or {}
-    if not auth and isinstance(headers, dict) and any(
-        str(key).lower() == "authorization" for key in headers
-    ):
+    if not auth and isinstance(headers, dict) and any(str(key).lower() == "authorization" for key in headers):
         auth = "header"
     return {
         "name": name,
@@ -149,17 +116,9 @@ def _mcp_oauth_transaction(flow) -> threading.Lock:
 
 def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
     """Run the normal MCP probe with dashboard redirect/callback handlers."""
-    from hermes_cli.mcp_config import (
-        _oauth_tokens_present,
-        _probe_single_server,
-        _save_mcp_server,
-    )
+    from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server, _save_mcp_server
     try:
-        from agent.secret_scope import (
-            build_profile_secret_scope,
-            reset_secret_scope,
-            set_secret_scope,
-        )
+        from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from tools.mcp_dashboard_oauth import dashboard_oauth_flow
         from tools.mcp_oauth import HermesTokenStorage, force_interactive_oauth
@@ -175,10 +134,7 @@ def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
                 backup = storage.snapshot()
                 previous_entry = None
                 try:
-                    previous_entry = manager.remove(
-                        flow.server_name,
-                        hermes_home=flow.hermes_home,
-                    )
+                    previous_entry = manager.remove(flow.server_name, hermes_home=flow.hermes_home)
                     tools = _probe_single_server(
                         flow.server_name,
                         cfg,
@@ -198,28 +154,20 @@ def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
                         reconnect_mcp_server(flow.server_name)
                 except Exception:
                     storage.restore(backup, only_if_absent=True)
-                    manager.restore_entry(
-                        flow.server_name,
-                        previous_entry,
-                        hermes_home=flow.hermes_home,
-                    )
+                    manager.restore_entry(flow.server_name, previous_entry, hermes_home=flow.hermes_home)
                     raise
         finally:
             reset_secret_scope(secret_token)
             reset_hermes_home_override(home_token)
     except Exception as exc:
         msg = str(exc)
-        # Providers that gate RFC 7591 registration to pre-approved clients
-        # (Figma's MCP catalog, etc.) 403 the register call before any
-        # authorization URL exists — surface what's actually happening
-        # instead of a bare "403 Forbidden".
+        # Providers gating RFC 7591 registration to pre-approved clients 403 the
+        # register call before any auth URL exists; say so, not "403 Forbidden".
         try:
             from tools.mcp_oauth import humanize_oauth_registration_error
 
             humanized = humanize_oauth_registration_error(
-                flow.server_name,
-                exc,
-                server_url=cfg.get("url") if isinstance(cfg, dict) else None,
+                flow.server_name, exc, server_url=cfg.get("url") if isinstance(cfg, dict) else None
             )
             if humanized:
                 msg = humanized
