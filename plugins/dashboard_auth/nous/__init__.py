@@ -13,13 +13,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from hermes_cli.dashboard_auth import (
-    DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session)
+from hermes_cli.dashboard_auth import LoginStart, ProviderError, Session
 from plugins.dashboard_auth._shared import (
+    JwtOAuthProvider,
     SkipRegistration,
     exchange_token,
     load_config_section,
-    make_jwks_client,
     pkce_login_start,
     refresh_token_from,
     register_provider,
@@ -38,7 +37,7 @@ _EXPECTED_CONTRACT_VERSION = 1  # contract C11
 LAST_SKIP_REASON: str = ""  # cleared on every register() so restarts don't leak stale reasons
 
 
-class NousDashboardAuthProvider(DashboardAuthProvider):
+class NousDashboardAuthProvider(JwtOAuthProvider):
     """Nous Portal OAuth via authorization-code + PKCE (S256)."""
 
     name = "nous"
@@ -56,63 +55,41 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         self._token_url = f"{self._portal_url}/api/oauth/token"
         self._jwks_client: Any = None  # lazily built (crypto import cost)
 
-    # ---- public API (DashboardAuthProvider) -------------------------------
-
     def start_login(self, *, redirect_uri: str) -> LoginStart:
         validate_redirect_uri(redirect_uri)
         return pkce_login_start(self._authorize_url, client_id=self._client_id, scope=_SCOPE, redirect_uri=redirect_uri)
-
-    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
-        # ``state`` is verified by the auth-route layer; Portal doesn't re-check it at the token endpoint.
-        return self._token_grant(
-            {
-                "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
-                "client_id": self._client_id, "code_verifier": code_verifier},
-            bad_request_exc=InvalidCodeError)
-
-    def refresh_session(self, *, refresh_token: str) -> Session:
-        if not refresh_token:
-            raise RefreshExpiredError("no refresh token present in session")
-        # The RT goes in BOTH the body (Portal's request schema requires it) and the
-        # ``x-nous-refresh-token`` header (Portal reconciles the two and keeps the value
-        # out of body access logs). Header-only → 400.
-        return self._token_grant(
-            {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token},
-            headers={"x-nous-refresh-token": refresh_token},
-            bad_request_exc=RefreshExpiredError)
-
-    def verify_session(self, *, access_token: str) -> Optional[Session]:
-        # None on expiry/invalidity (middleware then tries refresh); a ProviderError
-        # (JWKS unreachable) bubbles up so middleware emits 503.
-        try:
-            claims = self._verify_jwt(access_token)
-        except InvalidCodeError:
-            return None
-        return self._session(access_token, "", claims)
 
     def revoke_session(self, *, refresh_token: str) -> None:
         # Portal exposes no token-endpoint revocation grant; logout is client-side cookie
         # clearing and the RT expires within its 24h TTL.
         return None
 
-    # ---- internals --------------------------------------------------------
+    # ---- JwtOAuthProvider hooks -------------------------------------------
 
-    def _token_grant(
+    def _jwks_uri(self) -> str:
+        return self._jwks_url
+
+    def _refresh_request(self, refresh_token: str) -> tuple[Dict[str, str], Optional[Dict[str, str]]]:
+        # The RT goes in BOTH the body (Portal's request schema requires it) and the
+        # ``x-nous-refresh-token`` header (Portal reconciles the two and keeps the value
+        # out of body access logs). Header-only → 400.
+        return (
+            {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token},
+            {"x-nous-refresh-token": refresh_token})
+
+    def _grant(
         self, data: Dict[str, str], *, bad_request_exc: type[Exception], headers: Optional[Dict[str, str]] = None,
+        previous_refresh_token: str = "",
     ) -> Session:
         access_token, payload = exchange_token(
             self._token_url, data, headers=headers, bad_request_exc=bad_request_exc,
             idp="Portal", endpoint="Portal token endpoint", token_key="access_token",
             missing_msg="Portal token response missing access_token")
         # Rotating RT the caller MUST persist back to the cookie.
-        return self._session(access_token, refresh_token_from(payload), self._verify_jwt(access_token))
+        return self._session(access_token, refresh_token_from(payload), self._claims_for(access_token))
 
-    def _get_jwks_client(self) -> Any:
-        if self._jwks_client is None:
-            self._jwks_client = make_jwks_client(self._jwks_url)
-        return self._jwks_client
 
-    def _verify_jwt(self, access_token: str) -> Dict[str, Any]:
+    def _claims_for(self, access_token: str) -> Dict[str, Any]:
         claims = verify_jwt(
             access_token, self._get_jwks_client(), algorithms=["RS256"],
             audience=self._client_id,  # contract C2: bare client_id
@@ -133,11 +110,11 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
                 f"unsupported oauth_contract_version={contract_version!r}, expected {_EXPECTED_CONTRACT_VERSION}")
         return claims
 
+
     def _session(self, access_token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
         # Contract C4: no email / display_name in tokens.
         return session_from_claims(
-            self.name, claims, access_token=access_token, refresh_token=refresh_token, org_id=str(claims.get("org_id") or ""),
-        )
+            self.name, claims, access_token=access_token, refresh_token=refresh_token, org_id=str(claims.get("org_id") or ""))
 
 
 # ---- Plugin entry point ----

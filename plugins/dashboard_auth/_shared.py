@@ -17,7 +17,9 @@ from typing import Any, Callable, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import InvalidCodeError, LoginStart, ProviderError, Session, classify_jwks_lookup_error
+from hermes_cli.dashboard_auth import (
+    DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session,
+    classify_jwks_lookup_error)
 
 # JWKS Cache-Control max-age (nous contract C7); self-hosted mirrors it.
 JWKS_CACHE_SECONDS = 300
@@ -221,3 +223,75 @@ def verify_jwt(
         except Exception:
             pass
         raise ProviderError(f"{label} verification failed: {exc}{details}") from exc
+
+
+# ---- Shared provider skeletons ----
+
+class NonInteractiveMixin:
+    """OAuth-redirect stubs for providers without a browser login flow (password / service
+    credential). ``_NOT_INTERACTIVE`` is the operator-facing reason; ``_NO_START_LOGIN``
+    optionally overrides the ``start_login`` message."""
+
+    _NOT_INTERACTIVE: str = ""
+    _NO_START_LOGIN: str = ""
+
+    def start_login(self, *, redirect_uri: str) -> LoginStart:
+        raise NotImplementedError(self._NO_START_LOGIN or self._NOT_INTERACTIVE)
+
+    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
+        raise NotImplementedError(self._NOT_INTERACTIVE)
+
+
+class JwtOAuthProvider(DashboardAuthProvider):
+    """Authorization-code + PKCE provider whose session token is a JWT we verify ourselves
+    (nous: Portal access token; self-hosted: OIDC ID token). Subclasses implement
+    ``_jwks_uri``, ``_claims_for``, ``_grant``, ``_refresh_request`` and ``_session``."""
+
+    _jwks_client: Any = None
+
+    def _jwks_uri(self) -> str:
+        raise NotImplementedError
+
+    def _claims_for(self, token: str) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def _grant(
+        self, data: Dict[str, str], *, bad_request_exc: type[Exception], headers: Optional[Dict[str, str]] = None,
+        previous_refresh_token: str = "",
+    ) -> Session:
+        raise NotImplementedError
+
+    def _refresh_request(self, refresh_token: str) -> tuple[Dict[str, str], Optional[Dict[str, str]]]:
+        """``(form_data, extra_headers)`` for the refresh grant."""
+        raise NotImplementedError
+
+    def _session(self, token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
+        raise NotImplementedError
+
+    def _get_jwks_client(self) -> Any:
+        if self._jwks_client is None:
+            self._jwks_client = make_jwks_client(self._jwks_uri())
+        return self._jwks_client
+
+    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
+        # ``state`` is verified by the auth-route layer before this call.
+        return self._grant(
+            {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
+             "client_id": self._client_id, "code_verifier": code_verifier},
+            bad_request_exc=InvalidCodeError)
+
+    def refresh_session(self, *, refresh_token: str) -> Session:
+        if not refresh_token:
+            raise RefreshExpiredError("no refresh token present in session")
+        data, headers = self._refresh_request(refresh_token)
+        return self._grant(
+            data, headers=headers, bad_request_exc=RefreshExpiredError, previous_refresh_token=refresh_token)
+
+    def verify_session(self, *, access_token: str) -> Optional[Session]:
+        # None on expiry/invalidity (middleware then tries refresh); a ProviderError
+        # (JWKS unreachable) bubbles up so middleware emits 503.
+        try:
+            claims = self._claims_for(access_token)
+        except InvalidCodeError:
+            return None
+        return self._session(access_token, "", claims)

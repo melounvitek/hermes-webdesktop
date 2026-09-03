@@ -19,15 +19,14 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import (
-    DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session)
+from hermes_cli.dashboard_auth import LoginStart, ProviderError, Session
 from plugins.dashboard_auth._shared import (
     JSON_HEADERS,
     TOKEN_ENDPOINT_TIMEOUT_SEC as _TOKEN_ENDPOINT_TIMEOUT_SEC,
+    JwtOAuthProvider,
     SkipRegistration,
     exchange_token,
     load_config_section,
-    make_jwks_client,
     parse_json_body,
     pkce_login_start,
     refresh_token_from,
@@ -65,7 +64,7 @@ def _require_https_or_loopback(url: str, *, field: str) -> str:
     raise ProviderError(f"OIDC {field} must be https:// (or http on localhost), got {url!r}")
 
 
-class SelfHostedOIDCProvider(DashboardAuthProvider):
+class SelfHostedOIDCProvider(JwtOAuthProvider):
     """Generic self-hosted OpenID Connect provider (authorization-code + PKCE)."""
 
     name = "self-hosted"
@@ -92,44 +91,12 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         self._discovery_lock = threading.Lock()
         self._jwks_client: Any = None
 
-    # ---- public API (DashboardAuthProvider) -------------------------------
-
     def start_login(self, *, redirect_uri: str) -> LoginStart:
         # Validate the redirect before discovery so a bad redirect_uri surfaces even when the IDP is unreachable.
         validate_redirect_uri(redirect_uri)
         disco = self._get_discovery()
         return pkce_login_start(
             disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri)
-
-    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
-        # ``state`` is verified by the auth-route layer before this call.
-        return self._exchange(
-            {
-                "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
-                "client_id": self._client_id, "code_verifier": code_verifier},
-            bad_request_exc=InvalidCodeError)
-
-    def refresh_session(self, *, refresh_token: str) -> Session:
-        if not refresh_token:
-            raise RefreshExpiredError("no refresh token present in session")
-        return self._exchange(
-            {
-                "grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token,
-                # Re-request the same scopes so the rotated ID token keeps its identity
-                # claims (some IDPs narrow scope on refresh otherwise).
-                "scope": self._scopes},
-            bad_request_exc=RefreshExpiredError,
-            previous_refresh_token=refresh_token)
-
-    def verify_session(self, *, access_token: str) -> Optional[Session]:
-        # The session cookie carries the ID token in the access-token slot (see _session)
-        # so this per-request check verifies a real JWT. None on expiry/invalidity;
-        # ProviderError if IDP/JWKS unreachable.
-        try:
-            claims = self._verify_id_token(access_token)
-        except InvalidCodeError:
-            return None
-        return self._session(access_token, "", claims)
 
     def revoke_session(self, *, refresh_token: str) -> None:
         # Best-effort RFC 7009 revocation when the IDP advertises an endpoint.
@@ -152,7 +119,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
             logger.debug("self-hosted OIDC: revoke failed (ignored): %s", exc)
         return None
 
-    # ---- internals: token exchange ----------------------------------------
+    # ---- JwtOAuthProvider hooks: token exchange ---------------------------
 
     def _token_endpoint_auth(self, disco: Dict[str, Any]) -> tuple[Dict[str, str], Dict[str, str]]:
         """``(extra_data, extra_headers)`` for token-endpoint client auth. Public client →
@@ -169,7 +136,18 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         userpass = f"{urllib.parse.quote(self._client_id, safe='')}:{urllib.parse.quote(self._client_secret, safe='')}"
         return {}, {"Authorization": f"Basic {base64.b64encode(userpass.encode('utf-8')).decode('ascii')}"}
 
-    def _exchange(self, data: Dict[str, str], *, bad_request_exc: type[Exception], previous_refresh_token: str = "") -> Session:
+    def _refresh_request(self, refresh_token: str) -> tuple[Dict[str, str], Optional[Dict[str, str]]]:
+        # Re-request the same scopes so the rotated ID token keeps its identity claims
+        # (some IDPs narrow scope on refresh otherwise).
+        return (
+            {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token,
+             "scope": self._scopes},
+            None)
+
+    def _grant(
+        self, data: Dict[str, str], *, bad_request_exc: type[Exception], headers: Optional[Dict[str, str]] = None,
+        previous_refresh_token: str = "",
+    ) -> Session:
         """POST the discovered token endpoint and turn the response into a Session.
         Confidential-client auth (body field or Basic header) is added for both grants —
         the IDP rejects an unauthenticated refresh with ``invalid_client``."""
@@ -234,8 +212,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         if advertised_issuer and advertised_issuer.rstrip("/") != self._issuer:
             raise ProviderError(
                 f"OIDC discovery issuer mismatch: document advertises {advertised_issuer!r} "
-                f"but configured issuer is {self._issuer!r}"
-            )
+                f"but configured issuer is {self._issuer!r}")
         for key, url in endpoints.items():
             _require_https_or_loopback(url, field=key)
         # Absent/garbage auth-methods → [] → OIDC default (basic) applies.
@@ -247,18 +224,18 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
             "token_endpoint_auth_methods_supported": (
                 [str(m) for m in auth_methods_raw] if isinstance(auth_methods_raw, list) else [])}
 
-    # ---- internals: JWT verification + mapping ----------------------------
+    # ---- JwtOAuthProvider hooks: verification + mapping -------------------
 
-    def _get_jwks_client(self) -> Any:
-        if self._jwks_client is None:
-            self._jwks_client = make_jwks_client(self._get_discovery()["jwks_uri"])
-        return self._jwks_client
+    def _jwks_uri(self) -> str:
+        return self._get_discovery()["jwks_uri"]
 
     def _verify_id_token(self, id_token: str) -> Dict[str, Any]:
         issuer = self._get_discovery()["issuer"]
         return verify_jwt(
             id_token, self._get_jwks_client(), algorithms=list(_ALLOWED_ID_TOKEN_ALGS),
             audience=self._client_id, issuer=issuer, label="ID token")
+
+    _claims_for = _verify_id_token
 
     def _session(self, id_token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
         """Map verified OIDC claims onto a Session. The verified ID token is stored in
@@ -315,5 +292,4 @@ def register(ctx) -> None:
     if kw is not None:
         logger.info(
             "dashboard-auth-self-hosted: registered provider (issuer=%s, client_id=%s, scopes=%r, confidential=%s)",
-            kw["issuer"], kw["client_id"], kw["scopes"], bool(kw["client_secret"]),  # never log the secret itself
-        )
+            kw["issuer"], kw["client_id"], kw["scopes"], bool(kw["client_secret"]))  # never log the secret itself
