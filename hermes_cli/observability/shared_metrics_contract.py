@@ -37,63 +37,49 @@ PROVIDER_IDENTIFIER_MAX_LENGTH = 64
 _METRIC_IDENTIFIER_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._:/@+-")
 _METRIC_IDENTIFIER_START_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 
-EXECUTION_SURFACES: frozenset[str] = frozenset({
-    "api", "batch", "cli", "desktop", "gateway", "python", "scheduled_task", "tui",
-    "other", "unknown",
+EXECUTION_SURFACES = frozenset({
+    "api", "batch", "cli", "desktop", "gateway", "python", "scheduled_task", "tui", "other",
+    "unknown",
 })
-TASK_OUTCOMES: frozenset[str] = frozenset({
-    "cancelled", "failed", "success", "timed_out", "unknown",
-})
-TASK_END_REASONS: frozenset[str] = frozenset({
+TASK_OUTCOMES = frozenset({"cancelled", "failed", "success", "timed_out", "unknown"})
+TASK_END_REASONS = frozenset({
     "approval_denied", "completed", "failed", "guardrail_blocked", "iteration_limit",
     "system_aborted", "timed_out", "unknown", "user_cancelled",
 })
-TASK_TERMINATIONS: frozenset[str] = frozenset({
-    "none", "system_aborted", "timed_out", "unknown", "user_cancelled",
+TASK_TERMINATIONS = frozenset({"none", "system_aborted", "timed_out", "unknown", "user_cancelled"})
+TASK_ENTRYPOINTS = frozenset({
+    "api", "background", "batch", "delegated", "gateway_message", "interactive", "other", "python",
+    "scheduled_task", "unknown",
 })
-TASK_ENTRYPOINTS: frozenset[str] = frozenset({
-    "api", "background", "batch", "delegated", "gateway_message", "interactive", "other",
-    "python", "scheduled_task", "unknown",
-})
-DURATION_BUCKETS: frozenset[str] = frozenset({
+DURATION_BUCKETS = frozenset({
     "1s_to_5s", "2m_to_10m", "30s_to_2m", "5s_to_30s", "gte_10m", "lt_1s",
 })
-COUNT_BUCKETS: frozenset[str] = frozenset({"0", "1", "2", "3_to_5", "6_to_10", "gte_11"})
-TOOL_CATEGORIES: frozenset[str] = frozenset({
+COUNT_BUCKETS = frozenset({"0", "1", "2", "3_to_5", "6_to_10", "gte_11"})
+TOOL_CATEGORIES = frozenset({
     "browser", "code_execution", "communication", "computer_use", "delegation", "file",
-    "home_automation", "mcp", "media", "memory", "other", "planning", "project",
-    "scheduler", "skill", "terminal", "unknown", "web",
+    "home_automation", "mcp", "media", "memory", "other", "planning", "project", "scheduler",
+    "skill", "terminal", "unknown", "web",
 })
-TOOL_OUTCOMES: frozenset[str] = frozenset({
-    "blocked", "cancelled", "failed", "success", "timed_out", "unknown",
-})
-TOOL_APPROVAL_OUTCOMES: frozenset[str] = frozenset({
-    "approved", "denied", "not_required", "timed_out", "unknown",
-})
-TOOL_APPROVAL_ATTRIBUTIONS: frozenset[str] = frozenset({"tool_call", "unattributed"})
-TOOL_LATENCY_BUCKETS: frozenset[str] = frozenset({
+TOOL_OUTCOMES = frozenset({"blocked", "cancelled", "failed", "success", "timed_out", "unknown"})
+TOOL_APPROVAL_OUTCOMES = frozenset({"approved", "denied", "not_required", "timed_out", "unknown"})
+TOOL_APPROVAL_ATTRIBUTIONS = frozenset({"tool_call", "unattributed"})
+TOOL_LATENCY_BUCKETS = frozenset({
     "100ms_to_250ms", "10s_to_30s", "1s_to_2s", "250ms_to_500ms", "2s_to_5s", "500ms_to_1s",
     "5s_to_10s", "gte_30s", "lt_100ms", "unknown",
 })
-TOOL_RETRY_BUCKETS: frozenset[str] = COUNT_BUCKETS | frozenset({"unknown"})
-SKILL_LIFECYCLE_ACTIONS: frozenset[str] = frozenset({
+TOOL_RETRY_BUCKETS = COUNT_BUCKETS | frozenset({"unknown"})
+SKILL_LIFECYCLE_ACTIONS = frozenset({
     "archived", "created", "edited", "installed", "patched", "restored", "stale",
 })
-SKILL_PROVENANCES: frozenset[str] = frozenset({
-    "agent_created", "external", "installed", "local", "unknown",
-})
-SKILL_REUSE_STATES: frozenset[str] = frozenset({"first_use", "reused"})
-SKILL_POST_PATCH_STATES: frozenset[str] = frozenset({
-    "no_new_patch", "not_applicable", "reused_after_patch",
-})
-CLIENT_OS_FAMILIES: frozenset[str] = frozenset({"linux", "macos", "unknown", "windows"})
-CLIENT_ARCHITECTURES: frozenset[str] = frozenset({"arm", "arm64", "unknown", "x86", "x86_64"})
-CLIENT_INSTALL_METHODS: frozenset[str] = frozenset({
+SKILL_PROVENANCES = frozenset({"agent_created", "external", "installed", "local", "unknown"})
+SKILL_REUSE_STATES = frozenset({"first_use", "reused"})
+SKILL_POST_PATCH_STATES = frozenset({"no_new_patch", "not_applicable", "reused_after_patch"})
+CLIENT_OS_FAMILIES = frozenset({"linux", "macos", "unknown", "windows"})
+CLIENT_ARCHITECTURES = frozenset({"arm", "arm64", "unknown", "x86", "x86_64"})
+CLIENT_INSTALL_METHODS = frozenset({
     "apt", "docker", "git", "home-manager", "homebrew", "nixos", "pip", "unknown",
 })
-CLIENT_RESOURCE_KEYS: frozenset[str] = frozenset({
-    "architecture", "hermes_version", "install_method", "os_family",
-})
+CLIENT_RESOURCE_KEYS = frozenset({"architecture", "hermes_version", "install_method", "os_family"})
 
 _ARCHITECTURE_ALIASES = {
     "amd64": "x86_64", "x64": "x86_64", "x86_64": "x86_64",
@@ -134,12 +120,10 @@ def client_resource(
     hermes_version: Any, *, os_name: Any, architecture: Any, install_method: Any
 ) -> dict[str, str]:
     """Build the bounded client resource attached to aggregate packages."""
-    normalized_version = str(hermes_version or "").strip()
-    if not normalized_version or len(normalized_version) > 64:
-        normalized_version = "unknown"
+    version = str(hermes_version or "").strip()
     return {
         "architecture": client_architecture(architecture),
-        "hermes_version": normalized_version,
+        "hermes_version": version if 0 < len(version) <= 64 else "unknown",
         "install_method": client_install_method(install_method),
         "os_family": client_os_family(os_name),
     }
@@ -223,7 +207,7 @@ _METRIC_FIELDS: dict[str, frozenset[str]] = {
     **{name: frozenset(contract) for name, contract in _COUNTER_DIMENSION_VALUES.items()},
     MODEL_ROUTE_METRIC: frozenset(_MODEL_ROUTE_MAX_LENGTHS),
 }
-COUNTER_METRICS: frozenset[str] = frozenset(_METRIC_FIELDS) - {LEGACY_MODEL_CALL_METRIC}
+COUNTER_METRICS = frozenset(_METRIC_FIELDS) - {LEGACY_MODEL_CALL_METRIC}
 _SKILL_MARK_METRICS = {
     SKILL_LIFECYCLE_MARK: SKILL_LIFECYCLE_METRIC,
     SKILL_LOAD_MARK: SKILL_LOAD_METRIC,
@@ -246,9 +230,7 @@ def counter_dimensions_are_valid(metric_name: str, dimensions: dict[str, Any]) -
     )
 
 
-def _relay_metadata(
-    event: Any, schema_key: str, schema_version: str, *extra_keys: str
-) -> dict | None:
+def _relay_metadata(event: Any, schema_key: str, schema_version: str, *extra_keys: str) -> dict | None:
     """Return the event metadata when it carries only the allowlisted Relay keys."""
     metadata = getattr(event, "metadata", None)
     if not isinstance(metadata, dict) or metadata.get(schema_key) != schema_version:
@@ -259,44 +241,21 @@ def _relay_metadata(
     return metadata
 
 
-_ANY = object()
-
-
 def _event_text(event: Any, attr: str) -> str:
     return str(getattr(event, attr, "") or "")
 
 
-def _event_shape_matches(
-    event: Any,
-    *,
-    kind: str,
-    name: Any = _ANY,
-    category: Any = _ANY,
-    scope_category: Any = _ANY,
-    category_profile: Any = _ANY,
-) -> bool:
-    """Match the coarse Relay event shape.
+def _event_shape_matches(event: Any, **expected: Any) -> bool:
+    """Match the coarse Relay event shape (``kind`` plus any of name/category/scope_category/
+    category_profile).
 
     A ``str`` expectation compares against the stringified attribute; ``None`` requires the
-    attribute itself to be ``None``; ``_ANY`` skips the check. Anything else (the
-    ``category_profile`` dict) compares with plain equality.
+    attribute itself to be ``None``; anything else (the ``category_profile`` dict) compares
+    with plain equality. Unmentioned attributes are not checked.
     """
-    if _event_text(event, "kind") != kind:
-        return False
-    expectations = {
-        "name": name, "category": category, "scope_category": scope_category,
-        "category_profile": category_profile,
-    }
-    for attr, expected in expectations.items():
-        if expected is _ANY:
-            continue
-        if isinstance(expected, str):
-            matched = _event_text(event, attr) == expected
-        elif expected is None:
-            matched = getattr(event, attr, None) is None
-        else:
-            matched = getattr(event, attr, None) == expected
-        if not matched:
+    for attr, value in expected.items():
+        actual = _event_text(event, attr) if isinstance(value, str) else getattr(event, attr, None)
+        if actual != value:
             return False
     return True
 
@@ -470,9 +429,7 @@ def execution_surface(kwargs: dict[str, Any]) -> str:
             return "gateway"
     except Exception:
         pass
-    if value in _KNOWN_GATEWAY_PLATFORMS:
-        return "gateway"
-    return "unknown" if value == "unknown" else "other"
+    return "gateway" if value in _KNOWN_GATEWAY_PLATFORMS else "other"
 
 
 def task_start_fields(kwargs: dict[str, Any]) -> dict[str, str]:
