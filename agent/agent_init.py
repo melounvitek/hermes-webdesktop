@@ -296,25 +296,22 @@ def _custom_provider_extra_body_for_agent(
     for entry in custom_providers or []:
         if not isinstance(entry, dict):
             continue
-        if provider_key_filter:
-            entry_keys = {
-                str(entry.get("provider_key", "") or "").strip().lower(),
-                str(entry.get("name", "") or "").strip().lower(),
-            }
-            if provider_key_filter not in entry_keys:
-                continue
+        entry_keys = {
+            str(entry.get("provider_key", "") or "").strip().lower(),
+            str(entry.get("name", "") or "").strip().lower(),
+        }
+        if provider_key_filter and provider_key_filter not in entry_keys:
+            continue
         if _normalized_custom_base_url(entry.get("base_url")) != target_url:
             continue
         extra_body = entry.get("extra_body")
         if not isinstance(extra_body, dict) or not extra_body:
             continue
-        provider_model = str(entry.get("model", "") or "").strip()
-        if provider_model:
+        if str(entry.get("model", "") or "").strip():
             if _custom_provider_model_matches(model, entry):
                 return dict(extra_body)
         elif fallback is None:
             fallback = dict(extra_body)
-
     return fallback
 
 
@@ -325,7 +322,6 @@ def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, An
     )
     if not extra_body:
         return
-
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
     merged_extra_body = dict(extra_body)
     existing_extra_body = overrides.get("extra_body")
@@ -343,9 +339,7 @@ def _normalize_run_budget_seconds(value) -> Optional[float]:
         seconds = float(value)
     except (TypeError, ValueError):
         return None
-    if seconds != seconds or seconds <= 0:  # NaN or non-positive
-        return None
-    return seconds
+    return seconds if seconds > 0 else None  # NaN compares False → None
 
 
 def _refuse_checkpoint_required_on_codex_app_server(
@@ -1572,20 +1566,14 @@ def _configured_default_base_url(_agent_cfg, _model_cfg, _custom_providers) -> s
 
 def _active_route_url(agent, base_url) -> str:
     """The runtime route, keeping the requested URL's query string when it is the same route."""
-    _active_route_url = str(agent.base_url or "")
-    _requested_route_url = str(base_url or "")
-    if "?" in _requested_route_url.split("#", 1)[0]:
-        try:
-            _requested_without_query = urlunparse(
-                urlparse(_requested_route_url)._replace(query="")
-            )
-            if _normalize_route_base_url(
-                _requested_without_query
-            ) == _normalize_route_base_url(_active_route_url):
-                _active_route_url = _requested_route_url
-        except (TypeError, ValueError):
-            pass
-    return _normalize_route_base_url(_active_route_url)
+    _active = str(agent.base_url or "")
+    _requested = str(base_url or "")
+    if "?" in _requested.split("#", 1)[0]:
+        with suppress(TypeError, ValueError):
+            _without_query = urlunparse(urlparse(_requested)._replace(query=""))
+            if _normalize_route_base_url(_without_query) == _normalize_route_base_url(_active):
+                _active = _requested
+    return _normalize_route_base_url(_active)
 
 
 def _scope_context_length_to_default_runtime(
