@@ -18,7 +18,7 @@ import uuid
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 from hermes_cli.auth_constants import (
     AuthError, DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL, DEFAULT_SPOTIFY_API_BASE_URL, DEFAULT_SPOTIFY_REDIRECT_URI,
@@ -36,12 +36,9 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _spotify_scope_list(raw_scope: Optional[str] = None) -> List[str]:
-    return list(dict.fromkeys((raw_scope or DEFAULT_SPOTIFY_SCOPE).split()))
-
-
 def _spotify_scope_string(raw_scope: Optional[str] = None) -> str:
-    return " ".join(_spotify_scope_list(raw_scope))
+    """Requested scope, whitespace-normalized and de-duplicated (order kept)."""
+    return " ".join(dict.fromkeys((raw_scope or DEFAULT_SPOTIFY_SCOPE).split()))
 
 
 def _spotify_setting(
@@ -50,7 +47,6 @@ def _spotify_setting(
 ) -> str:
     """First non-empty of explicit arg, env vars (``.env`` aware), stored state, then *default*."""
     from hermes_cli.config import get_env_value
-
     candidates = (
         explicit, *(get_env_value(var) for var in env_vars),
         state.get(state_key) if isinstance(state, dict) else None, default,
@@ -246,27 +242,6 @@ def _spotify_token_post(
     return payload
 
 
-def _spotify_exchange_code_for_tokens(
-    *, client_id: str, code: str, redirect_uri: str, code_verifier: str, accounts_base_url: str,
-    timeout_seconds: float = 20.0,
-) -> Dict[str, Any]:
-    return _spotify_token_post(
-        accounts_base_url,
-        {
-            "client_id": client_id,
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "code_verifier": code_verifier,
-        },
-        timeout_seconds=timeout_seconds,
-        what="token exchange",
-        failed_code="spotify_token_exchange_failed",
-        invalid_code="spotify_token_exchange_invalid",
-        invalid_message="Spotify token response did not include an access_token.",
-    )
-
-
 def _refresh_spotify_oauth_state(state: Dict[str, Any], *, timeout_seconds: float = 20.0) -> Dict[str, Any]:
     refresh_token = _clean(state.get("refresh_token"))
     if not refresh_token:
@@ -370,7 +345,6 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
     """Walk the user through creating a Spotify developer app; persist the client_id to ~/.hermes/.env."""
     from hermes_cli.auth import _is_remote_session
     from hermes_cli.config import save_env_value
-
     print(
         f"\n{'=' * 70}\nSpotify first-time setup\n{'=' * 70}\n\n"
         "Spotify requires every user to register their own lightweight\n"
@@ -396,7 +370,6 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
             pass
 
     from hermes_cli.cli_output import line_input
-
     try:
         raw = line_input("Spotify Client ID: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -469,10 +442,19 @@ def login_spotify_command(args) -> None:
     if callback.get("state") != state_nonce:
         raise SystemExit("Spotify authorization failed: state mismatch.")
 
-    token_payload = _spotify_exchange_code_for_tokens(
-        client_id=client_id, code=str(callback.get("code") or ""), redirect_uri=redirect_uri,
-        code_verifier=code_verifier, accounts_base_url=accounts_base_url,
+    token_payload = _spotify_token_post(
+        accounts_base_url,
+        {
+            "client_id": client_id,
+            "grant_type": "authorization_code",
+            "code": str(callback.get("code") or ""),
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        },
         timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
+        what="token exchange", failed_code="spotify_token_exchange_failed",
+        invalid_code="spotify_token_exchange_invalid",
+        invalid_message="Spotify token response did not include an access_token.",
     )
     spotify_state = _spotify_token_payload_to_state(
         token_payload, client_id=client_id, redirect_uri=redirect_uri, requested_scope=scope,

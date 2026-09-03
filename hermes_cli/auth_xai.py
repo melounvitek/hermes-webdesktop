@@ -26,7 +26,6 @@ from utils import env_float
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
-
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
@@ -436,7 +435,6 @@ def resolve_xai_oauth_runtime_credentials(
     refresh_skew_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _auth_store_lock, _is_terminal_xai_oauth_refresh_error, _refresh_xai_oauth_tokens, _xai_oauth_discovery
-
     def _view(data: Dict[str, Any]) -> tuple[Dict[str, Any], str, str, str, bool]:
         tokens = dict(data["tokens"])
         access_token = _clean(tokens.get("access_token"))
@@ -546,7 +544,6 @@ def _xai_oauth_poll_device_token(
     poll_interval: int,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _poll_device_token_generic
-
     def _validate(payload: Dict[str, Any]) -> None:
         for field_name, article in (("access_token", "an"), ("refresh_token", "a")):
             if not payload.get(field_name):

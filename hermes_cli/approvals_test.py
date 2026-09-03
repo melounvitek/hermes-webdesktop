@@ -35,7 +35,6 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     de-obfuscated forms the detectors actually evaluated).
     """
     import tools.approval as approval
-
     # Sync config-persisted "always" patterns so the allowlist check below sees what the runtime
     # would see (load is read-only).
     try:

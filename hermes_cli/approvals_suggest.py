@@ -112,7 +112,6 @@ class Proposal:
 
 def default_db_path() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "state.db"
 
 
@@ -175,7 +174,6 @@ def scan_approval_history(db_path: Optional[Path] = None, days: int = 90) -> lis
     that actually executed (i.e. carried an implied user approval).
     """
     from tools.approval import detect_dangerous_command, detect_hardline_command
-
     path = Path(db_path) if db_path else default_db_path()
     if not path.exists():
         return []
@@ -208,7 +206,6 @@ def scan_approval_history(db_path: Optional[Path] = None, days: int = 90) -> lis
 def normalize_command(command: str) -> str:
     """Fold user/hermes home prefixes and collapse whitespace."""
     from tools.approval import _rewrite_resolved_hermes_home, _rewrite_resolved_user_home
-
     return " ".join(_rewrite_resolved_user_home(_rewrite_resolved_hermes_home(command)).split())
 
 
@@ -229,7 +226,6 @@ def derive_glob(normalized: str) -> Optional[str]:
     those anyway) and for commands anchored on an unsafe root binary.
     """
     from tools.approval import _has_allowlist_shell_operator
-
     tokens = normalized.split()
     if _has_allowlist_shell_operator(normalized) or not tokens or _unsafe_root_binary(tokens[0]):
         return None
@@ -298,7 +294,6 @@ def parse_apply_indices(spec: str, total: int) -> list[int]:
 def apply_proposals(proposals: list[Proposal], indices: list[int]) -> set:
     """Merge chosen proposal patterns into command_allowlist and persist."""
     import tools.approval as approval_module
-
     merged = set(approval_module.load_permanent_allowlist()) | {proposals[idx].pattern for idx in indices}
     approval_module.save_permanent_allowlist(merged)
     # Keep the in-process allowlist consistent so a long-lived process sees the new entries
@@ -341,7 +336,6 @@ def suggest_command(args) -> int:
         return 1
 
     import tools.approval as approval_module
-
     existing = set(approval_module.load_permanent_allowlist())
     proposals = build_proposals(
         scan_approval_history(db_path, days=days), existing=existing,

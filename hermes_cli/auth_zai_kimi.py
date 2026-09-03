@@ -69,7 +69,6 @@ def _probe_single_zai_endpoint(api_key: str, endpoint: tuple, timeout: float) ->
 def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str, str]]:
     """Probe z.ai endpoints in parallel; first working one in ZAI_ENDPOINTS priority order, or None."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-
     # No `with` block: a context manager would join ALL probe threads on exit, defeating the early
     # return below. shutdown(wait=False) lets surviving probes drain in the background.
     pool = ThreadPoolExecutor(max_workers=len(ZAI_ENDPOINTS))

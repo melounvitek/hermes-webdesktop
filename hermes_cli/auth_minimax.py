@@ -23,7 +23,6 @@ from hermes_cli.auth_constants import (
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
-
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
@@ -33,34 +32,23 @@ _MINIMAX_OAUTH_ERROR_BODY_LIMIT = 16 * 1024
 def _minimax_response_error_text(response: httpx.Response, *, limit: int = _MINIMAX_OAUTH_ERROR_BODY_LIMIT) -> str:
     """Return a bounded error body from a streamed MiniMax OAuth response."""
     limit = max(0, int(limit))
-    chunks: list[bytes] = []
-    total = 0
-    truncated = False
     try:
         if getattr(response, "is_stream_consumed", False):
             text = response.text
             return text[:limit] + ("...[truncated]" if len(text) > limit else "")
-
+        # Read at most limit+1 bytes so truncation can be detected without buffering the whole body.
+        chunks: list[bytes] = []
+        total = 0
         for chunk in response.iter_bytes():
             if not chunk:
                 continue
-            remaining = limit + 1 - total
-            if remaining <= 0:
-                truncated = True
+            chunks.append(chunk[: limit + 1 - total])
+            total += len(chunks[-1])
+            if total > limit:
                 break
-            if len(chunk) > remaining:
-                chunks.append(chunk[:remaining])
-                total += remaining
-                truncated = True
-                break
-            chunks.append(chunk)
-            total += len(chunk)
         raw = b"".join(chunks)
-        if len(raw) > limit:
-            raw = raw[:limit]
-            truncated = True
-        text = raw.decode(response.encoding or "utf-8", errors="replace")
-        return text + ("...[truncated]" if truncated else "")
+        text = raw[:limit].decode(response.encoding or "utf-8", errors="replace")
+        return text + ("...[truncated]" if len(raw) > limit else "")
     finally:
         response.close()
 

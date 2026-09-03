@@ -27,7 +27,6 @@ class ApprovalModeResult:
 def _effective_mode() -> str:
     """Return the exact mode enforced by the terminal approval guard."""
     from tools.approval import _get_approval_mode
-
     return _get_approval_mode()
 
 
@@ -46,7 +45,6 @@ def run_approval_mode_command(requested_mode: Optional[str]) -> ApprovalModeResu
     # unparseable config.yaml; capture both for slash-command output instead of terminating the
     # interactive worker.
     from hermes_cli.config import set_config_value
-
     output = StringIO()
     try:
         with redirect_stdout(output), redirect_stderr(output):

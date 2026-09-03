@@ -31,7 +31,6 @@ def _confirm_selection_guards(
     """
     try:
         from hermes_cli.model_selection_guards import combined_message, selection_warnings
-
         warnings = selection_warnings(
             model_id, provider=provider, base_url=base_url, api_key=api_key, include_kinds=include_kinds,
         )
@@ -64,7 +63,6 @@ class _ModelPickerRows:
         current_model: str, sale_chrome: bool,
     ) -> None:
         from hermes_cli.models import _format_price_per_mtok, compute_sale_discount
-
         self.current_model = current_model
         self.has_pricing = bool(pricing and any(pricing.get(m) for m in all_models))
         # Leave room for a leading "★ " on sale rows (Nous only).
@@ -165,7 +163,6 @@ def _prompt_model_selection(
     *unavailable_models* render grayed out and unselectable with an upgrade link to *portal_url*.
     """
     from hermes_cli.cli_output import line_input
-
     _unavailable = unavailable_models or []
     # Sale chrome (★ / -N% / was) is Nous Portal-only — never for OpenRouter or other providers
     # even if pricing.original is somehow present.
@@ -206,7 +203,6 @@ def _prompt_model_selection(
     # Try arrow-key menu first, fall back to number input.
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         choices = [rows.segments(mid) for mid in ordered] + [_CUSTOM_LABEL, _SKIP_LABEL]
 
         unavailable_footer = unavailable_message.strip()
@@ -229,7 +225,6 @@ def _prompt_model_selection(
         # ids (e.g. Kimi Coding `k3` ↔ query "kimi"). model_search_text always starts with the
         # wire id; only append when aliases add tokens beyond the bare id already in the label.
         from hermes_cli.model_search import model_search_text
-
         model_search_labels = []
         for mid in ordered:
             label, haystack = rows.label(mid), model_search_text(mid)
@@ -259,7 +254,6 @@ def _prompt_model_selection(
     # Fallback: numbered list (ANSI colors for sale chrome)
     from hermes_cli.curses_ui import format_radio_item_ansi
     from hermes_cli.colors import Colors, color
-
     for line in menu_title.splitlines():
         print(line.replace("★", color("★", Colors.YELLOW), 1) if "★" in line else line)
     num_width = len(str(n + 2))
@@ -301,7 +295,6 @@ def _prompt_model_selection(
 def _save_model_choice(model_id: str) -> None:
     """Save the selected model to config.yaml only — NOT .env, which would stomp in multi-agent setups."""
     from hermes_cli.config import save_config, load_config
-
     config = load_config()
     # Always use dict format so provider/base_url can be stored alongside
     if isinstance(config.get("model"), dict):
