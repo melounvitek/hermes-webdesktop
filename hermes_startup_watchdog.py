@@ -434,11 +434,7 @@ class StartupWatchdogHandle:
             return
 
     def _start(self) -> bool:
-        thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name="gateway-startup-watchdog",
-        )
+        thread = threading.Thread(target=self._run, daemon=True, name="gateway-startup-watchdog")
         try:
             thread.start()
         except Exception:

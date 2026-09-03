@@ -1039,9 +1039,7 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
     result = parse_reasoning_effort(effort)
     if effort and str(effort).strip() and result is None:
         import logging
-        logging.getLogger(__name__).warning(
-            "Unknown reasoning_effort '%s', using default (medium)", effort
-        )
+        logging.getLogger(__name__).warning("Unknown reasoning_effort '%s', using default (medium)", effort)
     return result
 
 
@@ -1178,9 +1176,7 @@ def apply_ipv4_preference(force: bool = False) -> None:
     def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         if family == 0:  # AF_UNSPEC — caller didn't request a specific family
             try:
-                return _original_getaddrinfo(
-                    host, port, socket.AF_INET, type, proto, flags
-                )
+                return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
             except socket.gaierror:  # no A record — pure-IPv6 host
                 return _original_getaddrinfo(host, port, family, type, proto, flags)
         return _original_getaddrinfo(host, port, family, type, proto, flags)

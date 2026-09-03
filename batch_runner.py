@@ -298,10 +298,7 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     print(f"\n🔄 Batch {batch_num}: Starting ({len(batch_data)} prompts)")
     batch_output_file = output_dir / f"batch_{batch_num}.jsonl"
-    prompts_to_process = [
-        (idx, data) for idx, data in batch_data
-        if idx not in completed_prompts_set
-    ]
+    prompts_to_process = [(idx, data) for idx, data in batch_data if idx not in completed_prompts_set]
 
     if not prompts_to_process:
         print(f"✅ Batch {batch_num}: Already completed (skipping)")
@@ -497,12 +494,7 @@ class BatchRunner:
         return _chunk(list(enumerate(self.dataset)), self.batch_size)
 
     def _empty_checkpoint(self) -> Dict[str, Any]:
-        return {
-            "run_name": self.run_name,
-            "completed_prompts": [],
-            "batch_stats": {},
-            "last_updated": None
-        }
+        return {"run_name": self.run_name, "completed_prompts": [], "batch_stats": {}, "last_updated": None}
 
     def _load_checkpoint(self) -> Dict[str, Any]:
         """Checkpoint data (completed prompt indices), or an empty one if missing/unreadable."""
