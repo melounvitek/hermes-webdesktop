@@ -305,8 +305,7 @@ def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         report["journal_mode"] = None
         # Journal metadata is context, not canonical data: a damaged pragma must not block readable rows.
         report["warnings"].append(f"journal mode: {exc}")
-    for table in _INVENTORY_TABLES:
-        report["tables"][table] = _table_inventory(conn, table)
+    report["tables"] = {table: _table_inventory(conn, table) for table in _INVENTORY_TABLES}
     for required in ("sessions", "messages"):
         table_report = report["tables"][required]
         if not table_report.get("available") or table_report.get("rows") is None:
@@ -350,10 +349,7 @@ def inspect_session_database(source_path: Path, *, work_dir: Optional[Path] = No
     temp_dir, _, inspection = _snapshot_and_inspect(source, work_root)
     try:
         return {
-            "operation": "inspect",
-            "source": str(source),
-            "disk_space": disk_space,
-            **inspection,
+            "operation": "inspect", "source": str(source), "disk_space": disk_space, **inspection,
             "source_unchanged": _source_fingerprint(source) == inspection["source_fingerprint"],
         }
     finally:
@@ -748,34 +744,29 @@ def _cleanup_partial_orphans(destination: sqlite3.Connection) -> dict[str, Any]:
         # Rebuild owners BEFORE any orphan deletion.
         result.update(_reconstruct_missing_sessions(destination))
         result["sessions_parent_cleared"] = _reconcile(
-            destination,
-            "sessions",
+            destination, "sessions",
             "parent_session_id IS NOT NULL AND NOT EXISTS ("
             "SELECT 1 FROM sessions AS parent WHERE parent.id = sessions.parent_session_id)",
             "UPDATE sessions SET parent_session_id = NULL",
         )
         result["session_prompt_refs_cleared"] = _reconcile(
-            destination,
-            "sessions",
+            destination, "sessions",
             "system_prompt_hash IS NOT NULL AND NOT EXISTS ("
             "SELECT 1 FROM system_prompts WHERE system_prompts.hash = sessions.system_prompt_hash)",
             "UPDATE sessions SET system_prompt_hash = NULL",
         )
         result["system_prompts_removed"] = _reconcile(
-            destination,
-            "system_prompts",
+            destination, "system_prompts",
             "NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.system_prompt_hash = system_prompts.hash)",
             "DELETE FROM system_prompts",
         )
         for table in _DEPENDENT_TABLES:
-            if not _table_columns(destination, table):
-                continue
-            result[f"{table}_removed"] = _reconcile(
-                destination,
-                table,
-                f'NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = "{table}".session_id)',
-                f'DELETE FROM "{table}"',
-            )
+            if _table_columns(destination, table):
+                result[f"{table}_removed"] = _reconcile(
+                    destination, table,
+                    f'NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = "{table}".session_id)',
+                    f'DELETE FROM "{table}"',
+                )
     # Only destructive/relinking actions count: reconstruction counters describe RETAINED data.
     result["total_removed_or_relinked"] = sum(
         int(result[key]) for key in (*_RELINK_COUNTERS, *(f"{table}_removed" for table in _DEPENDENT_TABLES))
@@ -1007,13 +998,9 @@ def _recovery_report(
         verification["errors"].append("the source database bundle changed during recovery")
         verification[on_source_change] = False
     return {
-        "operation": "recover",
-        "source": str(source),
-        "output": str(output),
-        "source_bundle": inspection["source_bundle"],
-        "source_fingerprint": inspection["source_fingerprint"],
-        "source_unchanged": source_unchanged,
-        "disk_space": disk_space,
+        "operation": "recover", "source": str(source), "output": str(output),
+        "source_bundle": inspection["source_bundle"], "source_fingerprint": inspection["source_fingerprint"],
+        "source_unchanged": source_unchanged, "disk_space": disk_space,
         "inspection": {
             "journal_mode": inspection.get("journal_mode"), "tables": inspection["tables"],
             "errors": inspection["errors"], "warnings": inspection["warnings"],
