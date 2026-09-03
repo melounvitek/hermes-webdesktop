@@ -1,8 +1,7 @@
 """Interactive messaging-platform setup wizards: WhatsApp (bridge + Cloud API), Slack manifest,
 Skill Sync.
 
-Split out of ``hermes_cli/main.py``, which re-imports every name (``hermes_cli.main.<name>`` keeps
-resolving and monkeypatching). Names that stay in main are imported lazily at call time.
+Split out of ``hermes_cli/main.py``. Names that still live in main are imported lazily at call time.
 """
 
 import contextlib
@@ -246,9 +245,10 @@ def _sync_device(args, ssc) -> int:
 
 
 def _sync_propose(args, ssc) -> int:
+    from tools.skills_sync_client_org import propose_skill
     name = args.name
     try:
-        result = ssc.propose_skill(name, message=args.message)
+        result = propose_skill(name, message=args.message)
     except ssc.SyncInertError as e:
         _err(f"cannot share this skill: {e}")
         return 1
@@ -310,7 +310,8 @@ def _sync_pull(ssc, identity):
     result = ssc.pull_skills(identity=identity)
     # Refresh the org mirror too when this account belongs to an organisation (no-op
     # otherwise), so one pull covers both.
-    org_result = ssc.maybe_pull_org_skills()
+    from tools.skills_sync_client_org import maybe_pull_org_skills
+    org_result = maybe_pull_org_skills()
     if org_result:
         n = len(org_result.get("updated") or [])
         _err(f"org: refreshed {n} shared skill(s) from your organisation.")

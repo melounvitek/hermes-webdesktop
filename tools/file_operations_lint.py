@@ -1,7 +1,7 @@
 """Syntax-lint and LSP-diagnostics tier for ``tools.file_operations``.
 
 ``ShellFileOperations`` inherits ``LintMixin``; module constants and in-process
-linters are pure and re-imported into ``tools.file_operations`` for back-compat.
+linters are pure functions importable from this module.
 """
 
 import ast

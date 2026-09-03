@@ -4439,7 +4439,7 @@ def _housekeeping_skill_sync() -> None:
 
 def _housekeeping_org_skill_sync() -> None:
     """Gated on real org membership (the token must carry an org role): solo accounts never reach the network."""
-    from tools.skills_sync_client import maybe_pull_org_skills
+    from tools.skills_sync_client_org import maybe_pull_org_skills
     maybe_pull_org_skills()
 
 

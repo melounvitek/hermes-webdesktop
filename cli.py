@@ -3761,7 +3761,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # the token (only issued for multi-member orgs), so a solo account never hits
         # the network here. Both fail-quiet.
         try:
-            from tools.skills_sync_client import maybe_pull_org_skills, maybe_pull_skills
+            from tools.skills_sync_client import maybe_pull_skills
+            from tools.skills_sync_client_org import maybe_pull_org_skills
         except Exception:
             return
         for pull in (maybe_pull_skills, maybe_pull_org_skills):

@@ -17,12 +17,13 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
-    DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, KIND_COMMIT, KIND_TREE, MODE_EXEC, MODE_FILE, ObjectSet,
-    SyncClient, SyncConflict, SyncError, _check_version, assemble_root_from_skill_trees, build_commit,
-    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, checked_capabilities,
-    materialize_tree, merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root,
-    read_ref_hash, root_tree_of_commit, skill_trees_of_root, wire_address)
+from tools.skills_sync_client_wire import (
+    DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, ObjectSet, SyncClient, SyncConflict, SyncError,
+    assemble_root_from_skill_trees, build_commit, build_root_tree, build_sync_manifest_bytes, build_tree,
+    checked_capabilities, materialize_tree, merge_skill, nest_skill_tree, read_manifest_of_root,
+    read_ref_hash, root_tree_of_commit, skill_trees_of_root)
+from tools.skills_sync_client_org import (
+    ORG_DIR_NAME, list_locally_modified_org_skills, list_org_skill_names, resolve_org_identity)
 
 logger = logging.getLogger(__name__)
 # Gate claim (NAS's wire name; means "Nous admin" / Permissions.ADMIN_ACCESS). The bearer comes
@@ -495,10 +496,3 @@ def sync_status() -> Dict[str, Any]:
     except Exception as e:
         logger.debug("skills_sync_client: sync_status org lookup failed: %s", e)
     return status
-
-
-# Imported last: skills_sync_client_org reads this module's state lazily.
-from tools.skills_sync_client_org import (  # noqa: E402,F401  (re-exports)
-    ORG_DIR_NAME, _skill_dir_fingerprint, _write_org_baseline, list_locally_modified_org_skills,
-    list_org_skill_names, maybe_pull_org_skills, org_skill_is_locally_modified, propose_skill,
-    pull_org_skills, resolve_org_identity)

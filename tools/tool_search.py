@@ -17,12 +17,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.registry import tool_error
-from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/test names
+from tools.tool_search_catalog import (
     BRIDGE_TOOL_NAMES, CHARS_PER_TOKEN, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
-    CatalogEntry, _corpus_stats, _entry_search_text, _fn, _listing_group_label,
-    _registry_entry, _registry_toolset, _short_desc, _stem, _tokenize, build_catalog,
-    build_catalog_listing_with_form, search_catalog)
-from tools.tool_search_validation import validate_deferred_call_args  # noqa: F401
+    CatalogEntry, _corpus_stats, _fn, _listing_group_label, _registry_entry, _registry_toolset,
+    build_catalog, build_catalog_listing_with_form, search_catalog)
+from tools.tool_search_validation import validate_deferred_call_args
 
 logger = logging.getLogger("tools.tool_search")
 _MAX_QUERIES_PER_CALL = _MAX_DESCRIBE_NAMES_PER_CALL = 10  # bound the work one bridge call requests

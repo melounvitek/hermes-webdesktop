@@ -279,7 +279,8 @@ def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
                 f"This skill is shared by your organisation. Your edit is "
                 f"saved locally and will not be overwritten by org updates. "
                 f"Run `hermes sync propose {name}` to share it back.")
-        result = ssc.propose_skill(name)
+        from tools.skills_sync_client_org import propose_skill
+        result = propose_skill(name)
         if result.get("proposal_pending"):
             return (
                 f"Auto-proposed to your organisation as proposal "
