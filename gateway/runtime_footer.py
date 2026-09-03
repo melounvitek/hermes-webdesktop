@@ -83,12 +83,8 @@ def _format_latency(seconds: float) -> str:
 
 
 def format_runtime_footer(
-    *,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
-    turn_seconds: Optional[float] = None,
+    *, model: Optional[str], context_tokens: int, context_length: Optional[int],
+    cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or "" if no fields have data.
@@ -113,13 +109,8 @@ def format_runtime_footer(
 
 
 def build_footer_line(
-    *,
-    user_config: dict[str, Any] | None,
-    platform_key: str | None,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
+    *, user_config: dict[str, Any] | None, platform_key: str | None, model: Optional[str],
+    context_tokens: int, context_length: Optional[int], cwd: Optional[str] = None,
     turn_seconds: Optional[float] = None,
 ) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data.

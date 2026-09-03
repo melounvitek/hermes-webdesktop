@@ -80,10 +80,7 @@ def should_arm(*, enabled: bool, relay_only_or_absent: bool, wake_url: Optional[
 
 
 def is_idle(
-    *,
-    active_work_count: int,
-    seconds_since_last_inbound: float,
-    idle_timeout_seconds: float,
+    *, active_work_count: int, seconds_since_last_inbound: float, idle_timeout_seconds: float,
     has_live_background_work: bool,
 ) -> bool:
     """Pure idle predicate: no active work, no inbound within the window, no live background work.

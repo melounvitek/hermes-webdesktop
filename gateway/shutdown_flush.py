@@ -176,8 +176,7 @@ def drain_transcript_spool(session_id: str, replay) -> tuple[int, int]:
         replayed += 1
     if replayed:
         logger.info(
-            "Replayed %d spooled transcript message(s) for %s after DB recovery",
-            replayed,
+            "Replayed %d spooled transcript message(s) for %s after DB recovery", replayed,
             session_id,
         )
     return replayed, remaining
@@ -196,13 +195,7 @@ def _serialise_value(value: Any) -> Optional[dict]:
     if hasattr(value, "text"):  # MessageEvent-like object
         result: Dict[str, Any] = {"text": getattr(value, "text", "")}
         for attr in (
-            "session_id",
-            "platform",
-            "sender_id",
-            "sender_name",
-            "reply_to",
-            "media",
-            "raw_event",
+            "session_id", "platform", "sender_id", "sender_name", "reply_to", "media", "raw_event",
         ):
             val = getattr(value, attr, None)
             if val is not None:
@@ -260,8 +253,7 @@ def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> boo
                            "file %s; preserved for manual inspection", path)
             return False
         session_db.append_message(
-            session_id=spooled_sid,
-            role=message.get("role", "unknown"),
+            session_id=spooled_sid, role=message.get("role", "unknown"),
             content=message.get("content") or "",
             timestamp=message.get("timestamp") or payload.get("ts"),
         )
@@ -281,9 +273,7 @@ def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> boo
                        "The message text is preserved in %s", session_key, path)
         return False
     session_db.append_message(
-        session_id=session_id,
-        role="user",
-        content=text,
+        session_id=session_id, role="user", content=text,
         timestamp=payload.get("ts", int(time.time())),
     )
     return True

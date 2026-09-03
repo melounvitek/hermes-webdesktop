@@ -154,11 +154,7 @@ def resolve_status_phrase_catalog(
 
 
 def classify_status_context(
-    kind: str,
-    *,
-    tool_name: str | None = None,
-    preview: str | None = None,
-    args: Any = None,
+    kind: str, *, tool_name: str | None = None, preview: str | None = None, args: Any = None,
 ) -> str:
     """Classify an internal gateway event into a Hermes UI-surface bucket."""
     if str(kind or "").strip().lower() in {"heartbeat", "waiting", "long_running", "status"}:
@@ -167,13 +163,8 @@ def classify_status_context(
 
 
 def choose_status_phrase(
-    kind: str,
-    *,
-    tool_name: str | None = None,
-    preview: str | None = None,
-    args: Any = None,
-    recent: MutableSequence[str] | None = None,
-    rng: Any = None,
+    kind: str, *, tool_name: str | None = None, preview: str | None = None, args: Any = None,
+    recent: MutableSequence[str] | None = None, rng: Any = None,
     catalog: Mapping[str, list[str]] | None = None,
 ) -> str:
     """Pick a short generic status phrase, avoiding recent repeats.

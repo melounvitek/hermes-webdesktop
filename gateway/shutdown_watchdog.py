@@ -85,9 +85,7 @@ def _arm_loop_floor_timer(
 
 
 def start_loop_liveness_watchdog(
-    loop: asyncio.AbstractEventLoop,
-    *,
-    probe_interval: float = DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
+    loop: asyncio.AbstractEventLoop, *, probe_interval: float = DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
     probe_timeout: float = DEFAULT_LOOP_WATCHDOG_TIMEOUT_S,
     max_strikes: int = DEFAULT_LOOP_WATCHDOG_MAX_STRIKES,
     exit_code: int = GATEWAY_SERVICE_RESTART_EXIT_CODE,

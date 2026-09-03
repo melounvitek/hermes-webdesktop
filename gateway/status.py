@@ -914,8 +914,7 @@ def write_runtime_status(
         # most recent writer, so /api/status tells "written by the live process" from
         # "preserved from a prior one" by exact (pid, start_time) equality, not clocks.
         platform_payload.update(
-            updated_at=_utc_now_iso(),
-            writer_pid=current_record["pid"],
+            updated_at=_utc_now_iso(), writer_pid=current_record["pid"],
             writer_start_time=current_record["start_time"],
         )
         payload["platforms"][platform] = platform_payload
@@ -1595,8 +1594,7 @@ def get_running_pid(
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     if is_gateway_runtime_lock_active(resolved_lock_path):
         records = (
-            _read_pid_record(resolved_pid_path),
-            _read_gateway_lock_record(resolved_lock_path),
+            _read_pid_record(resolved_pid_path), _read_gateway_lock_record(resolved_lock_path),
         )
         for record in records:
             pid = _live_pid_from_record(record)

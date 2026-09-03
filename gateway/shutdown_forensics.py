@@ -95,8 +95,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     # INVOCATION_ID is set by systemd units; ppid==1 also strongly suggests systemd forwarded the
     # SIGTERM.
     for ctx_key, env_key in (
-        ("systemd_invocation_id", "INVOCATION_ID"),
-        ("systemd_journal_stream", "JOURNAL_STREAM"),
+        ("systemd_invocation_id", "INVOCATION_ID"), ("systemd_journal_stream", "JOURNAL_STREAM"),
     ):
         if os.environ.get(env_key):
             ctx[ctx_key] = os.environ[env_key]
@@ -159,11 +158,8 @@ def spawn_async_diagnostic(
         # start_new_session: survive systemd killing our cgroup (KillMode=control-group) long enough
         # to flush.
         return subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
-            stdout=fd,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script], stdout=fd,
+            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
             close_fds=True,
         ).pid
     except OSError:
