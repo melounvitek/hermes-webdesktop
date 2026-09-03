@@ -1073,11 +1073,13 @@ class CLICommandsMixin:
             class _TTYBuf(StringIO):
                 def isatty(self) -> bool:
                     return True
+
             buf = _TTYBuf()
             with redirect_stdout(buf):
                 tools_disable_enable_command(ns)
             for line in buf.getvalue().splitlines():
                 _cp(line)
+
         parts = _shlex_args(cmd)
         subcommand = parts[0] if parts else ""
         if subcommand not in {"list", "disable", "enable"}:
@@ -1657,6 +1659,7 @@ class CLICommandsMixin:
                 print("  ┊ composing spritesheet…")
             elif event == "save":
                 print("  ┊ saving…")
+
         try:
             result = orchestrate.hatch_pet(
                 base_image=drafts[0], slug=slug, display_name=display_name, concept=concept,
@@ -1961,7 +1964,7 @@ class CLICommandsMixin:
         turn_route = self._resolve_turn_agent_config(prompt)
         runtime = turn_route["runtime"]
 
-        def run_background():
+        def produce():
             set_sudo_password_callback(self._sudo_password_callback)
             set_approval_callback(self._approval_callback)
             with suppress(Exception):
@@ -1987,37 +1990,54 @@ class CLICommandsMixin:
                         self._spinner_text = text
                         if self._app:
                             self._app.invalidate()
+
                 bg_agent.thinking_callback = _bg_thinking
                 result = bg_agent.run_conversation(user_message=prompt, task_id=task_id)
                 response = result.get("final_response", "") if result else ""
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
-                _print_side_result_panel(
-                    self,
-                    header_lines=[f"  ✅ Background task #{task_num} complete",
-                                  f"  Prompt: \"{preview}\""],
-                    body=response,
-                    title_suffix=f"(background #{task_num})",
-                    empty_note="  (No response generated)")
-                if self.bell_on_complete:
-                    sys.stdout.write("\a")
-                    sys.stdout.flush()
-            except Exception as e:
-                _refresh_tui_before_print(self)
-                _cp(f"  ❌ Background task #{task_num} failed: {e}")
+                return response
             finally:
                 with suppress(Exception):
                     set_sudo_password_callback(None)
                     set_approval_callback(None)
                     set_secret_capture_callback(None)
-                self._background_tasks.pop(task_id, None)
-                if not self._agent_running:  # clear spinner only if no foreground agent owns it
-                    self._spinner_text = ""
-                if self._app:
-                    self._invalidate(min_interval=0)
-        thread = threading.Thread(target=run_background, daemon=True, name=f"bg-task-{task_id}")
+
+        def done():
+            self._background_tasks.pop(task_id, None)
+            if not self._agent_running:  # clear spinner only if no foreground agent owns it
+                self._spinner_text = ""
+
+        thread = self._side_worker(
+            produce, name=f"bg-task-{task_id}", fail_label=f"Background task #{task_num}",
+            header_lines=[f"  ✅ Background task #{task_num} complete", f"  Prompt: \"{preview}\""],
+            title_suffix=f"(background #{task_num})", empty_note="  (No response generated)",
+            bell=True, on_done=done)
         self._background_tasks[task_id] = thread
         thread.start()
+
+    def _side_worker(self, produce, *, name, fail_label, header_lines, title_suffix, empty_note,
+                     bell=False, on_done=None) -> threading.Thread:
+        """Daemon thread for /bg and /btw: ``produce()`` returns the body to print in a side-result
+        panel; failures print ``fail_label`` failed; the TUI is always re-invalidated afterwards."""
+        def run():
+            try:
+                body = produce()
+                _print_side_result_panel(self, header_lines=header_lines, body=body,
+                                         title_suffix=title_suffix, empty_note=empty_note)
+                if bell and self.bell_on_complete:
+                    sys.stdout.write("\a")
+                    sys.stdout.flush()
+            except Exception as e:
+                _refresh_tui_before_print(self)
+                _cp(f"  ❌ {fail_label} failed: {e}")
+            finally:
+                if on_done is not None:
+                    on_done()
+                if self._app:
+                    self._invalidate(min_interval=0)
+
+        return threading.Thread(target=run, daemon=True, name=name)
 
     def _handle_btw_command(self, cmd: str):
         """Handle /btw <question> — answer a side question about this conversation from a
@@ -2044,22 +2064,14 @@ class CLICommandsMixin:
         _cp(f"  💬 Side question: \"{preview}\"",
             "  Answering from a snapshot of this conversation — the current work continues.\n")
 
-        def run_side_question():
-            try:
-                from agent.side_question import answer_side_question
-                answer = answer_side_question(
-                    question, history_snapshot, parent_agent=parent_agent, main_runtime=main_runtime,
-                )
-                _print_side_result_panel(
-                    self, header_lines=[f"  💬 /btw: \"{preview}\""], body=answer,
-                    title_suffix="(btw)", empty_note="  (No answer generated)")
-            except Exception as e:
-                _refresh_tui_before_print(self)
-                _cp(f"  ❌ /btw failed: {e}")
-            finally:
-                if self._app:
-                    self._invalidate(min_interval=0)
-        threading.Thread(target=run_side_question, daemon=True, name="btw-side-question").start()
+        def produce():
+            from agent.side_question import answer_side_question
+            return answer_side_question(
+                question, history_snapshot, parent_agent=parent_agent, main_runtime=main_runtime)
+
+        self._side_worker(produce, name="btw-side-question", fail_label="/btw",
+                          header_lines=[f"  💬 /btw: \"{preview}\""], title_suffix="(btw)",
+                          empty_note="  (No answer generated)").start()
 
     # ---- /bundles, /browser ---------------------------------------------------------------
     def _handle_bundles_command(self, cmd: str) -> None:
