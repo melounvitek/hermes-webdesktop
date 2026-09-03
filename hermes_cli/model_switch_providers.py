@@ -284,7 +284,6 @@ def _auth_store_has_provider(*keys: str) -> bool:
 
 def _raw_pool_usable(hermes_id: str) -> bool:
     """Section-1 pool check: only consult the pool when auth.json lists a raw entry."""
-    from hermes_cli.model_switch import _credential_pool_is_usable
     try:
         from hermes_cli.auth import _load_auth_store
         store = _load_auth_store()
@@ -296,7 +295,6 @@ def _raw_pool_usable(hermes_id: str) -> bool:
 
 
 def _pool_usable(slug: str) -> bool:
-    from hermes_cli.model_switch import _credential_pool_is_usable
     try:
         return _credential_pool_is_usable(slug)
     except Exception as exc:
@@ -506,7 +504,6 @@ def _discover_endpoint_models(
     ``has_explicit_models`` gates the *probe* (a network-cost guard for keyless endpoints that
     declare a catalog), never the cache read — applying it to the read re-pins the endpoint to
     its declared subset. Returns ``(None, False)`` when nothing usable was found."""
-    from hermes_cli.model_switch import _fetch_picker_live_models
     timeout = 1.5 if for_picker else 5.0
     if probe_live:
         try:
@@ -705,7 +702,6 @@ def _lap_builtin_rows(b: _PickerBuild, data: dict, user_providers: dict) -> None
 def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> bool:
     """Section-2 credential ladder: env/SDK, external-process executable, auth store, pool,
     anthropic's external credential files."""
-    from hermes_cli.model_switch import _credential_pool_is_usable
     if overlay.keyless:
         return True  # served anonymously (opencode-free)
     if overlay.auth_type == "aws_sdk":
@@ -909,7 +905,7 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
     (endpoint, credential identity, api_mode, extra_headers, display prefix). Four "Ollama — X"
     entries on one host become one "Ollama" row; distinct prefixes sharing a proxy URL keep
     their own rows."""
-    from hermes_cli.model_switch import _extra_headers_from_config, _save_discovered_models_to_config, _scoped_key_env
+    from hermes_cli.model_switch import _extra_headers_from_config, _scoped_key_env
     from hermes_cli.config import coerce_provider_id
     groups: dict[tuple, dict] = {}
     for entry in custom_providers:
@@ -1031,7 +1027,6 @@ def list_authenticated_providers(
     ``refresh`` busts the model-id disk cache up front (explicit user action only);
     ``probe_custom_providers`` enables live ``/models`` discovery for saved custom endpoints (CLI
     true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint."""
-    from hermes_cli.model_switch import _collect_authed_provider_slugs, _prefetch_provider_models_parallel
     from agent.models_dev import fetch_models_dev
     from hermes_cli.config import coerce_provider_id, stringify_provider_map
 

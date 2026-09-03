@@ -13,6 +13,7 @@ import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set
+from hermes_cli import setup_platforms
 
 logger = logging.getLogger(__name__)
 
@@ -6404,7 +6405,7 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
 def interactive_setup() -> None:
     """Configure Telegram credentials and allowlist via the CLI setup wizard (lazy import)."""
     from hermes_cli import setup as _setup_mod
-    _setup_mod._setup_telegram()
+    setup_platforms._setup_telegram()
 
 
 def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:

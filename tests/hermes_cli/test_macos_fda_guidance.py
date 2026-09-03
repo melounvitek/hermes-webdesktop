@@ -12,7 +12,7 @@ import contextlib
 
 import hermes_cli.doctor as doctor_mod
 import pathlib
-from hermes_cli.setup import _print_macos_fda_tip
+from hermes_cli.setup_quick import _print_macos_fda_tip
 from hermes_cli import doctor_platform
 
 

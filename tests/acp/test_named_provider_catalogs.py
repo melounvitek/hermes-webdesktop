@@ -45,7 +45,7 @@ class TestNamedCustomProviderCatalogs:
             }
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models",
+            "hermes_cli.model_switch_providers._fetch_picker_live_models",
             return_value=["model-a", "model-b"],
         ):
             catalogs = _named_custom_provider_catalogs()
@@ -70,7 +70,7 @@ class TestNamedCustomProviderCatalogs:
             }
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models", return_value=None
+            "hermes_cli.model_switch_providers._fetch_picker_live_models", return_value=None
         ):
             assert _named_custom_provider_catalogs() == []
 
@@ -86,7 +86,7 @@ class TestNamedCustomProviderCatalogs:
             }
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models", return_value=None
+            "hermes_cli.model_switch_providers._fetch_picker_live_models", return_value=None
         ):
             assert _named_custom_provider_catalogs() == []
 
@@ -103,7 +103,7 @@ class TestNamedCustomProviderCatalogs:
             ]
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models", return_value=None
+            "hermes_cli.model_switch_providers._fetch_picker_live_models", return_value=None
         ):
             catalogs = _named_custom_provider_catalogs()
 
@@ -123,7 +123,7 @@ class TestNamedCustomProviderCatalogs:
             "hermes_cli.models.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models",
+            "hermes_cli.model_switch_providers._fetch_picker_live_models",
             return_value=["qwen3:1.7b"],
         ) as fetch:
             catalogs = _named_custom_provider_catalogs()
@@ -151,7 +151,7 @@ class TestNamedCustomProviderCatalogs:
             "hermes_cli.models.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models",
+            "hermes_cli.model_switch_providers._fetch_picker_live_models",
             return_value=["qwen3:1.7b"],
         ) as fetch:
             catalogs = _named_custom_provider_catalogs()
@@ -169,13 +169,13 @@ class TestNamedCustomProviderCatalogs:
                 }
             }
         )
-        from hermes_cli.model_switch import _NativePickerModelList
+        from hermes_cli.model_switch_providers import _NativePickerModelList
 
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
             "hermes_cli.models.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
-            "hermes_cli.model_switch._fetch_picker_live_models",
+            "hermes_cli.model_switch_providers._fetch_picker_live_models",
             return_value=_NativePickerModelList(),
         ):
             assert _named_custom_provider_catalogs() == [

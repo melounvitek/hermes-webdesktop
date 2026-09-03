@@ -13,6 +13,7 @@ from hermes_cli.telegram_managed_bot import (
     print_qr_code,
     render_qr_terminal,
 )
+from hermes_cli import setup_platforms
 
 
 VALID_TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
@@ -173,11 +174,11 @@ class TestSetupTelegramAuto:
             fake_auto_setup_telegram_bot_result,
         )
 
-        assert setup._setup_telegram_auto_result() is None
+        assert setup_platforms._setup_telegram_auto_result() is None
         assert seen["profile_name"] == "oracle"
 
     def test_profile_name_from_home_path_handles_windows_separators(self):
-        from hermes_cli.setup import _profile_name_from_hermes_home
+        from hermes_cli.setup_platforms import _profile_name_from_hermes_home
 
         assert (
             _profile_name_from_hermes_home(

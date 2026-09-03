@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Callable
 
 from hermes_cli.curses_ui import MenuNavigationEvent, MenuNavigationStart
-from hermes_cli.nous_subscription import get_nous_subscription_features  # noqa: F401  (re-export; patched by tests)
-from tools.tool_backend_helpers import managed_nous_tools_enabled  # noqa: F401  (re-export; patched by tests)
 # Config helpers are re-exported (tests patch them on this module). display_hermes_home is
 # imported lazily at call sites (stale-module safety during hermes update).
 from hermes_cli.config import (
@@ -602,27 +600,12 @@ def _record_send_consent_change(*, enabled: bool) -> None:
 # Extracted sections, re-exported so callers and test patches keep resolving through
 # hermes_cli.setup. They import this module lazily inside bodies, so this is cycle-free.
 
-from hermes_cli.setup_tts import (  # noqa: E402,F401
-    _run_xai_oauth_login_from_setup, _setup_tts_provider, _xai_oauth_logged_in_for_setup, setup_tts,
-)
-from hermes_cli.setup_terminal import (  # noqa: E402,F401
-    _prompt_vercel_sandbox_settings, _read_nearest_vercel_project, setup_terminal_backend,
-)
-from hermes_cli.setup_platforms import (  # noqa: E402,F401
-    _TELEGRAM_BOT_TOKEN_RE, _profile_name_from_hermes_home, _setup_bluebubbles, _setup_telegram,
-    _setup_telegram_auto_result, _setup_webhooks, setup_gateway,
-)
+from hermes_cli.setup_tts import setup_tts  # noqa: E402
+from hermes_cli.setup_terminal import setup_terminal_backend  # noqa: E402
+from hermes_cli.setup_platforms import setup_gateway  # noqa: E402
 from hermes_cli.setup_summary import _print_setup_summary  # noqa: E402,F401
-from hermes_cli.setup_migration import (  # noqa: E402,F401
-    _OPENCLAW_SCRIPT, _get_section_config_summary, _load_openclaw_migration_module,
-    _model_section_has_credentials, _offer_openclaw_migration, _print_migration_preview,
-    _skip_configured_section,
-)
-from hermes_cli.setup_quick import (  # noqa: E402,F401
-    _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough,
-    _print_macos_fda_tip, _run_blank_slate_setup, _run_first_time_quick_setup, _run_portal_one_shot,
-    _run_quick_setup,
-)
+from hermes_cli.setup_migration import _offer_openclaw_migration, _skip_configured_section  # noqa: E402
+from hermes_cli.setup_quick import _run_portal_one_shot, _run_quick_setup  # noqa: E402
 
 
 # ── Main Wizard Orchestrator ──
@@ -714,8 +697,7 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
         _step("tools", "Tools", lambda: setup_tools(config, first_install=not is_existing))])
 
 
-# First-time mode picker: (menu label, runner name on this module) — None falls through to Full
-# Setup; runners resolve at call time so test patches on hermes_cli.setup apply.
+# First-time mode picker: (menu label, setup_quick runner name) — None falls through to Full Setup.
 _FIRST_TIME_MODES = (
     ("Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
      "_run_first_time_quick_setup"),
@@ -788,7 +770,8 @@ def _run_setup_wizard_impl(args):
         setup_mode = prompt_choice("How would you like to set up Hermes?", [label for label, _ in _FIRST_TIME_MODES], 0)
         label, runner = _FIRST_TIME_MODES[setup_mode]
         if runner is not None:
-            _run_setup_steps([(label, lambda: globals()[runner](config, hermes_home, is_existing))])
+            from hermes_cli import setup_quick
+            _run_setup_steps([(label, lambda: getattr(setup_quick, runner)(config, hermes_home, is_existing))])
             return
     _run_full_setup(config, hermes_home, is_existing=is_existing, migration_ran=migration_ran)
 

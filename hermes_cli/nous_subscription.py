@@ -13,13 +13,8 @@ from hermes_cli.nous_account import (
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 from utils import is_truthy_value
 from tools.tool_backend_helpers import (
-    fal_key_is_configured,
-    has_direct_modal_credentials,
-    managed_nous_tools_enabled,  # noqa: F401  (test-patchable re-export)
-    normalize_browser_cloud_provider,
-    normalize_modal_mode,
-    resolve_modal_backend_state,
-    resolve_openai_audio_api_key,
+    fal_key_is_configured, has_direct_modal_credentials, normalize_browser_cloud_provider, normalize_modal_mode,
+    resolve_modal_backend_state, resolve_openai_audio_api_key
 )
 
 

@@ -2,6 +2,8 @@
 resolved through the module object so test patches on ``hermes_cli.setup.<name>`` take effect."""
 
 import logging
+from tools import tool_backend_helpers
+from hermes_cli import nous_subscription
 
 logger = logging.getLogger("hermes_cli.setup")
 
@@ -160,7 +162,7 @@ def _modal_row(config, feats):
         if feats.modal.direct_override:
             return ("Modal Execution (direct Modal)", True, None)
         return ("Modal Execution", False, "run 'hermes setup terminal'")
-    if _setup.managed_nous_tools_enabled() and feats.nous_auth_present:
+    if tool_backend_helpers.managed_nous_tools_enabled() and feats.nous_auth_present:
         return ("Modal Execution (optional via Nous subscription)", True, None)
     return None
 
@@ -227,7 +229,7 @@ def _print_setup_summary(config: dict, hermes_home):
     _setup.print_header("Tool Availability Summary")
 
     tool_status = []
-    subscription_features = _setup.get_nous_subscription_features(config)
+    subscription_features = nous_subscription.get_nous_subscription_features(config)
     for build in _TOOL_ROW_BUILDERS:
         row = build(config, subscription_features)
         tool_status.extend(row if isinstance(row, list) else [] if row is None else [row])

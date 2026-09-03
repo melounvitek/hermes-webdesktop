@@ -251,7 +251,7 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     # _save_discovered_models_to_config. A failed save is non-fatal.
     if live_models:
         with contextlib.suppress(Exception):
-            from hermes_cli.model_switch import _save_discovered_models_to_config
+            from hermes_cli.model_switch_providers import _save_discovered_models_to_config
             _save_discovered_models_to_config(base_url, live_models, api_mode=api_mode, headers=extra_headers or None)
     return models, native_catalog_empty
 

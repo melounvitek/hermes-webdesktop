@@ -26,10 +26,8 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
     ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip."""
     try:
         from hermes_cli.config import (get_compatible_custom_providers, is_provider_enabled, load_config)
-        from hermes_cli.model_switch import (
-            _NativePickerModelList, _declared_model_ids, _entry_models_discovered, _fetch_picker_live_models,
-            _models_config_is_allowlist,
-        )
+        from hermes_cli.model_switch import _declared_model_ids, _entry_models_discovered, _models_config_is_allowlist
+        from hermes_cli.model_switch_providers import _NativePickerModelList, _fetch_picker_live_models
         from hermes_cli.model_switch_providers import _discover_flag
         from hermes_cli.models import should_use_ollama_native_catalog
         from hermes_cli.providers import custom_provider_slug

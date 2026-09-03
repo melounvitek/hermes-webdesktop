@@ -85,9 +85,8 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     """Streamlined first-time setup via Nous Portal: OAuth, model, terminal & messaging;
     everything else gets defaults."""
     from hermes_cli.setup import (
-        _apply_default_agent_settings, _info, print_header, print_info, _print_macos_fda_tip,
-        _print_setup_summary, print_success, print_warning, prompt_choice, save_config, setup_gateway,
-        setup_terminal_backend,
+        _apply_default_agent_settings, _info, print_header, print_info, _print_setup_summary, print_success,
+        print_warning, prompt_choice, save_config, setup_gateway, setup_terminal_backend
     )
     # Step 1: Nous Portal — OAuth login + model selection (provider set to "nous" by the save).
     print_header("Nous Portal", gap=True)
@@ -219,9 +218,8 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     """Blank Slate setup — essentials only, everything else OFF; then finish now or walk through
     opting capabilities back in. Nothing is enabled that the user did not explicitly choose."""
     from hermes_cli.setup import (
-        _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough, _info,
-        print_header, print_info, print_success, prompt_choice, save_config, setup_model_provider,
-        setup_terminal_backend,
+        _info, print_header, print_info, print_success, prompt_choice, save_config, setup_model_provider,
+        setup_terminal_backend
     )
     print_header("Blank Slate Setup", gap=True)
     _info("Everything starts OFF. First we force-enable only what's required",

@@ -20,11 +20,7 @@ from agent.models_dev import (
     ModelCapabilities, ModelInfo, get_model_capabilities, get_model_info, list_provider_models)
 from utils import base_url_hostname, base_url_origin
 # Re-exported: callers/tests patch hermes_cli.model_switch.<name>.
-from hermes_cli.model_switch_providers import (  # noqa: F401
-    _NativePickerModelList, _collect_authed_provider_slugs, _credential_pool_is_usable,
-    _fetch_picker_live_models, _picker_prewarm_done, _prefetch_provider_models_parallel,
-    _save_discovered_models_to_config, list_authenticated_providers, list_picker_providers,
-    prewarm_picker_cache_async)
+from hermes_cli.model_switch_providers import list_authenticated_providers
 
 
 logger = logging.getLogger(__name__)

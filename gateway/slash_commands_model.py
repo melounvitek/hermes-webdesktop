@@ -362,7 +362,7 @@ class GatewayModelCommandsMixin:
     async def _send_model_picker(self, event: MessageEvent, source, adapter, session_key: str, listing_kwargs: dict, on_model_selected) -> bool:
         """Send the interactive /model picker; False when nothing was sent (text fallback). *source*
         is session-key-normalized so the picker's thread metadata lands where the next turn reads."""
-        from hermes_cli.model_switch import list_picker_providers
+        from hermes_cli.model_switch_providers import list_picker_providers
         try:  # off-loop: listing can hit a synchronous HTTP fetch on a stale cache
             # Offload blocking provider-listing (can fall through to a synchronous urllib HTTP fetch on a
             # stale cache) off the event loop so the gateway doesn't freeze. See #41289.

@@ -141,7 +141,6 @@ _OPENCLAW_SCRIPT = (
 
 def _load_openclaw_migration_module():
     """Load the openclaw_to_hermes migration script as a module; None if it can't be loaded."""
-    from hermes_cli.setup import _OPENCLAW_SCRIPT
     if not _OPENCLAW_SCRIPT.exists():
         return None
     spec = importlib.util.spec_from_file_location("openclaw_to_hermes", _OPENCLAW_SCRIPT)
@@ -256,8 +255,8 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     """Detect ~/.openclaw and offer to migrate during first-time setup: dry-run preview first,
     execute only after explicit confirmation. Returns True iff migration ran successfully."""
     from hermes_cli.setup import (
-        get_config_path, _info, load_config, _OPENCLAW_SCRIPT, print_header, print_info, print_success,
-        print_warning, prompt_yes_no, save_config,
+        get_config_path, _info, load_config, print_header, print_info, print_success, print_warning, prompt_yes_no,
+        save_config
     )
     openclaw_dir = Path.home() / ".openclaw"
     if not openclaw_dir.is_dir() or not _OPENCLAW_SCRIPT.exists():

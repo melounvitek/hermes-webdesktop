@@ -11,6 +11,7 @@ import argparse
 import pytest
 
 import hermes_cli.models as models_mod
+from hermes_cli import model_switch_providers
 
 CURATED = ["vendor/allowed", "vendor/blocked"]
 ALLOWED = {"vendor/allowed"}
@@ -208,7 +209,7 @@ class TestNousPrefetch:
             auth_mod, "_load_auth_store",
             lambda *a, **k: {"providers": {"nous": {"access_token": "tok"}}},
         )
-        slugs = ms._collect_authed_provider_slugs({}, {"nous": list(CURATED)}, [])
+        slugs = model_switch_providers._collect_authed_provider_slugs({}, {"nous": list(CURATED)}, [])
         assert "nous" not in slugs
 
 

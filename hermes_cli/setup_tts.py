@@ -6,6 +6,8 @@ import logging
 import shutil
 import subprocess
 import sys
+from tools import tool_backend_helpers
+from hermes_cli import nous_subscription
 
 logger = logging.getLogger("hermes_cli.setup")
 
@@ -178,7 +180,7 @@ def _tts_local_install_step(selected: str) -> str:
 
 
 def _xai_oauth_path():
-    if _setup._run_xai_oauth_login_from_setup():
+    if _run_xai_oauth_login_from_setup():
         _setup.print_success("Logged in — xAI TTS will use these OAuth credentials")
         return None
     return "xAI Grok OAuth login did not complete. Falling back to Edge TTS."
@@ -198,7 +200,7 @@ def _xai_api_key_path():
 def _tts_xai_step(config: dict) -> str:
     """xAI TTS auth. Order: existing OAuth tokens (free for SuperGrok) > existing
     XAI_API_KEY > offer both paths — xAI TTS works with OAuth bearer tokens too."""
-    if _setup._xai_oauth_logged_in_for_setup():
+    if _xai_oauth_logged_in_for_setup():
         _setup.print_success("xAI TTS will use your xAI Grok OAuth (SuperGrok / Premium+) credentials")
     elif _setup.get_env_value("XAI_API_KEY"):
         _setup.print_success("xAI TTS will use your existing XAI_API_KEY")
@@ -230,7 +232,7 @@ def _setup_tts_provider(config: dict):
     _setup.print_header("Text-to-Speech Provider (optional)")
     _setup._info(f"Current: {current_label}", None)
     options = list(_TTS_PROVIDER_CHOICES)
-    if _setup.managed_nous_tools_enabled() and _setup.get_nous_subscription_features(config).nous_auth_present:
+    if tool_backend_helpers.managed_nous_tools_enabled() and nous_subscription.get_nous_subscription_features(config).nous_auth_present:
         options.insert(0, ("nous-openai",
                            "Nous Subscription (managed OpenAI TTS, billed to your subscription)"))
     choices = [label for _, label in options] + [f"Keep current ({current_label})"]

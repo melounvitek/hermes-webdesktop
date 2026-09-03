@@ -309,7 +309,8 @@ def _post_setup_xai_grok() -> None:
 
     _print_info("    xAI needs credentials. Choose one:")
     try:
-        from hermes_cli.setup import _run_xai_oauth_login_from_setup, prompt_choice, prompt as _setup_prompt
+        from hermes_cli.setup import prompt_choice, prompt as _setup_prompt
+        from hermes_cli.setup_tts import _run_xai_oauth_login_from_setup
         from hermes_cli.config import save_env_value
     except Exception as exc:
         _print_warning(f"    Could not load setup helpers: {exc}")

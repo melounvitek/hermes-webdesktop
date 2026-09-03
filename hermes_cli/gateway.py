@@ -19,6 +19,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from hermes_cli import setup_platforms
 
 # UV's bundled Python ships a minimal PATH; ensure launchctl/systemctl are discoverable.
 if os.name == "posix":
@@ -5351,8 +5352,8 @@ def _builtin_setup_fn(key: str):
     from hermes_cli import setup as _s
     return {
         # telegram/discord/slack/whatsapp/dingtalk/feishu/wecom setup_fns come from their plugins.
-        "bluebubbles": _s._setup_bluebubbles,
-        "webhooks": _s._setup_webhooks,
+        "bluebubbles": setup_platforms._setup_bluebubbles,
+        "webhooks": setup_platforms._setup_webhooks,
         "signal": _setup_signal,
         "weixin": _setup_weixin,
         "qqbot": _setup_qqbot,

@@ -17,6 +17,7 @@ network or auth state is required.
 
 import pytest
 from hermes_cli import model_switch
+from hermes_cli import model_switch_providers
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +76,7 @@ def test_passthrough_kwargs_to_base(monkeypatch):
     monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
                         lambda *a, **kw: [])
 
-    model_switch.list_picker_providers(
+    model_switch_providers.list_picker_providers(
         current_provider="openrouter",
         current_base_url="http://x",
         current_model="openai/gpt-5.4",
@@ -101,7 +102,7 @@ def test_current_custom_endpoint_passthrough_marks_current_row(monkeypatch):
     monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
                         lambda *a, **kw: [])
 
-    result = model_switch.list_picker_providers(
+    result = model_switch_providers.list_picker_providers(
         current_provider="custom:ollama",
         current_base_url="http://localhost:11434/v1",
         current_model="glm-5.1",

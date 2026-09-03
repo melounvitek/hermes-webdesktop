@@ -15,12 +15,8 @@ import time
 import hermes_cli.providers as providers_mod
 import pytest
 import yaml
-from hermes_cli.model_switch import (
-    _fetch_picker_live_models,
-    _save_discovered_models_to_config,
-    list_authenticated_providers,
-    switch_model,
-)
+from hermes_cli.model_switch import list_authenticated_providers, switch_model
+from hermes_cli.model_switch_providers import _fetch_picker_live_models, _save_discovered_models_to_config
 from hermes_cli.providers import resolve_provider_full
 
 
@@ -976,7 +972,7 @@ def test_list_authenticated_providers_current_endpoint_uses_current_slug(monkeyp
 
 
 def test_picker_endpoint_authorization_overrides_inferred_bearer(monkeypatch):
-    from hermes_cli.model_switch import _fetch_picker_live_models
+    from hermes_cli.model_switch_providers import _fetch_picker_live_models
 
     captured: dict[str, str] = {}
 
@@ -1463,7 +1459,7 @@ def test_discovered_models_auto_saved_to_cache(monkeypatch):
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
     monkeypatch.setattr(
-        "hermes_cli.model_switch._save_discovered_models_to_config",
+        "hermes_cli.model_switch_providers._save_discovered_models_to_config",
         lambda api_url, model_ids, **kwargs: save_calls.append((api_url, model_ids)),
     )
 
@@ -1506,7 +1502,7 @@ def test_save_discovered_models_preserves_dict_form(monkeypatch):
     """``_save_discovered_models_to_config`` must not replace a dict-form
     ``models`` mapping (per-model metadata like ``context_length``) with
     a flat list of strings (#67841)."""
-    from hermes_cli.model_switch import _save_discovered_models_to_config
+    from hermes_cli.model_switch_providers import _save_discovered_models_to_config
 
     save_calls = []
 
@@ -1575,7 +1571,7 @@ def test_model_flow_named_custom_persists_discovered_models(monkeypatch):
 
     save_calls = []
     monkeypatch.setattr(
-        "hermes_cli.model_switch._save_discovered_models_to_config",
+        "hermes_cli.model_switch_providers._save_discovered_models_to_config",
         lambda api_url, model_ids, **kwargs: save_calls.append(
             (api_url, model_ids, kwargs)
         ),
@@ -1942,7 +1938,7 @@ def test_cached_catalog_is_not_written_back_to_config(monkeypatch):
     _seed_custom_model_cache(monkeypatch, _LOCAL_CATALOG)
     saves = []
     monkeypatch.setattr(
-        "hermes_cli.model_switch._save_discovered_models_to_config",
+        "hermes_cli.model_switch_providers._save_discovered_models_to_config",
         lambda api_url, model_ids, **kwargs: saves.append((api_url, model_ids)),
     )
 

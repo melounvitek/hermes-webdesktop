@@ -8,6 +8,8 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from tools import tool_backend_helpers
+from hermes_cli import nous_subscription
 
 logger = logging.getLogger("hermes_cli.setup")
 
