@@ -83,14 +83,12 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
-        # Stale, disabled, or crash-looping: stop trying; a manual message continues.
-        clear_turn_marker(home, session_key)
+        clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
-    attempt = marker["attempts"] + 1
-    text = _auto_continue_note(marker["prompt"])
+    attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
 
     def kickoff() -> None:
         rid = f"__auto_continue__{int(time.time() * 1000)}"
@@ -100,30 +98,26 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         except Exception:
             logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
             err = {"error": {"message": "agent build failed"}}
-        if err:
-            # Leave the marker: the next resume retries (bounded by attempts).
+        if err:  # leave the marker: the next resume retries (bounded by attempts)
             session["_auto_continue_scheduled"] = False
             return
         with session["history_lock"]:
             if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
-                # A real user prompt beat us; its own conclusion clears the marker.
-                session["_auto_continue_scheduled"] = False
+                session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
                 return
             session["running"] = True
             session["last_active"] = time.time()
         # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have
-        # written the marker and still be mid-turn. Leave the marker so a later resume retries once the
-        # owner finishes or dies.
+        # written the marker and still be mid-turn. Leave the marker so a later resume retries.
         if _ensure_active_session_slot(sid, session) is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
             _ac_release_turn(session, unschedule=True)
             return
         with session["history_lock"]:
-            # Marker inputs read back by _run_prompt_submit: count the attempt (crash breaker) and
-            # re-record the ORIGINAL prompt (no nested notes). Set here, not at schedule time, so a bail
-            # above leaves nothing for a racing user turn.
-            session["_auto_continue_attempt"] = attempt
-            session["_auto_continue_prompt"] = marker["prompt"]
+            # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL
+            # prompt (no nested notes). Set here, not at schedule time, so a bail above leaves nothing
+            # for a racing user turn.
+            session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
         try:
             _emit("status.update", sid, {"kind": "process", "text": "Resuming interrupted turn…"})
             _emit("message.start", sid)
@@ -279,15 +273,16 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
     text_only = not image_paths and _is_text_only_busy_payload(text)
     plain_text = _coerce_message_text(text).strip() if text_only else ""
+    # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall
+    # through to the proven interrupt + queue path.
     if plain_text and agent is not None:
-        if mode == "steer" and hasattr(agent, "steer"):
-            resp = _ac_try_correction(rid, session, agent, "steer", plain_text, "steered")
-            if resp is not None:
-                return resp
-        # Text-only corrections redirect in place when supported; media payloads and older agents fall
-        # through to the proven interrupt + queue path.
-        if mode == "interrupt" and getattr(agent, "_supports_active_turn_redirect", False) is True and hasattr(agent, "redirect"):
-            resp = _ac_try_correction(rid, session, agent, "redirect", plain_text, "redirected")
+        supported = {
+            "steer": hasattr(agent, "steer"),
+            "interrupt": getattr(agent, "_supports_active_turn_redirect", False) is True and hasattr(agent, "redirect"),
+        }
+        method, status = {"steer": ("steer", "steered"), "interrupt": ("redirect", "redirected")}.get(mode, (None, None))
+        if method and supported[mode]:
+            resp = _ac_try_correction(rid, session, agent, method, plain_text, status)
             if resp is not None:
                 return resp
     # Queue before asking the live turn to stop. Never call a provider/compute-host method under
@@ -340,17 +335,14 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         kwargs["image_paths"] = queued["image_paths"]
     dispatch_failed = False
     try:
-        if use_compute_host:
-            resp = _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)
-            if resp.get("error"):
-                message = str(((resp.get("error") or {}).get("message")) or "queued prompt failed")
-                with session["history_lock"]:
-                    session["running"] = False
-                    _clear_inflight_turn(session)
-                _emit("error", sid, {"message": message})
-                dispatch_failed = True
-        else:
+        if not use_compute_host:
             _run_prompt_submit(rid, sid, session, queued["text"], **kwargs)
+        elif (resp := _submit_prompt_to_compute_host(rid, sid, session, queued["text"], **kwargs)).get("error"):
+            with session["history_lock"]:
+                session["running"] = False
+                _clear_inflight_turn(session)
+            _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
+            dispatch_failed = True
     except Exception as exc:
         _notif_log_failure("queued prompt dispatch failed", exc)
         _ac_release_turn(session)

@@ -76,12 +76,12 @@ def _store(path: Path, entries: dict[str, dict]) -> None:
 
 
 def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
-    """Load → ``mutate(entries)`` → store under the lock; ``mutate`` returns False to skip the write."""
+    """Load → ``mutate(entries)`` → store under the lock; ``mutate`` returns None to skip the write."""
     try:
         with _lock:
             path = _marker_path(home)
-            entries = _load(path)
-            if mutate(entries) is not False:
+            entries = mutate(_load(path))
+            if entries is not None:
                 _store(path, entries)
     except Exception:
         logger.debug("failed to %s turn marker for %s", what, session_key, exc_info=True)
@@ -97,20 +97,16 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         return
     now = time.time()
     entry = {"attempts": max(0, int(attempts)), "prompt": prompt[:_MAX_PROMPT_CHARS], "started_at": now}
-
-    def mutate(entries: dict) -> None:
-        pruned = _prune(entries, now)
-        entries.clear()
-        entries.update(pruned)
-        entries[session_key] = entry
-
-    _update(home, session_key, mutate, "record")
+    _update(home, session_key, lambda entries: {**_prune(entries, now), session_key: entry}, "record")
 
 
 def clear_turn_marker(home: Path | str, session_key: str) -> None:
     """Remove the marker once its turn concluded (any outcome the client saw)."""
     if session_key:
-        _update(home, session_key, lambda entries: entries.pop(session_key, None) is not None, "clear")
+        _update(
+            home, session_key,
+            lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear",
+        )
 
 
 def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | None:
