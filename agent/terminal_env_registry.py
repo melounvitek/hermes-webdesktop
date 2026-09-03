@@ -1,26 +1,13 @@
-"""
-Terminal Environment Registry
-=============================
+"""Terminal Environment Registry.
 
-Central map of registered pluggable terminal backends. Populated by plugins
-at load time via :meth:`PluginContext.register_terminal_environment_provider`;
-consumed by :func:`tools.terminal_tool._create_environment` and the
-classification helpers spread across the terminal/file/approval/prompt
-surfaces.
-
-Unlike the image/video/web/browser registries there is **no active-provider
-resolution here**: the active backend is whatever ``TERMINAL_ENV`` /
-``terminal.backend`` names, exactly as for built-in backends. The registry's
-only job is mapping that name to a provider instance (and answering the
-classification questions the core historically answered with frozensets of
-built-in names).
-
-Built-in backend names are reserved — :func:`register_provider` rejects a
-provider whose ``name`` collides with one, so a plugin can never shadow the
-in-tree docker/modal/... implementations.
-
-Mirrors :mod:`agent.browser_registry` scope semantics: providers register
-into a per-profile scope (multiplexed gateways) or the global base map.
+Central map of registered pluggable terminal backends, populated by plugins via
+:meth:`PluginContext.register_terminal_environment_provider` and consumed by
+:func:`tools.terminal_tool._create_environment` plus the classification helpers across the
+terminal/file/approval/prompt surfaces. Unlike the image/video/web/browser registries there
+is **no active-provider resolution**: the active backend is whatever ``TERMINAL_ENV`` /
+``terminal.backend`` names. Built-in names are reserved (registration raises) so a plugin can
+never shadow the in-tree docker/modal/... implementations. Scope semantics mirror
+:mod:`agent.browser_registry` (per-profile scope or the global base map).
 """
 
 from __future__ import annotations
@@ -68,9 +55,8 @@ def plugin_backend_names(*, scope: Optional[str] = None) -> List[str]:
 def provider_flag(name: str, attr: str, default=False):
     """Read a classification attribute off the provider for *name*.
 
-    Fail-soft: unknown backend or a raising property returns *default* so a
-    misbehaving plugin degrades to built-in-equivalent behavior instead of
-    taking the terminal tool down.
+    Fail-soft: unknown backend or a raising property returns *default* so a misbehaving
+    plugin degrades to built-in-equivalent behavior instead of taking the terminal tool down.
     """
     provider = _registry.get_provider(name)
     if provider is None:
@@ -86,13 +72,9 @@ def provider_flag(name: str, attr: str, default=False):
 
 
 def plugin_strip_env_keys() -> frozenset:
-    """Union of every registered provider's ``strip_env_keys``.
-
-    Secrets are stripped for ALL registered backends, not just the active
-    one — a token in the process environment is strippable regardless of
-    which backend is selected (mirrors how MODAL_*/DAYTONA_API_KEY sit in
-    the static tier-1 set unconditionally).
-    """
+    """Union of every registered provider's ``strip_env_keys`` — across ALL scopes, not
+    just the active backend: a token in the process environment is strippable regardless of
+    which backend is selected (as MODAL_*/DAYTONA_API_KEY sit in the static tier-1 set)."""
     keys: set = set()
     with _registry._lock:
         all_providers = list(_registry._providers.values())
