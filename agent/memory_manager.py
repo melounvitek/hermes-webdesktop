@@ -451,11 +451,10 @@ class MemoryManager:
         clean_query = self._strip_skill_scaffolding(query) if providers else None
         if not clean_query:
             return
-        fanout = lambda: self._each_provider(  # noqa: E731
+        self._submit_background(lambda: self._each_provider(
             "queue_prefetch failed (non-fatal)", lambda p: p.queue_prefetch(clean_query, session_id=session_id),
             providers=providers,
-        )
-        self._submit_background(fanout, kind="prefetch")
+        ), kind="prefetch")
 
     @staticmethod
     def _provider_sync_accepts_messages(provider: MemoryProvider) -> bool:
