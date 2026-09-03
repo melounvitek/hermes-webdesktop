@@ -19,8 +19,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from tools.computer_use.backend import (
-    ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes)
+from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -228,10 +227,10 @@ def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cac
     _shutdown_backend_atexit()
     _AUX_VISION_ROUTE_CACHE.clear()
 
-def _noop_input(name: str, first: Optional[str] = None):
-    # Recording stub for a keyword-only input method; a leading positional arg is folded in under *first*.
+def _noop_stub(name: str, *params: str, result: Any = None):
+    # Recording stub: positional args are folded in under *params* (declared params default to None).
     def method(self, *pos, **kw):
-        return self._record(name, {**dict(zip((first,) if first else (), pos)), **kw})
+        return self._record(name, {**dict.fromkeys(params), **dict(zip(params, pos)), **kw}, result)
     return method
 
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
@@ -253,14 +252,11 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
                             CaptureResult(mode=mode, width=1024, height=768, png_b64=None, elements=[],
                                           app=app or "", window_title=""))
 
-    click, drag, scroll = _noop_input("click"), _noop_input("drag"), _noop_input("scroll")
-    type_text, key = _noop_input("type", "text"), _noop_input("key", "keys")
-    def list_apps(self) -> List[Dict[str, Any]]: return self._record("list_apps", {}, [])
-    def list_windows(self) -> List[Dict[str, Any]]: return self._record("list_windows", {}, [])
+    click, drag, scroll = _noop_stub("click"), _noop_stub("drag"), _noop_stub("scroll")
+    type_text, key, set_value = _noop_stub("type", "text"), _noop_stub("key", "keys"), _noop_stub("set_value", "value", "element")
+    list_apps, list_windows = _noop_stub("list_apps", result=[]), _noop_stub("list_windows", result=[])
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         return self._record("focus_app", {"app": app, "raise": raise_window})
-    def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
-        return self._record("set_value", {"value": value, "element": element})
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
@@ -285,10 +281,9 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     try:
         backend = _get_backend(session_id=session_id)
     except Exception as e:
-        return json.dumps({
-            "error": f"computer_use backend unavailable: {e}",
-            "hint": "If the cua-driver binary is missing, run `hermes computer-use install`. "
-                    "If a Python dependency is missing, the error above shows the exact install command."})
+        return json.dumps({"error": f"computer_use backend unavailable: {e}",
+                           "hint": "If the cua-driver binary is missing, run `hermes computer-use install`. "
+                                   "If a Python dependency is missing, the error above shows the exact install command."})
     try:
         with _backend_lock:
             call_lock = _backend_call_locks.setdefault(session_id, threading.RLock())
@@ -442,11 +437,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
     requested_app = args.get("app")
     if (spec.input and isinstance(requested_app, str) and requested_app.strip()
             and (mismatch := _input_target_mismatch(backend, requested_app)) is not None):
-        return json.dumps({
-            "ok": False, "action": action, "code": "input_target_mismatch",
-            "error": (f"{action} would go to the current target {mismatch!r}, not {requested_app.strip()!r} "
-                      "— input actions always hit the sticky target from the last capture/focus_app. "
-                      f"Call capture(app={requested_app.strip()!r}) or focus_app first, then retry.")})
+        return json.dumps({"ok": False, "action": action, "code": "input_target_mismatch", "error": (
+            f"{action} would go to the current target {mismatch!r}, not {requested_app.strip()!r} "
+            "— input actions always hit the sticky target from the last capture/focus_app. "
+            f"Call capture(app={requested_app.strip()!r}) or focus_app first, then retry.")})
     # delivery_mode / bring_to_front thread through every input action (background → foreground ladder).
     res = spec.handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
                        bring_to_front=bool(args.get("bring_to_front")))
@@ -499,12 +493,6 @@ _MIN_PROVIDER_IMAGE_DIMENSION = 8
 _MAX_ELEMENT_LABEL_CHARS = 120
 # Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
 _MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
-
-def _image_dimensions_from_b64(image_b64: str) -> Optional[Tuple[int, int]]:
-    try:  # (width, height) of an inline PNG/JPEG screenshot, or None
-        return image_dimensions_from_bytes(base64.b64decode(image_b64, validate=False)) if image_b64 else None
-    except Exception:
-        return None
 
 def _capture_mime(cap: CaptureResult) -> str:
     """cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/, PNG with iVBOR)."""
@@ -586,8 +574,9 @@ class _CaptureView:
         return len(self.cap.elements)
 
 def _capture_view(cap: CaptureResult, max_elements: int) -> _CaptureView:
-    visible = cap.elements[:max_elements]
-    dims = _image_dimensions_from_b64(cap.png_b64 or "")
+    visible, dims = cap.elements[:max_elements], None
+    with contextlib.suppress(Exception):  # (width, height) of the inline PNG/JPEG screenshot, else the backend's
+        dims = image_dimensions_from_bytes(base64.b64decode(cap.png_b64, validate=False)) if cap.png_b64 else None
     width, height = dims or (cap.width, cap.height)
     scale, note = _bounds_hints(visible, width, height)
     # Capped labels / capped element array: spill the complete tree for on-demand reads.
@@ -817,16 +806,6 @@ _VISION_PROMPT = ("Describe what is visible in this desktop application screensh
                   "about. Do not invent details that are not actually visible.\n\nAX/SOM index for "
                   "cross-reference:\n")
 
-def _vision_analysis_text(result_json: Any) -> str:
-    # The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON.
-    if not isinstance(result_json, str):
-        return ""
-    try:
-        parsed = json.loads(result_json)
-    except (TypeError, json.JSONDecodeError):
-        return result_json.strip()
-    return str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
-
 def _route_capture_through_aux_vision(
     cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
     truncated_elements: int = 0, elements_file: Optional[str] = None, screenshot_path: Optional[str] = None,
@@ -859,7 +838,15 @@ def _route_capture_through_aux_vision(
         if temp_image_path is not None:
             with contextlib.suppress(Exception):
                 os.unlink(str(temp_image_path))
-    if not (analysis_text := _vision_analysis_text(result_json)):
+    # The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON; empty -> no merge.
+    analysis_text = ""
+    if isinstance(result_json, str):
+        try:
+            parsed = json.loads(result_json)
+            analysis_text = str(parsed.get("analysis") or "").strip() if isinstance(parsed, dict) else ""
+        except (TypeError, json.JSONDecodeError):
+            analysis_text = result_json.strip()
+    if not analysis_text:
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
     # exactly for non-vision main models. Dimensions are the backend's on this branch.
