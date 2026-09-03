@@ -121,8 +121,7 @@ class _ToolMatcherMixin:
                 self.compiled_matcher = re.compile(self.matcher)
             except re.error as exc:
                 logger.warning(
-                    "%s matcher %r is invalid (%s) — treating as "
-                    "literal equality", self._MATCHER_KIND, self.matcher, exc,
+                    "%s matcher %r is invalid (%s) — treating as literal equality", self._MATCHER_KIND, self.matcher, exc,
                 )
                 self.compiled_matcher = None
 
@@ -185,10 +184,8 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
 
         if not already_allowlisted and not _prompt_and_record(spec.event, spec.command, accept_hooks=effective_accept):
             logger.warning(
-                "shell hook for %s (%s) not allowlisted — skipped. "
-                "Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / "
-                "hooks_auto_accept: true, or approve at the TTY "
-                "prompt next run.",
+                "shell hook for %s (%s) not allowlisted — skipped. Use --accept-hooks / "
+                "HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true, or approve at the TTY prompt next run.",
                 spec.event, spec.command,
             )
             continue
@@ -249,9 +246,8 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
         if event_name in SHELL_UNSUPPORTED_HOOKS:
             # _parse_response has no channel for these directives — refuse loudly.
             logger.warning(
-                "hook event %r is Python-plugin-only: shell hooks cannot "
-                "return its directive, so this registration is refused "
-                "rather than silently ignored",
+                "hook event %r is Python-plugin-only: shell hooks cannot return its directive, "
+                "so this registration is refused rather than silently ignored",
                 event_name,
             )
             continue
@@ -294,9 +290,8 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
         matcher = None
     if matcher is not None and event not in _TOOL_EVENTS:
         warn(
-            ".matcher=%r will be ignored at runtime — the "
-            "matcher field is only honored for pre_tool_call / "
-            "post_tool_call.  The hook will fire on every %s event.",
+            ".matcher=%r will be ignored at runtime — the matcher field is only honored for "
+            "pre_tool_call / post_tool_call.  The hook will fire on every %s event.",
             matcher, event,
         )
         matcher = None
@@ -321,9 +316,8 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
         fail_closed = False
     if fail_closed and event not in _BLOCKING_EVENTS:
         warn(
-            ".fail_closed=true will be ignored at runtime — "
-            "fail_closed only applies to blocking-capable events (%s).  "
-            "The hook will fail open on %s like any other hook.",
+            ".fail_closed=true will be ignored at runtime — fail_closed only applies to blocking-capable "
+            "events (%s).  The hook will fail open on %s like any other hook.",
             ", ".join(sorted(_BLOCKING_EVENTS)), event,
         )
         fail_closed = False
@@ -340,14 +334,17 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         "returncode": None, "stdout": "", "stderr": "",
         "timed_out": False, "elapsed_seconds": 0.0, "error": None,
     }
+
+    def failed(error: str) -> Dict[str, Any]:
+        result["error"] = error
+        return result
+
     try:
         argv = _split(os.path.expanduser(spec.command))
     except ValueError as exc:
-        result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
-        return result
+        return failed(f"command {spec.command!r} cannot be parsed: {exc}")
     if not argv:
-        result["error"] = "empty command"
-        return result
+        return failed("empty command")
 
     t0 = time.monotonic()
     # Own process group on POSIX so a timed-out hook's descendants are reaped with it; Windows tree
@@ -362,14 +359,11 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
             **popen_kwargs,
         )
     except FileNotFoundError:
-        result["error"] = "command not found"
-        return result
+        return failed("command not found")
     except PermissionError:
-        result["error"] = "command not executable"
-        return result
+        return failed("command not executable")
     except Exception as exc:  # pragma: no cover — defensive
-        result["error"] = str(exc)
-        return result
+        return failed(str(exc))
 
     try:
         stdout, stderr = proc.communicate(input=stdin_json, timeout=spec.timeout)
@@ -380,17 +374,16 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
             proc.communicate(timeout=1)
         except Exception:
             pass
-        if isinstance(exc, subprocess.TimeoutExpired):
-            result["timed_out"] = True
-            result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
-        else:  # pragma: no cover — defensive
-            result["error"] = str(exc)
+        if not isinstance(exc, subprocess.TimeoutExpired):  # pragma: no cover — defensive
+            return failed(str(exc))
+        result["timed_out"] = True
+        result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
         return result
 
-    result["returncode"] = proc.returncode
-    result["stdout"] = stdout or ""
-    result["stderr"] = stderr or ""
-    result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
+    result.update(
+        returncode=proc.returncode, stdout=stdout or "", stderr=stderr or "",
+        elapsed_seconds=round(time.monotonic() - t0, 3),
+    )
     return result
 
 
@@ -565,10 +558,9 @@ def save_allowlist(data: Dict[str, Any]) -> None:
             raise
     except OSError as exc:
         logger.warning(
-            "Failed to persist shell hook allowlist to %s: %s. "
-            "The approval is in-memory for this run, but the next "
-            "startup will re-prompt (or skip registration on non-TTY "
-            "runs without --accept-hooks / HERMES_ACCEPT_HOOKS).",
+            "Failed to persist shell hook allowlist to %s: %s. The approval is in-memory for this run, "
+            "but the next startup will re-prompt (or skip registration on non-TTY runs without "
+            "--accept-hooks / HERMES_ACCEPT_HOOKS).",
             p, exc,
         )
 
