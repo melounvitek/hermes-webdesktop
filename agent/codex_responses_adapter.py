@@ -220,11 +220,8 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
     parts = list(_iter_content_parts(content))
     text_bits = [payload for kind, payload in parts if kind == "text"]
     image_count = len(parts) - len(text_bits)
-    summary = sep.join(text_bits).strip()
-    if image_count:
-        note = f"[{image_count} image{'s' if image_count != 1 else ''}]"
-        summary = f"{note} {summary}" if summary else note
-    return summary
+    note = f"[{image_count} image{'s' if image_count != 1 else ''}]" if image_count else ""
+    return " ".join(bit for bit in (note, sep.join(text_bits).strip()) if bit)
 
 
 # --- ID helpers ---------------------------------------------------------------
@@ -426,8 +423,8 @@ def _replay_tool_call_items(msg: Dict[str, Any], *, start_index: int) -> List[Di
     return replayed
 
 
-def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Convert a tool-role message to ``function_call_output`` (None if unpairable)."""
+def _tool_output_items(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert a tool-role message to ``[function_call_output]`` (``[]`` if unpairable)."""
     raw_tool_call_id = msg.get("tool_call_id")
     call_id, tool_response_item_id = _split_responses_tool_id(raw_tool_call_id)
     if not _nonblank(call_id):
@@ -437,14 +434,14 @@ def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if call_id is None and _nonblank(raw_tool_call_id):
             call_id = raw_tool_call_id.strip()
     if not _nonblank(call_id):
-        return None
+        return []
     # ``output`` may be a string or an ``input_text``/``input_image`` array.
     tool_content = msg.get("content")
     output_value: Any = (
         (_chat_content_to_responses_parts(tool_content, role="user") or "")
         if isinstance(tool_content, list) else str(tool_content or "")
     )
-    return {"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}
+    return [{"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}]
 
 
 def _chat_messages_to_responses_input(
@@ -478,9 +475,7 @@ def _chat_messages_to_responses_input(
             continue
         role = msg.get("role")
         if role == "tool":
-            tool_item = _tool_output_item(msg)
-            if tool_item is not None:
-                emit([tool_item], msg)
+            emit(_tool_output_items(msg), msg)
             continue
         if role not in {"user", "assistant"}:
             continue
@@ -670,11 +665,9 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) 
         if isinstance(part, str):
             if part:
                 validated.append({"type": text_type, "text": ctx.sanitize_text(part)})
-            continue
-        if not isinstance(part, dict):
+        elif not isinstance(part, dict):
             raise ValueError(f"Codex Responses input[{idx}].content[{part_idx}] must be an object or string.")
-        ptype = _part_type(part)
-        if ptype in _TEXT_PART_TYPES:
+        elif (ptype := _part_type(part)) in _TEXT_PART_TYPES:
             text = part.get("text", "")
             text = text if isinstance(text, str) else str(text or "")
             validated.append({"type": text_type, "text": ctx.sanitize_text(text)})
@@ -741,10 +734,10 @@ _PREFLIGHT_OPTIONAL_FIELDS: tuple[tuple[str, Callable[[Any], bool], Optional[Cal
     ("timeout", lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < float("inf"), float),
     ("temperature", lambda v: isinstance(v, (int, float)), float),
     # Cache routing/retention and tool-dispatch hints pass through as-is.
-    ("tool_choice", lambda v: v is not None, None),
-    ("parallel_tool_calls", lambda v: v is not None, None),
-    ("prompt_cache_key", lambda v: v is not None, None),
-    ("prompt_cache_retention", lambda v: v is not None, None),
+    *(
+        (key, lambda v: v is not None, None)
+        for key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key", "prompt_cache_retention")
+    ),
     # Native compaction directive; eligibility is resolved in agent/native_compaction.py.
     ("context_management", lambda v: isinstance(v, list) and bool(v), None),
 )
@@ -834,12 +827,8 @@ def _preflight_codex_api_kwargs(
 
 def _text_chunks(parts: Any, types: Optional[set] = None) -> List[str]:
     """Non-empty ``.text`` of each part (optionally filtered by ``.type``); [] if not a list."""
-    return [
-        text for text in (
-            getattr(part, "text", None) for part in _as_list(parts) if types is None or getattr(part, "type", None) in types
-        )
-        if _nonempty_str(text)
-    ]
+    selected = [part for part in _as_list(parts) if types is None or getattr(part, "type", None) in types]
+    return [text for text in (getattr(part, "text", None) for part in selected) if _nonempty_str(text)]
 
 
 def _extract_responses_message_text(item: Any) -> str:
@@ -1039,6 +1028,13 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         reasoning_content=None, reasoning_details=None,
         codex_reasoning_items=scan.reasoning_items_raw or None, codex_message_items=scan.message_items_raw or None,
     )
+    # Reasoning-only: for Codex/xAI/GitHub, status=completed means "still thinking" →
+    # incomplete so the continuation retries. Other backends trust response.status —
+    # forcing incomplete there stalls for minutes on a legitimately final state.
+    reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text
+    trusted_final = (
+        response_status == "completed" and issuer_kind not in ("codex_backend", "xai_responses", "github_responses")
+    )
     if tool_calls:
         finish_reason = "tool_calls"
     elif response_incomplete_content_filter:
@@ -1047,16 +1043,9 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         leaked_tool_call_text
         or scan.saw_streaming_or_item_incomplete
         or ((scan.has_incomplete_items or scan.saw_commentary_phase) and not scan.saw_final_answer_phase)
+        or (reasoning_only and not trusted_final)
     ):
         finish_reason = "incomplete"
-    elif (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text:
-        # Reasoning-only: for Codex/xAI/GitHub, status=completed means "still thinking" →
-        # incomplete so the continuation retries. Other backends trust response.status —
-        # forcing incomplete there stalls for minutes on a legitimately final state.
-        trusted_final = (
-            response_status == "completed" and issuer_kind not in ("codex_backend", "xai_responses", "github_responses")
-        )
-        finish_reason = "stop" if trusted_final else "incomplete"
     else:
         finish_reason = "stop"
     return assistant_message, finish_reason
