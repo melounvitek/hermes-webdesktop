@@ -39,8 +39,7 @@ _DURABLE_CLAIM_OPS = {
 class GatewayNotificationsMixin:
     """Process/completion/update notifications, media delivery and async-delegation delivery for GatewayRunner."""
 
-    # Routing-complete coalescing keys: process completions (short-window fan-in) and async
-    # delegations (originating session + parent session + route).
+    # Coalescing keys: process completions (short-window fan-in) and async delegations (+ parent session).
     _COMPLETION_BATCH_KEY_FIELDS = ("session_key", "platform", "chat_type", "chat_id", "thread_id", "user_id")
     _ASYNC_GROUP_KEY_FIELDS = ("session_key", "parent_session_id", *_COMPLETION_BATCH_KEY_FIELDS[1:])
 
@@ -141,8 +140,7 @@ class GatewayNotificationsMixin:
             return None
         route_owns_lineage = session_entry.session_id in {pinned_session_id, target_session_id}
         if not route_owns_lineage:
-            # A delegation may survive several compression rotations: accept an intermediate stale
-            # route only when its own verified compression tip is the same live target.
+            # Across several rotations, accept a stale route only when its own tip is the same live target.
             try:
                 route_row = await session_db.get_session(session_entry.session_id)
                 route_tip = (
@@ -204,9 +202,8 @@ class GatewayNotificationsMixin:
                 )
                 return None
             if _end_reason != "compression":
-                # Idle/timeout/lifecycle end (scale-to-zero norm): the chat route is still valid and
-                # ``session_entry`` is its current session, so deliver here rather than drop — otherwise
-                # the row is acked at adapter acceptance then silently lost.
+                # Idle/timeout end (scale-to-zero norm): the chat route is still valid, so deliver to its
+                # current session rather than drop (the row would be acked then silently lost).
                 logger.info(
                     "Async-delegation completion pinned to %s-ended session %s; "
                     "retargeting to the chat's current session %s.",
@@ -250,13 +247,12 @@ class GatewayNotificationsMixin:
         directive is a deliberate attach); stale auto-appended tags are deduped upstream."""
         from urllib.parse import quote as _quote
         with _log_suppressed(logging.WARNING, "Post-stream media extraction failed: %s"):
-            # Capture [[as_document]] before extract_media strips it: image files then go through
-            # send_document (preserving bytes), not send_multiple_images (Telegram recompresses).
+            # Capture [[as_document]] before extract_media strips it: images then go via send_document.
             force_document_attachments = "[[as_document]]" in response
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-            # Strip image URLs for parity with the non-streaming chain; no extract_local_files here.
+            # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
             adapter.extract_images(cleaned)
             _thread_meta = (
                 dict(thread_metadata)
@@ -302,9 +298,8 @@ class GatewayNotificationsMixin:
         if not text_already_delivered:
             text_content = _strip_response_attachments_for_direct_send(response, adapter)
             if text_content:
-                # Reconcile-by-edit first: a stream-sealed message whose recorded payload didn't confirm
-                # the final (post-stream mutation) already carries most of the answer; a plain send here
-                # would duplicate it.
+                # Reconcile-by-edit first: a stream-sealed message already carries most of the answer;
+                # a plain send here would duplicate it.
                 _reconciled = False
                 _sc_msg_id = getattr(stream_consumer, "message_id", None)
                 if (
@@ -388,8 +383,7 @@ class GatewayNotificationsMixin:
     async def _watch_update_completion_only(self, paths: "_UpdatePaths", deadline: float, poll_interval: float) -> None:
         """Fallback when no adapter/chat can be resolved: wait for the exit code, then notify."""
         logger.warning("Update watcher: cannot resolve adapter/chat_id, falling back to completion-only")
-        # Keep polling until _send_update_notification actually delivers (True) — it re-resolves the
-        # adapter each call and returns False (markers kept) while the platform is still reconnecting.
+        # Poll until _send_update_notification delivers (it returns False while the platform reconnects).
         loop = asyncio.get_running_loop()
         while paths.any_pending() and loop.time() < deadline:
             if paths.exit_code.exists() and await self._send_update_notification():
@@ -443,8 +437,7 @@ class GatewayNotificationsMixin:
                 f"⚕ **Update needs your input:**\n\n{prompt_text}{default_hint}\n\n"
                 f"Reply `{_p}approve` (yes) or `{_p}deny` (no), or type your answer directly."
             )
-        # Keep the prompt marker on disk until the user answers so a watcher after a mid-prompt
-        # gateway restart can recover by re-forwarding it.
+        # Keep the prompt marker on disk until answered so a restarted watcher can re-forward it.
         self._session_state(target.session_key).persistent.update_prompt_pending = True
         logger.info("Forwarded update prompt to %s: %s", target.session_key, prompt_text[:80])
 
@@ -504,8 +497,7 @@ class GatewayNotificationsMixin:
             _read_new_output()
             if buffer.strip() and (loop.time() - last_stream_time) >= stream_interval:
                 await _flush_buffer()
-            # Forward a prompt only when none is still awaiting a response; otherwise the watcher
-            # would re-read the same .update_prompt.json every poll and spam duplicate prompts.
+            # Forward a prompt only when none is pending, else every poll re-forwards the same prompt.
             _pending_state = self._peek_session_state(session_key) if session_key else None
             if paths.prompt.exists() and session_key and not getattr(
                 getattr(_pending_state, "persistent", None), "update_prompt_pending", False
@@ -566,9 +558,8 @@ class GatewayNotificationsMixin:
             platform = Platform(platform_str)
             adapter = self.adapters.get(platform)
             if chat_id and not adapter:
-                # The update finished, but the target platform has not reconnected yet (common right
-                # after the restart that `hermes update` triggers). A definitive skip would delete the
-                # markers and silently lose the notification; preserve them for a later retry.
+                # Target platform not reconnected yet (common right after the update's restart): keep the
+                # markers for a later retry instead of silently losing the notification.
                 return _defer("Update notification deferred: %s adapter not connected yet", platform_str)
             if chat_id:
                 metadata = self._pending_marker_metadata(platform, chat_id, pending, adapter)
@@ -869,8 +860,7 @@ class GatewayNotificationsMixin:
         from gateway.wake import adapter_supports_push
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
-            # API-server sessions bind the RAW X-Hermes-Session-Id key (_bind_api_server_session), not a
-            # structured ``agent:main:...`` key, so _build_process_event_source returned None above.
+            # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
             raw_sid = str(evt.get("origin_session_id") or "").strip()
             _sk = str(evt.get("session_key") or "").strip()
             if not raw_sid and _sk and _parse_session_key(_sk) is None:
@@ -894,9 +884,8 @@ class GatewayNotificationsMixin:
         if not adapter:
             return None
         if not adapter_supports_push(adapter):
-            # Non-push adapter (api_server) resolved WITH routing metadata: its chat_id is the raw session
-            # id (_bind_api_server_session binds chat_id = session_id), so handle_message would run the
-            # wake under a build_session_key() key that never matches the raw session — self-post.
+            # Non-push adapter (api_server): its chat_id IS the raw session id, so handle_message would
+            # key the wake under a build_session_key() that never matches — self-post instead.
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
         try:
@@ -912,9 +901,8 @@ class GatewayNotificationsMixin:
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
             )
-            # Relay-plane egress priming: a synthetic turn injected right after a restart reaches a relay
-            # adapter whose per-chat routing caches are cold (they warm only on inbound), so its replies
-            # egress without tenant discriminators and the connector's fail-closed guard declines them.
+            # Relay egress priming: post-restart routing caches are cold (they warm only on inbound), so
+            # replies would egress without tenant discriminators and be declined by the connector.
             _prime = getattr(adapter, "prime_routing_cache", None)
             if callable(_prime):
                 _prime(synth_event)
@@ -985,15 +973,13 @@ class GatewayNotificationsMixin:
             return "deliver"
         end_reason = str(parent.get("end_reason") or "")
         if end_reason != "compression":
-            # Only a USER-closed thread of work (/new, user_exit, session_switch) is unreachable;
-            # idle/timeout ends are normal on scale-to-zero relays — the chat stays routable and the
-            # resolver retargets. Boundary set shared with the resolver: no drift.
+            # Only a USER-closed session (/new, user_exit, session_switch) is unreachable; idle/timeout
+            # ends stay routable and the resolver retargets. Boundary set shared with the resolver.
             return "terminal" if end_reason in _USER_BOUNDARY_END_REASONS else "deliver"
         try:
             tip_session_id = await session_db.get_compression_tip(parent_session_id)
             if not tip_session_id or tip_session_id == parent_session_id:
-                # Rotation caught mid-flight: parent is compression-ended but its continuation isn't
-                # visible yet. Retry, don't drop.
+                # Rotation mid-flight: continuation not visible yet. Retry, don't drop.
                 return "retry"
             tip = await session_db.get_session(tip_session_id)
         except Exception:
@@ -1038,8 +1024,7 @@ class GatewayNotificationsMixin:
         elif evt_type != "completion":
             return claim
         # Background completions carry only session_key, so after /new the OLD session's notification
-        # would land in the chat's NEW session. Stamped events get the same pre-flight as async
-        # delegations; unstamped ones deliver.
+        # would land in the NEW one. Stamped events get the async-delegation pre-flight; unstamped deliver.
         parent_session_id = str(evt.get("parent_session_id") or "").strip()
         if not parent_session_id:
             return claim
@@ -1062,8 +1047,7 @@ class GatewayNotificationsMixin:
                 )
             claim.proceed = False
         elif verdict == "retry":
-            # Transient uncertainty (session DB down / compression rotation mid-flight): tell the
-            # watcher to re-poll and retry rather than drop or misroute the result.
+            # Transient uncertainty: tell the watcher to re-poll rather than drop or misroute.
             if claim.claim_id:
                 self._settle_durable_claim("release", claim.delegation_id, claim.claim_id)
             claim.proceed, claim.early_result = False, False
@@ -1090,8 +1074,7 @@ class GatewayNotificationsMixin:
             if identity is not None:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
-            # The durable async-delegation row is the authoritative replay state — ack it after
-            # adapter acceptance; no parallel ledger here.
+            # The durable row is the authoritative replay state — ack it after adapter acceptance.
             if claim.claim_id:
                 try:
                     from tools.async_delegation import complete_completion_delivery
@@ -1124,8 +1107,7 @@ class GatewayNotificationsMixin:
             session_id = str(evt.get("session_id") or "unknown")
             exit_code = evt.get("exit_code")
             reason = str(evt.get("completion_reason") or "exited")
-            # Completion output normally passes the terminal redactor at the producer seam, but that is
-            # configurable and this is user-facing, so keep the unconditional gateway floor. Redact
+            # Unconditional gateway redaction floor (the producer-seam redactor is configurable). Redact
             # BEFORE slicing: truncating first can leave a credential fragment the patterns miss.
             output = _redact_gateway_user_facing_secrets(str(evt.get("output") or "")).strip()
             if len(output) > 800:
@@ -1156,15 +1138,14 @@ class GatewayNotificationsMixin:
         try:
             await asyncio.sleep(self._completion_notification_batch_window)
             entries = self._completion_notification_batches.pop(key, [])
-            # Detach before adapter delivery: a completion arriving while this batch is in flight
-            # must be able to schedule the next flush.
+            # Detach before delivery so a completion arriving mid-flight can schedule the next flush.
             if self._completion_notification_batch_tasks.get(key) is current_task:
                 self._completion_notification_batch_tasks.pop(key, None)
             if not entries:
                 return
             synth_text = entries[0][0] if len(entries) == 1 else self._format_coalesced_process_completions(entries)
-            # A duplicate primary can legitimately return None from the lifecycle dedupe seam; try the
-            # next batch identity so a fresh sibling is never discarded with that duplicate.
+            # A duplicate primary returns None from the dedupe seam; try the next identity so a fresh
+            # sibling is never discarded with it.
             delivered = None
             for _text, candidate_evt, _future in entries:
                 delivered = await self._deliver_completion_notification(synth_text, candidate_evt)
@@ -1173,8 +1154,7 @@ class GatewayNotificationsMixin:
             if delivered is True and len(entries) > 1:
                 self._record_coalesced_completion_siblings([evt for _text, evt, _future in entries])
         except asyncio.CancelledError:
-            # Shutdown may cancel us mid fan-in or while adapter delivery is blocked: recover entries not
-            # yet detached and resolve every waiter as retryable before adapters are torn down.
+            # Shutdown cancellation: recover undetached entries and resolve every waiter as retryable.
             delivered = False
             if not entries:
                 entries = self._completion_notification_batches.pop(key, [])
@@ -1183,8 +1163,7 @@ class GatewayNotificationsMixin:
             logger.exception("Coalesced process completion delivery failed")
             delivered = False
         finally:
-            # Never strand watcher futures when formatting, delivery, or cancellation interrupts a batch:
-            # False follows the existing watcher retry path; None remains the ordinary dedupe result.
+            # Never strand watcher futures: False = watcher retry path; None = ordinary dedupe result.
             self._settle_batch_waiters(entries, delivered)
             # Do not remove a newer flush task that reused the same route key.
             if self._completion_notification_batch_tasks.get(key) is current_task:
@@ -1218,8 +1197,7 @@ class GatewayNotificationsMixin:
 
     async def _enqueue_process_completion_notification(self, synth_text: str, evt: dict) -> Optional[bool]:
         """Fan in concurrent process completions that share one conversation."""
-        # Some unit tests construct GatewayRunner with object.__new__.  Keep the
-        # batching seam lazy so those focused lifecycle tests remain valid.
+        # Lazy defaults: lifecycle tests build GatewayRunner via object.__new__.
         for attr, default in (
             ("_completion_notification_batches", dict), ("_completion_notification_batch_tasks", dict),
             ("_completion_notification_batch_flush_tasks", set),
@@ -1295,8 +1273,7 @@ class GatewayNotificationsMixin:
         for evt, synth_text in deliverable[1:]:
             claim_id = claim_event_delivery(evt, f"gateway-batch:{id(self)}")
             if claim_id is None:
-                # Another consumer owns this row's delivery; keep its result out of our
-                # consolidated text so it is never double-injected.
+                # Another consumer owns this row: keep it out of our text so it is never double-injected.
                 continue
             siblings.append((evt, claim_id))
             blocks.append(synth_text)
@@ -1319,12 +1296,10 @@ class GatewayNotificationsMixin:
                 )
                 self._record_coalesced_completion_siblings([evt for evt, _claim_id in siblings])
             else:
-                # Not delivered — release every sibling claim so a retry or another consumer can claim
-                # it, honestly leaving the durable rows pending.
+                # Not delivered: release every sibling claim so a retry or another consumer can take it.
                 self._settle_sibling_claims(siblings, release_event_delivery, "Could not release coalesced durable claim")
                 if delivered is None:
-                    # The primary was dropped/owned elsewhere but the siblings still need delivery —
-                    # requeue just them for the next tick.
+                    # Primary dropped/owned elsewhere: requeue just the siblings for the next tick.
                     for evt, _claim_id in siblings:
                         _pr.completion_queue.put(evt)
         return delivered
@@ -1339,8 +1314,7 @@ class GatewayNotificationsMixin:
         from tools.process_registry import process_registry as _pr
         while self._running:
             with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
-                # Peek for async-delegation events only; watch/completion events belong to other drains,
-                # so requeue anything that isn't ours.
+                # Take async-delegation events only; requeue watch/completion events for their own drains.
                 requeue = []
                 async_events = []
                 while not _pr.completion_queue.empty():
@@ -1351,9 +1325,8 @@ class GatewayNotificationsMixin:
                     (async_events if evt.get("type") == "async_delegation" else requeue).append(evt)
                 for evt in requeue:
                     _pr.completion_queue.put(evt)
-                # A same-tick drain often carries several completions for the SAME session (a fan-out
-                # finishing together); delivering each individually floods it with N synthetic turns.
-                # Group by full gateway route + parent session: one consolidated turn per group.
+                # A fan-out finishing together yields N completions for one session; group by full route +
+                # parent session so each group becomes ONE consolidated turn.
                 groups: dict[tuple[str, ...], list[dict]] = {}
                 for evt in async_events:
                     self._enrich_async_delegation_routing(evt)
@@ -1378,9 +1351,8 @@ class GatewayNotificationsMixin:
         if new_output:
             from agent.redact import redact_terminal_output
             new_output = redact_terminal_output(new_output, getattr(session, "command", "") or "")
-            # redact_terminal_output() is unforced, so it returns raw text when security.redact_secrets
-            # is off. This goes straight to the platform adapter, so it needs the same unconditional
-            # floor as agent-notify.
+            # redact_terminal_output() is unforced (raw when security.redact_secrets is off); this goes
+            # straight to the adapter, so apply the same unconditional floor as agent-notify.
             new_output = _redact_gateway_user_facing_secrets(new_output)
         return new_output
 
@@ -1403,8 +1375,7 @@ class GatewayNotificationsMixin:
         _command = getattr(session, "command", "") or ""
         _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
         _raw = redact_terminal_output(_raw, _command)
-        # Truncate on line boundaries (never start mid-line): keep the last ~2000 chars snapped to
-        # the preceding newline, prepending a marker when output was cut.
+        # Keep the last ~2000 chars snapped to a line boundary, with a marker when cut.
         _LIMIT = 2000
         if len(_raw) > _LIMIT:
             _tail = _raw[-_LIMIT:]
@@ -1424,8 +1395,7 @@ class GatewayNotificationsMixin:
             "completion_reason": getattr(session, "completion_reason", "exited"),
             "termination_source": getattr(session, "termination_source", ""),
             "output": _redact_gateway_user_facing_secrets(_out),
-            # Spawning conversation's session-db id (stamped in terminal_tool); lets delivery
-            # pre-flight drop this completion if the user closed that session (/new) first.
+            # Spawning session-db id: lets pre-flight drop this completion if the user /new'd first.
             "parent_session_id": (
                 watcher.get("parent_session_id") or getattr(session, "parent_session_id", "") or ""
             ),
@@ -1477,9 +1447,8 @@ class GatewayNotificationsMixin:
             has_new_output = current_output_len > last_output_len
             last_output_len = current_output_len
             if session.exited:
-                # Agent-triggered completion: inject a synthetic message unless the agent already consumed
-                # the result via wait/log. poll() is read-only and deliberately does NOT mark consumed —
-                # a status check must not suppress this delivery turn.
+                # Agent-notify: inject a synthetic message unless the agent already consumed the result via
+                # wait/log (poll() is read-only and deliberately does NOT mark consumed).
                 if agent_notify and not process_registry.is_completion_consumed(session_id):
                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
                     synth_text = format_process_notification(completion_evt)
@@ -1491,9 +1460,8 @@ class GatewayNotificationsMixin:
                         # of suppressing the result.
                         continue
                     break
-                # Normal text-only notification. Skip when the agent already consumed this completion via
-                # wait/log (output returned inline) — the raw "finished" message would be a duplicate.
-                # The agent_notify skip FALLS THROUGH here, hence this check. poll() is read-only.
+                # Text-only notification; skip when already consumed via wait/log (the agent_notify branch
+                # FALLS THROUGH here, hence the re-check).
                 if process_registry.is_completion_consumed(session_id):
                     logger.debug(
                         "Process watcher: completion for %s already consumed "
