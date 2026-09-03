@@ -152,14 +152,13 @@ def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) 
     ``_run_budget_wrapup_injected`` only on a successful append. Returns True when
     injected. Dormant unless ``run_budget_seconds`` + ``_run_budget_started_at`` set."""
     budget = getattr(agent, "run_budget_seconds", None)
-    if not budget:
-        return False
-    if getattr(agent, "_run_budget_wrapup_injected", False):
-        return False
     started = getattr(agent, "_run_budget_started_at", None)
-    if not started:
-        return False
-    if (time.time() - started) < 0.8 * float(budget):
+    if (
+        not budget
+        or not started
+        or getattr(agent, "_run_budget_wrapup_injected", False)
+        or (time.time() - started) < 0.8 * float(budget)
+    ):
         return False
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
@@ -192,26 +191,16 @@ def _restore_user_after_reference_handoff(
 
     Returns True when a restore append happened; only decides whether a restorable
     ask exists (#80622)."""
-    if user_message is None:
-        return False
     if isinstance(user_message, str):
-        if not user_message.strip():
-            return False
-        content: Any = user_message
-    elif isinstance(user_message, list):
-        if not user_message:
-            return False
-        content = user_message
+        restorable = bool(user_message.strip())
     else:
+        restorable = isinstance(user_message, list) and bool(user_message)
+    if not restorable:
         return False
-    if (
-        messages
-        and isinstance(messages[-1], dict)
-        and messages[-1].get("role") == "user"
-        and messages[-1].get("content") == content
-    ):
+    last = messages[-1] if messages else None
+    if isinstance(last, dict) and last.get("role") == "user" and last.get("content") == user_message:
         return False
-    append_message(messages, {"role": "user", "content": content})
+    append_message(messages, {"role": "user", "content": user_message})
     return True
 
 
@@ -221,13 +210,11 @@ def _should_skip_model_call_for_reference_handoff(
     """Guard post-compaction continues against sole-handoff active turns (#80622)."""
     from agent.context_compressor import reference_handoff_would_drive_next_model_call
 
-    if not reference_handoff_would_drive_next_model_call(messages):
-        return False
-    if _restore_user_after_reference_handoff(messages, user_message):
-        # The restored ask is an actionable non-synthetic user row appended
-        # after the handoff — by construction the handoff no longer drives.
-        return False
-    return True
+    # A restored ask is an actionable non-synthetic user row appended after the
+    # handoff — by construction the handoff no longer drives.
+    return reference_handoff_would_drive_next_model_call(messages) and not (
+        _restore_user_after_reference_handoff(messages, user_message)
+    )
 
 
 # Fallback final_response for the sole-handoff skip (#80622). Not a replay of the
@@ -417,16 +404,14 @@ def _is_stale_copilot_credential_error(status_code: Optional[int], error_message
     ``model_not_supported`` / "the requested model is not supported", so a wrong model
     name never triggers the single-shot re-exchange. Caller enforces scoping/guard."""
     lowered = (error_message or "").lower()
-    is_400 = status_code == 400 or "error code: 400" in lowered
-    if not is_400:
+    if status_code != 400 and "error code: 400" not in lowered:
         return False
-    return (
-        "model_not_available_for_integrator" in lowered
-        or "not available for integrator" in lowered
-        or "model_not_supported" in lowered
-        or "the requested model is not supported" in lowered
-    )
-
+    return any(marker in lowered for marker in (
+        "model_not_available_for_integrator",
+        "not available for integrator",
+        "model_not_supported",
+        "the requested model is not supported",
+    ))
 
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
@@ -526,13 +511,17 @@ def _nous_entitlement_message(capability: str) -> str:
         return ""
 
 
-def _print_nous_entitlement_guidance(agent, capability: str) -> bool:
-    message = _nous_entitlement_message(capability)
+def _print_guidance(agent, message: str) -> bool:
+    """Print each line of ``message`` as a 💡 hint; False when there is nothing to print."""
     if not message:
         return False
     for line in message.splitlines():
         agent._vprint(f"{agent.log_prefix}   💡 {line}", force=True)
     return True
+
+
+def _print_nous_entitlement_guidance(agent, capability: str) -> bool:
+    return _print_guidance(agent, _nous_entitlement_message(capability))
 
 
 def _system_prompt_for_hooks(api_kwargs: Any, request_messages: Any) -> Any:
@@ -726,19 +715,66 @@ def _print_billing_or_entitlement_guidance(
     model: str,
     unverified: bool = False,
 ) -> bool:
-    message = _billing_or_entitlement_message(
-        capability=capability,
-        provider=provider,
-        base_url=base_url,
-        model=model,
+    return _print_guidance(agent, _billing_or_entitlement_message(
+        capability=capability, provider=provider, base_url=base_url, model=model,
         unverified=unverified,
-    )
-    if not message:
-        return False
-    for line in message.splitlines():
-        agent._vprint(f"{agent.log_prefix}   💡 {line}", force=True)
-    return True
+    ))
 
+
+
+def _bot_chat_prompt_stale(agent, stored_prompt: str) -> bool:
+    """Bot Chat capability epoch check for a stored prompt.
+
+    The stored prompt embeds a capability fingerprint; a mismatch is a deliberate
+    once-per-change rebuild. Unstamped prompts never match; probe failures fail closed
+    to "reuse" so the cache is kept. Legacy upgrade: a Bot Chat prompt predating the
+    epoch mechanism gets ONE title-gated migration rebuild; the stamped result cannot
+    re-fire."""
+    try:
+        from tools.bot_mode_probe import (
+            BOT_CHAT_TITLE,
+            stored_bot_chat_prompt_needs_upgrade,
+            stored_prompt_capability_stale,
+        )
+
+        home = None
+        try:
+            from agent.system_prompt import _agent_home
+
+            home = _agent_home(agent)
+        except Exception:
+            pass
+        if stored_prompt_capability_stale(stored_prompt, home):
+            return True
+        if not getattr(agent, "_bot_mode_protocol", True):
+            return False
+        title = str(getattr(agent, "_session_title_hint", "") or "").strip()
+        if not title and agent._session_db and agent.session_id:
+            try:
+                title = str(agent._session_db.get_session_title(agent.session_id) or "").strip()
+            except Exception:
+                title = ""
+        return title == BOT_CHAT_TITLE and bool(
+            stored_bot_chat_prompt_needs_upgrade(stored_prompt, home)
+        )
+    except Exception:
+        return False
+
+
+def _persist_system_prompt(agent, failure_message: str, *, persist_tools: bool = False) -> None:
+    """Persist ``agent._cached_system_prompt`` to the session row; failures log at WARNING
+    (with ``failure_message``) because the gateway path (fresh AIAgent per turn) reads
+    this row every turn, so a silent failure breaks prefix-cache reuse."""
+    if not agent._session_db:
+        return
+    try:
+        agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+        if persist_tools:
+            from tools.mcp_tool import persist_agent_tool_names
+
+            persist_agent_tool_names(agent)
+    except Exception as exc:
+        logger.warning(failure_message, agent.session_id, exc)
 
 
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
@@ -771,39 +807,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
-        # Bot Chat capability epoch: the stored prompt embeds a capability fingerprint;
-        # a mismatch is a deliberate once-per-change rebuild. Unstamped prompts never
-        # take this branch; probe failures fail closed to "reuse" so cache is kept.
-        _bot_stale = False
-        try:
-            from tools.bot_mode_probe import (
-                BOT_CHAT_TITLE,
-                stored_bot_chat_prompt_needs_upgrade,
-                stored_prompt_capability_stale,
-            )
-
-            _home_for_epoch = None
-            try:
-                from agent.system_prompt import _agent_home
-
-                _home_for_epoch = _agent_home(agent)
-            except Exception:
-                pass
-            _bot_stale = stored_prompt_capability_stale(stored_prompt, _home_for_epoch)
-            if not _bot_stale and getattr(agent, "_bot_mode_protocol", True):
-                # Legacy upgrade: a Bot Chat prompt predating the epoch mechanism gets
-                # ONE title-gated migration rebuild; the stamped result cannot re-fire.
-                _t = str(getattr(agent, "_session_title_hint", "") or "").strip()
-                if not _t and agent._session_db and agent.session_id:
-                    try:
-                        _t = str(agent._session_db.get_session_title(agent.session_id) or "").strip()
-                    except Exception:
-                        _t = ""
-                if _t == BOT_CHAT_TITLE:
-                    _bot_stale = stored_bot_chat_prompt_needs_upgrade(stored_prompt, _home_for_epoch)
-        except Exception:
-            _bot_stale = False
-        if _bot_stale:
+        if _bot_chat_prompt_stale(agent, stored_prompt):
             logger.info(
                 "Bot Chat capability epoch changed for session %s; rebuilding "
                 "system prompt to adopt the new capability surface (one-time "
@@ -822,18 +826,12 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             agent._cached_system_prompt = agent._build_system_prompt(system_message)
             # Persist so the NEXT turn restores the new bytes verbatim (cache break is
             # once per capability change). on_session_start not re-fired: continuation.
-            if agent._session_db:
-                try:
-                    agent._session_db.update_system_prompt(
-                        agent.session_id, agent._cached_system_prompt
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Session DB update_system_prompt failed after Bot Chat "
-                        "capability refresh (session=%s): %s. The refresh will "
-                        "re-fire next turn.",
-                        agent.session_id, exc,
-                    )
+            _persist_system_prompt(
+                agent,
+                "Session DB update_system_prompt failed after Bot Chat "
+                "capability refresh (session=%s): %s. The refresh will "
+                "re-fire next turn.",
+            )
             return
         # Continuing session — reuse the exact system prompt from the
         # previous turn so the Anthropic cache prefix matches.
@@ -849,15 +847,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         except Exception:
             logger.debug("tool prefix restore skipped", exc_info=True)
         # Prompt-section callbacks are new-session-only; recover their frozen bytes
-        # from the persisted prompt so a compression rebuild keeps them.
-        from agent.system_prompt import restore_plugin_prompt_sections
+        # from the persisted prompt so a compression rebuild keeps them. The static
+        # prefix is not persisted either; rebuild it for the early cache breakpoint or
+        # fresh-per-turn gateway agents fall back to the single-breakpoint layout
+        # (reconstruct_static_prefix gates on _use_prompt_caching, fails open to legacy).
+        from agent.system_prompt import reconstruct_static_prefix, restore_plugin_prompt_sections
 
         restore_plugin_prompt_sections(agent, stored_prompt)
-        # The static prefix is not persisted; rebuild it for the early cache breakpoint
-        # or fresh-per-turn gateway agents fall back to the single-breakpoint layout.
-        # reconstruct_static_prefix gates on _use_prompt_caching, fails open to legacy.
-        from agent.system_prompt import reconstruct_static_prefix
-
         reconstruct_static_prefix(agent, system_message=system_message)
         return
     if stored_prompt:
@@ -881,12 +877,10 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             agent.session_id, stored_state,
         )
 
-    # First turn of a new session (or recovering from a broken stored
-    # prompt) — build from scratch.
+    # First turn of a new session (or recovering from a broken stored prompt).
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
 
-    # Plugin hook: on_session_start — fired once for a brand-new session, not on
-    # continuation.
+    # Plugin hook: on_session_start — fired once for a brand-new session, not on continuation.
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _invoke_hook(
@@ -907,21 +901,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     except Exception:
         logger.debug("cold-start credits seed failed (fail-open)", exc_info=True)
 
-    # Persist the system prompt snapshot; the gateway path (fresh AIAgent per turn)
-    # reads this row every turn, so a failure here breaks prefix-cache reuse.
-    if agent._session_db:
-        try:
-            agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
-            from tools.mcp_tool import persist_agent_tool_names
-
-            persist_agent_tool_names(agent)
-        except Exception as exc:
-            logger.warning(
-                "Session DB update_system_prompt failed for session %s: "
-                "%s. Subsequent turns will rebuild the system prompt and "
-                "miss the prefix cache.",
-                agent.session_id, exc,
-            )
+    _persist_system_prompt(
+        agent,
+        "Session DB update_system_prompt failed for session %s: "
+        "%s. Subsequent turns will rebuild the system prompt and "
+        "miss the prefix cache.",
+        persist_tools=True,
+    )
 
 
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:

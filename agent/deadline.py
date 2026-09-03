@@ -1,21 +1,15 @@
-"""Unified deadline layer — one bounded-execution primitive, one timeout resolver.
+"""Unified deadline layer — one bounded-execution primitive, one timeout resolver (#85125).
 
-Shared foundation for the site-local deadline mechanisms (#85125):
-
-* :func:`resolve_timeout` — config-first timeout resolution
-  (``timeouts:`` in config.yaml > legacy env var > default).
-* :func:`clamp_timeout` — platform-safe clamping (huge timeouts overflow
-  ``time_t`` in ``Lock.acquire`` / ``Thread.join`` on macOS, #83220).
-* :func:`run_bounded_async` — wall-clock deadline for awaitables driven by a
-  daemon ``threading.Timer``, so a blocked event loop cannot disable it (the
-  telegram adapter's ``_await_with_thread_deadline`` generalized).
-* :func:`run_bounded_sync` — same contract for synchronous callables.
+* :func:`resolve_timeout` — ``timeouts:`` in config.yaml > legacy env var > default.
+* :func:`clamp_timeout` — huge timeouts overflow ``time_t`` in ``Lock.acquire`` /
+  ``Thread.join`` on macOS (#83220), so every timeout is capped.
+* :func:`run_bounded_async` / :func:`run_bounded_sync` — wall-clock deadlines driven by
+  a daemon ``threading.Timer`` / worker thread, so a blocked event loop cannot disable them.
 * :func:`kill_process_tree` — portable whole-tree termination.
 
-Invariants: operation exceptions propagate unchanged (only the *timeout*
-outcome is reified as :class:`BoundedResult`); a timeout from this layer is
-OUR deadline, not the provider's (classify :class:`DeadlineExpired` distinctly
-from transport timeouts); ``None`` / non-positive timeout means unbounded.
+Invariants: operation exceptions propagate unchanged (only the *timeout* outcome is reified
+as :class:`BoundedResult`); a timeout here is OUR deadline, not the provider's (classify
+:class:`DeadlineExpired` distinctly from transport timeouts); ``None`` / non-positive means unbounded.
 """
 
 from __future__ import annotations
@@ -45,8 +39,7 @@ __all__ = [
     "kill_process_tree",
 ]
 
-# One year: semantically "unbounded" yet far below any platform time_t limit
-# (#83220: larger relative timeouts overflow inside Lock.acquire/Thread.join on macOS).
+# One year: semantically "unbounded" yet far below any platform time_t limit (#83220).
 MAX_SAFE_TIMEOUT_S = 31_536_000.0
 
 # Grace after a deadline fires before concluding the loop thread is blocked and dumping stacks.
@@ -70,10 +63,9 @@ class SuspectableBackend(Protocol):
     """A stateful backend (MCP connection, browser session, LSP client) the deadline layer can flag.
 
     ``run_bounded_*`` calls ``mark_suspect`` on timeout so the owner can health-check or
-    recycle the backend (``ensure_healthy``) before reuse. Backends without the protocol
-    are simply never marked. ``mark_suspect`` MUST be cheap, non-blocking, and must not
-    acquire locks the guarded operation may hold — it runs inline on the event loop /
-    caller's thread while the wedged worker is still alive.
+    recycle the backend (``ensure_healthy``) before reuse. ``mark_suspect`` MUST be cheap,
+    non-blocking, and must not acquire locks the guarded operation may hold — it runs inline
+    on the event loop / caller's thread while the wedged worker is still alive.
     """
 
     def mark_suspect(self, reason: str) -> None: ...
@@ -122,9 +114,7 @@ def clamp_timeout(timeout: Optional[float]) -> Optional[float]:
     if value != value:  # NaN
         logger.warning("clamp_timeout: NaN timeout; treating as unbounded")
         return None
-    if value <= 0:
-        return None
-    return min(value, MAX_SAFE_TIMEOUT_S)
+    return None if value <= 0 else min(value, MAX_SAFE_TIMEOUT_S)
 
 
 # --- Timeout resolution: config ``timeouts:`` > legacy env var > default ------
@@ -336,8 +326,7 @@ def run_bounded_sync(
         finally:
             done.set()
 
-    thread = threading.Thread(target=_worker, name=f"deadline-{label}", daemon=True)
-    thread.start()
+    threading.Thread(target=_worker, name=f"deadline-{label}", daemon=True).start()
     deadline = start + timeout_s
     while not done.is_set():
         remaining = deadline - time.monotonic()
