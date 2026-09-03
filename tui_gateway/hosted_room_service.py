@@ -453,7 +453,8 @@ class HostedRoomService:
         binding = next((b for b in self.bindings() if b.room_id == room_id), None)
         if binding is None:
             raise hosted_rooms.RoomNotFoundError("hosted room not found")
-        self.publish_terminal(binding, {})
+        self.prepare_room(binding)
+        self.runtime.wakeup()
         return event
 
     def stop_room(
