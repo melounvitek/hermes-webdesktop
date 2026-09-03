@@ -236,7 +236,7 @@ class TestOrgPullIsWiredIn:
         main_src = (
             pathlib.Path(__file__).resolve().parents[2]
             / "hermes_cli"
-            / "main.py"
+            / "main_platform_setup.py"
         ).read_text(encoding="utf-8")
         assert "maybe_pull_org_skills" in main_src, (
             "`hermes sync pull` must also refresh the org mirror."
@@ -302,7 +302,7 @@ class TestSkillSyncIsOneCommand:
         )
 
     def test_sync_usage_lists_propose(self):
-        main_src = self._src("hermes_cli", "main.py")
+        main_src = self._src("hermes_cli", "main_platform_setup.py")
         usage_start = main_src.index("usage: hermes sync ")
         usage_block = main_src[usage_start : usage_start + 1400]
         assert "propose" in usage_block, (
