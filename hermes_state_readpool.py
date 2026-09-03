@@ -18,33 +18,28 @@ if TYPE_CHECKING:  # pragma: no cover
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
 
-# Ceiling on read-only connections ALIVE at once against one database FILE
-# (idle pooled + checked out, summed over every SessionDB on that file). One
-# constant for both the pool maxsize and the permit count: a LifoQueue only caps
-# how many are *returned*; with open-on-miss, N readers hitting an empty pool
-# all open and peak at N, and EMFILE is a peak-instant condition. So a
-# connection holds a permit for its whole lifetime (_get_read_conn ->
-# _close_read_conn); once permits are gone reads degrade to the locked writer
-# connection — slower, but not a process-wide wedge the supervisor can't see.
+# Ceiling on read-only connections ALIVE at once against one database FILE (idle
+# pooled + checked out, over every SessionDB on that file). One constant for both
+# the pool maxsize and the permit count: a LifoQueue only caps how many are
+# *returned*, and EMFILE is a peak-instant condition, so a connection holds a
+# permit for its whole lifetime; once permits are gone reads degrade to the
+# locked writer connection — slower, but not a wedge the supervisor can't see.
 _READ_POOL_MAX = 8
 
-# Ceiling on read-only connections ALIVE in this PROCESS across every state.db
-# (a multiplexed gateway opens one per profile, so a per-file cap still scales
-# with profile count). Three profiles' worth; past it readers degrade to the
-# writer connection for the same reason as _READ_POOL_MAX.
+# Ceiling ALIVE in this PROCESS across every state.db (a multiplexed gateway
+# opens one per profile); three profiles' worth, then readers degrade likewise.
 _READ_POOL_PROCESS_MAX = 24
 
-# Warn past this many SessionDB handles on one file in one process. Diagnostic
-# only: writer connections cannot be rationed the way read connections can.
+# Warn past this many SessionDB handles on one file in one process (diagnostic:
+# writer connections cannot be rationed the way read connections can).
 _HANDLES_PER_PATH_WARN = 4
 
 # Descriptors kept in reserve for everything that is NOT this module (httpx
-# sockets, terminal pipes, log files): SQLite's share is only part of the fd
-# table, and the EMFILE it pushes over surfaces elsewhere (terminal_tool).
+# sockets, terminal pipes, log files): the EMFILE SQLite pushes over surfaces elsewhere.
 _FD_HEADROOM_RESERVE = 64
 
 # The fd count is a directory listing; cache it briefly so a read burst isn't a
-# syscall per query. Staleness lets through at most the ceiling's worth of opens.
+# syscall per query (staleness lets through at most the ceiling's worth of opens).
 _FD_USAGE_CACHE_SECONDS = 0.25
 
 _process_read_permits = threading.BoundedSemaphore(_READ_POOL_PROCESS_MAX)
@@ -70,8 +65,7 @@ def _proc_fd_targets(pid: int) -> Iterator[str]:
 
 def _open_fd_count() -> Optional[int]:
     """Open descriptors in THIS process; None when unmeasurable (Windows: no fd
-    dir and no RLIMIT_NOFILE, correctly inert — its limit is thousands); -1 when
-    the probe itself hit EMFILE/ENFILE (that IS the answer: no headroom)."""
+    dir, correctly inert); -1 when the probe itself hit EMFILE/ENFILE (no headroom)."""
     for fd_dir in ("/proc/self/fd", "/dev/fd"):
         try:
             return len(os.listdir(fd_dir))
@@ -97,10 +91,9 @@ def _fd_soft_limit() -> Optional[int]:
 
 
 def _fd_headroom_ok() -> bool:
-    """Can the process spare a descriptor for a new read connection?
-    Fails OPEN when unmeasurable (refusing every read there would be a
-    self-inflicted convoy); fails CLOSED only on evidence (measured shortfall,
-    or a probe that couldn't get a descriptor itself)."""
+    """Can the process spare a descriptor for a new read connection? Fails OPEN
+    when unmeasurable (refusing every read would be a self-inflicted convoy);
+    fails CLOSED only on evidence (measured shortfall or a starved probe)."""
     soft = _fd_soft_limit()
     if soft is None:
         return True
@@ -127,11 +120,10 @@ def _reclaim_idle_read_conn_anywhere() -> bool:
 
 
 class _PathReadBudget:
-    """Read-connection permits for ONE database file, shared process-wide:
-    per-instance semaphores let N SessionDBs on one file peak at N x (1 + MAX)
-    and walk into EMFILE. An idle pooled connection keeps its permit, so a
-    permit miss first reclaims an IDLE connection from a peer on the same path
-    (idle descriptors are transferable, in-use ones are not)."""
+    """Read-connection permits for ONE database file, shared process-wide
+    (per-instance semaphores let N SessionDBs peak at N x (1 + MAX)). An idle
+    pooled connection keeps its permit, so a permit miss first reclaims an IDLE
+    connection from a peer on the same path."""
 
     def __init__(self) -> None:
         self.permits = threading.BoundedSemaphore(_READ_POOL_MAX)
@@ -148,22 +140,19 @@ class _PathReadBudget:
             if warn:
                 self._duplicate_handles_warned = True
         if warn:
-            # Writer connections cannot be capped (a SessionDB without one cannot
-            # write); the only bound is not opening redundant handles. Make the
-            # next duplicate visible before it becomes an incident.
+            # Writer connections cannot be capped; the only bound is not opening
+            # redundant handles, so make the duplicate visible before it's an incident.
             logger.warning(
                 "%d live SessionDB handles on %s in this process; each holds "
                 "its own writer connection (read connections are capped at %d "
                 "for the file). A long-lived process should share one handle per path.",
-                handles,
-                db.db_path,
-                _READ_POOL_MAX,
+                handles, db.db_path, _READ_POOL_MAX,
             )
 
     def acquire(self, requester: "SessionDB") -> bool:
-        """Take a permit for a new read connection, or refuse (caller then reads
-        via the locked writer connection — slower, never an error). Gates,
-        broadest first: fd headroom, process-wide ceiling, this file's ceiling."""
+        """Take a permit for a new read connection, or refuse (caller degrades to the
+        locked writer connection). Gates, broadest first: fd headroom, process
+        ceiling, this file's ceiling."""
         if not _fd_headroom_ok():
             global _read_open_denied_fd_headroom
             with _read_budgets_lock:
@@ -182,8 +171,7 @@ class _PathReadBudget:
         _process_read_permits.release()
 
     def _acquire_process_permit(self) -> bool:
-        # Another thread may take a freed permit first; that is a legitimate
-        # loss, and the caller degrades to the writer lock rather than looping.
+        # Another thread may take a freed permit first: legitimate loss, no looping.
         return _process_read_permits.acquire(blocking=False) or (
             _reclaim_idle_read_conn_anywhere() and _process_read_permits.acquire(blocking=False)
         )
@@ -201,8 +189,8 @@ class _PathReadBudget:
         return any(member._evict_one_idle_read_conn() for member in members)
 
 
-# canonical db path -> permits for that file. Weak values: the budget lives as
-# long as some SessionDB on the path holds it, so tmp_path churn can't grow this.
+# canonical db path -> permits for that file. Weak values: the budget lives only
+# while some SessionDB on the path holds it, so tmp_path churn can't grow this.
 _read_budgets: "weakref.WeakValueDictionary[str, _PathReadBudget]" = (weakref.WeakValueDictionary())
 _read_budgets_lock = threading.Lock()
 

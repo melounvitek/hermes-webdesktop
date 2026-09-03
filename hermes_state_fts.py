@@ -14,23 +14,18 @@ from hermes_state_common import FTS_CJK_STALE_KEY, FTS_STALE_KEY, _FTS_CJK_TRIGG
 logger = logging.getLogger("hermes_state")
 
 # ── CJK-bigram FTS index (replaces the trigram index when available) ────
-# Trigram needs >=3 chars per term, so 1-2 char CJK terms fell through to a
-# LIKE table scan (3-6s CPU per query on multi-GB installs). ``cjk_unicode61``
-# (native/fts5_cjk/, loadable) re-emits CJK runs as overlapping bigrams; FTS5
-# phrase semantics then give exact substring matching down to 2 chars.
+# Trigram needs >=3 chars per term, so 1-2 char CJK terms fell through to a LIKE
+# table scan; ``cjk_unicode61`` (native/fts5_cjk/, loadable) re-emits CJK runs as
+# overlapping bigrams. Same v23 discipline as the trigram table: external-content
+# over a tool-row-excluding view, triggers gated on a DEDICATED marker pair
+# (fts_cjk_rebuild_high_water / _progress). The table exists ONLY when the
+# tokenizer loads; a process that cannot load it drops the cjk triggers (writes
+# keep working; the index goes stale until the next optimize-storage).
 #
-# Same v23 discipline as the trigram table: external-content over a
-# tool-row-excluding view, triggers gated on a DEDICATED marker pair
-# (fts_cjk_rebuild_high_water / _progress) so a cjk-only backfill never gates
-# the complete messages_fts triggers. The table exists ONLY when the tokenizer
-# loads (~/.hermes/lib/libfts5_cjk.so); a process that cannot load it drops the
-# cjk triggers (writes keep working; the index goes stale until the next
-# optimize-storage on a capable host).
-#
-# Split DDL: the table/view is safe to ensure any time; triggers are created
-# ONLY while the index is complete-or-marker-gated. A stale index must keep its
+# Split DDL: the table/view is safe to ensure any time; triggers are created ONLY
+# while the index is complete-or-marker-gated. A stale index must keep its
 # triggers DROPPED — an external-content 'delete' for a rowid the index never
-# held is the canonical FTS5 corruption hazard the marker gating prevents.
+# held is the canonical FTS5 corruption hazard.
 FTS_CJK_TABLE_SQL = """
 CREATE VIEW IF NOT EXISTS messages_fts_cjk_src AS
     SELECT id, role, content, tool_name, tool_calls
@@ -90,12 +85,11 @@ BEGIN
 END;
 """
 
+
 def fts5_cjk_so_path() -> Path:
     """Location of the cjk_unicode61 loadable extension."""
     env = os.getenv("HERMES_FTS5_CJK_SO")
-    if env:
-        return Path(env).expanduser()
-    return get_hermes_home() / "lib" / "libfts5_cjk.so"
+    return Path(env).expanduser() if env else get_hermes_home() / "lib" / "libfts5_cjk.so"
 
 
 def _cjk_fts_config_enabled() -> bool:
@@ -104,13 +98,10 @@ def _cjk_fts_config_enabled() -> bool:
 
 
 def load_fts5_cjk_extension(conn: sqlite3.Connection) -> bool:
-    """Best-effort load of the cjk_unicode61 tokenizer. False (never raises)
-    when the .so is absent, ``sessions.cjk_fts`` is off, or extension loading
-    is compiled out — callers then behave as before the cjk index existed."""
-    if not _cjk_fts_config_enabled():
-        return False
+    """Best-effort load of the cjk_unicode61 tokenizer; False (never raises) when
+    the .so is absent, ``sessions.cjk_fts`` is off, or loading is compiled out."""
     path = fts5_cjk_so_path()
-    if not path.exists():
+    if not _cjk_fts_config_enabled() or not path.exists():
         return False
     try:
         conn.enable_load_extension(True)
@@ -129,10 +120,7 @@ class SessionFtsSetupMixin:
 
     @staticmethod
     def _is_fts5_unavailable_error(exc: sqlite3.OperationalError) -> bool:
-        # Builds with FTS5 but without the optional trigram tokenizer raise
-        # "no such tokenizer: trigram" instead of "no such module"; the loadable
-        # cjk_unicode61 tokenizer shows the same capability-error shape. Scoped
-        # to those two tokenizers so unrelated tokenizer errors aren't masked.
+        """No FTS5 module, or an optional tokenizer missing (same capability-error shape)."""
         err = str(exc).lower()
         return ("no such module" in err and "fts5" in err) or SessionFtsSetupMixin._is_trigram_unavailable_error(exc)
 
@@ -141,14 +129,12 @@ class SessionFtsSetupMixin:
         """Only an optional tokenizer is missing (trigram needs SQLite >= 3.34;
         cjk_unicode61 is loadable): "this one index can't be served", never "disable FTS"."""
         err = str(exc).lower()
-        return ("no such tokenizer: trigram" in err or "no such tokenizer: cjk_unicode61" in err)
+        return "no such tokenizer: trigram" in err or "no such tokenizer: cjk_unicode61" in err
 
     @staticmethod
     def _db_has_legacy_inline_fts(cursor: sqlite3.Cursor) -> bool:
-        """messages_fts exists in ANY pre-v23 shape. v23 is external-content over
-        content/tool_name/tool_calls; every legacy shape (inline single-column
-        v11..v22, or the v10-era external single-column) lacks tool_name, so
-        "stored CREATE lacks tool_name" catches both. False when absent (fresh DB)."""
+        """messages_fts exists in ANY pre-v23 shape: every legacy shape lacks
+        tool_name, so "stored CREATE lacks tool_name" catches them all. False when absent."""
         row = cursor.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
@@ -156,7 +142,7 @@ class SessionFtsSetupMixin:
 
     def _warn_trigram_unavailable(self, exc: sqlite3.OperationalError) -> None:
         """Log once that the trigram tokenizer is missing; base FTS5 stays enabled."""
-        if getattr(self, "_trigram_unavailable_warned", False):
+        if getattr(self, "_trigram_unavailable_warned", False):  # attr is lazily created here
             return
         self._trigram_unavailable_warned = True
         logger.info(
@@ -182,12 +168,11 @@ class SessionFtsSetupMixin:
         )
 
     def _ensure_fts_cjk_schema(self, cursor) -> None:
-        """Create / repair / self-heal the CJK-bigram index (see the module
-        comment). Sets ``_fts_cjk_available``; never raises. Loaded + absent →
-        create (a populated DB gets the backfill markers and is NOT served until
-        optimize-storage backfills); loaded + present → ensure triggers, honour
-        the stale breadcrumb; NOT loaded + live triggers → drop them so INSERTs
-        don't fail at trigger time and leave the breadcrumb."""
+        """Create / repair / self-heal the CJK-bigram index (see the module comment).
+        Sets ``_fts_cjk_available``; never raises. Loaded + absent → create (a
+        populated DB gets backfill markers and is NOT served until optimize-storage
+        backfills); loaded + present → ensure triggers, honour the stale breadcrumb;
+        NOT loaded + live triggers → drop them (INSERTs must not fail at trigger time)."""
         try:
             cjk_present = bool(cursor.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_cjk'"
@@ -200,8 +185,7 @@ class SessionFtsSetupMixin:
                         _FTS_CJK_TRIGGERS,
                     ).fetchall()]
                     if live:
-                        # Breadcrumb FIRST (a crash between the two statements
-                        # is merely conservative), then drop.
+                        # Breadcrumb FIRST (a crash between the two is merely conservative).
                         logger.warning(
                             "messages_fts_cjk triggers present but the "
                             "cjk_unicode61 tokenizer is unavailable (%s) — "
@@ -230,12 +214,10 @@ class SessionFtsSetupMixin:
         try:
             cursor.executescript(FTS_CJK_TABLE_SQL)
             if not cjk_present:
-                # Any old stale breadcrumb refers to a table that no longer exists.
+                # An old stale breadcrumb refers to a table that no longer exists.
                 cursor.execute("DELETE FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,))
-                # Empty DB: index complete by construction (triggers cover everything),
-                # no markers. Populated DB: the marker pair keeps the id-gated triggers
-                # correct while old rows await optimize-storage; the index is NOT
-                # served until that backfill completes.
+                # Empty DB: complete by construction, no markers. Populated DB: the
+                # marker pair keeps the id-gated triggers correct until backfill.
                 if cursor.execute("SELECT COUNT(*) FROM messages WHERE role <> 'tool'").fetchone()[0] > 0:
                     hw = cursor.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
                     for k, v in (
@@ -247,9 +229,7 @@ class SessionFtsSetupMixin:
                             (k, v),
                         )
             if cursor.execute("SELECT 1 FROM state_meta WHERE key = ?", (FTS_CJK_STALE_KEY,)).fetchone():
-                # Gap of unknown extent: do NOT reinstall triggers (an
-                # external-content 'delete' for an unindexed rowid corrupts the
-                # index); the next optimize-storage rebuilds from scratch.
+                # Gap of unknown extent: do NOT reinstall triggers (see module comment).
                 self._fts_cjk_available = False
                 return
             cursor.executescript(FTS_CJK_TRIGGER_SQL)
@@ -292,9 +272,8 @@ class SessionFtsSetupMixin:
 
     @staticmethod
     def _is_fts_write_corruption_error(exc: sqlite3.DatabaseError) -> bool:
-        """Corruption SQLite identifies as FTS-scoped: SQLITE_CORRUPT_VTAB, or
-        (older builds) an ``fts5:`` message. A bare malformed-image error is
-        structural and must not trigger live FTS maintenance."""
+        """Corruption SQLite identifies as FTS-scoped (SQLITE_CORRUPT_VTAB, or an
+        ``fts5:`` message on older builds); a bare malformed image is structural."""
         error_code = getattr(exc, "sqlite_errorcode", None)
         if error_code is not None:
             return error_code == getattr(sqlite3, "SQLITE_CORRUPT_VTAB", 267)
@@ -302,10 +281,9 @@ class SessionFtsSetupMixin:
         return msg.startswith("fts5:") and "corrupt structure" in msg
 
     def _enter_fts_fail_open(self, exc: sqlite3.DatabaseError) -> bool:
-        """Detach corrupt FTS indexes so canonical writes can continue. Stale
-        breadcrumb + trigger drop commit atomically: once triggers are absent
-        the index has a gap of unknown extent, so no process may reinstall them
-        without rebuilding every row."""
+        """Detach corrupt FTS indexes so canonical writes can continue. Breadcrumb +
+        trigger drop commit atomically: once triggers are absent the index has a
+        gap of unknown extent, so nobody may reinstall them without a full rebuild."""
         if not self._fts_enabled or not self._is_fts_write_corruption_error(exc):
             return False
         self._raise_if_db_corrupt()
@@ -355,21 +333,18 @@ class SessionFtsSetupMixin:
         return True
 
     # ── Chunked FTS rebuild engine (v23 opt-in optimize) ──
-    # One blocking rebuild held the write lock ~16 minutes on a 25 GB DB, so the
-    # backfill runs in small chunks, each its own short transaction (resumable
-    # from fts_rebuild_progress; concurrent runners claim chunks by CAS).
-    # THROTTLING: a greedy loop owned the lock ~85% of the time and starved
-    # other processes' writers; 500-row chunks plus a pause of max(MIN_PAUSE,
-    # chunk cost x DUTY_FACTOR) cap our duty cycle unconditionally (works
-    # cross-process, unlike any same-process activity stamp).
+    # One blocking rebuild held the write lock ~16 min on a 25 GB DB, so the
+    # backfill runs in small chunks (each its own short transaction, resumable from
+    # fts_rebuild_progress, claimed by CAS). A greedy loop starved other writers:
+    # a pause of max(MIN_PAUSE, chunk cost x DUTY_FACTOR) caps the duty cycle
+    # cross-process, unlike any same-process activity stamp.
     _FTS_REBUILD_CHUNK_ROWS = 500
     _FTS_REBUILD_DUTY_FACTOR = 4.0      # sleep >= 4x chunk cost (≤20% duty)
     _FTS_REBUILD_MIN_PAUSE = 0.2        # seconds — floor between chunks
 
     # Demoted v22 FTS shadow tables awaiting teardown: DROP of a multi-GB vtable
-    # blocks for minutes, so the v23 migration demotes the vtable definitions
-    # out of sqlite_master and renames the orphaned shadow tables (now plain
-    # tables) to fts_v22_trash_*; the worker empties them in chunks, then drops.
+    # blocks for minutes, so the v23 migration renames the orphaned shadow tables
+    # to fts_v22_trash_*; the worker empties them in chunks, then drops.
     _FTS_TRASH_PREFIX = "fts_v22_trash_"
 
     def _has_fts_trash(self, conn) -> bool:
@@ -380,6 +355,6 @@ class SessionFtsSetupMixin:
             (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
         ).fetchone())
 
-    # FTS5 tables merged on optimize; trigram may be disabled and cjk exists only
-    # with the loadable tokenizer, so each is probed before touching (optimize_fts).
+    # FTS5 tables merged on optimize; each is probed before touching (trigram may
+    # be disabled, cjk exists only with the loadable tokenizer).
     _FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")

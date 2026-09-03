@@ -5,14 +5,12 @@ strings as well as live sqlite3 exceptions."""
 import errno
 import sqlite3
 
-# ---------------------------------------------------------------------------
-# Malformed-schema recovery: ``sqlite_master`` itself is inconsistent (typically
-# a DUPLICATE ``CREATE VIRTUAL TABLE messages_fts`` row). SQLite parses the
-# whole schema while preparing the FIRST statement, so EVERY statement raises —
-# including ``PRAGMA journal_mode`` (it trips in apply_wal_with_fallback during
-# __init__, before _init_schema) and plain ``DROP TABLE``; only
-# ``PRAGMA writable_schema=ON`` + sqlite_master surgery still work. Canonical
-# sessions/messages are intact; recovery rebuilds only the FTS layer.
+# Malformed schema: ``sqlite_master`` itself is inconsistent (typically a DUPLICATE
+# ``CREATE VIRTUAL TABLE messages_fts`` row). SQLite parses the whole schema while
+# preparing the FIRST statement, so EVERY statement raises (even ``PRAGMA
+# journal_mode`` during __init__); only ``PRAGMA writable_schema=ON`` +
+# sqlite_master surgery still work. Canonical rows are intact; recovery rebuilds
+# only the FTS layer.
 _MALFORMED_SCHEMA_MARKERS = ("malformed database schema",)
 _MALFORMED_DB_MARKERS = (*_MALFORMED_SCHEMA_MARKERS, "database disk image is malformed")
 
@@ -25,51 +23,42 @@ def is_malformed_db_error(exc: BaseException) -> bool:
     )
 
 
-# SQLITE_IOERR as a substring (wrapped strings still classify); shared by the
-# read-only open retry and the write-path BEGIN retry.
+# SQLITE_IOERR as a substring (wrapped strings still classify).
 _DISK_IO_ERROR_MARKER = "disk i/o error"
 
-# "Store BUSY, not gone" — HTTP callers map these to 503 instead of 500.
-# Corruption deliberately absent: a malformed store must surface, not be
-# retried into a timeout.
+# "Store BUSY, not gone" — HTTP callers map these to 503 instead of 500. Corruption
+# is deliberately absent: a malformed store must surface, not be retried into a timeout.
 _TRANSIENT_SQLITE_MARKERS = (
     _DISK_IO_ERROR_MARKER, "database is locked", "database table is locked", "busy",
 )
 
 
 def _is_no_more_rows(exc: sqlite3.Error) -> bool:
-    """Transient engine error on contended WAL appends; the identical write succeeds
-    standalone, so it retries like locked/busy. Message-scoped because some builds
-    raise it as InterfaceError (outside DatabaseError)."""
+    """Transient engine error on contended WAL appends (retries like locked/busy);
+    message-scoped because some builds raise it as InterfaceError."""
     return "no more rows available" in str(exc).lower()
 
 
 def is_transient_sqlite_error(exc: BaseException) -> bool:
-    """"Busy right now", not "damaged". One predicate so the read-only open
-    retry and the HTTP 503-vs-500 split cannot drift apart."""
+    """"Busy right now", not "damaged": one predicate so retry and the HTTP
+    503-vs-500 split cannot drift apart."""
     return isinstance(exc, sqlite3.OperationalError) and any(
         marker in str(exc).lower() for marker in _TRANSIENT_SQLITE_MARKERS
     )
 
 
 def is_malformed_schema_error(exc: BaseException) -> bool:
-    """Only SQLite's explicit malformed-schema text. A generic "disk image is
-    malformed" (SQLITE_CORRUPT) may be any B-tree/freelist page and does not
-    prove canonical rows intact, so runtime repair must fail closed on it."""
+    """Only SQLite's explicit malformed-schema text: a generic "disk image is
+    malformed" may be any B-tree page, so runtime repair must fail closed on it."""
     return isinstance(exc, sqlite3.DatabaseError) and any(
         marker in str(exc).lower() for marker in _MALFORMED_SCHEMA_MARKERS
     )
 
 
-# "Filesystem cannot accept another write" substrings (OSError, sqlite3, and
-# wrapped RPC strings all match the same helper).
+# "Filesystem cannot accept another write" substrings (OSError, sqlite3, wrapped RPC strings).
 _DISK_FULL_MARKERS = (
-    "no space left on device",
-    "not enough space",
-    "database or disk is full",  # SQLITE_FULL
-    "disk full",
-    "full disk",
-    "enospc",
+    "no space left on device", "not enough space", "database or disk is full",  # SQLITE_FULL
+    "disk full", "full disk", "enospc",
 )
 
 
@@ -83,65 +72,19 @@ def is_disk_full_error(exc: BaseException | str | None) -> bool:
     return any(marker in lowered for marker in _DISK_FULL_MARKERS)
 
 
-# Every classify_persistence_error bucket; consumers enumerate this tuple so a
-# new bucket can never silently desynchronize them.
+# Every classify_persistence_error bucket; consumers enumerate this tuple.
 PERSISTENCE_ERROR_CAUSES = (
     "locked", "compression", "compression_closed", "turn_lease", "corrupt", "replaced", "disk",
     "unknown",
 )
 
 
-# "Database FILE structurally damaged" substrings. NOTE: "database disk image is
+# "Database FILE structurally damaged" substrings. "database disk image is
 # malformed" contains "disk", so this check MUST run before the disk bucket in
 # classify_persistence_error or B-tree corruption reads as "free some disk space".
 _DB_CORRUPTION_MARKERS = (
-    "malformed",              # "database disk image is malformed" (SQLITE_CORRUPT)
-    "file is not a database", # SQLITE_NOTADB (also connection-level poisoning)
-    "not a database",
-    "database corruption",
+    "malformed", "file is not a database", "not a database", "database corruption",
 )
-
-
-def classify_persistence_error(exc_or_str) -> str:
-    """Coarse cause bucket (PERSISTENCE_ERROR_CAUSES) so the user's guidance
-    matches: "locked" = busy, retry; "disk" = full/read-only/permissions;
-    "compression" = a live lease refused the write; "compression_closed" = adopt
-    the rotated session id; "turn_lease" = fencing, not storage; "corrupt" =
-    file damage (repair path, not disk space); "replaced" = stop writing."""
-    if exc_or_str is None:
-        return "unknown"
-    # Lease refusals contain neither "locked" nor "busy": match by type, then by
-    # phrase for strings that survived RPC wrapping.
-    if isinstance(exc_or_str, SessionTurnLeaseLostError):
-        return "turn_lease"
-    if isinstance(exc_or_str, CompressionSessionClosedError):
-        return "compression_closed"
-    if isinstance(exc_or_str, CompressionSessionBusyError):
-        return "compression"
-    if isinstance(exc_or_str, StateDbReplacedError):  # incl. DeletedWalGenerationError
-        return "replaced"
-    if isinstance(exc_or_str, StateDbCorruptError):
-        return "corrupt"
-    text = str(exc_or_str).lower()
-    if "turn lease" in text:
-        return "turn_lease"
-    if "closed by compression" in text:
-        return "compression_closed"
-    if "being compressed" in text or "compression lease" in text:
-        return "compression"
-    if "was replaced underneath" in text:
-        return "replaced"
-    if "deleted state.db-wal" in text or "deleted state.db-shm" in text:
-        return "replaced"
-    # Corruption BEFORE the lock/disk buckets: "disk image is malformed"
-    # contains "disk" and some wrapped strings mention "locked" recovery.
-    if any(marker in text for marker in _DB_CORRUPTION_MARKERS):
-        return "corrupt"
-    if "locked" in text or "busy" in text:
-        return "locked"
-    if is_disk_full_error(exc_or_str) or "disk" in text or "readonly" in text or "read-only" in text:
-        return "disk"
-    return "unknown"
 
 
 class CompressionSessionClosedError(RuntimeError):
@@ -223,3 +166,44 @@ _STATE_DB_CORRUPT_MSG = (
     "--inspect-only` or restore a snapshot. Unwritten transcripts are diverted to "
     "sessions/<id>.jsonl (and the gateway pending_messages spool)."
 )
+
+
+_PERSISTENCE_CAUSE_BY_TYPE = (
+    (SessionTurnLeaseLostError, "turn_lease"),
+    (CompressionSessionClosedError, "compression_closed"),
+    (CompressionSessionBusyError, "compression"),
+    (StateDbReplacedError, "replaced"),
+    (StateDbCorruptError, "corrupt"),
+)
+_PERSISTENCE_CAUSE_BY_PHRASE = (
+    (("turn lease",), "turn_lease"),
+    (("closed by compression",), "compression_closed"),
+    (("being compressed", "compression lease"), "compression"),
+    (("was replaced underneath", "deleted state.db-wal", "deleted state.db-shm"), "replaced"),
+    (_DB_CORRUPTION_MARKERS, "corrupt"),
+    (("locked", "busy"), "locked"),
+)
+
+
+def classify_persistence_error(exc_or_str) -> str:
+    """Coarse cause bucket (PERSISTENCE_ERROR_CAUSES) so the user's guidance
+    matches: "locked" = busy, retry; "disk" = full/read-only/permissions;
+    "compression" = a live lease refused the write; "compression_closed" = adopt
+    the rotated session id; "turn_lease" = fencing, not storage; "corrupt" =
+    file damage (repair path, not disk space); "replaced" = stop writing."""
+    if exc_or_str is None:
+        return "unknown"
+    # Lease refusals contain neither "locked" nor "busy": match by type first,
+    # then by phrase for strings that survived RPC wrapping. Order matters:
+    # StateDbReplacedError covers DeletedWalGenerationError; corruption comes
+    # BEFORE the lock/disk buckets ("disk image is malformed" contains "disk").
+    for exc_type, cause in _PERSISTENCE_CAUSE_BY_TYPE:
+        if isinstance(exc_or_str, exc_type):
+            return cause
+    text = str(exc_or_str).lower()
+    for markers, cause in _PERSISTENCE_CAUSE_BY_PHRASE:
+        if any(marker in text for marker in markers):
+            return cause
+    if is_disk_full_error(exc_or_str) or any(m in text for m in ("disk", "readonly", "read-only")):
+        return "disk"
+    return "unknown"
