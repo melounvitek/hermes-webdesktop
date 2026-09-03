@@ -5325,12 +5325,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # "queue" (Enter queues for next turn), or "steer" (Enter injects
         # mid-run via /steer, arriving after the next tool call).
         _bim = str(CLI_CONFIG["display"].get("busy_input_mode", "interrupt")).strip().lower()
-        if _bim == "queue":
-            self.busy_input_mode = "queue"
-        elif _bim == "steer":
-            self.busy_input_mode = "steer"
-        else:
-            self.busy_input_mode = "interrupt"
+        self.busy_input_mode = _bim if _bim in ("queue", "steer") else "interrupt"
 
         # self.verbose ONLY controls global DEBUG logging (root logger level).
         # display.tool_progress="verbose" controls tool-call rendering (full args,
@@ -5373,16 +5368,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         _ump = CLI_CONFIG["display"].get("user_message_preview", {})
         if not isinstance(_ump, dict):
             _ump = {}
-        try:
-            _ump_first_lines = int(_ump.get("first_lines", 2))
-        except (TypeError, ValueError):
-            _ump_first_lines = 2
-        try:
-            _ump_last_lines = int(_ump.get("last_lines", 2))
-        except (TypeError, ValueError):
-            _ump_last_lines = 2
-        self.user_message_preview_first_lines = max(1, _ump_first_lines)
-        self.user_message_preview_last_lines = max(0, _ump_last_lines)
+        self.user_message_preview_first_lines = max(1, _int_or(_ump.get("first_lines", 2), 2))
+        self.user_message_preview_last_lines = max(0, _int_or(_ump.get("last_lines", 2), 2))
 
         # Streaming display state
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
@@ -6928,17 +6915,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # messages. Naive ``note + "\n\n" + agent_message`` crashed with
         # TypeError when an image was attached (agent_message is a list)
         # and a /model or /reload-skills note was queued for the turn.
-        _msn = getattr(self, '_pending_model_switch_note', None)
-        if _msn:
-            agent_message = _prepend_note_to_message(agent_message, _msn)
-            self._pending_model_switch_note = None
-        # Prepend pending /reload-skills note so the model sees which
-        # skills were added/removed before handling this turn. Same
-        # one-shot queue pattern as the model-switch note above.
-        _srn = getattr(self, '_pending_skills_reload_note', None)
-        if _srn:
-            agent_message = _prepend_note_to_message(agent_message, _srn)
-            self._pending_skills_reload_note = None
+        # Same one-shot queue for the /model note and the /reload-skills note.
+        for _note_attr in ("_pending_model_switch_note", "_pending_skills_reload_note"):
+            _note = getattr(self, _note_attr, None)
+            if _note:
+                agent_message = _prepend_note_to_message(agent_message, _note)
+                setattr(self, _note_attr, None)
         # Barged mid-speech (VAD or record key)? Tell the model it was
         # cut off — same one-shot, API-local note channel as above.
         from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE, take_speech_interrupted
@@ -6946,8 +6928,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             agent_message = _prepend_note_to_message(agent_message, SPEECH_INTERRUPTED_NOTE)
         _moa_cfg = getattr(self, "_pending_moa_config", None)
         self._pending_moa_config = None
-        if _moa_cfg is None:
-            _moa_cfg = None
         # Model/skill notes and voice instructions are API-local. Keep
         # the original staged input as the durable transcript value so a
         # close-path marker follows the same dict into turn setup rather
@@ -7694,13 +7674,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     continue
                 logger.warning("process_loop unhandled error (msg may be lost): %s", e)
             except Exception as e:
-                if isinstance(e, OSError) and getattr(e, "errno", None) == errno.EIO:
-                    self._mark_terminal_io_broken("process_loop")
-                    logger.warning(
-                        "process_loop EIO — freezing UI paints (#81521): %s",
-                        e,
-                    )
-                    continue
                 logger.warning("process_loop unhandled error (msg may be lost): %s", e)
 
     def _tui_signal_handler(self, signum, frame):
@@ -7743,20 +7716,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # never arm its own watchdog — leaving a "dead" CLI alive for
         # minutes (#65998 class).  Never raises.
         _arm_exit_watchdog_on_shutdown_signal()
-        try:
-            _signal_agent = getattr(self, "agent", None)
-            if _signal_agent is not None and getattr(self, "_agent_running", False):
-                request_hard_interrupt(
-                    _signal_agent, f"received signal {signum}"
-                )
-                try:
-                    _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
-                except (TypeError, ValueError):
-                    _grace = 1.5
-                if _grace > 0:
-                    time.sleep(_grace)
-        except Exception:
-            pass  # never block signal handling
+        if getattr(self, "_agent_running", False):
+            _interrupt_agent_for_signal(getattr(self, "agent", None), signum)
         # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`.
         # Raising KBI from a signal handler unwinds into whatever Python
         # frame the interpreter happens to be running — typically an
@@ -8033,43 +7994,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             from prompt_toolkit.renderer import _output_screen_diff as _orig_osd
 
             if not getattr(_pt_renderer, "_hermes_osd_patched", False):
-                def _patched_output_screen_diff(
-                    app, output, screen, current_pos, color_depth,
-                    previous_screen, last_style, is_done, full_screen,
-                    attrs_for_style_string, style_string_has_style,
-                    size, previous_width,
-                ):
-                    """Wraps pt's _output_screen_diff to suppress the
-                    reserve-vertical-space scroll (renderer.py L232-242).
-
-                    Strategy: ONLY when previous_screen is non-None and
-                    its current height is genuinely smaller than the new
-                    screen's height, inflate it to match.  This prevents
-                    the bottom-cursor-move at L242 without changing any
-                    other code path's behavior.
-
-                    Critical: do NOT replace a None previous_screen with
-                    a fresh Screen() on the happy path — that would skip
-                    the proper reset_attributes()+erase_down() at L178-185
-                    which fires when previous_screen is None (first-paint /
-                    width-change).  Without that reset, ANSI styles
-                    leak between renders.
-
-                    Safety net: if the diff crashes with AttributeError /
-                    TypeError (corrupt previous_screen after tmux attach —
-                    "'cell' object has no attribute 'char'"), retry once
-                    with previous_screen=None so pt takes the first-paint
-                    erase path instead of wedging the event loop.
-                    """
-                    return _hermes_call_output_screen_diff(
-                        _orig_osd,
-                        app, output, screen, current_pos, color_depth,
-                        previous_screen, last_style, is_done, full_screen,
-                        attrs_for_style_string, style_string_has_style,
-                        size, previous_width,
-                    )
-
-                _pt_renderer._output_screen_diff = _patched_output_screen_diff
+                # Same parameter names as pt's function, so pt's keyword call
+                # site binds unchanged; the guards live in the helper's docstring.
+                _pt_renderer._output_screen_diff = functools.partial(
+                    _hermes_call_output_screen_diff, _orig_osd
+                )
                 _pt_renderer._hermes_osd_patched = True
         except Exception:
             pass
@@ -8329,6 +8258,36 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._release_active_session()
 
 
+def _int_or(value, default: int) -> int:
+    """``int(value)``, or ``default`` when it does not parse."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _interrupt_agent_for_signal(agent, signum) -> None:
+    """Hard-interrupt ``agent`` for a shutdown signal, then sleep the grace window.
+
+    The grace (``HERMES_SIGTERM_GRACE``, default 1.5 s) lets the agent daemon thread
+    see the interrupt on its next poll and ``_kill_process`` the tool's setsid
+    subprocess group before the main thread unwinds — otherwise the child survives
+    as an orphan. ``time.sleep`` releases the GIL so the daemon actually runs.
+    Never raises (signal handler context).
+    """
+    try:
+        if agent is not None:
+            request_hard_interrupt(agent, f"received signal {signum}")
+            try:
+                _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
+            except (TypeError, ValueError):
+                _grace = 1.5
+            if _grace > 0:
+                time.sleep(_grace)
+    except Exception:
+        pass  # never block signal handling
+
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
@@ -8361,14 +8320,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
 
     # Resolve goal text from the card (title + body = the acceptance
     # criteria the judge evaluates against).
-    conn = _kb.connect()
-    try:
+    with _kb.connect_closing() as conn:
         task = _kb.get_task(conn, task_id)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
     if task is None:
         return
 
@@ -8398,29 +8351,12 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return resp or ""
 
     def _task_status() -> "str | None":
-        c = _kb.connect()
-        try:
+        with _kb.connect_closing() as c:
             return _kb.goal_run_status(c, task_id, worker_run_id)
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
 
     def _block(reason: str) -> None:
-        c = _kb.connect()
-        try:
-            _kb.block_task(
-                c,
-                task_id,
-                reason=reason,
-                expected_run_id=worker_run_id,
-            )
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
+        with _kb.connect_closing() as c:
+            _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
     _run_loop(
         task_id=task_id,
@@ -8542,6 +8478,13 @@ def _route_single_query_images(cli, query, effective_query, single_query_images,
         except Exception:
             _img_mode = "text"
 
+        def _text_fallback():
+            # ``_preprocess_images_with_vision`` only knows local files; when
+            # only URLs were supplied keep the original query text intact.
+            if single_query_images:
+                return cli._preprocess_images_with_vision(query, single_query_images, announce=False)
+            return effective_query
+
         if _img_mode == "native" and _build_parts is not None:
             try:
                 _parts, _skipped = _build_parts(
@@ -8552,26 +8495,11 @@ def _route_single_query_images(cli, query, effective_query, single_query_images,
                 if any(p.get("type") == "image_url" for p in _parts):
                     effective_query = _parts
                 else:
-                    # All images unreadable — text fallback.
-                    # ``_preprocess_images_with_vision`` only knows
-                    # about local files; URLs would be lost there,
-                    # so keep the original query text intact when
-                    # only URLs were supplied.
-                    if single_query_images:
-                        effective_query = cli._preprocess_images_with_vision(
-                            query, single_query_images, announce=False,
-                        )
+                    effective_query = _text_fallback()  # all images unreadable
             except Exception:
-                if single_query_images:
-                    effective_query = cli._preprocess_images_with_vision(
-                        query, single_query_images, announce=False,
-                    )
-        elif single_query_images:
-            effective_query = cli._preprocess_images_with_vision(
-                query,
-                single_query_images,
-                announce=False,
-            )
+                effective_query = _text_fallback()
+        else:
+            effective_query = _text_fallback()
     return effective_query
 
 
@@ -8591,14 +8519,8 @@ def _collect_kanban_task_images(single_query_images):
             from hermes_cli import kanban_db as _kb
             from agent.image_routing import extract_image_refs as _extract_refs
 
-            _conn = _kb.connect()
-            try:
+            with _kb.connect_closing() as _conn:
                 _task = _kb.get_task(_conn, _kanban_task_id)
-            finally:
-                try:
-                    _conn.close()
-                except Exception:
-                    pass
             _body = getattr(_task, "body", "") if _task is not None else ""
             if _body:
                 _kb_paths, _kb_urls = _extract_refs(_body)
@@ -8631,18 +8553,7 @@ def _install_single_query_signal_handlers(cli):
         # covers wedges in the unwind below that would otherwise leave the
         # process alive with no watchdog (#65998 class). Never raises.
         _arm_exit_watchdog_on_shutdown_signal()
-        try:
-            _agent = getattr(cli, "agent", None)
-            if _agent is not None:
-                request_hard_interrupt(_agent, f"received signal {signum}")
-                try:
-                    _grace = float(os.getenv("HERMES_SIGTERM_GRACE", "1.5"))
-                except (TypeError, ValueError):
-                    _grace = 1.5
-                if _grace > 0:
-                    time.sleep(_grace)
-        except Exception:
-            pass  # never block signal handling
+        _interrupt_agent_for_signal(getattr(cli, "agent", None), signum)
         # Kanban worker (#28181): a non-daemon worker thread blocked in
         # _wait_for_process survives KeyboardInterrupt, so the PID stays alive and
         # the dispatcher's _pid_alive sees 'running' forever. os._exit(0) instead,
