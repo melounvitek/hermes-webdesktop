@@ -22,7 +22,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -73,6 +73,16 @@ _LEN_FNS: Dict[str, Callable[[str], int]] = {
     "chars": len,
     "utf16": _utf16_len,
 }
+
+
+def _send_result(result: Dict[str, Any], **extra: Any) -> SendResult:
+    """Project a connector ``outbound_result`` dict onto a SendResult."""
+    return SendResult(
+        success=bool(result.get("success")),
+        message_id=result.get("message_id"),
+        error=result.get("error"),
+        **extra,
+    )
 
 
 def _event_ids(event) -> Tuple[Optional[str], Optional[str]]:
@@ -287,9 +297,7 @@ class RelayAdapter(BasePlatformAdapter):
         if platform is None:
             platform = self.descriptor.platform
         hints = self._slack_unfurl_hints(platform)
-        if not hints or not any(v is True for v in hints.values()):
-            return False
-        return bool(_URL_RE.search(content or ""))
+        return bool(hints) and any(v is True for v in hints.values()) and bool(_URL_RE.search(content or ""))
 
     def stream_is_message_for_chat(self, chat_id: str) -> bool:
         """Per-chat stream-is-the-message semantic (see ``draft_stream_is_message``).
@@ -595,6 +603,32 @@ class RelayAdapter(BasePlatformAdapter):
         )
         return None
 
+    async def _card_frame(
+        self, chat_id: str, op: str, reply_to: Optional[str], metadata: Dict[str, Any], **fields: Any
+    ) -> Union[SendResult, Dict[str, Any]]:
+        """Emit one task-card op: the connector result dict, or a failed SendResult
+        when the lane is unavailable / the transport raised.
+
+        Card frames are advisory and run inside the progress loop / turn-cleanup
+        path: an escaping exception there skipped final delivery, so transport
+        errors degrade to the TurnRunner's text fallback instead of raising.
+        """
+        if not self.supports_native_task_cards():
+            return SendResult(success=False, error="connector does not advertise task_card")
+        if self._transport is None:
+            return SendResult(success=False, error="no transport")
+        frame = {
+            "op": op,
+            "chat_id": chat_id,
+            "card_id": self._card_key(reply_to, metadata),
+            **fields,
+            "metadata": self._with_scope(chat_id, metadata),
+        }
+        try:
+            return await self._outbound(chat_id, frame)
+        except Exception as e:
+            return SendResult(success=False, error=f"{op} transport error: {e}")
+
     async def send_native_task_card_progress(
         self,
         chat_id: str,
@@ -612,40 +646,18 @@ class RelayAdapter(BasePlatformAdapter):
         are accepted for parity but not forwarded (the connector's plan-mode
         stream renders task chunks; field limits are enforced connector-side).
         """
-        if not self.supports_native_task_cards():
-            return SendResult(
-                success=False, error="connector does not advertise task_card"
-            )
-        if self._transport is None:
-            return SendResult(success=False, error="no transport")
-        card_id = self._card_key(reply_to, metadata)
         merged_meta = dict(metadata or {})
         if reply_to and "thread_ts" not in merged_meta:
             # Slack card streams are thread replies anchored on the trigger.
             merged_meta["thread_ts"] = str(reply_to)
-        try:
-            result = await self._outbound(
-                chat_id,
-                {
-                    "op": "task_card",
-                    "chat_id": chat_id,
-                    "card_id": card_id,
-                    "chunks": [dict(t) for t in tasks],
-                    "metadata": self._with_scope(chat_id, merged_meta),
-                },
-            )
-        except Exception as e:
-            # Progress is advisory: degrade to the TurnRunner's text fallback,
-            # never raise into the progress loop / turn-cleanup path (an
-            # escaping card exception in cleanup skipped final delivery).
-            return SendResult(
-                success=False, error=f"task_card transport error: {e}"
-            )
+        result = await self._card_frame(
+            chat_id, "task_card", reply_to, merged_meta, chunks=[dict(t) for t in tasks]
+        )
+        if isinstance(result, SendResult):
+            return result
         if result.get("success"):
             return SendResult(success=True)
-        return SendResult(
-            success=False, error=str(result.get("error") or "task_card failed")
-        )
+        return SendResult(success=False, error=str(result.get("error") or "task_card failed"))
 
     async def stop_native_task_card_progress(
         self,
@@ -655,29 +667,9 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Seal the card stream at turn end (idempotent connector-side); same key derivation as send."""
-        if not self.supports_native_task_cards():
-            return SendResult(
-                success=False, error="connector does not advertise task_card"
-            )
-        if self._transport is None:
-            return SendResult(success=False, error="no transport")
-        try:
-            result = await self._outbound(
-                chat_id,
-                {
-                    "op": "task_card_stop",
-                    "chat_id": chat_id,
-                    "card_id": self._card_key(reply_to, metadata),
-                    "metadata": self._with_scope(chat_id, dict(metadata or {})),
-                },
-            )
-        except Exception as e:
-            # Runs in the progress loop's finally block: an escaping exception
-            # there skipped final delivery. A lost stop is cosmetic (the
-            # connector seals orphaned card streams on its own).
-            return SendResult(
-                success=False, error=f"task_card_stop transport error: {e}"
-            )
+        result = await self._card_frame(chat_id, "task_card_stop", reply_to, dict(metadata or {}))
+        if isinstance(result, SendResult):
+            return result
         return SendResult(success=bool(result.get("success")))
 
     async def abandon_open_draft(
@@ -856,9 +848,7 @@ class RelayAdapter(BasePlatformAdapter):
         """
         if raw is None:
             return default
-        if isinstance(raw, bool):
-            return raw
-        return str(raw).strip().lower() in _TRUTHY
+        return raw if isinstance(raw, bool) else str(raw).strip().lower() in _TRUTHY
 
     def _slack_flag(self, knob: str, default: bool) -> bool:
         """A coerced boolean knob from the relay Slack extra; ``default`` on any config-shape error."""
@@ -1058,12 +1048,8 @@ class RelayAdapter(BasePlatformAdapter):
         sent at handshake, not from an inbound chat cache.
         """
         platform_value = getattr(platform, "value", platform)
-        if not platform_value:
-            return False
-        ids = getattr(self._transport, "_identities", None)
-        if not ids:
-            return False
-        return any(p == str(platform_value) for p, _ in ids)
+        ids = getattr(self._transport, "_identities", None) or ()
+        return bool(platform_value) and any(p == str(platform_value) for p, _ in ids)
 
     def supports_inchannel_continuable_for_platform(self, platform: Any) -> bool:
         """Whether ONE fronted platform can host the flat continuable cron
@@ -1202,9 +1188,7 @@ class RelayAdapter(BasePlatformAdapter):
     @staticmethod
     def _decode_prompt_token(token: str):
         """Decode an hp1:<prompt_id>:<option_id> callback token, or None (mirrors the connector's promptCodec)."""
-        if not token:
-            return None
-        parts = token.split(":")
+        parts = (token or "").split(":")
         if len(parts) != 3 or parts[0] != "hp1":
             return None
         if not _PROMPT_ID_RE.match(parts[1]) or not _PROMPT_ID_RE.match(parts[2]):
@@ -1366,12 +1350,7 @@ class RelayAdapter(BasePlatformAdapter):
             },
             platform=str(platform_value),
         )
-        return SendResult(
-            success=bool(result.get("success")),
-            message_id=result.get("message_id"),
-            error=result.get("error"),
-            raw_response=result,
-        )
+        return _send_result(result, raw_response=result)
 
     def _format_hints(
         self, descriptor: Optional[CapabilityDescriptor], platform: Optional[str]
@@ -1505,11 +1484,7 @@ class RelayAdapter(BasePlatformAdapter):
         waiter = self._auto_thread_waiters.get(str(chat_id))
         if waiter is not None:
             waiter.set()
-        return SendResult(
-            success=bool(result.get("success")),
-            message_id=result.get("message_id"),
-            error=result.get("error"),
-        )
+        return _send_result(result)
 
     def auto_thread_info_for_chat(
         self, chat_id: str
@@ -1792,11 +1767,7 @@ class RelayAdapter(BasePlatformAdapter):
             },
             platform=follow_up_platform,
         )
-        return SendResult(
-            success=bool(result.get("success")),
-            message_id=result.get("message_id"),
-            error=result.get("error"),
-        )
+        return _send_result(result)
 
     # ── Phase 2 media ─────────────────────────────────────────────────────
 
@@ -1892,6 +1863,8 @@ class RelayAdapter(BasePlatformAdapter):
             raw_response=result,
         )
 
+    # Each media override tries the native ``send_media`` lane, then falls back to
+    # the base adapter's text/URL behaviour when the lane is unavailable.
     async def send_image(
         self,
         chat_id: str,
@@ -1900,16 +1873,13 @@ class RelayAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send an image (public URL) as a native attachment via the connector."""
         result = await self._send_media(
             chat_id, media_kind="image", source=image_url, source_is_path=False,
             caption=caption, reply_to=reply_to, metadata=metadata,
         )
         if result is not None:
             return result
-        return await super().send_image(
-            chat_id, image_url, caption=caption, reply_to=reply_to, metadata=metadata
-        )
+        return await super().send_image(chat_id, image_url, caption=caption, reply_to=reply_to, metadata=metadata)
 
     async def send_image_file(
         self,
@@ -1920,7 +1890,6 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local image file natively (upload → send_media)."""
         result = await self._send_media(
             chat_id, media_kind="image", source=image_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
@@ -1940,7 +1909,6 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local audio file as a native voice message (upload → send_media)."""
         result = await self._send_media(
             chat_id, media_kind="voice", source=audio_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
@@ -1960,7 +1928,6 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local video file natively (upload → send_media)."""
         result = await self._send_media(
             chat_id, media_kind="video", source=video_path, source_is_path=True,
             caption=caption, reply_to=reply_to, metadata=metadata,
@@ -1981,7 +1948,6 @@ class RelayAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local file as a downloadable attachment (upload → send_media)."""
         result = await self._send_media(
             chat_id, media_kind="document", source=file_path, source_is_path=True,
             caption=caption, filename=file_name, reply_to=reply_to, metadata=metadata,
@@ -2030,9 +1996,7 @@ class RelayAdapter(BasePlatformAdapter):
     def _pop_prompt(self, prompt_id: str) -> Optional[Dict[str, Any]]:
         """Consume a pending prompt: one answer wins, expired entries miss."""
         state = self._pending_prompts.pop(str(prompt_id), None)
-        if not state:
-            return None
-        if state.get("expires_at", 0) < time.time():
+        if not state or state.get("expires_at", 0) < time.time():
             return None
         return state
 
@@ -2118,6 +2082,8 @@ class RelayAdapter(BasePlatformAdapter):
             self._pending_prompts.pop(prompt_id, None)
         return result
 
+    _PROMPT_UNAVAILABLE = SendResult(success=False, error="relay prompt op unavailable")
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -2161,9 +2127,7 @@ class RelayAdapter(BasePlatformAdapter):
             options=options,
             metadata=metadata,
         )
-        if result is not None:
-            return result
-        return SendResult(success=False, error="relay prompt op unavailable")
+        return result if result is not None else self._PROMPT_UNAVAILABLE
 
     async def send_slash_confirm(
         self,
@@ -2190,9 +2154,7 @@ class RelayAdapter(BasePlatformAdapter):
             options=options,
             metadata=metadata,
         )
-        if result is not None:
-            return result
-        return SendResult(success=False, error="relay prompt op unavailable")
+        return result if result is not None else self._PROMPT_UNAVAILABLE
 
     async def send_clarify(
         self,
@@ -2530,11 +2492,7 @@ class RelayAdapter(BasePlatformAdapter):
             logger.debug("relay thread_rename transport failure", exc_info=True)
             return False
         if not result.get("success"):
-            logger.info(
-                "relay thread_rename declined for %s: %s",
-                thread_id,
-                result.get("error"),
-            )
+            logger.info("relay thread_rename declined for %s: %s", thread_id, result.get("error"))
             return False
         return True
 
