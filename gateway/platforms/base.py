@@ -239,9 +239,8 @@ def _detect_macos_system_proxy() -> str | None:
     if sys.platform != "darwin":
         return None
     try:
-        out = subprocess.check_output(
-            ["scutil", "--proxy"], timeout=3, text=True, encoding='utf-8', errors='replace', stderr=subprocess.DEVNULL,
-        )
+        out = subprocess.check_output(["scutil", "--proxy"], timeout=3, text=True, encoding='utf-8',
+                                      errors='replace', stderr=subprocess.DEVNULL)
     except Exception:
         return None
     props = {
@@ -356,9 +355,8 @@ def _aiohttp_socks_connector(proxy_url: str):
         return ProxyConnector.from_url(proxy_url, rdns=True)
     except ImportError:
         if proxy_url.lower().startswith("socks"):
-            logger.warning(
-                "aiohttp_socks not installed — SOCKS proxy %s ignored. "
-                "Run: pip install aiohttp-socks", proxy_url)
+            logger.warning("aiohttp_socks not installed — SOCKS proxy %s ignored. "
+                           "Run: pip install aiohttp-socks", proxy_url)
         return None
 
 
@@ -473,9 +471,8 @@ def streaming_tts_turn_key(session_key: str | None, turn_marker: Any = None, *, 
     return None if turn_marker is None else f"{session_key}:{turn_marker}"
 
 
-def streaming_tts_should_skip_whole_file(
-    completed_turns: set[str], session_key: str | None, turn_marker: Any = None, *,
-    event: Any = None) -> bool:
+def streaming_tts_should_skip_whole_file(completed_turns: set[str], session_key: str | None,
+                                         turn_marker: Any = None, *, event: Any = None) -> bool:
     """Pure, turn-scoped auto-TTS suppression decision (testable without the adapter stack)."""
     turn_key = streaming_tts_turn_key(session_key, turn_marker, event=event)
     return bool(turn_key and turn_key in completed_turns)
@@ -542,9 +539,8 @@ DEFAULT_INBOUND_MEDIA_MAX_BYTES = 128 * 1024 * 1024
 def get_inbound_media_max_bytes() -> int:
     """Max inbound media bytes held in memory (``gateway.max_inbound_media_bytes``);
     ``0`` / negative / unparseable disables the cap; unreadable config → default."""
-    return _or_default(
-        lambda: int(_config_section("gateway")["max_inbound_media_bytes"]),
-        DEFAULT_INBOUND_MEDIA_MAX_BYTES, (KeyError, TypeError, ValueError))
+    return _or_default(lambda: int(_config_section("gateway")["max_inbound_media_bytes"]),
+                       DEFAULT_INBOUND_MEDIA_MAX_BYTES, (KeyError, TypeError, ValueError))
 
 
 def validate_inbound_media_size(
@@ -597,12 +593,9 @@ get_image_cache_dir, cleanup_image_cache = _cache_dir_accessors(
 
 def _looks_like_image(data: bytes) -> bool:
     """Return True if *data* starts with a known image magic-byte sequence."""
-    return len(data) >= 4 and (
-        data[:8] == b"\x89PNG\r\n\x1a\n"
-        or data[:3] == b"\xff\xd8\xff"
-        or data[:6] in {b"GIF87a", b"GIF89a"}
-        or data[:2] == b"BM"
-        or (data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP"))
+    return len(data) >= 4 and (data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"
+               or data[:6] in {b"GIF87a", b"GIF89a"} or data[:2] == b"BM"
+               or (data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP"))
 
 
 def _write_cache_file(cache_dir: Path, prefix: str, ext: str, data: bytes) -> str:
@@ -622,9 +615,8 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     return _write_cache_file(get_image_cache_dir(), "img", ext, data)
 
 
-async def _cache_media_from_url(
-    url: str, ext: str, retries: int, *, media_type: str, accept: str, cache_fn, log_label: str,
-) -> str:
+async def _cache_media_from_url(url: str, ext: str, retries: int, *, media_type: str, accept: str,
+                                cache_fn, log_label: str) -> str:
     """Shared downloader behind ``cache_image_from_url`` / ``cache_audio_from_url``:
     SSRF-checked (pre-flight + per-redirect; raises ValueError), size-capped, and
     retried with linear backoff on timeouts / 429 / 5xx."""
@@ -647,9 +639,8 @@ async def _cache_media_from_url(
                     raise
                 if attempt < retries:
                     wait = 1.5 * (attempt + 1)
-                    logger.debug(
-                        "%s cache retry %d/%d for %s (%.1fs): %s",
-                        log_label, attempt + 1, retries, safe_url_for_log(url), wait, exc)
+                    logger.debug("%s cache retry %d/%d for %s (%.1fs): %s", log_label, attempt + 1,
+                                 retries, safe_url_for_log(url), wait, exc)
                     await asyncio.sleep(wait)
                     continue
                 raise
@@ -790,11 +781,10 @@ def _kanban_attachment_roots() -> List[Path]:
     roots = [root / "kanban" / "attachments"]
     boards_root = root / "kanban" / "boards"
     try:
-        board_dirs = [
-            path for path in boards_root.iterdir()
-            if path.is_dir() and not path.is_symlink()
-            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", path.name)
-            and (path / "kanban.db").is_file()]
+        board_dirs = [path for path in boards_root.iterdir()
+                      if path.is_dir() and not path.is_symlink()
+                      and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", path.name)
+                      and (path / "kanban.db").is_file()]
     except OSError:
         return roots
     roots.extend(path / "attachments" for path in board_dirs)
@@ -963,9 +953,8 @@ def _docker_persistent_sandbox_roots(session_key: str, leaf: str) -> List[Path]:
     try:
         from tools.environments.base import get_sandbox_dir
         base = get_sandbox_dir() / "docker"
-        return [
-            cand for name in _docker_sandbox_dir_candidates(session_key)
-            if (cand := (base / name / leaf).resolve(strict=False)).is_dir()]
+        return [cand for name in _docker_sandbox_dir_candidates(session_key)
+                if (cand := (base / name / leaf).resolve(strict=False)).is_dir()]
     except Exception:
         return []
 
@@ -1002,12 +991,10 @@ def _warn_unresolved_docker_media(candidate: Path, session_key: str, reason: str
     the generic "Skipping unsafe MEDIA directive path" line). Docker-only; host rejections quiet."""
     if not _docker_env_active():
         return
-    logger.warning(
-        "Docker MEDIA path %s did not resolve to a host sandbox file (%s%s); "
-        "the producing container's sandbox directory may not exist yet or "
-        "was pruned",
-        _log_safe_path(str(candidate)), reason,
-        f", session_key={session_key}" if session_key else "")
+    logger.warning("Docker MEDIA path %s did not resolve to a host sandbox file (%s%s); "
+                   "the producing container's sandbox directory may not exist yet or "
+                   "was pruned", _log_safe_path(str(candidate)), reason,
+                   f", session_key={session_key}" if session_key else "")
 
 
 def _translate_docker_container_media_path(candidate: Path, session_key: str = "") -> Optional[Path]:
@@ -1354,9 +1341,8 @@ def _resolve_media_ext(filename: str, mime_type: str) -> str:
     return ext or _MIME_TO_EXT.get((mime_type or "").lower(), "")
 
 
-def cache_media_bytes(
-    data: bytes, *, filename: str = "", mime_type: str = "", default_kind: Optional[str] = None,
-) -> Optional[CachedMedia]:
+def cache_media_bytes(data: bytes, *, filename: str = "", mime_type: str = "",
+                      default_kind: Optional[str] = None) -> Optional[CachedMedia]:
     """Classify and cache raw attachment bytes; return a CachedMedia or None. ``default_kind``
     biases classification when extension/MIME are ambiguous (Telegram native photo, no name).
     Anything not image/video/audio is a document; only images failing validation return None."""
@@ -1626,9 +1612,8 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
-def merge_pending_message_event(
-    pending_messages: Dict[str, MessageEvent], session_key: str, event: MessageEvent, *,
-    merge_text: bool = False) -> None:
+def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], session_key: str,
+                                event: MessageEvent, *, merge_text: bool = False) -> None:
     """Store or merge a pending event for a session: photo bursts/albums (several near-simultaneous
     PHOTO events) merge into the queued event so the next turn sees the whole burst; with
     ``merge_text``, rapid follow-up TEXT events are appended instead of replacing the turn."""
@@ -1667,9 +1652,7 @@ def merge_pending_message_event(
                 if hasattr(existing, attr):
                     delattr(existing, attr)
             return
-        if (
-            merge_text
-            and getattr(existing, "message_type", None) == MessageType.TEXT
+        if (merge_text and getattr(existing, "message_type", None) == MessageType.TEXT
             and event.message_type == MessageType.TEXT):
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
@@ -1915,9 +1898,8 @@ class BasePlatformAdapter(ABC):
         (Telegram Rich Messages: 32,768 vs 4,096). ``None`` = use ``MAX_MESSAGE_LENGTH``."""
         return None
 
-    async def send_draft(
-        self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
+    async def send_draft(self, chat_id: str, draft_id: int, content: str,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send or update an animated streaming-draft preview.
 
         Reuse one non-zero ``draft_id`` across a single response so the platform animates;
@@ -2111,9 +2093,8 @@ class BasePlatformAdapter(ABC):
                 factory(native, self)
                 logger.info("[%s] Wired native handlers from plugin '%s'", self.name, plugin_name)
             except Exception as exc:
-                logger.error(
-                    "[%s] Plugin '%s' handler factory raised: %s",
-                    self.name, plugin_name, exc, exc_info=True)
+                logger.error("[%s] Plugin '%s' handler factory raised: %s", self.name, plugin_name,
+                             exc, exc_info=True)
 
     @property
     def name(self) -> str:
@@ -2180,10 +2161,9 @@ class BasePlatformAdapter(ABC):
         senders as unverified background rather than authoritative input."""
         self._authorization_check = callback
 
-    def _is_sender_authorized(
-        self, user_id: Optional[str], chat_type: Optional[str] = None,
-        chat_id: Optional[str] = None, *, is_bot: bool = False, thread_id: Optional[str] = None,
-    ) -> Optional[bool]:
+    def _is_sender_authorized(self, user_id: Optional[str], chat_type: Optional[str] = None,
+                              chat_id: Optional[str] = None, *, is_bot: bool = False,
+                              thread_id: Optional[str] = None) -> Optional[bool]:
         """True/False from the registered check, or ``None`` when no check exists ("trust
         unknown", legacy). ``is_bot``/``thread_id`` are forwarded as keywords only when set
         so legacy three-positional callbacks keep working. Only literal booleans propagate:
@@ -2197,14 +2177,12 @@ class BasePlatformAdapter(ABC):
             result = self._authorization_check(user_id, chat_type, chat_id, **extra)
             if result is True or result is False:
                 return result
-            logger.warning(
-                "[%s] Authorization check returned %s for user %s; treating as unknown",
-                self.name, type(result).__name__, user_id)
+            logger.warning("[%s] Authorization check returned %s for user %s; treating as unknown",
+                           self.name, type(result).__name__, user_id)
             return None
         except Exception:
-            logger.warning(
-                "[%s] Authorization check raised for user %s; treating as unknown",
-                self.name, user_id, exc_info=True)
+            logger.warning("[%s] Authorization check raised for user %s; treating as unknown",
+                           self.name, user_id, exc_info=True)
             return None
 
     def set_session_store(self, session_store: Any) -> None:
@@ -2367,9 +2345,8 @@ class BasePlatformAdapter(ABC):
         """Disconnect from the platform."""
 
     @abstractmethod
-    async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                   metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send ``content`` (may be markdown) to a chat; returns SendResult with message id."""
 
     # True for surfaces that need an explicit finalize edit to close the message
@@ -2443,10 +2420,9 @@ class BasePlatformAdapter(ABC):
         """Shared exec-approval prompt text: header + fenced (truncated) command + reason,
         plus the smart-deny line. Buttons/trailing instructions stay platform-local."""
         cmd_preview = self._truncate_preview(str(command or ""), self._EA_CMD_BUDGET)
-        text = (
-            f"{self._EA_HEADER}"
-            f"{self._EA_CODE_OPEN}{self._ea_escape(cmd_preview)}{self._EA_CODE_CLOSE}"
-            f"{self._EA_REASON_LABEL}{self._ea_escape(description)}")
+        text = (f"{self._EA_HEADER}"
+                f"{self._EA_CODE_OPEN}{self._ea_escape(cmd_preview)}{self._EA_CODE_CLOSE}"
+                f"{self._EA_REASON_LABEL}{self._ea_escape(description)}")
         return text + self._EA_SMART_DENY_LINE if smart_denied else text
 
     @staticmethod
@@ -2459,9 +2435,8 @@ class BasePlatformAdapter(ABC):
         page = max(0, min(page, total_pages - 1))
         start, end = page * per_page, min(page * per_page + per_page, total)
         page_info = f" ({start + 1}–{end} of {total})" if total_pages > 1 else ""
-        meta: Dict[str, Any] = {
-            "page": page, "total_pages": total_pages, "start": start, "end": end,
-            "total": total, "page_info": page_info}
+        meta: Dict[str, Any] = {"page": page, "total_pages": total_pages, "start": start,
+                   "end": end, "total": total, "page_info": page_info}
         return options[start:end], meta
 
     async def send_slash_confirm(
@@ -2545,9 +2520,8 @@ class BasePlatformAdapter(ABC):
             if human_delay > 0:
                 await asyncio.sleep(human_delay)
             try:
-                logger.info(
-                    "[%s] Sending image: %s (alt=%s)",
-                    self.name, safe_url_for_log(image_url), alt_text[:30] if alt_text else "")
+                logger.info("[%s] Sending image: %s (alt=%s)", self.name,
+                            safe_url_for_log(image_url), alt_text[:30] if alt_text else "")
                 caption = alt_text if alt_text else None
                 if image_url.startswith("file://"):
                     sender, url_kw = self.send_image_file, {"image_path": _unquote(image_url[7:])}
@@ -2684,10 +2658,9 @@ class BasePlatformAdapter(ABC):
         return await self._send_media_fallback_notice(
             "send_video", "video", video_path, chat_id, caption, reply_to, metadata)
 
-    async def send_document(
-        self, chat_id: str, file_path: str, caption: Optional[str] = None,
-        file_name: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                            file_name: Optional[str] = None, reply_to: Optional[str] = None,
+                            metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         """Send a document/file natively. Default: friendly failure notice."""
         return await self._send_media_fallback_notice(
             "send_document", "file", file_path, chat_id, caption, reply_to, metadata, file_name=file_name)
@@ -2856,9 +2829,8 @@ class BasePlatformAdapter(ABC):
             cleaned = cleaned.replace(raw, '')
         return list(unique), re.sub(r'\n{3,}', '\n\n', cleaned).strip() if unique else cleaned
 
-    async def _keep_typing(
-        self, chat_id: str, interval: float = 2.0, metadata=None,
-        stop_event: asyncio.Event | None = None) -> None:
+    async def _keep_typing(self, chat_id: str, interval: float = 2.0, metadata=None,
+                           stop_event: asyncio.Event | None = None) -> None:
         """Refresh the typing indicator every ``interval`` seconds until cancelled.
 
         Platform typing state expires after ~5s. Chats in ``_typing_paused`` are skipped
@@ -2873,9 +2845,8 @@ class BasePlatformAdapter(ABC):
                     return
                 if chat_id not in self._typing_paused:
                     try:
-                        await asyncio.wait_for(
-                            self.send_typing(chat_id, metadata=metadata),
-                            timeout=_send_typing_timeout)
+                        await asyncio.wait_for(self.send_typing(chat_id, metadata=metadata),
+                                               timeout=_send_typing_timeout)
                     except asyncio.TimeoutError:
                         pass  # Slow network — abandon this tick, stay on schedule.
                     except Exception as typing_err:
@@ -3075,9 +3046,8 @@ class BasePlatformAdapter(ABC):
         if not text:
             return
         if log_cmd is not None:
-            logger.info(
-                "[%s] Sending command '/%s' response (%d chars) to %s",
-                self.name, log_cmd, len(text), event.source.chat_id)
+            logger.info("[%s] Sending command '/%s' response (%d chars) to %s", self.name, log_cmd,
+                        len(text), event.source.chat_id)
         result = await self._send_with_retry(
             chat_id=event.source.chat_id, content=text, reply_to=_reply_anchor_for_event(event),
             metadata=_mark_notify_metadata(thread_meta))
@@ -3128,9 +3098,8 @@ class BasePlatformAdapter(ABC):
                     backoff = server_retry_after
                 delay = backoff + random.uniform(0, 1)
                 server_retry_after = None
-                logger.warning(
-                    "[%s] Send failed (attempt %d/%d, retrying in %.1fs): %s",
-                    self.name, attempt, max_retries, delay, error_str)
+                logger.warning("[%s] Send failed (attempt %d/%d, retrying in %.1fs): %s", self.name,
+                               attempt, max_retries, delay, error_str)
                 await asyncio.sleep(delay)
                 result = await _send(content)
                 if result.success:
@@ -3176,14 +3145,11 @@ class BasePlatformAdapter(ABC):
         """Return True for normal text eligible for queue-mode debounce."""
         result = (
             getattr(self, "_busy_text_mode", "interrupt") == "queue"
-            and event.message_type == MessageType.TEXT
-            and not getattr(event, "internal", False)
-            and not event.is_command()
-            and bool((event.text or "").strip()))
+            and event.message_type == MessageType.TEXT and not getattr(event, "internal", False)
+            and not event.is_command() and bool((event.text or "").strip()))
         if result:
-            logger.debug(
-                "[%s] Queue-text debounce candidate accepted: session=%s text_len=%d", self.name,
-                getattr(event, "session_key", "?"), len(event.text or ""))
+            logger.debug("[%s] Queue-text debounce candidate accepted: session=%s text_len=%d",
+                         self.name, getattr(event, "session_key", "?"), len(event.text or ""))
         return result
 
     def _can_merge_text_debounce_events(self, existing: MessageEvent, event: MessageEvent) -> bool:
@@ -3208,9 +3174,8 @@ class BasePlatformAdapter(ABC):
         state = self._text_debounce_store().get(session_key)
         if state is None:
             return 0.0
-        deadline = min(
-            state.last_ts + self._busy_text_debounce_seconds,
-            state.first_ts + self._busy_text_hard_cap_seconds)
+        deadline = min(state.last_ts + self._busy_text_debounce_seconds,
+                       state.first_ts + self._busy_text_hard_cap_seconds)
         return max(0.0, deadline - time.monotonic())
 
     async def _queue_text_debounce(self, session_key: str, event: MessageEvent) -> None:
@@ -3267,8 +3232,7 @@ class BasePlatformAdapter(ABC):
         state.cancel_timer(unless=asyncio.current_task())
         state.task = None
         existing_pending = self._pending_messages.get(session_key)
-        if (
-            existing_pending is not None
+        if (existing_pending is not None
             and not self._can_merge_text_debounce_events(existing_pending, state.event)):
             return False
         store.pop(session_key, None)
@@ -3308,18 +3272,16 @@ class BasePlatformAdapter(ABC):
         nothing processing) traps the chat in "Interrupting..." until restart."""
         if session_key not in self._active_sessions or not self._session_task_is_stale(session_key):
             return False
-        logger.warning(
-            "[%s] Healing stale session lock for %s (owner task is done/absent)",
-            self.name, session_key)
+        logger.warning("[%s] Healing stale session lock for %s (owner task is done/absent)",
+                       self.name, session_key)
         self._active_sessions.pop(session_key, None)
         self._pending_messages.pop(session_key, None)
         self._session_tasks.pop(session_key, None)
         self._discard_text_debounce(session_key)
         return True
 
-    def _start_session_processing(
-        self, event: MessageEvent, session_key: str, *,
-        interrupt_event: Optional[asyncio.Event] = None) -> bool:
+    def _start_session_processing(self, event: MessageEvent, session_key: str, *,
+                                  interrupt_event: Optional[asyncio.Event] = None) -> bool:
         """Spawn a background processing task under the session guard; True on
         success. If ``create_task`` is stubbed with a non-Task sentinel (tests),
         the guard is rolled back and False returned — no half-installed lock."""
@@ -3346,9 +3308,8 @@ class BasePlatformAdapter(ABC):
             task.add_done_callback(self._expected_cancelled_tasks.discard)
         return True
 
-    async def cancel_session_processing(
-        self, session_key: str, *, release_guard: bool = True, discard_pending: bool = True,
-    ) -> None:
+    async def cancel_session_processing(self, session_key: str, *, release_guard: bool = True,
+                                        discard_pending: bool = True) -> None:
         """Cancel in-flight processing for one session. ``release_guard=False`` keeps
         the guard so reset-like commands finish atomically before follow-ups start;
         the await is bounded (5s) so a wedged finally block can't stall dispatch."""
@@ -3362,14 +3323,12 @@ class BasePlatformAdapter(ABC):
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
-                logger.warning(
-                    "[%s] Cancelled task for %s did not exit within 5s; "
-                    "unblocking dispatch and letting the task unwind in the background",
-                    self.name, session_key)
+                logger.warning("[%s] Cancelled task for %s did not exit within 5s; "
+                               "unblocking dispatch and letting the task unwind in the background",
+                               self.name, session_key)
             except Exception:
-                logger.debug(
-                    "[%s] Session cancellation raised while unwinding %s", self.name, session_key,
-                    exc_info=True)
+                logger.debug("[%s] Session cancellation raised while unwinding %s", self.name,
+                             session_key, exc_info=True)
         if discard_pending:
             self._pending_messages.pop(session_key, None)
             self._discard_text_debounce(session_key)
@@ -3423,9 +3382,8 @@ class BasePlatformAdapter(ABC):
         session_key = self._event_session_key(event)
         expected_session_key = str((event.metadata or {}).get("gateway_session_key") or "").strip()
         if expected_session_key and session_key != expected_session_key:
-            logger.warning(
-                "Dropping internally routed event: expected session=%s derived=%s",
-                expected_session_key, session_key)
+            logger.warning("Dropping internally routed event: expected session=%s derived=%s",
+                           expected_session_key, session_key)
             return
         # On-entry self-heal: clear a guard whose owner task already exited.
         if session_key in self._active_sessions:
@@ -3452,9 +3410,8 @@ class BasePlatformAdapter(ABC):
                     self._discard_text_debounce(session_key)
                     await self._dispatch_active_session_command(event, session_key, cmd)
                 else:
-                    logger.debug(
-                        "[%s] Command '/%s' bypassing active-session guard for %s",
-                        self.name, cmd, session_key)
+                    logger.debug("[%s] Command '/%s' bypassing active-session guard for %s",
+                                 self.name, cmd, session_key)
                     await self._dispatch_inline_reply(event)
             except Exception as e:
                 logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
@@ -3487,19 +3444,15 @@ class BasePlatformAdapter(ABC):
             merge_pending_message_event(self._pending_messages, session_key, event)
             return
         if self._is_queue_text_debounce_candidate(event):
-            logger.debug(
-                "[%s] New text message while session %s is active — "
-                "debouncing follow-up (busy_text_mode=queue, window=%.2fs)",
-                self.name, session_key, self._busy_text_debounce_seconds)
+            logger.debug("[%s] New text message while session %s is active — "
+                         "debouncing follow-up (busy_text_mode=queue, window=%.2fs)", self.name,
+                         session_key, self._busy_text_debounce_seconds)
             await self._queue_text_debounce(session_key, event)
         else:
-            logger.debug(
-                "[%s] New message while session %s is active — queuing follow-up "
-                "(no interrupt, will cascade after current turn)",
-                self.name, session_key)
-            merge_pending_message_event(
-                self._pending_messages, session_key, event,
-                merge_text=event.message_type == MessageType.TEXT)
+            logger.debug("[%s] New message while session %s is active — queuing follow-up "
+                         "(no interrupt, will cascade after current turn)", self.name, session_key)
+            merge_pending_message_event(self._pending_messages, session_key, event,
+                                        merge_text=event.message_type == MessageType.TEXT)
 
     @staticmethod
     def _get_human_delay() -> float:
@@ -3513,9 +3466,8 @@ class BasePlatformAdapter(ABC):
             return random.uniform(800 / 1000.0, 2500 / 1000.0)
         def _ms(name: str, default: int) -> int:  # custom mode tolerates malformed env vars
             return _or_default(lambda: int(os.getenv(name, str(default))), default)
-        return random.uniform(
-            _ms("HERMES_HUMAN_DELAY_MIN_MS", 800) / 1000.0,
-            _ms("HERMES_HUMAN_DELAY_MAX_MS", 2500) / 1000.0)
+        return random.uniform(_ms("HERMES_HUMAN_DELAY_MIN_MS", 800) / 1000.0,
+                              _ms("HERMES_HUMAN_DELAY_MAX_MS", 2500) / 1000.0)
 
     async def _synthesize_auto_tts(self, text_content: str) -> Tuple[List[str], Optional[str]]:
         """Synthesize auto-TTS audio -> ``(existing_paths, requested_path)``; empty/None
@@ -3540,9 +3492,8 @@ class BasePlatformAdapter(ABC):
             logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
         return paths, requested_path
 
-    def _wants_auto_tts(
-        self, event: MessageEvent, session_key: str, interrupt_event: asyncio.Event,
-        text_content: str, media_files: list) -> bool:
+    def _wants_auto_tts(self, event: MessageEvent, session_key: str, interrupt_event: asyncio.Event,
+                        text_content: str, media_files: list) -> bool:
         """Auto-TTS on voice input (voice-first), gated by /voice or voice.auto_tts;
         skipped when streaming TTS already delivered audio this turn."""
         return bool(
@@ -3609,9 +3560,8 @@ class BasePlatformAdapter(ABC):
             await asyncio.to_thread(mark_failed, obligation_id, _delivery_error)
             if _delivery_error == "send_path_degraded":
                 _live_adapter = self._final_delivery_adapter(event.source)
-                _runtime_redeliver = getattr(
-                    getattr(self, "gateway_runner", None),
-                    "_redeliver_failed_obligations_for_platform", None)
+                _runtime_redeliver = getattr(getattr(self, "gateway_runner", None),
+                                             "_redeliver_failed_obligations_for_platform", None)
                 if _live_adapter is not delivery_adapter and callable(_runtime_redeliver):
                     await _runtime_redeliver(
                         event.source.platform,
@@ -3683,9 +3633,8 @@ class BasePlatformAdapter(ABC):
         """Send the final text on the CURRENT transport (a reconnect may have replaced
         this adapter), ledger-bracketed; the message-id owner owns the ephemeral delete."""
         delivery_adapter = self._final_delivery_adapter(event.source)
-        logger.info(
-            "[%s] Sending response (%d chars) to %s", delivery_adapter.name, len(text_content),
-            event.source.chat_id)
+        logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
+                    len(text_content), event.source.chat_id)
         _obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
         result = await delivery_adapter._send_with_retry(
@@ -3708,18 +3657,15 @@ class BasePlatformAdapter(ABC):
             _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
             await self.send(
                 chat_id=event.source.chat_id,
-                content=(
-                    f"Sorry, I encountered an error ({type(e).__name__}).\n{error_detail}\n"
-                    "Try again or use /reset to start a fresh session."),
-                metadata=_thread_metadata)
+                content=(f"Sorry, I encountered an error ({type(e).__name__}).\n{error_detail}\n"
+                "Try again or use /reset to start a fresh session."), metadata=_thread_metadata)
         except Exception as notify_err:
             logger.error(
                 "[%s] Failed to send error notification to user: %s", self.name, notify_err, exc_info=True)
         return _thread_metadata
 
-    async def _deliver_attachments(
-        self, event: MessageEvent, extracted: "_ExtractedResponse", metadata: Dict[str, Any], *,
-        anything_sent: bool) -> None:
+    async def _deliver_attachments(self, event: MessageEvent, extracted: "_ExtractedResponse",
+                                   metadata: Dict[str, Any], *, anything_sent: bool) -> None:
         """Send extracted image URLs, MEDIA files and bare local files (human-paced),
         then fail loudly if a non-empty response produced nothing deliverable."""
         human_delay = self._get_human_delay()
@@ -3732,15 +3678,13 @@ class BasePlatformAdapter(ABC):
             force_document_attachments=extracted.force_document_attachments,
             human_delay=human_delay, metadata=metadata)
         if not (anything_sent or images or local_files or media_files) and extracted.pre_extract.strip():
-            logger.error(
-                "[%s] response_delivery_dropped: non-empty response "
-                "(%d chars) produced no delivered message or attachment "
-                "for %s (empty after extract, recovery yielded nothing).",
-                self.name, len(extracted.pre_extract), event.source.chat_id)
+            logger.error("[%s] response_delivery_dropped: non-empty response "
+                         "(%d chars) produced no delivered message or attachment "
+                         "for %s (empty after extract, recovery yielded nothing).", self.name,
+                         len(extracted.pre_extract), event.source.chat_id)
 
-    def _start_typing_refresh(
-        self, event: MessageEvent, interrupt_event: asyncio.Event, metadata: Optional[dict],
-    ) -> Optional[asyncio.Task]:
+    def _start_typing_refresh(self, event: MessageEvent, interrupt_event: asyncio.Event,
+                              metadata: Optional[dict]) -> Optional[asyncio.Task]:
         """Spawn the typing-refresh task, or None when ``typing_indicator=False``.
         ``stop_event`` is passed only when the (possibly overridden) ``_keep_typing`` accepts it."""
         if not getattr(self.config, "typing_indicator", True):
@@ -3754,9 +3698,8 @@ class BasePlatformAdapter(ABC):
             kwargs["stop_event"] = interrupt_event
         return asyncio.create_task(self._keep_typing(event.source.chat_id, **kwargs))
 
-    async def _extract_response_content(
-        self, response: str, event: MessageEvent, session_key: str, *, is_ephemeral_response: bool,
-    ) -> "_ExtractedResponse":
+    async def _extract_response_content(self, response: str, event: MessageEvent, session_key: str,
+                                        *, is_ephemeral_response: bool) -> "_ExtractedResponse":
         """Split a handler response into deliverable text + attachments. Order matters:
         MEDIA tags → image URLs → residual directives → bare local paths (skipped for
         ephemeral notices so config paths stay text; unknown-extension MEDIA tags survive
@@ -3790,11 +3733,10 @@ class BasePlatformAdapter(ABC):
         if not (text_content or images or local_files or media_files):
             _recovered = _strip_media_directives(response).strip()
             if _recovered:
-                logger.warning(
-                    "[%s] response_delivery_recovered: extract pipeline "
-                    "reduced a non-empty response (%d chars) to empty with "
-                    "no attachment; delivering recovered original to %s",
-                    self.name, len(pre_extract), event.source.chat_id)
+                logger.warning("[%s] response_delivery_recovered: extract pipeline "
+                               "reduced a non-empty response (%d chars) to empty with "
+                               "no attachment; delivering recovered original to %s", self.name,
+                               len(pre_extract), event.source.chat_id)
                 text_content = _recovered
         return _ExtractedResponse(
             text_content=text_content, images=images, media_files=media_files,
@@ -3854,9 +3796,8 @@ class BasePlatformAdapter(ABC):
             # None/empty is normal (streamed/queued). Suppress a stale response when the
             # session was interrupted by a still-pending message.
             if (response and interrupt_event.is_set() and session_key in self._pending_messages):
-                logger.info(
-                    "[%s] Suppressing stale response for interrupted session %s",
-                    self.name, session_key)
+                logger.info("[%s] Suppressing stale response for interrupted session %s", self.name,
+                            session_key)
                 response = None
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
@@ -3976,10 +3917,9 @@ class BasePlatformAdapter(ABC):
                     asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True),
                     timeout=5.0)
             except asyncio.TimeoutError:
-                logger.warning(
-                    "[%s] %d background task(s) did not exit within 5s; "
-                    "releasing tracking and letting them unwind in the background",
-                    self.name, len([t for t in tasks if not t.done()]))
+                logger.warning("[%s] %d background task(s) did not exit within 5s; "
+                               "releasing tracking and letting them unwind in the background",
+                               self.name, len([t for t in tasks if not t.done()]))
                 break
         self._background_tasks.clear()
         self._expected_cancelled_tasks.clear()
@@ -4014,13 +3954,12 @@ class BasePlatformAdapter(ABC):
         profile is stamped on ``source.profile`` for per-profile HERMES_HOME isolation."""
         def _opt(value) -> Optional[str]:
             return str(value) if value else None
-        fields = dict(
-            platform=self.platform, chat_id=str(chat_id), chat_name=chat_name, chat_type=chat_type,
-            user_id=_opt(user_id), user_name=user_name, thread_id=_opt(thread_id),
-            chat_topic=(chat_topic or "").strip() or None,
-            user_id_alt=user_id_alt, chat_id_alt=chat_id_alt, is_bot=is_bot,
-            scope_id=_opt(scope_id), guild_id=_opt(guild_id), parent_chat_id=_opt(parent_chat_id),
-            message_id=_opt(message_id))
+        fields = dict(platform=self.platform, chat_id=str(chat_id), chat_name=chat_name,
+                      chat_type=chat_type, user_id=_opt(user_id), user_name=user_name,
+                      thread_id=_opt(thread_id), chat_topic=(chat_topic or "").strip() or None,
+                      user_id_alt=user_id_alt, chat_id_alt=chat_id_alt, is_bot=is_bot,
+                      scope_id=_opt(scope_id), guild_id=_opt(guild_id),
+                      parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
         profile = None  # from configured routes; None when no match / no routes
         profile_route_rejected = False
         runner = getattr(self, "gateway_runner", None)
@@ -4031,13 +3970,11 @@ class BasePlatformAdapter(ABC):
             except ProfileRouteRejected:
                 profile_route_rejected = True
             except Exception:
-                logger.warning(
-                    "Profile resolution failed for %s/%s, defaulting to active profile",
-                    self.platform, chat_id, exc_info=True)
-        source = SessionSource(
-            **fields, profile=profile, role_authorized=role_authorized,
-            auto_thread_created=auto_thread_created,
-            auto_thread_initial_name=auto_thread_initial_name)
+                logger.warning("Profile resolution failed for %s/%s, defaulting to active profile",
+                               self.platform, chat_id, exc_info=True)
+        source = SessionSource(**fields, profile=profile, role_authorized=role_authorized,
+                               auto_thread_created=auto_thread_created,
+                               auto_thread_initial_name=auto_thread_initial_name)
         # Both transport-only, kept out of to_dict(): the live receiving adapter is
         # authoritative this turn even if profile_routes picks another runtime; the
         # fail-closed reject flag is consumed before auth so rejected routes never 500.
@@ -4061,9 +3998,8 @@ class BasePlatformAdapter(ABC):
         return content
 
     @staticmethod
-    def truncate_message(
-        content: str, max_length: int = 4096, len_fn: Optional["Callable[[str], int]"] = None,
-    ) -> List[str]:
+    def truncate_message(content: str, max_length: int = 4096,
+                         len_fn: Optional["Callable[[str], int]"] = None) -> List[str]:
         """Split a long message into chunks, preserving code-block boundaries: a split
         inside a fence closes it at the chunk end and reopens it (same language tag) in
         the next; multi-chunk output gets ``(1/3)`` indicators. ``len_fn`` overrides
