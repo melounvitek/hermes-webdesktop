@@ -32,7 +32,6 @@ from tools.tts_tool import (
     _get_command_tts_output_format,
     _get_command_tts_timeout,
     _get_named_provider_config,
-    _has_any_command_tts_provider,
     _is_command_provider_config,
     _is_command_tts_voice_compatible,
     _iter_command_providers,
@@ -168,7 +167,7 @@ class TestIsCommandProviderConfig:
 
 
 # ---------------------------------------------------------------------------
-# _iter_command_providers / _has_any_command_tts_provider
+# _iter_command_providers
 # ---------------------------------------------------------------------------
 
 class TestIterCommandProviders:
@@ -183,11 +182,6 @@ class TestIterCommandProviders:
         }
         names = sorted(name for name, _ in _iter_command_providers(cfg))
         assert names == ["piper-cli", "voxcpm"]
-
-
-    def test_has_any_command_provider_when_none(self):
-        assert _has_any_command_tts_provider({"providers": {}}) is False
-        assert _has_any_command_tts_provider({}) is False
 
 
 # ---------------------------------------------------------------------------

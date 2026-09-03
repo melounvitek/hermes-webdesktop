@@ -192,13 +192,6 @@ _NATIVE_OPUS_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"}
 _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittentts", "piper"})
 
 
-def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -> bool:
-    """Return True when any command-type TTS provider is configured."""
-    if tts_config is None:
-        tts_config = _load_tts_config()
-    return any(True for _ in _iter_command_providers(tts_config))
-
-
 # --- Built-in provider dispatch ---
 # provider -> (availability predicate or None, log label, generator name, "package missing" error).
 # Predicates and generator names resolve module globals at call time so tests that monkeypatch
@@ -249,10 +242,8 @@ def _select_builtin_engine(provider: str) -> tuple:
     names take the Edge default; without edge-tts NeuTTS is the fallback (engine != provider)."""
     entry = _BUILTIN_DISPATCH.get(provider)
     if entry is not None:
-        available, missing_error = entry[0], entry[3]
-        if available is not None and not available():
-            return provider, _error_json(missing_error)
-        return provider, None
+        available, _label, _generator, missing_error = entry
+        return provider, (_error_json(missing_error) if available is not None and not available() else None)
     if _importable(_import_edge_tts):
         return provider, None  # Edge default; the reported provider stays as configured
     if _check_neutts_available():
@@ -476,10 +467,8 @@ def text_to_speech_tool(
     if not chunks:
         return tool_error("Text is required", success=False)
     if len(chunks) > 1:
-        logger.info(
-            "TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
-            provider, len(chunks), len(text), max_len,
-        )
+        logger.info("TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
+                    provider, len(chunks), len(text), max_len)
 
     platform, want_opus = _session_platform()
     delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
@@ -625,10 +614,7 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path"),
-        speed=args.get("speed"),
-        instructions=args.get("instructions"),
-        provider=args.get("provider")),
+        **{k: args.get(k) for k in ("output_path", "speed", "instructions", "provider")}),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )

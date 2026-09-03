@@ -184,11 +184,9 @@ class _StreamerPlayback:
     def close_output_stream(self) -> None:
         """Always release the device so a later stream can open it."""
         if self.output_stream is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self.output_stream.stop()
                 self.output_stream.close()
-            except Exception:
-                pass
 
     # -- prefetch ----------------------------------------------------------
 
@@ -202,9 +200,9 @@ class _StreamerPlayback:
         self._prefetch_sem.acquire()
         chunk_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=self._CHUNK_QUEUE_MAX)
         self._audio_queue.put(chunk_queue)
-        t = threading.Thread(target=self._consume_to_queue, args=(audio_iter, chunk_queue), daemon=True)
-        self._prefetch_threads.append(t)
-        t.start()
+        self._prefetch_threads.append(
+            threading.Thread(target=self._consume_to_queue, args=(audio_iter, chunk_queue), daemon=True))
+        self._prefetch_threads[-1].start()
 
     def _consume_to_queue(self, audio_iter: Iterator[bytes], chunk_queue: "queue.Queue[Optional[bytes]]") -> None:
         try:
@@ -269,10 +267,8 @@ class _StreamerPlayback:
                 logger.warning("PortAudio write failed, attempting stream reinit: %s", write_exc)
                 if not self._recover_stream():
                     return
-                try:
+                with contextlib.suppress(Exception):
                     self._write_pcm(aligned)
-                except Exception:
-                    pass
 
     def _playback_worker(self) -> None:
         """Single consumer: play audio segments from the queue in order."""
@@ -339,8 +335,6 @@ def stream_tts_to_speaker(
             playback = _StreamerPlayback(streamer, stop_event)
 
         chunker = SentenceChunker()
-        long_flush_len = 100
-        queue_timeout = 0.5
         spoken_sentences: list[str] = []  # skip duplicate/near-duplicate sentences (LLM repetition)
 
         def _speak_sentence(sentence: str) -> None:
@@ -364,27 +358,20 @@ def stream_tts_to_speaker(
 
         while not stop_event.is_set():
             try:
-                delta = text_queue.get(timeout=queue_timeout)
+                delta = text_queue.get(timeout=0.5)
             except queue.Empty:
-                # Idle producer: flush a long buffer instead of sitting on it
-                if len(chunker.buf) > long_flush_len:
-                    for sentence in chunker.flush():
-                        _speak_sentence(sentence)
-                continue
-
-            if delta is None:
-                for sentence in chunker.flush():
-                    _speak_sentence(sentence)
-                break
-
-            for sentence in chunker.feed(delta):
+                delta = ""  # idle producer: flush a long buffer instead of sitting on it
+                sentences = chunker.flush() if len(chunker.buf) > 100 else ()
+            else:
+                sentences = chunker.flush() if delta is None else chunker.feed(delta)
+            for sentence in sentences:
                 _speak_sentence(sentence)
-
-        while True:
-            try:
-                text_queue.get_nowait()
-            except queue.Empty:
+            if delta is None:
                 break
+
+        with contextlib.suppress(queue.Empty):
+            while True:
+                text_queue.get_nowait()
 
     except Exception as exc:
         logger.warning("Streaming TTS pipeline error: %s", exc)
@@ -393,10 +380,8 @@ def stream_tts_to_speaker(
         # when stop_event is set) BEFORE tts_done_event fires, so continuous voice mode
         # never reopens the mic over its own voice.
         if sync_pipeline is not None:
-            try:
+            with contextlib.suppress(Exception):
                 sync_pipeline.close()
-            except Exception:
-                pass
         # The end sentinel lives in finally: so an exception in the text pump still lets
         # the playback worker exit.
         if playback is not None:

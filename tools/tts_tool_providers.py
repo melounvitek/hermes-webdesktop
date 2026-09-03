@@ -160,10 +160,6 @@ def _write_bytes(output_path: str, audio_bytes: bytes) -> str:
     return output_path
 
 
-def _write_tts_response_to_file(response: Any, output_path: str, *, label: str, limit: Optional[int] = None) -> None:
-    _write_bytes(output_path, _read_tts_response_bytes(response, label=label, limit=limit))
-
-
 def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], **extra: Any):
     """Streaming ``requests.post`` with the shared 60s timeout (body read via the bounded readers)."""
     import requests
@@ -355,20 +351,16 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     if auto_speech_tags:
         text = _apply_xai_auto_speech_tags(text)
     if creds.get("provider") == "xai-oauth":
-        base_url = str(creds.get("base_url") or DEFAULT_XAI_BASE_URL).strip().rstrip("/")
+        base_url = creds.get("base_url")
     else:
-        base_url = str(
-            xai_config.get("base_url")
-            or creds.get("base_url")
-            or _origin().get_env_value("XAI_BASE_URL")
-            or DEFAULT_XAI_BASE_URL
-        ).strip().rstrip("/")
+        base_url = xai_config.get("base_url") or creds.get("base_url") or _origin().get_env_value("XAI_BASE_URL")
+    base_url = str(base_url or DEFAULT_XAI_BASE_URL).strip().rstrip("/")
 
     # Documented minimal POST /v1/tts shape; optional fields only when they
     # differ from the API defaults.
     codec = "wav" if output_path.endswith(".wav") else "mp3"
     payload: Dict[str, Any] = {"text": text, "voice_id": voice_id, "language": language}
-    if codec != "mp3" or sample_rate != DEFAULT_XAI_SAMPLE_RATE or (codec == "mp3" and bit_rate != DEFAULT_XAI_BIT_RATE):
+    if codec != "mp3" or sample_rate != DEFAULT_XAI_SAMPLE_RATE or bit_rate != DEFAULT_XAI_BIT_RATE:
         output_format: Dict[str, Any] = {"codec": codec}
         if sample_rate:
             output_format["sample_rate"] = sample_rate
@@ -377,7 +369,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         payload["output_format"] = output_format
     if speed is not None and speed != DEFAULT_XAI_SPEED_DEFAULT:
         payload["speed"] = speed
-    if optimize_streaming_latency is not None and optimize_streaming_latency != DEFAULT_XAI_OPTIMIZE_STREAMING_LATENCY_DEFAULT:
+    if optimize_streaming_latency not in (None, DEFAULT_XAI_OPTIMIZE_STREAMING_LATENCY_DEFAULT):
         payload["optimize_streaming_latency"] = optimize_streaming_latency
     if text_normalization:
         payload["text_normalization"] = True
@@ -388,8 +380,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         "User-Agent": hermes_xai_user_agent(),
     })
     response.raise_for_status()
-    _write_tts_response_to_file(response, output_path, label="xAI TTS")
-    return output_path
+    return _write_bytes(output_path, _read_tts_response_bytes(response, label="xAI TTS"))
 
 
 # --- MiniMax TTS ---
@@ -435,9 +426,7 @@ def _resolve_minimax_tts_runtime(tts_config: Dict[str, Any]) -> _MiniMaxTTSRunti
     other_region = "cn" if region == "global" else "global"
     if (urlparse(endpoint).hostname or "").lower() in _MINIMAX_OFFICIAL_HOSTS[other_region]:
         raise ValueError(
-            f"tts.minimax.base_url points to the {other_region!r} MiniMax endpoint "
-            f"but region is {region!r}"
-        )
+            f"tts.minimax.base_url points to the {other_region!r} MiniMax endpoint but region is {region!r}")
     return _MiniMaxTTSRuntime(region=region, endpoint=endpoint, credential_source=credential_source, api_key=api_key)
 
 
@@ -445,8 +434,8 @@ def _raise_minimax_api_error(result: Dict[str, Any]) -> None:
     base_resp = result.get("base_resp", {})
     status_code = base_resp.get("status_code", -1)
     if status_code != 0:
-        status_msg = base_resp.get("status_msg", "unknown error")
-        raise RuntimeError(f"MiniMax TTS API error (code {status_code}): {status_msg}")
+        raise RuntimeError(
+            f"MiniMax TTS API error (code {status_code}): {base_resp.get('status_msg', 'unknown error')}")
 
 
 def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
@@ -470,20 +459,14 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     is_t2a_v2 = "t2a_v2" in base_url
     if is_t2a_v2:
         payload = {
-            "model": model,
-            "text": text,
+            "model": model, "text": text,
             "voice_setting": {
-                "voice_id": voice_id,
-                "speed": mm_config.get("speed", 1.0),
-                "vol": mm_config.get("vol", 1.0),
-                "pitch": mm_config.get("pitch", 0),
-                "emotion": mm_config.get("emotion", "neutral"),
+                "voice_id": voice_id, "speed": mm_config.get("speed", 1.0), "vol": mm_config.get("vol", 1.0),
+                "pitch": mm_config.get("pitch", 0), "emotion": mm_config.get("emotion", "neutral"),
             },
             "audio_setting": {
-                "sample_rate": mm_config.get("sample_rate", 32000),
-                "bitrate": mm_config.get("bitrate", 128000),
-                "format": "mp3",
-                "channel": 1,
+                "sample_rate": mm_config.get("sample_rate", 32000), "bitrate": mm_config.get("bitrate", 128000),
+                "format": "mp3", "channel": 1,
             },
         }
     else:
@@ -504,8 +487,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
 
     content_type = response.headers.get("Content-Type", "")
     if "audio/" in content_type:
-        _write_tts_response_to_file(response, output_path, label="MiniMax TTS")
-        return output_path
+        return _write_bytes(output_path, _read_tts_response_bytes(response, label="MiniMax TTS"))
 
     # Non-audio reply: surface the API error if the body is JSON.
     raw_body = b""
@@ -515,9 +497,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         response.raise_for_status()
         raise RuntimeError(
-            f"MiniMax TTS returned unexpected Content-Type '{content_type}' "
-            f"({len(raw_body)} bytes)"
-        )
+            f"MiniMax TTS returned unexpected Content-Type '{content_type}' ({len(raw_body)} bytes)")
     raise RuntimeError("MiniMax TTS returned no audio data")
 
 
@@ -647,10 +627,8 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     """Generate audio via Gemini ``generateContent`` (``responseModalities=["AUDIO"]``). The reply is
     base64 24kHz mono 16-bit PCM, wrapped as WAV and ffmpeg-converted to the requested container."""
     origin = _origin()
-    api_key = (
-        origin._resolve_provider_key("GEMINI_API_KEY", "gemini")
-        or origin._resolve_provider_key("GOOGLE_API_KEY", "gemini")
-    )
+    api_key = origin._resolve_provider_key("GEMINI_API_KEY", "gemini") or origin._resolve_provider_key(
+        "GOOGLE_API_KEY", "gemini")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set. Get one at https://aistudio.google.com/app/apikey")
 
@@ -701,8 +679,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         audio_part = next((p for p in parts if "inlineData" in p or "inline_data" in p), None)
         if audio_part is None:
             raise RuntimeError("Gemini TTS response contained no audio data")
-        inline = audio_part.get("inlineData") or audio_part.get("inline_data") or {}
-        audio_b64 = inline.get("data", "")
+        audio_b64 = (audio_part.get("inlineData") or audio_part.get("inline_data") or {}).get("data", "")
     except (KeyError, IndexError, TypeError) as e:
         raise RuntimeError(f"Gemini TTS response was malformed: {e}") from e
     if not audio_b64:
