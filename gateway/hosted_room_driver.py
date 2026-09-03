@@ -630,9 +630,10 @@ def acquire_lease(
         row = conn.execute(_SELECT_LEASE, (room_id,)).fetchone()
         if row is None:
             conn.execute(
-                """INSERT INTO hosted_room_driver_leases ( room_id, gateway_id, authority_epoch,
-                    process_generation, lease_generation, expires_at, acquired_at, updated_at,
-                    released_at ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)""",
+                """INSERT INTO hosted_room_driver_leases (
+                       room_id, gateway_id, authority_epoch, process_generation, lease_generation,
+                       expires_at, acquired_at, updated_at, released_at
+                   ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)""",
                 (room_id, gateway_id, authority_epoch, process_generation, expires_at, now, now),
             )
             return _lease_from_row(conn.execute(_SELECT_LEASE, (room_id,)).fetchone())
@@ -1041,10 +1042,11 @@ def prune_published_terminal_tasks(
         if publications is None:
             return 0
         rows = conn.execute(
-            """SELECT t.task_id, t.terminal_at FROM hosted_room_driver_tasks t WHERE t.room_id=?
-                AND t.status IN ('settled', 'failed', 'cancelled') AND EXISTS (SELECT 1 FROM
-                hosted_room_policy_publications p WHERE p.room_id=t.room_id AND p.task_id=t.task_id
-                AND p.kind IN ('turn.settled', 'turn.failed', 'turn.cancelled'))
+            """SELECT t.task_id, t.terminal_at FROM hosted_room_driver_tasks t
+                WHERE t.room_id=? AND t.status IN ('settled', 'failed', 'cancelled')
+                  AND EXISTS (SELECT 1 FROM hosted_room_policy_publications p
+                              WHERE p.room_id=t.room_id AND p.task_id=t.task_id
+                                AND p.kind IN ('turn.settled', 'turn.failed', 'turn.cancelled'))
                 ORDER BY t.terminal_at DESC, t.task_id ASC""",
             (room_id,),
         ).fetchall()

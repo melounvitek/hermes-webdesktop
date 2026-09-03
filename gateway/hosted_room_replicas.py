@@ -60,18 +60,22 @@ class ReplicaEpochRegressionError(ReplicaError):
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replicas ( room_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL, members_json TEXT NOT NULL, authority_gateway_id TEXT NOT NULL,
+        """CREATE TABLE IF NOT EXISTS hosted_room_replicas (
+            room_id TEXT PRIMARY KEY, name TEXT NOT NULL, members_json TEXT NOT NULL,
+            authority_gateway_id TEXT NOT NULL,
             authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1),
             last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
             latest_seq INTEGER NOT NULL DEFAULT 0, event_bytes INTEGER NOT NULL DEFAULT 0,
-            created_at REAL NOT NULL, updated_at REAL NOT NULL )"""
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        )"""
     )
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replica_events ( room_id TEXT NOT NULL,
-            seq INTEGER NOT NULL CHECK (seq >= 1), event_id TEXT NOT NULL, kind TEXT NOT NULL,
-            actor_json TEXT NOT NULL, authority_epoch INTEGER, payload_json TEXT NOT NULL,
-            created_at REAL NOT NULL, PRIMARY KEY (room_id, seq) )"""
+        """CREATE TABLE IF NOT EXISTS hosted_room_replica_events (
+            room_id TEXT NOT NULL, seq INTEGER NOT NULL CHECK (seq >= 1), event_id TEXT NOT NULL,
+            kind TEXT NOT NULL, actor_json TEXT NOT NULL, authority_epoch INTEGER,
+            payload_json TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY (room_id, seq)
+        )"""
     )
 
 
@@ -301,9 +305,10 @@ def promote_replica(
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
 
         conn.execute(
-            """INSERT INTO hosted_rooms (room_id, name, members_json, authority_gateway_id,
-                authority_epoch, next_seq, event_bytes, revision, created_at, updated_at,
-                disbanded_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
+            """INSERT INTO hosted_rooms
+               (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, event_bytes,
+                revision, created_at, updated_at, disbanded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
             (
                 room_id, replica["name"], replica["members_json"], local_gateway, target_epoch,
                 claim_seq + 1, int(replica["event_bytes"]) + claim_bytes, now, now,
@@ -387,8 +392,9 @@ def demote_room(
             ),
         )
         conn.execute(
-            """UPDATE hosted_rooms SET authority_gateway_id=?, authority_epoch=?,
-                next_seq=next_seq+1, revision=revision+1, updated_at=? WHERE room_id=?""",
+            """UPDATE hosted_rooms
+                  SET authority_gateway_id=?, authority_epoch=?, next_seq=next_seq+1, revision=revision+1, updated_at=?
+                WHERE room_id=?""",
             (observed_gateway_id, observed_epoch, now, room_id),
         )
     return {
