@@ -82,18 +82,21 @@ def _is_status_footer_rule(line: str) -> bool:
     return len(stripped) >= 8 and set(stripped.replace("\u2500", "-")) <= {"-"}
 
 
-def _strip_console_status_footer(text: str) -> str:
-    lines = text.splitlines()
+def _drop_trailing_blank(lines: list[str]) -> None:
     while lines and not _strip_ansi(lines[-1]).strip():
         lines.pop()
+
+
+def _strip_console_status_footer(text: str) -> str:
+    lines = text.splitlines()
+    _drop_trailing_blank(lines)
     if len(lines) < 2:
         return text.rstrip()
     last, prev = (_strip_ansi(lines[i]).strip() for i in (-1, -2))
     if not (prev.startswith("Run 'hermes doctor'") and last.startswith("Run 'hermes setup'")):
         return text.rstrip()
     lines = lines[:-2]
-    while lines and not _strip_ansi(lines[-1]).strip():
-        lines.pop()
+    _drop_trailing_blank(lines)
     if lines and _is_status_footer_rule(lines[-1]):
         lines.pop()
     return "\n".join(lines).rstrip()
@@ -151,10 +154,9 @@ def _clean_summary(text: str | None) -> str:
 
 def _choice_help(action: argparse._SubParsersAction, name: str) -> str:
     for choice in action._choices_actions:
-        if name in (getattr(choice, "dest", None), getattr(choice, "metavar", None)):
-            help_text = getattr(choice, "help", None)
-            if help_text and help_text is not argparse.SUPPRESS:
-                return str(help_text)
+        help_text = choice.help if name in (choice.dest, choice.metavar) else None
+        if help_text and help_text is not argparse.SUPPRESS:
+            return str(help_text)
     return ""
 
 
@@ -185,12 +187,10 @@ def _noop_console_command(_args: argparse.Namespace) -> None:
 @dataclass(frozen=True)
 class _CliSurface:
     """How a CLI subcommand module hangs its argparse tree off a root subparsers action.
-
     ``extracted``: ``builder(subparsers, <handler>=fn)``, fn from hermes_cli.main.
-    ``registered``: ``register(subparsers.add_parser(root))``, optional module-level ``handler``.
-    ``builder``: ``top = builder(subparsers)``, func from hermes_cli.main. ``adder``: self-wiring.
-    """
-
+    ``registered``: ``register(subparsers.add_parser(root))``, optional module ``handler``.
+    ``builder``: ``top = builder(subparsers)``, func from hermes_cli.main.
+    ``adder``: self-wiring."""
     kind: Literal["extracted", "registered", "builder", "adder"]
     module: str
     builder: str
@@ -247,18 +247,12 @@ def _dispatch(
 
 
 def _paths(spec: str) -> list[tuple[tuple[str, ...], bool]]:
-    """``"list, *snapshot export"`` -> ``[(("list",), False), (("snapshot", "export"), True)]``.
-
-    ``*`` marks a mutating path; ``.`` is the bare root.
-    """
-    out = []
-    for item in spec.split(","):
-        item = item.strip()
-        if item:
-            mutating = item.startswith("*")
-            item = item.lstrip("*")
-            out.append((() if item == "." else tuple(item.split()), mutating))
-    return out
+    """``"list, *snapshot export"`` -> ``[(("list",), False), (("snapshot", "export"), True)]``;
+    ``*`` marks a mutating path, ``.`` is the bare root."""
+    items = [item.strip() for item in spec.split(",") if item.strip()]
+    return [
+        (() if item.lstrip("*") == "." else tuple(item.lstrip("*").split()), item.startswith("*"))
+        for item in items]
 
 
 def _sub(module: str, builder: str, handler: str) -> _CliSurface:
@@ -269,8 +263,7 @@ def _reg(module: str, handler: str | None = None) -> _CliSurface:
     return _CliSurface("registered", f"hermes_cli.{module}", "register_cli", handler)
 
 
-# root -> (surface, comma-separated subcommand paths; `.` = bare root, `*` marks mutating).
-# Registered in this order.
+# root -> (surface, subcommand paths as a ``_paths`` spec). Registered in this order.
 _CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
     "dump": (_sub("dump", "build_dump_parser", "cmd_dump"), "."),
     "debug": (_sub("debug", "build_debug_parser", "cmd_debug"), "*share, *delete"),
@@ -340,8 +333,7 @@ _SEND_SURFACE = _CliSurface("adder", "hermes_cli.send_cmd", "register_send_subpa
 
 
 def _register_command_family(
-    engine: "HermesConsoleEngine", root: str, surface: _CliSurface, paths: str
-) -> None:
+    engine: "HermesConsoleEngine", root: str, surface: _CliSurface, paths: str) -> None:
     summaries = _surface_summaries(surface, root)
     namespace_update = _apply_confirmed_defaults if surface.kind in _CONFIRMED_KINDS else None
     for child_path, mutating in _paths(paths):
@@ -429,10 +421,8 @@ class HermesConsoleEngine:
         for command in sorted(self.commands.values(), key=lambda c: c.usage):
             marker = " *" if command.mutating else "  "
             lines.append(f"{marker} {command.usage:<32} {_table_summary(command.summary)}")
-        lines += [
-            "",
-            "* requires confirmation",
-            "Built-ins: help, help <command>, history, clear, exit, quit"]
+        lines += ["", "* requires confirmation",
+                  "Built-ins: help, help <command>, history, clear, exit, quit"]
         return "\n".join(lines)
 
     def _register_defaults(self) -> None:
@@ -443,22 +433,14 @@ class HermesConsoleEngine:
         for root, (surface, paths) in _CLI_FAMILIES.items():
             _register_command_family(self, root, surface, paths)
         self.register(
-            ("send",),
-            "send --to <target> <message>",
-            "Send a message to a configured platform.",
+            ("send",), "send --to <target> <message>", "Send a message to a configured platform.",
             lambda _engine, args: _dispatch(_SEND_SURFACE, "send", (), args),
-            mutating=True,
-            confirmation="Send this message?")
+            mutating=True, confirmation="Send this message?")
 
     def register(
-        self,
-        path: Iterable[str],
-        usage: str,
-        summary: str,
-        handler: Callable[["HermesConsoleEngine", list[str]], str],
-        *,
-        mutating: bool = False,
-        confirmation: str = "") -> None:
+        self, path: Iterable[str], usage: str, summary: str,
+        handler: Callable[["HermesConsoleEngine", list[str]], str], *,
+        mutating: bool = False, confirmation: str = "") -> None:
         key = tuple(path)
         self.commands[key] = ConsoleCommand(key, usage, summary, handler, mutating, confirmation)
 
@@ -528,12 +510,12 @@ def _captured(fn):
     return wrapper
 
 
-def _simple_command(usage: str, module: str, name: str, make_args=lambda: ()):
-    """Handler for no-arg commands that just capture ``module.name(*make_args())``."""
+def _simple_command(usage: str, module: str, name: str, make_args=lambda: (), **kwargs):
+    """Handler for no-arg commands that capture ``module.name(*make_args(), **kwargs)``."""
     def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
         _expect_no_args(args, usage)
         fn = getattr(importlib.import_module(module), name)
-        return _capture_output(lambda: fn(*make_args()))
+        return _capture_output(lambda: fn(*make_args(), **kwargs))
     return handler
 
 
@@ -565,10 +547,8 @@ def _apply_confirmed_defaults(args: argparse.Namespace) -> None:
         args.yes = True
 
 
-def _version(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    _expect_no_args(args, "version")
-    from hermes_cli._startup_fast import print_fast_version_info
-    return _capture_output(lambda: print_fast_version_info(check_updates=True))
+_version = _simple_command(
+    "version", "hermes_cli._startup_fast", "print_fast_version_info", check_updates=True)
 
 
 def _status(_engine: HermesConsoleEngine, args: list[str]) -> str:
@@ -687,10 +667,9 @@ def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> None:
             if not resolved_session_id:
                 raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
             _guard_exports(db, [resolved_session_id])
-            data = db.export_session(resolved_session_id)
-            if not data:
+            rows = [db.export_session(resolved_session_id)]
+            if not rows[0]:
                 raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
-            rows = [data]
         else:
             found = db.search_sessions(source=ns.source, limit=100000)
             _guard_exports(db, [session["id"] for session in found])
@@ -710,10 +689,8 @@ def _sessions_rename(_engine: HermesConsoleEngine, args: list[str]) -> None:
     ns = _parse("sessions rename", args, "session_id", (("title",), dict(nargs="+")))
     with _session_db() as db:
         resolved_session_id = db.resolve_session_id(ns.session_id)
-        if not resolved_session_id:
-            raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
         title = " ".join(ns.title)
-        if not db.set_session_title(resolved_session_id, title):
+        if not resolved_session_id or not db.set_session_title(resolved_session_id, title):
             raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
         print(f"Session '{resolved_session_id}' renamed to: {title}")
 
@@ -789,10 +766,9 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
         raise ConsoleCommandError("Use exactly one of --at or --run-now.")
     from cron.jobs import AmbiguousJobReference, _hermes_now, rearm_oneshot, resume_job
     try:
-        if ns.at or ns.run_now:
-            job = rearm_oneshot(ns.job, _hermes_now().isoformat() if ns.run_now else ns.at)
-        else:
-            job = resume_job(ns.job)
+        job = (
+            rearm_oneshot(ns.job, _hermes_now().isoformat() if ns.run_now else ns.at)
+            if ns.at or ns.run_now else resume_job(ns.job))
     except (AmbiguousJobReference, ValueError) as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:
@@ -848,15 +824,17 @@ def run_console_repl(
     if interactive is None:
         interactive = bool(getattr(stdin, "isatty", lambda: False)())
     engine = HermesConsoleEngine()
-    if interactive:
-        print("Hermes Console. Type `help` for commands, `exit` to quit.", file=stdout)
-    while True:
+
+    def say(text: str, **kw) -> None:
         if interactive:
-            print("hermes> ", end="", file=stdout, flush=True)
+            print(text, file=stdout, **kw)
+
+    say("Hermes Console. Type `help` for commands, `exit` to quit.")
+    while True:
+        say("hermes> ", end="", flush=True)
         line = stdin.readline()
         if line == "":
-            if interactive:
-                print(file=stdout)
+            say("")
             return 0
         result = engine.execute(line)
         if result.status == "confirm_required":

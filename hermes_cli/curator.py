@@ -25,26 +25,21 @@ def _fmt_ts(ts: Optional[str]) -> str:
     if dt is None:
         return str(ts)
     secs = int((datetime.now(timezone.utc) - dt).total_seconds())
-    if secs < 60:
-        return f"{secs}s ago"
-    if secs < 3600:
-        return f"{secs // 60}m ago"
-    if secs < 86400:
-        return f"{secs // 3600}h ago"
+    for unit, div, limit in (("s", 1, 60), ("m", 60, 3600), ("h", 3600, 86400)):
+        if secs < limit:
+            return f"{secs // div}{unit} ago"
     return f"{secs // 86400}d ago"
 
 
 def _confirm(prompt: str, cancel: str = "cancelled", eof_prefix: str = "\n") -> bool:
     """Ask ``prompt``; print ``cancel`` (prefixed on EOF/Ctrl-C) and return False unless y/yes."""
     try:
-        reply = input(prompt).strip().lower()
+        if input(prompt).strip().lower() in {"y", "yes"}:
+            return True
     except (EOFError, KeyboardInterrupt):
-        print(f"{eof_prefix}{cancel}")
-        return False
-    if reply not in {"y", "yes"}:
-        print(cancel)
-        return False
-    return True
+        print(eof_prefix, end="")
+    print(cancel)
+    return False
 
 
 def _print_skill_rows(title: str, rows: list) -> None:
@@ -60,11 +55,9 @@ def _print_skill_rows(title: str, rows: list) -> None:
 
 
 def _print_unmanaged_summary() -> None:
-    """Report curation-eligible skills that carry no provenance marker.
-
-    Only background-review creations get ``created_by: agent``; older skills and every foreground
-    ``skill_manage(create)`` are eligible but unmanaged, so no automatic transition touches them.
-    """
+    """Report curation-eligible skills that carry no provenance marker: only background-review
+    creations get ``created_by: agent``; older skills and every foreground ``skill_manage(create)``
+    are eligible but unmanaged, so no automatic transition touches them."""
     from tools import skill_usage
     try:
         unmanaged = skill_usage.unmanaged_report()
@@ -82,14 +75,15 @@ def _print_unmanaged_summary() -> None:
 
 def _print_curator_config(curator) -> None:
     state = curator.load_state()
-    paused = state.get("paused", False)
-    summary = state.get("last_run_summary") or "(none)"
-    status_line = "PAUSED" if paused else "ENABLED" if curator.is_enabled() else "DISABLED"
+    status_line = (
+        "PAUSED" if state.get("paused", False)
+        else "ENABLED" if curator.is_enabled() else "DISABLED")
     print(f"curator: {status_line}")
     print(f"  runs:           {state.get('run_count', 0)}")
     print(f"  last run:       {_fmt_ts(state.get('last_run_at'))}")
     # Multi-line when the curator archived skills (rename map appended as `name → umbrella`
     # lines); indent continuation lines so the block reads as one field.
+    summary = state.get("last_run_summary") or "(none)"
     first, *rest = summary.splitlines() if "\n" in summary else [summary]
     print(f"  last summary:   {first}")
     for line in rest:
@@ -116,7 +110,6 @@ def _cmd_status(args) -> int:
         print("\nno curator-managed skills")
         _print_unmanaged_summary()
         return 0
-
     by_state: dict = {}
     for r in rows:
         by_state.setdefault(r.get("state", "active"), []).append(r)
@@ -129,23 +122,23 @@ def _cmd_status(args) -> int:
     if pinned:
         print(f"\npinned ({len(pinned)}): {', '.join(pinned)}")
     _print_unmanaged_summary()  # the curation blind spot matters on the managed path too
-
     # Views and edits count as activity: a skill must not read as "never used" right after
     # skill_view()/skill_manage() touched it. Recency (last_activity_at) and frequency
     # (activity_count) are different signals, so both top-5s are shown.
     active_all = by_state.get("active", [])
-    if active_all:
-        recency = sorted(
-            active_all, key=lambda r: r.get("last_activity_at") or r.get("created_at") or "")
-        _print_skill_rows("least recently active (top 5)", recency[:5])
+    if not active_all:
+        return 0
+    recency = sorted(
+        active_all, key=lambda r: r.get("last_activity_at") or r.get("created_at") or "")
+    _print_skill_rows("least recently active (top 5)", recency[:5])
 
-        def _freq(r):
-            return (r.get("activity_count") or 0, r.get("last_activity_at") or "")
+    def _freq(r):
+        return (r.get("activity_count") or 0, r.get("last_activity_at") or "")
 
-        most_active = sorted(active_all, key=_freq, reverse=True)[:5]
-        if (most_active[0].get("activity_count") or 0) > 0:
-            _print_skill_rows("most active (top 5)", most_active)
-        _print_skill_rows("least active (top 5)", sorted(active_all, key=_freq)[:5])
+    most_active = sorted(active_all, key=_freq, reverse=True)[:5]
+    if (most_active[0].get("activity_count") or 0) > 0:
+        _print_skill_rows("most active (top 5)", most_active)
+    _print_skill_rows("least active (top 5)", sorted(active_all, key=_freq)[:5])
     return 0
 
 
@@ -154,7 +147,6 @@ def _cmd_run(args) -> int:
     if not curator.is_enabled():
         print("curator: disabled via config; enable with `curator.enabled: true`")
         return 1
-
     dry = bool(getattr(args, "dry_run", False))
     background = bool(getattr(args, "background", False))
     synchronous = bool(getattr(args, "synchronous", False)) or not background
@@ -169,7 +161,6 @@ def _cmd_run(args) -> int:
             "curator: consolidation is off — running prune-only "
             "(deterministic stale/archive). Pass --consolidate or set "
             "`curator.consolidate: true` to enable the LLM merge pass.")
-
     result = curator.run_curator_review(
         on_summary=print, synchronous=synchronous, dry_run=dry, consolidate=consolidate)
     auto = result.get("auto_transitions", {})
@@ -185,12 +176,11 @@ def _cmd_run(args) -> int:
             f"reactivated={auto.get('reactivated', 0)}")
     if not synchronous:
         print("llm pass running in background — check `hermes curator status` later")
-    if dry and synchronous:
+    if dry:
         print(
             "dry-run: no changes applied. Read the report with "
-            "`hermes curator status` and run `hermes curator run` (no flag) to apply.")
-    elif dry:
-        print(
+            "`hermes curator status` and run `hermes curator run` (no flag) to apply."
+            if synchronous else
             "dry-run: no changes applied. When the report lands, read it with "
             "`hermes curator status` and run `hermes curator run` (no flag) to apply.")
     return 0
@@ -254,27 +244,21 @@ def _cmd_list_unmanaged(args) -> int:
     if not rows:
         print("curator: no unmanaged skills — every eligible skill is managed")
         return 0
-
     print(f"unmanaged skills ({len(rows)}):")
     for r in sorted(rows, key=lambda x: x["name"]):
         why = "created_by:null" if r.get("has_provenance_key") else "no marker"
-        last = _fmt_ts(r.get("last_activity_at"))
         print(
-            f"  {r['name']:44s} "
-            f"activity={r.get('activity_count', 0):4d}  "
-            f"last_activity={last:14s}  "
-            f"({why})")
+            f"  {r['name']:44s} activity={r.get('activity_count', 0):4d}  "
+            f"last_activity={_fmt_ts(r.get('last_activity_at')):14s}  ({why})")
     print("\nadopt one with `hermes curator adopt <name>`, "
           "or all with `hermes curator adopt --all-unmanaged`")
     return 0
 
 
 def _cmd_adopt(args) -> int:
-    """Hand unmanaged skills to the curator by explicit user declaration.
-
-    Provenance cannot be inferred from telemetry: a high patch count proves the agent MAINTAINS a
-    skill, not that it AUTHORED it.
-    """
+    """Hand unmanaged skills to the curator by explicit user declaration: provenance cannot be
+    inferred from telemetry (a high patch count proves the agent MAINTAINS a skill, not that it
+    AUTHORED it)."""
     from tools import skill_usage
     names = list(getattr(args, "skill", None) or [])
     adopt_all = bool(getattr(args, "all_unmanaged", False))
@@ -289,20 +273,17 @@ def _cmd_adopt(args) -> int:
     if not names:
         print("curator: name a skill to adopt, or pass --all-unmanaged")
         return 1
-
     if getattr(args, "dry_run", False):
         print(f"curator: would adopt {len(names)} skill(s) (dry run):")
         for n in names:
             print(f"  + {n}")
         return 0
-
     # Bulk adoption is a lifecycle change (adopted skills become archivable): confirm.
     if adopt_all and not getattr(args, "yes", False):
         print(f"curator: adopt {len(names)} unmanaged skill(s) into curator management?")
         print("  they become eligible for automatic staleness + archival")
         if not _confirm("  proceed? [y/N] ", "curator: aborted", eof_prefix=""):
             return 1
-
     failed = 0
     for n in names:
         ok, msg = skill_usage.adopt_skill(n)
@@ -342,15 +323,11 @@ def _cmd_archive(args) -> int:
 
 
 def _idle_days(record: dict) -> Optional[int]:
-    """Days since last activity; falls back to ``created_at`` so never-used skills aren't immortal.
-
-    None only when both fields are missing or unparseable.
-    """
+    """Days since last activity, falling back to ``created_at`` so never-used skills aren't
+    immortal; None only when both fields are missing or unparseable."""
     ts = record.get("last_activity_at") or record.get("created_at")
     dt = _parse_ts(str(ts)) if ts else None
-    if dt is None:
-        return None
-    return max(0, (datetime.now(timezone.utc) - dt).days)
+    return None if dt is None else max(0, (datetime.now(timezone.utc) - dt).days)
 
 
 def _cmd_prune(args) -> int:
@@ -360,22 +337,17 @@ def _cmd_prune(args) -> int:
     if days < 1:
         print(f"curator: --days must be >= 1 (got {days})", file=sys.stderr)
         return 2
-    candidates = []
-    for r in skill_usage.curated_report():
-        if r.get("pinned") or r.get("state") == skill_usage.STATE_ARCHIVED:
-            continue
-        idle = _idle_days(r)
-        if idle is not None and idle >= days:
-            candidates.append((r["name"], idle))
+    candidates = [
+        (r["name"], idle) for r in skill_usage.curated_report()
+        if not (r.get("pinned") or r.get("state") == skill_usage.STATE_ARCHIVED)
+        and (idle := _idle_days(r)) is not None and idle >= days]
     if not candidates:
         print(f"curator: nothing to prune (no unpinned skills idle >= {days}d)")
         return 0
-
     candidates.sort(key=lambda c: -c[1])
     print(f"curator: {len(candidates)} skill(s) idle >= {days}d:")
     for name, idle in candidates:
         print(f"  {name:40s} idle {idle}d")
-
     if getattr(args, "dry_run", False):
         print("\n(dry run — no changes made)")
         return 0
@@ -436,11 +408,11 @@ def _cmd_ledger(args) -> int:
 
 
 def _cmd_purge(args) -> int:
-    """Delete archived skills older than curator.archive_ttl_days.
-
-    Explicit only — never automatic. Each purged skill is captured (before-blobs) and recorded
-    as a 'purge' ledger entry, so even a purge is auditable and blob-recoverable.
-    """
+    """Delete archived skills older than curator.archive_ttl_days. Explicit only — never
+    automatic; each purged skill is captured (before-blobs) and recorded as a 'purge' ledger
+    entry, so even a purge is auditable and blob-recoverable."""
+    import shutil
+    import time
     from hermes_cli.config import cfg_get, load_config
     from tools import skill_ledger
     from tools.skill_usage import _archive_dir
@@ -452,21 +424,16 @@ def _cmd_purge(args) -> int:
             "curator: purge disabled (curator.archive_ttl_days is 0). Set the "
             "config key or pass --days N to purge archives older than N days.")
         return 1
-
     archive_root = _archive_dir()
     if not archive_root.exists():
         print("curator: no archive directory — nothing to purge.")
         return 0
-
-    import shutil
-    import time
     cutoff = time.time() - ttl_days * 86400
     candidates = sorted(
         p for p in archive_root.iterdir() if p.is_dir() and p.stat().st_mtime < cutoff)
     if not candidates:
         print(f"curator: no archived skills older than {ttl_days}d.")
         return 0
-
     print(f"Archived skills older than {ttl_days}d:")
     for p in candidates:
         print(f"  {p.name}")
@@ -476,7 +443,6 @@ def _cmd_purge(args) -> int:
     if not getattr(args, "yes", False) and not _confirm(
         f"Permanently delete {len(candidates)} archived skill(s)? [y/N] "):
         return 1
-
     purged = 0
     for p in candidates:
         before = skill_ledger.capture_before(p, complete_package=True, skill=p.name)
@@ -499,10 +465,8 @@ def _report_rollback(ok: bool, msg: str) -> int:
 
 
 def _rollback_ledger_entry(args, entry_id: str) -> int:
-    """Restore exactly the files touched by one ledger entry (from content-addressed blobs).
-
-    A pre-rollback safety ledger entry is taken first; fails closed if that capture fails.
-    """
+    """Restore exactly the files touched by one ledger entry (from content-addressed blobs); a
+    pre-rollback safety ledger entry is taken first and it fails closed if that capture fails."""
     from tools import skill_ledger
     entry = skill_ledger.get_entry(entry_id)
     if entry is None:
@@ -533,12 +497,10 @@ def _cmd_rollback(args) -> int:
     if getattr(args, "list", False):
         print(curator_backup.summarize_backups())
         return 0
-
     backup_id = getattr(args, "backup_id", None)
     target_path = curator_backup._resolve_backup(backup_id)
     if target_path is None:
-        rows = curator_backup.list_backups()
-        if not rows:
+        if not curator_backup.list_backups():
             print(
                 "curator: no snapshots exist yet. Take one with "
                 "`hermes curator backup` or wait for the next curator run.")
@@ -549,7 +511,6 @@ def _cmd_rollback(args) -> int:
             print("Available:")
             print(curator_backup.summarize_backups())
         return 1
-
     manifest = curator_backup._read_manifest(target_path)
     print(f"Rollback target: {target_path.name}")
     if manifest:
@@ -563,14 +524,12 @@ def _cmd_rollback(args) -> int:
                     f"  cron jobs:   {cron.get('jobs_count', 0)} "
                     f"(will be restored for skill-link fields only)")
             else:
-                reason = cron.get("reason", "not captured")
-                print(f"  cron jobs:   not in snapshot ({reason})")
+                print(f"  cron jobs:   not in snapshot ({cron.get('reason', 'not captured')})")
     print(
         "\nThis will replace the current ~/.hermes/skills/ tree (a safety "
         "snapshot of the current state is taken first so this is undoable). "
         "Cron jobs that still exist will have their skills/skill fields "
         "restored from the snapshot; all other cron fields are left alone.")
-
     if not getattr(args, "yes", False) and not _confirm("Proceed? [y/N] "):
         return 1
     ok, msg, _ = curator_backup.rollback(backup_id=target_path.name)
@@ -585,6 +544,12 @@ def _cmd_list_archived(args) -> int:
     return 0
 
 
+_USAGE_SORTS = {
+    "name": (lambda r: r["name"], False),
+    "recent": (lambda r: r.get("last_activity_at") or "", True),
+    "activity": (lambda r: r.get("activity_count", 0), True)}
+
+
 def _cmd_usage(args) -> int:
     """Usage telemetry for ALL skills on disk (bundled + hub included), with provenance."""
     import json as _json
@@ -595,13 +560,8 @@ def _cmd_usage(args) -> int:
         rows = [r for r in rows if r.get("provenance") == prov_filter]
     # name: alphabetical; recent: most-recently-active first (never-active sinks); activity
     # (default): most-used first.
-    sort_key = getattr(args, "sort", "activity")
-    if sort_key == "name":
-        rows.sort(key=lambda r: r["name"])
-    elif sort_key == "recent":
-        rows.sort(key=lambda r: r.get("last_activity_at") or "", reverse=True)
-    else:
-        rows.sort(key=lambda r: r.get("activity_count", 0), reverse=True)
+    key, reverse = _USAGE_SORTS.get(getattr(args, "sort", "activity"), _USAGE_SORTS["activity"])
+    rows.sort(key=key, reverse=reverse)
     if getattr(args, "json", False):
         print(_json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
@@ -612,8 +572,7 @@ def _cmd_usage(args) -> int:
     counts = {k: provenance.count(k) for k in ("agent", "bundled", "hub")}
     print(
         f"skills: {len(rows)} total  "
-        f"(agent={counts['agent']}  bundled={counts['bundled']}  hub={counts['hub']})")
-    print()
+        f"(agent={counts['agent']}  bundled={counts['bundled']}  hub={counts['hub']})\n")
     print(
         f"  {'skill':40s}  {'origin':8s}  "
         f"{'use':>4s}  {'view':>4s}  {'patch':>5s}  {'act':>4s}  last_activity")
