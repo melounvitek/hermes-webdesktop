@@ -16,10 +16,9 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason, classify_api_error
-from agent.message_sanitization import close_interrupted_tool_sequence
 from agent.turn_overflow import recover_from_overflow
 from agent.turn_recovery import (
-    compute_error_backoff, interruptible_backoff_sleep, log_api_error_attempt,
+    abort_turn_on_interrupt, compute_error_backoff, interruptible_backoff_sleep, log_api_error_attempt,
     max_retries_exhausted_result, nonretryable_client_error_result, recover_after_classification,
     recover_before_classification, route_classified_error,
 )
@@ -147,15 +146,11 @@ def handle_api_error(
         if agent.clear_interrupt(preserve_redirect=True):
             _retry.restart_with_redirected_messages = True
             return _verdict("break")
-        agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
-        _interrupt_text = f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))})."
-        close_interrupted_tool_sequence(messages, _interrupt_text)
-        agent._persist_session(messages, conversation_history)
-        agent.clear_interrupt()
-        return _verdict("return", {
-            "final_response": _interrupt_text, "messages": messages, "api_calls": api_call_count,
-            "completed": False, "interrupted": True,
-        })
+        return _verdict("return", abort_turn_on_interrupt(
+            agent, messages, conversation_history, api_call_count,
+            abort_message="Interrupt detected during error handling, aborting retries.",
+            interrupt_text=f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))}).",
+        ))
 
     _ce = route_classified_error(
         agent, api_error, classified, _retry, error_msg=error_msg, error_context=error_context,

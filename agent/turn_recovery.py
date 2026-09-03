@@ -423,10 +423,7 @@ def recover_after_classification(
         if isinstance(api_messages, list) and _strip_images_from_messages(api_messages):
             _vlines(agent, "⚠️  Provider rejected a corrupted image — stripped images from the retry payload and retrying...")
             return True, recovered_with_pool
-        logger.info(
-            "image-corrupt recovery: no image parts found to "
-            "strip; surfacing original error."
-        )
+        logger.info("image-corrupt recovery: no image parts found to strip; surfacing original error.")
 
     # Anthropic OAuth subscription rejected the 1M-context beta: disable it for this
     # session, rebuild the client, retry once. Reactive so capable subscriptions keep 1M.
@@ -897,10 +894,24 @@ def log_api_error_attempt(
                 f"   💡 Model '{_model}' is not a valid id for provider {_provider} — "
                 f"it is missing its vendor prefix."
             )
-            agent._buffer_vprint(
-                f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`."
-            )
+            agent._buffer_vprint(f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`.")
     return error_type, error_msg, _provider, _base, _model
+
+
+def abort_turn_on_interrupt(
+    agent: Any, messages: List[Dict[str, Any]], conversation_history: Any, api_call_count: int, *,
+    abort_message: str, interrupt_text: str,
+) -> Dict[str, Any]:
+    """Announce ``abort_message``, close any open tool sequence with ``interrupt_text``,
+    persist, clear the interrupt and return the ``interrupted`` result dict."""
+    _vlines(agent, f"⚡ {abort_message}")
+    close_interrupted_tool_sequence(messages, interrupt_text)
+    agent._persist_session(messages, conversation_history)
+    agent.clear_interrupt()
+    return {
+        "final_response": interrupt_text, "messages": messages, "api_calls": api_call_count,
+        "completed": False, "interrupted": True,
+    }
 
 
 def interruptible_backoff_sleep(
@@ -924,14 +935,10 @@ def interruptible_backoff_sleep(
             if _retry is not None and agent.clear_interrupt(preserve_redirect=True):
                 _retry.restart_with_redirected_messages = True
                 return None
-            _vlines(agent, f"⚡ {abort_message}")
-            close_interrupted_tool_sequence(messages, interrupt_text)
-            agent._persist_session(messages, conversation_history)
-            agent.clear_interrupt()
-            return {
-                "final_response": interrupt_text, "messages": messages, "api_calls": api_call_count,
-                "completed": False, "interrupted": True,
-            }
+            return abort_turn_on_interrupt(
+                agent, messages, conversation_history, api_call_count,
+                abort_message=abort_message, interrupt_text=interrupt_text,
+            )
         time.sleep(0.2)
         _touch_counter += 1
         if _touch_counter % 150 == 0:  # 150 × 0.2s = 30s
