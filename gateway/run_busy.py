@@ -582,19 +582,14 @@ class GatewayBusySessionMixin:
             return True  # handled (silently dropped); do not fall through
 
         effective_mode = self._effective_busy_input_mode(event.source)
-
-        # --- Draining case (gateway restarting/stopping) ---
-        if self._draining:
+        if self._draining:  # gateway restarting/stopping
             await self._send_busy_drain_notice(event, session_key, effective_mode)
             return True
-
         if await self._route_plaintext_approval_while_busy(event, session_key):
             return True
-
         adapter = self._adapter_for_source(event.source)
         if not adapter:
             return False  # let default path handle it
-
         # Internal synthetic events (delegation / background completions) must never interrupt or
         # steer; they surface as a NEW turn when idle. Plugin events carry untrusted payload text, so
         # queue them through the FIFO (security metadata kept apart).
@@ -603,10 +598,6 @@ class GatewayBusySessionMixin:
                 return False
             self._queue_or_replace_pending_event(session_key, event)
             return True
-
-        _busy_state = self._peek_session_state(session_key)
-        running_agent = _busy_state.turn.agent if _busy_state else None
-
         if (
             event.message_type == MessageType.TEXT
             and self._effective_busy_text_mode(event.source) == "queue"
@@ -614,23 +605,20 @@ class GatewayBusySessionMixin:
         ):
             return False
 
+        _busy_state = self._peek_session_state(session_key)
+        running_agent = _busy_state.turn.agent if _busy_state else None
         _steer = await self._resolve_busy_steer_or_redirect(event, session_key, effective_mode, running_agent)
         effective_mode, redirected = _steer.effective_mode, _steer.redirected
-
         # Queue as the next turn — skipped after a successful steer/redirect (the text is already in
         # the run and must NOT replay). FIFO gives each text its own turn (raw merge would join them).
         if not _steer.steered and not redirected:
             self._queue_or_replace_pending_event(session_key, event)
-
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
         is_redirect_mode = effective_mode == "interrupt" and redirected
-
         if (
-            effective_mode == "interrupt"
-            and not redirected
-            and running_agent
-            and running_agent is not _AGENT_PENDING_SENTINEL
+            effective_mode == "interrupt" and not redirected
+            and running_agent and running_agent is not _AGENT_PENDING_SENTINEL
         ):
             await self._interrupt_running_agent_for_busy_event(event, adapter, running_agent)
 
