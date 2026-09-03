@@ -221,61 +221,33 @@ def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -
 
 
 # --- Built-in provider dispatch ---
-# provider -> (availability predicate or None, "package missing" error, log line, generator
-# name). Predicates and generator names resolve module globals at call time so tests that
-# monkeypatch ``tools.tts_tool._import_x`` / ``_check_x`` / ``_generate_x`` apply.
+# provider -> (availability predicate or None, log label, generator name, "package missing" error).
+# Predicates and generator names resolve module globals at call time so tests that monkeypatch
+# ``tools.tts_tool._import_x`` / ``_check_x`` / ``_generate_x`` apply.
 _BUILTIN_DISPATCH: Dict[str, tuple] = {
-    "elevenlabs": (
-        lambda: _importable(_import_elevenlabs),
-        "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs",
-        "Generating speech with ElevenLabs...",
-        "_generate_elevenlabs",
-    ),
-    "openai": (
-        lambda: _importable(_import_openai_client),
-        "OpenAI provider selected but 'openai' package not installed.",
-        "Generating speech with OpenAI TTS...",
-        "_generate_openai_tts",
-    ),
-    "deepinfra": (
-        lambda: _importable(_import_openai_client),
-        "DeepInfra TTS uses the 'openai' SDK but it isn't installed.",
-        "Generating speech with DeepInfra TTS...",
-        "_generate_deepinfra_tts",
-    ),
-    "minimax": (None, None, "Generating speech with MiniMax TTS...", "_generate_minimax_tts"),
-    "xai": (None, None, "Generating speech with xAI TTS...", "_generate_xai_tts"),
-    "mistral": (
-        lambda: _importable(_import_mistral_client),
-        "Mistral provider selected but 'mistralai' package not installed. "
-        "Run `hermes setup` to install Mistral support.",
-        "Generating speech with Mistral Voxtral TTS...",
-        "_generate_mistral_tts",
-    ),
-    "gemini": (None, None, "Generating speech with Google Gemini TTS...", "_generate_gemini_tts"),
-    "neutts": (
-        lambda: _check_neutts_available(),
-        "NeuTTS provider selected but neutts is not installed. "
-        "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all].",
-        "Generating speech with NeuTTS (local)...",
-        "_generate_neutts",
-    ),
-    "kittentts": (
-        lambda: _importable(_import_kittentts),
-        "KittenTTS provider selected but 'kittentts' package not installed. "
-        "Run 'hermes setup tts' and choose KittenTTS, or install manually: "
-        "pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
-        "Generating speech with KittenTTS (local, ~25MB)...",
-        "_generate_kittentts",
-    ),
-    "piper": (
-        lambda: _importable(_import_piper),
-        "Piper provider selected but 'piper-tts' package not installed. "
-        "Run 'hermes tools' and select Piper under TTS, or install manually: "
-        "pip install piper-tts",
-        "Generating speech with Piper (local)...",
-        "_generate_piper_tts",
-    ),
+    "elevenlabs": (lambda: _importable(_import_elevenlabs), "ElevenLabs", "_generate_elevenlabs",
+                   "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"),
+    "openai": (lambda: _importable(_import_openai_client), "OpenAI TTS", "_generate_openai_tts",
+               "OpenAI provider selected but 'openai' package not installed."),
+    "deepinfra": (lambda: _importable(_import_openai_client), "DeepInfra TTS", "_generate_deepinfra_tts",
+                  "DeepInfra TTS uses the 'openai' SDK but it isn't installed."),
+    "minimax": (None, "MiniMax TTS", "_generate_minimax_tts", None),
+    "xai": (None, "xAI TTS", "_generate_xai_tts", None),
+    "mistral": (lambda: _importable(_import_mistral_client), "Mistral Voxtral TTS", "_generate_mistral_tts",
+                "Mistral provider selected but 'mistralai' package not installed. "
+                "Run `hermes setup` to install Mistral support."),
+    "gemini": (None, "Google Gemini TTS", "_generate_gemini_tts", None),
+    "neutts": (lambda: _check_neutts_available(), "NeuTTS (local)", "_generate_neutts",
+               "NeuTTS provider selected but neutts is not installed. "
+               "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all]."),
+    "kittentts": (lambda: _importable(_import_kittentts), "KittenTTS (local, ~25MB)", "_generate_kittentts",
+                  "KittenTTS provider selected but 'kittentts' package not installed. "
+                  "Run 'hermes setup tts' and choose KittenTTS, or install manually: "
+                  "pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"),
+    "piper": (lambda: _importable(_import_piper), "Piper (local)", "_generate_piper_tts",
+              "Piper provider selected but 'piper-tts' package not installed. "
+              "Run 'hermes tools' and select Piper under TTS, or install manually: "
+              "pip install piper-tts"),
 }
 
 
@@ -301,7 +273,7 @@ def _select_builtin_engine(provider: str) -> tuple:
     """
     entry = _BUILTIN_DISPATCH.get(provider)
     if entry is not None:
-        available, missing_error = entry[0], entry[1]
+        available, missing_error = entry[0], entry[3]
         if available is not None and not available():
             return provider, _error_json(missing_error)
         return provider, None
@@ -319,15 +291,13 @@ def _select_builtin_engine(provider: str) -> tuple:
 def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[str, Any], instructions: Optional[str]) -> None:
     """Run the already-selected built-in *engine*."""
     entry = _BUILTIN_DISPATCH.get(engine)
+    logger.info("Generating speech with %s...", entry[1] if entry else "Edge TTS")
     if entry is None:
-        logger.info("Generating speech with Edge TTS...")
         _run_edge_tts(text, file_str, tts_config)
-        return
-    logger.info(entry[2])
-    if engine == "openai":
+    elif engine == "openai":
         _generate_openai_tts(text, file_str, tts_config, instructions=instructions)
     else:
-        globals()[entry[3]](text, file_str, tts_config)
+        globals()[entry[2]](text, file_str, tts_config)
 
 
 def _finalize_voice_delivery(
