@@ -70,10 +70,7 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     window — nothing rewinds.
     """
     from hermes_cli.local_runtime.bootstrap import (
-        get_supervisor,
-        refresh_local_runtime,
-        staged_models,
-    )
+        get_supervisor, refresh_local_runtime, staged_models)
     from hermes_cli.local_runtime.context_policy import growth_decision
     from hermes_cli.local_runtime.estimator import profile_from_gguf
     from hermes_cli.local_runtime.gguf import read_gguf_header
@@ -83,8 +80,7 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     if sup is None or not is_managed_endpoint(base_url):
         return None
 
-    gguf = next((p for p in staged_models()
-                 if p.stem.startswith(model_id) or model_id in p.stem), None)
+    gguf = next((p for p in staged_models() if p.stem.startswith(model_id) or model_id in p.stem), None)
     if gguf is None:
         return None
 

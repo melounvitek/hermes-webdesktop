@@ -9,19 +9,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hermes_cli.local_runtime.context_policy import (
-    RUNTIME_OVERHEAD_BYTES,
-    WindowDecision,
-    initial_window,
-    launch_args,
-    ub_logits_bytes,
-)
+    RUNTIME_OVERHEAD_BYTES, WindowDecision, initial_window, launch_args, ub_logits_bytes)
 from hermes_cli.local_runtime.estimator import (
-    HardwareBudget,
-    ModelProfile,
-    PhysicsRefusal,
-    ctx_bytes,
-    profile_from_gguf,
-)
+    HardwareBudget, ModelProfile, PhysicsRefusal, ctx_bytes, profile_from_gguf)
 from hermes_cli.local_runtime.gguf import model_id_from_stem, read_gguf_header
 
 logger = logging.getLogger(__name__)
@@ -145,9 +135,8 @@ def _preset_for(gguf: Path, budget: HardwareBudget,
 
     # The launch flags MUST match the pricing above (same entry/is_mtp/posture).
     keys = _args_to_keys(launch_args(
-        profile, decision, mtp_capable=is_mtp,
-        mtp_draft_depth=entry.mtp_draft_depth if entry is not None else 3,
-        uma=budget.uma, mtp_prefill=mtp_prefill))
+        profile, decision, mtp_capable=is_mtp, uma=budget.uma, mtp_prefill=mtp_prefill,
+        mtp_draft_depth=entry.mtp_draft_depth if entry is not None else 3))
     if entry is not None and is_mtp:
         # Integrated-MTP targets sample on the backend, and so does the draft (pairing validated
         # against the vendor's published llama.cpp recipes).
@@ -175,8 +164,7 @@ def _preset_for(gguf: Path, budget: HardwareBudget,
                        spilled=decision.spilled, keys=keys)
 
 
-def generate_presets(models_dir: Path, budget: HardwareBudget,
-                     preset_path: Path,
+def generate_presets(models_dir: Path, budget: HardwareBudget, preset_path: Path,
                      mtp_capable: set[str] | None = None) -> list[PresetEntry]:
     """Walk the staged models, run the launch decision per model, and write one INI. Refused
     models get no section (the picker surfaces the refusal from the returned entries)."""

@@ -19,17 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from hermes_cli.local_runtime.context_policy import (
-    FLOOR,
-    RUNTIME_OVERHEAD_BYTES,
-    TARGET_WINDOW,
-    ub_logits_bytes,
-)
-from hermes_cli.local_runtime.estimator import (
-    HardwareBudget,
-    LayerKind,
-    ModelProfile,
-    ctx_bytes,
-)
+    FLOOR, RUNTIME_OVERHEAD_BYTES, TARGET_WINDOW, ub_logits_bytes)
+from hermes_cli.local_runtime.estimator import HardwareBudget, LayerKind, ModelProfile, ctx_bytes
 from hermes_cli.local_runtime.gguf import model_id_from_stem
 
 logger = logging.getLogger(__name__)
@@ -122,11 +113,9 @@ class CatalogEntry:
                   + [(LayerKind.SWA, self.per_layer_f16)] * self.swa_layers
                   + [(LayerKind.RECURRENT, 0)] * self.recurrent_layers)
         return ModelProfile(
-            name=variant.model_id, weights_bytes=variant.weights_bytes,
-            embd_table_bytes=0, n_ctx_train=self.n_ctx_train,
-            layers=layers, swa_window=self.swa_window, moe=self.moe,
-            n_vocab=self.n_vocab,
-            kv_scale=1.2 if self.mtp else 1.0)
+            name=variant.model_id, weights_bytes=variant.weights_bytes, embd_table_bytes=0,
+            n_ctx_train=self.n_ctx_train, layers=layers, swa_window=self.swa_window, moe=self.moe,
+            n_vocab=self.n_vocab, kv_scale=1.2 if self.mtp else 1.0)
 
     def download_files(self, variant: QuantVariant) -> tuple:
         """Everything a download job fetches for this variant, in order."""
@@ -191,8 +180,7 @@ _HOST_BANDWIDTH_GB_S = 80.0         # spilled weights stream over host DRAM
 PLEASANT_FLOOR_TOK_S = 20.0
 
 
-def predicted_decode_tok_s(entry: CatalogEntry, variant: QuantVariant,
-                           budget: HardwareBudget, *,
+def predicted_decode_tok_s(entry: CatalogEntry, variant: QuantVariant, budget: HardwareBudget, *,
                            spilled: bool = False) -> float:
     """Memory-bound decode prediction for ordering and floor-gating."""
     bandwidth = (_HOST_BANDWIDTH_GB_S if spilled
@@ -251,8 +239,7 @@ _last_refresh_attempt = 0.0
 def _asset_from(d: "dict | None") -> "AssetFile | None":
     if not d:
         return None
-    return AssetFile(path=d["path"], size_bytes=int(d["size_bytes"]),
-                     local=d.get("local"))
+    return AssetFile(path=d["path"], size_bytes=int(d["size_bytes"]), local=d.get("local"))
 
 
 # Scalar CatalogEntry fields parsed from JSON: key -> (coerce, default); None default = required.
@@ -274,11 +261,9 @@ def _load_catalog(doc: dict) -> "tuple[CatalogEntry, ...]":
                          f"(this build reads {_SCHEMA_VERSION})")
     entries = []
     for m in doc["models"]:
-        variants = tuple(
-            QuantVariant(quant=v["quant"],
-                         files=tuple(_asset_from(f) for f in v["files"]),
-                         validated=bool(v.get("validated")))
-            for v in m["variants"])
+        variants = tuple(QuantVariant(quant=v["quant"], validated=bool(v.get("validated")),
+                                      files=tuple(_asset_from(f) for f in v["files"]))
+                         for v in m["variants"])
         scalars = {k: coerce(m[k] if default is None else m.get(k, default))
                    for k, (coerce, default) in _SCALAR_FIELDS.items()}
         entries.append(CatalogEntry(
@@ -292,8 +277,7 @@ def _load_catalog(doc: dict) -> "tuple[CatalogEntry, ...]":
 def _packaged_catalog() -> "tuple[CatalogEntry, ...]":
     from importlib.resources import files
 
-    raw = files("hermes_cli.local_runtime").joinpath("catalog.json").read_text(
-        encoding="utf-8")
+    raw = files("hermes_cli.local_runtime").joinpath("catalog.json").read_text(encoding="utf-8")
     return _load_catalog(json.loads(raw))
 
 
@@ -312,8 +296,7 @@ def refresh_catalog(force: bool = False) -> bool:
             return False
         _last_refresh_attempt = now
     try:
-        req = urllib.request.Request(
-            _CATALOG_URL, headers={"User-Agent": "hermes-local-runtime"})
+        req = urllib.request.Request(_CATALOG_URL, headers={"User-Agent": "hermes-local-runtime"})
         with urllib.request.urlopen(req, timeout=10) as r:
             fetched = _load_catalog(json.load(r))
     except Exception as exc:  # noqa: BLE001
@@ -330,8 +313,7 @@ def refresh_catalog_soon() -> None:
     it already has — the refresh lands for the next one."""
     if time.monotonic() - _last_refresh_attempt < _REFRESH_TTL_S:
         return
-    threading.Thread(target=refresh_catalog, daemon=True,
-                     name="catalog-refresh").start()
+    threading.Thread(target=refresh_catalog, daemon=True, name="catalog-refresh").start()
 
 
 def catalog_by_id() -> dict[str, CatalogEntry]:

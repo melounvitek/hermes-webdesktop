@@ -95,16 +95,9 @@ def profile_from_gguf(header: GGUFHeader) -> ModelProfile:
         n_attn_seen += 1
 
     return ModelProfile(
-        name=header.path,
-        weights_bytes=header.tensor_bytes,
-        embd_table_bytes=header.embd_table_bytes,
-        n_ctx_train=header.n_ctx_train,
-        layers=layers,
-        swa_window=header.sliding_window,
-        moe=header.expert_count > 0,
-        architecture=header.architecture,
-        n_vocab=header.n_vocab,
-    )
+        name=header.path, weights_bytes=header.tensor_bytes, embd_table_bytes=header.embd_table_bytes,
+        n_ctx_train=header.n_ctx_train, layers=layers, swa_window=header.sliding_window,
+        moe=header.expert_count > 0, architecture=header.architecture, n_vocab=header.n_vocab)
 
 
 def kv_dtype_factor(flash_attention: bool) -> float:
@@ -113,8 +106,7 @@ def kv_dtype_factor(flash_attention: bool) -> float:
     return (_Q8_BYTES_PER_ELEM / _F16_BYTES_PER_ELEM) if flash_attention else 1.0
 
 
-def ctx_bytes(profile: ModelProfile, window: int, *,
-              flash_attention: bool = True) -> int:
+def ctx_bytes(profile: ModelProfile, window: int, *, flash_attention: bool = True) -> int:
     """Context memory for one window: full layers linear in T, SWA layers capped at the sliding
     window, recurrent layers constant. Scaled by profile.kv_scale (MTP draft context)."""
     factor = kv_dtype_factor(flash_attention)
@@ -145,11 +137,11 @@ def physics_check(profile: ModelProfile, budget: HardwareBudget,
               + ctx_bytes(profile, min(floor, profile.n_ctx_train or floor),
                           flash_attention=flash_attention))
     available = budget.usable_vram_bytes + budget.ram_available_bytes
-    if needed > available:
-        gib = 1 << 30
-        return PhysicsRefusal(
-            needed_bytes=needed, available_bytes=available,
-            message=(f"{profile.name}: needs ~{needed / gib:.1f} GiB at the "
-                     f"{floor // 1024}K floor but only ~{available / gib:.1f} GiB "
-                     "of VRAM+RAM exist — try a smaller quant (UD-Q3/Q2)"))
-    return None
+    if needed <= available:
+        return None
+    gib = 1 << 30
+    return PhysicsRefusal(
+        needed_bytes=needed, available_bytes=available,
+        message=(f"{profile.name}: needs ~{needed / gib:.1f} GiB at the "
+                 f"{floor // 1024}K floor but only ~{available / gib:.1f} GiB "
+                 "of VRAM+RAM exist — try a smaller quant (UD-Q3/Q2)"))

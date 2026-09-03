@@ -9,6 +9,7 @@ support (older engines) all read as "nothing loading".
 
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import logging
 import threading
@@ -61,8 +62,7 @@ def _apply_event(model: str, event: str, data: dict) -> None:
             stages = [str(s) for s in (progress.get("stages") or [])]
             current = str(progress.get("current", ""))
             value = progress.get("value")
-            entry = _snapshot.setdefault(model, {"stage": "", "value": 0.0,
-                                                 "percent": 0, "ts": 0.0})
+            entry = _snapshot.setdefault(model, {"stage": "", "value": 0.0, "percent": 0, "ts": 0.0})
             entry["ts"] = time.monotonic()
             if current and isinstance(value, (int, float)):
                 entry["stage"] = current
@@ -87,10 +87,8 @@ def _watch() -> None:
             continue
         base, key = endpoint
         try:
-            req = urllib.request.Request(
-                f"{base}/models/sse",
-                headers={"Authorization": f"Bearer {key}",
-                         "Accept": "text/event-stream"})
+            req = urllib.request.Request(f"{base}/models/sse", headers={
+                "Authorization": f"Bearer {key}", "Accept": "text/event-stream"})
             with urllib.request.urlopen(req, timeout=60) as r:
                 buf = b""
                 while True:
@@ -103,13 +101,10 @@ def _watch() -> None:
                         text = line.decode("utf-8", "replace").strip()
                         if not text.startswith("data:"):
                             continue
-                        try:
+                        with suppress(json.JSONDecodeError, TypeError):
                             msg = json.loads(text[5:].strip())
-                            _apply_event(str(msg.get("model", "")),
-                                         str(msg.get("event", "")),
+                            _apply_event(str(msg.get("model", "")), str(msg.get("event", "")),
                                          msg.get("data") or {})
-                        except (json.JSONDecodeError, TypeError):
-                            continue
         except Exception as exc:  # noqa: BLE001 — watcher must never die loud
             logger.debug("load-progress SSE reconnecting: %s", exc)
         # Stream ended (router bounce, timeout, error): loading entries from the dead connection
@@ -122,8 +117,7 @@ def _ensure_watcher() -> None:
     global _watcher
     with _lock:
         if _watcher is None or not _watcher.is_alive():
-            _watcher = threading.Thread(target=_watch, daemon=True,
-                                        name="llamacpp-load-progress")
+            _watcher = threading.Thread(target=_watch, daemon=True, name="llamacpp-load-progress")
             _watcher.start()
 
 
@@ -133,10 +127,8 @@ def get_loading_progress() -> dict[str, dict]:
     _ensure_watcher()
     now = time.monotonic()
     with _lock:
-        return {m: {"stage": e["stage"], "value": e["value"],
-                    "percent": e["percent"]}
-                for m, e in _snapshot.items()
-                if now - e["ts"] < _STALE_ENTRY_TTL_S}
+        return {m: {"stage": e["stage"], "value": e["value"], "percent": e["percent"]}
+                for m, e in _snapshot.items() if now - e["ts"] < _STALE_ENTRY_TTL_S}
 
 
 def get_prefill_progress(model: str) -> "dict | None":
@@ -161,11 +153,7 @@ def get_prefill_progress(model: str) -> "dict | None":
         return None
     best = 0
     for slot in slots if isinstance(slots, list) else []:
-        if not slot.get("is_processing"):
-            continue
-        try:
-            processed = int(slot.get("n_prompt_tokens_processed") or 0)
-        except (TypeError, ValueError):
-            continue
-        best = max(best, processed)
+        with suppress(TypeError, ValueError):
+            if slot.get("is_processing"):
+                best = max(best, int(slot.get("n_prompt_tokens_processed") or 0))
     return {"processed": best} if best > 0 else None

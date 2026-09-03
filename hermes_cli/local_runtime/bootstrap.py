@@ -106,13 +106,10 @@ def _stop_state_server(state: dict) -> None:
 
     try:
         pid = int(state.get("pid"))
-    except (TypeError, ValueError):
-        return
-    if pid <= 0:
-        return
-    try:
+        if pid <= 0:
+            return
         os.kill(pid, signal.SIGTERM)
-    except (OSError, ValueError):
+    except (TypeError, ValueError, OSError):
         return
     # Give it a moment to release the port and the GPU. Liveness via psutil — on Windows
     # os.kill(pid, 0) TERMINATES the process, it is not a probe.
@@ -136,8 +133,7 @@ def refresh_local_runtime() -> bool:
             state = _state_endpoint()
             if state is None:
                 return False
-            logger.info("bouncing adopted llama-server (pid=%s) to rescan models",
-                        state.get("pid"))
+            logger.info("bouncing adopted llama-server (pid=%s) to rescan models", state.get("pid"))
             _stop_state_server(state)
         else:
             shutdown_local_runtime()
@@ -213,11 +209,7 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
 
     try:
         from hermes_cli.local_runtime.binaries import (
-            default_tag,
-            ensure_runtime_installed,
-            installed_tags,
-            select_backend,
-        )
+            default_tag, ensure_runtime_installed, installed_tags, select_backend)
         from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
 
         backend = section.get("backend", "auto")
@@ -244,12 +236,9 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
         mdir.mkdir(parents=True, exist_ok=True)
         preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
 
-        sup = LlamaServerSupervisor(
-            install_dir, mdir,
-            models_max=int(section.get("models_max", 4)),
-            port=int(section.get("port", 0)) or None,
-            preset_path=preset_path,
-        )
+        sup = LlamaServerSupervisor(install_dir, mdir, preset_path=preset_path,
+                                    models_max=int(section.get("models_max", 4)),
+                                    port=int(section.get("port", 0)) or None)
         try:
             sup.start()
         except Exception:
@@ -259,8 +248,7 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
                 sup.stop()
             raise
         _SUPERVISOR = sup
-        logger.info("managed llama-server up at %s (backend=%s tag=%s)",
-                    sup.base_url, backend, tag)
+        logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, backend, tag)
         _start_idle_sweeper(sup)
         return sup
     except Exception as exc:  # noqa: BLE001 — never break session start
@@ -294,5 +282,4 @@ def _start_idle_sweeper(sup) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("idle sweep skipped: %s", exc)
 
-    threading.Thread(target=_loop, daemon=True,
-                     name="local-runtime-idle-sweep").start()
+    threading.Thread(target=_loop, daemon=True, name="local-runtime-idle-sweep").start()

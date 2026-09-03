@@ -10,12 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from hermes_cli.local_runtime.estimator import (
-    HardwareBudget,
-    ModelProfile,
-    PhysicsRefusal,
-    ctx_bytes,
-    physics_check,
-)
+    HardwareBudget, ModelProfile, PhysicsRefusal, ctx_bytes, physics_check)
 
 FLOOR = 64 * 1024                     # = target; one internal constant
 _LADDER_GROWTH = 1.5
@@ -60,8 +55,7 @@ class WindowDecision:
         return self.spill_bytes > 0
 
 
-def initial_window(profile: ModelProfile, budget: HardwareBudget,
-                   *, flash_attention: bool = True,
+def initial_window(profile: ModelProfile, budget: HardwareBudget, *, flash_attention: bool = True,
                    overhead_bytes: int = 0) -> WindowDecision | PhysicsRefusal:
     """The launch decision: largest cheap rung, never below the floor.
 
@@ -103,10 +97,9 @@ def initial_window(profile: ModelProfile, budget: HardwareBudget,
         reason = f"floor held at {window // 1024}K; weights spill (deliberate price of the guarantee)"
 
     kv_bytes = kv(window)
-    spill = max(0, profile.weights_bytes + kv_bytes - budget.usable_vram_bytes)
-    return WindowDecision(window=window, spill_bytes=spill,
-                          kv_on_gpu=kv_bytes <= budget.usable_vram_bytes,
-                          reasons=[reason])
+    return WindowDecision(window=window, reasons=[reason],
+                          spill_bytes=max(0, profile.weights_bytes + kv_bytes - budget.usable_vram_bytes),
+                          kv_on_gpu=kv_bytes <= budget.usable_vram_bytes)
 
 
 @dataclass
@@ -117,10 +110,8 @@ class GrowthDecision:
 
 
 def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
-                    current_window: int, session_tokens: int,
-                    measured_decode_tok_s: float | None,
-                    server_idle: bool,
-                    flash_attention: bool = True,
+                    current_window: int, session_tokens: int, measured_decode_tok_s: float | None,
+                    server_idle: bool, flash_attention: bool = True,
                     occupancy_confirmed: bool = False) -> GrowthDecision:
     """One growth evaluation, END-OF-TURN ONLY (recurrent state cannot rewind mid-sequence).
 
@@ -135,8 +126,7 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
 
     native = profile.n_ctx_train or current_window
     if current_window >= native:
-        return GrowthDecision("compress-default",
-                              reason="at native window; compression is the only move")
+        return GrowthDecision("compress-default", reason="at native window; compression is the only move")
 
     if not server_idle:
         return GrowthDecision("hold", reason="server busy; re-grant deferred to idle")
@@ -154,8 +144,7 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
     # that no longer fits doesn't get granted.
     kv = ctx_bytes(profile, next_rung, flash_attention=flash_attention)
     if profile.weights_bytes + kv > budget.usable_vram_bytes + budget.ram_available_bytes:
-        return GrowthDecision("compress-default",
-                              reason="next rung exceeds physics; compression instead")
+        return GrowthDecision("compress-default", reason="next rung exceeds physics; compression instead")
 
     return GrowthDecision("grow", next_window=next_rung,
                           reason=f"rung {current_window // 1024}K -> {next_rung // 1024}K")
@@ -172,19 +161,15 @@ def spill_overrides(profile: ModelProfile) -> list[str]:
     return []  # dense: fit's back-to-front layer cut is the only axis
 
 
-def launch_args(profile: ModelProfile, decision: WindowDecision, *,
-                flash_attention: bool = True,
-                mtp_capable: bool = False,
-                mtp_draft_depth: int = 3,
-                uma: bool = False,
+def launch_args(profile: ModelProfile, decision: WindowDecision, *, flash_attention: bool = True,
+                mtp_capable: bool = False, mtp_draft_depth: int = 3, uma: bool = False,
                 mtp_prefill: bool = False) -> list[str]:
     """Per-model launch flags from a window decision. Explicit -c puts fit into
     spill-weights-and-hold-ctx; q8 KV cache wherever flash attention exists; -ot placement on
     spilled configs — DISCRETE cards only."""
     args = ["-c", str(decision.window)]
     if mtp_capable:
-        args += ["--spec-type", "draft-mtp",
-                 "--spec-draft-n-max", str(mtp_draft_depth),
+        args += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp_draft_depth),
                  "--backend-sampling", "--spec-draft-backend-sampling"]
         if mtp_prefill:
             args += ["-b", "4096", "-ub", "2048"]
@@ -197,8 +182,7 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *,
     return args
 
 
-def ub_logits_bytes(n_vocab: int, *, mtp_capable: bool,
-                    mtp_prefill: bool = False) -> int:
+def ub_logits_bytes(n_vocab: int, *, mtp_capable: bool, mtp_prefill: bool = False) -> int:
     """GPU logits/compute-buffer cost of the microbatch posture chosen by launch_args, priced from
     the model's own vocab and calibrated against measured server RSS (Qwen3.8 Q4, both postures,
     three windows)."""

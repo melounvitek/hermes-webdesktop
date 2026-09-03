@@ -136,11 +136,8 @@ class LlamaServerSupervisor:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         if json_type:
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(
-            self._url(route),
-            data=json.dumps(body).encode() if body is not None else None,
-            headers=headers,
-        )
+        req = urllib.request.Request(self._url(route), headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
         return urllib.request.urlopen(req, timeout=timeout_s)
 
     def _request(self, route: str, body: dict | None = None, timeout_s: int = 30) -> dict:
@@ -194,26 +191,21 @@ class LlamaServerSupervisor:
         self._spawn()
         self._wait_health(timeout_s)
         self._write_state()
-        self._watchdog = threading.Thread(target=self._watch, daemon=True,
-                                          name="llamacpp-supervisor")
+        self._watchdog = threading.Thread(target=self._watch, daemon=True, name="llamacpp-supervisor")
         self._watchdog.start()
 
     def _write_state(self) -> None:
         path = state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            "base_url": self.base_url,
-            "api_key": self.api_key,
-            "pid": self.proc.pid if self.proc else None,
-        }), encoding="utf-8")
+        path.write_text(json.dumps({"base_url": self.base_url, "api_key": self.api_key,
+                                    "pid": self.proc.pid if self.proc else None}), encoding="utf-8")
 
     def _wait_health(self, timeout_s: int) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self.proc and self.proc.poll() is not None:
-                raise RuntimeError(
-                    f"llama-server exited rc={self.proc.returncode} during startup "
-                    f"(log: {self.log_path})")
+                raise RuntimeError(f"llama-server exited rc={self.proc.returncode} during startup "
+                                   f"(log: {self.log_path})")
             with suppress(urllib.error.URLError, OSError, TimeoutError):
                 with urllib.request.urlopen(self._url("/health"), timeout=3) as r:
                     if r.status == 200:
@@ -234,8 +226,7 @@ class LlamaServerSupervisor:
             if self._stopping:
                 return
             backoff = _RESTART_BACKOFF_S[min(self._restarts, len(_RESTART_BACKOFF_S) - 1)]
-            logger.warning("llama-server exited rc=%s; restart #%s in %ss",
-                           rc, self._restarts + 1, backoff)
+            logger.warning("llama-server exited rc=%s; restart #%s in %ss", rc, self._restarts + 1, backoff)
             time.sleep(backoff)
             self._restarts += 1
             try:
@@ -292,27 +283,22 @@ class LlamaServerSupervisor:
             exe = str(server_binary(self.install_dir))
         except Exception:  # noqa: BLE001
             return
+        own_pid = self.proc.pid if self.proc is not None else None
         for p in psutil.process_iter(["exe", "ppid"]):
-            try:
-                if p.info.get("exe") != exe:
-                    continue
-                if self.proc is not None and p.pid == self.proc.pid:
-                    continue
+            with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                 ppid = p.info.get("ppid") or 0
-                if ppid and psutil.pid_exists(ppid):
+                if (p.info.get("exe") != exe or p.pid == own_pid
+                        or (ppid and psutil.pid_exists(ppid))):
                     continue
                 logger.warning("reaping orphaned llama-server child pid=%s", p.pid)
                 p.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
 
     # ── model management (router endpoints) ──────────────────
 
     def models(self) -> dict:
         """{model_id: status_value} from GET /models."""
-        data = self._request("/models")
         return {m["id"]: m.get("status", {}).get("value", "unknown")
-                for m in data.get("data", [])}
+                for m in self._request("/models").get("data", [])}
 
     def load_model(self, model_id: str, timeout_s: int = 600) -> None:
         self._request("/models/load", {"model": model_id}, timeout_s=timeout_s)
@@ -344,15 +330,15 @@ class LlamaServerSupervisor:
                 self._idle_since.pop(model_id, None)
                 continue
             first_idle = self._idle_since.setdefault(model_id, now)
-            if now - first_idle >= self.IDLE_UNLOAD_S:
-                try:
-                    self.unload_model(model_id)
-                    self._idle_since.pop(model_id, None)
-                    unloaded.append(model_id)
-                    logger.info("idle-unloaded %s (idle %ds)", model_id,
-                                int(now - first_idle))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("idle unload of %s failed: %s", model_id, exc)
+            if now - first_idle < self.IDLE_UNLOAD_S:
+                continue
+            try:
+                self.unload_model(model_id)
+                self._idle_since.pop(model_id, None)
+                unloaded.append(model_id)
+                logger.info("idle-unloaded %s (idle %ds)", model_id, int(now - first_idle))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("idle unload of %s failed: %s", model_id, exc)
         return unloaded
 
     def touch_generate(self, model_id: str, timeout_s: int = 300) -> bool:
@@ -360,10 +346,8 @@ class LlamaServerSupervisor:
         false-fail reasoning models, which spend their first tokens thinking."""
         try:
             resp = self._request("/v1/chat/completions", {
-                "model": model_id,
-                "messages": [{"role": "user", "content": TOUCH_PROMPT}],
-                "max_tokens": 512, "temperature": 0,
-            }, timeout_s=timeout_s)
+                "model": model_id, "messages": [{"role": "user", "content": TOUCH_PROMPT}],
+                "max_tokens": 512, "temperature": 0}, timeout_s=timeout_s)
             msg = resp["choices"][0]["message"]
             blob = (msg.get("content") or "") + " " + (msg.get("reasoning_content") or "")
             return TOUCH_EXPECT in blob.lower()
@@ -387,10 +371,8 @@ class LlamaServerSupervisor:
         per-child and require ?model= (bare calls 400). With ``model_id`` checks that one child;
         without, every loaded child."""
         try:
-            if model_id is not None:
-                loaded = [model_id]
-            else:
-                loaded = [m for m, status in self.models().items() if status in _RESIDENT]
+            loaded = ([model_id] if model_id is not None
+                      else [m for m, status in self.models().items() if status in _RESIDENT])
             for mid in loaded:
                 slots = self._request(f"/slots?model={mid}")
                 if any(s.get("is_processing") for s in slots):

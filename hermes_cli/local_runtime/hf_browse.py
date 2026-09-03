@@ -64,8 +64,7 @@ class HFFileGroup:
     fit: str = "unknown"        # fits-gpu | needs-ram | too-big | unknown
 
 
-_QUANT_RE = re.compile(
-    r"(?:IQ|Q)\d[_A-Z0-9]*|F16|BF16|F32", re.IGNORECASE)
+_QUANT_RE = re.compile(r"(?:IQ|Q)\d[_A-Z0-9]*|F16|BF16|F32", re.IGNORECASE)
 _SPLIT_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
 
 
@@ -114,10 +113,8 @@ def repo_files(repo: str) -> list[HFFileGroup]:
               for path, size in singles]
     for stem, parts in splits.items():
         parts.sort()
-        groups.append(HFFileGroup(
-            label=_quant_label(stem),
-            paths=tuple(p for _, p, _ in parts),
-            total_bytes=sum(s for _, _, s in parts)))
+        groups.append(HFFileGroup(label=_quant_label(stem), paths=tuple(p for _, p, _ in parts),
+                                  total_bytes=sum(s for _, _, s in parts)))
     groups.sort(key=lambda g: g.total_bytes, reverse=True)
     return groups
 
@@ -134,5 +131,4 @@ def rough_fit(total_bytes: int, budget) -> str:
 
 
 def priced_repo_files(repo: str, budget) -> list[HFFileGroup]:
-    return [replace(g, fit=rough_fit(g.total_bytes, budget))
-            for g in repo_files(repo)]
+    return [replace(g, fit=rough_fit(g.total_bytes, budget)) for g in repo_files(repo)]

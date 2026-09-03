@@ -295,9 +295,7 @@ def ensure_runtime_installed(tag: str, backend: str,
     if progress is not None:
         progress("verify", 0, 0, "")
     version = verify_install(install_dir, tag)
-    manifest_path.write_text(json.dumps({
-        "tag": tag, "backend": plan.backend, "assets": recorded,
-        "verified_version": version,
-    }, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps({"tag": tag, "backend": plan.backend, "assets": recorded,
+                                         "verified_version": version}, indent=2), encoding="utf-8")
     logger.info("installed llama.cpp %s (%s): %s", tag, backend, version)
     return install_dir
