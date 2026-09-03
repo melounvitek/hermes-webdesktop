@@ -51,11 +51,9 @@ def _delegation_config() -> dict:
 
 def _delegation_model_not_found(results, config) -> bool:
     """True when a result reflects a config-level model_not_found rejection.
-
     Requires both a model-not-found phrase AND the currently-configured model
     name in the same error/summary text, so a stale task failing on a
-    different (removed) model is not mis-attributed to the config.
-    """
+    different (removed) model is not mis-attributed to the config."""
     model = str((config or {}).get("model") or "").lower()
     if not model:
         return False
@@ -177,12 +175,10 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
 
 def _format_async_delegation(evt: dict) -> str:
     """Format an async-delegation completion into a self-contained re-injection.
-
     Carries the FULL original task source (goal, context, toolsets, role, model) plus
     dispatch time, status, and the complete result summary: when this re-enters the
     conversation the agent may be deep in unrelated context and must be able to use
-    the result OR re-dispatch without remembering why the subagent existed.
-    """
+    the result OR re-dispatch without remembering why the subagent existed."""
     deleg_id = evt.get("delegation_id", "unknown")
     completed_at = evt.get("completed_at") or time.time()
     if evt.get("is_batch") or isinstance(evt.get("results"), list):
@@ -228,12 +224,10 @@ def _format_async_delegation(evt: dict) -> str:
 
 def _delegation_attribution_line(evt: dict) -> "str | None":
     """One-line provenance for a subagent-owned process event, else None.
-
     A background process a subagent started outlives the child and is routed to
     the PARENT conversation, which otherwise sees an anonymous raw output wall.
     Judged on ``owner_task_id`` (the raw spawning id) — ``task_id`` is the
-    container key and may be collapsed to the session key.
-    """
+    container key and may be collapsed to the session key."""
     task_id = str(evt.get("owner_task_id") or evt.get("task_id") or "")
     if not task_id.startswith("sa-"):
         return None

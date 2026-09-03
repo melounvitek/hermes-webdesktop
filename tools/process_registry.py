@@ -73,11 +73,9 @@ _WORKER_MEMORY_MAX_CAP_BYTES = 4 * 1024 * 1024 * 1024
 
 def _worker_memory_max_bytes() -> int:
     """Finite per-worker cgroup limit that can never widen host risk.
-
     ``TERMINAL_LOCAL_MEMORY_MAX_MB`` is honored only when it *tightens* the safe
     bound (min of the gateway's cgroup-v2 ``memory.max`` and half of physical RAM,
-    capped at 4 GiB), so an oversized override cannot exceed the enclosing slice.
-    """
+    capped at 4 GiB), so an oversized override cannot exceed the enclosing slice."""
     override_bound: Optional[int] = None
     override = os.getenv("TERMINAL_LOCAL_MEMORY_MAX_MB", "").strip()
     if override:
@@ -131,11 +129,9 @@ def _systemd_scope_cached() -> Optional[bool]:
 
 def _systemd_run_user_scope_available() -> bool:
     """True if ``systemd-run --user --scope`` can create a cgroup.
-
     ``shutil.which`` alone is insufficient: system services and containers may lack
     the user D-Bus bus even with the binary on PATH (every spawn would fail with
-    ``Failed to connect to user bus``), so a cheap ``/bin/true`` probe is run and cached.
-    """
+    ``Failed to connect to user bus``), so a cheap ``/bin/true`` probe is run and cached."""
     global _SYSTEMD_SCOPE_AVAILABLE, _SYSTEMD_SCOPE_PROBED_AT
     verdict = _systemd_scope_cached()
     if verdict is not None:
@@ -173,11 +169,9 @@ def _systemd_run_user_scope_available() -> bool:
 
 def _is_supervised_gateway_process() -> bool:
     """Whether this process is the live, supervised Hermes gateway itself.
-
     Supervisor markers and ``_HERMES_GATEWAY`` are inherited by every descendant (and
     importing ``gateway.run`` sets the latter), so also require ownership of the live
-    gateway PID file — scopes are for the gateway, not terminal children or CLIs.
-    """
+    gateway PID file — scopes are for the gateway, not terminal children or CLIs."""
     if os.environ.get("_HERMES_GATEWAY") != "1":
         return False
     try:
@@ -204,12 +198,10 @@ def _build_systemd_scope_argv(shell_argv: List[str], unit_suffix: str) -> List[s
 
 def _stop_systemd_unit(unit_name: str) -> bool:
     """Stop a transient systemd user scope by unit name.
-
     Reaps the *entire* cgroup — catching double-forked descendants reparented to init
     inside the scope that survive a plain PID signal (SIGTERM all, SIGKILL after
     ``TimeoutStopSec``). True if stopped or already gone; False if ``systemctl`` is
-    unavailable or the stop failed.
-    """
+    unavailable or the stop failed."""
     import shutil
 
     binary = shutil.which("systemctl")
@@ -337,10 +329,8 @@ _CHECKPOINT_DEFAULTS = {
 
 class ProcessRegistry:
     """In-memory registry of running and finished background processes.
-
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
-    the gateway asyncio loop (watchers, reset checks) and the cleanup thread.
-    """
+    the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
 
     _SHELL_NOISE_SUBSTRINGS = (
         "no job control in this shell",
@@ -402,12 +392,10 @@ class ProcessRegistry:
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
         """Scan a freshly-read chunk for watch patterns and queue notifications.
-
         Per-session rate limiting (see WATCH_* constants): one match per cooldown
         window, a match inside the window is one strike, WATCH_STRIKE_LIMIT consecutive
         strikes or WATCH_LIFETIME_MAX_HITS total deliveries disable watching and
-        promote the session to notify_on_complete.
-        """
+        promote the session to notify_on_complete."""
         if not session.watch_patterns or session._watch_disabled:
             return
         # Late chunks after the reader declared exit are post-exit noise; dropping them
@@ -514,11 +502,9 @@ class ProcessRegistry:
 
     def _global_watch_admit(self, now: float) -> bool:
         """True if this watch_match may pass the global breaker.
-
         In cooldown: drop and count. Otherwise slide the rolling window; exceeding
         the cap trips the breaker for WATCH_GLOBAL_COOLDOWN_SECONDS with ONE
-        "tripped" summary, and the cooldown's end emits ONE "released" summary.
-        """
+        "tripped" summary, and the cooldown's end emits ONE "released" summary."""
         release_msg = trip_msg = None
         with self._global_watch_lock:
             # Handle cooldown expiry first so we can emit the release summary.
@@ -584,12 +570,10 @@ class ProcessRegistry:
     @classmethod
     def _host_pid_is_ours(cls, pid: Optional[int], expected_start: Optional[int]) -> bool:
         """True only if ``pid`` is alive AND still the process we spawned.
-
         The kernel recycles PIDs, so a stored number can later name an unrelated
         process (seen in the wild: a browser's session leader tree-killed). The kernel
         start time captured at spawn must match the live one; with no baseline
-        (legacy checkpoints, no ``/proc``) degrade to a bare liveness check.
-        """
+        (legacy checkpoints, no ``/proc``) degrade to a bare liveness check."""
         if not cls._is_host_pid_alive(pid):
             return False
         return expected_start is None or cls._safe_host_start_time(pid) == expected_start
@@ -648,15 +632,13 @@ class ProcessRegistry:
     @classmethod
     def _terminate_host_pid(cls, pid: int, expected_start: Optional[int] = None) -> None:
         """Terminate a host-visible PID and its descendants.
-
         ``expected_start`` (kernel start time at spawn) is re-validated first: a mismatch
         or dead PID means the number was recycled onto a stranger and we refuse to touch
         it — a leaked orphan beats tree-killing someone's browser. POSIX: psutil SIGTERMs
         children before the parent (so trees aren't reparented to init and survive), then
         SIGKILLs survivors after ``terminal.daemon_term_grace_seconds``. Windows:
         ``taskkill /T /F`` (psutil's stale PPID links miss orphans there); ``os.kill``
-        is the fallback.
-        """
+        is the fallback."""
         if expected_start is not None and not cls._host_pid_is_ours(pid, expected_start):
             logger.warning(
                 "Refusing to terminate host pid %d: start-time mismatch — "
@@ -770,10 +752,8 @@ class ProcessRegistry:
 
     def _spawn_local_pty(self, session: ProcessSession, safe_command: str, env_vars: dict) -> ProcessSession:
         """PTY spawn for interactive CLI tools (Codex, Claude Code, REPLs).
-
         Raises ImportError when no PTY backend is installed and re-raises any spawn
-        failure; ``spawn_local`` falls back to pipe mode in both cases.
-        """
+        failure; ``spawn_local`` falls back to pipe mode in both cases."""
         if _IS_WINDOWS:
             from winpty import PtyProcess as _PtyProcessCls
         else:
@@ -867,11 +847,9 @@ class ProcessRegistry:
         self, env: Any, command: str, cwd: str = None, task_id: str = "", session_key: str = "",
         timeout: int = 10, owner_task_id: str = "") -> ProcessSession:
         """Spawn a background process inside a non-local backend's sandbox.
-
         The command is wrapped to capture its in-sandbox PID and redirect output to a
         log file that later execute() calls poll. No live pipe or stdin, but it runs in
-        the correct sandbox context.
-        """
+        the correct sandbox context."""
         session = self._new_session(command, task_id, owner_task_id, session_key, cwd, env_ref=env, pid_scope="sandbox")
         temp_dir = self._env_temp_dir(env)
         log_path, pid_path, exit_path = (f"{temp_dir}/hermes_bg_{session.id}.{ext}" for ext in ("log", "pid", "exit"))
@@ -906,15 +884,13 @@ class ProcessRegistry:
 
     def _reader_loop(self, session: ProcessSession):
         """Background thread: read stdout from a local Popen process.
-
         ``buffer.read1(4096)`` not ``TextIOWrapper.read(4096)``: on pipes the latter
         blocks until EOF, landing "live" output in one burst at exit. Orphaned-pipe
         guard: a backgrounded grandchild (``node server.js &``) inherits our pipe's write
         end so EOF never arrives while it lives, which would park this thread and never
         fire ``notify_on_complete``; on POSIX we ``select()`` and stop draining shortly
         after the direct child exits (mirrors ``environments/base.py::_wait_for_process``).
-        Windows pipes lack select(), so the lazy ``_reconcile_local_exit`` is the net.
-        """
+        Windows pipes lack select(), so the lazy ``_reconcile_local_exit`` is the net."""
         first_chunk = True
         # A multibyte UTF-8 char split across read1() chunks would become U+FFFD with
         # stateless decoding; the incremental decoder holds the partial sequence.
@@ -1062,10 +1038,8 @@ class ProcessRegistry:
 
     def _move_to_finished(self, session: ProcessSession):
         """Move a session from running to finished.
-
         Idempotent: kill_process() and the reader thread can both call this; only
-        the FIRST move enqueues the completion notification, so no duplicates.
-        """
+        the FIRST move enqueues the completion notification, so no duplicates."""
         with self._lock:
             was_running = self._running.pop(session.id, None) is not None
             self._finished[session.id] = session
@@ -1122,7 +1096,6 @@ class ProcessRegistry:
         self, task_id: Optional[str] = None, *, timeout: float | None = None, poll_interval: float = 1.0,
     ) -> dict:
         """Bounded linger for ``notify_on_complete`` background processes at one-shot exit.
-
         A one-shot CLI run (``hermes -q/-Q/-z``) exits when its turn ends; a background
         process it spawned still holds a stdout pipe owned by the dying parent and dies of
         SIGPIPE seconds later (Bot Mode handoff replies were the visible casualty). Only
@@ -1130,8 +1103,7 @@ class ProcessRegistry:
         watchers aren't the parent's to wait for. ``task_id=None`` waits on every tracked
         process; ``timeout=None`` reads ``terminal.oneshot_completion_wait_seconds`` (``<= 0``
         disables). Each pass re-reconciles child state so an orphaned-pipe exit can't wedge
-        the linger. Returns ``{"waited", "completed", "timed_out"}`` id lists.
-        """
+        the linger. Returns ``{"waited", "completed", "timed_out"}`` id lists."""
         if timeout is None:
             timeout = self._oneshot_completion_wait_seconds()
         result: dict = {"waited": [], "completed": [], "timed_out": []}
@@ -1223,15 +1195,13 @@ class ProcessRegistry:
         self, session_key: str = "", owns_event=None, *, skip_poll_observed: bool = True,
     ) -> "list[tuple[dict, str]]":
         """Pop all pending events and return ``(raw_event, formatted_text)`` pairs.
-
         Skips completions per ``_drain_should_skip`` (gateway/TUI pass
         ``skip_poll_observed=False``). Routing (``_owns_event``): async-delegation events
         always need ownership proof, ordinary events once they carry ``session_key`` or
         ``origin_ui_session_id``; ``owns_event(evt)`` (strongest; the TUI passes a
         compression-chain-aware check) consumes ONLY on True, ``session_key`` uses plain
         equality; non-owned events are re-queued for their owner. No filter consumes
-        everything (legacy single-session) except restored delegation payloads (fail-closed).
-        """
+        everything (legacy single-session) except restored delegation payloads (fail-closed)."""
         results: "list[tuple[dict, str]]" = []
         requeue: "list[dict]" = []
         # delegation.surface_child_process_notifications, read at most once per drain
@@ -1307,13 +1277,11 @@ class ProcessRegistry:
 
     def _reconcile_local_exit(self, session: "ProcessSession") -> None:
         """Reconcile ``session.exited`` against the real child state.
-
         The reader flips ``exited`` only at EOF; when the direct child has exited but a
         descendant (e.g. a daemon from ``hermes update``) holds the pipe open, poll()
         would report "running" forever. If ``Popen.poll()`` has an exit code, drain
         readable bytes non-blocking and flip ``exited``. No-op for env/PTY, exited and
-        detached sessions.
-        """
+        detached sessions."""
         if session is None or session.exited:
             return
         proc = getattr(session, "process", None)
@@ -1417,10 +1385,8 @@ class ProcessRegistry:
 
     def wait(self, session_id: str, timeout: int = None) -> dict:
         """Block until the process exits, the timeout elapses, or the user interrupts.
-
         ``timeout`` defaults to (and is clamped by) TERMINAL_TIMEOUT. Returns a dict
-        with status exited|timeout|interrupted|not_found|error and an output snapshot.
-        """
+        with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import is_interrupted as _is_interrupted
 
         try:
@@ -1495,12 +1461,10 @@ class ProcessRegistry:
         self, session_id: str, *, source: str = "process.kill", consume_output: bool = True,
     ) -> dict:
         """Kill a background process and return its output snapshot.
-
         ``consume_output`` is true for explicit tool/RPC kills (the caller sees the
         output). Bulk cleanup passes false so it doesn't suppress an autonomous
         completion notification — except abandoned-turn reaping (``kill_started_since``),
-        which passes true so a killed abandoned process can't revive stopped work.
-        """
+        which passes true so a killed abandoned process can't revive stopped work."""
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
@@ -1620,12 +1584,10 @@ class ProcessRegistry:
 
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
         """Send data + newline to stdin (like pressing Enter).
-
         On a Windows PTY, Enter is a carriage return: ConPTY treats ``\\r`` as
         end-of-line and a bare ``\\n`` through pywinpty is NOT a line terminator — the
         child's blocking line read (``readline()``, Go ``bufio.Scanner``) never returns
-        and the process hangs looking healthy. ``\\r\\n`` gives it both; POSIX keeps ``\\n``.
-        """
+        and the process hangs looking healthy. ``\\r\\n`` gives it both; POSIX keeps ``\\n``."""
         session = self.get(session_id)
         is_windows_pty = bool(_IS_WINDOWS and session is not None and session._pty)
         return self.write_stdin(session_id, data + ("\r\n" if is_windows_pty else "\n"))
@@ -1939,8 +1901,7 @@ def _redact_process_result(result: dict) -> dict:
     """Redact secrets from background-process output before it reaches the model,
     session.db and CLI, mirroring the foreground ``terminal`` redaction so the two
     surfaces can't diverge. Respects ``security.redact_secrets``; ``redact_terminal_output``
-    picks ``code_file`` from the recorded command. The command itself is redacted too.
-    """
+    picks ``code_file`` from the recorded command. The command itself is redacted too."""
     if not isinstance(result, dict):
         return result
     from agent.redact import redact_sensitive_text, redact_terminal_output
