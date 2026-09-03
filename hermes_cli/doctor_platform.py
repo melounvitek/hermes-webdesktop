@@ -1,7 +1,5 @@
 """Host-platform checks for hermes doctor: interpreter, SQLite, certificates, macOS TCC, gateway supervision, command install.
-
-Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching).
-"""
+Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching)."""
 
 from __future__ import annotations
 
@@ -43,7 +41,6 @@ def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
 def _hermes_database_paths(hermes_home: Path) -> list[tuple[str, Path]]:
     """(display name, path) pairs for Hermes-managed SQLite databases: backup.py's per-profile store list + per-board kanban.db."""
     from hermes_cli.backup import _QUICK_STATE_FILES
-
     entries = [(name, hermes_home / name) for name in _QUICK_STATE_FILES if name.endswith(".db")]
     for board_db in sorted((hermes_home / "kanban" / "boards").glob("*/kanban.db")):
         entries.append((str(board_db.relative_to(hermes_home)), board_db))
@@ -75,7 +72,6 @@ def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
     ``run_doctor`` in-process with live ``SessionDB`` connections — the helper refuses then (unreadable).
     """
     from hermes_cli.sqlite_safe_read import has_live_connection, read_header_bytes_preopen
-
     header = read_header_bytes_preopen(db_path, length=20)
     if header is None:
         return None, "database is open in this process" if has_live_connection(db_path) else _unreadable_reason(db_path)
@@ -89,7 +85,6 @@ def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
 
 def _format_db_size(db_path: Path) -> str:
     from hermes_cli.backup import _format_size  # backup.py owns size formatting
-
     try:
         return _format_size(db_path.stat().st_size)
     except OSError:
@@ -100,7 +95,6 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
     """List each database's journal mode; warn on WAL under a vulnerable SQLite."""
     from hermes_cli.doctor import HERMES_HOME
     from hermes_state import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
-
     vulnerable = is_sqlite_wal_reset_vulnerable(version_info)
     try:
         databases = _hermes_database_paths(hermes_home if hermes_home is not None else HERMES_HOME)
@@ -174,13 +168,11 @@ def _check_s6_supervision(issues: list[str]) -> None:
         return
     if detect_service_manager() != "s6":
         return
-
     _section("s6 Supervision")
     mgr = S6ServiceManager()
     for static in ("main-hermes", "dashboard"):  # s6-rc symlinks under /run/service/, same s6-svstat probe
         (check_ok if mgr.is_running(static) else check_info)(
             f"{static}: up" if mgr.is_running(static) else f"{static}: down (expected if not enabled via env)")
-
     profiles = mgr.list_profile_gateways()
     if not profiles:
         return check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
@@ -212,13 +204,11 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
     except Exception as e:
         check_warn("SSL certificate check skipped", str(e))
         return
-
     check_fail("SSL CA certificate bundle is broken", first_error)
     pip_cmd = f"{sys.executable} -m pip install --force-reinstall certifi"
     if not should_fix:
         issues.append(f"Repair the CA bundle: run `hermes doctor --fix`, or `{pip_cmd}`")
         return
-
     print("    → Repairing: force-reinstalling certifi...")
     try:
         result = subprocess.run([sys.executable, "-m", "pip", "install", "--force-reinstall", "certifi"],
@@ -230,13 +220,11 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
         check_fail(*failure)
         issues.append(f"Reinstall certifi manually: {pip_cmd}")
         return
-
     # Drop cached certifi modules so where() resolves the fresh install without a restart.
     import importlib
     for mod_name in [m for m in sys.modules if m == "certifi" or m.startswith("certifi.")]:
         sys.modules.pop(mod_name, None)
     importlib.invalidate_caches()
-
     try:
         verify_ca_bundle_with_fallback()
         check_ok("SSL CA certificate bundle repaired (certifi reinstalled)")
@@ -256,7 +244,6 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         return
     if not is_linux() or detect_service_manager() == "s6" or not get_systemd_unit_path().exists():
         return
-
     _section("Gateway Service")
     linger_enabled, linger_detail = get_systemd_linger_status()
     if linger_enabled is True:
@@ -325,7 +312,6 @@ def check_macos_tcc_anchor(should_fix: bool = False) -> None:
     Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI."""
     try:
         from hermes_cli import macos_tcc_anchor as tcc
-
         status, detail = tcc.tcc_anchor_state()
         if status == "skip":
             return
@@ -403,13 +389,11 @@ def _check_python_environment(should_fix: bool) -> Finding:
         check_warn(label, "(3.10+ recommended)")
     else:
         _fail_and_issue(label, "(3.10+ required)", "Upgrade Python to 3.10+", f.issues)
-
     # Linked SQLite: version + source id matter independently of the Python minor (uv's
     # python-build-standalone can keep a vulnerable SQLite across upgrades).
     try:
         import sqlite3
         from hermes_state import is_sqlite_wal_reset_vulnerable, sqlite_source_id
-
         src = sqlite_source_id()
         if is_sqlite_wal_reset_vulnerable():
             # Warn-only: Hermes already refuses WAL on fresh DBs and runtime repair is best-effort.
@@ -421,7 +405,6 @@ def _check_python_environment(should_fix: bool) -> Finding:
         _report_database_journal_modes()
     except Exception as e:
         check_warn(f"SQLite version probe failed: {e}")
-
     check_bool(sys.prefix != sys.base_prefix, "Virtual environment active", ("Not in virtual environment", "(recommended)"))
     check_macos_tcc_anchor(should_fix=should_fix)
     check_macos_full_disk_access()
@@ -478,13 +461,11 @@ def _check_command_installation(should_fix: bool) -> Finding:
     else:
         link_dir, display = Path.home() / ".local" / "bin", "~/.local/bin"
     link = link_dir / "hermes"
-
     if venv_bin is None:
         check_warn("Venv entry point not found", "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')")
         f.manual_issues.append(f"Reinstall entry point: cd {PROJECT_ROOT} && source venv/bin/activate && pip install -e '.[all]'")
         return f
     check_ok(f"Venv entry point exists ({venv_bin.relative_to(PROJECT_ROOT)})")
-
     if link.is_symlink():
         target, expected = link.resolve(), venv_bin.resolve()
         if target == expected:

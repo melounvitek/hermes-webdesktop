@@ -1,8 +1,5 @@
 """HERMES_HOME state checks for hermes doctor: directories, memory files, state.db health, skills hub, memory provider, profiles.
-
-Split out of ``hermes_cli/doctor.py``; every moved name is re-imported there, so
-``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching) as before.
-"""
+Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching)."""
 
 from __future__ import annotations
 
@@ -44,8 +41,7 @@ def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
         return {}
 
 
-# state.db size threshold (advisory only — deliberately a module constant, not config:
-# doctor warnings are guidance, not policy).
+# state.db size threshold — advisory only; deliberately a module constant, not config (doctor warnings are guidance, not policy).
 STATE_DB_SIZE_WARN_BYTES = 1 * 1024 * 1024 * 1024   # 1 GiB logical size
 
 
@@ -87,19 +83,15 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
         lines.append(("warn", f"state.db FTS repair is blocked after {deferral.get('attempts') or '?'} deferral(s) "
                       f"by PID(s) {deferral.get('holder_pids') or [] or 'unknown'}",
                       "(stop the listed processes, then run 'hermes sessions optimize-storage' with the gateway stopped)"))
-
-    # Advisory: oversized database. Suggest auto_prune, and — when the v23 FTS rebuild is pending OR
-    # the DB still carries the legacy inline trigram layout (fts_storage_version marker absent) —
-    # the offline optimize-storage pass that migrates/compacts the FTS indexes.
+    # Oversized DB: suggest auto_prune, plus the offline optimize-storage pass when the v23 FTS rebuild is
+    # pending OR the DB still carries the legacy inline trigram layout (fts_storage_version marker absent).
     if logical is not None and logical > STATE_DB_SIZE_WARN_BYTES:
         detail = "consider enabling sessions.auto_prune in config.yaml to bound growth"
         legacy_trigram = fts is not None and fts.get("messages_fts_trigram") and stats.get("fts_storage_version") is None
         if stats.get("fts_rebuild_pending") or legacy_trigram:
             detail += "; run 'hermes sessions optimize-storage' offline (with the gateway stopped) to compact FTS storage"
         lines.append(("warn", f"state.db is large ({_human_bytes(logical)})", f"({detail})"))
-
-    # WAL runaway is deliberately NOT warned here: the WAL check later in the state.db section already
-    # warns above 50 MB and offers a checkpoint via --fix; a second warning would only duplicate it.
+    # WAL runaway is deliberately NOT warned here: _state_db_wal already warns above 50 MB and offers --fix.
     return lines
 
 
@@ -114,16 +106,12 @@ def _check_directory_structure(should_fix: bool) -> Finding:
     f = Finding()
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
-
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
     memory_on = _memory_enabled or _user_profile_enabled
-
-    # Expected subdirectories. The built-in file store does not create or consume memories/ when
-    # both targets are disabled, so stale migration files are not an active diagnostic surface.
+    # The built-in file store neither creates nor consumes memories/ when both targets are disabled.
     for subdir_name in ["cron", "sessions", "logs", "skills"] + (["memories"] if memory_on else []):
         ensure_dir(f, should_fix, hermes_home / subdir_name, f"{_DHH}/{subdir_name}/ exists",
                    f"Created {_DHH}/{subdir_name}/", f"{_DHH}/{subdir_name}/ not found")
-
     # SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
@@ -141,9 +129,8 @@ def _check_directory_structure(should_fix: bool) -> Finding:
                                  "You are Hermes, a helpful AI assistant.\n", encoding="utf-8")
             check_ok(f"Created {_DHH}/SOUL.md with basic template")
             f.fixed += 1
-
-    # Check only enabled built-in stores. External providers are additive, but users can explicitly
-    # disable either legacy file target; stale migration files must not read as active memory usage.
+    # Only enabled built-in stores: users can disable either legacy file target, and stale migration files
+    # must not read as active memory usage.
     memories_dir = hermes_home / "memories"
     if not memory_on:
         check_info("Built-in memory files disabled by config")
@@ -212,8 +199,8 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
     """Session count + FTS write-health probe; malformed-schema path when even COUNT(*) fails."""
     try:
         check_ok(f"{_DHH}/state.db exists ({_session_count(state_db_path)} sessions)")
-        # `SELECT COUNT(*)` succeeds even when the FTS index is corrupt and every message write
-        # fails through the triggers; _db_opens_cleanly drives a rolled-back write to surface that.
+        # COUNT(*) succeeds even when the FTS index is corrupt and every write fails through the triggers;
+        # _db_opens_cleanly drives a rolled-back write to surface that.
         from hermes_state import _db_opens_cleanly
         _write_reason = _db_opens_cleanly(state_db_path)
         if _write_reason is not None:
@@ -224,8 +211,8 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
         if not is_malformed_db_error(e):
             check_warn(f"{_DHH}/state.db exists but has issues: {e}")
             return
-        # sqlite_master itself is malformed (e.g. duplicate messages_fts): every statement fails
-        # before it runs, so this is NOT a plain FTS rebuild — repair sqlite_master in place (backup first).
+        # sqlite_master itself is malformed (e.g. duplicate messages_fts): every statement fails before it runs,
+        # so this is NOT a plain FTS rebuild — repair sqlite_master in place (backup first).
         check_warn(f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)", f"({e})")
         _repair_state_db(f, should_fix, state_db_path, "schema")
 
@@ -314,7 +301,6 @@ def _check_skills_hub(should_fix: bool) -> Finding:
         q_count = sum(1 for d in quarantine.iterdir() if d.is_dir()) if quarantine.exists() else 0
         if q_count > 0:
             check_warn(f"{q_count} skill(s) in quarantine", "(pending review)")
-
     from hermes_cli.config import get_env_value
     if get_env_value("GITHUB_TOKEN") or get_env_value("GH_TOKEN"):
         check_ok("GitHub token configured (authenticated API access)")
@@ -423,7 +409,6 @@ def _check_profiles(should_fix: bool, f: Finding) -> None:
         if not (wrapper_dir / p.name).exists():
             parts.append("no alias")
         check_ok(f"  {p.name}: {', '.join(parts) if parts else 'configured'}")
-
     # Orphan wrappers
     if wrapper_dir.is_dir():
         for wrapper in wrapper_dir.iterdir():

@@ -1,8 +1,5 @@
 """Configuration-file checks for hermes doctor: .env, config.yaml validation, drift, deprecations.
-
-Split out of ``hermes_cli/doctor.py``; every moved name is re-imported there, so
-``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching) as before.
-"""
+Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_cli.doctor.<name>`` keeps resolving (and monkeypatching)."""
 
 from __future__ import annotations
 
@@ -19,10 +16,9 @@ def _has_provider_env_config(content: str) -> bool:
     return any(key in content for key in _PROVIDER_ENV_HINTS)
 
 
-# Deprecated / legacy config keys still read for back-compat. Doctor surfaces them as non-failing
-# warnings with the modern replacement — it does not auto-migrate (migrations live in config.py).
+# Legacy config keys still read for back-compat: warn-only with the modern replacement, never auto-migrated
+# (migrations live in config.py). (section, key, replacement)
 _DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
-    # (section, key, replacement)
     ("display", "tool_progress_overrides", "display.platforms"),
     ("delegation", "max_async_children", "delegation.max_concurrent_children"),
     ("compression", "summary_model", "auxiliary.compression"),
@@ -31,11 +27,10 @@ _DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-# Deprecated env vars (checked in the .env file, not process env, so config→env
-# bridges like terminal.cwd → TERMINAL_CWD do not false-positive).
+# Deprecated env vars (checked in the .env FILE, not process env, so config→env bridges like terminal.cwd →
+# TERMINAL_CWD do not false-positive). HERMES_TOOL_PROGRESS is silently ignored since the v12 config floor
+# removed its only consumer; HERMES_TOOL_PROGRESS_MODE is still read by the gateway as a back-compat fallback.
 _DEPRECATED_ENV_VARS: tuple[tuple[str, str], ...] = (
-    # HERMES_TOOL_PROGRESS is silently ignored since the v12 config floor removed its only consumer;
-    # HERMES_TOOL_PROGRESS_MODE is still read by the gateway as a back-compat fallback.
     ("HERMES_TOOL_PROGRESS", "display.tool_progress in config.yaml — ignored/unsupported since config floor v12"),
     ("HERMES_TOOL_PROGRESS_MODE", "display.tool_progress in config.yaml"),
     ("TERMINAL_CWD", "terminal.cwd in config.yaml"),
@@ -75,11 +70,9 @@ def collect_relay_plugin_cutover_findings(raw_config: dict | None, env_map: dict
     if isinstance(plugins, dict):
         findings += [(f"plugins.enabled: {key}", f"remove it and configure {RELAY_PLUGINS_CONFIG_ENV}")
                      for key in legacy_relay_plugin_keys(plugins.get("enabled"))]
-
     effective_env = dict(env_map or {})
-    # Fall through to process-level env ONLY when no explicit env_map was given: run_doctor passes
-    # None and wants live-process vars included, but callers (and tests) handing in an explicit map
-    # describe a complete environment — merging os.environ on top breaks hermeticity.
+    # Fall through to process env ONLY when no explicit env_map was given: run_doctor passes None and wants
+    # live-process vars, but an explicit map describes a complete environment (merging os.environ breaks hermeticity).
     if env_map is None:
         for name in (*LEGACY_RELAY_EXPORT_ENV_VARS, RELAY_PLUGINS_CONFIG_ENV):
             if name not in effective_env and os.environ.get(name) is not None:
@@ -99,7 +92,6 @@ def report_deprecated_config_and_env(raw_config: dict | None = None, env_map: di
     if not findings:
         check_ok("No deprecated config keys or env vars")
         return findings
-
     for legacy, replacement in deprecated:
         check_warn(f"Deprecated: {legacy}", f"(use {replacement} instead)")
         check_info(f"Replace {legacy} → {replacement} (warn-only; not auto-migrated here)")
@@ -153,8 +145,7 @@ def _check_env_file(should_fix: bool) -> Finding:
     env_path = HERMES_HOME / '.env'
     if env_path.exists():
         check_ok(f"{_DHH}/.env file exists")
-        # Prefer UTF-8 (.env is written as UTF-8 elsewhere); latin-1 fallback for Windows
-        # Notepad/cp1252 files — matches hermes_cli.env_loader._load_dotenv_with_fallback.
+        # UTF-8 first; latin-1 fallback for Windows Notepad/cp1252 files (matches env_loader._load_dotenv_with_fallback).
         try:
             content = env_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -206,7 +197,6 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
             custom_providers = []
     except Exception:
         pass
-
     user_providers = cfg.get("providers")
     if isinstance(user_providers, dict):
         from hermes_cli.config import is_provider_enabled
@@ -219,8 +209,8 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
     return known, custom_providers, resolve_auth, normalize, resolve_full
 
 
-# Vendor/model slugs are valid on aggregator-style providers and on any custom provider. Fireworks'
-# native IDs are slash-form (accounts/fireworks/models/...); DeepInfra's catalog is exclusively vendor/model.
+# Vendor/model slugs are valid on aggregators and any custom provider; Fireworks' native IDs are slash-form
+# (accounts/fireworks/models/...) and DeepInfra's catalog is exclusively vendor/model.
 _VENDOR_SLUG_PROVIDERS = {
     "openrouter", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface",
     "lmstudio", "nous", "nvidia", "fireworks", "deepinfra",
@@ -249,7 +239,6 @@ def _validate_model_config(config_path, issues: list) -> None:
     provider_raw = (model_section.get("provider") or "").strip()
     provider = provider_raw.lower()
     default_model = (model_section.get("default") or model_section.get("model") or "").strip()
-
     known_providers, custom_providers, resolve_auth, normalize, resolve_full = _known_provider_ids(cfg)
     valid_provider_ids = set(known_providers)
     accept = {provider} if provider else set()
@@ -258,7 +247,6 @@ def _validate_model_config(config_path, issues: list) -> None:
             valid_provider_ids.add(normalize(known_provider))
         except Exception:
             continue
-
     runtime_provider = catalog_provider = provider
     if provider and provider not in {"auto", "custom"}:
         if resolve_auth is not None:
@@ -272,7 +260,6 @@ def _validate_model_config(config_path, issues: list) -> None:
             catalog_provider = provider_def.id if provider_def is not None else None
             if catalog_provider is not None:
                 accept.add(catalog_provider)
-
     if provider and provider != "auto" and (catalog_provider is None or (known_providers and not (accept & valid_provider_ids))):
         known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
         _fail_and_issue(
@@ -281,7 +268,6 @@ def _validate_model_config(config_path, issues: list) -> None:
             f"Fix: run 'hermes config set model.provider <valid_provider>'",
             issues,
         )
-
     policy_id = str(runtime_provider or catalog_provider or "").strip().lower()
     accepts_vendor_slug = policy_id in _VENDOR_SLUG_PROVIDERS or policy_id == "custom" or policy_id.startswith("custom:")
     if default_model and "/" in default_model and policy_id and not accepts_vendor_slug:
@@ -289,7 +275,6 @@ def _validate_model_config(config_path, issues: list) -> None:
                    "(vendor-prefixed slugs belong to aggregators like openrouter)")
         issues.append(f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
                       "Either set model.provider to 'openrouter', or drop the vendor prefix.")
-
     if runtime_provider and runtime_provider not in ("auto", "custom"):
         from hermes_cli.doctor import _DHH
         try:

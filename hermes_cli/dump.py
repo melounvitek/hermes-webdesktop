@@ -28,10 +28,8 @@ def _dotenv_key_names() -> set[str]:
         if line.lower().startswith("export "):
             line = line[len("export "):].lstrip()
         name, _, value = line.partition("=")
-        name = name.strip()
-        # A bare `KEY=` (empty value) is effectively unset for the backend.
-        if name and value.strip().strip("'\""):
-            names.add(name)
+        if name.strip() and value.strip().strip("'\""):  # a bare `KEY=` is effectively unset for the backend
+            names.add(name.strip())
     return names
 
 
@@ -40,11 +38,9 @@ def _git_output(project_root: Path, *args: str) -> str:
     try:
         result = subprocess.run(["git", *args], capture_output=True, text=True, encoding='utf-8', errors='replace',
                                 timeout=5, cwd=str(project_root))
-        if result.returncode == 0:
-            return result.stdout.strip()
+        return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _get_git_commit(project_root: Path) -> str:
@@ -229,7 +225,6 @@ def _openai_version() -> str:
 def run_dump(args):
     """Output a compact, copy-pasteable setup summary."""
     show_keys = getattr(args, "show_keys", False)
-
     # Load env from .env file so key checks work
     load_hermes_dotenv(hermes_home=get_env_path().parent, project_env=get_project_root() / ".env")
     project_root = get_project_root()
@@ -245,7 +240,6 @@ def run_dump(args):
     except Exception:
         profile = "(default)"
     openai_ver = _openai_version()
-
     lines = [
         "--- hermes dump ---",
         f"version:          {_version_line(project_root)}",
@@ -261,7 +255,6 @@ def run_dump(args):
         "api_keys:",
         *_api_key_lines(show_keys),
     ]
-
     toolsets = config.get("toolsets", ["hermes-cli"])
     platforms = [name for name, env in _PLATFORM_ENV_VARS.items() if os.getenv(env)]
     lines += [
@@ -275,7 +268,6 @@ def run_dump(args):
         f"  cron_jobs:          {_cron_summary(hermes_home)}",
         f"  skills:             {_count_skills(hermes_home)}",
     ]
-
     overrides = _config_overrides(config)
     if overrides:
         lines += ["", "config_overrides:"] + [f"  {key}: {val}" for key, val in overrides.items()]
