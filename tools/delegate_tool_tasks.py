@@ -36,8 +36,7 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
 _PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
 
 _TEMPLATE_MARKER_RE = re.compile(
-    r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>"
-    r"|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
+    r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
 )
 
 _MIN_BATCH_GOAL_LEN = 10
@@ -58,16 +57,14 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
         if _PLACEHOLDER_GOAL_RE.match(normalized):
             return (
                 f"Task {i} has a placeholder goal ({goal!r}). Replace it "
-                "with a specific, self-contained description of what the "
-                "subagent should accomplish."
+                "with a specific, self-contained description of what the subagent should accomplish."
             )
         marker = _TEMPLATE_MARKER_RE.search(goal)
         if marker:
             return (
                 f"Task {i} goal contains an unexpanded template marker "
                 f"({marker.group(0)!r}). Substitute the real value before "
-                "calling delegate_task — subagents cannot resolve "
-                "placeholders."
+                "calling delegate_task — subagents cannot resolve placeholders."
             )
         if len(goal) < _MIN_BATCH_GOAL_LEN and len(task_list) >= 2:
             # Multi-task fan-outs with terse goals are usually unexpanded
@@ -98,10 +95,8 @@ def _normalize_task_list(
     if tasks and isinstance(tasks, list):
         if len(tasks) > max_children:
             return None, (
-                f"Too many tasks: {len(tasks)} provided, but "
-                f"max_concurrent_children is {max_children}. "
-                f"Either reduce the task count, split into multiple "
-                f"delegate_task calls, or increase "
+                f"Too many tasks: {len(tasks)} provided, but max_concurrent_children is {max_children}. "
+                f"Either reduce the task count, split into multiple delegate_task calls, or increase "
                 f"delegation.max_concurrent_children in config.yaml."
             )
         task_list = tasks
@@ -113,8 +108,7 @@ def _normalize_task_list(
     else:
         return None, (
             "No tasks provided. Pass tasks=[{goal: '...', context: '...'}, "
-            "...] — one entry per subagent (a single task is a one-entry "
-            "array)."
+            "...] — one entry per subagent (a single task is a one-entry array)."
         )
 
     for i, task in enumerate(task_list):
@@ -138,7 +132,6 @@ def _coerce_task_schemas(
     call before any child spawns; schema-less tasks resolve to None and take no
     new code paths downstream."""
     from tools.delegation_output_schema import coerce_output_schema
-
     task_schemas: List[Optional[Dict[str, Any]]] = []
     for i, task in enumerate(task_list):
         raw_schema = task.get("output_schema")

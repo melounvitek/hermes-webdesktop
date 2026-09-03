@@ -15,10 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 logger = logging.getLogger("tools.delegate_tool")
 
 def _extract_output_tail(
-    result: Dict[str, Any],
-    *,
-    max_entries: int = 12,
-    max_chars: int = 8000,
+    result: Dict[str, Any], *, max_entries: int = 12, max_chars: int = 8000,
 ) -> List[Dict[str, Any]]:
     """Pull the last N tool-call results from a child's conversation.
 
@@ -260,13 +257,11 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
     try:
         from hermes_constants import get_hermes_dir
         import datetime as _dt
-
         cache_dir = get_hermes_dir("cache/delegation", "delegation_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
         ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         path = cache_dir / f"subagent-summary-{task_index}-{ts}.txt"
         from tools.spill_safety import write_text_exclusive
-
         # Exclusive symlink-refusing create; not private because
         # cache/delegation is bind-mounted read-only into remote backends
         # whose container UID must be able to read it.
@@ -304,8 +299,7 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
     spill_path = _spill_summary_to_file(task_index, summary)
 
     footer_lines = [
-        "",
-        "─" * 8 + " [SUMMARY TRUNCATED] " + "─" * 8,
+        "", "─" * 8 + " [SUMMARY TRUNCATED] " + "─" * 8,
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
         f"of {original_len:,} total — trimmed to protect the parent's context window.",
     ]
@@ -319,10 +313,7 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
             f"summary; raise/lower offset to page through it)."
         )
     else:
-        footer_lines.append(
-            "Full output could not be stored to disk; the head+tail above is "
-            "all that was preserved."
-        )
+        footer_lines.append("Full output could not be stored to disk; the head+tail above is all that was preserved.")
     footer_lines.append("─" * 37)
 
     model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n".join(footer_lines)
@@ -400,10 +391,7 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
         if spill_path:
             entry["summary_full_path"] = spill_path
         logger.debug(
-            "[subagent-%s] summary trimmed %d → ~%d chars (spill=%s)",
-            entry.get("task_index", "?"),
-            original_len,
-            cap,
+            "[subagent-%s] summary trimmed %d → ~%d chars (spill=%s)", entry.get("task_index", "?"), original_len, cap,
             spill_path or "none",
         )
 
@@ -417,7 +405,6 @@ def _build_child_preserving_parent_tools(**kwargs):
     """Build a child without leaking its resolved toolset into the parent."""
     from tools.delegate_tool import _build_child_agent
     import model_tools
-
     with _CHILD_CONSTRUCTION_LOCK:
         parent_tool_names = list(model_tools._last_resolved_tool_names)
         try:
@@ -453,8 +440,7 @@ def _notify_memory_manager(results, task_list, child_by_index, parent_agent) -> 
             task_index = entry.get("task_index", -1)
             in_range = isinstance(task_index, int) and 0 <= task_index < len(task_list)
             memory.on_delegation(
-                task=task_list[task_index]["goal"] if in_range else "",
-                result=entry.get("summary", "") or "",
+                task=task_list[task_index]["goal"] if in_range else "", result=entry.get("summary", "") or "",
                 child_session_id=getattr(child_by_index.get(task_index), "session_id", ""),
             )
         except Exception:
@@ -482,13 +468,10 @@ def _fire_subagent_stop_hooks(results, child_by_index, parent_agent) -> float:
         try:
             child = child_by_index.get(entry.get("task_index", -1))
             invoke_hook(
-                "subagent_stop",
-                parent_session_id=getattr(parent_agent, "session_id", None),
+                "subagent_stop", parent_session_id=getattr(parent_agent, "session_id", None),
                 parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
-                child_session_id=getattr(child, "session_id", None),
-                child_role=child_role,
-                child_summary=entry.get("summary"),
-                child_status=entry.get("status"),
+                child_session_id=getattr(child, "session_id", None), child_role=child_role,
+                child_summary=entry.get("summary"), child_status=entry.get("status"),
                 tool_call_history=_subagent_stop_tool_call_history(entry.get("tool_trace")),
                 duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
             )
@@ -512,9 +495,7 @@ def _rollup_children_cost(parent_agent, children_cost_total: float) -> None:
         logger.debug("Subagent cost rollup failed", exc_info=True)
 
 def _finalize_child_results(
-    results: List[Dict[str, Any]],
-    task_list: List[Dict[str, Any]],
-    children: List[tuple[int, Dict[str, Any], Any]],
+    results: List[Dict[str, Any]], task_list: List[Dict[str, Any]], children: List[tuple[int, Dict[str, Any], Any]],
     parent_agent,
 ) -> None:
     """Apply host-owned summary, memory, hook, and cost contracts once."""

@@ -33,7 +33,6 @@ def _is_mcp_toolset_name(name: str) -> bool:
         return True
     try:
         from tools.registry import registry
-
         target = registry.get_toolset_alias_target(str(name))
     except Exception:
         target = None
@@ -118,7 +117,6 @@ def _resolve_child_toolsets(
         parent_toolsets = set(parent_enabled)
     elif parent_agent and hasattr(parent_agent, "valid_tool_names"):
         import model_tools
-
         parent_toolsets = {
             ts
             for name in parent_agent.valid_tool_names

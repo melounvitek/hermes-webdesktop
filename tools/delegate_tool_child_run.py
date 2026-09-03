@@ -90,7 +90,6 @@ def _signal_child_stop(child: Any, *reason: str) -> None:
 
 def _format_thread_stack(frame: Any, indent: str) -> List[str]:
     import traceback as _traceback
-
     return [f"{indent}{sub}" for frame_line in _traceback.format_stack(frame) for sub in frame_line.rstrip().split("\n")]
 
 _DIAG_CHILD_ATTRS = (
@@ -121,7 +120,6 @@ def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     often parked on a helper thread, so a pre-HTTP wedge is indistinguishable
     from a slow provider without the full picture."""
     import sys as _sys
-
     lines = ["## Worker thread stack at timeout"]
     frames = _sys._current_frames()
     if worker_thread is not None and worker_thread.is_alive():
@@ -153,13 +151,8 @@ def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     return lines
 
 def _dump_subagent_timeout_diagnostic(
-    *,
-    child: Any,
-    task_index: int,
-    timeout_seconds: float,
-    duration_seconds: float,
-    worker_thread: Optional[threading.Thread],
-    goal: str,
+    *, child: Any, task_index: int, timeout_seconds: float, duration_seconds: float,
+    worker_thread: Optional[threading.Thread], goal: str,
 ) -> Optional[str]:
     """Write a structured diagnostic for a subagent that timed out before any
     API call (users hit "timed out with no response" and 0 API calls with no way
@@ -170,7 +163,6 @@ def _dump_subagent_timeout_diagnostic(
     try:
         from hermes_constants import get_hermes_home
         import datetime as _dt
-
         logs_dir = get_hermes_home() / "logs"
         try:
             logs_dir.mkdir(parents=True, exist_ok=True)
@@ -183,19 +175,10 @@ def _dump_subagent_timeout_diagnostic(
         if len(_goal_preview) > 1000:
             _goal_preview = _goal_preview[:1000] + " ...[truncated]"
         lines: List[str] = [
-            "# Subagent timeout diagnostic — issue #14726",
-            f"# Generated: {_dt.datetime.now().isoformat()}",
-            "",
-            "## Timeout",
-            f"  task_index:        {task_index}",
-            f"  subagent_id:       {subagent_id}",
-            f"  configured_timeout: {timeout_seconds}s",
-            f"  actual_duration:   {duration_seconds:.2f}s",
-            "",
-            "## Goal",
-            _goal_preview or "(empty)",
-            "",
-            "## Child config",
+            "# Subagent timeout diagnostic — issue #14726", f"# Generated: {_dt.datetime.now().isoformat()}", "",
+            "## Timeout", f"  task_index:        {task_index}", f"  subagent_id:       {subagent_id}",
+            f"  configured_timeout: {timeout_seconds}s", f"  actual_duration:   {duration_seconds:.2f}s", "", "## Goal",
+            _goal_preview or "(empty)", "", "## Child config",
         ]
         for attr in _DIAG_CHILD_ATTRS:
             try:
@@ -235,7 +218,6 @@ def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
     and the finally-path join can be skipped safely.
     """
     from tools.delegate_tool import (_HEARTBEAT_INTERVAL, _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL)
-
     _heartbeat_stop = threading.Event()
     # Stale detection: a cycle counts as stale when (tool, iteration,
     # activity_ts) all froze; thresholds differ idle vs in-tool.
@@ -289,12 +271,7 @@ def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
     return _heartbeat_stop, threading.Thread(target=_heartbeat_loop, daemon=True)
 
 def _register_child(
-    child: Any,
-    parent_agent: Any,
-    goal: str,
-    *,
-    owner_session_id: Optional[str],
-    owner_transport: Any,
+    child: Any, parent_agent: Any, goal: str, *, owner_session_id: Optional[str], owner_transport: Any,
     owner_session_record: Any,
 ) -> Optional[str]:
     """Register the live child in the module registry; return its subagent_id.
@@ -308,7 +285,6 @@ def _register_child(
     if owner_session_id is None:
         with _quiet(None):
             from gateway.session_context import get_session_env
-
             owner_session_id = get_session_env("HERMES_UI_SESSION_ID", "") or None
     if owner_session_id and (owner_transport is None or owner_session_record is None):
         owner_transport, owner_session_record = _capture_gateway_steer_authority(owner_session_id)
@@ -360,7 +336,6 @@ class _WorktreeReporter:
         if info is None:
             return
         from tools import subagent_worktree
-
         try:
             entry_dict["worktree"] = subagent_worktree.finalize_subagent_worktree(info)
         except Exception as e:
@@ -383,19 +358,16 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
     child's terminal starts there). Git-only, local-backend-only; failures
     degrade silently to the shared workspace. Returns the worktree info or None."""
     from tools.delegate_tool import _get_worktree_isolation, _resolve_workspace_hint
-
     if not _get_worktree_isolation():
         return None
     try:
         from tools import subagent_worktree
-
         if not subagent_worktree.local_backend_active():
             logger.debug("worktree isolation skipped: non-local terminal backend")
             return None
         _parent_cwd = None
         with _quiet(None):
             from tools.terminal_tool import get_session_cwd as _gsc
-
             _parent_cwd = _gsc(parent_task_id)
         return subagent_worktree.create_subagent_worktree(
             _parent_cwd or _resolve_workspace_hint(parent_agent), subagent_id=subagent_id,
@@ -405,12 +377,7 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
         return None
 
 def _seed_child_workspace(
-    child: Any,
-    parent_agent: Any,
-    goal: str,
-    task_index: int,
-    subagent_id: Optional[str],
-    worktree: _WorktreeReporter,
+    child: Any, parent_agent: Any, goal: str, task_index: int, subagent_id: Optional[str], worktree: _WorktreeReporter,
 ) -> _ChildWorkspace:
     """Seed cwd/container aliases and optional worktree isolation for the child.
 
@@ -418,7 +385,6 @@ def _seed_child_workspace(
     worktree contract note when isolation engaged.
     """
     import uuid as _uuid
-
     child_task_id = subagent_id or f"subagent-{task_index}-{_uuid.uuid4().hex[:8]}"
     parent_task_id = getattr(parent_agent, "_current_task_id", None)
     # Seed the child's cwd record from the parent's: same starting directory,
@@ -426,7 +392,6 @@ def _seed_child_workspace(
     # isolation keys containers by task_id; the child must share the PARENT's.
     with _quiet("Child cwd seed failed: %s"):
         from tools.terminal_tool import get_session_cwd, record_session_cwd, register_container_alias
-
         record_session_cwd(child_task_id, get_session_cwd(parent_task_id))
         register_container_alias(child_task_id, parent_task_id)
 
@@ -434,12 +399,10 @@ def _seed_child_workspace(
     if _worktree_info is not None:
         with _quiet("worktree cwd seed failed: %s"):
             from tools.terminal_tool import record_session_cwd as _rsc
-
             _rsc(child_task_id, _worktree_info["path"])
         # The child's context is already built; carry the isolation contract on
         # the goal message instead (same turn, no system-prompt mutation).
         from tools.subagent_worktree import build_worktree_context_note
-
         goal = goal + build_worktree_context_note(_worktree_info)
 
     worktree.info = _worktree_info
@@ -508,16 +471,8 @@ def _make_text_relay(child_progress_cb: Any):
     return _relay_child_text
 
 def _await_child(
-    child: Any,
-    goal: str,
-    ws: "_ChildWorkspace",
-    relay_child_text: Any,
-    *,
-    task_index: int,
-    subagent_id: Optional[str],
-    child_start: float,
-    child_progress_cb: Any,
-    worktree: _WorktreeReporter,
+    child: Any, goal: str, ws: "_ChildWorkspace", relay_child_text: Any, *, task_index: int, subagent_id: Optional[str],
+    child_start: float, child_progress_cb: Any, worktree: _WorktreeReporter,
 ) -> tuple[Optional[Dict[str, Any]], Optional[_ChildFailure]]:
     """Run the child's conversation on a daemon worker; ``(result, None)`` or
     ``(None, failure)`` on timeout/exception.
@@ -531,7 +486,6 @@ def _await_child(
     """
     from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
     from tools.daemon_pool import DaemonThreadPoolExecutor
-
     child_timeout = _get_child_timeout()
     executor = DaemonThreadPoolExecutor(
         max_workers=1, initializer=_set_subagent_approval_cb, initargs=(_get_subagent_approval_callback(),),
@@ -542,7 +496,6 @@ def _await_child(
     def _run_with_thread_capture():
         worker_thread_holder["t"] = threading.current_thread()
         from agent.delegation_context import delegated_child_context
-
         with delegated_child_context(str(getattr(child, "session_id", "") or "")):
             return child.run_conversation(user_message=goal, task_id=ws.child_task_id, stream_callback=relay_child_text)
 
@@ -551,17 +504,9 @@ def _await_child(
         return future.result(timeout=child_timeout), None
     except Exception as exc:
         return None, _handle_child_wait_failure(
-            exc,
-            child=child,
-            task_index=task_index,
-            goal=goal,
-            subagent_id=subagent_id,
-            child_future=future,
-            child_timeout=child_timeout,
-            child_start=child_start,
-            child_progress_cb=child_progress_cb,
-            worker_thread_holder=worker_thread_holder,
-            worktree=worktree,
+            exc, child=child, task_index=task_index, goal=goal, subagent_id=subagent_id, child_future=future,
+            child_timeout=child_timeout, child_start=child_start, child_progress_cb=child_progress_cb,
+            worker_thread_holder=worker_thread_holder, worktree=worktree,
         )
     finally:
         # Shut down without waiting — a child stuck on blocking I/O would hang wait=True forever.
@@ -591,18 +536,9 @@ def _finish_failed_entry(
     return entry
 
 def _handle_child_wait_failure(
-    exc: BaseException,
-    *,
-    child: Any,
-    task_index: int,
-    goal: str,
-    subagent_id: Optional[str],
-    child_future: Any,
-    child_timeout: Optional[float],
-    child_start: float,
-    child_progress_cb: Any,
-    worker_thread_holder: Dict[str, Optional[threading.Thread]],
-    worktree: _WorktreeReporter,
+    exc: BaseException, *, child: Any, task_index: int, goal: str, subagent_id: Optional[str], child_future: Any,
+    child_timeout: Optional[float], child_start: float, child_progress_cb: Any,
+    worker_thread_holder: Dict[str, Optional[threading.Thread]], worktree: _WorktreeReporter,
 ) -> _ChildFailure:
     """Build the error entry for a child whose Future timed out or raised.
 
@@ -644,17 +580,13 @@ def _handle_child_wait_failure(
         _err = str(exc)
     elif child_api_calls == 0:
         _err = (
-            f"Subagent timed out after {child_timeout}s without "
-            f"making any API call — the child never reached its "
-            f"first LLM request (prompt construction, credential "
-            f"resolution, or transport may be stuck)."
+            f"Subagent timed out after {child_timeout}s without making any API call — the child never reached its "
+            f"first LLM request (prompt construction, credential resolution, or transport may be stuck)."
         )
     else:
         _err = (
-            f"Subagent timed out after {child_timeout}s with "
-            f"{child_api_calls} API call(s) completed — likely "
-            f"stuck on a slow API call, tool call, or unresponsive "
-            f"network request."
+            f"Subagent timed out after {child_timeout}s with {child_api_calls} API call(s) completed — likely "
+            f"stuck on a slow API call, tool call, or unresponsive network request."
         )
     if is_timeout and diagnostic_path:
         _err += f" Diagnostic: {diagnostic_path}"
@@ -706,7 +638,6 @@ def _validate_child_output_schema(
     if not isinstance(_output_schema, dict):
         return _SchemaOutcome(_output_schema, None, [], 0)
     from tools.delegation_output_schema import build_retry_message, validate_output
-
     _first_text = result.get("final_response") or ""
     _schema_valid, _schema_errors = validate_output(_first_text, _output_schema)
     if _schema_valid or not _first_text.strip() or result.get("interrupted", False):
@@ -750,8 +681,7 @@ def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
                 fn = tc.get("function", {})
                 arguments = fn.get("arguments", "")
                 entry_t = {
-                    "tool": fn.get("name", "unknown"),
-                    "args_bytes": len(arguments),
+                    "tool": fn.get("name", "unknown"), "args_bytes": len(arguments),
                     "input_summary": _summarize_tool_arguments(arguments),
                 }
                 tool_trace.append(entry_t)
@@ -769,11 +699,7 @@ def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
     return tool_trace
 
 def _build_result_entry(
-    child: Any,
-    result: Dict[str, Any],
-    task_index: int,
-    duration: float,
-    schema: _SchemaOutcome,
+    child: Any, result: Dict[str, Any], task_index: int, duration: float, schema: _SchemaOutcome,
 ) -> Dict[str, Any]:
     """Derive the parent-visible result entry (status, exit_reason, tool trace, tokens, cost).
 
@@ -892,11 +818,7 @@ def _append_sibling_write_reminder(entry: Dict[str, Any], ws: _ChildWorkspace) -
             entry["stale_paths"] = mod_paths
 
 def _emit_child_complete(
-    child: Any,
-    result: Dict[str, Any],
-    entry: Dict[str, Any],
-    ws: _ChildWorkspace,
-    duration: float,
+    child: Any, result: Dict[str, Any], entry: Dict[str, Any], ws: _ChildWorkspace, duration: float,
     child_progress_cb: Any,
 ) -> None:
     """Fire ``subagent.complete`` with the per-branch observability payload.
@@ -937,14 +859,8 @@ def _emit_child_complete(
     _safe_progress(child_progress_cb, "subagent.complete", **complete_kwargs)
 
 def _cleanup_child_run(
-    child: Any,
-    parent_agent: Any,
-    *,
-    subagent_id: Optional[str],
-    heartbeat: tuple,
-    child_pool: Any,
-    leased_cred_id: Any,
-    close_deferred: bool,
+    child: Any, parent_agent: Any, *, subagent_id: Optional[str], heartbeat: tuple, child_pool: Any,
+    leased_cred_id: Any, close_deferred: bool,
 ) -> None:
     """Finally-path teardown for one child run (idempotent, never raises).
 
@@ -969,7 +885,6 @@ def _cleanup_child_run(
     # Restore the parent's tool names so the process-global is correct for
     # any subsequent execute_code calls or other consumers.
     import model_tools
-
     saved_tool_names = getattr(child, "_delegate_saved_tool_names", None)
     if isinstance(saved_tool_names, list):
         model_tools._last_resolved_tool_names = list(saved_tool_names)
@@ -986,7 +901,6 @@ def _cleanup_child_run(
     # a scope while a timed-out child worker is still unwinding.
     with _quiet("Failed to close child Relay session after delegation"):
         from agent import relay_runtime
-
         runtime = relay_runtime.get_runtime(create=False)
         child_session_id = str(getattr(child, "session_id", "") or "")
         child_turn_is_active = relay_runtime.SESSION_COORDINATOR.has_active_turn(

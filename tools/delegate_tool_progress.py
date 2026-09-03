@@ -52,10 +52,7 @@ def _clean_error_text(error: Any, max_chars: int = 200) -> str:
     return line[: max_chars - 3] + "..." if len(line) > max_chars else line
 
 def format_subagent_failure_line(
-    goal: Optional[str],
-    status: Optional[str],
-    error: Any = None,
-    duration_seconds: Any = None,
+    goal: Optional[str], status: Optional[str], error: Any = None, duration_seconds: Any = None,
 ) -> str:
     """One clean, human-readable line describing a failed subagent, rendered
     directly to the user (CLI spinner echo, gateway platform notice), e.g.
@@ -129,13 +126,8 @@ def _normalize_event(event_type: Any) -> Any:
         return None
 
 def _build_child_system_prompt(
-    goal: str,
-    context: Optional[str] = None,
-    *,
-    workspace_path: Optional[str] = None,
-    role: str = "leaf",
-    max_spawn_depth: int = 2,
-    child_depth: int = 1,
+    goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
+    max_spawn_depth: int = 2, child_depth: int = 1,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -162,7 +154,6 @@ def _build_child_system_prompt(
         _ctx_files = ""
         with _quiet("subagent: workspace context-files load failed", exc_info=True):
             from agent.prompt_builder import build_context_files_prompt
-
             _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         if _ctx_files.strip():
             parts.append(
@@ -192,8 +183,7 @@ def _build_child_system_prompt(
             if child_depth + 1 >= max_spawn_depth
             else "Your own children can themselves be orchestrators or leaves, "
             "depending on the `role` you pass to delegate_task. Default is "
-            "'leaf'; pass role='orchestrator' explicitly when a child "
-            "needs to further decompose its work."
+            "'leaf'; pass role='orchestrator' explicitly when a child needs to further decompose its work."
         )
         parts.append(
             "\n## Subagent Spawning (Orchestrator Role)\n"
@@ -221,12 +211,8 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     """Best-effort local workspace hint for child prompts: only a concrete
     absolute directory is ever injected (never a fake container path)."""
     candidates = [
-        os.getenv("TERMINAL_CWD"),
-        getattr(
-            getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None
-        ),
-        getattr(parent_agent, "terminal_cwd", None),
-        getattr(parent_agent, "cwd", None),
+        os.getenv("TERMINAL_CWD"), getattr(getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None),
+        getattr(parent_agent, "terminal_cwd", None), getattr(parent_agent, "cwd", None),
     ]
     for candidate in candidates:
         if not candidate:
@@ -367,8 +353,7 @@ class _ChildProgressRelay:
         # sees WHY, not just a vanished branch (gateway renders off the relayed event).
         if kwargs.get("status") in SUBAGENT_FAILURE_STATUSES:
             self._tree_line(format_subagent_failure_line(
-                self.goal_label, kwargs.get("status"),
-                error=kwargs.get("summary") or preview,
+                self.goal_label, kwargs.get("status"), error=kwargs.get("summary") or preview,
                 duration_seconds=kwargs.get("duration_seconds"),
             ))
         self._relay("subagent.complete", preview=preview, **kwargs)
@@ -405,7 +390,6 @@ class _ChildProgressRelay:
                     rec["last_tool"] = tool_name or ""
         if self.spinner:
             from agent.display import get_tool_emoji
-
             line = f"{get_tool_emoji(tool_name or '')} {tool_name}"
             short = _short(preview, 35) if preview else ""
             self._tree_line(f'{line}  "{short}"' if short else line)
@@ -424,17 +408,9 @@ class _ChildProgressRelay:
             getattr(self, method)(tool_name, preview, args, kwargs)
 
 def _build_child_progress_callback(
-    task_index: int,
-    goal: str,
-    parent_agent,
-    task_count: int = 1,
-    *,
-    subagent_id: Optional[str] = None,
-    parent_id: Optional[str] = None,
-    depth: Optional[int] = None,
-    model: Optional[str] = None,
-    toolsets: Optional[List[str]] = None,
-    session_ref: Optional[Dict[str, Any]] = None,
+    task_index: int, goal: str, parent_agent, task_count: int = 1, *, subagent_id: Optional[str] = None,
+    parent_id: Optional[str] = None, depth: Optional[int] = None, model: Optional[str] = None,
+    toolsets: Optional[List[str]] = None, session_ref: Optional[Dict[str, Any]] = None,
 ) -> Optional[callable]:
     """Relay for one child's events (see ``_ChildProgressRelay``), or None when
     the parent has neither a spinner nor a progress callback — the child then
@@ -444,6 +420,5 @@ def _build_child_progress_callback(
     if not spinner and not parent_cb:
         return None
     return _ChildProgressRelay(
-        task_index, goal, spinner, parent_cb, task_count,
-        subagent_id, parent_id, depth, model, toolsets, session_ref,
+        task_index, goal, spinner, parent_cb, task_count, subagent_id, parent_id, depth, model, toolsets, session_ref,
     )

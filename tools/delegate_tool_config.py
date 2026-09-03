@@ -33,7 +33,6 @@ DEFAULT_CHILD_TIMEOUT: Optional[float] = None
 def _cfg() -> dict:
     """The ``delegation`` section, read through the origin so tests can patch it."""
     from tools.delegate_tool import _load_config
-
     return _load_config()
 
 
@@ -47,8 +46,7 @@ def _cfg() -> dict:
 def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
     """Auto-deny (safe default): returns 'deny' so the child sees a recoverable refusal."""
     logger.warning(
-        "Subagent auto-denied dangerous command: %s (%s). "
-        "Set delegation.subagent_auto_approve: true to allow.",
+        "Subagent auto-denied dangerous command: %s (%s). Set delegation.subagent_auto_approve: true to allow.",
         command, description,
     )
     return "deny"
@@ -102,8 +100,7 @@ def _get_max_concurrent_children() -> int:
             _HIGH_CONCURRENCY_WARNED = True
             logger.warning(
                 "delegation.max_concurrent_children=%d: each child consumes API tokens "
-                "independently. High values multiply cost linearly.",
-                result,
+                "independently. High values multiply cost linearly.", result,
             )
     return result
 
@@ -228,14 +225,11 @@ def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> 
 def _loaded_pool(key: Any):
     """``load_pool(key)`` when it holds credentials, else None."""
     from agent.credential_pool import load_pool
-
     pool = load_pool(key)
     return pool if pool is not None and pool.has_credentials() else None
 
 def _resolve_child_credential_pool(
-    effective_provider: Optional[str],
-    parent_agent,
-    effective_base_url: Optional[str] = None,
+    effective_provider: Optional[str], parent_agent, effective_base_url: Optional[str] = None,
 ):
     """Credential pool for the child: parent's pool (same provider), that
     provider's own pool, or None (child keeps its fixed credential).
@@ -253,7 +247,6 @@ def _resolve_child_credential_pool(
     if effective_provider == "custom":
         try:
             from agent.credential_pool import get_custom_provider_pool_key
-
             child_key = get_custom_provider_pool_key(effective_base_url)
             if child_key is None:
                 # Unregistered endpoint (no custom_providers entry): keep the
@@ -294,7 +287,6 @@ def _merge_request_overrides(runtime_overrides, explicit_overrides):
     None when both sides are empty.
     """
     import copy as _copy
-
     runtime_overrides = runtime_overrides if isinstance(runtime_overrides, dict) else None
     explicit_overrides = explicit_overrides if isinstance(explicit_overrides, dict) else None
     if not runtime_overrides and not explicit_overrides:
@@ -323,7 +315,6 @@ def _require_pinned_command(command: Optional[str], message: str) -> None:
     if not command:
         return
     import shutil as _shutil
-
     if not _shutil.which(command):
         raise ValueError(message)
 
@@ -337,7 +328,6 @@ def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -
     # endpoints (/anthropic suffix: Azure AI Foundry, MiniMax, Zhipu, LiteLLM)
     # get the Messages transport instead of 404ing on chat_completions.
     from hermes_cli.runtime_provider import _detect_api_mode_for_url
-
     base_lower = configured_base_url.lower()
     host = base_url_hostname(configured_base_url)
     provider = "custom"
@@ -360,7 +350,6 @@ def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -
     if configured_provider:
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
-
             runtime = resolve_runtime_provider(requested=configured_provider, target_model=configured_model)
             request_overrides = dict(runtime.get("request_overrides") or {}) or None
             max_output_tokens = runtime.get("max_output_tokens")
@@ -386,7 +375,6 @@ def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) 
     configured_model, configured_provider = cfg_values["model"], cfg_values["provider"]
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-
         runtime = resolve_runtime_provider(requested=configured_provider, target_model=configured_model)
     except Exception as exc:
         raise ValueError(
@@ -404,8 +392,7 @@ def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) 
         )
     pinned_command = runtime.get("command")
     _require_pinned_command(
-        pinned_command,
-        f"Delegation provider '{configured_provider}' is pinned to the "
+        pinned_command, f"Delegation provider '{configured_provider}' is pinned to the "
         f"'{pinned_command}' command, which was not found on PATH. "
         f"Install it or choose a different delegation provider.",
     )
@@ -415,9 +402,7 @@ def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) 
         "base_url": runtime.get("base_url"),
         "api_key": api_key,
         "api_mode": runtime.get("api_mode"),
-        "request_overrides": _merge_request_overrides(
-            runtime.get("request_overrides"), explicit_request_overrides
-        )
+        "request_overrides": _merge_request_overrides(runtime.get("request_overrides"), explicit_request_overrides)
         or {},
         "max_output_tokens": runtime.get("max_output_tokens"),
         "command": runtime.get("command"),
@@ -454,8 +439,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "api_key": None,
             "api_mode": None,
             "request_overrides": _merge_request_overrides(
-                getattr(parent_agent, "request_overrides", None),
-                explicit_request_overrides,
+                getattr(parent_agent, "request_overrides", None), explicit_request_overrides,
             ),
             "max_output_tokens": None,
         }
@@ -473,7 +457,6 @@ def _load_config() -> dict:
     if os.environ.get("HERMES_IGNORE_USER_CONFIG") != "1":
         try:
             from hermes_cli.config import load_config_readonly
-
             cfg = load_config_readonly().get("delegation") or {}
             if isinstance(cfg, dict):
                 return cfg
@@ -481,7 +464,6 @@ def _load_config() -> dict:
             pass
     try:
         from cli import CLI_CONFIG
-
         cfg = CLI_CONFIG.get("delegation") or {}
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
@@ -492,29 +474,16 @@ def _load_config() -> dict:
 # would silently force the child back onto the parent's provider.
 # openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
 _ROUTING_FILTER_DEFAULTS = (
-    ("providers_allowed", None),
-    ("providers_ignored", None),
-    ("providers_order", None),
-    ("provider_sort", None),
-    ("provider_require_parameters", False),
-    ("provider_data_collection", ""),
+    ("providers_allowed", None), ("providers_ignored", None), ("providers_order", None), ("provider_sort", None),
+    ("provider_require_parameters", False), ("provider_data_collection", ""),
 )
 
 _NOUS_PROVIDERS = frozenset({"nous", "nous-portal", "nousresearch"})
 
 def _resolve_child_runtime(
-    parent_agent,
-    delegation_cfg: dict,
-    parent_api_key: Any,
-    *,
-    model: Optional[str],
-    override_provider: Optional[str],
-    override_base_url: Optional[str],
-    override_api_key: Optional[str],
-    override_api_mode: Optional[str],
-    override_max_tokens: Optional[int],
-    override_acp_command: Optional[str],
-    override_acp_args: Optional[List[str]],
+    parent_agent, delegation_cfg: dict, parent_api_key: Any, *, model: Optional[str], override_provider: Optional[str],
+    override_base_url: Optional[str], override_api_key: Optional[str], override_api_mode: Optional[str],
+    override_max_tokens: Optional[int], override_acp_command: Optional[str], override_acp_args: Optional[List[str]],
 ) -> Dict[str, Any]:
     """Resolve the child's credentials, transport and routing (config override >
     parent inherit) as ``AIAgent`` keyword arguments.
@@ -537,7 +506,6 @@ def _resolve_child_runtime(
         effective_api_mode = override_api_mode
     elif (effective_provider or "").strip().lower() in _NOUS_PROVIDERS:
         from hermes_cli.providers import nous_api_mode
-
         effective_api_mode = nous_api_mode(effective_model)
     elif effective_provider != _parent_provider:
         effective_api_mode = None  # force re-derivation from provider's defaults
@@ -546,10 +514,8 @@ def _resolve_child_runtime(
     # A pinned transport that cannot run must fail the spawn loudly, never fall
     # back silently (delegate_task pre-validates; this covers direct callers).
     _require_pinned_command(
-        override_acp_command,
-        f"Pinned delegation command '{override_acp_command}' was not "
-        f"found on PATH. Install it or remove delegation.command from "
-        f"config.yaml.",
+        override_acp_command, f"Pinned delegation command '{override_acp_command}' was not "
+        f"found on PATH. Install it or remove delegation.command from config.yaml.",
     )
     effective_acp_command = override_acp_command or getattr(parent_agent, "acp_command", None)
     effective_acp_args = list(
@@ -570,7 +536,6 @@ def _resolve_child_runtime(
         delegation_effort = delegation_cfg.get("reasoning_effort")
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
-
             parsed = parse_reasoning_effort(delegation_effort)
             if parsed is not None:
                 child_reasoning = parsed

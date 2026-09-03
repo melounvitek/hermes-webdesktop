@@ -49,8 +49,7 @@ class _Batch:
     def owner_kwargs(self) -> Dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
         return {
-            "owner_session_id": self.origin_ui_session_id or None,
-            "owner_transport": self.origin_owner_transport,
+            "owner_session_id": self.origin_ui_session_id or None, "owner_transport": self.origin_owner_transport,
             "owner_session_record": self.origin_owner_session_record,
         }
 
@@ -68,12 +67,10 @@ def _capture_origin() -> tuple[str, str, Any, Any]:
     ORIGINATING session, captured BEFORE building any child: AIAgent construction
     clobbers the HERMES_SESSION_ID ContextVar/os.environ with the subagent's id."""
     from tools.async_delegation import _current_origin_session_id
-
     _origin_wake_sid = _current_origin_session_id()
     _origin_ui_session_id = ""
     with _quiet(None):
         from gateway.session_context import get_session_env
-
         _origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
     transport, record = _capture_gateway_steer_authority(_origin_ui_session_id)
     return _origin_wake_sid, _origin_ui_session_id, transport, record
@@ -120,7 +117,6 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
     # but if the parent is interrupted while a child is wedged, the abandoned
     # worker must not block interpreter exit.
     from tools.daemon_pool import DaemonThreadPoolExecutor
-
     parent_agent, n_tasks = batch.parent_agent, len(batch.task_list)
     task_labels = [t["goal"][:40] for t in batch.task_list]
     completed_count = 0
@@ -185,7 +181,6 @@ def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True
     """
     from tools.delegate_tool import _run_single_child
     from tools.delegation_live_log import update_manifest_statuses
-
     results: list = []
     if len(batch.task_list) == 1:
         _i, _t, child = batch.children[0]
@@ -209,15 +204,12 @@ _SYNC_FALLBACK_NOTES = {
         "background=true is not available in this session — it cannot "
         "receive a detached subagent result after the turn ends (a "
         "one-shot runner such as `hermes -z`, a cron job, a Kanban "
-        "worker, or a stateless HTTP endpoint). The subagent(s) ran "
-        "SYNCHRONOUSLY and the result is included above."
+        "worker, or a stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY and the result is included above."
     ),
     "at_capacity": (
-        "The background delegation pool was at capacity "
-        "(delegation.max_concurrent_children), so the subagent(s) ran "
+        "The background delegation pool was at capacity (delegation.max_concurrent_children), so the subagent(s) ran "
         "SYNCHRONOUSLY and the result is included above. Raise "
-        "delegation.max_concurrent_children in config.yaml to allow "
-        "more concurrent background delegations."
+        "delegation.max_concurrent_children in config.yaml to allow more concurrent background delegations."
     ),
 }
 
@@ -249,12 +241,9 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
         return ""
     if origin_wake_sid:
         logger.info(
-            "delegate_task: async delivery unsupported on this "
-            "session, but a session id is bound (%s) — dispatching "
-            "in the background and waking the session via self-post "
-            "when it completes instead of forcing synchronous "
-            "execution.",
-            origin_wake_sid,
+            "delegate_task: async delivery unsupported on this session, but a session id is bound (%s) — dispatching "
+            "in the background and waking the session via self-post when it completes instead of forcing synchronous "
+            "execution.", origin_wake_sid,
         )
         return origin_wake_sid
     return None
@@ -272,12 +261,10 @@ def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> 
     key would fail closed — stamp the parent's durable id.
     """
     from tools.approval import get_current_session_key
-
     session_key = get_current_session_key(default="")
     agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
     with _quiet(None):
         from gateway.session_context import get_session_env
-
         source = get_session_env("HERMES_SESSION_SOURCE", "")
         # Refresh from the task-local source when available, else retain the
         # immutable value captured before child construction.
@@ -321,14 +308,12 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
         "note": (
             "Subagent is running in the background. You and the user can "
             "keep working; its full result re-enters the conversation as a "
-            "new message when it finishes. Do not wait or poll — just "
-            "continue."
+            "new message when it finishes. Do not wait or poll — just continue."
             if n == 1 else
             f"{n} subagents are running in parallel in the background. You "
             f"and the user can keep working; they wait on each other and "
             f"their consolidated results re-enter the conversation as a "
-            f"single message once ALL of them finish. Do not wait or poll "
-            f"— just continue."
+            f"single message once ALL of them finish. Do not wait or poll — just continue."
         ),
     }
     sids = [getattr(c, "_subagent_id", None) for c in child_agents]
@@ -338,16 +323,14 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
             "While a child runs you can orchestrate it live with this "
             "same tool: delegate_task(action='list') to see live "
             "children, action='steer' with subagent_id + message to "
-            "redirect one, action='stop' with subagent_id to end one "
-            "early."
+            "redirect one, action='stop' with subagent_id to end one early."
         )
     if live_paths:
         payload["live_transcripts"] = list(live_paths)
         payload["live_transcripts_hint"] = (
             "Each subagent streams a human-readable transcript of its "
             "operations to the file listed above (append-only, one per "
-            "task). Read or `tail -f` these paths at any time to watch "
-            "a child work while it runs."
+            "task). Read or `tail -f` these paths at any time to watch a child work while it runs."
         )
     return payload
 
@@ -363,7 +346,6 @@ def _dispatch_background(batch: _Batch) -> str:
     """
     from tools.delegate_tool import _get_max_async_children
     from tools.async_delegation import dispatch_async_delegation_batch
-
     wake_sid = _resolve_async_wake_sid(batch.origin_wake_sid)
     if wake_sid is None:
         logger.info("delegate_task: async delivery unsupported on this session runtime; running the batch synchronously instead.")

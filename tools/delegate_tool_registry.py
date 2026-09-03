@@ -82,8 +82,7 @@ def _retain_recent_subagent(record: Dict[str, Any]) -> None:
     if not sid:
         return
     _recent_subagents[sid] = {
-        "goal": record.get("goal"),
-        "delegation_id": record.get("delegation_id"),
+        "goal": record.get("goal"), "delegation_id": record.get("delegation_id"),
         "owner_agent_session_id": record.get("owner_agent_session_id"),
     }
     while len(_recent_subagents) > _RECENT_SUBAGENTS_CAP:
@@ -143,11 +142,7 @@ def interrupt_subagent(subagent_id: str) -> bool:
     return True
 
 def steer_subagent(
-    subagent_id: str,
-    text: str,
-    *,
-    owner_session_id: Optional[str] = None,
-    owner_transport: Any = None,
+    subagent_id: str, text: str, *, owner_session_id: Optional[str] = None, owner_transport: Any = None,
     owner_session_record: Any = None,
 ) -> bool:
     """Queue steering text into a running subagent without stopping it.
@@ -194,7 +189,6 @@ def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[A
         return None, None
     try:
         from tui_gateway.server import _current_session_steer_authority
-
         return _current_session_steer_authority(owner_session_id)
     except Exception:
         return None, None
@@ -281,8 +275,7 @@ def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
         return True
     # Compression rotation on either side: compare lineage tips.
     return _resolve_session_lineage(owner_sid, parent_agent) in {
-        parent_sid,
-        _resolve_session_lineage(parent_sid, parent_agent),
+        parent_sid, _resolve_session_lineage(parent_sid, parent_agent),
     }
 
 def _handle_control_action(action: str, subagent_id: Optional[str], message: Optional[str], parent_agent: Any) -> str:
@@ -308,11 +301,7 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
                     "goal": r.get("goal"),
                     "model": r.get("model"),
                     "status": r.get("status"),
-                    "running_seconds": (
-                        round(time.time() - started, 1)
-                        if isinstance(started, (int, float))
-                        else None
-                    ),
+                    "running_seconds": (round(time.time() - started, 1) if isinstance(started, (int, float)) else None),
                     "accepting_steer": bool(r.get("accepting_steer", False)),
                     "live_transcript": getattr(agent, "_live_transcript_path", None),
                 }
@@ -357,21 +346,16 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
 _CONTROL_OUTCOMES = {
     "stop": (
         "interrupt_requested",
-        "The subagent stops at its next iteration boundary "
-        "(in-flight tool calls are asked to cancel). Its "
-        "partial result still re-enters the conversation as a "
-        "completion message — do not wait or poll.",
+        "The subagent stops at its next iteration boundary (in-flight tool calls are asked to cancel). Its "
+        "partial result still re-enters the conversation as a completion message — do not wait or poll.",
         "Could not interrupt '{sid}' — it likely finished in the last "
         "moment. Its result arrives as a normal completion message.",
     ),
     "steer": (
         "queued",
-        "Steering text queued. The subagent sees it appended "
-        "to its next tool result — the current tool call is "
-        "never cut. If the child finishes before a delivery "
-        "boundary remains, the text is reported back as "
-        "missed_steer in its completion entry.",
-        "Subagent '{sid}' is no longer accepting steering (finishing or "
+        "Steering text queued. The subagent sees it appended to its next tool result — the current tool call is "
+        "never cut. If the child finishes before a delivery boundary remains, the text is reported back as "
+        "missed_steer in its completion entry.", "Subagent '{sid}' is no longer accepting steering (finishing or "
         "already finished). Its result arrives as a normal completion "
         "message; re-delegate a follow-up task if more work is needed.",
     ),
