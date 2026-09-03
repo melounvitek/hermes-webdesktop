@@ -33,14 +33,11 @@ def validate_platform_toolsets(
     is_allowed_for_platform: Callable[[str, str], bool] = toolset_allowed_for_platform,
 ) -> List[str]:
     """Return human-readable warnings for a ``platform_toolsets`` mapping.
-
-    Reports: a toolset name ``is_valid_toolset`` rejects (suggesting ``hermes-<platform>`` when
-    that would have been valid); a non-empty mapping resolving to zero valid toolsets (agent
-    would start with no tools); a platform with no valid toolsets, checked per-platform because
-    the global net is suppressed once any platform is valid; and non-list platform values, which
-    fall back to the platform default. ``is_valid_toolset`` is injected so this does no registry
-    imports or I/O.
-    """
+    Reports: a toolset name ``is_valid_toolset`` rejects (suggesting ``hermes-<platform>`` when that
+    would have been valid); a non-empty mapping resolving to zero valid toolsets (agent would start with
+    no tools); a platform with no valid toolsets, checked per-platform because the global net is
+    suppressed once any platform is valid; and non-list platform values, which fall back to the platform
+    default. ``is_valid_toolset`` is injected so this does no registry imports or I/O."""
     warnings: List[str] = []
     if not isinstance(platform_toolsets, dict) or not platform_toolsets:
         return warnings

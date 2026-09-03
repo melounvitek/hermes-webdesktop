@@ -25,11 +25,9 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 def _ensure_browser_use_cli(*, verbose_hints: bool = False) -> None:
     """Install the Browser Use CLI if it isn't already runnable.
-
     Primary driver engine for EVERY browser backend except Camofox (Firefox-based, no CDP surface).
     MANAGED-FIRST: a browser-use on the user's PATH does NOT satisfy this check — only the
-    Hermes-managed ``$HERMES_HOME/bin`` copy does.
-    """
+    Hermes-managed ``$HERMES_HOME/bin`` copy does."""
     _print_info("    Ensuring browser-use CLI (managed install)...")
     try:
         from tools.browser_use_cli import install_cli
@@ -86,10 +84,8 @@ def _install_chromium(install_cmd: list[str]) -> None:
 
 def _post_setup_agent_browser(post_setup_key: str) -> None:
     """``agent_browser`` (local Chromium) and ``browserbase`` (cloud rows) hooks.
-
     agent-browser is not a root package.json dependency — it resolves lazily via npx (or a
-    global/Hermes-managed install), so there is no ``npm install`` step here.
-    """
+    global/Hermes-managed install), so there is no ``npm install`` step here."""
     # Every non-Camofox backend drives through the Browser Use CLI — install it here too.
     _ensure_browser_use_cli()
     try:
@@ -286,10 +282,9 @@ def _post_setup_langfuse() -> None:
 
 
 def _post_setup_xai_grok() -> None:
-    """Shared xAI credential bootstrap for any picker row that talks to xAI (TTS, STT, Video Gen,
-    x_search …). Accepts a SuperGrok-tier OAuth token (preferred — billed to the existing
-    subscription) or a raw XAI_API_KEY; the rows declare empty env_vars so the auth UX lives here.
-    """
+    """Shared xAI credential bootstrap for any picker row that talks to xAI (TTS, STT, Video Gen, x_search
+    …). Accepts a SuperGrok-tier OAuth token (preferred — billed to the existing subscription) or a raw
+    XAI_API_KEY; the rows declare empty env_vars so the auth UX lives here."""
     try:
         from hermes_cli.auth import get_xai_oauth_auth_status
         oauth_logged_in = bool(get_xai_oauth_auth_status().get("logged_in"))
@@ -361,8 +356,7 @@ def _run_post_setup(post_setup_key: str):
 def valid_post_setup_keys() -> Set[str]:
     """Return the set of post-setup keys declared by any visible provider (``TOOL_CATEGORIES`` plus
     plugin-registered providers). This is the allowlist ``post-setup`` and the dashboard endpoint
-    validate against, so a caller cannot drive ``_run_post_setup`` with an arbitrary key.
-    """
+    validate against, so a caller cannot drive ``_run_post_setup`` with an arbitrary key."""
     from hermes_cli.tools_config import (
         TOOL_CATEGORIES,
         _plugin_browser_providers,
@@ -384,9 +378,8 @@ def valid_post_setup_keys() -> Set[str]:
 
 
 def run_post_setup_command(args) -> int:
-    """``hermes tools post-setup <key>`` — non-interactive runner the dashboard spawns so the GUI can
-    drive backend setup without re-implementing install logic. Exit code: 0 ok, 2 unknown key.
-    """
+    """``hermes tools post-setup <key>`` — non-interactive runner the dashboard spawns so the GUI can drive
+    backend setup without re-implementing install logic. Exit code: 0 ok, 2 unknown key."""
     key = getattr(args, "post_setup_key", None)
     if not key:
         _print_error("Usage: hermes tools post-setup <key>")
@@ -458,10 +451,9 @@ def restorable_python_tool_dependency(name: str) -> tuple[str, tuple[str, ...]] 
 
 
 def _agent_browser_installed() -> bool:
-    """True when everything ``_run_post_setup("agent_browser")`` installs is present: the agent-browser
-    CLI *and* the Chromium build it drives (or the Lightpanda engine, which needs no Chromium), so
-    "Run setup" flips to installed only when re-running it would be a no-op.
-    """
+    """True when everything ``_run_post_setup("agent_browser")`` installs is present: the agent-browser CLI
+    *and* the Chromium build it drives (or the Lightpanda engine, which needs no Chromium), so "Run
+    setup" flips to installed only when re-running it would be a no-op."""
     from hermes_cli.nous_subscription import _local_browser_runnable
 
     # The hook runs in a spawned process; this probe runs in the long-lived web-server/CLI process whose

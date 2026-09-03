@@ -39,11 +39,10 @@ def _plugin_provider_rows(
     registry_module: str, marker_keys: tuple[str, ...], *, require_name: bool = True, skip_builtin: bool = False,
     flatten_variants: bool = False) -> list[dict]:
     """Picker-row dicts (TOOL_CATEGORIES-shaped) for a plugin registry's providers.
-
-    ``marker_keys`` are all set to the registry name so downstream config/model-picker code routes through
-    the registry. ``skip_builtin`` drops names shadowing ``_BUILTIN_NAMES``; ``flatten_variants`` expands a
-    schema's tier ``variants`` into separate rows sharing one backend name, distinguished by ``web_tier``.
-    """
+    ``marker_keys`` are all set to the registry name so downstream config/model-picker code routes
+    through the registry. ``skip_builtin`` drops names shadowing ``_BUILTIN_NAMES``;
+    ``flatten_variants`` expands a schema's tier ``variants`` into separate rows sharing one backend
+    name, distinguished by ``web_tier``."""
     registry = _plugin_registry(registry_module)
     if registry is None:
         return []
@@ -109,10 +108,8 @@ _plugin_tts_providers = partial(_plugin_rows_for, "tts")
 
 def web_provider_capabilities(backend: str) -> list:
     """Capabilities (``search`` / ``extract``) a web backend supports, per the registry provider instance.
-
-    Lets the Capabilities GUI offer ``web.search_backend`` / ``web.extract_backend`` only where it makes sense
-    (ddgs and brave-free are search-only). Unknown backend or registry failure -> both.
-    """
+    Lets the Capabilities GUI offer ``web.search_backend`` / ``web.extract_backend`` only where it makes
+    sense (ddgs and brave-free are search-only). Unknown backend or registry failure -> both."""
     try:
         from agent.web_search_registry import get_provider
 
@@ -138,10 +135,8 @@ def _visible_providers(
     cat: dict, config: dict, *, force_fresh: bool = False, features: Optional[NousSubscriptionFeatures] = None,
 ) -> list[dict]:
     """Provider entries visible for the current auth/config state.
-
-    Nous-managed rows (``managed_nous_feature``) are always shown, even logged-out/unentitled, to advertise
-    the capability.
-    """
+    Nous-managed rows (``managed_nous_feature``) are always shown, even logged-out/unentitled, to
+    advertise the capability."""
     from hermes_cli.tools_config import get_nous_subscription_features
 
     if features is None:
@@ -170,10 +165,8 @@ def _visible_providers(
 
 def provider_readiness_status(provider: dict, config: dict, *, features=None, is_active: Optional[bool] = None) -> str:
     """Honest readiness state for a provider picker row.
-
-    ``features`` avoids re-fetching portal state per row. ``is_active`` is the completed-setup fallback for
-    post_setup hooks with no registered installed-check (selecting a row runs its hook).
-    """
+    ``features`` avoids re-fetching portal state per row. ``is_active`` is the completed-setup fallback
+    for post_setup hooks with no registered installed-check (selecting a row runs its hook)."""
     from hermes_cli.tools_config import (
         _POST_SETUP_READY, _provider_env_ready, _xai_credentials_present, get_nous_subscription_features,
     )
@@ -262,10 +255,8 @@ def _any_plugin_provider_available(registry_module: str) -> bool:
 
 def _configure_tool_category(ts_key: str, cat: dict, config: dict, *, force_fresh: bool = True, reconfigure: bool = False):
     """Provider selection for a tool category, then API-key setup for the chosen row.
-
-    ``reconfigure`` ("Reconfigure an existing tool"): no setup note / skip row / Nous marker, and the chosen
-    provider goes through the key-update prompts instead of the new-enable prompts.
-    """
+    ``reconfigure`` ("Reconfigure an existing tool"): no setup note / skip row / Nous marker, and the
+    chosen provider goes through the key-update prompts instead of the new-enable prompts."""
     from hermes_cli.tools_config import _prompt_choice, _provider_env_ready, get_nous_subscription_features
 
     icon = cat.get("icon", "")
@@ -329,11 +320,10 @@ def _configure_tool_category(ts_key: str, cat: dict, config: dict, *, force_fres
 
 def _web_tier_matches(provider: dict, config: dict) -> bool:
     """True when a web picker row's tier matches the configured tier (``web.provider_tier.<backend>``).
-
-    Tiered rows (Exa/Parallel Free vs Paid) share one ``web_backend`` and differ only in ``web_tier``. No
-    ``web_tier`` on the row → matches; configured tier set → must equal the row's tier; unset → "auto":
-    paid when the row's key is present, free otherwise (highlight the row the runtime would actually use).
-    """
+    Tiered rows (Exa/Parallel Free vs Paid) share one ``web_backend`` and differ only in ``web_tier``.
+    No ``web_tier`` on the row → matches; configured tier set → must equal the row's tier; unset →
+    "auto": paid when the row's key is present, free otherwise (highlight the row the runtime would
+    actually use)."""
     row_tier = provider.get("web_tier")
     if not row_tier:
         return True
@@ -547,11 +537,10 @@ def _pick_model_from_catalog(
     catalog: dict, default_model, cfg_key: str, display: str, config: dict, *, row_indent: str = "",
 ) -> None:
     """Column-aligned model picker shared by the FAL, plugin image gen and video gen flows.
-
-    Writes the choice to ``config[cfg_key]["model"]``. The current model is listed first so the cursor lands
-    on it; a saved model belonging to another provider (shared config key) or a drifted catalog default never
-    indexes the catalog. Safe when stdin is not a TTY — curses_radiolist keeps the current selection.
-    """
+    Writes the choice to ``config[cfg_key]["model"]``. The current model is listed first so the cursor
+    lands on it; a saved model belonging to another provider (shared config key) or a drifted catalog
+    default never indexes the catalog. Safe when stdin is not a TTY — curses_radiolist keeps the current
+    selection."""
     from hermes_cli.tools_config import _cfg_section, _prompt_choice
 
     if not catalog:
@@ -633,10 +622,9 @@ def _configure_xai_imagine_storage(section_name: str, config: dict) -> None:
 
 def _select_plugin_gen_provider(section: str, plugin_name: str, config: dict, *, use_gateway: bool = False) -> None:
     """Persist a plugin-backed image/video gen provider selection and run its model picker.
-
-    ``use_gateway=True`` (Nous-managed pick) stores ``<section>.provider: nous``; BYOK picks store the plugin
-    name. Any legacy ``use_gateway`` key is removed so old read-time shims cannot override the selection.
-    """
+    ``use_gateway=True`` (Nous-managed pick) stores ``<section>.provider: nous``; BYOK picks store the
+    plugin name. Any legacy ``use_gateway`` key is removed so old read-time shims cannot override the
+    selection."""
     from hermes_cli.tools_config import _cfg_section
 
     cfg = _cfg_section(config, section)
@@ -698,12 +686,10 @@ def _drop_use_gateway(section) -> None:
 
 def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> None:
     """Persist the provider/backend config keys for a selected provider.
-
-    Pure, non-interactive core of :func:`_configure_provider` (no env prompts, post-setup hooks, Nous auth
-    gating or model pickers) shared by the CLI and the GUI ``PUT .../provider`` endpoint. Each pick writes
-    exactly ONE provider string per category (``nous`` for managed rows) and removes any legacy
-    ``use_gateway`` key so the read-time shim cannot override the new choice.
-    """
+    Pure, non-interactive core of :func:`_configure_provider` (no env prompts, post-setup hooks, Nous
+    auth gating or model pickers) shared by the CLI and the GUI ``PUT .../provider`` endpoint. Each pick
+    writes exactly ONE provider string per category (``nous`` for managed rows) and removes any legacy
+    ``use_gateway`` key so the read-time shim cannot override the new choice."""
     from hermes_cli.tools_config import TOOL_CATEGORIES, _cfg_section
 
     def _set_selection(section_key: str, name_key: str, vendor_value) -> None:
@@ -797,11 +783,10 @@ def apply_provider_selection(ts_key: str, provider_name: str, config: dict) -> N
 
 def _nous_provider_gate(provider: dict, config: dict, managed_feature, *, force_fresh: bool) -> bool:
     """Return False (after printing why) when a Nous-gated row cannot be selected.
-
-    Managed Tool Gateway rows are always listed but only *activate* with paid Nous Portal access — selecting
-    one runs an inline Portal login (auth + entitlement only, no inference-provider switch). Pure pre-auth UX
-    rows (``requires_nous_auth`` without a managed feature) keep the older logged-in + entitled gate.
-    """
+    Managed Tool Gateway rows are always listed but only *activate* with paid Nous Portal access —
+    selecting one runs an inline Portal login (auth + entitlement only, no inference-provider switch).
+    Pure pre-auth UX rows (``requires_nous_auth`` without a managed feature) keep the older logged-in +
+    entitled gate."""
     from hermes_cli.tools_config import get_nous_subscription_features
 
     if managed_feature:
@@ -896,11 +881,9 @@ def _prompt_secret(
     key: str, label: str, url: str, default_val: str, *, reconfigure: bool, url_label: str, strip: bool = False,
 ) -> bool:
     """One env-var prompt; True unless the new-enable flow skipped the key.
-
-    Reconfigure mode shows the current value and re-prompts ("Enter to keep current"); the new-enable flow
-    prompts with ``default_val`` visible when one exists, else as a password, and ``strip`` decides whether
-    whitespace is trimmed (and whitespace-only counts as skipped).
-    """
+    Reconfigure mode shows the current value and re-prompts ("Enter to keep current"); the new-enable
+    flow prompts with ``default_val`` visible when one exists, else as a password, and ``strip`` decides
+    whether whitespace is trimmed (and whitespace-only counts as skipped)."""
     if reconfigure:
         existing = get_env_value(key)
         if existing:
@@ -928,10 +911,8 @@ def _prompt_secret(
 
 def _prompt_env_vars(env_vars: list, *, reconfigure: bool) -> bool:
     """Prompt for a provider's env vars; True when every key ended up configured.
-
     Reconfigure mode re-prompts every key and always returns True; the new-enable flow keeps already-set
-    keys without asking and reports False on any skipped key.
-    """
+    keys without asking and reports False on any skipped key."""
     all_configured = True
     for var in env_vars:
         if not reconfigure and get_env_value(var["key"]):
@@ -945,10 +926,9 @@ def _prompt_env_vars(env_vars: list, *, reconfigure: bool) -> bool:
 
 def _configure_provider(provider: dict, config: dict, *, force_fresh: bool = True, reconfigure: bool = False):
     """Configure a single provider - prompt for API keys and set config.
-
-    ``reconfigure=False`` (new-enable): already-set keys are kept without asking and the post-setup hook only
-    runs when every key was provided. ``reconfigure=True`` re-prompts every key and always runs the hook.
-    """
+    ``reconfigure=False`` (new-enable): already-set keys are kept without asking and the post-setup hook
+    only runs when every key was provided. ``reconfigure=True`` re-prompts every key and always runs the
+    hook."""
     from hermes_cli.tools_config import _run_post_setup
 
     env_vars = provider.get("env_vars", [])
@@ -989,10 +969,9 @@ def _reconfigure_provider(provider: dict, config: dict, *, force_fresh: bool = T
 
 def _configure_vision_backend() -> None:
     """Interactive vision-backend configuration (``auxiliary.vision.{provider,model,base_url}``).
-
-    Offers any authenticated provider + model (same surface as ``hermes model``) or a custom endpoint rather
-    than forcing OpenRouter. "Auto" leaves the keys empty so the resolver uses the main-model fallback chain.
-    """
+    Offers any authenticated provider + model (same surface as ``hermes model``) or a custom endpoint
+    rather than forcing OpenRouter. "Auto" leaves the keys empty so the resolver uses the main-model
+    fallback chain."""
     from hermes_cli.tools_config import _cfg_section, _prompt_choice
 
     print()
@@ -1045,11 +1024,9 @@ def _configure_vision_backend() -> None:
 
 def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
     """Provider + model picker for vision, mirroring the ``/model`` surface.
-
-    Rows come from ``build_aux_picker_rows()`` so this lists exactly what the ``hermes model`` aux-task picker
-    lists, including user-defined ``providers:`` / ``custom_providers:`` endpoints. Persists
-    ``auxiliary.vision.provider`` + ``.model``.
-    """
+    Rows come from ``build_aux_picker_rows()`` so this lists exactly what the ``hermes model`` aux-task
+    picker lists, including user-defined ``providers:`` / ``custom_providers:`` endpoints. Persists
+    ``auxiliary.vision.provider`` + ``.model``."""
     from hermes_cli.tools_config import _prompt_choice
 
     try:
@@ -1108,10 +1085,8 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
 
 def _configure_simple_requirements(ts_key: str, *, reconfigure: bool = False):
     """Fallback for toolsets that just need env vars (no provider selection).
-
     Vision has its own provider/model picker — run it directly so neither flow falls back to the generic
-    single-key prompt (which would re-ask for OPENROUTER_API_KEY).
-    """
+    single-key prompt (which would re-ask for OPENROUTER_API_KEY)."""
     from hermes_cli.tools_config import TOOLSET_ENV_REQUIREMENTS, _toolset_has_keys, _toolset_label
 
     if ts_key == "vision":

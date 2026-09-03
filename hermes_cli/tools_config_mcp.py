@@ -14,11 +14,9 @@ from hermes_cli.toolset_scope import (
 
 def _mcp_match_filter():
     """Runtime name-filter matcher (exact names or fnmatch globs), with a literal fallback.
-
-    Must use the SAME semantics as tools/mcp_tool.py registration — a literal ``in`` check renders
-    glob excludes (e.g. ``*team_member*`` from catalog default_excluded manifests) as if nothing
-    were excluded.
-    """
+    Must use the SAME semantics as tools/mcp_tool.py registration — a literal ``in`` check renders glob
+    excludes (e.g. ``*team_member*`` from catalog default_excluded manifests) as if nothing were
+    excluded."""
     try:
         from tools.mcp_tool import matches_name_filter
         return matches_name_filter
