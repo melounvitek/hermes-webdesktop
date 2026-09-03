@@ -202,10 +202,9 @@ def _slot_label(slot: dict[str, Any]) -> str:
 
 def _slot_reasoning_config(slot: dict[str, Any]) -> dict[str, Any] | None:
     """Translate optional per-MoA-slot reasoning_effort into runtime config."""
-    effort = slot.get("reasoning_effort")
     try:
         from hermes_constants import parse_reasoning_effort
-        return parse_reasoning_effort(effort)
+        return parse_reasoning_effort(slot.get("reasoning_effort"))
     except Exception:  # pragma: no cover - bad config must not break MoA
         return None
 
@@ -246,11 +245,10 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rt = resolve_runtime_provider(requested=provider, target_model=model)
         out.update({k: rt[k] for k in ("base_url", "api_key", "api_mode") if rt.get(k)})
-        request_overrides = rt.get("request_overrides")
-        if isinstance(request_overrides, dict):
-            extra_body = request_overrides.get("extra_body")
-            if isinstance(extra_body, dict) and extra_body:
-                out["extra_body"] = dict(extra_body)
+        overrides = rt.get("request_overrides")
+        extra_body = overrides.get("extra_body") if isinstance(overrides, dict) else None
+        if isinstance(extra_body, dict) and extra_body:
+            out["extra_body"] = dict(extra_body)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("MoA slot runtime resolution failed for %s: %s", _slot_label(slot), exc)
         return out
@@ -261,27 +259,21 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
 
 def _merge_slot_extra_body(slot_extra_body: Any, caller_extra_body: Any) -> Any:
     """Merge slot defaults with a caller override (caller wins) for ``call_llm``."""
-    if isinstance(slot_extra_body, dict) and slot_extra_body:
-        if isinstance(caller_extra_body, dict):
-            return {**slot_extra_body, **caller_extra_body}
-        if caller_extra_body:
-            return caller_extra_body
-        return dict(slot_extra_body)
-    return caller_extra_body
+    if not (isinstance(slot_extra_body, dict) and slot_extra_body):
+        return caller_extra_body
+    if isinstance(caller_extra_body, dict):
+        return {**slot_extra_body, **caller_extra_body}
+    return caller_extra_body or dict(slot_extra_body)
 
 
 def _agent_cache_opts(agent: Any) -> tuple[Any, Any]:
     """The live agent's ``(_cache_disabled, _cache_ttl)``; ``(None, None)`` without an agent."""
-    if agent is None:
-        return None, None
-    return getattr(agent, "_cache_disabled", None), getattr(agent, "_cache_ttl", None)
+    return (None, None) if agent is None else (getattr(agent, "_cache_disabled", None), getattr(agent, "_cache_ttl", None))
 
 
 def _with_cache_disabled(runtime: dict[str, Any], cache_disabled: Any) -> dict[str, Any]:
     """Pin the live agent's cache disable onto a runtime snapshot (None is a no-op)."""
-    if cache_disabled is None:
-        return runtime
-    return {**runtime, "_cache_disabled": cache_disabled}
+    return runtime if cache_disabled is None else {**runtime, "_cache_disabled": cache_disabled}
 
 
 def _maybe_apply_moa_cache_control(
@@ -697,9 +689,7 @@ def _preset_temperature(preset: dict[str, Any], key: str) -> float | None:
 
 
 def _hash_messages(msgs: list[dict[str, Any]]) -> str:
-    return hashlib.sha256(
-        "\u0000".join(f"{m.get('role')}:{m.get('content')}" for m in msgs).encode("utf-8", "replace")
-    ).hexdigest()
+    return hashlib.sha256("\u0000".join(f"{m.get('role')}:{m.get('content')}" for m in msgs).encode("utf-8", "replace")).hexdigest()
 
 
 def _is_failed_reference(text: str) -> bool:
@@ -777,10 +767,8 @@ def aggregate_moa_context(
         logger.debug("MoA privacy filter check failed", exc_info=True)
     agg_refs, degraded, all_failed = _guidance_inputs(reference_outputs, privacy_full, degraded_reference_policy)
     joined = _join_reference_outputs(agg_refs, degraded)
-
-    # Every reference failed: skip the aggregator (synthesizing over nothing can block
-    # for the full provider timeout) and return only the sanitized notice.
     if all_failed:
+        # Skip the aggregator: synthesizing over nothing can block for the full provider timeout.
         logger.warning("MoA: all %d reference(s) failed — skipping aggregator synthesis", len(reference_outputs))
         return (
             "[Mixture of Agents context — all reference models failed. "
@@ -806,14 +794,12 @@ def aggregate_moa_context(
         # Same cache_control decoration as the advisor calls; this synthesis call is
         # a third independent MoA call path that otherwise re-bills its full input.
         agg_messages = _maybe_apply_moa_cache_control(
-            [{"role": "user", "content": synth_prompt}],
-            _with_cache_disabled(agg_runtime, cache_disabled), cache_ttl=cache_ttl,
+            [{"role": "user", "content": synth_prompt}], _with_cache_disabled(agg_runtime, cache_disabled), cache_ttl=cache_ttl,
         )
-        response = call_llm(
+        synthesis = _extract_text(call_llm(
             task="moa_aggregator", messages=agg_messages, temperature=aggregator_temperature,
             reasoning_config=_aggregator_reasoning_config(aggregator), **agg_runtime,
-        )
-        synthesis = _extract_text(response)
+        ))
     except Exception as exc:
         logger.warning("MoA aggregator model %s failed: %s", agg_label, exc)
         synthesis = ""
@@ -838,9 +824,7 @@ def _completed_response_as_stream_chunk(response: Any) -> Any:
     if isinstance(raw_tool_calls, (list, tuple)) and raw_tool_calls:
         tool_call_deltas = [
             SimpleNamespace(
-                index=getattr(tc, "index", index),
-                id=getattr(tc, "id", None),
-                type=getattr(tc, "type", None) or "function",
+                index=getattr(tc, "index", index), id=getattr(tc, "id", None), type=getattr(tc, "type", None) or "function",
                 function=SimpleNamespace(
                     name=getattr(getattr(tc, "function", None), "name", None),
                     arguments=getattr(getattr(tc, "function", None), "arguments", None),
@@ -853,12 +837,10 @@ def _completed_response_as_stream_chunk(response: Any) -> Any:
         **{k: getattr(message, k, None) for k in ("reasoning_content", "reasoning", "reasoning_details")},
     )
     choice = SimpleNamespace(
-        index=getattr(first_choice, "index", 0), delta=delta,
-        finish_reason=getattr(first_choice, "finish_reason", None) or "stop",
+        index=getattr(first_choice, "index", 0), delta=delta, finish_reason=getattr(first_choice, "finish_reason", None) or "stop",
     )
     return SimpleNamespace(
-        id=getattr(response, "id", None), model=getattr(response, "model", None), choices=[choice],
-        usage=getattr(response, "usage", None),
+        id=getattr(response, "id", None), model=getattr(response, "model", None), choices=[choice], usage=getattr(response, "usage", None),
     )
 
 
@@ -871,15 +853,13 @@ def _attach_reference_guidance(agg_messages: list[dict[str, Any]], guidance: str
     consecutive user turns would be rejected by strict providers).
     """
     last = agg_messages[-1] if agg_messages else None
-    if last is not None and last.get("role") == "user":
-        last_content = last.get("content")
-        if isinstance(last_content, str):
-            last["content"] = last_content + "\n\n" + guidance
-            return
-        if isinstance(last_content, list):
-            last["content"] = [*last_content, {"type": "text", "text": "\n\n" + guidance}]
-            return
-    agg_messages.append({"role": "user", "content": guidance})
+    last_content = last.get("content") if last is not None and last.get("role") == "user" else None
+    if isinstance(last_content, str):
+        last["content"] = last_content + "\n\n" + guidance
+    elif isinstance(last_content, list):
+        last["content"] = [*last_content, {"type": "text", "text": "\n\n" + guidance}]
+    else:
+        agg_messages.append({"role": "user", "content": guidance})
 
 
 def peel_reference_guidance(messages: list[dict[str, Any]], guidance: Any) -> list[dict[str, Any]]:
@@ -892,26 +872,21 @@ def peel_reference_guidance(messages: list[dict[str, Any]], guidance: Any) -> li
     if not isinstance(last, dict) or last.get("role") != "user":
         return messages
     content = last.get("content")
-    if content == guidance_text:
-        # Attach shape (c): guidance was appended as its own user message.
+    if content == guidance_text:  # shape (c): guidance was its own user message
         return list(messages[:-1])
     suffix = "\n\n" + guidance_text
-    if isinstance(content, str) and content.endswith(suffix):
-        # Attach shape (a): merged into a trailing string user turn.
+    if isinstance(content, str) and content.endswith(suffix):  # shape (a): merged into a string turn
         return [*messages[:-1], {**last, "content": content[: -len(suffix)]}]
     if isinstance(content, list) and content:
         last_part = content[-1]
         if isinstance(last_part, dict) and last_part.get("type", "text") == "text":
             text = last_part.get("text") or ""
             if text in (suffix, guidance_text):
-                # Attach shape (b): guidance rode as its own trailing part. Guidance as
-                # the only content drops the whole message (mirrors shape c).
-                if len(content) == 1:
-                    return list(messages[:-1])
-                return [*messages[:-1], {**last, "content": list(content[:-1])}]
+                # Shape (b): guidance rode as its own trailing part. Guidance as the
+                # only content drops the whole message (mirrors shape c).
+                return list(messages[:-1]) if len(content) == 1 else [*messages[:-1], {**last, "content": list(content[:-1])}]
             if text.endswith(suffix):
-                new_part = {**last_part, "text": text[: -len(suffix)]}
-                return [*messages[:-1], {**last, "content": [*content[:-1], new_part]}]
+                return [*messages[:-1], {**last, "content": [*content[:-1], {**last_part, "text": text[: -len(suffix)]}]}]
     return messages
 
 
