@@ -80,16 +80,9 @@ class _ManagedFalSyncClient:
         _require(self._request_handle_class, "fal_client.client.SyncRequestHandle")
 
     def submit(
-        self,
-        application: str,
-        arguments: Dict[str, Any],
-        *,
-        path: str = "",
-        hint: Optional[str] = None,
-        webhook_url: Optional[str] = None,
-        priority: Any = None,
-        headers: Optional[Dict[str, str]] = None,
-        start_timeout: Optional[Union[int, float]] = None,
+        self, application: str, arguments: Dict[str, Any], *, path: str = "",
+        hint: Optional[str] = None, webhook_url: Optional[str] = None, priority: Any = None,
+        headers: Optional[Dict[str, str]] = None, start_timeout: Optional[Union[int, float]] = None,
     ):
         url = self._queue_url_format + application
         if path:

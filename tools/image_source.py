@@ -30,24 +30,11 @@ class ImageResolutionError(Exception):
         self.src, self.origin = src, origin
 
 
-class UnsupportedScheme(ImageResolutionError):
-    pass
-
-
-class SourceUnsafe(ImageResolutionError):  # SSRF / path-allowlist
-    pass
-
-
-class SourceTooLarge(ImageResolutionError):
-    pass
-
-
-class SourceNotFound(ImageResolutionError):
-    pass
-
-
-class NotAnImage(ImageResolutionError):
-    pass
+class UnsupportedScheme(ImageResolutionError): ...
+class SourceUnsafe(ImageResolutionError): ...  # SSRF / path-allowlist
+class SourceTooLarge(ImageResolutionError): ...
+class SourceNotFound(ImageResolutionError): ...
+class NotAnImage(ImageResolutionError): ...
 
 
 @dataclass
