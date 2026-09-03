@@ -113,16 +113,6 @@ ClientSession: Any = None
 _MCP_SDK_IMPORT_ATTEMPTED = False
 _MCP_SDK_IMPORT_LOCK = threading.Lock()
 
-# SDK symbols bound by _ensure_mcp_sdk(). Module __getattr__ (PEP 562) imports the SDK on
-# first external access, so mock.patch("tools.mcp_tool.stdio_client") sees a real original
-# and the mock is never clobbered (_ensure is idempotent).
-_MCP_SDK_LAZY_SYMBOLS = frozenset({
-    "StdioServerParameters", "stdio_client", "streamablehttp_client", "streamable_http_client",
-    "CreateMessageResult", "CreateMessageResultWithTools", "ErrorData", "SamplingCapability",
-    "SamplingToolsCapability", "TextContent", "ToolUseContent", "ElicitRequestParams",
-    "ElicitResult", "ServerNotification", "ToolListChangedNotification",
-    "PromptListChangedNotification", "ResourceListChangedNotification"})
-
 # Optional SDK type families (module, names, debug message when absent) bound in this order to
 # _MCP_SAMPLING_TYPES / _MCP_ELICITATION_TYPES / _MCP_NOTIFICATION_TYPES. Each is gated
 # separately so an older SDK only loses that feature, not MCP.
@@ -136,6 +126,12 @@ _OPTIONAL_TYPE_FAMILIES = (
                    "ResourceListChangedNotification"),
      "MCP notification types not available -- dynamic tool discovery disabled"),
 )
+# SDK symbols bound by _ensure_mcp_sdk(). Module __getattr__ (PEP 562) imports the SDK on
+# first external access, so mock.patch("tools.mcp_tool.stdio_client") sees a real original
+# and the mock is never clobbered (_ensure is idempotent).
+_MCP_SDK_LAZY_SYMBOLS = frozenset(
+    {"StdioServerParameters", "stdio_client", "streamablehttp_client", "streamable_http_client"}
+    | {n for _mod, names, _msg in _OPTIONAL_TYPE_FAMILIES for n in names})
 
 
 def __getattr__(name: str):
@@ -173,7 +169,6 @@ def _ensure_mcp_sdk() -> bool:
     global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES, sse_client
     global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED, LATEST_HANDSHAKE_VERSION
     global _JSONRPC_METHOD_NOT_FOUND
-
     if not _MCP_AVAILABLE:
         return False
     if _MCP_SDK_IMPORT_ATTEMPTED or ClientSession is not None:
@@ -201,13 +196,11 @@ def _ensure_mcp_sdk() -> bool:
                 _import_sdk_names(*family) for family in _OPTIONAL_TYPE_FAMILIES]
         else:
             logger.debug("mcp package not installed -- MCP tool support disabled")
-
         if _MCP_AVAILABLE:
             try:
                 _JSONRPC_METHOD_NOT_FOUND = importlib.import_module("mcp.types").METHOD_NOT_FOUND
             except Exception:  # pragma: no cover — SDK without the constant
                 pass
-
         _MCP_MESSAGE_HANDLER_SUPPORTED = _client_session_accepts("message_handler")
         if _MCP_AVAILABLE and not _MCP_MESSAGE_HANDLER_SUPPORTED:
             logger.debug("MCP SDK does not support message_handler -- dynamic tool discovery disabled")
@@ -236,15 +229,13 @@ def sdk_httpx():
         _SDK_HTTPX_MOD = getattr(_transport, "httpx2", None) or getattr(_transport, "httpx", None)
     except ImportError:
         _SDK_HTTPX_MOD = None
-    if _SDK_HTTPX_MOD is None:
+    for fallback in ("httpx2", "httpx"):
+        if _SDK_HTTPX_MOD is not None:
+            break
         try:
-            import httpx2 as _fallback
+            _SDK_HTTPX_MOD = importlib.import_module(fallback)
         except ImportError:
-            try:
-                import httpx as _fallback  # type: ignore[no-redef]
-            except ImportError:
-                return None
-        _SDK_HTTPX_MOD = _fallback
+            pass
     return _SDK_HTTPX_MOD
 
 
@@ -314,21 +305,16 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
             # mcp 2.0 takes params=PaginatedRequestParams, 1.x takes cursor=.
             try:
                 import mcp.types as _types  # late: keeps the SDK import lazy
-
                 _params_cls = getattr(_types, "PaginatedRequestParams", None)
-                if _params_cls is not None:
-                    result = await list_method(params=_params_cls(cursor=cursor))
-                else:
-                    result = await list_method(cursor=cursor)
+                result = await (list_method(params=_params_cls(cursor=cursor)) if _params_cls is not None
+                                else list_method(cursor=cursor))
             except TypeError:
                 result = await list_method(cursor=cursor)
         if cache_meta_out is not None and not items:
-            _ttl = mcp_field(result, "ttl_ms", "ttlMs")
-            _scope = mcp_field(result, "cache_scope", "cacheScope")
-            if _ttl is not None:
-                cache_meta_out["ttl_ms"] = _ttl
-            if _scope is not None:
-                cache_meta_out["cache_scope"] = _scope
+            for key, snake, camel in (("ttl_ms", "ttl_ms", "ttlMs"), ("cache_scope", "cache_scope", "cacheScope")):
+                hint = mcp_field(result, snake, camel)
+                if hint is not None:
+                    cache_meta_out[key] = hint
         items.extend(getattr(result, items_attr, None) or [])
         cursor = mcp_field(result, "next_cursor", "nextCursor")
         # Cursor is an opaque string; anything else (incl. mocks) = last page.
@@ -517,11 +503,9 @@ def _mcp_registry_scope() -> Optional[str]:
     """Registry scope for MCP registrations: under a profile multiplexer each profile's MCP
     tools live in its own registry overlay; single-profile processes stay global (None)."""
     from agent.secret_scope import is_multiplex_active
-
     if not is_multiplex_active():
         return None
     from tools.registry import registry
-
     return registry.current_scope_key()
 
 

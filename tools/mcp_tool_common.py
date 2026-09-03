@@ -21,7 +21,6 @@ class _OriginProxy:
 
     def __getattr__(self, name: str):
         from tools import mcp_tool
-
         return getattr(mcp_tool, name)
 
 
@@ -51,7 +50,6 @@ def _resolve_tool_timeout(config: dict) -> float:
         return per_server
     try:
         from agent.deadline import resolve_timeout
-
         resolved = resolve_timeout("mcp.tool_call", default=_DEFAULT_TOOL_TIMEOUT)
         if resolved is not None:
             return resolved
@@ -151,9 +149,8 @@ def _get_lifecycle_seconds(config: dict, key: str) -> Optional[float]:
     """Optional positive lifecycle timeout from top-level/nested ``lifecycle`` config (``0``
     disables; negatives and non-numbers are warned about and ignored)."""
     raw = config.get(key)
-    lifecycle = config.get("lifecycle")
-    if raw is None and isinstance(lifecycle, dict):
-        raw = lifecycle.get(key)
+    if raw is None and isinstance(config.get("lifecycle"), dict):
+        raw = config["lifecycle"].get(key)
     if raw is None:
         return None
     try:

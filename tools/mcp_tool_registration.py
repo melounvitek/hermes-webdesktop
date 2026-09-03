@@ -154,13 +154,9 @@ class _CachedMCPTool:
     @classmethod
     def from_cache_dicts(cls, raws: Iterable[Any]) -> List["_CachedMCPTool"]:
         """Cached rows -> stand-ins; rows that are not dicts or lack a name are dropped."""
-        out = []
-        for raw in raws:
-            if isinstance(raw, dict) and raw.get("name"):
-                schema = raw.get("inputSchema")
-                out.append(cls(raw["name"], raw.get("description") or "",
-                               schema if isinstance(schema, dict) else {}, raw.get("annotations")))
-        return out
+        return [cls(raw["name"], raw.get("description") or "",
+                    raw["inputSchema"] if isinstance(raw.get("inputSchema"), dict) else {}, raw.get("annotations"))
+                for raw in raws if isinstance(raw, dict) and raw.get("name")]
 
 
 @dataclass
@@ -224,7 +220,6 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
         seen.add((c.registry_name, c.origin))
         unique.append(c)
         origins_by_name.setdefault(c.registry_name, set()).add(c.origin)
-
     ambiguous: Dict[str, List[str]] = {}
     shadowed: set[tuple[str, str]] = set()
     for registry_name, origins in origins_by_name.items():
@@ -273,7 +268,6 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
     ``ToolRegistry.register()`` is the atomic ownership gate and its verdict is re-read after
     every call."""
     from tools.registry import registry
-
     toolset_name = f"mcp-{name}"
     registered: List[str] = []
     for c in candidates:
@@ -301,7 +295,6 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
     lazily without spawning it. Never raises."""
     try:
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
-
         tools_payload = []
         for t in server._tools:
             if should_register(t.name):
@@ -345,7 +338,6 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     ``_ensure_lazy_server_connected``. Trust metadata is recorded first so the call-time gate
     is identical whether the server was spawned live or registered from cache."""
     from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
-
     tool_timeout = _resolve_tool_timeout(config)
     cached_tools = _CachedMCPTool.from_cache_dicts(tools_from_cache_entry(entry))
     _record_tool_trust_metadata(name, config, cached_tools)
