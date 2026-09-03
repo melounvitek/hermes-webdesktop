@@ -550,6 +550,10 @@ def _tool_use_block(tool_use_id, name, input_dict) -> Dict:
     return {"toolUse": {"toolUseId": tool_use_id, "name": name, "input": input_dict}}
 
 
+def _tool_use_block_from(tu: Dict) -> Dict:
+    return _tool_use_block(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {}))
+
+
 def _decode_redacted(encoded) -> Optional[bytes]:
     """Strict base64 → bytes; None for empty/non-str/undecodable input."""
     if not isinstance(encoded, str) or not encoded:
@@ -585,8 +589,7 @@ def _replay_ordered_blocks(ordered_blocks: List) -> List[Dict]:
             if replay:
                 content_blocks.append({"reasoningContent": replay})
         elif "toolUse" in block and isinstance(block["toolUse"], dict):
-            tu = block["toolUse"]
-            content_blocks.append(_tool_use_block(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})))
+            content_blocks.append(_tool_use_block_from(block["toolUse"]))
     return content_blocks
 
 
@@ -712,11 +715,9 @@ class _ResponseParts:
         """Assemble the OpenAI-shaped response. Converse's inputTokens EXCLUDES cache
         read/write tokens (OpenAI's prompt_tokens includes them), so they are added back."""
         msg = SimpleNamespace(
-            role="assistant",
-            content="\n".join(self.text_parts) if self.text_parts else None,
-            tool_calls=self.tool_calls or None,
+            role="assistant", content="\n".join(self.text_parts) if self.text_parts else None,
+            tool_calls=self.tool_calls or None, reasoning_details=self.reasoning_details or None,
             reasoning_content="\n\n".join(self.reasoning_parts) if self.reasoning_parts else None,
-            reasoning_details=self.reasoning_details or None,
             bedrock_content_blocks=ordered_blocks or None,
         )
         cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
@@ -724,11 +725,8 @@ class _ResponseParts:
         output_tokens = usage_data.get("outputTokens", 0)
         prompt_tokens = usage_data.get("inputTokens", 0) + cache_read_tokens + cache_write_tokens
         usage = SimpleNamespace(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=output_tokens,
-            total_tokens=prompt_tokens + output_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            cache_creation_input_tokens=cache_write_tokens,
+            prompt_tokens=prompt_tokens, completion_tokens=output_tokens, total_tokens=prompt_tokens + output_tokens,
+            cache_read_input_tokens=cache_read_tokens, cache_creation_input_tokens=cache_write_tokens,
         )
         finish_reason = _STOP_REASON_TO_FINISH_REASON.get(stop_reason, "stop")
         if self.tool_calls and finish_reason == "stop":
@@ -755,9 +753,8 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
                 ordered_blocks.append({"reasoningContent": ordered_reasoning})
         elif "toolUse" in block:
             tu = block["toolUse"]
-            tool_use_id, name, tool_input = tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})
-            ordered_blocks.append(_tool_use_block(tool_use_id, name, tool_input))
-            parts.tool_calls.append(_tool_call_ns(tool_use_id, name, tool_input))
+            ordered_blocks.append(_tool_use_block_from(tu))
+            parts.tool_calls.append(_tool_call_ns(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})))
     return parts.build(
         ordered_blocks, response.get("usage", {}), response.get("stopReason", "end_turn"), response.get("modelId", ""),
     )
@@ -852,10 +849,7 @@ def stream_converse_with_callbacks(
             stop_reason = event["messageStop"].get("stopReason", "end_turn")
         elif "metadata" in event:
             meta_usage = event["metadata"].get("usage", {})
-            usage_data = {
-                key: meta_usage.get(key, 0)
-                for key in ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")
-            }
+            usage_data = {key: meta_usage.get(key, 0) for key in ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")}
     flush_text()
     return parts.build([stream_blocks[i] for i in sorted(stream_blocks)], usage_data, stop_reason, "")
 
