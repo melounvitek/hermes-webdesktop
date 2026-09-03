@@ -1192,21 +1192,26 @@ def _has_media_directives(text: str) -> bool:
 def _mask_media_scan_text(text: str) -> str:
     """Offset-preserving mask of protected spans (code, quotes, JSON string values).
     BasePlatformAdapter is defined later in this module; resolved at call time."""
-    return BasePlatformAdapter._mask_json_string_media(
-        BasePlatformAdapter._mask_protected_spans(text))
+    A = BasePlatformAdapter
+    return A._mask_json_string_media(A._mask_protected_spans(text))
+
+
+def _extensionless_media_matches(masked: str):
+    """Yield ``(match, safe_path, end_offset)`` for every extension-less / unknown-extension
+    MEDIA tag in ``masked`` that ``validate_media_delivery_path`` accepts."""
+    for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked):
+        path = _normalize_media_tag_path(match.group("path"))
+        if path and _path_lacks_deliverable_extension(path):
+            resolved = _match_extensionless_path(masked, match)
+            if resolved is not None:
+                yield match, resolved[0], resolved[1]
 
 
 def _real_media_tag_spans(masked: str) -> list:
     """(start, end) spans of deliverable MEDIA tags on a masked copy: known-extension tags
     unconditionally, extension-less / unknown ones only if validate_media_delivery_path accepts."""
     spans: list = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
-    for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked):
-        path = _normalize_media_tag_path(match.group("path"))
-        if not path or not _path_lacks_deliverable_extension(path):
-            continue
-        resolved = _match_extensionless_path(masked, match)
-        if resolved is not None:
-            spans.append((match.start(), resolved[1]))
+    spans.extend((match.start(), end) for match, _, end in _extensionless_media_matches(masked))
     return spans
 
 
@@ -1216,7 +1221,7 @@ _INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
 
 def _code_spans(content: str) -> list:
     """(start, end) spans of fenced code blocks and inline code in ``content``."""
-    return [m.span() for m in _FENCED_CODE_RE.finditer(content)] + [m.span() for m in _INLINE_CODE_RE.finditer(content)]
+    return [m.span() for rx in (_FENCED_CODE_RE, _INLINE_CODE_RE) for m in rx.finditer(content)]
 
 
 def _blank_spans(text: str, spans: list) -> str:
@@ -2676,13 +2681,8 @@ class BasePlatformAdapter(ABC):
                     _add(os.path.expanduser(path))
                 except (OSError, RuntimeError, ValueError):
                     continue  # crafted ~\x00 path: skip it, keep the rest
-        for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(scan_content):
-            path = _normalize_media_tag_path(match.group("path"))
-            if not path or not _path_lacks_deliverable_extension(path):
-                continue
-            resolved = _match_extensionless_path(scan_content, match)
-            if resolved is not None:
-                _add(resolved[0])
+        for _, safe_path, _ in _extensionless_media_matches(scan_content):
+            _add(safe_path)
         # Locate tag spans on a masked copy, delete them from the unmasked text (protected spans
         # survive).
         if media:
