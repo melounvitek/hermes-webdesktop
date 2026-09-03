@@ -1,15 +1,12 @@
 """Auto-resume restart-loop breaker (defense-3).
 
-Defenses 1 and 2 (the ``_HERMES_GATEWAY`` guard on ``hermes gateway stop|restart``
-+ ``terminal_tool``, and the cron-creation lifecycle filter) stop the agent
-scheduling its own restart but not every SIGTERM source (``launchctl kickstart``,
-a bad external monitor, any repeated crash): the supervisor respawns, the gateway
-auto-resumes the restart-interrupted session, whose next turn re-runs the
-offending logic.  Each such boot is persisted to ``<HERMES_HOME>/gateway/
-restart_loop.json``; boots CHAIN while consecutive gaps stay within
-``max_gap_seconds`` (a ~150s watchdog-kill cycle trips like a ~10s respawn loop).
-Tripped → caller SKIPS auto-resume; inbound messages still served.  Any I/O
-failure fails OPEN — a broken breaker must never wedge a healthy gateway.
+Defenses 1-2 (``_HERMES_GATEWAY`` guard on ``hermes gateway stop|restart`` /
+``terminal_tool``, cron lifecycle filter) stop the agent scheduling its own restart
+but not every SIGTERM source: the supervisor respawns, the gateway auto-resumes the
+restart-interrupted session, whose next turn re-runs the offending logic.  Boots are
+persisted to ``<HERMES_HOME>/gateway/restart_loop.json`` and CHAIN while gaps stay
+within ``max_gap_seconds`` (a ~150s watchdog-kill cycle trips like a ~10s loop).
+Tripped → caller SKIPS auto-resume.  Any I/O failure fails OPEN, never wedging.
 """
 
 from __future__ import annotations
@@ -28,15 +25,12 @@ logger = logging.getLogger("gateway.run")
 # within a few cycles.
 DEFAULT_MAX_RESTARTS = 3
 DEFAULT_WINDOW_SECONDS = 60
-
-# Longest gap between consecutive restart-interrupted boots that still counts
-# them as the SAME loop.  A fixed-window prune only sees cycles faster than the
-# window (a slower loop drops its own history every boot and never trips);
-# chaining on the inter-boot gap is period-agnostic, and real quiet resets it.
+# Longest gap between consecutive restart-interrupted boots still counted as the
+# SAME loop.  A fixed-window prune only sees cycles faster than the window (a slower
+# loop drops its history every boot and never trips); chaining on the inter-boot
+# gap is period-agnostic, and real quiet resets it.
 DEFAULT_MAX_GAP_SECONDS = 300
-
-# Cap the persisted chain; only the newest ``max_restarts`` entries can change
-# a verdict, the rest are forensics.
+# Only the newest ``max_restarts`` entries can change a verdict; the rest are forensics.
 _MAX_STORED_BOOTS = 50
 
 
@@ -66,12 +60,10 @@ def _chain_gap(window_seconds: int, max_gap_seconds: int) -> float:
 
 
 def _chain_ending_at(boots: List[float], ts: float, gap: float) -> List[float]:
-    """Unbroken chain of boots leading up to ``ts`` (oldest first).
-
-    Walks backwards while each successive gap stays within ``gap``; the first
-    wider gap ends the chain (older boots belong to a resolved episode).
-    Nothing recent enough -> empty list: how a healthy gateway forgets a loop.
-    """
+    """Unbroken chain of boots leading up to ``ts`` (oldest first): walks backwards
+    while each gap stays within ``gap``; the first wider gap ends the chain (older
+    boots are a resolved episode).  Empty when nothing is recent — how a healthy
+    gateway forgets a loop."""
     chain: List[float] = []
     prev = ts
     for t in sorted(boots, reverse=True):
@@ -89,15 +81,11 @@ def _chain_ending_at(boots: List[float], ts: float, gap: float) -> List[float]:
 
 
 def record_restart_interrupted_boot(
-    window_seconds: int = DEFAULT_WINDOW_SECONDS,
-    *,
-    now: Optional[float] = None,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS, *, now: Optional[float] = None,
     max_gap_seconds: int = DEFAULT_MAX_GAP_SECONDS,
 ) -> List[float]:
-    """Record a restart-interrupted boot; return the pruned chain + now (most recent last).
-
-    Best-effort — a persistence failure returns the in-memory list without raising.
-    """
+    """Record a restart-interrupted boot; return the pruned chain + now (most recent
+    last).  A persistence failure returns the in-memory list without raising."""
     ts = time.time() if now is None else now
     boots = _chain_ending_at(_load_boots(), ts, _chain_gap(window_seconds, max_gap_seconds))
     boots.append(ts)
@@ -112,32 +100,19 @@ def clear() -> None:
 
 
 def check_and_record(
-    max_restarts: int = DEFAULT_MAX_RESTARTS,
-    window_seconds: int = DEFAULT_WINDOW_SECONDS,
-    *,
-    now: Optional[float] = None,
-    max_gap_seconds: int = DEFAULT_MAX_GAP_SECONDS,
+    max_restarts: int = DEFAULT_MAX_RESTARTS, window_seconds: int = DEFAULT_WINDOW_SECONDS, *,
+    now: Optional[float] = None, max_gap_seconds: int = DEFAULT_MAX_GAP_SECONDS,
 ) -> bool:
-    """Record this boot and return True when auto-resume should be SKIPPED.
-
-    The single entry point the gateway calls: appends the current boot, then
-    checks whether the updated chain has reached ``max_restarts``.
-    """
-    boots = record_restart_interrupted_boot(
-        window_seconds, now=now, max_gap_seconds=max_gap_seconds
-    )
+    """Gateway entry point: record this boot; True when the chain reached
+    ``max_restarts`` and auto-resume should be SKIPPED."""
+    boots = record_restart_interrupted_boot(window_seconds, now=now, max_gap_seconds=max_gap_seconds)
     tripped = max_restarts > 0 and len(boots) >= max_restarts
     if tripped:
         logger.warning(
-            "Restart-loop breaker TRIPPED: %d chained restart-interrupted "
-            "gateway boots (no gap wider than %ds; threshold %d). Skipping "
-            "auto-resume to break a suspected SIGTERM-respawn loop (#30719, "
-            "#81642). Restart-interrupted sessions stay resume-pending and "
-            "will continue on the next real user message. If this is a false "
-            "positive, delete %s.",
-            len(boots),
-            int(_chain_gap(window_seconds, max_gap_seconds)),
-            max_restarts,
-            _state_path(),
+            "Restart-loop breaker TRIPPED: %d chained restart-interrupted gateway boots (no gap wider than %ds; "
+            "threshold %d). Skipping auto-resume to break a suspected SIGTERM-respawn loop (#30719, #81642). "
+            "Restart-interrupted sessions stay resume-pending and will continue on the next real user message. "
+            "If this is a false positive, delete %s.",
+            len(boots), int(_chain_gap(window_seconds, max_gap_seconds)), max_restarts, _state_path(),
         )
     return tripped

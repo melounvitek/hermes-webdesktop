@@ -12,12 +12,7 @@ from typing import Any
 # Exact whole-response markers meaning "the agent intentionally chose not to
 # reply". Keep small and explicit; arbitrary empty output remains an
 # error/empty-response path, not silence.
-LIVE_GATEWAY_SILENT_MARKERS = frozenset({
-    "[SILENT]",
-    "SILENT",
-    "NO_REPLY",
-    "NO REPLY",
-})
+LIVE_GATEWAY_SILENT_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
 
 # Longer than any marker could plausibly be, even with stray punctuation.
 _MARKER_LENGTH_CAP = 64
@@ -68,12 +63,10 @@ def is_intentional_silence_response(response: Any) -> bool:
 def is_autonomous_silence_response(response: Any) -> bool:
     """Loose silence matcher for autonomous lanes (cron, webhook).
 
-    Autonomous lanes ask for ``[SILENT]`` when a tick produced nothing worth
-    attention, and models reliably bracket the marker with a short note. Unlike
-    :func:`is_intentional_silence_response` (interactive rule: EXACTLY a marker),
-    this suppresses when a marker is the whole response, sits on its own first or
-    last line, or the bracketed sentinel opens the response (``[SILENT] No
-    changes detected``). A token buried mid-sentence is still delivered.
+    Models reliably bracket ``[SILENT]`` with a short note, so unlike the
+    interactive EXACT rule this also suppresses when a marker sits on its own
+    first/last line or the bracketed sentinel opens the response (``[SILENT] No
+    changes detected``).  A token buried mid-sentence is still delivered.
     Shares :data:`LIVE_GATEWAY_SILENT_MARKERS` so the two sets cannot drift.
     """
     if not isinstance(response, str):
@@ -104,13 +97,10 @@ def is_intentional_silence_agent_result(agent_result: dict | None, response: Any
 def is_partial_silence_marker(text: Any) -> bool:
     """True while streamed ``text`` could still resolve to a silence marker.
 
-    The streaming path must decide, before the whole response is known, whether
-    to show its buffer. A buffer whose canonical form is a non-empty *prefix* of
-    a marker (``"NO"`` on the way to ``"NO_REPLY"``, or an exact marker not yet
-    terminated by stream-end) is held back so a raw marker is never shown and
-    then retracted. Anything that has diverged from every marker, or exceeds the
-    marker cap, returns False so normal streaming resumes. Shares the marker set
-    and canonicalization with :func:`is_intentional_silence_response`.
+    A buffer whose canonical form is a non-empty *prefix* of a marker (``"NO"`` on
+    the way to ``"NO_REPLY"``, or an exact marker not yet terminated by stream-end)
+    is held back so a raw marker is never shown and then retracted.  Divergence
+    from every marker, or exceeding the cap, resumes normal streaming.
     """
     return any(
         c and any(marker.startswith(c) for marker in LIVE_GATEWAY_SILENT_MARKERS)

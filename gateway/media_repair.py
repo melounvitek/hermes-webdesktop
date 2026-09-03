@@ -1,13 +1,11 @@
 """Repair model-mangled ``computer_use`` screenshot paths in final responses.
 
-``computer_use`` persists a screenshot into the image cache and tells the model
-its absolute path.  Some models rewrite a Windows path into a POSIX-looking one
-(``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) inside an explicit ``MEDIA:``
+Some models rewrite the Windows path ``computer_use`` reported into a POSIX-looking
+one (``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) inside an explicit ``MEDIA:``
 directive, so delivery-path validation rejects it and drops the attachment.
-Deliberately narrow: only rewrites paths inside a response that *already*
-carries a ``MEDIA:`` directive, and only when its ``computer_use_<uuid>``
-basename exactly matches a canonical path returned by ``computer_use`` this
-turn.  Never auto-attaches; normal media path validation still runs afterwards.
+Deliberately narrow: only rewrites paths in a response that *already* carries a
+``MEDIA:`` directive whose ``computer_use_<uuid>`` basename exactly matches a
+canonical path returned this turn.  Never auto-attaches; validation still runs.
 """
 
 from __future__ import annotations
@@ -41,8 +39,7 @@ def tool_name_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
             continue
         for call in msg.get("tool_calls") or []:
             call_id = call.get("id") or call.get("call_id")
-            fn = call.get("function") or {}
-            name = str(fn.get("name") or call.get("name") or "")
+            name = str((call.get("function") or {}).get("name") or call.get("name") or "")
             if call_id and name:
                 mapping[str(call_id)] = name
     return mapping
@@ -56,12 +53,9 @@ def _computer_use_capture_basename(path: Any) -> str:
 
 
 def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
-    """Yield persisted screenshot paths from computer_use result content.
-
-    The tool can return JSON, a multimodal content list, or a text fallback; the
-    latter two keep the canonical path in the human-readable summary even though
-    the multimodal envelope's ``meta`` is not stored in the tool message.
-    """
+    """Yield persisted screenshot paths from computer_use result content (JSON, a
+    multimodal list, or text; the latter two keep the canonical path in the summary
+    line since the envelope's ``meta`` is not stored in the tool message)."""
     if isinstance(content, str):
         stripped = content.strip()
         if stripped.startswith(("{", "[")):
@@ -114,13 +108,9 @@ def _current_turn_messages(messages: List[Dict[str, Any]], history_offset: int) 
 def repair_explicit_computer_use_media_paths(
     response: str, messages: List[Dict[str, Any]], history_offset: int = 0
 ) -> str:
-    """Recover model-mangled paths for explicitly requested screenshots.
-
-    Repairs only an already-explicit ``MEDIA:`` directive whose generated
-    basename case-insensitively matches a canonical screenshot path from this
-    turn.  Fail-open: the repair is cosmetic, so any unexpected error returns
-    the response unchanged rather than aborting delivery.
-    """
+    """Recover model-mangled paths in explicit ``MEDIA:`` directives whose basename
+    matches (case-insensitively) a canonical screenshot path from this turn.
+    Fail-open: the repair is cosmetic, so any error returns the response unchanged."""
     try:
         return _repair_explicit_computer_use_media_paths_inner(response, messages, history_offset)
     except Exception:

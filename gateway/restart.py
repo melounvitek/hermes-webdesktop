@@ -6,11 +6,10 @@ from collections.abc import Mapping
 
 from hermes_cli.config import DEFAULT_CONFIG
 
-# EX_TEMPFAIL (sysexits.h): ask the service manager to restart the gateway
-# after a graceful drain/reload path completes.
+# EX_TEMPFAIL (sysexits.h): ask the service manager to restart after a graceful drain/reload.
 GATEWAY_SERVICE_RESTART_EXIT_CODE = 75
-# EX_CONFIG (sysexits.h): fatal configuration error (token collision, no
-# platforms); the s6 finish script maps it to exit 125 so the supervisor stops restarting.
+# EX_CONFIG (sysexits.h): fatal configuration error (token collision, no platforms);
+# the s6 finish script maps it to exit 125 so the supervisor stops restarting.
 GATEWAY_FATAL_CONFIG_EXIT_CODE = 78
 
 # Set by ``hermes gateway run --external-supervisor``. Unlike systemd's INVOCATION_ID
@@ -22,9 +21,8 @@ DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = float(DEFAULT_CONFIG["agent"]["restart_d
 DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT = float(DEFAULT_CONFIG["gateway"]["signal_interrupt_grace_timeout"])
 DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT = 5.0
 
-# In-band restart (``/restart``, SIGUSR1, self-restart) waits for active turns to
-# finish *before* ``stop()`` begins. Distinct from ``restart_drain_timeout``, the
-# force-interrupt budget once ``stop()`` runs (must stay short under systemd TimeoutStopSec).
+# In-band restart waits for active turns to finish *before* ``stop()`` begins; distinct from
+# ``restart_drain_timeout``, the force-interrupt budget once ``stop()`` runs (short under TimeoutStopSec).
 DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT = float(DEFAULT_CONFIG["agent"]["restart_after_turn_timeout"])
 
 # Cron-only floor under the ``stop()`` drain. ``restart_drain_timeout`` defaults to 0
@@ -123,11 +121,7 @@ def parse_signal_interrupt_grace_timeout(raw: object) -> float:
 
 
 def resolve_cron_drain_budget(
-    drain_timeout: float,
-    cron_drain_timeout: float,
-    *,
-    watchdog_delay: float,
-    elapsed: float = 0.0,
+    drain_timeout: float, cron_drain_timeout: float, *, watchdog_delay: float, elapsed: float = 0.0,
     cleanup_reserve_s: float = CRON_DRAIN_CLEANUP_RESERVE_S,
 ) -> float:
     """Seconds the shutdown drain may spend waiting on in-flight cron work.
@@ -147,11 +141,8 @@ def resolve_cron_drain_budget(
 
 
 def resolve_systemd_timeout_stop_sec(
-    drain_timeout: float,
-    cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
-    *,
-    cleanup_reserve_s: float = CRON_DRAIN_CLEANUP_RESERVE_S,
-    headroom_s: float = SYSTEMD_STOP_HEADROOM_S,
+    drain_timeout: float, cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, *,
+    cleanup_reserve_s: float = CRON_DRAIN_CLEANUP_RESERVE_S, headroom_s: float = SYSTEMD_STOP_HEADROOM_S,
     floor_s: float = SYSTEMD_TIMEOUT_STOP_SEC_FLOOR,
 ) -> int:
     """Seconds systemd ``TimeoutStopSec`` must cover the full stop budget.

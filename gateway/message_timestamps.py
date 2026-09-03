@@ -56,11 +56,8 @@ def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
 
 
 def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
-    """Coerce a timestamp-like value to Unix epoch seconds.
-
-    Accepts epoch numbers, datetime objects, ISO strings, and the gateway's
-    bracketed human-readable format. Returns ``None`` when uninterpretable.
-    """
+    """Epoch seconds from a number, datetime, ISO string, or the gateway's bracketed
+    format; ``None`` when uninterpretable."""
     if ts_value is None:
         return None
     if isinstance(ts_value, (int, float)):
@@ -96,12 +93,9 @@ def format_message_timestamp(ts_value: Any, tz=None) -> str:
 
 
 def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Optional[float]]:
-    """Strip one or more leading gateway timestamp prefixes from ``content``.
-
-    Returns ``(clean_content, embedded_epoch)``. With multiple prefixes the one
-    closest to the message text wins, preserving the original platform-send
-    time for legacy contaminated rows like ``[processing time] [platform time] [sender] message``.
-    """
+    """Strip leading gateway timestamp prefixes → ``(clean_content, embedded_epoch)``.
+    With several prefixes the one closest to the text wins, preserving the platform-send
+    time of legacy rows like ``[processing time] [platform time] [sender] message``."""
     if not isinstance(content, str) or not content:
         return content, None
     text = content
@@ -115,11 +109,8 @@ def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Option
 
 
 def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=None) -> str:
-    """Render a user message for LLM context with exactly one timestamp prefix.
-
-    An existing leading prefix is stripped and its parsed time wins over
-    ``ts_value``. If no timestamp is available the cleaned content is returned.
-    """
+    """Render a user message for LLM context with exactly one timestamp prefix; an
+    existing prefix is stripped and its parsed time wins over ``ts_value``."""
     clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
     effective_ts = embedded_epoch if embedded_epoch is not None else ts_value
     prefix = format_message_timestamp(effective_ts, tz=tz)

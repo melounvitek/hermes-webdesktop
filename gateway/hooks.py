@@ -1,14 +1,12 @@
 """Event hook system: fires handlers at gateway lifecycle points.
 
-Hooks live in ~/.hermes/hooks/<name>/ with HOOK.yaml (name, description, events)
-and handler.py (``def handle(event_type, context)``, sync or async).  Handler
-errors are logged and never block the pipeline.  Events: gateway:startup,
-session:start/end/reset, agent:start, agent:step (each tool-loop turn),
-agent:end, command:* (wildcard).  ``agent:start``/``agent:end`` context: platform,
-user_id, chat_id, thread_id (forum-topic/thread root as str, "" outside a thread),
-chat_type ("dm"|"group"|"forum"|""), session_id, message (500 chars); ``agent:end``
-adds response (500 chars), model, provider.  Telegram forum follow-ups should pass
-``message_thread_id=int(thread_id)`` when ``chat_type == "forum"`` and thread_id set.
+Hooks live in ~/.hermes/hooks/<name>/ with HOOK.yaml (name, description, events) and
+handler.py (``def handle(event_type, context)``, sync or async); errors never block
+the pipeline.  Events: gateway:startup, session:start/end/reset, agent:start,
+agent:step (each tool-loop turn), agent:end, command:* (wildcard).  agent:* context:
+platform, user_id, chat_id, thread_id ("" outside a thread), chat_type
+("dm"|"group"|"forum"|""), session_id, message (500 chars); agent:end adds response,
+model, provider.  Forum follow-ups pass ``message_thread_id=int(thread_id)``.
 """
 
 import asyncio

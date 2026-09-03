@@ -51,9 +51,7 @@ def _probe_config(home: Path) -> dict[str, Any]:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
         return _check("degraded", f"invalid config ({type(exc).__name__})")
-    if raw is not None and not isinstance(raw, dict):
-        return _check("degraded", "top level is not a mapping")
-    return _check("ok")
+    return _check("ok") if raw is None or isinstance(raw, dict) else _check("degraded", "top level is not a mapping")
 
 
 def _probe_disk(home: Path) -> dict[str, Any]:
@@ -81,27 +79,19 @@ def _probe_gateway(runtime_status: dict[str, Any]) -> dict[str, Any]:
 def _probe_session_store(runtime_status: dict[str, Any], state_db_probe: dict[str, Any]) -> dict[str, Any]:
     """Report the running gateway cache state, not an independent reopen."""
     runtime_store = runtime_status.get("session_store")
-    if isinstance(runtime_store, dict):
-        state = str(runtime_store.get("status") or "unknown")
-        if state in {"ok", "unavailable", "retrying"}:
-            return _check(state)
+    state = str(runtime_store.get("status") or "unknown") if isinstance(runtime_store, dict) else ""
+    if state in {"ok", "unavailable", "retrying"}:
+        return _check(state)
     # Older gateways publish no cache state: fall back to the state_db probe.
     return _check("ok" if state_db_probe.get("status") == "ok" else "unavailable")
 
 
 def collect_runtime_readiness(
-    *,
-    configured_model: str,
-    runtime_status: dict[str, Any] | None,
-    active_api_runs: int = 0,
-    process_completion_queue_depth: int = 0,
-    active_delegations: int = 0,
+    *, configured_model: str, runtime_status: dict[str, Any] | None, active_api_runs: int = 0,
+    process_completion_queue_depth: int = 0, active_delegations: int = 0,
 ) -> dict[str, Any]:
-    """Return bounded readiness diagnostics without mutating runtime state.
-
-    Even on the authenticated endpoint, probes expose status and counts only:
-    never config values, credentials, paths, queue payloads, or exception messages.
-    """
+    """Bounded readiness diagnostics, no runtime mutation.  Even authenticated, probes
+    expose status and counts only: never config values, credentials, paths, payloads."""
     home = get_hermes_home()
     runtime = runtime_status if isinstance(runtime_status, dict) else {}
     state_db_probe = _probe_state_db(home)
@@ -113,8 +103,7 @@ def collect_runtime_readiness(
         "disk": _probe_disk(home),
         "gateway": _probe_gateway(runtime),
         "background_queues": _check(
-            "ok",
-            active_api_runs=max(0, int(active_api_runs)),
+            "ok", active_api_runs=max(0, int(active_api_runs)),
             process_completions=max(0, int(process_completion_queue_depth)),
             active_delegations=max(0, int(active_delegations)),
         ),

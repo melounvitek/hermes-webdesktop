@@ -1,18 +1,12 @@
 """Shared config→env bridge for media-delivery policy.
 
-``validate_media_delivery_path`` (gateway/platforms/base.py) reads its policy
-from environment variables:
-
-  - ``HERMES_MEDIA_DELIVERY_STRICT``    <- gateway.strict
-  - ``HERMES_MEDIA_ALLOW_DIRS``         <- gateway.media_delivery_allow_dirs
-  - ``HERMES_MEDIA_TRUST_RECENT_FILES`` <- gateway.trust_recent_files
-
-Every delivery entrypoint (gateway startup, ``hermes cron run``, ``hermes send``)
-calls :func:`apply_media_policy_env` before filtering media paths, so standalone
-paths filter under the same policy as the gateway instead of silently dropping
-attachments in strict/allowlisted deployments.  An explicitly-set environment
-variable WINS over config.yaml, so a shell override (and gateway startup's own
-earlier run) survives.
+``validate_media_delivery_path`` reads ``HERMES_MEDIA_DELIVERY_STRICT`` (gateway.strict),
+``HERMES_MEDIA_ALLOW_DIRS`` (gateway.media_delivery_allow_dirs) and
+``HERMES_MEDIA_TRUST_RECENT_FILES`` (gateway.trust_recent_files).  Every delivery
+entrypoint (gateway startup, ``hermes cron run``, ``hermes send``) calls
+:func:`apply_media_policy_env` first so standalone paths filter under the gateway's
+policy instead of silently dropping attachments in strict/allowlisted deployments.
+An explicitly-set env var WINS over config.yaml, so shell overrides survive.
 """
 
 from __future__ import annotations

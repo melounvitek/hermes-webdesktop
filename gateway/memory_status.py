@@ -1,10 +1,9 @@
 """Memory status rollup for ``/api/status``.
 
-Read side for signals the gateway already persists: the 30s
-``state/gateway.heartbeat`` (RSS + MemAvailable/MemTotal + swap) and the
-lifecycle sentinel's ``suspected_oom`` flag.  Two small file reads, no IPC.
-``/api/status`` is unauthenticated, so the block carries only coarse numbers
-(MB), enums and booleans.  Best-effort: a missing/corrupt file degrades to
+Read side for signals the gateway already persists: the 30s ``state/gateway.heartbeat``
+(RSS + MemAvailable/MemTotal + swap) and the lifecycle sentinel's ``suspected_oom``
+flag — two small file reads, no IPC.  ``/api/status`` is unauthenticated, so only
+coarse numbers (MB), enums and booleans.  A missing/corrupt file degrades to
 ``pressure="unknown"`` rather than raising into the status endpoint.
 """
 
@@ -24,6 +23,10 @@ _CRITICAL_AVAILABLE_KIB = 64 * 1024  # < 64 MiB available
 _CRITICAL_AVAILABLE_FRACTION = 0.05  # < 5% of MemTotal
 _ELEVATED_AVAILABLE_KIB = 128 * 1024  # < 128 MiB available
 _ELEVATED_AVAILABLE_FRACTION = 0.15  # < 15% of MemTotal
+_PRESSURE_TIERS = (  # order-sensitive: worst first
+    ("critical", _CRITICAL_AVAILABLE_KIB, _CRITICAL_AVAILABLE_FRACTION),
+    ("elevated", _ELEVATED_AVAILABLE_KIB, _ELEVATED_AVAILABLE_FRACTION),
+)
 
 # Writer cadence is 30s; 150s tolerates a briefly stalled loop without letting
 # a long-dead gateway's last sample pose as current.
@@ -51,20 +54,14 @@ def _parse_iso(value: Any) -> Optional[datetime]:
 
 
 def classify_pressure(available_kib: Any, total_kib: Any) -> str:
-    """Map a MemAvailable/MemTotal pair to ``ok``/``elevated``/``critical``.
-
-    ``unknown`` when the sample is missing or malformed — the caller must
-    not treat "we could not read it" as "memory is fine".
-    """
+    """``ok``/``elevated``/``critical`` from MemAvailable/MemTotal; ``unknown`` when the
+    sample is missing/malformed — "could not read it" must never read as "fine"."""
     available = _nonneg_int(available_kib)
     if available is None:
         return "unknown"
     total = _nonneg_int(total_kib)
     fraction = available / total if total else None
-    for level, kib_floor, frac_floor in (
-        ("critical", _CRITICAL_AVAILABLE_KIB, _CRITICAL_AVAILABLE_FRACTION),
-        ("elevated", _ELEVATED_AVAILABLE_KIB, _ELEVATED_AVAILABLE_FRACTION),
-    ):
+    for level, kib_floor, frac_floor in _PRESSURE_TIERS:
         if available < kib_floor or (fraction is not None and fraction < frac_floor):
             return level
     return "ok"
@@ -86,13 +83,9 @@ def collect_memory_status(
     *,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Build the ``memory`` block for ``/api/status``.
-
-    ``home`` scopes the read to a profile's HERMES_HOME (``None`` = active
-    profile); ``now`` is injectable for tests.  Always returns a dict and never
-    raises — a down gateway or corrupt files yield ``{"pressure": "unknown", ...}``
-    plus whatever fields could be recovered.
-    """
+    """``memory`` block for ``/api/status``; ``home`` scopes to a profile (``None`` =
+    active), ``now`` is injectable.  Never raises — a down gateway or corrupt files
+    yield ``pressure="unknown"`` plus whatever fields could be recovered."""
     moment = now or datetime.now(timezone.utc)
     status: Dict[str, Any] = {
         "pressure": "unknown", "gateway_rss_mb": None, "system_total_mb": None, "system_available_mb": None,

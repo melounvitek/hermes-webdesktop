@@ -50,11 +50,8 @@ def log_memory_usage(prefix: str = "") -> None:
     """Log ``[MEMORY] [<prefix> ]rss=... gc=... threads=... uptime=...``; safe from any thread."""
     rss = _get_rss_mb()
     logger.info(
-        "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds",
-        f"{prefix} " if prefix else "",
-        "unavailable" if rss is None else f"{rss}MB",
-        gc.get_count(),  # (gen0, gen1, gen2)
-        threading.active_count(),
+        "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds", f"{prefix} " if prefix else "",
+        "unavailable" if rss is None else f"{rss}MB", gc.get_count(), threading.active_count(),
         int(time.monotonic() - _start_time) if _start_time else 0,
     )
 
@@ -81,16 +78,15 @@ def start_memory_monitoring(interval_seconds: float = 300.0) -> bool:
             return False
         if _get_rss_mb() is None:
             logger.warning(
-                "[MEMORY] Memory monitoring unavailable: neither resource.getrusage "
-                "nor psutil could read process RSS — skipping periodic logging.",
+                "[MEMORY] Memory monitoring unavailable: neither resource.getrusage nor psutil could read process RSS "
+                "— skipping periodic logging.",
             )
             return False
         _start_time = time.monotonic()
         _stop_event = threading.Event()
         log_memory_usage(prefix="baseline")
         _monitor_thread = threading.Thread(
-            target=_monitor_loop, args=(_stop_event, float(interval_seconds)),
-            name="gateway-memory-monitor", daemon=True,
+            target=_monitor_loop, args=(_stop_event, float(interval_seconds)), name="gateway-memory-monitor", daemon=True
         )
         _monitor_thread.start()
         logger.info("[MEMORY] Periodic memory monitoring started (interval: %ds)", int(interval_seconds))

@@ -1,12 +1,11 @@
 """Memory-pressure bounds for the gateway's per-session AIAgent cache.
 
-Each cached ``AIAgent`` pins ``_session_messages`` (the full live transcript,
-tens of MB on a tool-heavy session).  The cache's LRU cap counts entries, not
-bytes, and the idle TTL defers eviction for busy sessions, so neither sees
-actual memory use.  This module supplies that signal: own anonymous RSS against
-a budget derived from the cgroup limit; ``GatewayRunner`` sheds LRU transcripts
-via soft eviction (rebuilt from the persisted session on the next turn).
-Everything here is pure or read-only.  Config lives under ``agent.agent_cache``.
+Each cached ``AIAgent`` pins its full live transcript (tens of MB on a tool-heavy
+session); the LRU cap counts entries, not bytes, and the idle TTL defers eviction
+for busy sessions, so neither sees actual memory use.  This module supplies that
+signal — own anonymous RSS against a budget derived from the cgroup limit — and
+``GatewayRunner`` sheds LRU transcripts via soft eviction (rebuilt from the
+persisted session next turn).  Pure/read-only; config under ``agent.agent_cache``.
 """
 
 from __future__ import annotations
@@ -33,12 +32,8 @@ _OFF_WORDS = frozenset({"", "off", "none", "false", "disabled"})
 
 @dataclass(frozen=True)
 class AgentCacheBounds:
-    """Operator-facing bounds for the per-session agent cache.
-
-    ``max_size`` / ``idle_ttl_secs`` are ``None`` when unset so ``gateway/run.py``
-    keeps its module defaults; ``memory_high_mb`` is ``None`` when pressure
-    eviction is off.
-    """
+    """Operator-facing bounds.  ``max_size``/``idle_ttl_secs`` are ``None`` when unset
+    so ``gateway/run.py`` keeps its defaults; ``memory_high_mb`` ``None`` = pressure eviction off."""
 
     max_size: Optional[int] = None
     idle_ttl_secs: Optional[float] = None
@@ -65,11 +60,10 @@ def _positive(value: Any, cast: Callable[[Any], Any] = int) -> Any:
 def _cgroup_limit_bytes() -> Optional[int]:
     """Memory limit this process runs under, if cgroup-capped.
 
-    Prefers cgroup v2 ``memory.high`` (the throttling point) over ``memory.max``,
-    then cgroup v1.  Checks the process's *own* cgroup first (where a systemd
-    unit's ``MemoryHigh=``/``MemoryMax=`` lands — the root files read ``max``
-    there), then the root for container-style limits.  ``max`` and the v1
-    near-2^63 sentinel mean unlimited.
+    Prefers v2 ``memory.high`` (the throttling point) over ``memory.max``, then v1.
+    Own cgroup first (where a systemd unit's ``MemoryHigh=``/``MemoryMax=`` lands —
+    root reads ``max`` there), then root for container-style limits.  ``max`` and
+    the v1 near-2^63 sentinel mean unlimited.
     """
     if sys.platform != "linux":
         return None
@@ -106,11 +100,8 @@ def _total_memory_bytes() -> Optional[int]:
 
 
 def resolve_memory_high_mb(setting: Any) -> Optional[int]:
-    """Resolve ``memory_high_mb`` into an absolute MB budget.
-
-    ``"auto"`` derives it from the cgroup limit (or total RAM when uncapped);
-    a positive number is literal; anything falsy/off disables the pass.
-    """
+    """Absolute MB budget: ``"auto"`` derives from the cgroup limit (or total RAM when
+    uncapped); a positive number is literal; anything falsy/off disables the pass."""
     if isinstance(setting, str):
         normalized = setting.strip().lower()
         if normalized != "auto":
@@ -129,11 +120,8 @@ def resolve_memory_high_mb(setting: Any) -> Optional[int]:
 
 
 def resolve_agent_cache_bounds(config: Any) -> AgentCacheBounds:
-    """Read ``agent.agent_cache`` out of the *raw* config mapping.
-
-    The gateway's loader does not deep-merge ``DEFAULT_CONFIG``, so an absent
-    key stays absent and callers can tell "operator chose 128" from "unset".
-    """
+    """Read ``agent.agent_cache`` from the *raw* config: the gateway loader does not
+    deep-merge ``DEFAULT_CONFIG``, so callers can tell "operator chose 128" from "unset"."""
     section = (config.get("agent") or {}).get("agent_cache") if isinstance(config, dict) else None
     if not isinstance(section, dict):
         section = {}
@@ -154,12 +142,8 @@ def resolve_agent_cache_bounds(config: Any) -> AgentCacheBounds:
 
 
 def read_anon_rss_mb() -> Optional[int]:
-    """Process anonymous resident memory in MB, or None.
-
-    Anonymous pages are where cached transcripts live; file-backed pages are
-    noise.  ``collect_memory_snapshot`` reads ``/proc/self/status`` without a
-    dependency; psutil covers other platforms (total RSS only).
-    """
+    """Anonymous RSS in MB (where cached transcripts live; file-backed pages are noise),
+    or None.  ``/proc/self/status`` first; psutil covers other platforms (total RSS only)."""
     try:
         from hermes_cli.mem_trim import collect_memory_snapshot
 
@@ -179,13 +163,12 @@ def read_anon_rss_mb() -> Optional[int]:
 
 
 def transcript_persistence_caught_up(agent: Any) -> bool:
-    """True when the agent's live transcript is fully on disk.
+    """True when the live transcript is fully on disk.
 
-    Soft eviction drops ``_session_messages`` and rebuilds from the persisted
-    session, so it is only safe once ``_last_flushed_db_idx`` (advanced to
-    ``len(messages)`` only on a fully successful write) has caught up.  Unknown
-    shapes are *not* caught up: a skipped eviction costs memory, a wrong one
-    costs the conversation.
+    Soft eviction rebuilds from the persisted session, so it is only safe once
+    ``_last_flushed_db_idx`` (advanced only on a fully successful write) has caught
+    up.  Unknown shapes are *not* caught up: a skipped eviction costs memory, a
+    wrong one costs the conversation.
     """
     messages = getattr(agent, "_session_messages", None)
     flushed = getattr(agent, "_last_flushed_db_idx", None)
@@ -193,19 +176,15 @@ def transcript_persistence_caught_up(agent: Any) -> bool:
 
 
 def plan_pressure_evictions(
-    ordered_entries: Iterable[Tuple[str, Any]],
-    *,
-    is_evictable: Callable[[str, Any], bool],
-    max_evictions: int,
-    protect_recent: int = 0,
+    ordered_entries: Iterable[Tuple[str, Any]], *, is_evictable: Callable[[str, Any], bool],
+    max_evictions: int, protect_recent: int = 0,
 ) -> List[Tuple[str, Any]]:
     """Choose which cached sessions to shed, least-recently-used first.
 
-    ``ordered_entries`` must be LRU→MRU (the cache OrderedDict is kept that way
-    by ``move_to_end`` on every hit).  The batch is capped so one pass cannot
-    stall the gateway.  ``protect_recent`` is clamped to half the cache: a few
-    huge transcripts can exhaust the budget alone, and a fixed guard would then
-    protect the whole cache with nothing left to shed.
+    ``ordered_entries`` must be LRU→MRU (the cache OrderedDict ``move_to_end``s on
+    every hit).  The batch is capped so one pass cannot stall the gateway.
+    ``protect_recent`` is clamped to half the cache: a few huge transcripts can
+    exhaust the budget alone, and a fixed guard would leave nothing to shed.
     """
     entries = list(ordered_entries)
     if max_evictions <= 0 or not entries:
