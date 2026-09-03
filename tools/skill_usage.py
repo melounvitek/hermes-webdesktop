@@ -1,19 +1,10 @@
-"""Skill usage telemetry + provenance tracking for the Curator feature.
+"""Skill usage telemetry + provenance for the Curator: a sidecar ``~/.hermes/skills/.usage.json`` keyed by
+skill name (never frontmatter — keeps telemetry out of user-authored SKILL.md and off bundled/hub skills).
 
-Per-skill usage metadata lives in a sidecar JSON file (~/.hermes/skills/.usage.json) keyed by skill name.
-Counters are bumped by the skill tools (skill_view, skill_manage); the curator orchestrator reads the derived
-activity timestamp to decide lifecycle transitions.
-
-Design notes: sidecar, not frontmatter (keeps operational telemetry out of user-authored SKILL.md content and
-avoids conflict pressure for bundled/hub skills); atomic writes via tempfile + os.replace (same pattern as
-.bundled_manifest); all counter bumps are best-effort — failures log at DEBUG and return silently, so a broken
-sidecar never breaks the underlying tool call; and curator-managed skills are explicitly marked when created
-through skill_manage — bundled / hub-installed skills stay off-limits, and manually authored skills are not
-inferred from location.
-
-Lifecycle states: active (default) -> stale (unused > stale_after_days, config) -> archived (unused >
-archive_after_days, config; moved to .archive/). ``pinned`` is a boolean opt-out from auto transitions,
-orthogonal to state.
+Counter bumps are best-effort (failures log at DEBUG, never break the tool call); writes are atomic
+(tempfile + os.replace) under a cross-process lock. Curator management is an explicit ``created_by: agent``
+marker written by skill_manage — never inferred from location. Lifecycle: active -> stale -> archived
+(moved to .archive/); ``pinned`` opts out of auto transitions, orthogonal to state.
 """
 
 from __future__ import annotations
@@ -49,20 +40,15 @@ STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
-# Load-bearing bundled built-ins the curator must NEVER archive or consolidate, regardless of
-# ``curator.prune_builtins``, pin state, or LLM judgment. These back advertised UX paths; silently archiving one
-# turns its slash command into "Unknown command" with no signal to the user. Protection is by skill ``name``
-# (frontmatter ``name:``), matching the keys used throughout this module. Keep this list tiny and intentional —
-# it is not a substitute for ``curator.prune_builtins: false``, which exempts ALL built-ins. (``plan`` used to
-# live here; it is now a first-class built-in command with no skill on disk, so the set is currently empty.)
+# Load-bearing built-ins (by frontmatter ``name``) the curator must NEVER archive or consolidate, regardless
+# of ``curator.prune_builtins``, pin state, or LLM judgment — silently archiving one turns its slash command
+# into "Unknown command". Keep tiny; it is not a substitute for ``curator.prune_builtins: false``.
+# (``plan`` used to live here; it is now a first-class command with no skill on disk.)
 PROTECTED_BUILTIN_SKILLS: Set[str] = set()
 
 
 def is_protected_builtin(skill_name: str) -> bool:
-    """Whether *skill_name* is a load-bearing built-in the curator never touches.
-
-    Protected built-ins are exempt from archival and consolidation on every path: the automatic state-transition walk,
-    the LLM consolidation pass (dropped from the candidate list), and direct ``archive_skill`` calls."""
+    """Exempt from archival/consolidation on every path: auto transitions, LLM pass, direct archive_skill."""
     return skill_name in PROTECTED_BUILTIN_SKILLS
 
 
@@ -139,7 +125,6 @@ def _now_iso() -> str:
 
 
 def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
-    """Parse an ISO timestamp defensively for activity comparisons."""
     if not value:
         return None
     try:
@@ -150,19 +135,15 @@ def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
 
 
 def latest_activity_at(record: Dict[str, Any]) -> Optional[str]:
-    """Return the newest actual activity timestamp for a usage record.
-
-    "Activity" means a skill was used, viewed, or patched. Creation time is intentionally excluded so callers can
-    still distinguish never-active skills; lifecycle code can fall back to ``created_at`` as its own anchor."""
-    stamps = [
-        (dt, str(raw)) for raw in (record.get(k) for k in ("last_used_at", "last_viewed_at", "last_patched_at"))
-        if (dt := _parse_iso_timestamp(raw)) is not None
-    ]
+    """Newest use/view/patch timestamp. Creation time is excluded so never-active skills stay
+    distinguishable; lifecycle code falls back to ``created_at`` itself."""
+    stamps = [(dt, str(raw)) for raw in (record.get(k) for k in ("last_used_at", "last_viewed_at", "last_patched_at"))
+              if (dt := _parse_iso_timestamp(raw)) is not None]
     return max(stamps, key=lambda t: t[0])[1] if stamps else None
 
 
 def activity_count(record: Dict[str, Any]) -> int:
-    """Return the total observed activity count across use/view/patch events."""
+    """Total observed use+view+patch events."""
     total = 0
     for key in ("use_count", "view_count", "patch_count"):
         try:
@@ -174,24 +155,20 @@ def activity_count(record: Dict[str, Any]) -> int:
 
 # --- Provenance — which skills are agent-created (and thus eligible for curation) ---
 def _read_bundled_manifest_names() -> Set[str]:
-    """Skill names seeded from the bundled repo: ~/.hermes/skills/.bundled_manifest ("name:hash" per line). Empty set
-    if the file is missing or unreadable."""
+    """Names from ``.bundled_manifest`` ("name:hash" per line); empty if missing/unreadable."""
     lines = _read_lines(_skills_dir() / ".bundled_manifest", "Failed to read bundled manifest: %s")
     return {n for n in (line.split(":", 1)[0].strip() for line in lines) if n}
 
 
 def _read_hub_installed_names() -> Set[str]:
-    """Skill names installed via the Skills Hub, read from ~/.hermes/skills/.hub/lock.json (see tools/skills_hub.py ::
-    HubLockFile)."""
+    """Names installed via the Skills Hub (``.hub/lock.json``, see tools/skills_hub.py::HubLockFile), plus the
+    frontmatter name of each ``install_path`` that resolves inside the skills dir."""
     lock_path = _skills_dir() / ".hub" / "lock.json"
     if not lock_path.exists():
         return set()
     try:
-        # Tolerate non-UTF-8 bytes in the lock file. Hub descriptions can carry Windows-1252 typographic chars
-        # (em-dash 0x97, smart quotes, bullets) written as single high bytes; a strict utf-8 read raises
-        # UnicodeDecodeError, which is a ValueError sibling (not OSError/JSONDecodeError) so it escapes the
-        # handler below and 500s the whole /api/skills endpoint. errors="replace" degrades the offending byte to
-        # U+FFFD, keeping the (structurally valid) JSON — and every other skill — readable. See #68053.
+        # errors="replace": hub descriptions can carry Windows-1252 high bytes; a strict read raises
+        # UnicodeDecodeError (a ValueError, not caught below) and would 500 the whole /api/skills endpoint.
         data = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
         installed = (data.get("installed") or {}) if isinstance(data, dict) else None
         if not isinstance(installed, dict):
@@ -216,12 +193,8 @@ def _read_hub_installed_names() -> Set[str]:
 
 
 def _prune_builtins_enabled() -> bool:
-    """Whether bundled built-in skills are eligible for curator pruning.
-
-    Reads ``curator.prune_builtins`` from config (default True). Lazy import keeps this module importable without the
-    CLI config layer (e.g. in the update/sync context); on any failure we fall back to the default. The real safety
-    against a mass-prune is the curator's seed-on-first-sight, not this flag — built-ins only archive after a fresh
-    inactivity window."""
+    """``curator.prune_builtins`` (default True). Lazy config import keeps this module importable in the
+    update/sync context. The real mass-prune safety is seed-on-first-sight, not this flag."""
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
@@ -234,15 +207,14 @@ def _prune_builtins_enabled() -> bool:
 
 
 def read_suppressed_names() -> Set[str]:
-    """Built-in skills the curator pruned — the re-seeder must leave archived.
-
-    One skill name per line in ``~/.hermes/skills/.curator_suppressed``. This is what makes pruning a built-in
-    durable: without it, ``hermes update`` would re-copy the bundled skill on the next sync."""
+    """Built-ins the curator pruned (one name per line in ``.curator_suppressed``); the update-time re-seeder
+    must leave these archived, otherwise ``hermes update`` would re-copy the bundled skill."""
     lines = _read_lines(_skills_dir() / ".curator_suppressed", "Failed to read curator suppression list: %s")
     return {line for line in lines if not line.startswith("#")}
 
 
 def _toggle_suppressed_name(skill_name: str, *, add: bool) -> None:
+    """Add (built-in pruned) or drop (restored) *skill_name* in the suppression list; no-op when unchanged."""
     if not skill_name or (skill_name in (names := read_suppressed_names())) == add:
         return
     (names.add if add else names.discard)(skill_name)
@@ -253,72 +225,46 @@ def _toggle_suppressed_name(skill_name: str, *, add: bool) -> None:
         logger.debug("Failed to write curator suppression list: %s", e, exc_info=True)
 
 
-def add_suppressed_name(skill_name: str) -> None:
-    """Record that a built-in skill was pruned, so sync won't restore it."""
-    _toggle_suppressed_name(skill_name, add=True)
-
-
-def remove_suppressed_name(skill_name: str) -> None:
-    """Clear a built-in's suppression entry (e.g. on restore)."""
-    _toggle_suppressed_name(skill_name, add=False)
-
-
 def _iter_skill_mds(base: Path, *, local_only: bool) -> Iterator[Tuple[str, Path]]:
-    """Yield ``(frontmatter name, SKILL.md)`` for every skill under *base* — the flat layout AND nested
-    category/skill/SKILL.md — skipping Hermes metadata, VCS, virtualenv/dependency, and cache dirs. With
-    *local_only*, external skill dirs mounted below the local tree are skipped too: discovery may see them,
-    but autonomous lifecycle curation must not."""
+    """``(frontmatter name, SKILL.md)`` for flat and category-nested skills under *base*, skipping metadata/VCS/
+    venv/cache dirs. *local_only* also skips external skill dirs mounted below the tree — discovery may see
+    them, autonomous curation must not."""
     for skill_md in base.rglob("SKILL.md"):
         if not (is_excluded_skill_path(skill_md) or (local_only and is_external_skill_path(skill_md))):
             yield _read_skill_name(skill_md, fallback=skill_md.parent.name), skill_md
 
 
 def _scan_local_skills(keep: Callable[[str, Path, Set[str], Dict[str, Any]], bool]) -> List[str]:
-    """Sorted, de-duplicated names of local skills passing *keep(name, skill_md, bundled, usage)*.
-
-    Hub-installed skills are always off-limits, and protected built-ins are never curation candidates
-    (exempt from the automatic transition walk AND the LLM consolidation pass), so neither ever reaches
-    *keep*."""
+    """Sorted unique names of local skills passing *keep(name, skill_md, bundled, usage)*. Hub-installed and
+    protected built-ins never reach *keep*."""
     base = _skills_dir()
     if not base.exists():
         return []
     hub, bundled, usage = _read_hub_installed_names(), _read_bundled_manifest_names(), load_usage()
     return sorted({
         name for name, skill_md in _iter_skill_mds(base, local_only=True)
-        if name not in hub and not is_protected_builtin(name) and keep(name, skill_md, bundled, usage)
-    })
+        if name not in hub and not is_protected_builtin(name) and keep(name, skill_md, bundled, usage)})
 
 
 def list_agent_created_skill_names() -> List[str]:
-    """Enumerate skills the curator may manage.
-
-    Always includes agent-authored skills (those marked in ``.usage.json`` via ``skill_manage(action="create")``).
-    When ``curator.prune_builtins`` is enabled, bundled built-in skills are ALSO included even though they have no
-    agent-created usage record — their inactivity clock is anchored on first sight (see
-    ``apply_automatic_transitions``). Hub-installed skills are never included; manually authored skills are not
-    inferred from filesystem location."""
-    if not _skills_dir().exists():
-        return []
+    """Skills the curator may manage: agent-authored (``created_by: agent`` record) plus, when
+    ``curator.prune_builtins`` is on, bundled built-ins (inactivity anchored on first sight). Never hub skills."""
     prune_builtins = _prune_builtins_enabled()  # read once, before the walk
 
     def _keep(name: str, _skill_md: Path, bundled: Set[str], usage: Dict[str, Any]) -> bool:
-        # Built-ins are only candidates when pruning is enabled; they never carry a curator-managed record, so
-        # the record gate is skipped. Agent-authored (or local-manual) skills must opt in via their record.
+        # Built-ins never carry a curator-managed record, so the record gate applies only to local skills.
         return prune_builtins if name in bundled else _is_curator_managed_record(usage.get(name))
     return _scan_local_skills(_keep)
 
 
 def list_archived_skill_names() -> List[str]:
-    """Enumerate skills in ``~/.hermes/skills/.archive/``.
-
-    Archive layout is flat (``.archive/<skill>/``) as set by ``archive_skill``, so the directory name is the skill
-    name. Used by ``hermes curator list-archived`` to help users pass a name to ``hermes curator restore``."""
+    """Skills in ``.archive/`` — flat layout (``archive_skill`` flattens), so dir name == skill name."""
     archive_root = _archive_dir()
     return sorted({p.name for p in archive_root.iterdir() if p.is_dir()}) if archive_root.exists() else []
 
 
 def _read_skill_name(skill_md: Path, fallback: str) -> str:
-    """Parse the `name:` field from a SKILL.md YAML frontmatter."""
+    """The frontmatter ``name:`` field of a SKILL.md (first 4000 chars), else *fallback*."""
     try:
         text = skill_md.read_text(encoding="utf-8", errors="replace")[:4000]
     except OSError:
@@ -337,19 +283,17 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
 
 
 def is_agent_created(skill_name: str) -> bool:
-    """Whether *skill_name* is neither bundled nor hub-installed."""
+    """Neither bundled nor hub-installed (and not only present in an external dir)."""
     if skill_name in _read_bundled_manifest_names() | _read_hub_installed_names():
         return False
     return _find_skill_dir(skill_name) is not None or _find_external_skill_dir(skill_name) is None
 
 
 def is_hub_installed(skill_name: str) -> bool:
-    """Whether *skill_name* was installed via the Skills Hub."""
     return skill_name in _read_hub_installed_names()
 
 
 def is_bundled(skill_name: str) -> bool:
-    """Whether *skill_name* was seeded from the bundled repo skills."""
     return skill_name in _read_bundled_manifest_names()
 
 
@@ -358,15 +302,11 @@ def _external_read_only_message(skill_name: str) -> str:
 
 
 def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None) -> bool:
-    """Whether the curator may track/archive *skill_name*.
-
-    Agent-created skills are always eligible. Bundled built-ins become eligible only when ``curator.prune_builtins``
-    is enabled. Hub-installed and external skill-dir skills are NEVER eligible — they have an external upstream owner.
-    Org-shared skills ARE eligible for improvement (the curator may patch them like any other skill; edits stay local
-    until proposed) but are protected from ARCHIVE/DELETE elsewhere — removing a shared skill is an org-admin action,
-    not a local curation decision. Protected built-ins (``PROTECTED_BUILTIN_SKILLS``) are NEVER eligible regardless of
-    any flag — they back load-bearing UX and must never be archived or consolidated."""
-    if (skill_path is not None and is_external_skill_path(skill_path)) or is_protected_builtin(skill_name) or is_hub_installed(skill_name):
+    """May the curator track/archive this skill? Agent-created: yes. Bundled: only with
+    ``curator.prune_builtins``. Hub-installed / external-dir / protected built-ins: never (external owner).
+    Org-shared skills are eligible for improvement (edits stay local) but protected from ARCHIVE/DELETE elsewhere."""
+    if ((skill_path is not None and is_external_skill_path(skill_path)) or is_protected_builtin(skill_name)
+            or is_hub_installed(skill_name)):
         return False
     if is_bundled(skill_name):
         return _prune_builtins_enabled()
@@ -375,75 +315,42 @@ def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None) -> 
 
 
 def _is_curator_managed_record(record: Any) -> bool:
-    """Return True when a usage record opts a skill into curator management.
-
-    NAMING (issue #67140): the on-disk field is ``created_by``, which reads like provenance but is consumed as a
-    **curator-management opt-in policy flag**. The two are not the same question: provenance = "who authored this
-    file" — historical fact, unrecoverable for records written before the marker existed; management = "may autonomous
-    curation mutate/archive this" — a policy decision the user can change at any time via ``hermes curator adopt``.
-
-    ``created_by: "agent"`` therefore means "curator-managed", NOT "proof the agent wrote it". The field name is
-    retained because it is already on disk in every user's ``.usage.json``; renaming it would strand those records.
-    Read it as policy, and prefer ``is_curator_managed()`` at call sites so the intent is unambiguous."""
+    """The on-disk ``created_by`` field reads like provenance but is a curator-management OPT-IN policy flag:
+    ``"agent"`` means "curator-managed", not proof of authorship (the user can flip it via ``hermes curator
+    adopt``). The name is kept because it is already in every user's ``.usage.json``."""
     return isinstance(record, dict) and (record.get("created_by") == "agent" or record.get("agent_created") is True)
 
 
 def is_curator_managed(skill_name: str) -> bool:
-    """Whether *skill_name* is opted into curator management — the policy-intent alias for the ``created_by``-marker
-    check (see ``_is_curator_managed_record`` for the field-name story)."""
+    """Policy-intent alias for the ``created_by`` marker check."""
     return _is_curator_managed_record(load_usage().get(skill_name))
 
 
 def list_unmanaged_skill_names() -> List[str]:
-    """Enumerate curation-ELIGIBLE skills that carry no provenance marker.
-
-    These are skills the curator *could* manage (not hub-installed, not external, not protected built-ins) but never
-    will, because nothing ever wrote ``created_by: agent`` onto their usage record. Two ways a skill lands here: it
-    predates the provenance mechanism entirely (records written before ``created_by`` existed carry no key at all, so
-    authorship is unknowable from the record alone), or it was created by a FOREGROUND
-    ``skill_manage(action="create")`` call, which deliberately does not mark provenance (skills a user asks for belong
-    to the user).
-
-    Either way the skill is invisible to ``curated_report()`` and therefore to every automatic transition. ``hermes
-    curator status`` surfaces this count so the blind spot is legible instead of silent, and ``hermes curator adopt``
-    lets the user hand specific skills over explicitly.
-
-    Provenance is a DECLARATION, never an inference: this function only reports, and callers must not auto-adopt what
-    it returns. Heavy patch or use counts are evidence of maintenance, not of authorship — the agent edits
-    user-authored skills on the user's behalf routinely."""
+    """Curation-ELIGIBLE skills with no provenance marker: records predating ``created_by``, or FOREGROUND
+    ``skill_manage(action="create")`` results (skills a user asks for belong to the user). Invisible to
+    ``curated_report()`` and every automatic transition; surfaced by ``hermes curator status`` and handed over
+    only by explicit ``hermes curator adopt`` — provenance is a declaration, never inferred from activity."""
     def _keep(name: str, skill_md: Path, bundled: Set[str], usage: Dict[str, Any]) -> bool:
-        # Anything with an external owner or a bundled/protected identity is outside the adoption question.
         return name not in bundled and not _is_curator_managed_record(usage.get(name)) and is_curation_eligible(name, skill_md)
     return _scan_local_skills(_keep)
 
 
 def unmanaged_report() -> List[Dict[str, Any]]:
-    """Rows for every skill :func:`list_unmanaged_skill_names` returns.
-
-    Each row carries the usual activity fields plus ``has_provenance_key``: False when the record has no
-    ``created_by`` key at all (pre-dates the mechanism), True when the key is present but unset (a foreground create
-    under the current policy). The distinction matters for explaining WHY a skill is unmanaged; it is not a signal to
-    adopt on."""
+    """Rows for :func:`list_unmanaged_skill_names`. ``has_provenance_key`` is False when the record has no
+    ``created_by`` key (pre-dates the mechanism), True when present but unset (foreground create) — explains
+    WHY a skill is unmanaged; not a signal to adopt on."""
     usage = load_usage()
     return [
-        _report_row(
-            name, dict(raw) if isinstance(raw, dict) else None,
-            has_provenance_key=isinstance(raw, dict) and "created_by" in raw, has_record=isinstance(raw, dict),
-        )
-        for name, raw in ((n, usage.get(n)) for n in list_unmanaged_skill_names())
-    ]
+        _report_row(name, raw, has_provenance_key=isinstance(raw, dict) and "created_by" in raw,
+                    has_record=isinstance(raw, dict))
+        for name, raw in ((n, usage.get(n)) for n in list_unmanaged_skill_names())]
 
 
 def adopt_skill(skill_name: str) -> Tuple[bool, str]:
-    """Hand *skill_name* to the curator by user declaration.
-
-    Writes the same ``created_by: agent`` marker the background review fork writes, so the skill joins
-    ``curated_report()`` and the automatic transition walk. The inactivity clock is NOT reset: the skill's existing
-    ``last_activity_at`` still governs staleness, so adopting something idle for months does not buy it a fresh window
-    (nor does it archive it on the spot — the state machine decides on the next pass).
-
-    Returns (ok, message). Refuses hub-installed, external, and protected built-in skills, which have an owner other
-    than the user."""
+    """Hand *skill_name* to the curator by user declaration — writes the same ``created_by: agent`` marker the
+    background review fork writes. The inactivity clock is NOT reset. Refuses hub-installed, external, bundled
+    and protected built-in skills. Returns (ok, message)."""
     if not skill_name:
         return False, "no skill name given"
     if is_protected_builtin(skill_name):
@@ -451,8 +358,7 @@ def adopt_skill(skill_name: str) -> Tuple[bool, str]:
     if is_hub_installed(skill_name):
         return False, f"'{skill_name}' is hub-installed; its upstream owns it"
     if is_bundled(skill_name):
-        # Bundled skills already fall under the curator via ``curator.prune_builtins``; stamping created_by=agent
-        # on one would claim Hermes' own shipped skill was agent-authored and change nothing about its eligibility.
+        # Bundled skills are governed by prune_builtins; stamping created_by=agent would change nothing.
         return False, f"'{skill_name}' is a bundled built-in — it is governed by curator.prune_builtins, not by adoption"
     skill_dir = _find_skill_dir(skill_name)
     if skill_dir is None:
@@ -474,13 +380,11 @@ def _empty_record() -> Dict[str, Any]:
     return {
         "created_by": None, "use_count": 0, "view_count": 0, "last_used_at": None, "last_viewed_at": None,
         "patch_count": 0, "patch_generation": 0, "last_reused_patch_generation": 0, "last_patched_at": None,
-        "created_at": _now_iso(), "state": STATE_ACTIVE, "pinned": False, "archived_at": None,
-    }
+        "created_at": _now_iso(), "state": STATE_ACTIVE, "pinned": False, "archived_at": None}
 
 
 def _backfilled(rec: Any) -> Dict[str, Any]:
-    """*rec* with every missing default key filled in (a fresh record when not a dict), so
-    callers never need to handle old files that predate newer keys."""
+    """*rec* with every missing default key filled in (a fresh record when not a dict)."""
     if not isinstance(rec, dict):
         return _empty_record()
     for k, v in _empty_record().items():
@@ -489,28 +393,26 @@ def _backfilled(rec: Any) -> Dict[str, Any]:
 
 
 def _report_row(name: str, raw: Any, **extra: Any) -> Dict[str, Any]:
-    """Build one report row: name + backfilled record + *extra* + derived activity fields."""
     row = {"name": name, **_backfilled(raw), **extra}
     row.update(last_activity_at=latest_activity_at(row), activity_count=activity_count(row))
     return row
 
 
 def load_usage() -> Dict[str, Dict[str, Any]]:
-    """Read the entire .usage.json map. Returns empty dict on missing/corrupt."""
+    """The whole .usage.json map (non-dict values dropped); {} on missing/corrupt."""
     path = _usage_file()
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError) as e:
         logger.debug("Failed to read %s: %s", path, e)
         return {}
-    # Defensive: drop any non-dict values
-    return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
 def save_usage(data: Dict[str, Dict[str, Any]]) -> bool:
-    """Write the usage map atomically and report whether it committed."""
+    """Write the usage map atomically; True when it committed."""
     path = _usage_file()
     try:
         _atomic_write(path, ".usage_", lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
@@ -521,18 +423,16 @@ def save_usage(data: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def get_record(skill_name: str) -> Dict[str, Any]:
-    """Return the record for *skill_name*, creating a fresh one if missing."""
+    """The (backfilled) record for *skill_name*; fresh defaults if missing."""
     return _backfilled(load_usage().get(skill_name))
 
 
 def _locked_update(
     skill_name: str, op: Callable[[Dict[str, Dict[str, Any]]], Tuple[Any, bool]], fail_log: str,
-    guard: Optional[Callable[[], bool]] = None,
-) -> Any:
-    """Run *op(data)* on the loaded usage map under the file lock. Best-effort. *guard* (if given) is evaluated before
-    the lock is taken; a False result skips the update. *op* returns a (result, dirty) pair; the map is saved only
-    when dirty. Returns the result, or None when the guard failed, the save did not land, or anything raised (logged
-    at DEBUG via *fail_log*)."""
+    guard: Optional[Callable[[], bool]] = None) -> Any:
+    """Run *op(data) -> (result, dirty)* on the usage map under the file lock; save only when dirty. *guard*
+    runs before the lock is taken. Returns result, or None when the guard failed, the save did not land, or
+    anything raised (logged at DEBUG via *fail_log*)."""
     try:
         if guard is not None and not guard():
             return None
@@ -546,12 +446,8 @@ def _locked_update(
 
 
 def seed_record_if_missing(skill_name: str) -> None:
-    """Persist a baseline usage record for a curation-eligible skill.
-
-    Built-ins carry no usage record until something touches them, which leaves their inactivity clock with no anchor.
-    Seeding a record here fixes ``created_at`` to the moment the curator first sees the skill, so the archive/stale
-    clock measures non-use FROM THEN — not from epoch. No-op when a record already exists or the skill isn't
-    curation-eligible."""
+    """Persist a baseline record for a curation-eligible skill so its inactivity clock is anchored at first
+    sight (``created_at`` = now), not at epoch. No-op if a record exists or the skill isn't eligible."""
     if not skill_name or not is_curation_eligible(skill_name):
         return
 
@@ -563,13 +459,9 @@ def seed_record_if_missing(skill_name: str) -> None:
 
 
 def _mutate(skill_name: str, mutator, *, require_curation_eligible: bool = False) -> Any:
-    """Load, apply *mutator(record)* in place, save. Best-effort.
-
-    By default this records telemetry for ANY skill — bundled, hub-installed, or agent-created — because usage
-    tracking is pure observability and is orthogonal to whether a skill is ever curated. Lifecycle mutators
-    (``set_state``, ``set_pinned``, ``mark_agent_created``) pass ``require_curation_eligible=True`` so they never
-    write meaningless state onto a skill the curator can't manage (e.g. an ``archived`` flag on a hub-installed
-    skill)."""
+    """Load, apply *mutator(record)* in place, save; returns the mutator result (None if nothing landed).
+    Telemetry is recorded for ANY skill (observability is orthogonal to curation); lifecycle mutators pass
+    ``require_curation_eligible=True`` so they never write state onto a skill the curator can't manage."""
     if not skill_name:
         return None
 
@@ -582,10 +474,7 @@ def _mutate(skill_name: str, mutator, *, require_curation_eligible: bool = False
 
 def _set_field(skill_name: str, key: str, value: Any) -> bool:
     """Curation-gated single-field write; True only when the write landed."""
-    def _apply(rec: Dict[str, Any]) -> bool:
-        rec[key] = value
-        return True  # non-None sentinel: _mutate propagates the mutator result
-    return bool(_mutate(skill_name, _apply, require_curation_eligible=True))
+    return bool(_mutate(skill_name, lambda rec: rec.update({key: value}) or True, require_curation_eligible=True))
 
 
 def _non_negative_int(value: Any) -> int:
@@ -603,7 +492,7 @@ def _bump(rec: Dict[str, Any], count_key: str, ts_key: str) -> None:
 
 
 def telemetry_provenance(skill_name: str, record: Optional[Dict[str, Any]] = None) -> str:
-    """Return the bounded provenance used by shared skill metrics."""
+    """Bounded provenance label for shared skill metrics."""
     if is_hub_installed(skill_name) or is_bundled(skill_name):
         return "installed"
     if ":" in skill_name:
@@ -623,10 +512,8 @@ def telemetry_provenance(skill_name: str, record: Optional[Dict[str, Any]] = Non
 
 def _emit_skill_lifecycle(
     skill_name: str, action: str, *, record: Optional[Dict[str, Any]] = None,
-    task_id: Optional[str] = None, session_id: Optional[str] = None, **facts: Any,
-) -> None:
-    """Emit one best-effort lifecycle fact after authoritative state changes. *facts* may carry ``use_count`` /
-    ``reused`` / ``reuse_after_patch``; absent ones are sent as None."""
+    task_id: Optional[str] = None, session_id: Optional[str] = None, **facts: Any) -> None:
+    """Best-effort lifecycle hook after an authoritative state change; absent facts are sent as None."""
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if not has_hook("on_skill_lifecycle"):
@@ -640,27 +527,22 @@ def _emit_skill_lifecycle(
         logger.debug("skill_usage lifecycle hook failed for %s/%s", skill_name, action, exc_info=True)
 
 
-def _mutate_and_emit(skill_name: str, action: str, mutator: Callable[[Dict[str, Any]], Dict[str, Any]], **hook_kwargs: Any) -> None:
-    """``_mutate`` then emit *action* with the mutator's facts as the record — only if the write landed. Any
-    ``use_count`` / ``reused`` / ``reuse_after_patch`` facts are forwarded to the hook."""
+def _mutate_and_emit(skill_name: str, action: str, mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+                     **hook_kwargs: Any) -> None:
+    """``_mutate`` then emit *action* with the mutator's facts as the record — only if the write landed."""
     facts = _mutate(skill_name, mutator)
     if isinstance(facts, dict):
         hook_kwargs.update({k: facts[k] for k in ("use_count", "reused", "reuse_after_patch") if k in facts})
         _emit_skill_lifecycle(skill_name, action, record=facts, **hook_kwargs)
 
 
-# --- Public counter-bump helpers — telemetry for ALL skills (observability only) ---
+# --- Public counter-bump helpers — telemetry for ALL skills regardless of provenance (observability only) ---
 def bump_view(skill_name: str) -> None:
-    """Bump view_count and last_viewed_at. Called from skill_view().
-
-    Tracks every skill regardless of provenance — built-ins and hub skills included. Usage telemetry is observability,
-    not a curation signal."""
     _mutate(skill_name, lambda rec: _bump(rec, "view_count", "last_viewed_at"))
 
 
 def bump_use(skill_name: str, *, task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
-    """Bump use_count and last_used_at. Called when a skill is actively used (e.g. loaded into the prompt path or
-    referenced from an assistant turn). Tracks every skill regardless of provenance."""
+    """Skill actively used (loaded into the prompt path / referenced from an assistant turn)."""
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
         previous_use_count = _non_negative_int(rec.get("use_count"))
         patch_generation = _non_negative_int(rec.get("patch_generation"))
@@ -669,20 +551,16 @@ def bump_use(skill_name: str, *, task_id: Optional[str] = None, session_id: Opti
         reuse_after_patch = reused and patch_generation > last_reused_generation
         rec.update(
             use_count=previous_use_count + 1, last_used_at=_now_iso(), patch_generation=patch_generation,
-            last_reused_patch_generation=patch_generation if reuse_after_patch else last_reused_generation,
-        )
+            last_reused_patch_generation=patch_generation if reuse_after_patch else last_reused_generation)
         return {
             "created_by": rec.get("created_by"), "use_count": rec["use_count"],
-            "reused": reused, "reuse_after_patch": reuse_after_patch,
-        }
+            "reused": reused, "reuse_after_patch": reuse_after_patch}
     _mutate_and_emit(skill_name, "loaded", _apply, task_id=task_id, session_id=session_id)
 
 
 def bump_patch(
-    skill_name: str, *, action: str = "patch", task_id: Optional[str] = None, session_id: Optional[str] = None
-) -> None:
-    """Bump patch_count and last_patched_at. Called from skill_manage (patch/edit). Tracks every skill regardless of
-    provenance."""
+    skill_name: str, *, action: str = "patch", task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+    """Called from skill_manage (patch/edit)."""
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
         _bump(rec, "patch_count", "last_patched_at")
         rec["patch_generation"] = _non_negative_int(rec.get("patch_generation")) + 1
@@ -692,12 +570,10 @@ def bump_patch(
 
 
 def record_created(
-    skill_name: str, *, agent_created: bool, task_id: Optional[str] = None, session_id: Optional[str] = None
-) -> None:
-    """Persist explicit creation provenance and emit a successful create fact."""
+    skill_name: str, *, agent_created: bool, task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+    """Persist creation provenance and emit a create fact. A successful create is a new logical skill even
+    if stale sidecar state survived an earlier deletion, so the record is reset."""
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
-        # A successful create is a new logical skill even if stale sidecar state survived an earlier deletion or
-        # manual filesystem change.
         rec.clear()
         rec.update(_empty_record(), **({"created_by": "agent"} if agent_created else {}))
         return {"created_by": rec["created_by"]}
@@ -706,23 +582,18 @@ def record_created(
 
 def record_installed(skill_name: str) -> None:
     """Record a successful Skills Hub install without exporting its name."""
-    def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
-        rec.update(created_by="installed", state=STATE_ACTIVE, archived_at=None)
-        return {"created_by": rec["created_by"]}
-    _mutate_and_emit(skill_name, "installed", _apply)
+    _mutate_and_emit(skill_name, "installed",
+                     lambda rec: rec.update(created_by="installed", state=STATE_ACTIVE, archived_at=None) or {"created_by": "installed"})
 
 
 def mark_agent_created(skill_name: str) -> None:
-    """Opt a skill created by skill_manage into curator management.
-
-    Viewing or invoking a manually authored skill may still create telemetry, but only this explicit marker makes it
-    eligible for automatic curation."""
+    """Opt a skill into curator management — the only thing that makes it eligible for automatic curation."""
     _set_field(skill_name, "created_by", "agent")
 
 
 def set_state(skill_name: str, state: str) -> None:
-    """Set lifecycle state. No-op if *state* is invalid or the skill isn't curator-manageable (hub skills, or
-    built-ins with pruning disabled)."""
+    """Set lifecycle state; no-op for an invalid state or a skill the curator can't manage. Emits
+    archived/stale/restored (active<-archived); active<-stale emits nothing."""
     if state not in _VALID_STATES:
         logger.debug("set_state: invalid state %r for %s", state, skill_name)
         return
@@ -739,46 +610,39 @@ def set_state(skill_name: str, state: str) -> None:
     facts = _mutate(skill_name, _apply, require_curation_eligible=True)
     if not isinstance(facts, dict) or not facts.get("changed"):
         return
-    restored = state == STATE_ACTIVE and facts.get("previous_state") == STATE_ARCHIVED  # active<-stale emits nothing
+    restored = state == STATE_ACTIVE and facts.get("previous_state") == STATE_ARCHIVED
     action = "restored" if restored else {STATE_ARCHIVED: "archived", STATE_STALE: "stale"}.get(state)
     if action is not None:
         _emit_skill_lifecycle(skill_name, action, record=facts)
 
 
 def set_pinned(skill_name: str, pinned: bool) -> bool:
-    """Set/clear the pin flag. Returns False when the write did not land (skill not curation-eligible), True on
-    success — so callers can report failure instead of a false success (issue #92993)."""
+    """Set/clear the pin flag; False when the write did not land (not curation-eligible) so callers can
+    report failure instead of a false success."""
     return _set_field(skill_name, "pinned", bool(pinned))
 
 
 def set_sync(skill_name: str, sync: bool) -> None:
-    """Set the sync opt-in flag on a skill's usage record.
-
-    Sync is OPT-IN: nothing propagates to the sync plane unless the user marks a skill with ``sync: true`` here. Sits
-    alongside ``pinned``/``created_by`` on the ``.usage.json`` sidecar and is read by
-    ``tools.skills_sync_client.list_synced_skill_names``. Gated on curation eligibility so bundled/hub/external skills
-    (which never sync) can't be marked. Provisional per the M1-D default."""
+    """Sync is OPT-IN (``sync: true`` on the record, read by ``tools.skills_sync_client.list_synced_skill_names``);
+    gated on curation eligibility so bundled/hub/external skills can't be marked."""
     _set_field(skill_name, "sync", bool(sync))
 
 
 def is_sync_enabled(skill_name: str) -> bool:
-    """Whether a skill is opted into sync (``sync: true`` in its record)."""
     return get_record(skill_name).get("sync") is True
 
 
 def forget(skill_name: str) -> None:
-    """Drop a skill's usage entry entirely. Called when the skill is deleted."""
+    """Drop a skill's usage entry entirely (skill deleted)."""
     if skill_name:
         _locked_update(skill_name, lambda d: (None, d.pop(skill_name, None) is not None), "skill_usage.forget(%s) failed: %s")
 
 
 # --- Archive / restore ---
 def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwargs: Any) -> Tuple[bool, str]:
-    """Move *src* to *dest* for *action* ("archive" | "restore") with an audit-ledger entry around it, then apply the
-    suppression + state side effects for that direction.
-
-    Ledger pre-capture is best-effort and never blocks the move; if it is unavailable the post-move record is skipped
-    too. The rename falls back to shutil.move across devices. Returns (ok, message)."""
+    """Move *src* to *dest* for *action* ("archive" | "restore") with an audit-ledger entry around it, then
+    apply the suppression + state side effects. Ledger capture is best-effort and never blocks the move; the
+    rename falls back to shutil.move across devices. Returns (ok, message)."""
     try:
         from tools import skill_ledger as _ledger
         _ledger_before = _ledger.capture_before(src, **capture_kwargs)
@@ -795,28 +659,22 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
             return False, f"failed to {action}: {e}"
 
     if action == "archive":
-        # Pruning a built-in only sticks if the re-seeder is told to leave it alone.
-        if is_bundled(skill_name):
-            add_suppressed_name(skill_name)
+        if is_bundled(skill_name):  # pruning a built-in only sticks if the re-seeder is told to leave it alone
+            _toggle_suppressed_name(skill_name, add=True)
         set_state(skill_name, STATE_ARCHIVED)
     else:
-        # Restoring a pruned built-in lifts its suppression so updates can manage it.
-        remove_suppressed_name(skill_name)
+        _toggle_suppressed_name(skill_name, add=False)
         set_state(skill_name, STATE_ACTIVE)
     with suppress(Exception):
         if _ledger is not None:
             _ledger.record_mutation(
-                action, skill_name, before=_ledger_before if _ledger_before is not None else [], after_root=dest
-            )
+                action, skill_name, before=_ledger_before if _ledger_before is not None else [], after_root=dest)
     return True, f"{action}d to {dest}"
 
 
 def archive_skill(skill_name: str) -> Tuple[bool, str]:
-    """Move a curator-eligible skill directory to ~/.hermes/skills/.archive/.
-
-    Returns (ok, message). Never archives hub-installed skills. Bundled built-ins are only archivable when
-    ``curator.prune_builtins`` is enabled; when one is archived, its name is added to the suppression list so the
-    update-time re-seeder leaves it archived instead of restoring it."""
+    """Move a curator-eligible skill dir to ``.archive/`` (flattened; timestamp suffix on collision). Never
+    hub skills; bundled built-ins only with ``curator.prune_builtins`` (and then suppressed from re-seeding)."""
     skill_dir = _find_skill_dir(skill_name)
     if skill_dir is None and _find_external_skill_dir(skill_name) is not None:
         return False, _external_read_only_message(skill_name)
@@ -836,52 +694,37 @@ def archive_skill(skill_name: str) -> Tuple[bool, str]:
         archive_root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return False, f"failed to create archive dir: {e}"
-
-    # Flatten any category nesting into a single ".archive/<skill>/" so restores are simple; on collision, append
-    # a timestamp.
     dest = archive_root / skill_dir.name
     if dest.exists():
         dest = archive_root / f"{skill_dir.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-
-    # complete_package: consolidation may have re-homed support files out of the tree first, so a disk-only
-    # capture can come back hollow; the fill from the newest curator backup keeps rollback restorable (#96962).
+    # complete_package: consolidation may have re-homed support files first, so a disk-only capture can come
+    # back hollow; the fill from the newest curator backup keeps rollback restorable.
     return _relocate(skill_dir, dest, skill_name, "archive", complete_package=True, skill=skill_name)
 
 
 def restore_skill(skill_name: str) -> Tuple[bool, str]:
-    """Move an archived skill back to ~/.hermes/skills/. Restores to the flat top-level layout; original category
-    nesting is NOT reconstructed.
+    """Move an archived skill back to the flat top-level layout (category nesting is NOT reconstructed).
 
-    Refuses to restore under a name that now collides with a hub-installed skill — that would shadow the upstream
-    version. Also refuses to restore over a bundled built-in UNLESS ``curator.prune_builtins`` is enabled (in which
-    case built-ins are curator-managed and restoring is the documented way to lift a prune). Restoring clears any
-    suppression entry so future updates may re-seed the built-in again."""
-    # Hub skills always have an external upstream owner — never shadow them.
+    Refuses names that now collide with a hub skill, or a bundled built-in unless ``curator.prune_builtins``
+    is on (then restoring is the documented way to lift a prune) — either would shadow the upstream copy."""
     if is_hub_installed(skill_name):
         return False, f"skill '{skill_name}' is now hub-installed; restore would shadow the upstream version"
-    # A bundled built-in is upstream-owned UNLESS prune_builtins is on; with the flag off, restoring over it
-    # would shadow the bundled version.
     if is_bundled(skill_name) and not _prune_builtins_enabled():
         return False, f"skill '{skill_name}' is now bundled; restore would shadow the upstream version"
     archive_root = _archive_dir()
     if not archive_root.exists():
         return False, "no archive directory"
 
-    # Try exact name match first, then the timestamped-duplicate fallback. Recursive walk handles nested archive
-    # layouts (e.g. .archive/<category>/<skill>/) left behind by older archive paths or external imports.
+    # Exact name first (recursive: older archive paths left nested layouts), then the timestamped-duplicate
+    # fallback. Only "<skill>-YYYYMMDDHHMMSS" (14 digits) counts — a bare startswith("<skill>-") would let
+    # restoring "git" pull an archived "git-helpers" out and rename it, destroying the sibling's only copy.
     candidates = [p for p in archive_root.rglob("*") if p.is_dir() and p.name == skill_name]
     if not candidates:
-        # A name collision makes archive_skill() disambiguate by appending its UTC timestamp
-        # ("<skill>-YYYYMMDDHHMMSS", a 14-digit suffix), so only that exact shape is another copy of THIS skill.
-        # A bare startswith(f"{skill_name}-") also swallows unrelated sibling skills — restoring "git" would
-        # otherwise pull an archived "git-helpers" out of the archive and rename it to "git", destroying the
-        # sibling's only copy. Require the suffix to be the timestamp archive_skill writes.
         prefix = f"{skill_name}-"
         candidates = sorted(
             (p for p in archive_root.rglob("*") if p.is_dir() and p.name.startswith(prefix)
              and len(p.name) - len(prefix) == 14 and p.name[len(prefix):].isdigit()),
-            reverse=True,
-        )
+            reverse=True)
     if not candidates:
         return False, f"skill '{skill_name}' not found in archive"
 
@@ -896,22 +739,18 @@ def _match_skill_dir(skill_mds: Iterable[Path], skill_name: str) -> Optional[Pat
 
 
 def _find_skill_dir(skill_name: str) -> Optional[Path]:
-    """Locate the directory for a skill by its frontmatter `name:` field.
-
-    Handles both flat (~/.hermes/skills/<skill>/SKILL.md) and category-nested
-    (~/.hermes/skills/<category>/<skill>/SKILL.md) layouts. Uses the gated index iterator so M2 org mirrors resolve
-    ONLY for the active org (stale ``_org/<other>/`` trees never match)."""
+    """Skill dir by frontmatter ``name`` (flat or category-nested). The gated index iterator makes org mirrors
+    resolve ONLY for the active org (stale ``_org/<other>/`` trees never match)."""
     base = _skills_dir()
     if not base.exists():
         return None
     from agent.skill_utils import iter_skill_index_files
     return _match_skill_dir(
-        (p for p in iter_skill_index_files(base, "SKILL.md") if not is_external_skill_path(p)), skill_name
-    )
+        (p for p in iter_skill_index_files(base, "SKILL.md") if not is_external_skill_path(p)), skill_name)
 
 
 def _find_external_skill_dir(skill_name: str) -> Optional[Path]:
-    """Locate a skill under configured external dirs by frontmatter name."""
+    """Skill dir under configured external dirs by frontmatter name."""
     from agent.skill_utils import get_all_skills_dirs
     for base in (b for b in get_all_skills_dirs()[1:] if b.exists()):
         found = _match_skill_dir((p for p in base.rglob("SKILL.md") if not is_excluded_skill_path(p)), skill_name)
@@ -922,20 +761,13 @@ def _find_external_skill_dir(skill_name: str) -> Optional[Path]:
 
 # --- Reporting — for the curator CLI / slash command ---
 def curated_report() -> List[Dict[str, Any]]:
-    """Return a list of {name, provenance, state, pinned, last_activity_at, ...} records for every curator-managed
-    skill. Missing usage records are backfilled with defaults so callers can always index fields.
-
-    ``provenance`` is 'agent', 'bundled', or 'hub' (see :func:`provenance`). Bundled skills are only included when
-    ``curator.prune_builtins`` is enabled. Hub-installed skills are never included.
-
-    Each row carries ``_persisted``: True when a real record exists in ``.usage.json``, False when the row is a fresh
-    backfill (e.g. a built-in seen for the first time). The curator uses this to seed the inactivity clock instead of
-    treating an unrecorded skill as ancient."""
+    """One backfilled row per curator-managed skill with ``provenance`` ('agent'|'bundled'|'hub') and
+    ``_persisted`` (a real record exists — the curator seeds the inactivity clock for fresh backfills instead of
+    treating them as ancient). Bundled skills only with ``curator.prune_builtins``; hub skills never."""
     data = load_usage()
     names = set(list_agent_created_skill_names())
-    # Issue #92993: a successfully pinned skill must be visible in the report even when it lacks the created_by
-    # marker (eligible-but-unmanaged), or its pin silently vanishes from `curator status`. The local-dir guard
-    # keeps stale records for deleted skill dirs from rendering as ghost rows; `curator unpin` is the cleanup path.
+    # A pinned-but-unmanaged skill must stay visible or its pin silently vanishes from `curator status`; the
+    # local-dir guard keeps stale records for deleted dirs from rendering as ghost rows (`curator unpin` cleans up).
     names.update(
         name for name, rec in data.items()
         if isinstance(rec, dict) and rec.get("pinned") and is_curation_eligible(name) and _find_skill_dir(name) is not None
@@ -947,18 +779,13 @@ def curated_report() -> List[Dict[str, Any]]:
 
 
 def provenance(skill_name: str) -> str:
-    """Classify a skill's origin: 'hub', 'bundled', or 'agent'. 'agent' covers both agent-authored and local
-    manually-authored skills — anything not seeded from the bundled repo or installed via the hub."""
+    """'hub', 'bundled', or 'agent' (the latter covers agent-authored AND local manually-authored skills)."""
     return "hub" if is_hub_installed(skill_name) else "bundled" if is_bundled(skill_name) else "agent"
 
 
 def usage_report() -> List[Dict[str, Any]]:
-    """Return usage telemetry for EVERY skill on disk, with provenance.
-
-    Unlike ``curated_report()`` (which is scoped to curator-managed candidates), this surfaces all skills — bundled
-    built-ins and hub-installed included — so callers can answer "how often is this skill used" independent of whether
-    it's ever curated. Rows carry a ``provenance`` field ('agent' | 'bundled' | 'hub') and ``_persisted`` (whether a
-    real ``.usage.json`` record backs the row)."""
+    """Usage rows for EVERY skill on disk (built-ins and hub included), with ``provenance`` and ``_persisted`` —
+    unlike ``curated_report()``, which is scoped to curator-managed candidates."""
     base = _skills_dir()
     if not base.exists():
         return []
@@ -966,5 +793,6 @@ def usage_report() -> List[Dict[str, Any]]:
     rows: Dict[str, Dict[str, Any]] = {}
     for name, _skill_md in _iter_skill_mds(base, local_only=False):
         if name not in rows:
-            rows[name] = _report_row(name, data.get(name), provenance=provenance(name), _persisted=isinstance(data.get(name), dict))
+            rows[name] = _report_row(name, data.get(name), provenance=provenance(name),
+                                     _persisted=isinstance(data.get(name), dict))
     return [rows[name] for name in sorted(rows)]
