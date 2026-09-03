@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
@@ -26,16 +27,10 @@ _SENTINEL = object()  # "parse failed"
 def _safe_int(value: Any) -> Any:
     """Exact int (money-safe) or ``_SENTINEL``. ``int()`` directly, NOT ``int(float())``
     (precision loss above 2**53 corrupts money); float-shaped strings fail."""
-    if value is None:
-        return _SENTINEL
     try:
-        return int(str(value))
+        return _SENTINEL if value is None else int(str(value))
     except (TypeError, ValueError):
         return _SENTINEL
-
-
-def _validate_usd(value: Optional[str]) -> bool:
-    return value is not None and bool(_USD_RE.match(value))
 
 
 @dataclass
@@ -259,7 +254,7 @@ def _parse_field(kind: str, raw: Optional[str], default: Any = None) -> Any:
         val = _safe_int(raw)
         return _SENTINEL if val is _SENTINEL or (kind == "micros" and val < 0) else val
     if kind == "usd":
-        return raw if _validate_usd(raw) else _SENTINEL
+        return raw if raw is not None and _USD_RE.match(raw) else _SENTINEL
     if raw is None:
         return default
     flag = raw.strip().lower()
@@ -404,8 +399,7 @@ def _hydrate_seed_state(agent, state) -> None:
         agent._credits_session_start_micros = state.remaining_micros
     latch = getattr(agent, "_credits_latch", None)
     if isinstance(latch, dict) and state.used_fraction is not None:
-        # Prime ONLY seen_below_90 — priming seen_grant_unspent would revive the nag (grant-spent is a steady state).
-        latch["seen_below_90"] = True
+        latch["seen_below_90"] = True  # ONLY this gate — priming seen_grant_unspent would revive the steady-state nag
     if callable(emit := getattr(agent, "_emit_credits_notices", None)):
         emit()
 
@@ -426,24 +420,18 @@ def seed_credits_at_session_start(agent) -> bool:
             _hydrate_seed_state(agent, fixture)
             return True
 
-        # FIRE-AND-FORGET: a slow portal must never delay "ready". The daemon
-        # thread re-checks idempotency (a live header may land first).
-        import threading
-
-        def _bg_seed() -> None:
+        def _bg_seed() -> None:  # FIRE-AND-FORGET: a slow portal must never delay "ready"
             try:
                 from hermes_cli.nous_account import get_nous_portal_account_info
                 info = get_nous_portal_account_info(force_fresh=True)
                 if getattr(agent, "_credits_state", None) is not None:
                     return  # a live inference header beat us — don't clobber it
-                state = _credits_state_from_account(info)
-                if state is not None:
+                if (state := _credits_state_from_account(info)) is not None:
                     _hydrate_seed_state(agent, state)
             except Exception:
                 logger.debug("credits ▸ session-start seed (background) failed", exc_info=True)
         threading.Thread(target=_bg_seed, name="credits-seed", daemon=True).start()
         return True
     except Exception:
-        # Innermost log across all call sites so a dead seed is diagnosable.
-        logger.debug("credits ▸ session-start seed failed (fail-open)", exc_info=True)
+        logger.debug("credits ▸ session-start seed failed (fail-open)", exc_info=True)  # innermost log: diagnosable dead seed
         return False
