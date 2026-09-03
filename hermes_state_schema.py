@@ -50,6 +50,8 @@ _READ_PROBE_STATEMENTS: Optional[tuple] = None
 _FTS_TRIGRAM_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if "_trigram_" in n)
 _FTS_BASE_TRIGGERS = tuple(n for n in _FTS_TRIGGERS if n not in _FTS_TRIGRAM_TRIGGERS)
 
+# (base DDL, trigram DDL) keyed by "legacy inline layout?" — v23 external-content vs pre-v23 inline.
+_FTS_DDL = {False: (FTS_SQL, FTS_TRIGRAM_SQL), True: (LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL)}
 _LEGACY_INLINE_CONCAT_SQL = (
     "COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(tool_calls, '') "
 )
@@ -248,29 +250,27 @@ class SessionSchemaMixin:
 
         # Re-apply current DDL (legacy vs v23 chosen as _init_schema does) so
         # CREATE TRIGGER installs the OF variants.
-        if legacy_layout:
-            self._ensure_fts_schema(cursor, "messages_fts", LEGACY_FTS_SQL)
-            self._ensure_fts_schema(cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL)
-        else:
-            self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
-            self._ensure_fts_schema(cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL)
-            # Only recreate the CJK trigger this migration actually dropped.
-            # ``_ensure_fts_cjk_schema`` soft-fails OperationalError by clearing
-            # availability (never raises), so afterwards require a narrowed CJK
-            # UPDATE trigger or durable quarantine (stale breadcrumb + unavailable).
-            if "messages_fts_cjk_update" in to_drop:
-                try:
-                    self._ensure_fts_cjk_schema(cursor)
-                except Exception:
-                    self._quarantine_cjk_after_update_of_migration(cursor)
-                    logger.exception("CJK FTS re-ensure after UPDATE OF migration failed")
-                    raise
-                if not self._cjk_update_trigger_is_narrowed(cursor):
-                    self._quarantine_cjk_after_update_of_migration(cursor)
-                    logger.warning(
-                        "CJK FTS UPDATE trigger missing or still broad after "
-                        "UPDATE OF migration; marked stale and unavailable"
-                    )
+        base_sql, trigram_sql = _FTS_DDL[legacy_layout]
+        self._ensure_fts_schema(cursor, "messages_fts", base_sql)
+        self._ensure_fts_schema(cursor, "messages_fts_trigram", trigram_sql)
+        # Only recreate the CJK trigger this migration actually dropped (it is
+        # a candidate only on the v23 layout). ``_ensure_fts_cjk_schema``
+        # soft-fails OperationalError by clearing availability (never raises),
+        # so afterwards require a narrowed CJK UPDATE trigger or durable
+        # quarantine (stale breadcrumb + unavailable).
+        if "messages_fts_cjk_update" in to_drop:
+            try:
+                self._ensure_fts_cjk_schema(cursor)
+            except Exception:
+                self._quarantine_cjk_after_update_of_migration(cursor)
+                logger.exception("CJK FTS re-ensure after UPDATE OF migration failed")
+                raise
+            if not self._cjk_update_trigger_is_narrowed(cursor):
+                self._quarantine_cjk_after_update_of_migration(cursor)
+                logger.warning(
+                    "CJK FTS UPDATE trigger missing or still broad after "
+                    "UPDATE OF migration; marked stale and unavailable"
+                )
         logger.info(
             "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF " "(no rebuild required)",
             len(to_drop),
@@ -334,27 +334,29 @@ class SessionSchemaMixin:
         try:
             cursor.execute(f"SELECT * FROM {table_name} LIMIT 0")
             return True
-        except (sqlite3.OperationalError, UnicodeDecodeError) as exc:
-            if isinstance(exc, sqlite3.OperationalError):
-                if self._is_fts5_unavailable_error(exc):
-                    # A missing trigram tokenizer only affects trigram search;
-                    # only a missing FTS5 module disables FTS entirely.
-                    if self._is_trigram_unavailable_error(exc):
-                        self._warn_trigram_unavailable(exc)
-                    else:
-                        self._warn_fts5_unavailable(exc)
-                    return None
-                if "no such table" in str(exc).lower():
-                    return False
-                if "decode to utf-8" not in str(exc).lower():
-                    raise
-            logger.warning(
-                "%s probe encountered invalid UTF-8 in FTS content; "
-                "search may return incomplete results until FTS is rebuilt: %s",
-                table_name,
-                exc,
-            )
-            return None
+        except UnicodeDecodeError as exc:
+            decode_exc = exc
+        except sqlite3.OperationalError as exc:
+            if self._is_fts5_unavailable_error(exc):
+                # A missing trigram tokenizer only affects trigram search;
+                # only a missing FTS5 module disables FTS entirely.
+                if self._is_trigram_unavailable_error(exc):
+                    self._warn_trigram_unavailable(exc)
+                else:
+                    self._warn_fts5_unavailable(exc)
+                return None
+            if "no such table" in str(exc).lower():
+                return False
+            if "decode to utf-8" not in str(exc).lower():
+                raise
+            decode_exc = exc
+        logger.warning(
+            "%s probe encountered invalid UTF-8 in FTS content; "
+            "search may return incomplete results until FTS is rebuilt: %s",
+            table_name,
+            decode_exc,
+        )
+        return None
 
     # ── Stale-FTS recovery ─────────────────────────────────────────────────
 
@@ -1047,11 +1049,8 @@ class SessionSchemaMixin:
                 self._trigram_available = False
                 self._fts_cjk_available = False
         else:
-            base_sql, trigram_sql, rebuild = (
-                (LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL, self._rebuild_legacy_fts_indexes)
-                if legacy_fts
-                else (FTS_SQL, FTS_TRIGRAM_SQL, self._rebuild_fts_indexes)
-            )
+            base_sql, trigram_sql = _FTS_DDL[legacy_fts]
+            rebuild = self._rebuild_legacy_fts_indexes if legacy_fts else self._rebuild_fts_indexes
             # Measure BEFORE the DDL below runs (pre-repair state). Whether the
             # trigram half is even creatable is only known AFTER
             # _ensure_fts_schema, which is why the halves combine at the `if`.
