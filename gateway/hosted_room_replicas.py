@@ -60,18 +60,22 @@ class ReplicaEpochRegressionError(ReplicaError):
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replicas ( room_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL, members_json TEXT NOT NULL, authority_gateway_id TEXT NOT NULL,
+        """CREATE TABLE IF NOT EXISTS hosted_room_replicas (
+            room_id TEXT PRIMARY KEY, name TEXT NOT NULL, members_json TEXT NOT NULL,
+            authority_gateway_id TEXT NOT NULL,
             authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1),
             last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0),
             latest_seq INTEGER NOT NULL DEFAULT 0, event_bytes INTEGER NOT NULL DEFAULT 0,
-            created_at REAL NOT NULL, updated_at REAL NOT NULL )"""
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        )"""
     )
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS hosted_room_replica_events ( room_id TEXT NOT NULL,
-            seq INTEGER NOT NULL CHECK (seq >= 1), event_id TEXT NOT NULL, kind TEXT NOT NULL,
-            actor_json TEXT NOT NULL, authority_epoch INTEGER, payload_json TEXT NOT NULL,
-            created_at REAL NOT NULL, PRIMARY KEY (room_id, seq) )"""
+        """CREATE TABLE IF NOT EXISTS hosted_room_replica_events (
+            room_id TEXT NOT NULL, seq INTEGER NOT NULL CHECK (seq >= 1), event_id TEXT NOT NULL,
+            kind TEXT NOT NULL, actor_json TEXT NOT NULL, authority_epoch INTEGER,
+            payload_json TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY (room_id, seq)
+        )"""
     )
 
 
@@ -148,6 +152,43 @@ def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     return events, {"gateway_id": gateway_id, "epoch": epoch}
 
 
+def _replica_row_state(conn: sqlite3.Connection, room_id: str) -> tuple[sqlite3.Row | None, int, int, int]:
+    """Return (row, stored_epoch, last_seq, stored_bytes); a new room is admitted only under the room cap."""
+    row = conn.execute(
+        """SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
+             FROM hosted_room_replicas WHERE room_id=?""",
+        (room_id,),
+    ).fetchone()
+    if row is None:
+        count = conn.execute("SELECT COUNT(*) FROM hosted_room_replicas").fetchone()[0]
+        if int(count) >= MAX_REPLICA_ROOMS:
+            raise ReplicaError("replica room capacity exhausted")
+        return None, 0, 0, 0
+    return row, int(row["authority_epoch"]), int(row["last_seq"]), int(row["event_bytes"])
+
+
+def _store_replica(
+    conn: sqlite3.Connection, *, is_new: bool, room_id: str, room_name: str, members_json: str,
+    authority: dict[str, Any], new_last: int, latest_seq: int, added_bytes: int, now: float,
+) -> None:
+    """INSERT the replica row for a new room, else UPDATE it (event_bytes accumulates)."""
+    values = (room_name, members_json, authority["gateway_id"], authority["epoch"], new_last, max(latest_seq, new_last))
+    if is_new:
+        conn.execute(
+            """INSERT INTO hosted_room_replicas (room_id, name, members_json,
+                authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes,
+                created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (room_id, *values, added_bytes, now, now),
+        )
+    else:
+        conn.execute(
+            """UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
+                authority_epoch=?, last_seq=?, latest_seq=?, event_bytes=event_bytes+?,
+                updated_at=? WHERE room_id=?""",
+            (*values, added_bytes, now, room_id),
+        )
+
+
 def ingest_page(
     db_path: Path | str, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
 ) -> dict[str, Any]:
@@ -163,20 +204,7 @@ def ingest_page(
     now = time.time() if now is None else float(now)
 
     with _replica_transaction(db_path) as conn:
-        row = conn.execute(
-            """SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes
-                 FROM hosted_room_replicas WHERE room_id=?""",
-            (room_id,),
-        ).fetchone()
-        if row is None:
-            count = conn.execute("SELECT COUNT(*) FROM hosted_room_replicas").fetchone()[0]
-            if int(count) >= MAX_REPLICA_ROOMS:
-                raise ReplicaError("replica room capacity exhausted")
-            stored_epoch = last_seq = stored_bytes = 0
-        else:
-            stored_epoch, last_seq, stored_bytes = (
-                int(row["authority_epoch"]), int(row["last_seq"]), int(row["event_bytes"])
-            )
+        row, stored_epoch, last_seq, stored_bytes = _replica_row_state(conn, room_id)
         if authority["epoch"] < stored_epoch:
             raise ReplicaEpochRegressionError("page authority epoch is older than the stored replica epoch")
 
@@ -202,26 +230,10 @@ def ingest_page(
         latest_seq = page.get("latest_seq")
         if isinstance(latest_seq, bool) or not isinstance(latest_seq, int):
             latest_seq = new_last
-        if row is None:
-            conn.execute(
-                """INSERT INTO hosted_room_replicas (room_id, name, members_json,
-                    authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes,
-                    created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    room_id, room_name, members_json, authority["gateway_id"], authority["epoch"],
-                    new_last, max(latest_seq, new_last), added_bytes, now, now,
-                ),
-            )
-        else:
-            conn.execute(
-                """UPDATE hosted_room_replicas SET name=?, members_json=?, authority_gateway_id=?,
-                    authority_epoch=?, last_seq=?, latest_seq=?, event_bytes=event_bytes+?,
-                    updated_at=? WHERE room_id=?""",
-                (
-                    room_name, members_json, authority["gateway_id"], authority["epoch"],
-                    new_last, max(latest_seq, new_last), added_bytes, now, room_id,
-                ),
-            )
+        _store_replica(
+            conn, is_new=row is None, room_id=room_id, room_name=room_name, members_json=members_json,
+            authority=authority, new_last=new_last, latest_seq=latest_seq, added_bytes=added_bytes, now=now,
+        )
     return {
         "room_id": room_id,
         "stored_seq": new_last,
@@ -293,9 +305,10 @@ def promote_replica(
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
 
         conn.execute(
-            """INSERT INTO hosted_rooms (room_id, name, members_json, authority_gateway_id,
-                authority_epoch, next_seq, event_bytes, revision, created_at, updated_at,
-                disbanded_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
+            """INSERT INTO hosted_rooms
+               (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, event_bytes,
+                revision, created_at, updated_at, disbanded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
             (
                 room_id, replica["name"], replica["members_json"], local_gateway, target_epoch,
                 claim_seq + 1, int(replica["event_bytes"]) + claim_bytes, now, now,
@@ -379,8 +392,9 @@ def demote_room(
             ),
         )
         conn.execute(
-            """UPDATE hosted_rooms SET authority_gateway_id=?, authority_epoch=?,
-                next_seq=next_seq+1, revision=revision+1, updated_at=? WHERE room_id=?""",
+            """UPDATE hosted_rooms
+                  SET authority_gateway_id=?, authority_epoch=?, next_seq=next_seq+1, revision=revision+1, updated_at=?
+                WHERE room_id=?""",
             (observed_gateway_id, observed_epoch, now, room_id),
         )
     return {
