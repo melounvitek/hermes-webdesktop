@@ -246,11 +246,19 @@ def _dispatch(
     return _capture_output(lambda: func(namespace))
 
 
-def _paths(spec: str) -> list[tuple[str, ...]]:
-    """``"list, snapshot export"`` -> ``[("list",), ("snapshot", "export")]``; ``"."`` is root."""
-    return [
-        () if item.strip() == "." else tuple(item.split())
-        for item in spec.split(",") if item.strip()]
+def _paths(spec: str) -> list[tuple[tuple[str, ...], bool]]:
+    """``"list, *snapshot export, ."`` -> ``[(("list",), False), (("snapshot", "export"), True), ...]``.
+
+    ``*`` marks a mutating path; ``.`` is the bare root.
+    """
+    out = []
+    for item in spec.split(","):
+        item = item.strip()
+        if item:
+            mutating = item.startswith("*")
+            item = item.lstrip("*")
+            out.append((() if item == "." else tuple(item.split()), mutating))
+    return out
 
 
 def _sub(module: str, builder: str, handler: str) -> _CliSurface:
@@ -261,95 +269,68 @@ def _reg(module: str, handler: str | None = None) -> _CliSurface:
     return _CliSurface("registered", f"hermes_cli.{module}", "register_cli", handler)
 
 
-# root -> (surface, paths, mutating paths). Registered in this order.
-_CLI_FAMILIES: dict[str, tuple[_CliSurface, str, str]] = {
-    "dump": (_sub("dump", "build_dump_parser", "cmd_dump"), ".", ""),
-    "debug": (_sub("debug", "build_debug_parser", "cmd_debug"), "share, delete", "share, delete"),
-    "prompt-size": (_sub("prompt_size", "build_prompt_size_parser", "cmd_prompt_size"), ".", ""),
-    "insights": (_sub("insights", "build_insights_parser", "cmd_insights"), ".", ""),
-    "security": (_sub("security", "build_security_parser", "cmd_security"), "audit", ""),
-    "backup": (_sub("backup", "build_backup_parser", "cmd_backup"), ".", "."),
-    "import": (_sub("import_cmd", "build_import_cmd_parser", "cmd_import"), ".", "."),
-    "config": (_sub("config", "build_config_parser", "cmd_config"), "env-path, check", ""),
+# root -> (surface, comma-separated subcommand paths; `.` = bare root, `*` marks mutating).
+# Registered in this order.
+_CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
+    "dump": (_sub("dump", "build_dump_parser", "cmd_dump"), "."),
+    "debug": (_sub("debug", "build_debug_parser", "cmd_debug"), "*share, *delete"),
+    "prompt-size": (_sub("prompt_size", "build_prompt_size_parser", "cmd_prompt_size"), "."),
+    "insights": (_sub("insights", "build_insights_parser", "cmd_insights"), "."),
+    "security": (_sub("security", "build_security_parser", "cmd_security"), "audit"),
+    "backup": (_sub("backup", "build_backup_parser", "cmd_backup"), "*."),
+    "import": (_sub("import_cmd", "build_import_cmd_parser", "cmd_import"), "*."),
+    "config": (_sub("config", "build_config_parser", "cmd_config"), "env-path, check"),
     "tools": (
         _sub("tools", "build_tools_parser", "cmd_tools"),
-        "list, enable, disable, post-setup",
-        "enable, disable, post-setup"),
+        "list, *enable, *disable, *post-setup"),
     "plugins": (
         _sub("plugins", "build_plugins_parser", "cmd_plugins"),
-        "list, enable, disable, install, update, remove",
-        "enable, disable, install, update, remove"),
+        "list, *enable, *disable, *install, *update, *remove"),
     "skills": (
         _sub("skills", "build_skills_parser", "cmd_skills"),
-        "browse, search, inspect, list, check, list-modified, diff, install, update, audit, "
-        "uninstall, reset, opt-in, opt-out, repair-official, snapshot export, snapshot import, "
-        "tap list, tap add, tap remove",
-        "install, update, audit, uninstall, reset, opt-in, opt-out, repair-official, "
-        "snapshot export, snapshot import, tap add, tap remove"),
+        "browse, search, inspect, list, check, list-modified, diff, *install, *update, *audit, "
+        "*uninstall, *reset, *opt-in, *opt-out, *repair-official, *snapshot export, "
+        "*snapshot import, tap list, *tap add, *tap remove"),
     "mcp": (
         _sub("mcp", "build_mcp_parser", "cmd_mcp"),
-        "list, catalog, test, add, remove, install, login, reauth, configure, picker",
-        "add, remove, install, login, reauth, configure, picker"),
-    "memory": (
-        _sub("memory", "build_memory_parser", "cmd_memory"), "status, off, reset", "off, reset"),
+        "list, catalog, test, *add, *remove, *install, *login, *reauth, *configure, *picker"),
+    "memory": (_sub("memory", "build_memory_parser", "cmd_memory"), "status, *off, *reset"),
     "auth": (
         _sub("auth", "build_auth_parser", "cmd_auth"),
-        "list, status, reset, add, remove, logout, spotify status, spotify login, spotify logout",
-        "reset, add, remove, logout, spotify login, spotify logout"),
+        "list, status, *reset, *add, *remove, *logout, spotify status, *spotify login, "
+        "*spotify logout"),
     "pairing": (
         _sub("pairing", "build_pairing_parser", "cmd_pairing"),
-        "list, approve, revoke, clear-pending",
-        "approve, revoke, clear-pending"),
+        "list, *approve, *revoke, *clear-pending"),
     "webhook": (
         _sub("webhook", "build_webhook_parser", "cmd_webhook"),
-        "list, subscribe, remove, test",
-        "subscribe, remove"),
-    "hooks": (
-        _sub("hooks", "build_hooks_parser", "cmd_hooks"),
-        "list, test, doctor, revoke",
-        "test, doctor, revoke"),
-    "slack": (_sub("slack", "build_slack_parser", "cmd_slack"), "manifest", ""),
+        "list, *subscribe, *remove, test"),
+    "hooks": (_sub("hooks", "build_hooks_parser", "cmd_hooks"), "list, *test, *doctor, *revoke"),
+    "slack": (_sub("slack", "build_slack_parser", "cmd_slack"), "manifest"),
     "profile": (
         _sub("profile", "build_profile_parser", "cmd_profile"),
-        "list, show, info, create, use, describe, rename, delete, export, import, install, update",
-        "create, use, describe, rename, delete, export, import, install, update"),
-    "cron": (
-        _sub("cron", "build_cron_parser", "cmd_cron"),
-        "create, edit, remove, tick",
-        "create, edit, remove, tick"),
-    "portal": (_CliSurface("adder", "hermes_cli.portal_cli", "add_parser"), "info, tools", ""),
+        "list, show, info, *create, *use, *describe, *rename, *delete, *export, *import, "
+        "*install, *update"),
+    "cron": (_sub("cron", "build_cron_parser", "cmd_cron"), "*create, *edit, *remove, *tick"),
+    "portal": (_CliSurface("adder", "hermes_cli.portal_cli", "add_parser"), "info, tools"),
     "project": (
         _CliSurface("builder", "hermes_cli.projects_cmd", "build_parser", "cmd_project"),
-        "list, show, create, add-folder, remove-folder, rename, set-primary, use, archive, "
-        "restore, bind-board",
-        "create, add-folder, remove-folder, rename, set-primary, use, archive, restore, bind-board",
-    ),
+        "list, show, *create, *add-folder, *remove-folder, *rename, *set-primary, *use, "
+        "*archive, *restore, *bind-board"),
     "kanban": (
         _CliSurface("builder", "hermes_cli.kanban", "build_parser", "cmd_kanban"),
-        "init, boards list, boards create, boards rm, boards switch, boards current, "
-        "boards rename, boards set-workdir, create, list, show, assign, reclaim, reassign, "
-        "diagnose, link, unlink, claim, comment, complete, edit, block, schedule, unblock, "
-        "promote, archive, stats, runs, heartbeat, assignments, context",
-        "init, boards create, boards rm, boards switch, boards rename, boards set-workdir, "
-        "create, assign, reclaim, reassign, link, unlink, claim, comment, complete, edit, "
-        "block, schedule, unblock, promote, archive"),
-    "bundles": (
-        _reg("bundles", "bundles_command"),
-        "list, show, create, delete, reload",
-        "create, delete, reload"),
-    "checkpoints": (
-        _reg("checkpoints"),
-        "status, list, prune, clear, clear-legacy",
-        "prune, clear, clear-legacy"),
+        "*init, boards list, *boards create, *boards rm, *boards switch, boards current, "
+        "*boards rename, *boards set-workdir, *create, list, show, *assign, *reclaim, *reassign, "
+        "diagnose, *link, *unlink, *claim, *comment, *complete, *edit, *block, *schedule, "
+        "*unblock, *promote, *archive, stats, runs, heartbeat, assignments, context"),
+    "bundles": (_reg("bundles", "bundles_command"), "list, show, *create, *delete, *reload"),
+    "checkpoints": (_reg("checkpoints"), "status, list, *prune, *clear, *clear-legacy"),
     "curator": (
         _reg("curator"),
-        "status, run, pause, resume, pin, unpin, restore, list-archived, archive, prune, "
-        "backup, rollback",
-        "run, pause, resume, pin, unpin, restore, archive, prune, backup, rollback"),
-    "pets": (
-        _reg("pets"),
-        "list, install, select, show, off, scale, remove, doctor",
-        "install, select, off, scale, remove")}
+        "status, *run, *pause, *resume, *pin, *unpin, *restore, list-archived, *archive, *prune, "
+        "*backup, *rollback"),
+    "pets": (_reg("pets"), "list, *install, *select, show, *off, *scale, *remove, doctor"),
+}
 
 # Only extracted/registered families skip nested prompts after console confirmation
 # (builder/adder families never did).
@@ -359,12 +340,11 @@ _SEND_SURFACE = _CliSurface("adder", "hermes_cli.send_cmd", "register_send_subpa
 
 
 def _register_command_family(
-    engine: "HermesConsoleEngine", root: str, surface: _CliSurface, paths: str, mutating: str
+    engine: "HermesConsoleEngine", root: str, surface: _CliSurface, paths: str
 ) -> None:
     summaries = _surface_summaries(surface, root)
-    mutating_paths = set(_paths(mutating))
     namespace_update = _apply_confirmed_defaults if surface.kind in _CONFIRMED_KINDS else None
-    for child_path in _paths(paths):
+    for child_path, mutating in _paths(paths):
         full_path = (root, *child_path)
         usage = " ".join(full_path)
 
@@ -376,7 +356,7 @@ def _register_command_family(
             usage,
             summaries.get(full_path) or f"Run `hermes {usage}`.",
             handler,
-            mutating=child_path in mutating_paths,
+            mutating=mutating,
             confirmation=f"Run `hermes {usage}`?")
 
 
@@ -464,8 +444,8 @@ class HermesConsoleEngine:
             self.register(
                 path, usage, summary, handler,
                 mutating=bool(confirmation), confirmation=confirmation)
-        for root, (surface, paths, mutating) in _CLI_FAMILIES.items():
-            _register_command_family(self, root, surface, paths, mutating)
+        for root, (surface, paths) in _CLI_FAMILIES.items():
+            _register_command_family(self, root, surface, paths)
         self.register(
             ("send",),
             "send --to <target> <message>",
