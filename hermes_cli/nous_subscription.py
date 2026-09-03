@@ -470,12 +470,10 @@ def get_nous_subscription_features(
         config = load_config() or {}
     provider_is_nous = _provider_is_nous(config)
     account_info = _account_info_or_none(**({"force_fresh": True} if force_fresh else {}))
-
     # Coarse "entitled to any managed tool" gate: paid access OR a live free tool pool. Per-backend
     # availability is then narrowed by coverage (the pool funds image but not video, etc.).
-    managed_tools_flag = bool(account_info and account_info.logged_in and account_info.tool_gateway_entitled)
     nous_auth_present = bool(account_info and account_info.logged_in)
-
+    managed_tools_flag = nous_auth_present and account_info.tool_gateway_entitled
     enabled = {key: _toolset_enabled(config, key) for key in ("web", "image_gen", "video_gen", "tts", "browser", "terminal")}
     # Stored selections (strict model): "nous" = managed gateway; vendor name = that vendor direct;
     # None = never configured (autodetect). Lockstep with tool_backend_helpers.read_selection: a
@@ -489,13 +487,11 @@ def get_nous_subscription_features(
     # credentials — managed availability must not light it up (the runtime errors, not reroutes).
     managed = {
         key: (
-            managed_tools_flag
-            and nous_auth_present
-            and is_managed_tool_gateway_ready(_FEATURES[key].gateway)
-            and bool(account_info and account_info.tool_gateway_entitled_for(_FEATURES[key].coverage))
+            managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready(spec.gateway)
+            and bool(account_info and account_info.tool_gateway_entitled_for(spec.coverage))
             and (selected.get(key) is None or use_gateway[key])
         )
-        for key in _FEATURE_ORDER
+        for key, spec in _FEATURES.items()
     }
     direct_firecrawl = _any_env("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") and not use_gateway["web"]
     fal_configured = fal_key_is_configured()
