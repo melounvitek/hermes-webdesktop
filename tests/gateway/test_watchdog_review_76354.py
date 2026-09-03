@@ -77,7 +77,7 @@ def test_s1_clear_labels_noop_skips_transaction(tmp_path, monkeypatch):
     calls.clear()
     db.clear_session_activity_labels(sid)
     assert len(calls) == 1
-    activity = db.get_session_activity(sid)
+    activity = db.get_session(sid)
     assert activity["last_activity_description"] == ""
 
 

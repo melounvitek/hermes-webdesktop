@@ -2369,7 +2369,7 @@ class TestListSessionsRich:
         assert row["last_activity_description"] == "starting API call #1"
         assert row["last_activity_provenance"] == "unknown"
 
-        activity = db.get_session_activity("s1")
+        activity = db.get_session("s1")
         assert activity["last_activity_at"] == heartbeat
         assert activity["last_activity_description"] == "starting API call #1"
         assert "phase" not in activity
@@ -2399,7 +2399,7 @@ class TestListSessionsRich:
         assert row["last_activity_at"] == heartbeat
         assert row["last_activity_description"] == ""
         assert row["last_activity_provenance"] == "unknown"
-        activity = db.get_session_activity("s1")
+        activity = db.get_session("s1")
         assert activity["last_activity_at"] == heartbeat
         assert activity["last_activity_description"] == ""
         assert activity["last_activity_provenance"] == "unknown"
@@ -2442,7 +2442,7 @@ class TestListSessionsRich:
         rows = db.list_gateway_sessions(active_only=True)
         assert len(rows) == 1
         assert rows[0]["last_active"] == heartbeat
-        activity = db.get_session_activity("gw-1")
+        activity = db.get_session("gw-1")
         assert activity["last_activity_description"] == "compressing context"
 
     def test_order_by_last_active_surfaces_recently_touched_older_session_first(self, db):
