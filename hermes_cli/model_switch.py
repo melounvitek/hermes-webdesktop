@@ -96,7 +96,7 @@ def _models_config_is_allowlist(value: Any, discovered: bool = False) -> bool:
 
 def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
     """ProviderDef for a direct ``model.provider: custom`` endpoint."""
-    base_url = str(current_base_url or "").strip()
+    base_url = _clean(current_base_url)
     if not base_url:
         return None
     return ProviderDef(
@@ -198,6 +198,11 @@ class DirectAlias(NamedTuple):
 # Built-in direct aliases (extended via config.yaml model_aliases:)
 _BUILTIN_DIRECT_ALIASES: dict[str, DirectAlias] = {}
 
+
+def _clean(value: Any) -> str:
+    """``str(value or "").strip()`` — the config-field normaliser used throughout this module."""
+    return str(value or "").strip()
+
 # Merged dict (builtins + user config); populated by _load_direct_aliases()
 DIRECT_ALIASES: dict[str, DirectAlias] = {}
 
@@ -225,9 +230,8 @@ def _load_direct_aliases() -> dict[str, DirectAlias]:
                 if isinstance(entry, dict) and entry.get("model", ""):
                     merged[name.strip().lower()] = DirectAlias(
                         model=entry.get("model", ""), provider=entry.get("provider", "custom"),
-                        base_url=entry.get("base_url", ""),
-                        api_key=str(entry.get("api_key", "") or "").strip(),
-                        key_env=str(entry.get("key_env", "") or "").strip())
+                        base_url=entry.get("base_url", ""), api_key=_clean(entry.get("api_key", "")),
+                        key_env=_clean(entry.get("key_env", "")))
 
         model_section = cfg.get("model", {})
         simple_aliases = model_section.get("aliases") if isinstance(model_section, dict) else None
@@ -238,12 +242,11 @@ def _load_direct_aliases() -> dict[str, DirectAlias]:
                 if not key or key in merged:
                     continue
                 if isinstance(value, dict):
-                    model = str(value.get("model") or "").strip()
+                    model = _clean(value.get("model"))
                     if model:
-                        provider = str(value.get("provider") or "").strip()
                         merged[key] = DirectAlias(
-                            model=model, provider=provider or current_provider or "custom",
-                            base_url=str(value.get("base_url") or "").strip())
+                            model=model, provider=_clean(value.get("provider")) or current_provider or "custom",
+                            base_url=_clean(value.get("base_url")))
                 elif isinstance(value, str) and value.strip():
                     val = value.strip()
                     provider, model = val.split("/", 1) if "/" in val else (current_provider, val)
@@ -376,7 +379,7 @@ def resolve_startup_model_route(
     the input stays on the aggregator — a ``providers:`` block for the same vendor must not
     steal the route.
     """
-    raw = str(raw_model or "").strip()
+    raw = _clean(raw_model)
     if not raw:
         return None
 
@@ -412,7 +415,7 @@ def resolve_startup_model_route(
     configured.update(
         f"custom:{entry.get('name', '').strip().lower()}"
         for entry in (custom_providers or [])
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip())
+        if isinstance(entry, dict) and _clean(entry.get("name")))
     try:
         from hermes_cli.models import normalize_provider
         canonical = normalize_provider(prefix)
@@ -610,9 +613,9 @@ def _effective_model_candidate(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
-        return str(value.get("model") or "").strip()
+        return _clean(value.get("model"))
     model_attr = getattr(value, "model", None)
-    return str(model_attr or "").strip() if model_attr is not None else ""
+    return _clean(model_attr) if model_attr is not None else ""
 
 
 def resolve_effective_model(
@@ -890,7 +893,7 @@ def _configured_provider_matches(
 
 def _resolve_named_custom_model_id(model_name: str, target_provider: str, custom_providers: Optional[list]) -> str:
     """Map a picker-prefixed custom model selection (``prefix/model``) to its configured ID."""
-    provider = str(target_provider or "").strip().lower()
+    provider = _clean(target_provider).lower()
     if not provider.startswith("custom:") or "/" not in model_name:
         return model_name
 
@@ -924,11 +927,11 @@ def _runtime_creds(fallback_headers: dict, **kwargs) -> tuple[str, str, str, dic
 def _entry_configured_key(cfg: dict, read_env) -> str:
     """Inline ``api_key`` (a ``${VAR}`` template resolves via *read_env*), else
     ``key_env``/``api_key_env`` via *read_env*."""
-    key = str(cfg.get("api_key", "") or "").strip()
+    key = _clean(cfg.get("api_key", ""))
     if key.startswith("${") and key.endswith("}"):
         key = read_env(key[2:-1])
     if not key:
-        key_env = str(cfg.get("key_env") or cfg.get("api_key_env") or "").strip()
+        key_env = _clean(cfg.get("key_env") or cfg.get("api_key_env"))
         key = read_env(key_env) if key_env else ""
     return key
 
@@ -936,7 +939,7 @@ def _entry_configured_key(cfg: dict, read_env) -> str:
 def _ollama_configured_base() -> tuple[dict, str]:
     from hermes_cli.models import _get_provider_config_dict
     cfg = _get_provider_config_dict("ollama")
-    return cfg, str(cfg.get("base_url") or cfg.get("api") or cfg.get("url") or "").strip()
+    return cfg, _clean(cfg.get("base_url") or cfg.get("api") or cfg.get("url"))
 
 
 def _unknown_provider_message(explicit_provider: str) -> str:
@@ -964,9 +967,7 @@ def _aggregator_alias_error(
     explicit_norm = explicit_provider.strip().lower()
     alias_target = ALIASES.get(explicit_norm)
     if not (
-        alias_target
-        and alias_target == target_provider
-        and target_provider != explicit_norm
+        alias_target and alias_target == target_provider and target_provider != explicit_norm
         and target_provider in _AGGREGATOR_PROVIDERS):
         return ""
     authed = get_authenticated_provider_slugs(
@@ -1189,11 +1190,8 @@ def _convert_vendor_colon_slug(st: _Switch) -> None:
     colon_pos = raw_input.find(":")
     cur_norm = str(st.current_provider).strip().lower()
     if (
-        colon_pos > 0
-        and "/" not in raw_input
-        and is_aggregator(st.current_provider)
-        and not cur_norm.startswith("custom")
-        and cur_norm != "ollama"):
+        colon_pos > 0 and "/" not in raw_input and is_aggregator(st.current_provider)
+        and not cur_norm.startswith("custom") and cur_norm != "ollama"):
         left = raw_input[:colon_pos].strip().lower()
         right = raw_input[colon_pos + 1:].strip()
         if left and right:
@@ -1277,15 +1275,11 @@ def _route_from_model_input(st: _Switch) -> Optional[ModelSwitchResult]:
 
     # Step e
     is_custom = (
-        current_provider in {"custom", "local"}
-        or current_provider.startswith("custom:")
+        current_provider in {"custom", "local"} or current_provider.startswith("custom:")
         or base_url_hostname(st.current_base_url or "") in ("localhost", "127.0.0.1"))
     if (
-        st.target_provider == current_provider
-        and not is_custom
-        and not st.resolved_alias
-        and not resolved_in_current_catalog
-        and not config_routed):
+        st.target_provider == current_provider and not is_custom and not st.resolved_alias
+        and not resolved_in_current_catalog and not config_routed):
         detected = detect_provider_for_model(st.new_model, current_provider)
         if detected:
             st.target_provider, st.new_model = detected
@@ -1425,8 +1419,7 @@ def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
     else:
         headers = st.validation_headers or (
             _extra_headers_from_config(st.user_providers.get(st.target_provider))
-            if st.user_providers and st.target_provider in st.user_providers
-            else None)
+            if st.user_providers and st.target_provider in st.user_providers else None)
     try:
         validation = validate_requested_model(
             st.new_model, st.target_provider, api_key=st.api_key, base_url=st.base_url,

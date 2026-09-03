@@ -52,22 +52,7 @@ def _save_discovered_models_to_config(
                 continue
             if headers is not None and _extra_headers_from_config(entry) != headers:
                 continue
-            existing = entry.get("models")
-            legacy_discovered = isinstance(existing, dict) and existing.get("__discovered_model_catalog__") is True
-            entry_discovered = entry.get("models_discovered") is True or legacy_discovered
-            # A ``models`` mapping or list of dicts is user-curated per-model metadata — never
-            # replace it. A mapping Hermes itself discovered (entry flag or legacy in-mapping
-            # sentinel) is ours to refresh.
-            if isinstance(existing, dict) and not entry_discovered:
-                continue
-            if isinstance(existing, list) and any(isinstance(m, dict) for m in existing):
-                continue
-            # Only write when stale. A legacy-shape entry is always rewritten so the save
-            # migrates it to the clean entry-level flag.
-            if isinstance(existing, list) and existing == model_ids:
-                continue
-            if (isinstance(existing, dict) and entry_discovered and not legacy_discovered
-                    and list(existing) == model_ids):
+            if not _discovered_catalog_stale(entry, model_ids):
                 continue
             entry["models"] = {model_id: {} for model_id in model_ids}
             entry["models_discovered"] = True
@@ -78,6 +63,24 @@ def _save_discovered_models_to_config(
             save_config(cfg)
     except Exception:
         pass
+
+
+def _discovered_catalog_stale(entry: dict, model_ids: list[str]) -> bool:
+    """Whether a live probe may overwrite ``entry["models"]``.
+
+    A ``models`` mapping or list of dicts is user-curated per-model metadata — never replaced.
+    A mapping Hermes itself discovered (entry flag or legacy in-mapping sentinel) is ours to
+    refresh, but only when stale; a legacy-shape entry is always rewritten so the save migrates
+    it to the clean entry-level flag.
+    """
+    existing = entry.get("models")
+    legacy_discovered = isinstance(existing, dict) and existing.get("__discovered_model_catalog__") is True
+    entry_discovered = entry.get("models_discovered") is True or legacy_discovered
+    if isinstance(existing, dict):
+        return entry_discovered and (legacy_discovered or list(existing) != model_ids)
+    if isinstance(existing, list):
+        return not any(isinstance(m, dict) for m in existing) and existing != model_ids
+    return True
 
 
 _MODEL_DISCOVERY_ERRORS = (
@@ -213,10 +216,8 @@ def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
             continue
         entry = cache.get(normalized)
         if (
-            isinstance(entry, dict)
-            and entry.get("fp") == _credential_fingerprint(normalized)
-            and isinstance(entry.get("models"), list)
-            and entry["models"]
+            isinstance(entry, dict) and entry.get("fp") == _credential_fingerprint(normalized)
+            and isinstance(entry.get("models"), list) and entry["models"]
             and now - float(entry.get("at", 0)) < _PROVIDER_MODELS_CACHE_TTL):
             continue
         stale_slugs.append(normalized)
@@ -269,15 +270,14 @@ def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
         alias_target = ALIASES.get(hermes_id)
         if alias_target and alias_target != hermes_id and alias_target in _AGGREGATOR_PROVIDERS:
             continue
-        canonical = hermes_id
         try:
             from providers import get_provider_profile
             prof = get_provider_profile(hermes_id)
-            if prof is not None:
-                canonical = prof.name
+            if prof is not None and prof.name != hermes_id:
+                continue
         except Exception:
             pass
-        if canonical != hermes_id or hermes_id.lower() in seen:
+        if hermes_id.lower() in seen:
             continue
         if hermes_id.lower() in excluded or mdev_id.lower() in excluded:
             continue
@@ -414,14 +414,10 @@ def _first_curated(curated: dict, keys) -> list:
 def _aws_live_or_curated_ids(slug: str, curated: dict, *fallback_keys: str) -> list:
     """Bedrock: live discovery reflects the active region (eu.*, ap.*) rather than the static
     us.* list; any failure falls back to the curated list."""
-    from hermes_cli.models import cached_provider_model_ids
     try:
-        ids = cached_provider_model_ids(slug)
-        if ids:
-            return ids
+        return _live_or_curated_ids(slug, curated, *fallback_keys, merge_models_dev=False) or []
     except Exception:
-        pass
-    return _first_curated(curated, fallback_keys or (slug,)) or []
+        return _first_curated(curated, fallback_keys or (slug,)) or []
 
 
 def _nous_picker_model_ids(curated: dict, force_fresh_nous_tier: bool) -> list:
@@ -459,6 +455,13 @@ def _cap_models(model_ids: list, max_models: int | None, slug: str = "") -> list
     if slug in _UNCAPPED_PICKER_PROVIDERS or max_models is None:
         return model_ids
     return model_ids[:max_models]
+
+
+def _extend_unique(target: list, items) -> None:
+    """Append each truthy item of *items* not already in *target* (order preserved)."""
+    for item in items:
+        if item and item not in target:
+            target.append(item)
 
 
 def _norm_url(url: Any) -> str:
@@ -567,8 +570,7 @@ def _collect_authed_provider_slugs(
             continue
         if (
             _overlay_has_env_creds(pid, hermes_slug, overlay, _scoped_key_env)
-            or _auth_store_has_provider(pid, hermes_slug)
-            or _pool_usable(hermes_slug)):
+            or _auth_store_has_provider(pid, hermes_slug) or _pool_usable(hermes_slug)):
             _emit(hermes_slug, pid, hermes_slug)
 
     for cp in CANONICAL_PROVIDERS:
@@ -656,16 +658,22 @@ class _PickerBuild:
             "api_url": api_url, "native_catalog_empty": native_catalog_empty})
         self.seen_slugs.add(slug.lower())
 
+    def record_section3_pair(self, name: str, url_norm: str) -> bool:
+        """Remember a (display_name, base_url) pair for section-4 dedup; False when either is blank."""
+        pair = (str(name).strip().lower(), url_norm)
+        if not (pair[0] and pair[1]):
+            return False
+        self.section3_pairs.add(pair)
+        return True
+
     def endpoint_is_current(self, slug: str, aliases: set, url_norm: str, *, url_match_ok: bool = True) -> bool:
         """Row is current by slug/alias, or (bare ``custom`` provider) by matching base_url."""
         return (
             str(slug).strip().lower() == self.current_provider_norm
             or self.current_provider_norm in aliases
             or (
-                self.current_provider_norm == "custom"
-                and bool(self.current_base_url_norm)
-                and url_norm == self.current_base_url_norm
-                and url_match_ok))
+                self.current_provider_norm == "custom" and bool(self.current_base_url_norm)
+                and url_norm == self.current_base_url_norm and url_match_ok))
 
     def discover_endpoint(
         self, api_key: str, api_url: str, native_provider: str, has_explicit_models: bool, *,
@@ -677,8 +685,7 @@ class _PickerBuild:
         the probe. A dict-shaped ``models:`` is metadata, so still probe; pin with
         ``discover_models: false``."""
         probe_live = (
-            discovery_allowed
-            and (bool(api_key) or not has_explicit_models)
+            discovery_allowed and (bool(api_key) or not has_explicit_models)
             and self.can_probe_custom(row_is_current=is_current))
         discovered, native_catalog_empty = _discover_endpoint_models(
             api_key, api_url, native_provider, has_explicit_models,
@@ -847,11 +854,9 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
             tuple(sorted(headers.items())))
 
         # ``default_model`` is the legacy key; ``model`` matches custom_providers.
-        default_model = ep_cfg.get("default_model", "") or ep_cfg.get("model", "")
-        entry_models = [default_model] if default_model else []
-        for model_id in _declared_model_ids(ep_cfg.get("models", [])):
-            if model_id not in entry_models:
-                entry_models.append(model_id)
+        entry_models: list = []
+        _extend_unique(entry_models, [ep_cfg.get("default_model", "") or ep_cfg.get("model", "")])
+        _extend_unique(entry_models, _declared_model_ids(ep_cfg.get("models", [])))
 
         if group_key not in ep_groups:
             # Strip the per-model suffix and trailing version tokens ("Palantir Claude 4.7 Opus"
@@ -870,9 +875,7 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
                 "headers": headers, "api_mode": ep_cfg.get("api_mode"),
                 "discovery_allowed": bool(api_url) and _discover_flag(ep_cfg), "raw_names": [], "aliases": set()}
         grp = ep_groups[group_key]
-        for m in entry_models:
-            if m and m not in grp["models"]:
-                grp["models"].append(m)
+        _extend_unique(grp["models"], entry_models)
         # A singular default_model/model is only the active selection and must not suppress
         # discovery; dict-shaped ``models:`` is context_length metadata, not an allowlist — see
         # ``_models_config_is_allowlist``.
@@ -904,13 +907,9 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         # Record every raw member name so section 4 can match per-model custom_providers rows
         # even though the group label was collapsed.
         for raw_name in grp["raw_names"] or [display_name]:
-            pair = (str(raw_name).strip().lower(), ep_url_norm)
-            if pair[0] and pair[1]:
-                b.section3_pairs.add(pair)
+            if b.record_section3_pair(raw_name, ep_url_norm):
                 b.seen_slugs.add(custom_provider_slug(raw_name).lower())
-        pair = (str(display_name).strip().lower(), ep_url_norm)
-        if pair[0] and pair[1]:
-            b.section3_pairs.add(pair)
+        b.record_section3_pair(display_name, ep_url_norm)
 
 
 def _lap_bare_custom_row(b: _PickerBuild, custom_providers: list | None) -> None:
@@ -983,15 +982,11 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
         grp["aliases"].update(custom_provider_aliases(raw_name, provider_key))
         # ``model:`` is only the active selection; every configured model lives under
         # ``models:`` (dict written by _save_custom_provider).
-        default_model = (entry.get("model") or "").strip()
-        if default_model and default_model not in grp["models"]:
-            grp["models"].append(default_model)
+        _extend_unique(grp["models"], [(entry.get("model") or "").strip()])
         models_field = entry.get("models", {})
         if _models_config_is_allowlist(models_field, _entry_models_discovered(entry)):
             grp["has_explicit_models"] = True
-        for model_id in _declared_model_ids(models_field):
-            if model_id not in grp["models"]:
-                grp["models"].append(model_id)
+        _extend_unique(grp["models"], _declared_model_ids(models_field))
 
     section4_slugs: set = set()
     current_url_group_count = sum(
@@ -1156,8 +1151,7 @@ def _finalize_picker_rows(results: list, user_providers, current_model: str) -> 
         from hermes_cli.config import is_provider_enabled
         if isinstance(user_providers, dict):
             disabled = {
-                str(name).strip().lower()
-                for name, cfg in user_providers.items()
+                str(name).strip().lower() for name, cfg in user_providers.items()
                 if isinstance(cfg, dict) and not is_provider_enabled(cfg)}
             if disabled:
                 results = [
