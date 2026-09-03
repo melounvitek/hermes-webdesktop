@@ -11,7 +11,7 @@ import asyncio
 import time
 import urllib.parse
 from fastapi import APIRouter
-from hermes_cli.web_routers._common import http_failure
+from hermes_cli.web_routers._common import http_failure, scoped_to_thread
 from hermes_cli.web_deps import LateState, late
 from fastapi import HTTPException, Request
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, redact_key, _deep_merge
@@ -82,11 +82,7 @@ async def get_config(profile: Optional[str] = None):
     # load_config() reads from disk; a slow lock-holder on the event loop froze
     # the whole gateway for >1s. asyncio.to_thread copies the contextvar
     # context, so the profile override stays scoped to the worker thread.
-    def _run():
-        with _profile_scope(profile):
-            return _normalize_config_for_web(load_config())
-
-    config = await asyncio.to_thread(_run)
+    config = await scoped_to_thread(profile, lambda: _normalize_config_for_web(load_config()))
     # Strip internal keys that the frontend shouldn't see or send back
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
@@ -285,19 +281,16 @@ def _get_env_vars_sync(profile: Optional[str] = None):
 
 @router.put("/api/env")
 async def set_env_var(body: EnvVarUpdate, profile: Optional[str] = None):
-    def _run():
-        with _profile_scope(body.profile or profile):
-            # Unified credential lifecycle: writes .env AND reconciles any
-            # config.yaml mirror still holding the previous value of this var
-            # (model.api_key / auxiliary.*.api_key / custom_providers[*]), so a
-            # rotation can't leave a stale higher-precedence copy that keeps
-            # authenticating with the old key.
-            from hermes_cli.credential_lifecycle import save_provider_env_credential
-
-            return save_provider_env_credential(body.key, body.value)
-
+    # Unified credential lifecycle: writes .env AND reconciles any config.yaml
+    # mirror still holding the previous value of this var (model.api_key /
+    # auxiliary.*.api_key / custom_providers[*]), so a rotation can't leave a
+    # stale higher-precedence copy that keeps authenticating with the old key.
     with _env_write_errors("PUT /api/env failed", http_passthrough=False):
-        return await asyncio.to_thread(_run)
+        from hermes_cli.credential_lifecycle import save_provider_env_credential
+
+        return await scoped_to_thread(
+            body.profile or profile, lambda: save_provider_env_credential(body.key, body.value)
+        )
 
 
 # Live credential probes keyed by env var: (url, auth) where auth is "bearer"
@@ -713,20 +706,17 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
 
 @router.delete("/api/env")
 async def remove_env_var(body: EnvVarDelete, profile: Optional[str] = None):
-    def _run():
-        with _profile_scope(body.profile or profile):
-            # Unified credential lifecycle: clears the .env entry AND every
-            # mirror of the credential — env-seeded credential_pool entries in
-            # auth.json (stale ones kept providers alive in the model picker),
-            # the affected providers' model-cache rows, and value-matched
-            # config.yaml api_key mirrors. OAuth/device-code/manual pool entries
-            # for the same provider are preserved.
-            from hermes_cli.credential_lifecycle import remove_provider_env_credential
-
-            return remove_provider_env_credential(body.key)
-
+    # Unified credential lifecycle: clears the .env entry AND every mirror of
+    # the credential — env-seeded credential_pool entries in auth.json (stale
+    # ones kept providers alive in the model picker), the affected providers'
+    # model-cache rows, and value-matched config.yaml api_key mirrors.
+    # OAuth/device-code/manual pool entries for the same provider are preserved.
     with _env_write_errors("DELETE /api/env failed", http_passthrough=True):
-        result = await asyncio.to_thread(_run)
+        from hermes_cli.credential_lifecycle import remove_provider_env_credential
+
+        result = await scoped_to_thread(
+            body.profile or profile, lambda: remove_provider_env_credential(body.key)
+        )
         if not result.get("found"):
             raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
         return result
@@ -750,11 +740,7 @@ async def reveal_env_var(
         raise HTTPException(status_code=429, detail="Too many reveal requests. Try again shortly.")
     _reveal_timestamps.append(now)
 
-    def _run():
-        with _profile_scope(body.profile or profile):
-            return load_env()
-
-    env_on_disk = await asyncio.to_thread(_run)
+    env_on_disk = await scoped_to_thread(body.profile or profile, load_env)
     value = env_on_disk.get(body.key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")

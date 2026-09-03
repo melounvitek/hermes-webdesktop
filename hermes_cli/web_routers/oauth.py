@@ -10,6 +10,7 @@ import sys
 import time
 from fastapi import APIRouter
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_routers._common import scoped_to_thread
 from fastapi import HTTPException, Request
 from hermes_cli.web_models import OAuthSubmitBody
 from typing import Any, Callable, Dict, Optional
@@ -597,25 +598,24 @@ async def list_oauth_providers(profile: Optional[str] = None):
     (last N chars, never the full token), expires_at, has_refresh_token}.
     """
     def _run():
-        with _profile_scope(profile):
-            providers = []
-            for p in _build_oauth_catalog():
-                status = _resolve_provider_status(p["id"], p.get("status_fn"))
-                disconnect_hint = _oauth_provider_disconnect_hint(p, status)
-                providers.append({
-                    "id": p["id"],
-                    "name": p["name"],
-                    "flow": p["flow"],
-                    "cli_command": _external_process_cli_command(p["id"], p["cli_command"]),
-                    "docs_url": p["docs_url"],
-                    "disconnect_hint": disconnect_hint,
-                    "disconnect_command": _oauth_provider_disconnect_command(p),
-                    "disconnectable": disconnect_hint is None,
-                    "status": status,
-                })
-            return {"providers": providers}
+        providers = []
+        for p in _build_oauth_catalog():
+            status = _resolve_provider_status(p["id"], p.get("status_fn"))
+            disconnect_hint = _oauth_provider_disconnect_hint(p, status)
+            providers.append({
+                "id": p["id"],
+                "name": p["name"],
+                "flow": p["flow"],
+                "cli_command": _external_process_cli_command(p["id"], p["cli_command"]),
+                "docs_url": p["docs_url"],
+                "disconnect_hint": disconnect_hint,
+                "disconnect_command": _oauth_provider_disconnect_command(p),
+                "disconnectable": disconnect_hint is None,
+                "status": status,
+            })
+        return {"providers": providers}
 
-    return await asyncio.to_thread(_run)
+    return await scoped_to_thread(profile, _run)
 
 
 def _reject_if_not_disconnectable(provider: Dict[str, Any], status: Dict[str, Any]) -> None:
@@ -635,54 +635,53 @@ async def disconnect_oauth_provider(
     _require_token(request)
 
     def _run():
-        with _profile_scope(profile):
-            catalog_by_id = {p["id"]: p for p in _build_oauth_catalog()}
-            provider = catalog_by_id.get(provider_id)
-            if provider is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown provider: {provider_id}. "
-                           f"Available: {', '.join(sorted(catalog_by_id))}",
-                )
-
-            _reject_if_not_disconnectable(provider, {})
-            _reject_if_not_disconnectable(
-                provider, _resolve_provider_status(provider_id, provider.get("status_fn"))
+        catalog_by_id = {p["id"]: p for p in _build_oauth_catalog()}
+        provider = catalog_by_id.get(provider_id)
+        if provider is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown provider: {provider_id}. "
+                       f"Available: {', '.join(sorted(catalog_by_id))}",
             )
 
-            # Anthropic clears only the Hermes-managed PKCE file and auth-store
-            # entry; the external claude-code row was rejected above so we never
-            # pretend to remove ~/.claude/* credentials owned by the CLI.
-            if provider_id == "anthropic":
-                cleared = False
-                try:
-                    from agent.anthropic_adapter import _get_hermes_oauth_file
-                    oauth_file = _get_hermes_oauth_file()
-                    if oauth_file.exists():
-                        oauth_file.unlink()
-                        cleared = True
-                except Exception:
-                    pass
-                try:
-                    from hermes_cli.auth import clear_provider_auth
-                    cleared = clear_provider_auth("anthropic") or cleared
-                except Exception:
-                    pass
-                _log.info("oauth/disconnect: %s", provider_id)
-                return {"ok": bool(cleared), "provider": provider_id}
+        _reject_if_not_disconnectable(provider, {})
+        _reject_if_not_disconnectable(
+            provider, _resolve_provider_status(provider_id, provider.get("status_fn"))
+        )
 
+        # Anthropic clears only the Hermes-managed PKCE file and auth-store
+        # entry; the external claude-code row was rejected above so we never
+        # pretend to remove ~/.claude/* credentials owned by the CLI.
+        if provider_id == "anthropic":
+            cleared = False
             try:
-                from hermes_cli.auth import clear_provider_auth, invalidate_nous_auth_status_cache
-                cleared = clear_provider_auth(provider_id)
-                if provider_id == "nous":
-                    invalidate_nous_auth_status_cache()
-                _log.info("oauth/disconnect: %s (cleared=%s)", provider_id, cleared)
-                return {"ok": bool(cleared), "provider": provider_id}
-            except Exception as e:
-                _log.exception("disconnect %s failed", provider_id)
-                raise HTTPException(status_code=500, detail=str(e))
+                from agent.anthropic_adapter import _get_hermes_oauth_file
+                oauth_file = _get_hermes_oauth_file()
+                if oauth_file.exists():
+                    oauth_file.unlink()
+                    cleared = True
+            except Exception:
+                pass
+            try:
+                from hermes_cli.auth import clear_provider_auth
+                cleared = clear_provider_auth("anthropic") or cleared
+            except Exception:
+                pass
+            _log.info("oauth/disconnect: %s", provider_id)
+            return {"ok": bool(cleared), "provider": provider_id}
 
-    return await asyncio.to_thread(_run)
+        try:
+            from hermes_cli.auth import clear_provider_auth, invalidate_nous_auth_status_cache
+            cleared = clear_provider_auth(provider_id)
+            if provider_id == "nous":
+                invalidate_nous_auth_status_cache()
+            _log.info("oauth/disconnect: %s (cleared=%s)", provider_id, cleared)
+            return {"ok": bool(cleared), "provider": provider_id}
+        except Exception as e:
+            _log.exception("disconnect %s failed", provider_id)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return await scoped_to_thread(profile, _run)
 
 
 # In-browser device-code flows (Nous, OpenAI Codex, MiniMax, xAI):

@@ -8,9 +8,9 @@ import logging
 import math
 import re
 import shlex
-import asyncio
 from fastapi import APIRouter
 from hermes_cli.web_deps import late
+from hermes_cli.web_routers._common import scoped_to_thread
 from fastapi import HTTPException
 from hermes_cli.web_models import MemoryProviderConfigUpdate, MemoryProviderSetupRequest
 from plugins.memory.config_schema import get_provider_config_schema
@@ -36,7 +36,6 @@ _memory_provider_manifest = late("_memory_provider_manifest")
 _memory_provider_setup_info = late("_memory_provider_setup_info")
 _memory_provider_setup_manifest = late("_memory_provider_setup_manifest")
 _normalize_memory_provider_schema = late("_normalize_memory_provider_schema")
-_profile_scope = late("_profile_scope")
 _read_memory_provider_existing_values = late("_read_memory_provider_existing_values")
 _require_memory_provider_ready = late("_require_memory_provider_ready")
 _run_setup_command = late("_run_setup_command")
@@ -646,21 +645,20 @@ async def get_memory_provider_config(name: str, surface: Optional[str] = None, p
     _require_valid_memory_provider_name(name)
 
     def _run():
-        with _profile_scope(profile):
-            # Undeclared providers (e.g. builtin) have no config surface; an
-            # empty schema makes the generic panel render nothing.
-            if surface == "declared":
-                declared = get_provider_config_schema(name)
-                if declared is None:
-                    return {"name": name, "label": name, "docs_url": "", "fields": []}
-                return _declared_provider_payload(declared)
+        # Undeclared providers (e.g. builtin) have no config surface; an
+        # empty schema makes the generic panel render nothing.
+        if surface == "declared":
+            declared = get_provider_config_schema(name)
+            if declared is None:
+                return {"name": name, "label": name, "docs_url": "", "fields": []}
+            return _declared_provider_payload(declared)
 
-            provider = _load_memory_provider(name)
-            if provider is None:
-                return {"name": name, "label": name, "fields": [], "setup": _memory_provider_setup_info(name)}
-            return _memory_provider_payload(name, provider)
+        provider = _load_memory_provider(name)
+        if provider is None:
+            return {"name": name, "label": name, "fields": [], "setup": _memory_provider_setup_info(name)}
+        return _memory_provider_payload(name, provider)
 
-    return await asyncio.to_thread(_run)
+    return await scoped_to_thread(profile, _run)
 
 
 @router.post("/api/memory/providers/{name}/setup")
@@ -693,28 +691,27 @@ async def update_memory_provider_config(
     values = body.values or {}
 
     def _run():
-        with _profile_scope(profile):
-            if surface == "declared":
-                declared = get_provider_config_schema(name)
-                if declared is None:
-                    raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
-                _update_memory_provider_config(declared, _stringify_submitted_values(values))
-                _invalidate_plugins_hub_cache()
-                return {"ok": True}
-
-            provider = _load_memory_provider(name)
-            if provider is None:
+        if surface == "declared":
+            declared = get_provider_config_schema(name)
+            if declared is None:
                 raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
-            _write_memory_provider_config_values(name, provider, values)
-            _require_memory_provider_ready(name)
-            config = load_config()
-            _memory_section(config)["provider"] = name
-            save_config(config)
+            _update_memory_provider_config(declared, _stringify_submitted_values(values))
             _invalidate_plugins_hub_cache()
-            return {"ok": True, "active": name}
+            return {"ok": True}
+
+        provider = _load_memory_provider(name)
+        if provider is None:
+            raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
+        _write_memory_provider_config_values(name, provider, values)
+        _require_memory_provider_ready(name)
+        config = load_config()
+        _memory_section(config)["provider"] = name
+        save_config(config)
+        _invalidate_plugins_hub_cache()
+        return {"ok": True, "active": name}
 
     try:
-        return await asyncio.to_thread(_run)
+        return await scoped_to_thread(profile, _run)
     except HTTPException:
         raise
     except ValueError as exc:
