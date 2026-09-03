@@ -229,18 +229,18 @@ class GatewayShutdownMixin:
             for t in self._background_tasks
         ):
             return True
-        try:
+        def _delegations_active() -> bool:
             from tools.async_delegation import active_count
-            if active_count() > 0:
-                return True
-        except Exception:  # noqa: BLE001 - never let the idle check raise
-            logger.debug("scale-to-zero async-delegation check failed", exc_info=True)
-        try:
+            return active_count() > 0
+
+        def _processes_active() -> bool:
             from tools.process_registry import process_registry
-            if process_registry.has_any_active() or process_registry.pending_watchers:
-                return True
-        except Exception:  # noqa: BLE001 - never let the idle check raise
-            logger.debug("scale-to-zero bg-work check failed", exc_info=True)
+            return bool(process_registry.has_any_active() or process_registry.pending_watchers)
+
+        for label, probe in (("async-delegation", _delegations_active), ("bg-work", _processes_active)):
+            with _log_suppressed(logging.DEBUG, f"scale-to-zero {label} check failed", exc_info=True):
+                if probe():
+                    return True
         return False
 
     @staticmethod
@@ -765,14 +765,12 @@ class GatewayShutdownMixin:
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
         """
         restart_source = self._restart_command_source if self._restart_requested else None
-        action = "restarting" if self._restart_requested else "shutting down"
-        hint = (
-            "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
-            if self._restart_requested
-            else "Your current task will be interrupted."
-        )
-        msg = f"⚠️ Gateway {action} — {hint}"
+        msg = "⚠️ Gateway shutting down — Your current task will be interrupted."
+        if self._restart_requested:
+            msg = (
+                "⚠️ Gateway restarting — Your current task will be interrupted. "
+                "Send any message after restart and I'll try to resume where you left off."
+            )
         restart_key = None
         if restart_source is not None:
             with suppress(Exception):
@@ -998,7 +996,7 @@ class GatewayShutdownMixin:
 
     @staticmethod
     def _read_json_counts(path: Path) -> Optional[dict]:
-        """Parsed counter dict, or None when the file is missing/unreadable."""
+        """Parsed counter dict, or None when the file is missing/unreadable (no exists() pre-check needed)."""
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -1008,10 +1006,9 @@ class GatewayShutdownMixin:
         """Increment persisted restart-failure counters for active sessions; drop the rest (loop broken)."""
         from gateway.run import atomic_json_write
         path = self._stuck_loop_counts_path()
-        counts = (self._read_json_counts(path) if path.exists() else None) or {}
-        new_counts = {key: counts.get(key, 0) + 1 for key in active_session_keys}
+        counts = self._read_json_counts(path) or {}
         with suppress(Exception):
-            atomic_json_write(path, new_counts, indent=None)
+            atomic_json_write(path, {key: counts.get(key, 0) + 1 for key in active_session_keys}, indent=None)
 
     def _suspend_stuck_loop_sessions(self) -> int:
         """Suspend sessions active across too many restarts (startup, AFTER suspend_recently_active())."""
@@ -1301,11 +1298,14 @@ class GatewayShutdownMixin:
         def _step(label: str, fn: Callable[[], Any]) -> Any:
             return GatewayShutdownMixin._quiet_step(f"{label} ({phase}) error", fn)
 
+        def _count_step(fmt: str, fn: Callable[[], int]) -> None:
+            n = fn()
+            if n:
+                logger.info(fmt, phase, n)
+
         def _kill_processes() -> None:
             from tools.process_registry import process_registry
-            _killed = process_registry.kill_all()
-            if _killed:
-                logger.info("Shutdown (%s): killed %d tool subprocess(es)", phase, _killed)
+            _count_step("Shutdown (%s): killed %d tool subprocess(es)", process_registry.kill_all)
 
         def _mark_cron_interrupted() -> list:
             # kill_all() is a global sweep, so any cron job dispatched right now lost its tool
@@ -1324,9 +1324,10 @@ class GatewayShutdownMixin:
 
         def _interrupt_delegations() -> None:
             from tools.async_delegation import interrupt_all as _interrupt_async
-            _async_n = _interrupt_async(reason=f"gateway shutdown ({phase})")
-            if _async_n:
-                logger.info("Shutdown (%s): interrupted %d background delegation(s)", phase, _async_n)
+            _count_step(
+                "Shutdown (%s): interrupted %d background delegation(s)",
+                lambda: _interrupt_async(reason=f"gateway shutdown ({phase})"),
+            )
 
         _step("process_registry.kill_all", _kill_processes)
         _marked_cron_jobs = _step("mark_running_jobs_interrupted", _mark_cron_interrupted) or []

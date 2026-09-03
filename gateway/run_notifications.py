@@ -505,9 +505,8 @@ class GatewayNotificationsMixin:
             # Forward a prompt only when none is still awaiting a response; otherwise the watcher
             # would re-read the same .update_prompt.json every poll and spam duplicate prompts.
             _pending_state = self._peek_session_state(session_key) if session_key else None
-            if (
-                paths.prompt.exists() and session_key
-                and not (_pending_state is not None and _pending_state.persistent.update_prompt_pending)
+            if paths.prompt.exists() and session_key and not getattr(
+                getattr(_pending_state, "persistent", None), "update_prompt_pending", False
             ):
                 try:
                     prompt_data = json.loads(paths.prompt.read_text(encoding="utf-8"))
@@ -578,10 +577,11 @@ class GatewayNotificationsMixin:
                         output = "…" + output[-3500:]
                     status = "✅ Hermes update finished." if exit_code == 0 else "❌ Hermes update failed."
                     msg = f"{status}\n\n```\n{output}\n```"
-                elif exit_code == 0:
-                    msg = "✅ Hermes update finished successfully."
                 else:
-                    msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
+                    msg = (
+                        "✅ Hermes update finished successfully." if exit_code == 0 else
+                        "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
+                    )
                 await adapter.send(chat_id, msg, metadata=_non_conversational_metadata(metadata, platform=platform))
                 logger.info("Sent post-update notification to %s:%s (exit=%s)", platform_str, chat_id, exit_code)
         except Exception as e:

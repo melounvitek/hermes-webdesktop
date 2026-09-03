@@ -908,20 +908,19 @@ class GatewayAdapterLifecycleMixin:
             # one connection fans out by route); a secondary would only retry-loop and stall startup.
             if multiplex and platform in (Platform.RELAY, Platform.WHATSAPP):
                 continue
-            try:
+            adapter = None
+            with _log_suppressed(
+                logging.ERROR, "[MULTIPLEX] Profile '%s': _create_adapter('%s') raised %s", profile_name,
+                platform.value, exc_info=True,
+            ):
                 with _profile_runtime_scope(profile_home, hydrate_secrets=False):
                     adapter = self._create_adapter(platform, platform_config)
-            except Exception as e:
-                logger.error(
-                    "[MULTIPLEX] Profile '%s': _create_adapter('%s') raised %s", profile_name,
-                    platform.value, e, exc_info=True,
-                )
-                continue
+                if not adapter:
+                    logger.warning(
+                        "[MULTIPLEX] Profile '%s': skipping platform '%s' - adapter creation returned None",
+                        profile_name, platform.value,
+                    )
             if not adapter:
-                logger.warning(
-                    "[MULTIPLEX] Profile '%s': skipping platform '%s' - adapter creation returned None",
-                    profile_name, platform.value,
-                )
                 continue
             # Same-token / same-listener conflict detection — refuse a duplicate poll or bind.
             credential_claim = self._adapter_credential_claim(platform, adapter)
