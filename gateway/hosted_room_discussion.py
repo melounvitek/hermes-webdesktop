@@ -327,14 +327,12 @@ def _unaddressed_member_mentions(
             continue
         speaker_id = str(event.payload["member_id"])
         last_post_at[speaker_id] = event.seq
-        cited = resolve_mentions((str(event.payload["text"]),), room.members, default_all=False)
-        for member in cited:
+        for member in resolve_mentions((str(event.payload["text"]),), room.members, default_all=False):
             if member.member_id != speaker_id:
                 cited_at[member.member_id] = event.seq
     return tuple(
         member for member in room.members
-        if member.member_id in cited_at
-        and last_post_at.get(member.member_id, 0) <= cited_at[member.member_id])
+        if member.member_id in cited_at and last_post_at.get(member.member_id, 0) <= cited_at[member.member_id])
 
 
 def _require_gateway_actor(actor: Mapping[str, Any], room: DiscussionRoom, message: str) -> None:
@@ -475,8 +473,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
         if event.kind not in _TERMINAL_EVENT_KINDS:
             continue
         task_id = str(event.payload["task_id"])
-        previous = terminal_by_task.get(task_id)
-        if previous is not None:
+        if (previous := terminal_by_task.get(task_id)) is not None:
             if previous.kind != "turn.deferred":
                 raise DiscussionValidationError(f"task '{task_id}' has more than one terminal room event")
             if event.kind == "turn.deferred" and int(
@@ -488,8 +485,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
         if event.kind == "turn.settled" and not event.payload["passed"]:
             message = messages_by_id.get(str(event.payload["message_event_id"]))
             if message is None or any(
-                message.payload.get(field) != event.payload.get(field)
-                for field in ("task_id", "member_id", "thread_id")):
+                message.payload.get(f) != event.payload.get(f) for f in ("task_id", "member_id", "thread_id")):
                 raise DiscussionValidationError("turn.settled references no matching member message")
             watermark = max(watermark, message.seq)
         watermarks[key] = max(watermarks.get(key, 0), watermark)
@@ -581,8 +577,7 @@ def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent
     """Oldest latest-per-thread user message not stopped and not yet completed."""
     stopped_through_seq = max((event.seq for event in validated if event.kind == "room.stop_requested"), default=0)
     completed_discussion_ids = {
-        str(event.payload["discussion_event_id"])
-        for event in validated
+        str(event.payload["discussion_event_id"]) for event in validated
         if event.kind == "room.activity" and event.payload.get("status") in {"settled", "bounded"}}
     latest_by_thread = {
         str(event.payload["thread_id"]): event for event in validated if event.kind == "message.user"}
@@ -597,26 +592,20 @@ def _thread_messages(
     """Return (thread messages, messages since the discussion, this discussion's member messages)."""
     thread_id = str(discussion.payload["thread_id"])
     committed_member_message_ids = {
-        str(event.payload["message_event_id"])
-        for event in validated
+        str(event.payload["message_event_id"]) for event in validated
         if event.kind == "turn.settled" and event.payload.get("message_event_id") is not None}
     # Publication writes the visible member message before the terminal event.
     # A crash in that gap leaves the message in the log, but it is not committed
     # policy input yet: ignoring it reproduces the original task coordinates so
     # the caller can inspect the terminal driver row and finish publication.
     thread_messages = tuple(
-        event
-        for event in validated
-        if event.payload.get("thread_id") == thread_id
-        and (
+        event for event in validated
+        if event.payload.get("thread_id") == thread_id and (
             event.kind == "message.user"
             or (event.kind == "message.member" and event.event_id in committed_member_message_ids)))
-    discussion_messages = tuple(event for event in thread_messages if event.seq >= discussion.seq)
-    member_messages = tuple(
+    return thread_messages, tuple(event for event in thread_messages if event.seq >= discussion.seq), tuple(
         event for event in thread_messages
-        if event.kind == "message.member"
-        and event.payload.get("discussion_event_id") == discussion.event_id)
-    return thread_messages, discussion_messages, member_messages
+        if event.kind == "message.member" and event.payload.get("discussion_event_id") == discussion.event_id)
 
 
 def _effective_watermarks(
@@ -636,8 +625,7 @@ def plan_next_task(
     """Replay the complete room log and return at most one next member task."""
     room = validate_room(room_value, local_profiles=local_profiles)
     validated = _validated_events(events, room=room)
-    discussion = _pending_discussion(validated)
-    if discussion is None:
+    if (discussion := _pending_discussion(validated)) is None:
         return DiscussionDecision(status="idle", reason="no_pending_user_event")
     thread_id = str(discussion.payload["thread_id"])
     decide = partial(
@@ -647,10 +635,8 @@ def plan_next_task(
     if len(member_messages) >= MAX_DISCUSSION_MESSAGES:
         return decide("bounded", "max_messages")
     terminals = {
-        (int(event.payload["round_index"]), str(event.payload["member_id"])): event
-        for event in validated
-        if event.kind in _TERMINAL_EVENT_KINDS
-        and event.payload.get("discussion_event_id") == discussion.event_id}
+        (int(event.payload["round_index"]), str(event.payload["member_id"])) for event in validated
+        if event.kind in _TERMINAL_EVENT_KINDS and event.payload.get("discussion_event_id") == discussion.event_id}
     watermarks = _effective_watermarks(validated, initial_watermarks)
     seen_through_seq = max(event.seq for event in thread_messages)
     for round_index in range(MAX_DISCUSSION_ROUNDS):
@@ -660,8 +646,7 @@ def plan_next_task(
         # watermark remains intact, so a peer cited later still receives the
         # complete bounded transcript delta without consuming turns meanwhile.
         responders = (
-            resolve_mentions((str(discussion.payload["text"]),), room.members)
-            if round_index == 0
+            resolve_mentions((str(discussion.payload["text"]),), room.members) if round_index == 0
             else _unaddressed_member_mentions(discussion_messages, room))
         for member_index, member in enumerate(_rotate(responders, round_index)):
             if (round_index, member.member_id) in terminals:
@@ -672,10 +657,9 @@ def plan_next_task(
             prompt = _build_prompt(
                 room=room, member=member, messages=thread_messages, watermark=watermark,
                 seen_through_seq=seen_through_seq)
-            task = _make_task_plan(
+            return decide("task", "member_turn", task=_make_task_plan(
                 room=room, discussion_event=discussion, member=member, member_index=member_index,
-                round_index=round_index, seen_through_seq=seen_through_seq, prompt=prompt)
-            return decide("task", "member_turn", task=task)
+                round_index=round_index, seen_through_seq=seen_through_seq, prompt=prompt))
         if not any(int(event.payload["round_index"]) == round_index for event in member_messages):
             return decide("settled", "silent_round")
         if round_index == MAX_DISCUSSION_ROUNDS - 1:
@@ -693,8 +677,8 @@ def reconstruct_task_plan(
     if not isinstance(identity, driver.TaskIdentity) or not isinstance(payload, Mapping):
         raise DiscussionReconstructionError("driver task has no valid identity or payload")
     fields = frozenset(payload)
-    if not driver._TASK_PAYLOAD_REQUIRED_FIELDS <= fields or (
-        fields - driver._TASK_PAYLOAD_REQUIRED_FIELDS - driver._TASK_PAYLOAD_OPTIONAL_FIELDS):
+    if not driver._TASK_PAYLOAD_REQUIRED_FIELDS <= fields <= (
+        driver._TASK_PAYLOAD_REQUIRED_FIELDS | driver._TASK_PAYLOAD_OPTIONAL_FIELDS):
         raise DiscussionReconstructionError("driver task payload shape changed")
     if (match := _TURN_ID_RE.fullmatch(identity.turn_id)) is None:
         raise DiscussionReconstructionError("turn_id is not a Discussion coordinate")
@@ -708,9 +692,8 @@ def reconstruct_task_plan(
         raise DiscussionReconstructionError("task identity does not match its room thread")
     profile, target_member_id = payload.get("target_profile"), payload.get("target_member_id")
     member = next((
-        candidate for candidate in room.members
-        if candidate.profile == profile and (target_member_id is None or candidate.member_id == target_member_id)
-    ), None)
+        m for m in room.members
+        if m.profile == profile and (target_member_id is None or m.member_id == target_member_id)), None)
     if member is None or _member_digest(member) != match.group("member"):
         raise DiscussionReconstructionError("task target member does not match turn_id")
     prompt = payload.get("prompt")
