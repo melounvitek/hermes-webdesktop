@@ -13,6 +13,7 @@ import sys
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Iterable, Literal, NoReturn, Sequence
 
 from tools.ansi_strip import strip_ansi as _strip_ansi
@@ -538,6 +539,23 @@ def _expect_no_args(args: Sequence[str], usage: str) -> None:
         raise ConsoleCommandError(f"Usage: {usage}")
 
 
+def _captured(fn):
+    """Handler decorator: run ``fn(engine, args)`` under ``_capture_output`` and return its text."""
+    @functools.wraps(fn)
+    def wrapper(engine: HermesConsoleEngine, args: list[str]) -> str:
+        return _capture_output(lambda: fn(engine, args))
+    return wrapper
+
+
+def _simple_command(usage: str, module: str, name: str, make_args=lambda: ()):
+    """Handler for no-arg commands that just capture ``module.name(*make_args())``."""
+    def handler(_engine: HermesConsoleEngine, args: list[str]) -> str:
+        _expect_no_args(args, usage)
+        fn = getattr(importlib.import_module(module), name)
+        return _capture_output(lambda: fn(*make_args()))
+    return handler
+
+
 def _apply_confirmed_defaults(args: argparse.Namespace) -> None:
     """Skip nested prompts after the console-level confirmation has happened."""
     if hasattr(args, "yes"):
@@ -575,21 +593,16 @@ def _version(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 def _status(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "status")
-    from types import SimpleNamespace
-
     from hermes_cli.status import show_status
 
     output = _capture_output(lambda: show_status(SimpleNamespace(all=False, deep=False)))
     return _strip_console_status_footer(output)
 
 
-def _doctor(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    _expect_no_args(args, "doctor")
-    from types import SimpleNamespace
-
-    from hermes_cli.doctor import run_doctor
-
-    return _capture_output(lambda: run_doctor(SimpleNamespace(fix=False, ack=None)))
+_doctor = _simple_command(
+    "doctor", "hermes_cli.doctor", "run_doctor", lambda: (SimpleNamespace(fix=False, ack=None),))
+_config_show = _simple_command("config show", "hermes_cli.config", "show_config")
+_cron_status = _simple_command("cron status", "hermes_cli.cron", "cron_status")
 
 
 def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
@@ -648,13 +661,6 @@ def _sessions_stats(_engine: HermesConsoleEngine, args: list[str]) -> str:
         return "\n".join(lines)
 
 
-def _config_show(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    _expect_no_args(args, "config show")
-    from hermes_cli.config import show_config
-
-    return _capture_output(show_config)
-
-
 def _config_path(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "config path")
     from hermes_cli.config import get_config_path
@@ -670,135 +676,119 @@ def _config_set(_engine: HermesConsoleEngine, args: list[str]) -> str:
     return _capture_output(lambda: set_config_value(args[0], " ".join(args[1:])))
 
 
-def _config_migrate(_engine: HermesConsoleEngine, args: list[str]) -> str:
+@_captured
+def _config_migrate(_engine: HermesConsoleEngine, args: list[str]) -> None:
     _expect_no_args(args, "config migrate")
+    from hermes_cli.config import migrate_config
 
-    def _run() -> None:
-        from hermes_cli.config import migrate_config
-
-        results = migrate_config(interactive=False, quiet=False)
-        if results.get("env_added") or results.get("config_added"):
-            print("Configuration updated.")
-        else:
-            print("Configuration is up to date.")
-        for warning in results.get("warnings") or []:
-            print(f"Warning: {warning}")
-
-    return _capture_output(_run)
+    results = migrate_config(interactive=False, quiet=False)
+    if results.get("env_added") or results.get("config_added"):
+        print("Configuration updated.")
+    else:
+        print("Configuration is up to date.")
+    for warning in results.get("warnings") or []:
+        print(f"Warning: {warning}")
 
 
-def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> str:
+def _guard_exports(db, session_ids: list[str]) -> None:
+    """Per-session export budget: only an individual runaway transcript trips it; 0 disables."""
+    from hermes_state import SessionExportTooLargeError, resolved_max_export_messages
+
+    limit = resolved_max_export_messages()
+    if limit <= 0:
+        return
+    try:
+        for session_id in session_ids:
+            db.assert_export_safe(session_id, max_messages=limit)
+    except SessionExportTooLargeError as exc:
+        raise ConsoleCommandError(
+            f"Session '{exc.session_id}' has more than {limit:,} active "
+            "messages; in-memory export is capped per session. "
+            "Use the Sessions page's streaming Export action, or set "
+            "sessions.max_export_messages: 0 in config.yaml to disable "
+            "the guard.") from exc
+
+
+@_captured
+def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> None:
     parser = _ArgumentParser(prog="sessions export", add_help=False)
     parser.add_argument("output")
     parser.add_argument("--source")
     parser.add_argument("--session-id")
     ns = parser.parse_args(args)
-
-    def _run() -> None:
-        from hermes_state import SessionExportTooLargeError, resolved_max_export_messages
-
-        with _session_db() as db:
-            def _guard_exports(session_ids: list[str]) -> None:
-                # Per-session budget: a full-DB backup of many small sessions never trips the
-                # guard, only an individual runaway transcript does. 0 disables it.
-                limit = resolved_max_export_messages()
-                if limit <= 0:
-                    return
-                try:
-                    for session_id in session_ids:
-                        db.assert_export_safe(session_id, max_messages=limit)
-                except SessionExportTooLargeError as exc:
-                    raise ConsoleCommandError(
-                        f"Session '{exc.session_id}' has more than {limit:,} active "
-                        "messages; in-memory export is capped per session. "
-                        "Use the Sessions page's streaming Export action, or set "
-                        "sessions.max_export_messages: 0 in config.yaml to disable "
-                        "the guard."
-                    ) from exc
-
-            if ns.session_id:
-                resolved_session_id = db.resolve_session_id(ns.session_id)
-                if not resolved_session_id:
-                    raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
-                _guard_exports([resolved_session_id])
-                data = db.export_session(resolved_session_id)
-                if not data:
-                    raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
-                rows = [data]
-            else:
-                found = db.search_sessions(source=ns.source, limit=100000)
-                _guard_exports([session["id"] for session in found])
-                rows = db.export_all(source=ns.source)
-            text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
-            if text:
-                text += "\n"
-            if ns.output == "-":
-                sys.stdout.write(text)
-            else:
-                Path(ns.output).expanduser().write_text(text, encoding="utf-8")
-                print(f"Exported {len(rows)} session(s) to {ns.output}")
-
-    return _capture_output(_run)
+    with _session_db() as db:
+        if ns.session_id:
+            resolved_session_id = db.resolve_session_id(ns.session_id)
+            if not resolved_session_id:
+                raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
+            _guard_exports(db, [resolved_session_id])
+            data = db.export_session(resolved_session_id)
+            if not data:
+                raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
+            rows = [data]
+        else:
+            found = db.search_sessions(source=ns.source, limit=100000)
+            _guard_exports(db, [session["id"] for session in found])
+            rows = db.export_all(source=ns.source)
+        text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+        if text:
+            text += "\n"
+        if ns.output == "-":
+            sys.stdout.write(text)
+        else:
+            Path(ns.output).expanduser().write_text(text, encoding="utf-8")
+            print(f"Exported {len(rows)} session(s) to {ns.output}")
 
 
-def _sessions_rename(_engine: HermesConsoleEngine, args: list[str]) -> str:
+@_captured
+def _sessions_rename(_engine: HermesConsoleEngine, args: list[str]) -> None:
     parser = _ArgumentParser(prog="sessions rename", add_help=False)
     parser.add_argument("session_id")
     parser.add_argument("title", nargs="+")
     ns = parser.parse_args(args)
-
-    def _run() -> None:
-        with _session_db() as db:
-            resolved_session_id = db.resolve_session_id(ns.session_id)
-            if not resolved_session_id:
-                raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
-            title = " ".join(ns.title)
-            if not db.set_session_title(resolved_session_id, title):
-                raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
-            print(f"Session '{resolved_session_id}' renamed to: {title}")
-
-    return _capture_output(_run)
+    with _session_db() as db:
+        resolved_session_id = db.resolve_session_id(ns.session_id)
+        if not resolved_session_id:
+            raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
+        title = " ".join(ns.title)
+        if not db.set_session_title(resolved_session_id, title):
+            raise ConsoleCommandError(f"Session '{ns.session_id}' not found.")
+        print(f"Session '{resolved_session_id}' renamed to: {title}")
 
 
-def _sessions_optimize(_engine: HermesConsoleEngine, args: list[str]) -> str:
+@_captured
+def _sessions_optimize(_engine: HermesConsoleEngine, args: list[str]) -> None:
     _expect_no_args(args, "sessions optimize")
-
-    def _run() -> None:
-        with _session_db() as db:
-            print(f"Optimized {db.vacuum()} FTS index(es).")
-
-    return _capture_output(_run)
+    with _session_db() as db:
+        print(f"Optimized {db.vacuum()} FTS index(es).")
 
 
-def _sessions_repair(_engine: HermesConsoleEngine, args: list[str]) -> str:
+@_captured
+def _sessions_repair(_engine: HermesConsoleEngine, args: list[str]) -> None:
     parser = _ArgumentParser(prog="sessions repair", add_help=False)
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--no-backup", action="store_true")
     ns = parser.parse_args(args)
+    from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
 
-    def _run() -> None:
-        from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
-
-        db_path = DEFAULT_DB_PATH
-        if not db_path.exists():
-            print(f"No session database at {db_path} (nothing to repair).")
-            return
-        reason = _db_opens_cleanly(db_path)
-        if reason is None:
-            print(f"{db_path} opens cleanly; no repair needed.")
-            return
-        print(f"{db_path} does not open cleanly: {reason}")
-        if ns.check_only:
-            return
-        report = repair_state_db_schema(db_path, backup=not ns.no_backup)
-        if not report.get("repaired"):
-            raise ConsoleCommandError(f"Repair failed: {report.get('error')}")
-        if report.get("backup_path"):
-            print(f"backup: {report['backup_path']}")
-        print(f"strategy: {report.get('strategy')}")
-        print("Repaired session database.")
-
-    return _capture_output(_run)
+    db_path = DEFAULT_DB_PATH
+    if not db_path.exists():
+        print(f"No session database at {db_path} (nothing to repair).")
+        return
+    reason = _db_opens_cleanly(db_path)
+    if reason is None:
+        print(f"{db_path} opens cleanly; no repair needed.")
+        return
+    print(f"{db_path} does not open cleanly: {reason}")
+    if ns.check_only:
+        return
+    report = repair_state_db_schema(db_path, backup=not ns.no_backup)
+    if not report.get("repaired"):
+        raise ConsoleCommandError(f"Repair failed: {report.get('error')}")
+    if report.get("backup_path"):
+        print(f"backup: {report['backup_path']}")
+    print(f"strategy: {report.get('strategy')}")
+    print("Repaired session database.")
 
 
 def _profile_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
@@ -813,13 +803,6 @@ def _cron_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
     from hermes_cli.cron import cron_list
 
     return _capture_output(lambda: cron_list(show_all=ns.all))
-
-
-def _cron_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
-    _expect_no_args(args, "cron status")
-    from hermes_cli.cron import cron_status
-
-    return _capture_output(cron_status)
 
 
 def _cron_job_action(args: list[str], usage: str, action: str, run) -> str:
