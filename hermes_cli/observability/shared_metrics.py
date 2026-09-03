@@ -103,6 +103,17 @@ _MIGRATE_V1_SQL = (
             """,
     "DROP TABLE counter_aggregates_v1",
 )
+_INCREMENT_COUNTER_SQL = """
+            INSERT INTO counter_aggregates(
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json, value, packaged_value
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)
+            ON CONFLICT(
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json
+            )
+            DO UPDATE SET value = value + 1
+            """
 # (column, declaration) added to package_outbox for transmission bookkeeping.
 _SEND_COLUMNS = (
     # When the 202 was received. NULL = never acknowledged.
@@ -156,9 +167,7 @@ class SharedMetricsStore:
     """Persist allowlisted counters and export immutable delta packages."""
 
     def __init__(
-        self,
-        database_path: Path | None = None,
-        outbox_directory: Path | None = None,
+        self, database_path: Path | None = None, outbox_directory: Path | None = None
     ) -> None:
         root = get_hermes_home() / "telemetry" / "shared_metrics"
         self.database_path = database_path or root / "metrics.sqlite3"
@@ -183,22 +192,19 @@ class SharedMetricsStore:
                 (_ACTIVE_INSTALL_STATE_KEY,),
             ).fetchone()
             last_recorded = self._parse_state_timestamp(row["value"]) if row is not None else None
-            if last_recorded is not None:
-                if last_recorded > now:
-                    # A wall-clock correction must not suppress activity until the
-                    # stale future timestamp plus another full interval.
-                    connection.execute(
-                        "UPDATE telemetry_state SET value = ? WHERE key = ?",
-                        (_isoformat(now), _ACTIVE_INSTALL_STATE_KEY),
-                    )
-                    return False
-                if now < last_recorded + _ACTIVE_INSTALL_INTERVAL:
-                    return False
-
+            if last_recorded is not None and last_recorded > now:
+                # A wall-clock correction must not suppress activity until the stale future
+                # timestamp plus another full interval.
+                connection.execute(
+                    "UPDATE telemetry_state SET value = ? WHERE key = ?",
+                    (_isoformat(now), _ACTIVE_INSTALL_STATE_KEY),
+                )
+                return False
+            if last_recorded is not None and now < last_recorded + _ACTIVE_INSTALL_INTERVAL:
+                return False
             self._install_id(connection)
             self._record_counter_in_transaction(
-                connection, CLIENT_ACTIVE_METRIC, dimensions, resource,
-                period_start=now.date().isoformat(),
+                connection, CLIENT_ACTIVE_METRIC, dimensions, resource, now.date().isoformat()
             )
             connection.execute(
                 "INSERT INTO telemetry_state(key, value) VALUES (?, ?)"
@@ -214,8 +220,7 @@ class SharedMetricsStore:
         self._validate_counter(metric_name, dimensions, resource)
         with self._connection() as connection:
             self._record_counter_in_transaction(
-                connection, metric_name, dimensions, resource,
-                period_start=_utc_now().date().isoformat(),
+                connection, metric_name, dimensions, resource, _utc_now().date().isoformat()
             )
 
     @staticmethod
@@ -235,25 +240,12 @@ class SharedMetricsStore:
         metric_name: str,
         dimensions: dict[str, str],
         resource: dict[str, str],
-        *,
         period_start: str,
     ) -> None:
         connection.execute(
-            """
-            INSERT INTO counter_aggregates(
-                period_start, metric_name, hermes_version, os_family, architecture,
-                install_method, dimensions_json, value, packaged_value
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)
-            ON CONFLICT(
-                period_start, metric_name, hermes_version, os_family, architecture,
-                install_method, dimensions_json
-            )
-            DO UPDATE SET value = value + 1
-            """,
+            _INCREMENT_COUNTER_SQL,
             (
-                period_start,
-                metric_name,
-                *(resource[column] for column in _RESOURCE_COLUMNS),
+                period_start, metric_name, *(resource[column] for column in _RESOURCE_COLUMNS),
                 _compact_json(dimensions),
             ),
         )
