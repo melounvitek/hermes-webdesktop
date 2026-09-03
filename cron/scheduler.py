@@ -1614,6 +1614,27 @@ def _open_cron_session_db(job: dict):
     return None
 
 
+def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
+    """Log the agent's last activity, hard-interrupt it and raise TimeoutError."""
+    _activity = {}
+    if hasattr(agent, "get_activity_summary"):
+        with contextlib.suppress(Exception):
+            _activity = agent.get_activity_summary()
+    _last_desc = _activity.get("last_activity_desc", "unknown")
+    _secs_ago = _activity.get("seconds_since_activity", 0)
+    logger.error(
+        "Job '%s' idle for %.0fs (inactivity limit %.0fs) "
+        "| last_activity=%s | iteration=%s/%s | tool=%s",
+        job_name, _secs_ago, limit_s,
+        _last_desc, _activity.get("api_call_count", 0), _activity.get("max_iterations", 0),
+        _activity.get("current_tool") or "none")
+    request_hard_interrupt(agent, "Cron job timed out (inactivity)")
+    raise TimeoutError(
+        f"Cron job '{job_name}' idle for "
+        f"{int(_secs_ago)}s (limit {int(limit_s)}s) "
+        f"— last activity: {_last_desc}")
+
+
 def _run_agent_with_watchdog(
     agent, prompt: str, job: dict, job_id: str, job_name: str, task_id: str, cancel_event,
 ) -> dict:
@@ -1707,24 +1728,7 @@ def _run_agent_with_watchdog(
         _cron_pool.shutdown(wait=False, cancel_futures=True)
 
     if _inactivity_timeout:
-        _activity = {}
-        if hasattr(agent, "get_activity_summary"):
-            with contextlib.suppress(Exception):
-                _activity = agent.get_activity_summary()
-        _last_desc = _activity.get("last_activity_desc", "unknown")
-        _secs_ago = _activity.get("seconds_since_activity", 0)
-        logger.error(
-            "Job '%s' idle for %.0fs (inactivity limit %.0fs) "
-            "| last_activity=%s | iteration=%s/%s | tool=%s",
-            job_name, _secs_ago, _cron_inactivity_limit,
-            _last_desc, _activity.get("api_call_count", 0), _activity.get("max_iterations", 0),
-            _activity.get("current_tool") or "none")
-        request_hard_interrupt(agent, "Cron job timed out (inactivity)")
-        raise TimeoutError(
-            f"Cron job '{job_name}' idle for "
-            f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
-            f"— last activity: {_last_desc}"
-        )
+        _raise_inactivity_timeout(agent, job_name, _cron_inactivity_limit)
 
     if not isinstance(result, dict):
         raise RuntimeError(
@@ -3132,6 +3136,29 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
     return fut
 
 
+def _sweep_mcp_orphans_when_all_done(futures: list) -> None:
+    """Async (gateway ticker) mode: sweep via a done-callback after the LAST job completes; sweep
+    inline when nothing was dispatched (all skipped / no due jobs)."""
+    if not futures:
+        _sweep_mcp_orphans()
+        return
+    _remaining = [len(futures)]
+
+    def _on_done(_f: concurrent.futures.Future) -> None:
+        _remaining[0] -= 1
+        with contextlib.suppress(Exception):
+            _exc = _f.exception()
+            if _exc is not None:
+                logger.error(
+                    "Cron job future failed in async mode: %s", _exc,
+                    exc_info=(type(_exc), _exc, _exc.__traceback__))
+        if _remaining[0] <= 0:
+            _sweep_mcp_orphans()
+
+    for _f in futures:
+        _f.add_done_callback(_on_done)
+
+
 def tick(
     verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None):
     """Check and run all due jobs. File-locked so only one tick runs at a time (gateway ticker vs
@@ -3220,25 +3247,7 @@ def tick(
             _sweep_mcp_orphans()
             return sum(_results)
 
-        # Async (gateway ticker): sweep via a done-callback after the LAST job completes.
-        if _all_futures:
-            _remaining = [len(_all_futures)]
-
-            def _on_done(_f: concurrent.futures.Future) -> None:
-                _remaining[0] -= 1
-                with contextlib.suppress(Exception):
-                    _exc = _f.exception()
-                    if _exc is not None:
-                        logger.error("Cron job future failed in async mode: %s", _exc, exc_info=(type(_exc), _exc, _exc.__traceback__))
-                if _remaining[0] <= 0:
-                    _sweep_mcp_orphans()
-
-            for _f in _all_futures:
-                _f.add_done_callback(_on_done)
-        else:
-            # Nothing dispatched (all skipped / no due jobs) — sweep inline.
-            _sweep_mcp_orphans()
-
+        _sweep_mcp_orphans_when_all_done(_all_futures)
         return sum(_results)
     finally:
         _release_tick_lock(lock_fd)
