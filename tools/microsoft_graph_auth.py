@@ -53,13 +53,10 @@ class GraphCredentials:
 
     @property
     def token_url(self) -> str:
-        tenant = self.tenant_id.strip().strip("/")
-        return f"{self.authority_url.rstrip('/')}/{tenant}/oauth2/v2.0/token"
+        return f"{self.authority_url.rstrip('/')}/{self.tenant_id.strip().strip('/')}/oauth2/v2.0/token"
 
     @classmethod
-    def from_env(
-        cls, environ: dict[str, str] | None = None, *, required: bool = True
-    ) -> "GraphCredentials | None":
+    def from_env(cls, environ: dict[str, str] | None = None, *, required: bool = True) -> "GraphCredentials | None":
         env = environ if environ is not None else os.environ
         values = [(env.get(name) or "").strip() for name in _REQUIRED_ENV]
         missing = [name for name, value in zip(_REQUIRED_ENV, values) if not value]
@@ -90,10 +87,9 @@ class CachedAccessToken:
 class MicrosoftGraphTokenProvider:
     """Acquire and cache Microsoft Graph app-only access tokens."""
 
-    def __init__(
-        self, credentials: GraphCredentials, *, timeout: float = 20.0,
-        skew_seconds: int = DEFAULT_TOKEN_SKEW_SECONDS, transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
+    def __init__(self, credentials: GraphCredentials, *, timeout: float = 20.0,
+                 skew_seconds: int = DEFAULT_TOKEN_SKEW_SECONDS,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.credentials, self.timeout, self.skew_seconds = credentials, timeout, max(0, int(skew_seconds))
         self._transport = transport
         self._cached_token: CachedAccessToken | None = None
@@ -150,10 +146,8 @@ class MicrosoftGraphTokenProvider:
         except (TypeError, ValueError) as exc:
             raise MicrosoftGraphTokenError(
                 "Microsoft Graph token response did not include a valid expires_in.") from exc
-        return CachedAccessToken(
-            access_token=access_token,
-            token_type=str(payload.get("token_type") or "Bearer").strip() or "Bearer",
-            expires_at=time.time() + max(0, expires_in_seconds))
+        return CachedAccessToken(access_token, time.time() + max(0, expires_in_seconds),
+                                 str(payload.get("token_type") or "Bearer").strip() or "Bearer")
 
 
 def _extract_error_detail(response: httpx.Response) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -11,9 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from tools.approval import (
-    _bash_exec_payload,
-    _deobfuscate_shell_word_for_detection,
-    _iter_shell_command_starts,
+    _bash_exec_payload, _deobfuscate_shell_word_for_detection, _iter_shell_command_starts,
     _read_shell_word)
 
 # bisect drives repeated checkouts of the running root — the exact skew hazard guarded here.
@@ -24,8 +23,7 @@ _WORKTREE_TARGET_ACTIONS = frozenset({"move", "remove"})
 _STASH_SAFE_ACTIONS = frozenset({"list", "show", "create", "store", "drop", "clear"})
 _RESET_WORKTREE_MODES = frozenset({"--hard", "--merge", "--keep"})
 # `reset`/`stash`/`clean`/`restore` reach this set only in their SAFE forms (_mutates_worktree
-# classifies the dangerous forms first); listing them just skips a pointless
-# `git config --get alias.<sub>` subprocess for `stash list`, `reset --soft`, `clean -n`.
+# runs first); listing them skips a pointless `git config --get alias.<sub>` subprocess.
 _KNOWN_GIT_BUILTINS = frozenset({
     "add", "am", "apply", "blame", "branch", "bundle", "cat-file", "clean", "clone", "commit",
     "config", "describe", "diff", "fetch", "format-patch", "grep", "help", "init", "log",
@@ -64,36 +62,31 @@ class _Heredoc:
 
 
 @dataclass
-class _ShellContext:
+class _ShellContext:  # one `(` / `$(` / backtick nesting level and its live quote state
     kind: str
     opener: int
     quote: str | None = None
 
 
 def get_running_source_root() -> Path | None:
-    """Return the source checkout backing this process, if there is one."""
-    try:
+    """The source checkout backing this process, if there is one."""
+    with contextlib.suppress(OSError, RuntimeError):
         root = Path(__file__).resolve().parent.parent
-    except (OSError, RuntimeError):
-        return None
-    return root if (root / ".git").exists() else None
+        return root if (root / ".git").exists() else None
+    return None
 
 
 def _resolve(path_str: str, base: Path) -> Path:
-    path = Path(os.path.expanduser(path_str))
-    if not path.is_absolute():
-        path = base / path
-    try:
+    path = base / Path(os.path.expanduser(path_str))  # ``/`` keeps an absolute right operand
+    with contextlib.suppress(OSError, RuntimeError, ValueError):
         return path.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return path
+    return path
 
 
 def _is_within(path: Path, root: Path) -> bool:
-    try:
+    with contextlib.suppress(OSError, RuntimeError, ValueError):
         return path == root or path.is_relative_to(root)
-    except (OSError, RuntimeError, ValueError):
-        return False
+    return False
 
 
 def _executable_name(value: str) -> str:
@@ -101,6 +94,7 @@ def _executable_name(value: str) -> str:
 
 
 def _shell_words_at(command: str, start: int) -> list[str]:
+    """Deobfuscated words of the simple command at ``start`` (stops at a newline; max 64)."""
     words: list[str] = []
     cursor = start
     for _ in range(64):
@@ -116,13 +110,10 @@ def _consume_options(
     words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS) -> int:
     """Index of the first positional at/after ``start`` (``--`` ends options)."""
     index = start
-    while index < len(words):
-        option = words[index]
-        if option == "--":
+    while index < len(words) and words[index].startswith("-") and words[index] != "-":
+        if words[index] == "--":
             return index + 1
-        if not option.startswith("-") or option == "-":
-            break
-        index += 2 if "=" not in option and option in options_with_arg else 1
+        index += 2 if "=" not in words[index] and words[index] in options_with_arg else 1
     return index
 
 
@@ -140,9 +131,8 @@ def _command_parts(words: list[str]) -> tuple[dict[str, str], str | None, list[s
         wrapper_options = _WRAPPER_OPTIONS_WITH_ARG.get(executable)
         if wrapper_options is None:
             return env, words[index], words[index + 1 :]
-        # `command -v/-V` only reports; nothing runs.
         if executable == "command" and words[index + 1 : index + 2] in (["-v"], ["-V"]):
-            return env, None, []
+            break  # `command -v/-V` only reports; nothing runs
         index = _consume_options(words, index + 1, wrapper_options)
     return env, None, []
 
@@ -157,15 +147,14 @@ def _scope_keys(command: str, starts: list[int]) -> dict[int, tuple[int, ...]]:
             context = contexts[-1]
             quote = context.quote
             char = command[cursor]
-            nested = len(contexts) > 1
-            if quote == "'":
-                if char == "'":
-                    context.quote = None
+            closes = quote is None and len(contexts) > 1  # an unquoted closer may pop a scope
+            if quote is not None and char == quote:
+                context.quote = None
+            elif quote == "'":
+                pass  # single quotes: no escapes, no substitutions
             elif char == "\\" and cursor + 1 < start:
                 cursor += 1
-            elif quote == '"' and char == '"':
-                context.quote = None
-            elif quote is None and char in {"'", '"'}:
+            elif quote is None and char in "'\"":
                 context.quote = char
             # Unquoted or inside double quotes: substitutions still open scopes.
             elif command.startswith("$(", cursor):
@@ -173,28 +162,27 @@ def _scope_keys(command: str, starts: list[int]) -> dict[int, tuple[int, ...]]:
                 cursor += 1
             elif quote is None and char == "(":
                 contexts.append(_ShellContext("(", cursor))
-            elif quote is None and char == ")" and nested and contexts[-1].kind in {"(", "$("}:
+            elif (char == ")" and closes and context.kind in {"(", "$("}) or (
+                    char == "`" and closes and context.kind == "`"):
                 contexts.pop()
             elif char == "`":
-                if quote is None and nested and contexts[-1].kind == "`":
-                    contexts.pop()
-                else:
-                    contexts.append(_ShellContext("`", cursor))
+                contexts.append(_ShellContext("`", cursor))
             cursor += 1
         scopes[start] = tuple(item.opener for item in contexts[1:])
     return scopes
 
 
 def _operator_before(command: str, start: int) -> str | None:
+    """The list/grouping operator (or newline) immediately preceding a command start."""
     head = command[:start].rstrip()
-    if head[-2:] in {"&&", "||"}:
-        return head[-2:]
-    if head[-1:] in {";", "|", "&", "(", "{"}:
-        return head[-1:]
+    for tail in (head[-2:], head[-1:]):
+        if tail in {"&&", "||", ";", "|", "&", "(", "{"}:
+            return tail
     return "\n" if "\n" in command[len(head):start] else None
 
 
 def _cd_target(executable: str, args: list[str], cwd: Path) -> Path | None:
+    """Directory a ``cd``/``pushd`` would land in (existing dirs only), else None."""
     if _executable_name(executable) not in {"cd", "pushd"}:
         return None
     index = _consume_options(args, 0)
@@ -205,17 +193,15 @@ def _cd_target(executable: str, args: list[str], cwd: Path) -> Path | None:
 
 
 def _shell_script_arg(args: list[str]) -> str | None:
-    """Return the script string owned by a shell's ``-c``, if present. approval.py's
-    ``_bash_exec_payload`` parses bash's real option grammar (``-o pipefail -c '<script>'``
-    hides ``-c`` behind an operand); when it finds no ``-c``, fall back to a permissive
-    positional scan, since zsh/dash/ksh option letters (``zsh -yc``) fall outside bash's
-    alphabet and would otherwise make this block-guard fail open."""
+    """Script string owned by a shell's ``-c``, if present. ``_bash_exec_payload`` parses bash's
+    real option grammar (``-o pipefail -c '<script>'``); when it finds no ``-c``, fall back to a
+    permissive scan: zsh/dash/ksh letters (``zsh -yc``) would otherwise fail this guard open."""
     has_c, payload = _bash_exec_payload(args)
     if has_c:
         return payload
     for index, arg in enumerate(args):
         if arg == "--" or not arg.startswith("-"):
-            break
+            return None
         if "c" in arg[1:]:
             return args[index + 1] if index + 1 < len(args) else None
     return None
@@ -233,7 +219,7 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
                 index += 1  # skip the escaped character too
             elif char == quote:
                 quote = None
-        elif char in {"'", '"'}:
+        elif char in "'\"":
             quote = char
         if quote or not line.startswith("<<", index) or line.startswith("<<<", index):
             index += 1
@@ -241,52 +227,47 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
         opener = _HEREDOC_OPENER_RE.match(line, index)
         if opener is None:  # unterminated quoted delimiter: give up on this line
             break
-        operator_at, index = index, opener.end()
-        strip_tabs = bool(opener.group("dash"))
+        header, index = line[:index], opener.end()
         delimiter = opener.group("quoted") if opener.group("q") else opener.group("bare")
         if not delimiter:
             continue
-        header = line[:operator_at]
         starts = list(_iter_shell_command_starts(header))
-        words = _shell_words_at(header, starts[-1]) if starts else []
-        _, executable, args = _command_parts(words)
+        _, executable, args = _command_parts(_shell_words_at(header, starts[-1]) if starts else [])
+        # A bare shell (no -c script, no script operand) executes the body itself.
         execute_as_shell = bool(
-            executable
-            and _executable_name(executable) in _SHELL_EXECUTABLES
+            executable and _executable_name(executable) in _SHELL_EXECUTABLES
             and _shell_script_arg(args) is None
             and not any(arg and not arg.startswith("-") for arg in args))
-        specs.append(_Heredoc(delimiter, strip_tabs, execute_as_shell))
+        specs.append(_Heredoc(delimiter, bool(opener.group("dash")), execute_as_shell))
     return specs
 
 
 def _mask_heredocs(command: str) -> tuple[str, list[str]]:
-    """Blank heredoc bodies; return (masked command, bodies a bare shell would execute).
-    Unterminated heredocs run to end of input and are still reported."""
+    """Blank heredoc bodies -> (masked command, bodies a bare shell would execute). Unterminated
+    heredocs run to end of input and are still reported."""
     output: list[str] = []
     pending: list[_Heredoc] = []
     finished: list[_Heredoc] = []
     for line in command.splitlines(keepends=True):
-        if pending:
-            current = pending[0]
-            candidate = line.rstrip("\r\n")
-            if current.strip_tabs:
-                candidate = candidate.lstrip("\t")
-            if candidate == current.delimiter:
-                finished.append(pending.pop(0))
-            else:
-                current.body.append(line)
-            output.append("".join(char if char in {"\r", "\n"} else " " for char in line))
+        if not pending:
+            output.append(line)
+            pending.extend(_heredoc_specs(line))
             continue
-        output.append(line)
-        pending.extend(_heredoc_specs(line))
+        current = pending[0]
+        candidate = line.rstrip("\r\n")
+        if (candidate.lstrip("\t") if current.strip_tabs else candidate) == current.delimiter:
+            finished.append(pending.pop(0))
+        else:
+            current.body.append(line)
+        output.append(re.sub(r"[^\r\n]", " ", line))
     shell_scripts = ["".join(spec.body) for spec in finished + pending if spec.execute_as_shell]
     return "".join(output), shell_scripts
 
 
 def _record_alias(config: str, aliases: dict[str, str]) -> None:
     """Record an inline ``-c alias.<name>=<value>`` git config override."""
-    if config.lower().startswith("alias.") and "=" in config:
-        key, value = config.split("=", 1)
+    key, sep, value = config.partition("=")
+    if sep and key.lower().startswith("alias."):
         aliases[key[6:].lower()] = value
 
 
@@ -305,88 +286,70 @@ def _git_target_and_subcommand(
             break
         if not arg.startswith("-"):
             break
+        # Separate-argument form (`-C dir`) vs attached form (`-Cdir`, `--work-tree=dir`, `-cK=V`).
         if arg in _GIT_GLOBAL_OPTIONS_WITH_ARG:
-            if index + 1 < len(args):
-                value = args[index + 1]
-                if arg == "-C":
-                    target = _resolve(value, target)
-                elif arg == "--work-tree":
-                    work_tree = value
-                elif arg == "-c":
-                    _record_alias(value, aliases)
+            option, value = arg, args[index + 1] if index + 1 < len(args) else None
             index += 2
-            continue
-        if arg.startswith("-C") and len(arg) > 2:
-            target = _resolve(arg[2:], target)
-        elif arg.startswith("--work-tree="):
-            work_tree = arg.split("=", 1)[1]
-        elif arg.startswith("-calias."):
-            _record_alias(arg[2:], aliases)
-        index += 1
+        else:
+            option, value = next(((o, arg[len(o):]) for o in ("-C", "--work-tree=", "-c")
+                                  if arg.startswith(o) and len(arg) > len(o)), (None, None))
+            index += 1
+        if option == "-C" and value is not None:
+            target = _resolve(value, target)
+        elif option and option.startswith("--work-tree") and value is not None:
+            work_tree = value
+        elif option == "-c" and value is not None:
+            _record_alias(value, aliases)  # only alias.* overrides matter; others are ignored
     explicit_work_tree = work_tree or env.get("GIT_WORK_TREE")
     if explicit_work_tree:
         target = _resolve(explicit_work_tree, target)
     return target, args[index].lower() if index < len(args) else None, args[index + 1 :], aliases
 
 
-def _has_short_flag(arg: str, letter: str) -> bool:
-    return arg.startswith("-") and letter in arg[1:]
-
-
-def _reset_mutates(args: list[str]) -> bool:
-    return any(arg in _RESET_WORKTREE_MODES or _RESET_HARD_RE.fullmatch(arg) for arg in args)
-
-
-def _stash_mutates(args: list[str]) -> bool:
-    action = next((arg for arg in args if not arg.startswith("-")), "push")
-    return action not in _STASH_SAFE_ACTIONS
-
-
-def _clean_mutates(args: list[str]) -> bool:
-    return not any(
-        arg == "--dry-run" or (not arg.startswith("--") and _has_short_flag(arg, "n"))
+def _has_flag(args: list[str], long: str, letter: str, short_only: bool = False) -> bool:
+    """``--long`` present, or ``letter`` inside a dash-prefixed arg (``-fdn``; ``short_only``
+    additionally excludes ``--`` args from the letter scan)."""
+    return any(
+        arg == long or (arg.startswith("-") and letter in arg[1:]
+                        and not (short_only and arg.startswith("--")))
         for arg in args)
 
 
-def _restore_mutates(args: list[str]) -> bool:
-    staged = any(arg == "--staged" or _has_short_flag(arg, "S") for arg in args)
-    worktree = any(arg == "--worktree" or _has_short_flag(arg, "W") for arg in args)
-    return worktree or not staged
-
-
-# Subcommands whose worktree impact depends on their arguments.
+# Subcommands whose worktree impact depends on their arguments -> predicate(args).
 _CONDITIONAL_MUTATIONS: dict[str, Callable[[list[str]], bool]] = {
-    "reset": _reset_mutates,
-    "stash": _stash_mutates,
-    "clean": _clean_mutates,
-    "restore": _restore_mutates}
+    "reset": lambda args: any(
+        arg in _RESET_WORKTREE_MODES or _RESET_HARD_RE.fullmatch(arg) for arg in args),
+    "stash": lambda args: next(
+        (arg for arg in args if not arg.startswith("-")), "push") not in _STASH_SAFE_ACTIONS,
+    "clean": lambda args: not _has_flag(args, "--dry-run", "n", short_only=True),
+    # `restore` touches the worktree unless ONLY --staged was requested.
+    "restore": lambda args: (_has_flag(args, "--worktree", "W")
+                             or not _has_flag(args, "--staged", "S"))}
 
 
 def _mutates_worktree(subcommand: str, args: list[str]) -> bool:
-    check = _CONDITIONAL_MUTATIONS.get(subcommand)
-    return check(args) if check is not None else subcommand in _WORKTREE_MUTATIONS
+    check = _CONDITIONAL_MUTATIONS.get(subcommand, lambda _args: subcommand in _WORKTREE_MUTATIONS)
+    return check(args)
 
 
 def _inspect_git_worktree(args: list[str], cwd: Path, root: Path) -> str | None:
     """Block `worktree remove|move` aimed at the running root, from any directory."""
     action_index = _consume_options(args, 0)
     action = args[action_index].lower() if action_index < len(args) else None
-    if action not in _WORKTREE_TARGET_ACTIONS:
-        return None
     target_index = _consume_options(args, action_index + 1)
-    if target_index < len(args) and _resolve(args[target_index], cwd) == root:
+    if (action in _WORKTREE_TARGET_ACTIONS and target_index < len(args)
+            and _resolve(args[target_index], cwd) == root):
         return f"git worktree {action}"
     return None
 
 
 def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
-    try:
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         result = subprocess.run(
             [executable, "-C", str(target), "config", "--get", f"alias.{alias}"],
             capture_output=True, text=True, timeout=1, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return (result.stdout.strip() or None) if result.returncode == 0 else None
+        return (result.stdout.strip() or None) if result.returncode == 0 else None
+    return None
 
 
 def _inspect_git(
@@ -396,8 +359,7 @@ def _inspect_git(
         args, current_dir, env)
     if subcommand is None:
         return None
-    # `worktree` names its victim as an argument, so the cwd check does not apply.
-    if subcommand == "worktree":
+    if subcommand == "worktree":  # names its victim as an argument: the cwd check does not apply
         return _inspect_git_worktree(sub_args, target, root)
     if not _is_within(target, root):
         return None
@@ -405,18 +367,16 @@ def _inspect_git(
         return f"git {subcommand}"
     if subcommand in _KNOWN_GIT_BUILTINS or depth >= _MAX_RECURSION:
         return None
-    alias = inline_aliases.get(subcommand)
-    if alias is None:
-        alias = _read_git_alias(executable, target, subcommand)
+    alias = (inline_aliases[subcommand] if subcommand in inline_aliases
+             else _read_git_alias(executable, target, subcommand))
     if not alias:
         return None
-    if alias.startswith("!"):
+    if alias.startswith("!"):  # shell alias: scan it as a command
         return _find_mutation(alias[1:], target, root, depth + 1)
-    try:
+    with contextlib.suppress(ValueError):
         alias_args = shlex.split(alias, posix=True)
-    except ValueError:
-        return None
-    return _inspect_git(executable, [*alias_args, *sub_args], target, {}, root, depth + 1)
+        return _inspect_git(executable, [*alias_args, *sub_args], target, {}, root, depth + 1)
+    return None
 
 
 def _inspect_github_cli(
@@ -425,9 +385,8 @@ def _inspect_github_cli(
     if not _is_within(current_dir, root):
         return None
     index = _consume_options(args, 0, frozenset({"-R", "--repo", "--hostname"}))
-    if args[index : index + 2] == ["pr", "checkout"]:
-        return f"{_executable_name(executable)} pr checkout"
-    return None
+    is_checkout = args[index : index + 2] == ["pr", "checkout"]
+    return f"{_executable_name(executable)} pr checkout" if is_checkout else None
 
 
 def _inspect_shell(
@@ -439,9 +398,7 @@ def _inspect_shell(
 
 # executable name -> inspector(executable, args, current_dir, env, root, depth)
 _INSPECTORS: dict[str, Callable[..., str | None]] = {
-    "git": _inspect_git,
-    "gh": _inspect_github_cli,
-    "hub": _inspect_github_cli,
+    "git": _inspect_git, "gh": _inspect_github_cli, "hub": _inspect_github_cli,
     **{shell: _inspect_shell for shell in _SHELL_EXECUTABLES}}
 
 
@@ -451,8 +408,7 @@ def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str |
         return None
     masked_command, heredoc_scripts = _mask_heredocs(command)
     for script in heredoc_scripts:
-        operation = _find_mutation(script, cwd, root, depth + 1)
-        if operation:
+        if operation := _find_mutation(script, cwd, root, depth + 1):
             return operation
     starts = sorted(set(_iter_shell_command_starts(masked_command)))
     scopes = _scope_keys(masked_command, starts)
@@ -462,50 +418,42 @@ def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str |
     for start in starts:
         scope = scopes[start]
         cwd_by_scope.setdefault(scope, cwd_by_scope.get(scope[:-1], cwd))
-        operator = _operator_before(masked_command, start)
         pending = pending_cd.pop(scope, None)
-        if pending is not None and operator in {"&&", ";", "\n"}:
+        if pending is not None and _operator_before(masked_command, start) in {"&&", ";", "\n"}:
             cwd_by_scope[scope] = pending
         env, executable, args = _command_parts(_shell_words_at(masked_command, start))
         if executable is None:
             continue
         current_dir = cwd_by_scope[scope]
-        cd_target = _cd_target(executable, args, current_dir)
-        if cd_target is not None:
+        if (cd_target := _cd_target(executable, args, current_dir)) is not None:
             pending_cd[scope] = cd_target
-            continue
-        inspect = _INSPECTORS.get(_executable_name(executable))
-        if inspect is not None:
-            operation = inspect(executable, args, current_dir, env, root, depth)
-            if operation:
-                return operation
+        elif (inspect := _INSPECTORS.get(_executable_name(executable))) and (
+                operation := inspect(executable, args, current_dir, env, root, depth)):
+            return operation
     return None
 
 
 def guard_active() -> bool:
-    """Whether the self-repo git guard applies on this platform. Windows-only: NTFS locks
-    loaded .py/.pyd files, so overwriting the live checkout can corrupt the running
-    process. On POSIX open handles keep the old inode alive; the mixed-module hazard is
-    limited to later lazy imports — not worth blocking every git workflow for."""
+    """Windows-only: NTFS locks loaded .py/.pyd files, so overwriting the live checkout can
+    corrupt the running process. On POSIX open handles keep the old inode alive; the mixed-module
+    hazard is limited to later lazy imports — not worth blocking every git workflow for."""
     return os.name == "nt"
 
 
 def detect_self_repo_git_mutation(
     command: str, cwd: str | None, source_root: Path | None = None) -> tuple[bool, str | None]:
-    """Return whether a command would rewrite the live source checkout."""
+    """-> (blocked, message): whether a command would rewrite the live source checkout."""
     root = source_root if source_root is not None else get_running_source_root()
     if root is None or not command:
         return False, None
     root = _resolve(str(root), Path("/"))
-    operation = _find_mutation(command, _resolve(cwd, Path("/")) if cwd else Path("/"), root)
+    operation = _find_mutation(command, _resolve(cwd or "/", Path("/")), root)
     return (True, _block_message(operation, root)) if operation is not None else (False, None)
 
 
 def _block_message(operation: str, root: Path) -> str:
-    # Suggest a disk-backed scratch dir: /tmp is usually tmpfs (see message).
     hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    home = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
-    scratch = home / "scratch"
+    scratch = (Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes") / "scratch"
     return (
         f"Blocked: `{operation}` would rewrite Hermes's live source checkout "
         f"({root}) and can mix module versions in this running process. "

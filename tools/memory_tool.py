@@ -23,7 +23,7 @@ try:
 except ImportError:
     fcntl = None
     try:
-        import msvcrt
+        import msvcrt  # noqa: F401
     except ImportError:
         pass
 
@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 # One tool-definition pass must use ONE config decision for availability and the
 # dynamic target schema: the check_fn result flows to the immediately following
 # dynamic_schema_overrides call; ContextVar isolates concurrent profile builds.
-_memory_surface_flags: ContextVar[Optional[Tuple[bool, bool]]] = ContextVar(
-    "memory_surface_flags", default=None)
+_memory_surface_flags: ContextVar[Optional[Tuple[bool, bool]]] = ContextVar("memory_surface_flags", default=None)
 
 
 def get_memory_dir() -> Path:
@@ -46,25 +45,21 @@ from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
 
 
 def load_on_disk_store() -> "MemoryStore":
-    """Fresh on-disk MemoryStore with configured limits/flags for contexts with no
-    live agent (gateway, Desktop, ``/memory``) so approvals enforce the SAME caps
-    as ``agent_init``. Falls back to defaults if config can't load; never raises."""
+    """Fresh on-disk MemoryStore with configured limits/flags for contexts with no live
+    agent (gateway, Desktop, ``/memory``) so approvals enforce the SAME caps as
+    ``agent_init``. Falls back to defaults if config can't load; never raises."""
     try:
         from hermes_cli.config import load_config
         config = load_config() or {}
         mem_cfg = get_builtin_memory_config(config)
         memory_enabled, user_profile_enabled = get_builtin_memory_store_flags(config)
-        kwargs = {"memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
-                  "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
-                  "memory_enabled": memory_enabled, "user_profile_enabled": user_profile_enabled}
+        store = MemoryStore(int(mem_cfg.get("memory_char_limit", 2200)), int(mem_cfg.get("user_char_limit", 1375)),
+                            memory_enabled=memory_enabled, user_profile_enabled=user_profile_enabled)
     except Exception:
-        kwargs: Dict[str, Any] = {}  # config optional — fall back to defaults rather than break /memory
-    store = MemoryStore(**kwargs)
+        store = MemoryStore()  # config optional — fall back to defaults rather than break /memory
     store.load_from_disk()
     return store
 
-
-# -- Write-approval gate --
 
 def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Optional[str]:
     """JSON tool-result string when the write must NOT proceed (blocked or staged
@@ -93,35 +88,30 @@ _STORE_ACTIONS = {
                lambda label, content, old_text: (f"remove from {label}", old_text or ""))}
 
 
-def _apply_write_gate(action: str, target: str, content: Optional[str], old_text: Optional[str]) -> Optional[str]:
-    """Gate a single mutating op (add/replace/remove)."""
-    summary, detail = _STORE_ACTIONS[action][1]("user profile" if target == "user" else "memory", content, old_text)
-    return _gate_or_stage(summary, detail,
+def _batch_op_line(op: Dict[str, Any]) -> str:
+    op = op or {}
+    act, content, old = op.get("action", "?"), op.get("content") or op.get("new_text") or "", op.get("old_text", "")
+    if act == "remove":
+        return f"- remove: {old}"
+    return f"- replace: {old} -> {content}" if act == "replace" else f"- {act}: {content}"
+
+
+def _apply_write_gate(action: str, target: str, content: Optional[str], old_text: Optional[str],
+                      operations: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
+    """Gate one mutating op, or (``operations`` set) a whole batch as a single unit."""
+    label = "user profile" if target == "user" else "memory"
+    if operations is not None:
+        return _gate_or_stage(f"apply {len(operations)} op(s) to {label}",
+                              "\n".join(_batch_op_line(op) for op in operations),
+                              {"action": "batch", "target": target, "operations": operations})
+    return _gate_or_stage(*_STORE_ACTIONS[action][1](label, content, old_text),
                           {"action": action, "target": target, "content": content, "old_text": old_text})
 
 
-def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
-    """Gate a whole batch as a single unit."""
-    summary = f"apply {len(operations)} op(s) to {'user profile' if target == 'user' else 'memory'}"
-    detail_lines = []
-    for op in operations:
-        op = op or {}
-        act = op.get("action", "?")
-        content = op.get("content") or op.get("new_text") or ""
-        detail_lines.append(f"- remove: {op.get('old_text', '')}" if act == "remove"
-                            else f"- replace: {op.get('old_text', '')} -> {content}" if act == "replace"
-                            else f"- {act}: {content}")
-    return _gate_or_stage(summary, "\n".join(detail_lines),
-                          {"action": "batch", "target": target, "operations": operations})
-
-
-# -- Tool entry point --
-
 def _validate_single_op(store, action, target, content, old_text) -> Optional[str]:
-    """Validate BEFORE the gate so an invalid write is rejected now, not at approve
-    time. Missing ``old_text`` is recoverable (it can't be schema-required — needs a
-    combinator the Codex backend rejects — and some clients omit it): return the
-    current inventory plus a retry instruction instead of a dead-end."""
+    """Validate BEFORE the gate so an invalid write is rejected now, not at approve time.
+    Missing ``old_text`` is recoverable (it can't be schema-required — needs a combinator
+    the Codex backend rejects): return the inventory plus a retry instruction."""
     if action == "add" and not content:
         return tool_error("Content is required for 'add' action.", success=False)
     if action in ("replace", "remove") and not old_text:
@@ -154,26 +144,23 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
-        gate_result = _apply_batch_write_gate(target, operations)
+        # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
+        gate_result = _apply_write_gate("batch", target, None, None, operations)
         if gate_result is not None:
             return gate_result
         return json.dumps(store.apply_batch(target, operations), ensure_ascii=False)
     if action not in _STORE_ACTIONS:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
-    invalid = _validate_single_op(store, action, target, content, old_text)
+    invalid = (_validate_single_op(store, action, target, content, old_text)
+               or _apply_write_gate(action, target, content, old_text))
     if invalid is not None:
         return invalid
-    # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
-    gate_result = _apply_write_gate(action, target, content, old_text)
-    if gate_result is not None:
-        return gate_result
     return json.dumps(_STORE_ACTIONS[action][0](store, target, content, old_text), ensure_ascii=False)
 
 
 def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Normalized ``memory`` config section ({} when missing/malformed → flags default
-    to enabled). ``agent_init`` reads the same section so availability and store
-    construction cannot diverge."""
+    """Normalized ``memory`` config section ({} when missing/malformed → flags default to
+    enabled). ``agent_init`` reads the same section so availability and store cannot diverge."""
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -214,8 +201,7 @@ def _memory_target_error(store: "MemoryStore", target: str) -> Optional[Dict[str
 
 def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[str, Any]:
     """Replay a staged write against the store, bypassing the gate (/memory approve)."""
-    action = payload.get("action")
-    target = payload.get("target", "memory")
+    action, target = payload.get("action"), payload.get("target", "memory")
     target_error = _memory_target_error(store, target)
     if target_error is not None:
         return target_error
@@ -225,8 +211,6 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
         return {"success": False, "error": f"Unknown staged action '{action}'."}
     return _STORE_ACTIONS[action][0](store, target, payload.get("content") or "", payload.get("old_text") or "")
 
-
-# -- OpenAI Function-Calling Schema --
 
 MEMORY_SCHEMA = {
     "name": "memory",
@@ -318,21 +302,17 @@ def _build_memory_schema_overrides() -> Dict[str, Any]:
     _memory_surface_flags.set(None)
     targets = [t for t, on in zip(("memory", "user"), flags) if on]
     parameters = copy.deepcopy(MEMORY_SCHEMA["parameters"])
-    target_schema = parameters["properties"]["target"]
+    target_schema, description = parameters["properties"]["target"], MEMORY_SCHEMA["description"]
     target_schema["enum"] = targets
-    description = MEMORY_SCHEMA["description"]
-    narrowed = _SINGLE_TARGET_TEXT.get(tuple(targets))
-    if narrowed:
+    if narrowed := _SINGLE_TARGET_TEXT.get(tuple(targets)):
         target_schema["description"], replacement = narrowed
         description = description.replace(
             "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
-            "notes (environment, conventions, tool quirks, lessons).",
-            replacement)
+            "notes (environment, conventions, tool quirks, lessons).", replacement)
     return {"description": description, "parameters": parameters}
 
 
-# --- Registry ---
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error  # noqa: E402  (registration at import time)
 
 registry.register(
     name="memory",

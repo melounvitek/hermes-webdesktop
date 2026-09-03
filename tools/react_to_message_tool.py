@@ -4,6 +4,7 @@
 costs nothing elsewhere (adapters expose reactions via ``send_message(action="react")``);
 defaults to the triggering message and emits ``message.reaction`` for live painting."""
 
+import contextlib
 import json
 
 from gateway.session_context import get_session_env
@@ -20,56 +21,41 @@ def _open_session_db():
         return None
 
 
-def _react(emoji: str, message_row_id, messages_back, *, db, session_key: str) -> str:
-    row_id = message_row_id
-    target_role = "user"
-    if row_id is None:
-        # Default: the latest user message; `messages_back` steps to earlier user turns
-        # (ids aren't visible to the model; "two messages ago" is how a person thinks).
-        back = max(0, int(messages_back or 0))
-        row_id = db.latest_message_row_id(session_key, role="user", offset=back)
-        if row_id is None:
-            return tool_error(
-                f"No user message found {back} back." if back else "No user message to react to yet.")
-    else:
-        target_role = db.get_message_role(session_key, int(row_id)) or "user"
-
-    try:
-        reactions = db.set_message_reaction(session_key, int(row_id), emoji or None, author="agent")
-    except Exception as exc:
-        return tool_error(f"Failed to set the reaction: {exc}")
-    if reactions is None:
-        return tool_error(f"Message {row_id} is not part of this conversation.")
-
-    # Paint it live; a missing bridge (non-desktop) is not an error — the reaction is
-    # persisted. `role` lets the renderer match a live message without a durable row id.
-    try:
-        desktop_ui.emit(
-            "message.reaction", {"row_id": int(row_id), "reactions": reactions, "role": target_role})
-    except Exception:
-        pass
-
-    return json.dumps({"success": True, "row_id": int(row_id), "reactions": reactions}, ensure_ascii=False)
-
-
 def react_to_message_tool(emoji: str, message_row_id=None, messages_back=None) -> str:
     """Attach (or with an empty ``emoji`` retract) the agent's reaction."""
     emoji = (emoji or "").strip()
     session_key = get_session_env("HERMES_SESSION_KEY", "") or get_session_env("HERMES_SESSION_ID", "")
     if not session_key:
         return tool_error("No active session — reactions need a persisted conversation.")
-
     db = _open_session_db()
     if db is None:
         return tool_error("Session storage is unavailable.")
     try:
-        return _react(emoji, message_row_id, messages_back, db=db, session_key=session_key)
-    finally:
+        row_id, target_role = message_row_id, "user"
+        if row_id is None:
+            # Default: the latest user message; `messages_back` steps to earlier user turns
+            # (ids aren't visible to the model; "two messages ago" is how a person thinks).
+            back = max(0, int(messages_back or 0))
+            row_id = db.latest_message_row_id(session_key, role="user", offset=back)
+            if row_id is None:
+                return tool_error(f"No user message found {back} back." if back else "No user message to react to yet.")
+        else:
+            target_role = db.get_message_role(session_key, int(row_id)) or "user"
         try:
+            reactions = db.set_message_reaction(session_key, int(row_id), emoji or None, author="agent")
+        except Exception as exc:
+            return tool_error(f"Failed to set the reaction: {exc}")
+        if reactions is None:
+            return tool_error(f"Message {row_id} is not part of this conversation.")
+        # Paint it live; a missing bridge (non-desktop) is not an error — the reaction is
+        # persisted. `role` lets the renderer match a live message without a durable row id.
+        with contextlib.suppress(Exception):
+            desktop_ui.emit("message.reaction", {"row_id": int(row_id), "reactions": reactions, "role": target_role})
+        return json.dumps({"success": True, "row_id": int(row_id), "reactions": reactions}, ensure_ascii=False)
+    finally:
+        with contextlib.suppress(Exception):
             from hermes_state import release_or_close
             release_or_close(db)
-        except Exception:
-            pass
 
 
 def check_react_requirements() -> bool:

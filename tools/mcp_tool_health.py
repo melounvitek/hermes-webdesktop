@@ -1,6 +1,6 @@
 """Session health for MCPServerTask: dynamic tool refresh on list_changed notifications, server
 log forwarding, keepalive probes, suspect-mark / lazy-verify, in-flight call fail-fast, stdio
-child liveness and stdio idle/lifetime recycling. Split from tools/mcp_tool.py."""
+child liveness and stdio idle/lifetime recycling."""
 
 import asyncio
 import json
@@ -38,8 +38,7 @@ class MCPServerHealthMixin:
         self._recycled_reason = None
 
     def _stdio_recycle_deadlines(self):
-        """``[(deadline, reason), ...]`` for the configured lifetime/idle limits; empty for HTTP
-        servers or while an RPC holds the lock."""
+        """``[(deadline, reason), ...]`` for the lifetime/idle limits; empty for HTTP or while an RPC holds the lock."""
         if self._is_http() or self._rpc_lock.locked():
             return []
         limits = ((self._lifecycle_started_at, self._max_lifetime_seconds, "max_lifetime_seconds"),
@@ -52,8 +51,7 @@ class MCPServerHealthMixin:
         return next((reason for deadline, reason in self._stdio_recycle_deadlines() if now >= deadline), None)
 
     def _next_stdio_recycle_deadline(self) -> Optional[float]:
-        deadlines = self._stdio_recycle_deadlines()
-        return min(d for d, _ in deadlines) if deadlines else None
+        return min((d for d, _ in self._stdio_recycle_deadlines()), default=None)
 
     def _mark_stdio_recycled(self, reason: str) -> None:
         """Mark a stdio session dormant before its transport finishes closing."""
@@ -67,15 +65,13 @@ class MCPServerHealthMixin:
                 await self._refresh_tools()
             except Exception:
                 logger.exception("MCP server '%s': dynamic tool refresh failed", self.name)
-
         task = asyncio.create_task(_run())
         self._pending_refresh_tasks.add(task)
         task.add_done_callback(self._pending_refresh_tasks.discard)
         return task
 
     def _make_logging_callback(self):
-        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging
-        tagged with the server name (the SDK default drops them)."""
+        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging (SDK default drops them)."""
         async def _on_log(params):
             try:
                 level = _core._MCP_LOG_LEVEL_MAP.get(str(getattr(params, "level", "info")).lower(), logging.INFO)
@@ -95,8 +91,7 @@ class MCPServerHealthMixin:
         return _on_log
 
     def _make_message_handler(self):
-        """``message_handler`` for ``ClientSession``: only ``ToolListChangedNotification`` triggers
-        a refresh; prompt/resource changes are logged."""
+        """``message_handler``: only ``ToolListChangedNotification`` triggers a refresh; prompt/resource changes log."""
         async def _handler(message):
             try:
                 if isinstance(message, Exception):
@@ -122,20 +117,16 @@ class MCPServerHealthMixin:
         return _handler
 
     def _deregister_owned(self, tool_names: Iterable[str]) -> None:
-        """Deregister *tool_names* this server's toolset still owns. Never removes a colliding
-        name currently owned by another server."""
+        """Deregister *tool_names* this server's toolset still owns (never a colliding name owned by another server)."""
         from tools.registry import registry
-        toolset_name = f"mcp-{self.name}"
         for tool_name in tool_names:
-            if registry.get_toolset_for_tool(tool_name) != toolset_name:
-                continue
-            registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
-            _forget_mcp_tool_server(tool_name)
+            if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
+                registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
+                _forget_mcp_tool_server(tool_name)
 
     async def _refresh_tools(self):
-        """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes
-        rapid-fire notifications; after the list_tools ``await`` all mutations are synchronous —
-        atomic on the event loop."""
+        """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes rapid-fire
+        notifications; after the list_tools ``await`` all mutations are synchronous — atomic on the event loop."""
         if not self._advertises_tools():
             return  # tools/list would raise MCPError(-32601)
         async with self._refresh_lock:
@@ -165,6 +156,8 @@ class MCPServerHealthMixin:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
         OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
         back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+        async def list_tools():
+            await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
@@ -180,7 +173,7 @@ class MCPServerHealthMixin:
                     # A server that silently drops ping looks like a dead transport: confirm with
                     # list_tools before declaring it dead, else propagate the original failure.
                     try:
-                        await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+                        await list_tools()
                     except Exception:
                         raise exc from None
                     self._ping_unsupported = True  # latch so later keepalives skip the 30s wait
@@ -189,7 +182,7 @@ class MCPServerHealthMixin:
                     return
                 else:
                     raise  # closed transport, expired session, etc. — real failure
-        await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+        await list_tools()
 
     def _mark_session_proven(self) -> None:
         """Record that the session demonstrated real health (keepalive or tool-call success).
@@ -204,12 +197,10 @@ class MCPServerHealthMixin:
             logger.warning("MCP server '%s': revived — session healthy again after "
                            "parking (state: parked → connected)", self.name)
         # A proven fresh transport clears the one-time permanent-failure grace and any race bookkeeping.
-        self._permanent_grace_used = False
-        self._teardown_race = False
+        self._permanent_grace_used = self._teardown_race = False
 
     def mark_suspect(self, reason: str) -> None:
-        """Latch a suspicion (no I/O). The NEXT call verifies via :meth:`ensure_healthy` and
-        recycles the transport if the probe fails."""
+        """Latch a suspicion (no I/O); the NEXT call verifies via :meth:`ensure_healthy` and recycles on failure."""
         if self._suspect_reason is None and reason:
             logger.warning("MCP server '%s': connection marked suspect (%s); next call will health-check it",
                            self.name, reason)
@@ -253,8 +244,7 @@ class MCPServerHealthMixin:
         victims = [t for t in self._inflight_tasks if not t.done()]
         if not victims:
             return
-        self._reconnecting = True
-        self._teardown_race = True
+        self._reconnecting = self._teardown_race = True
         self.mark_suspect(f"{reason} tore down {len(victims)} in-flight call(s)")
         for task in victims:
             task.cancel()
@@ -272,7 +262,6 @@ class MCPServerHealthMixin:
             return False
 
     async def _watch_stdio_children(self) -> None:
-        """Poll child liveness while a stdio RPC is in flight; resolves when a tracked child dies
-        so the caller cancels the RPC instead of waiting out the timeout."""
+        """Poll child liveness during a stdio RPC; resolves when a tracked child dies so the caller cancels the RPC."""
         while not self._stdio_children_dead():
             await asyncio.sleep(0.25)

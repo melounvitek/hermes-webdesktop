@@ -363,8 +363,7 @@ class ProcessRegistry:
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
 
     _SHELL_NOISE_SUBSTRINGS = (
-        "no job control in this shell",
-        "cannot set terminal process group",
+        "no job control in this shell", "cannot set terminal process group",
         "tcsetattr: Inappropriate ioctl for device")
 
     def __init__(self):
@@ -394,10 +393,8 @@ class ProcessRegistry:
         self._poll_observed: set = set()
         # Global watch-match circuit breaker across all sessions.
         self._global_watch_lock = threading.Lock()
-        self._global_watch_window_start: float = 0.0
-        self._global_watch_window_hits: int = 0
-        self._global_watch_tripped_until: float = 0.0
-        self._global_watch_suppressed_during_trip: int = 0
+        self._global_watch_window_start = self._global_watch_tripped_until = 0.0
+        self._global_watch_window_hits = self._global_watch_suppressed_during_trip = 0
         # Driver-installed sinks (desktop gateway): on_output(session, chunk) streams
         # live output from reader threads; on_close(session_or_none, process_id) drops
         # a read-only terminal tab without killing the process.
@@ -432,16 +429,13 @@ class ProcessRegistry:
         # avoids stale notifications minutes after the process ended.
         if session.exited:
             return
-        matched_lines = []
-        matched_pattern = None
-        for line in new_text.splitlines():
-            pat = next((p for p in session.watch_patterns if p in line), None)  # one match per line
-            if pat is not None:
-                matched_lines.append(line.rstrip())
-                if matched_pattern is None:
-                    matched_pattern = pat
-        if not matched_lines:
+        hits = [  # (first matching pattern, line) — one match per line
+            (next(p for p in session.watch_patterns if p in line), line.rstrip())
+            for line in new_text.splitlines() if any(p in line for p in session.watch_patterns)]
+        if not hits:
             return
+        matched_pattern = hits[0][0]
+        matched_lines = [line for _, line in hits]
         now = time.time()
         with session._lock:
             if session._watch_cooldown_until and now < session._watch_cooldown_until:
@@ -535,45 +529,41 @@ class ProcessRegistry:
         In cooldown: drop and count. Otherwise slide the rolling window; exceeding
         the cap trips the breaker for WATCH_GLOBAL_COOLDOWN_SECONDS with ONE
         "tripped" summary, and the cooldown's end emits ONE "released" summary."""
-        release_msg = trip_msg = None
+        events = []  # summary events, queued outside the lock
         with self._global_watch_lock:
             # Handle cooldown expiry first so we can emit the release summary.
             if self._global_watch_tripped_until and now >= self._global_watch_tripped_until:
                 suppressed = self._global_watch_suppressed_during_trip
                 self._global_watch_tripped_until = 0.0
                 self._global_watch_suppressed_during_trip = 0
-                self._global_watch_window_start = now
-                self._global_watch_window_hits = 0
+                self._global_watch_window_start, self._global_watch_window_hits = now, 0
                 if suppressed > 0:
-                    release_msg = self._global_watch_event(
+                    events.append(self._global_watch_event(
                         "watch_overflow_released",
                         f"Watch-pattern notifications resumed. "
                         f"{suppressed} match event(s) were suppressed during the flood.",
-                        suppressed=suppressed)
+                        suppressed=suppressed))
             if self._global_watch_tripped_until and now < self._global_watch_tripped_until:
                 # Still in cooldown — drop and count.
                 self._global_watch_suppressed_during_trip += 1
                 admit = False
             else:
                 if now - self._global_watch_window_start >= WATCH_GLOBAL_WINDOW_SECONDS:
-                    self._global_watch_window_start = now
-                    self._global_watch_window_hits = 0
+                    self._global_watch_window_start, self._global_watch_window_hits = now, 0
                 admit = self._global_watch_window_hits < WATCH_GLOBAL_MAX_PER_WINDOW
                 if admit:
                     self._global_watch_window_hits += 1
                 else:
                     self._global_watch_tripped_until = now + WATCH_GLOBAL_COOLDOWN_SECONDS
                     self._global_watch_suppressed_during_trip += 1
-                    trip_msg = self._global_watch_event(
+                    events.append(self._global_watch_event(
                         "watch_overflow_tripped",
                         f"Watch-pattern overflow: >{WATCH_GLOBAL_MAX_PER_WINDOW} "
                         f"notifications in {WATCH_GLOBAL_WINDOW_SECONDS}s across all processes. "
                         f"Suppressing further watch_match events for "
-                        f"{WATCH_GLOBAL_COOLDOWN_SECONDS}s.")
-        # Queue summary events outside the lock.
-        for msg in (release_msg, trip_msg):
-            if msg is not None:
-                self.completion_queue.put(msg)
+                        f"{WATCH_GLOBAL_COOLDOWN_SECONDS}s."))
+        for msg in events:
+            self.completion_queue.put(msg)
         return admit
 
     @staticmethod
@@ -589,11 +579,9 @@ class ProcessRegistry:
     @staticmethod
     def _safe_host_start_time(pid: Optional[int]) -> Optional[int]:
         """Kernel start ticks for a host PID, or None when unavailable."""
-        if not pid:
-            return None
         try:
             from gateway.status import get_process_start_time
-            return get_process_start_time(pid)
+            return get_process_start_time(pid) if pid else None
         except Exception:
             return None
 
@@ -604,9 +592,8 @@ class ProcessRegistry:
         process (seen in the wild: a browser's session leader tree-killed). The kernel
         start time captured at spawn must match the live one; with no baseline
         (legacy checkpoints, no ``/proc``) degrade to a bare liveness check."""
-        if not cls._is_host_pid_alive(pid):
-            return False
-        return expected_start is None or cls._safe_host_start_time(pid) == expected_start
+        return cls._is_host_pid_alive(pid) and (
+            expected_start is None or cls._safe_host_start_time(pid) == expected_start)
 
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
         """Update recovered host-PID sessions when the underlying process has exited."""
@@ -619,9 +606,8 @@ class ProcessRegistry:
         with session._lock:
             if session.exited:
                 return session
-            session.exited = True
             # No waitable handle survives recovery, so the real exit code is unknown.
-            session.exit_code = None
+            session.exited, session.exit_code = True, None
         self._move_to_finished(session)
         return session
 
@@ -630,9 +616,7 @@ class ProcessRegistry:
         """True if a psutil.Process is running and not a zombie (already dead, just unreaped)."""
         try:
             import psutil
-            if not proc.is_running():
-                return False
-            return proc.status() != psutil.STATUS_ZOMBIE
+            return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
         except Exception:
             return False
 
@@ -921,8 +905,8 @@ class ProcessRegistry:
         after the direct child exits (mirrors ``environments/base.py::_wait_for_process``).
         Windows pipes lack select(), so the lazy ``_reconcile_local_exit`` is the net."""
         first_chunk = True
-        # A multibyte UTF-8 char split across read1() chunks would become U+FFFD with
-        # stateless decoding; the incremental decoder holds the partial sequence.
+        # A split multibyte UTF-8 char would become U+FFFD with stateless decoding; the
+        # incremental decoder holds the partial sequence until the rest arrives.
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def _append_chunk(chunk: str):
@@ -1648,20 +1632,18 @@ class ProcessRegistry:
         child's blocking line read (``readline()``, Go ``bufio.Scanner``) never returns
         and the process hangs looking healthy. ``\\r\\n`` gives it both; POSIX keeps ``\\n``."""
         session = self.get(session_id)
-        is_windows_pty = bool(_IS_WINDOWS and session is not None and session._pty)
-        return self.write_stdin(session_id, data + ("\r\n" if is_windows_pty else "\n"))
+        return self.write_stdin(session_id, data + ("\r\n" if _IS_WINDOWS and session and session._pty else "\n"))
 
     def request_close_terminal(self, session_id: str) -> dict:
         """Ask the desktop GUI to close this process's read-only terminal tab. Does NOT
         kill the process — output keeps buffering and the tab can be reopened from the
         status stack. Errors when no UI close sink is wired."""
-        sink = self.on_close
-        if sink is None:
+        if self.on_close is None:
             return {"status": "error", "error": "close_terminal is only available in the Hermes desktop app."}
         # The session may already be finished (or pruned) — the tab can still
         # linger and be closed, so a missing session is not an error here.
         try:
-            sink(self.get(session_id), session_id)
+            self.on_close(self.get(session_id), session_id)
         except Exception as e:
             return {"status": "error", "error": str(e)}
         return {
@@ -1836,10 +1818,9 @@ class ProcessRegistry:
         recovered = 0
         unresolved_scope_entries: List[Dict[str, Any]] = []
         for entry in entries:
-            pid = entry.get("pid")
+            pid, pid_scope = entry.get("pid"), entry.get("pid_scope", "host")
             if not pid:
                 continue
-            pid_scope = entry.get("pid_scope", "host")
             if pid_scope != "host":  # in-sandbox PIDs mean nothing once the env handle is gone
                 logger.info(
                     "Skipping recovery for non-host process: %s (pid=%s, scope=%s)",
