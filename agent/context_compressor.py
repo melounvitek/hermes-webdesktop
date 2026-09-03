@@ -1177,6 +1177,42 @@ def _collect_path_mentions(text: str, relevant_files: list[str], *, limit: int =
         _dedupe_append(relevant_files, match.rstrip(".,:;"), limit=limit)
 
 
+def _collect_paths_from_jsonish(obj: Any, relevant_files: list[str]) -> None:
+    """Harvest path-like values (known keys + inline mentions) from parsed tool arguments."""
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if key in {"path", "workdir", "file_path", "output_path"} and isinstance(val, str):
+                _dedupe_append(relevant_files, val, limit=12)
+            _collect_paths_from_jsonish(val, relevant_files)
+    elif isinstance(obj, list):
+        for val in obj:
+            _collect_paths_from_jsonish(val, relevant_files)
+    elif isinstance(obj, str):
+        _collect_path_mentions(obj, relevant_files)
+
+
+def _compact_fallback_turn(value: Any) -> str:
+    """One-line, redacted, length-capped rendering of a turn's content for the static fallback."""
+    text = _redact_compaction_text(_content_text_for_contains(value))
+    text = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b", "[REDACTED]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > _FALLBACK_TURN_MAX_CHARS:
+        text = text[: _FALLBACK_TURN_MAX_CHARS - 15].rstrip() + " ...[truncated]"
+    return re.sub(r"\bgh[pousr]_[A-Za-z0-9_.-]+", "[REDACTED]", text)
+
+
+def _bullets(items: list[str], limit: int = 8) -> str:
+    """Markdown bullets of the first ``limit`` distinct non-blank items, or ``None.``."""
+    unique: list[str] = []
+    for item in items:
+        item = item.strip()
+        if item and item not in unique:
+            unique.append(item)
+            if len(unique) >= limit:
+                break
+    return "\n".join(f"- {item}" for item in unique) if unique else "None."
+
+
 def _content_length_for_budget(raw_content: Any) -> int:
     """Return the effective char-length of a message's content for token budgeting.
 
@@ -3240,50 +3276,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
         return "\n\n".join(parts)
 
-    def _build_static_fallback_summary(
-        self,
-        turns_to_summarize: List[Dict[str, Any]],
-        reason: str | None = None,
-    ) -> str:
-        """Build a deterministic handoff when the LLM summarizer is unavailable.
-
-        Keeps locally extractable anchors (recent user asks, actions, files/commands, errors)
-        in the normal summary structure so downstream prompts recover gracefully.
-        """
+    def _fallback_anchors(self, turns_to_summarize: List[Dict[str, Any]]) -> Dict[str, list[str]]:
+        """Locally extractable anchors: user asks, actions, files, blockers, last dropped turns."""
         user_asks: list[str] = []
         assistant_actions: list[str] = []
         tool_actions: list[str] = []
         relevant_files: list[str] = []
         blockers: list[str] = []
         last_dropped_turns: list[str] = []
-
-        def _compact_fallback_turn(value: Any) -> str:
-            text = _redact_compaction_text(_content_text_for_contains(value))
-            text = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b", "[REDACTED]", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            if len(text) > _FALLBACK_TURN_MAX_CHARS:
-                text = text[: _FALLBACK_TURN_MAX_CHARS - 15].rstrip() + " ...[truncated]"
-            return re.sub(r"\bgh[pousr]_[A-Za-z0-9_.-]+", "[REDACTED]", text)
-
-        def _remember_dropped_turn(label: str, text: str, *, limit: int = 8) -> None:
-            text = text.strip()
-            if not text:
-                return
-            last_dropped_turns.append(f"{label}: {text}")
-            if len(last_dropped_turns) > limit:
-                del last_dropped_turns[0]
-
-        def _collect_paths_from_jsonish(obj: Any) -> None:
-            if isinstance(obj, dict):
-                for key, val in obj.items():
-                    if key in {"path", "workdir", "file_path", "output_path"} and isinstance(val, str):
-                        _dedupe_append(relevant_files, val, limit=12)
-                    _collect_paths_from_jsonish(val)
-            elif isinstance(obj, list):
-                for val in obj:
-                    _collect_paths_from_jsonish(val)
-            elif isinstance(obj, str):
-                _collect_path_mentions(obj, relevant_files)
 
         call_id_to_tool: dict[str, tuple[str, str]] = {}
         for msg in turns_to_summarize:
@@ -3299,27 +3299,26 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                             parsed = json.loads(args)
                         except Exception:
                             parsed = args
-                        _collect_paths_from_jsonish(parsed)
+                        _collect_paths_from_jsonish(parsed, relevant_files)
 
         for msg in turns_to_summarize:
             role = msg.get("role", "unknown")
             text = _compact_fallback_turn(msg.get("content"))
             _collect_path_mentions(text, relevant_files)
-            synthetic_user = (
-                role == "user" and self._is_synthetic_compression_user_turn(msg)
-            )
+            synthetic_user = role == "user" and self._is_synthetic_compression_user_turn(msg)
+            tool_names = [
+                _extract_tool_call_name_and_args(tc)[0]
+                for tc in (msg.get("tool_calls") or [])
+            ] if role == "assistant" else []
 
             turn_text = text
-            turn_tool_names: list[str] = []
-            if role == "assistant" and msg.get("tool_calls"):
-                for tc in msg.get("tool_calls") or []:
-                    name, _args = _extract_tool_call_name_and_args(tc)
-                    turn_tool_names.append(name)
-                if turn_tool_names:
-                    prefix = "tool calls: " + ", ".join(turn_tool_names[:6])
-                    turn_text = f"{prefix}; {turn_text}" if turn_text else prefix
+            if tool_names:
+                prefix = "tool calls: " + ", ".join(tool_names[:6])
+                turn_text = f"{prefix}; {turn_text}" if turn_text else prefix
             turn_label = "INTERNAL CONTEXT" if synthetic_user else str(role).upper()
-            _remember_dropped_turn(turn_label, turn_text)
+            if turn_text.strip():
+                last_dropped_turns.append(f"{turn_label}: {turn_text.strip()}")
+                del last_dropped_turns[:-8]
 
             if len(text) > 600:
                 text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
@@ -3327,46 +3326,36 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if role == "user" and text and not synthetic_user:
                 user_asks.append(text)
             elif role == "assistant":
-                tool_names: list[str] = []
-                for tc in msg.get("tool_calls") or []:
-                    name, _args = _extract_tool_call_name_and_args(tc)
-                    tool_names.append(name)
                 if tool_names:
-                    assistant_actions.append(
-                        "Called tool(s): " + ", ".join(tool_names[:6])
-                    )
+                    assistant_actions.append("Called tool(s): " + ", ".join(tool_names[:6]))
                 elif text:
                     assistant_actions.append(text)
             elif role == "tool":
-                call_id = str(msg.get("tool_call_id") or "")
-                tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
-                tool_actions.append(
-                    _summarize_tool_result(tool_name, tool_args, text or "")
-                )
-                if re.search(
-                    r"\b(error|failed|exception|traceback|timeout|timed out|fatal)\b",
-                    text,
-                    re.I,
-                ):
+                tool_name, tool_args = call_id_to_tool.get(str(msg.get("tool_call_id") or ""), ("unknown", ""))
+                tool_actions.append(_summarize_tool_result(tool_name, tool_args, text or ""))
+                if re.search(r"\b(error|failed|exception|traceback|timeout|timed out|fatal)\b", text, re.I):
                     blockers.append(text[:500])
+        return {
+            "user_asks": user_asks,
+            "completed": [f"{idx}. {item}" for idx, item in enumerate((assistant_actions + tool_actions)[:12], start=1)],
+            "relevant_files": relevant_files,
+            "blockers": blockers,
+            "last_dropped_turns": last_dropped_turns,
+        }
 
-        def _bullets(items: list[str], limit: int = 8) -> str:
-            unique: list[str] = []
-            seen: set[str] = set()
-            for item in items:
-                item = item.strip()
-                if not item or item in seen:
-                    continue
-                seen.add(item)
-                unique.append(item)
-                if len(unique) >= limit:
-                    break
-            return "\n".join(f"- {item}" for item in unique) if unique else "None."
+    def _build_static_fallback_summary(
+        self,
+        turns_to_summarize: List[Dict[str, Any]],
+        reason: str | None = None,
+    ) -> str:
+        """Build a deterministic handoff when the LLM summarizer is unavailable.
 
-        completed: list[str] = []
-        for idx, item in enumerate((assistant_actions + tool_actions)[:12], start=1):
-            completed.append(f"{idx}. {item}")
-
+        Keeps locally extractable anchors (recent user asks, actions, files/commands, errors)
+        in the normal summary structure so downstream prompts recover gracefully.
+        """
+        anchors = self._fallback_anchors(turns_to_summarize)
+        user_asks = anchors["user_asks"]
+        completed = anchors["completed"]
         active_task = (
             f"User asked: {user_asks[-1]!r}"
             if user_asks
@@ -3406,7 +3395,7 @@ Recovered from a deterministic fallback because the LLM context summarizer was u
 Unknown from deterministic fallback. Inspect current repository/session state if needed.
 
 ## Blocked
-{_bullets(blockers, limit=5)}
+{_bullets(anchors["blockers"], limit=5)}
 
 ## Key Decisions
 None recoverable from deterministic fallback.
@@ -3415,10 +3404,10 @@ None recoverable from deterministic fallback.
 None recoverable from deterministic fallback.
 
 ## Relevant Files
-{_bullets(relevant_files, limit=12)}
+{_bullets(anchors["relevant_files"], limit=12)}
 
 ## Last Dropped Turns
-{_bullets(last_dropped_turns, limit=8)}
+{_bullets(anchors["last_dropped_turns"], limit=8)}
 
 ## Critical Context
 Summary generation was unavailable, so this is a best-effort deterministic fallback for {len(turns_to_summarize)} compacted message(s).{reason_text}"""
@@ -3430,8 +3419,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             summary = summary[: _FALLBACK_SUMMARY_MAX_CHARS - 42].rstrip() + "\n...[fallback summary truncated]"
         # Re-inject AFTER the size cap: markers live at the end, where truncation cuts.
         summary = _reinject_pruned_skill_markers(summary, _pruned_names)
-        summary = self._augment_summary_lean(summary, turns_to_summarize)
-        return summary
+        return self._augment_summary_lean(summary, turns_to_summarize)
 
     def _demote_stale_tail_tools(
         self, messages: List[Dict[str, Any]], tail_start: int,
