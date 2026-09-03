@@ -235,19 +235,15 @@ class GatewayStartupMixin:
                 logger.log(level, message, exc_info=(type(exc), exc, exc.__traceback__))
         return _report
 
-    async def _await_startup_boot_sends(
-        self,
-        *,
-        planned_restart_notification_pending: bool,
-    ) -> None:
+    async def _await_startup_boot_sends(self, *, planned_restart_notification_pending: bool) -> None:
         """Run boot-path sends without letting them pin the inbound restore gate.
 
-        Awaiting ``_send_restart_notification`` / ``_redeliver_pending_obligations`` inline before
-        the gate releases lets one Telegram flood-control sleep freeze inbound on every platform.
-        Same bounded ``asyncio.wait`` as the resume gate: on timeout return and let the sends finish
-        in the background (not cancelled). The ledger claim + ``resume_pending`` clear run INLINE
-        before the send task exists: bounded DB work, and deferring it let a hung notification
-        expire the gate with zero rows claimed, so answered turns were replayed AND redelivered.
+        Awaiting the sends inline before the gate releases lets one Telegram flood-control sleep
+        freeze inbound on every platform. Same bounded ``asyncio.wait`` as the resume gate: on
+        timeout return and let the sends finish in the background (not cancelled). The ledger claim
+        + ``resume_pending`` clear run INLINE before the send task exists (bounded DB work): deferring
+        it let a hung notification expire the gate with zero rows claimed, so answered turns were
+        replayed AND redelivered.
         """
         from gateway.run import _clear_planned_restart_notification, _startup_restore_drain_timeout_secs
         claimed = await self._claim_pending_obligations()
@@ -256,9 +252,7 @@ class GatewayStartupMixin:
             await self._send_restart_notification()
             if planned_restart_notification_pending:
                 try:
-                    await self._send_home_channel_startup_notifications(
-                        skip_targets=None,
-                    )
+                    await self._send_home_channel_startup_notifications(skip_targets=None)
                 finally:
                     _clear_planned_restart_notification()
             await self._redeliver_claimed_obligations(claimed)
@@ -304,14 +298,10 @@ class GatewayStartupMixin:
             try:
                 await self.async_session_store.clear_resume_pending(session_key)
             except Exception:
-                logger.debug(
-                    "clear_resume_pending failed for %s", session_key,
-                    exc_info=True,
-                )
-                if not require_success:
-                    sendable.append(row)
-            else:
-                sendable.append(row)
+                logger.debug("clear_resume_pending failed for %s", session_key, exc_info=True)
+                if require_success:
+                    continue
+            sendable.append(row)
         return sendable
 
     async def _claim_pending_obligations(self) -> list:
@@ -325,10 +315,7 @@ class GatewayStartupMixin:
         silent (gateway/delivery_ledger.py). Returns the claimed rows for redelivery.
         """
         try:
-            from gateway.delivery_ledger import (
-                ledger_enabled,
-                sweep_recoverable,
-            )
+            from gateway.delivery_ledger import ledger_enabled, sweep_recoverable
 
             if not await asyncio.to_thread(ledger_enabled):
                 return []
@@ -336,24 +323,18 @@ class GatewayStartupMixin:
             # gateway can host several bot identities for one platform; platform-only filtering
             # would spend a disconnected bot's retry budget merely because another bot is online.
             _profile_adapters = getattr(self, "_profile_adapters", None) or {}
-            _deliverable_targets = {
-                (getattr(p, "value", str(p)), "default") for p in self.adapters
-            }
+            _pval = lambda p: getattr(p, "value", str(p))  # noqa: E731
+            _deliverable_targets = {(_pval(p), "default") for p in self.adapters}
             # Legacy rows predate adapter_profile. They are unambiguous only in a non-multiplexed
             # gateway; fail closed when multiple bot identities share the process.
             if not _profile_adapters:
-                _deliverable_targets.update(
-                    (getattr(p, "value", str(p)), None) for p in self.adapters
-                )
+                _deliverable_targets.update((_pval(p), None) for p in self.adapters)
             for _profile, _adapters in _profile_adapters.items():
-                _deliverable_targets.update(
-                    (getattr(p, "value", str(p)), _profile) for p in _adapters
-                )
-            _deliverable = {platform for platform, _ in _deliverable_targets}
+                _deliverable_targets.update((_pval(p), _profile) for p in _adapters)
             claimed = await asyncio.to_thread(
                 sweep_recoverable,
                 None,
-                deliverable_platforms=_deliverable,
+                deliverable_platforms={platform for platform, _ in _deliverable_targets},
                 deliverable_targets=_deliverable_targets,
             )
         except Exception:
@@ -392,29 +373,8 @@ class GatewayStartupMixin:
 
         redelivered = 0
         for row in claimed:
-            try:
-                platform = Platform(row["platform"])
-            except Exception:
-                logger.debug(
-                    "obligation %s: unknown platform %r",
-                    row["obligation_id"], row.get("platform"),
-                )
-                continue
-            if "profile" in row:
-                adapter = self._authorization_adapter(
-                    platform, row.get("profile")
-                )
-            else:
-                # Startup rows preserve the historical default-adapter route.
-                adapter = self.adapters.get(platform)
+            adapter = await self._obligation_adapter(row)
             if adapter is None:
-                # Runtime claims have not reached a transport yet. If the reconnect vanished before
-                # dispatch, release the claim without spending an attempt so the next reconnect can
-                # retry it. Startup claims keep their state; attempts cap + stale cutoff bound retries.
-                if row.get("runtime_recovery"):
-                    await self._release_runtime_claim_quiet(
-                        row["obligation_id"], "failed to release undispatched runtime obligation %s"
-                    )
                 continue
             content = row["content"]
             if row.get("needs_marker"):
@@ -448,21 +408,36 @@ class GatewayStartupMixin:
                 logger.debug("delivery ledger update failed", exc_info=True)
         return redelivered
 
+    async def _obligation_adapter(self, row: dict):
+        """Resolve the adapter for a claimed ledger row, or None when it cannot be delivered now."""
+        try:
+            platform = Platform(row["platform"])
+        except Exception:
+            logger.debug(
+                "obligation %s: unknown platform %r", row["obligation_id"], row.get("platform"),
+            )
+            return None
+        if "profile" in row:
+            adapter = self._authorization_adapter(platform, row.get("profile"))
+        else:
+            # Startup rows preserve the historical default-adapter route.
+            adapter = self.adapters.get(platform)
+        # Runtime claims have not reached a transport yet. If the reconnect vanished before
+        # dispatch, release the claim without spending an attempt so the next reconnect can retry
+        # it. Startup claims keep their state; attempts cap + stale cutoff bound later retries.
+        if adapter is None and row.get("runtime_recovery"):
+            await self._release_runtime_claim_quiet(
+                row["obligation_id"], "failed to release undispatched runtime obligation %s"
+            )
+        return adapter
+
     async def _redeliver_pending_obligations(self) -> int:
-        """Claim + redeliver in one call (:meth:`_claim_pending_obligations` then
-        :meth:`_redeliver_claimed_obligations`). Stable public shape for tests/external callers;
-        the startup path calls the halves separately so the DB half runs inline before the
-        abandonable send task.
-        """
-        return await self._redeliver_claimed_obligations(
-            await self._claim_pending_obligations()
-        )
+        """Claim + redeliver in one call. Stable shape for tests/external callers; the startup path
+        calls the halves separately so the DB half runs inline before the abandonable send task."""
+        return await self._redeliver_claimed_obligations(await self._claim_pending_obligations())
 
     async def _redeliver_failed_obligations_for_platform(
-        self,
-        platform: Platform,
-        *,
-        profile: Optional[str] = None,
+        self, platform: Platform, *, profile: Optional[str] = None,
     ) -> int:
         """Replay one adapter identity's transient failures after reconnect.
 
@@ -475,16 +450,10 @@ class GatewayStartupMixin:
 
             if not await asyncio.to_thread(ledger_enabled):
                 return 0
-            claimed = await asyncio.to_thread(
-                sweep_failed_for_runtime,
-                platform.value,
-                profile=profile,
-            )
+            claimed = await asyncio.to_thread(sweep_failed_for_runtime, platform.value, profile=profile)
         except Exception:
             logger.debug(
-                "runtime delivery ledger sweep failed after %s reconnect",
-                platform.value,
-                exc_info=True,
+                "runtime delivery ledger sweep failed after %s reconnect", platform.value, exc_info=True,
             )
             return 0
         if not claimed:
@@ -538,6 +507,26 @@ class GatewayStartupMixin:
                 logger.debug("Restart-loop guard check skipped: %s", exc)
         return candidates
 
+    def _resume_owner_authorized(self, session_key: str, source) -> bool:
+        """Validate the session owner against the CURRENT allowlist before auto-resuming.
+
+        A session created before the allowlist existed (or whose owner was since removed) must not
+        silently receive a full agent response just because it carries a resume marker.
+        """
+        try:
+            if self._is_user_authorized(source):
+                return True
+            logger.warning(
+                "Skipping auto-resume for %s: session owner is no "
+                "longer authorized under the current allowlist",
+                session_key,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Skipping auto-resume for %s: authorization check failed: %s", session_key, exc,
+            )
+        return False
+
     def _schedule_resume_pending_sessions(self, platform=None) -> int:
         """Auto-continue fresh restart-interrupted sessions after startup.
 
@@ -573,23 +562,7 @@ class GatewayStartupMixin:
                     getattr(source.platform, "value", source.platform),
                 )
                 continue
-
-            # Validate the session owner against the current allowlist before auto-resuming: a
-            # session created before the allowlist existed (or whose owner was since removed) must
-            # not silently receive a full agent response just because it carries a resume marker.
-            try:
-                if not self._is_user_authorized(source):
-                    logger.warning(
-                        "Skipping auto-resume for %s: session owner is no "
-                        "longer authorized under the current allowlist",
-                        entry.session_key,
-                    )
-                    continue
-            except Exception as exc:
-                logger.warning(
-                    "Skipping auto-resume for %s: authorization check failed: %s",
-                    entry.session_key, exc,
-                )
+            if not self._resume_owner_authorized(entry.session_key, source):
                 continue
 
             # Claim the session slot *before* spawning the task so an inbound message arriving
