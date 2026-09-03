@@ -203,8 +203,7 @@ def _build_client() -> Optional[Langfuse]:
         )
         return None
 
-    public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
-    secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
+    public_key, secret_key = (_env(f"HERMES_LANGFUSE_{n}") or _env(f"LANGFUSE_{n}") for n in ("PUBLIC_KEY", "SECRET_KEY"))
     if not (public_key and secret_key):
         return None
 
@@ -306,9 +305,18 @@ def _maybe_parse_json_string(value: str) -> Any:
     return {"data": parsed, hint_key: trailing}
 
 
-def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> dict[str, Any]:
+def _normalize_payload(value: Any, *, tool_name: str = "", args: Any = None) -> Any:
+    """Collapse a read_file result (line-numbered content + file metadata) into a compact preview."""
+    is_read_file = (
+        isinstance(value, dict)
+        and isinstance(value.get("content"), str)
+        and all(k in value for k in ("total_lines", "file_size", "is_binary", "is_image"))
+        and not value.get("error")
+    )
+    if not is_read_file:
+        return value
     normalized: dict[str, Any] = {}
-    if isinstance(args, dict):
+    if tool_name == "read_file" and isinstance(args, dict):
         if isinstance(args.get("path"), str) and args["path"]:
             normalized["path"] = args["path"]
         normalized.update({key: args[key] for key in ("offset", "limit") if isinstance(args.get(key), int)})
@@ -331,19 +339,6 @@ def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> 
     if isinstance(b64, str) and b64:
         normalized["base64_content"] = {"omitted": True, "length": len(b64)}
     return normalized
-
-
-def _normalize_payload(value: Any, *, tool_name: str = "", args: Any = None) -> Any:
-    """Collapse a read_file result (line-numbered content + file metadata) into a compact preview."""
-    is_read_file = (
-        isinstance(value, dict)
-        and isinstance(value.get("content"), str)
-        and all(k in value for k in ("total_lines", "file_size", "is_binary", "is_image"))
-        and not value.get("error")
-    )
-    if is_read_file:
-        return _normalize_read_file_payload(value, args=args if tool_name == "read_file" else None)
-    return value
 
 
 def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
@@ -399,13 +394,10 @@ def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
 
 def _messages_for_langfuse_input(*, request_messages: Any = None, messages: Any = None,
                                  conversation_history: Any = None, user_message: Any = None,
-                                 system_prompt: Any = None, pre_coerced: Any = None) -> list[dict[str, Any]]:
-    """Generation input, prepending ``system_prompt`` when the provider split it out
-    of messages. ``pre_coerced`` skips a second ``_coerce_request_messages``."""
-    raw = pre_coerced if pre_coerced is not None else _coerce_request_messages(
-        request_messages=request_messages, messages=messages,
-        conversation_history=conversation_history, user_message=user_message,
-    )
+                                 system_prompt: Any = None) -> list[dict[str, Any]]:
+    """Generation input, prepending ``system_prompt`` when the provider split it out of messages."""
+    raw = _coerce_request_messages(request_messages=request_messages, messages=messages,
+                                   conversation_history=conversation_history, user_message=user_message)
     system_msg = None if raw and raw[0].get("role") == "system" else _serialize_system_prompt(system_prompt)
     serialized = _serialize_messages(raw)
     return serialized if system_msg is None else [system_msg, *serialized]
@@ -431,20 +423,11 @@ def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
     return serialized
 
 
-def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
-    serialized = []
-    for tool_call in tool_calls or ():
-        fn = getattr(tool_call, "function", None)
-        name = getattr(fn, "name", None)
-        safe_arguments = _capture_content(getattr(fn, "arguments", None))
-        serialized.append({
-            "id": getattr(tool_call, "id", None),
-            "type": getattr(tool_call, "type", None) or "function",
-            "name": name,
-            "arguments": safe_arguments,
-            "function": {"name": name, "arguments": safe_arguments},
-        })
-    return serialized
+def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
+    fn = getattr(tool_call, "function", None)
+    name, safe_arguments = getattr(fn, "name", None), _capture_content(getattr(fn, "arguments", None))
+    return {"id": getattr(tool_call, "id", None), "type": getattr(tool_call, "type", None) or "function",
+            "name": name, "arguments": safe_arguments, "function": {"name": name, "arguments": safe_arguments}}
 
 
 def _serialize_assistant_message(message: Any) -> dict[str, Any]:
@@ -453,7 +436,7 @@ def _serialize_assistant_message(message: Any) -> dict[str, Any]:
     return {
         "content": _capture_content(getattr(message, "content", None)),
         "reasoning": None if reasoning is None else _capture_content(reasoning),
-        "tool_calls": _serialize_tool_calls(getattr(message, "tool_calls", None)),
+        "tool_calls": [_serialize_tool_call(tc) for tc in getattr(message, "tool_calls", None) or ()],
     }
 
 
@@ -529,7 +512,8 @@ def _summary_usage_and_cost(usage: dict, *, provider: str, model: str, base_url:
         canonical = CanonicalUsage(
             output_tokens=usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
             request_count=usage.get("request_count", 1),
-            **{attr: usage.get(attr, 0) for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
+            **{attr: usage.get(attr, 0)
+               for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
         )
         return _canonical_usage_and_cost(canonical, provider=provider, model=model, base_url=base_url)
     except Exception:
@@ -589,9 +573,9 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
     if observation is None:
         return
     try:
-        update_kwargs: Dict[str, Any] = {} if output is None else {"output": output}
-        update_kwargs.update({k: v for k, v in (("metadata", metadata), ("usage_details", usage_details),
-                                                ("cost_details", cost_details)) if v})
+        update_kwargs = {**({} if output is None else {"output": output}),
+                         **{k: v for k, v in (("metadata", metadata), ("usage_details", usage_details),
+                                              ("cost_details", cost_details)) if v}}
         if update_kwargs:
             observation.update(**update_kwargs)
         observation.end()
@@ -617,19 +601,6 @@ def _end_root(state: TraceState, label: str) -> None:
             state.root_ctx.__exit__(None, None, None)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"{label} failed: {exc}")
-
-
-def _evict_stale_locked() -> None:
-    """Evict least-recently-updated state down to ``_MAX_TRACE_STATE - 1``. Caller
-    holds ``_STATE_LOCK`` and inserts exactly one entry afterwards; evicted roots
-    are ended so they don't dangle on the Langfuse side."""
-    over = len(_TRACE_STATE) - (_MAX_TRACE_STATE - 1)
-    if over <= 0:
-        return
-    stale = sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:over]
-    for key, state in stale:
-        _TRACE_STATE.pop(key, None)
-        _end_root(state, "evict stale trace")
 
 
 def _finalize_all_traces() -> None:
@@ -720,11 +691,16 @@ def _pop_generation(task_key: str, api_call_count: Any) -> tuple[Optional[TraceS
 
 
 def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
-    """Caller must hold ``_STATE_LOCK``. Starts a root trace if the key is new."""
+    """Caller must hold ``_STATE_LOCK``. Starts a root trace if the key is new, first
+    evicting least-recently-updated state down to ``_MAX_TRACE_STATE - 1`` (evicted
+    roots are ended so they don't dangle on the Langfuse side)."""
     state = _TRACE_STATE.get(task_key)
     if state is None:
         state = _start_root_trace(task_key, **root_kwargs)
-        _evict_stale_locked()
+        over = len(_TRACE_STATE) - (_MAX_TRACE_STATE - 1)
+        for key, stale in sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:max(over, 0)]:
+            _TRACE_STATE.pop(key, None)
+            _end_root(stale, "evict stale trace")
         _TRACE_STATE[task_key] = state
     state.last_updated_at = time.time()
     return state
@@ -806,7 +782,7 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
         request_messages=request_messages, messages=messages,
         conversation_history=conversation_history, user_message=user_message,
     )
-    langfuse_input = _messages_for_langfuse_input(system_prompt=system_prompt, pre_coerced=input_messages)
+    langfuse_input = _messages_for_langfuse_input(request_messages=input_messages, system_prompt=system_prompt)
     has_system = bool(langfuse_input) and langfuse_input[0].get("role") == "system"
     system_chars = len(str(langfuse_input[0].get("content") or "")) if has_system else 0
     req_key = _request_key(api_call_count)
@@ -823,9 +799,8 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
         gen_metadata = {
             "provider": provider, "platform": platform, "api_mode": api_mode, "base_url": base_url,
             "message_count": message_count, "approx_input_tokens": approx_input_tokens,
+            **({"system_prompt_chars": system_chars} if system_chars else {}),
         }
-        if system_chars:
-            gen_metadata["system_prompt_chars"] = system_chars
         state.generations[req_key] = _start_child_observation(
             state, name=f"LLM call {api_call_count}", as_type="generation",
             input_value=langfuse_input, metadata=gen_metadata, model=model,
@@ -861,11 +836,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     elif assistant_response is not None:
         output = {"content": _capture_content(assistant_response), "reasoning": None, "tool_calls": []}
     else:
-        output = {
-            "content": f"[{assistant_content_chars} chars]" if assistant_content_chars else None,
-            "reasoning": None,
-            "tool_calls": [{"id": f"tc_{i}"} for i in range(assistant_tool_call_count or 0)],
-        }
+        output = {"content": f"[{assistant_content_chars} chars]" if assistant_content_chars else None, "reasoning": None,
+                  "tool_calls": [{"id": f"tc_{i}"} for i in range(assistant_tool_call_count or 0)]}
 
     if output.get("tool_calls"):
         state.turn_tool_calls.extend(output["tool_calls"])
@@ -873,7 +845,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     # post_api_request's ``response`` is a sanitized dict with no ``.usage``;
     # gate on the attribute so the usage-dict fallback is actually reached.
     if getattr(response, "usage", None) is not None:
-        usage_details, cost_details = _usage_and_cost(response, provider=provider, api_mode=api_mode, model=model, base_url=base_url)
+        usage_details, cost_details = _usage_and_cost(response, provider=provider, api_mode=api_mode,
+                                                      model=model, base_url=base_url)
     elif isinstance(usage, dict) and usage:
         usage_details, cost_details = _summary_usage_and_cost(usage, provider=provider, model=model, base_url=base_url)
     else:
@@ -967,9 +940,8 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     # Error messages can embed request fragments (URLs w/ keys, prompt echoes) — capture-pipeline them.
     error_metadata: Dict[str, Any] = {"error": True, "error_type": error_type, "error_message": _capture_content(error_message)}
     error_metadata.update({k: v for k, v in (("status_code", status_code), ("retry_count", retry_count),
-                                             ("max_retries", max_retries), ("retryable", retryable)) if v is not None})
-    if reason:
-        error_metadata["reason"] = str(reason)
+                                             ("max_retries", max_retries), ("retryable", retryable),
+                                             ("reason", str(reason) if reason else None)) if v is not None})
     _add_duration(error_metadata, api_duration)
 
     if generation is not None:
@@ -1029,9 +1001,8 @@ def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = Non
         state = _state_for_turn(parent_turn_id)
         if state is None:
             return
-        metadata = {"child_session_id": child_session_id, "child_subagent_id": child_subagent_id, "child_role": child_role}
-        if parent_subagent_id:
-            metadata["parent_subagent_id"] = parent_subagent_id
+        metadata = {"child_session_id": child_session_id, "child_subagent_id": child_subagent_id, "child_role": child_role,
+                    **({"parent_subagent_id": parent_subagent_id} if parent_subagent_id else {})}
         state.subagents[str(child_session_id)] = _start_child_observation(
             state, name=f"Subagent: {child_role or 'delegate'}", as_type="span",
             input_value=_capture_content(child_goal), metadata=metadata,
