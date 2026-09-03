@@ -1,21 +1,13 @@
 """Flush pending messages and agent transcripts to disk before shutdown to prevent data loss.
 
-When FTS5 index corruption prevents ``INSERT INTO messages``, the gateway
-accumulates messages in ``_pending_messages`` (memory-only) and the live
-``agent._session_messages`` cannot be flushed via ``_flush_messages_to_session_db``.
-On shutdown, ``.clear()`` would discard the only surviving copy.
-
-Hooks (all write atomic JSON payloads under ``<hermes_home>/pending_messages/``):
-
-* ``flush_pending_to_file()`` / ``flush_overflow_to_file()`` — called BEFORE
-  ``_pending_messages.clear()`` during shutdown (queue head / FIFO tail).
-* ``recover_pending_to_db()`` — called AFTER ``runner.start()`` on startup;
-  replays payloads via ``SessionDB.append_message`` (so FTS indexing, session
-  metadata and display_kind are handled), deleting each file on success.
-* ``flush_agent_history_to_file()`` — called from ``_finalize_shutdown_agents``
-  when ``_flush_messages_to_session_db`` raises; dumps ``agent._session_messages``.
-* ``spool_dropped_transcript_message()`` / ``drain_transcript_spool()`` — live
-  spool for transcript messages evicted by the in-memory pending cap.
+When FTS5 corruption blocks ``INSERT INTO messages``, ``_pending_messages`` and the live
+``agent._session_messages`` are the only surviving copies; shutdown ``.clear()`` would drop
+them. All hooks write atomic JSON payloads under ``<hermes_home>/pending_messages/``:
+``flush_pending_to_file`` / ``flush_overflow_to_file`` (queue head / FIFO tail, before
+clear), ``recover_pending_to_db`` (after ``runner.start()``; replays via
+``SessionDB.append_message`` and deletes each file on success), ``flush_agent_history_to_file``
+(when the DB flush raises), ``spool_dropped_transcript_message`` / ``drain_transcript_spool``
+(live spool for cap-evicted transcript messages).
 """
 
 from __future__ import annotations
@@ -50,29 +42,26 @@ def _get_flush_dir():
     return flush_dir
 
 
-def _fsync_directory(path: Path) -> None:
-    """Persist a directory entry on platforms that support directory fsync."""
-    if os.name != "posix":
-        return
-    directory_fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-
-
 def _write_payload(flush_dir: Path, payload: Dict[str, Any]) -> Path:
     """Atomically write one private, uniquely named recovery payload; return its path."""
     from utils import atomic_json_write
 
     final_path = flush_dir / f"pending-{uuid.uuid4().hex}.json"
     atomic_json_write(final_path, payload, mode=0o600, default=str)
-    try:
-        _fsync_directory(flush_dir)
-    except OSError as exc:
-        # The published file is still the only recovery copy; keep it even if
-        # this filesystem cannot persist directory entries.
-        logger.debug("Failed to fsync pending-message directory: %s", exc)
+    if os.name == "posix":
+        # Persist the directory entry too. The published file is still the only
+        # recovery copy; keep it even if this filesystem cannot fsync directories.
+        try:
+            directory_fd = os.open(flush_dir, os.O_RDONLY)
+        except OSError as exc:
+            logger.debug("Failed to fsync pending-message directory: %s", exc)
+        else:
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                logger.debug("Failed to fsync pending-message directory: %s", exc)
+            finally:
+                os.close(directory_fd)
     return final_path
 
 
@@ -89,11 +78,7 @@ def _flush_value(flush_dir: Path, kind: str, session_key: str, value: Any, **ext
         return False
 
 
-def flush_pending_to_file(
-    pending: Dict[str, Any],
-    *,
-    reason: str = "shutdown",
-) -> int:
+def flush_pending_to_file(pending: Dict[str, Any], *, reason: str = "shutdown") -> int:
     """Serialise non-empty ``_pending_messages`` slots to disk.
 
     ``pending`` values may be ``MessageEvent`` objects (adapter) or plain
@@ -106,20 +91,15 @@ def flush_pending_to_file(
     ts = int(time.time())
     flushed = 0
     for session_key, value in list(pending.items()):
-        if value is None:
-            continue
-        flushed += _flush_value(flush_dir, "pending", session_key, value, reason=reason, ts=ts)
+        if value is not None:
+            flushed += _flush_value(flush_dir, "pending", session_key, value, reason=reason, ts=ts)
 
     if flushed:
         logger.info("Flushed %d pending message(s) to %s (reason=%s)", flushed, flush_dir, reason)
     return flushed
 
 
-def flush_overflow_to_file(
-    overflow_by_session: Dict[str, Any],
-    *,
-    reason: str = "shutdown",
-) -> int:
+def flush_overflow_to_file(overflow_by_session: Dict[str, Any], *, reason: str = "shutdown") -> int:
     """Serialise the FIFO overflow tails (``queued_events``) to disk.
 
     The adapter slot holds the queue head and ``SessionState.conversation
@@ -138,9 +118,8 @@ def flush_overflow_to_file(
         if not session_key or not events:
             continue
         for seq, value in enumerate(list(events)):
-            if value is None:
-                continue
-            flushed += _flush_value(flush_dir, "overflow", session_key, value, reason=reason, ts=ts, seq=seq)
+            if value is not None:
+                flushed += _flush_value(flush_dir, "overflow", session_key, value, reason=reason, ts=ts, seq=seq)
 
     if flushed:
         logger.info("Flushed %d queued overflow message(s) to %s (reason=%s)", flushed, flush_dir, reason)
@@ -154,16 +133,13 @@ def spool_dropped_transcript_message(session_id: str, message: Dict[str, Any]) -
     callers must degrade to drop-and-log.
     """
     try:
-        return _write_payload(
-            _get_flush_dir(),
-            {
-                "session_key": session_id,
-                "reason": TRANSCRIPT_CAP_DROP_REASON,
-                "ts": int(time.time()),
-                "seq": next(_TRANSCRIPT_SPOOL_SEQ),
-                "data": {"session_id": session_id, "message": message},
-            },
-        )
+        return _write_payload(_get_flush_dir(), {
+            "session_key": session_id,
+            "reason": TRANSCRIPT_CAP_DROP_REASON,
+            "ts": int(time.time()),
+            "seq": next(_TRANSCRIPT_SPOOL_SEQ),
+            "data": {"session_id": session_id, "message": message},
+        })
     except Exception as exc:
         logger.debug("Failed to spool cap-dropped transcript message for %s: %s", session_id, exc)
         return None
@@ -189,10 +165,7 @@ def drain_transcript_spool(session_id: str, replay) -> tuple[int, int]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if (
-            payload.get("reason") != TRANSCRIPT_CAP_DROP_REASON
-            or payload.get("session_key") != session_id
-        ):
+        if payload.get("reason") != TRANSCRIPT_CAP_DROP_REASON or payload.get("session_key") != session_id:
             continue
         message = (payload.get("data") or {}).get("message")
         if not isinstance(message, dict):
@@ -222,28 +195,27 @@ def drain_transcript_spool(session_id: str, replay) -> tuple[int, int]:
     return replayed, remaining
 
 
+def _json_safe(value: Any) -> bool:
+    try:
+        json.dumps(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _serialise_value(value: Any) -> Optional[dict]:
     """Convert a pending message value to a JSON-serialisable dict."""
     if hasattr(value, "text"):  # MessageEvent-like object
         result: Dict[str, Any] = {"text": getattr(value, "text", "")}
-        for attr in ("session_id", "platform", "sender_id", "sender_name",
-                      "reply_to", "media", "raw_event"):
+        for attr in ("session_id", "platform", "sender_id", "sender_name", "reply_to", "media", "raw_event"):
             val = getattr(value, attr, None)
             if val is not None:
-                try:
-                    json.dumps(val)
-                    result[attr] = val
-                except (TypeError, ValueError):
-                    result[attr] = str(val)
+                result[attr] = val if _json_safe(val) else str(val)
         return result
     if isinstance(value, str):  # runner-level _pending_messages
         return {"text": value}
-    if isinstance(value, dict):
-        try:
-            json.dumps(value)
-            return value
-        except (TypeError, ValueError):
-            return {"text": str(value)}
+    if isinstance(value, dict) and _json_safe(value):
+        return value
     return {"text": str(value)}
 
 
@@ -255,8 +227,7 @@ def recover_pending_to_db(session_db=None) -> int:
     ``session_db=None`` opens (and afterwards releases) the shared default
     ``state.db``.  Returns the number of messages recovered.
     """
-    flush_dir = _get_flush_dir()
-    flush_files = sorted(flush_dir.glob("*.json"))
+    flush_files = sorted(_get_flush_dir().glob("*.json"))
     if not flush_files:
         return 0
 
@@ -273,59 +244,9 @@ def recover_pending_to_db(session_db=None) -> int:
             # operator recovery, not automatic DB insertion.
             if payload.get("reason") == "shutdown-with-unpersisted-agent-history":
                 continue
-            # Cap-dropped transcript payloads carry the full message dict keyed
-            # by session_id — replay directly (spool never drained before restart).
-            if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:
-                data = payload.get("data", {}) or {}
-                spooled_sid = data.get("session_id", "")
-                message = data.get("message")
-                if not spooled_sid or not isinstance(message, dict):
-                    logger.warning(
-                        "Cannot recover structurally invalid transcript spool "
-                        "file %s; preserved for manual inspection",
-                        path,
-                    )
-                    continue
-                session_db.append_message(
-                    session_id=spooled_sid,
-                    role=message.get("role", "unknown"),
-                    content=message.get("content") or "",
-                    timestamp=message.get("timestamp") or payload.get("ts"),
-                )
+            if _recover_one_payload(session_db, path, payload):
                 recovered += 1
                 path.unlink(missing_ok=True)
-                continue
-            session_key = payload.get("session_key", "")
-            data = payload.get("data", {})
-            text = data.get("text", "")
-            if not text or not session_key:
-                logger.warning(
-                    "Cannot recover structurally invalid pending message from %s; "
-                    "the flush file has been preserved",
-                    path,
-                )
-                continue
-
-            # session_key is a gateway routing key (e.g. "agent:main:telegram:...");
-            # appending a row needs the real session_id, which only the
-            # serialised data can supply at this recovery stage.
-            session_id = data.get("session_id", "")
-            if not session_id:
-                logger.warning(
-                    "Cannot recover pending message for %s: no session_id "
-                    "in flush file and session_key-to-id resolution is not "
-                    "available at this recovery stage. The message text is "
-                    "preserved in %s",
-                    session_key, path,
-                )
-                continue
-
-            session_db.append_message(
-                session_id=session_id, role="user", content=text,
-                timestamp=payload.get("ts", int(time.time())),
-            )
-            recovered += 1
-            path.unlink(missing_ok=True)
     finally:
         # Shutdown cancellation/interrupt must not strand an owned DB.
         if own_db:
@@ -338,6 +259,57 @@ def recover_pending_to_db(session_db=None) -> int:
     if recovered:
         logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
     return recovered
+
+
+def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> bool:
+    """Append one flush payload to ``session_db``; False (file preserved) when structurally invalid."""
+    if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:
+        # Cap-dropped transcript payloads carry the full message dict keyed by
+        # session_id — replay directly (spool never drained before restart).
+        data = payload.get("data", {}) or {}
+        spooled_sid = data.get("session_id", "")
+        message = data.get("message")
+        if not spooled_sid or not isinstance(message, dict):
+            logger.warning(
+                "Cannot recover structurally invalid transcript spool "
+                "file %s; preserved for manual inspection",
+                path,
+            )
+            return False
+        session_db.append_message(
+            session_id=spooled_sid,
+            role=message.get("role", "unknown"),
+            content=message.get("content") or "",
+            timestamp=message.get("timestamp") or payload.get("ts"),
+        )
+        return True
+    session_key = payload.get("session_key", "")
+    data = payload.get("data", {})
+    text = data.get("text", "")
+    if not text or not session_key:
+        logger.warning(
+            "Cannot recover structurally invalid pending message from %s; "
+            "the flush file has been preserved",
+            path,
+        )
+        return False
+    # session_key is a gateway routing key (e.g. "agent:main:telegram:...");
+    # appending a row needs the real session_id, which only the serialised
+    # data can supply at this recovery stage.
+    session_id = data.get("session_id", "")
+    if not session_id:
+        logger.warning(
+            "Cannot recover pending message for %s: no session_id "
+            "in flush file and session_key-to-id resolution is not "
+            "available at this recovery stage. The message text is "
+            "preserved in %s",
+            session_key, path,
+        )
+        return False
+    session_db.append_message(
+        session_id=session_id, role="user", content=text, timestamp=payload.get("ts", int(time.time())),
+    )
+    return True
 
 
 def flush_agent_history_to_file(session_id: Optional[str], history: list) -> None:
@@ -355,10 +327,7 @@ def flush_agent_history_to_file(session_id: Optional[str], history: list) -> Non
         snapshot = []
         for _m in history:
             try:
-                snapshot.append(
-                    _m if isinstance(_m, (dict, list, str, int, float, bool, type(None)))
-                    else str(_m)
-                )
+                snapshot.append(_m if isinstance(_m, (dict, list, str, int, float, bool, type(None))) else str(_m))
             except Exception:
                 continue
         _write_payload(flush_dir, {

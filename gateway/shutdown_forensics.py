@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 from gateway.restart import DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, resolve_systemd_timeout_stop_sec
 import contextlib
 
-
 _SIGNAL_NAME_BY_NUM: Dict[int, str] = {
     int(getattr(signal, _name)): _name
     for _name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2")
@@ -47,21 +46,9 @@ def _read_proc_field(pid: int, key: str) -> Optional[str]:
             for line in fh:
                 if line.startswith(key + ":"):
                     return line.split(":", 1)[1].strip()
-    except (FileNotFoundError, PermissionError, OSError):
+    except OSError:
         pass
     return None
-
-
-def _read_proc_cmdline(pid: int) -> Optional[str]:
-    """Read /proc/<pid>/cmdline (NUL-separated) as a printable string.  Linux only."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            data = fh.read()
-    except (FileNotFoundError, PermissionError, OSError):
-        return None
-    if not data:
-        return None
-    return data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
 
 
 def _proc_summary(pid: int) -> Dict[str, Any]:
@@ -81,17 +68,18 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
     if uid is not None:
         # "real effective saved fs"
         summary["uid"] = uid.split()[0] if uid else uid
-    cmdline = _read_proc_cmdline(pid)
-    if cmdline:
+    try:
+        data = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        data = b""
+    if data:
         # Truncate aggressively — these can be 4KB
-        summary["cmdline"] = cmdline[:300]
+        summary["cmdline"] = data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()[:300]
     return summary
 
 
 def _read_marker(path: Path) -> Optional[str]:
     """Return the marker file's text, or None if absent/unreadable."""
-    if not path.exists():
-        return None
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
@@ -121,13 +109,10 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
 
     # INVOCATION_ID is set by systemd units; ppid==1 also strongly suggests
     # systemd reaped+forwarded the SIGTERM.
-    invocation_id = os.environ.get("INVOCATION_ID")
-    if invocation_id:
-        ctx["systemd_invocation_id"] = invocation_id
-    journal_stream = os.environ.get("JOURNAL_STREAM")
-    if journal_stream:
-        ctx["systemd_journal_stream"] = journal_stream
-    ctx["under_systemd"] = bool(invocation_id) or ppid == 1
+    for ctx_key, env_key in (("systemd_invocation_id", "INVOCATION_ID"), ("systemd_journal_stream", "JOURNAL_STREAM")):
+        if os.environ.get(env_key):
+            ctx[ctx_key] = os.environ[env_key]
+    ctx["under_systemd"] = bool(os.environ.get("INVOCATION_ID")) or ppid == 1
 
     # High load points at "something crushing the box" rather than an external killer.
     with contextlib.suppress(OSError, AttributeError):
@@ -151,10 +136,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
             raw = _read_marker(Path(hermes_home_str) / ".gateway-takeover.json")
             if raw is not None:
                 ctx["takeover_marker"] = raw[:300]
-                ctx["takeover_marker_for_self"] = (
-                    f'"target_pid": {pid}' in raw
-                    or f"'target_pid': {pid}" in raw
-                )
+                ctx["takeover_marker_for_self"] = f'"target_pid": {pid}' in raw or f"'target_pid': {pid}" in raw
             raw = _read_marker(Path(hermes_home_str) / ".gateway-planned-stop.json")
             if raw is not None:
                 ctx["planned_stop_marker"] = raw[:300]
@@ -174,14 +156,13 @@ def spawn_async_diagnostic(
 
     A detached subprocess (own ``timeout`` so a wedged ``ps`` self-cleans) rather
     than a blocking ``ps aux`` in the signal handler, which can freeze the loop >2s
-    on a busy host. Returns the subprocess PID, or ``None`` on failure / Windows.
+    on a busy host. Returns the subprocess PID, or ``None`` on failure / Windows
+    (bash -c is available on every POSIX target; Windows has no ps anyway).
     """
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-
-    # bash -c is available on every POSIX target; Windows has no ps anyway.
     if sys.platform == "win32":
         return None
 
@@ -213,9 +194,7 @@ def spawn_async_diagnostic(
             stdout=fd, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, close_fds=True,
         )
-    except (FileNotFoundError, OSError):
-        with contextlib.suppress(OSError):
-            os.close(fd)
+    except OSError:
         return None
     finally:
         # Subprocess inherited the fd; we can drop our handle.
@@ -227,18 +206,12 @@ def spawn_async_diagnostic(
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
     """Render a shutdown context dict as a single, scannable log line."""
-    sig = ctx.get("signal", "?")
     parent = ctx.get("parent") or {}
-    parent_cmd = parent.get("cmdline", "(unknown)")
-    parent_name = parent.get("name") or "?"
-    parent_pid = parent.get("pid") or "?"
-    under_systemd = "yes" if ctx.get("under_systemd") else "no"
     load = ctx.get("loadavg_1m")
     load_str = f"{load:.2f}" if isinstance(load, (int, float)) else "?"
     extras: List[str] = []
     if ctx.get("takeover_marker") is not None:
-        for_self = ctx.get("takeover_marker_for_self")
-        extras.append(f"takeover_marker_present={'self' if for_self else 'other'}")
+        extras.append(f"takeover_marker_present={'self' if ctx.get('takeover_marker_for_self') else 'other'}")
     if ctx.get("planned_stop_marker") is not None:
         extras.append("planned_stop_marker_present=yes")
     if ctx.get("tracer_pid"):
@@ -246,9 +219,9 @@ def format_context_for_log(ctx: Dict[str, Any]) -> str:
     extras_str = (" " + " ".join(extras)) if extras else ""
     # Parent cmdline is the most useful single signal — log it prominently.
     return (
-        f"signal={sig} under_systemd={under_systemd} parent_pid={parent_pid} "
-        f"parent_name={parent_name} loadavg_1m={load_str}{extras_str} "
-        f"parent_cmdline={parent_cmd!r}"
+        f"signal={ctx.get('signal', '?')} under_systemd={'yes' if ctx.get('under_systemd') else 'no'} "
+        f"parent_pid={parent.get('pid') or '?'} parent_name={parent.get('name') or '?'} "
+        f"loadavg_1m={load_str}{extras_str} parent_cmdline={parent.get('cmdline', '(unknown)')!r}"
     )
 
 
@@ -272,8 +245,7 @@ def check_systemd_timing_alignment(
     when aligned OR undeterminable (not under systemd, no ``systemctl``); otherwise
     a dict with ``timeout_stop_sec``/``drain_timeout``/``expected_min``/``mismatch``.
     """
-    invocation_id = os.environ.get("INVOCATION_ID")
-    if not invocation_id:
+    if not os.environ.get("INVOCATION_ID"):
         return None  # Not running under systemd (or at least not directly)
 
     # /proc/self/cgroup: "0::/user.slice/.../hermes-gateway.service"
@@ -281,40 +253,15 @@ def check_systemd_timing_alignment(
     try:
         with open("/proc/self/cgroup", encoding="utf-8") as fh:
             for line in fh:
-                unit_name = next(
-                    (p for p in reversed(line.strip().split("/")) if p.endswith(".service")), None
-                )
+                unit_name = next((p for p in reversed(line.strip().split("/")) if p.endswith(".service")), None)
                 if unit_name:
                     break
-    except (OSError, FileNotFoundError):
+    except OSError:
         pass
     if not unit_name:
         return None
 
-    # Try --user first (the common case for hermes), then the system manager.
-    timeout_us: Optional[int] = None
-    for flag in (["--user"], []):
-        try:
-            result = subprocess.run(
-                ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=2.0,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            continue
-        if result.returncode != 0:
-            continue
-        # Output: "TimeoutStopUSec=1min 30s" or "TimeoutStopUSec=90000000"
-        for line in result.stdout.splitlines():
-            if line.startswith("TimeoutStopUSec="):
-                value = line.split("=", 1)[1].strip()
-                timeout_us = (
-                    int(value) if value.isdigit() else parse_systemd_duration_to_us(value)
-                )
-                if timeout_us is not None:
-                    break
-        if timeout_us is not None:
-            break
-
+    timeout_us = _systemd_timeout_stop_us(unit_name)
     if timeout_us is None:
         return None
 
@@ -328,6 +275,28 @@ def check_systemd_timing_alignment(
         "expected_min": expected,
         "mismatch": timeout_stop_sec < expected,
     }
+
+
+def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:
+    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' common case), then system."""
+    for flag in (["--user"], []):
+        try:
+            result = subprocess.run(
+                ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode != 0:
+            continue
+        # Output: "TimeoutStopUSec=1min 30s" or "TimeoutStopUSec=90000000"
+        for line in result.stdout.splitlines():
+            if line.startswith("TimeoutStopUSec="):
+                value = line.split("=", 1)[1].strip()
+                timeout_us = int(value) if value.isdigit() else parse_systemd_duration_to_us(value)
+                if timeout_us is not None:
+                    return timeout_us
+    return None
 
 
 def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
