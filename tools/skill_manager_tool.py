@@ -258,25 +258,21 @@ def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
         root = get_default_hermes_root()
     except Exception:
         return matches
-
     _active = _skills_dir()
     active_dir = _active.resolve() if _active.exists() else _active
-
     # Every profile's skills dir EXCEPT the active one (already searched).
     candidates: List[Tuple[str, Path]] = [("default", root / "skills")]
     profiles_root = root / "profiles"
     with suppress(OSError):
         if profiles_root.is_dir():
             candidates += [(e.name, e / "skills") for e in profiles_root.iterdir() if e.is_dir()]
-
     for profile_name, skills_dir in candidates:
         try:
             if skills_dir.resolve() == active_dir or not skills_dir.is_dir():
                 continue
-            for skill_dir in _iter_skill_dirs(skills_dir):
-                if skill_dir.name == name:
-                    matches.append((profile_name, skill_dir))
-                    break  # one match per profile is enough
+            hit = next((d for d in _iter_skill_dirs(skills_dir) if d.name == name), None)
+            if hit is not None:
+                matches.append((profile_name, hit))  # one match per profile is enough
         except (OSError, RuntimeError):
             continue
     return matches
@@ -285,9 +281,7 @@ def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
 def _skill_not_found_error(name: str, suffix: str = "") -> str:
     """Not-found error naming other profiles that hold the skill, plus ``suffix``."""
     from agent.file_safety import _resolve_active_profile_name
-    active = _resolve_active_profile_name()
-    base = f"Skill '{name}' not found in active profile '{active}'."
-
+    base = f"Skill '{name}' not found in active profile '{_resolve_active_profile_name()}'."
     others = _find_skill_in_other_profiles(name)
     if len(others) == 1:
         other_profile, other_path = others[0]
@@ -311,18 +305,18 @@ def _validate_file_path(file_path: str) -> Optional[str]:
 
     if not file_path:
         return "file_path is required."
-    normalized = Path(file_path)
+    parts = Path(file_path).parts
     # Traversal first, so the SKILL.md exception is unreachable by a traversal-laden path.
     if has_traversal_component(file_path):
         return "Path traversal ('..') is not allowed."
     # SKILL.md lives at the skill root; accept 'SKILL.md' and '<skill>/SKILL.md'.
-    if normalized.name == "SKILL.md" and len(normalized.parts) in (1, 2):
+    if parts and parts[-1] == "SKILL.md" and len(parts) in (1, 2):
         return None
-    if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
+    if not parts or parts[0] not in ALLOWED_SUBDIRS:
         allowed = ", ".join(sorted(ALLOWED_SUBDIRS))
         return f"File must be under one of: {allowed}. Got: '{file_path}'"
-    if len(normalized.parts) < 2:
-        return f"Provide a file path, not just a directory. Example: '{normalized.parts[0]}/myfile.md'"
+    if len(parts) < 2:
+        return f"Provide a file path, not just a directory. Example: '{parts[0]}/myfile.md'"
     return None
 
 
@@ -424,8 +418,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md = skill_dir / "SKILL.md"
     atomic_write_text(skill_md, content, preserve_mode=True, create_mode=0o644)
-    scan_error = _security_scan_skill(skill_dir)
-    if scan_error:
+    if scan_error := _security_scan_skill(skill_dir):
         shutil.rmtree(skill_dir, ignore_errors=True)
         return _err(scan_error)
 
@@ -682,14 +675,11 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
         return None
 
     def _staging(wa):
-        payload = {"action": action, "name": name}
-        payload.update({k: v for k, v in payload_kwargs.items() if v is not None})
-        gist = wa.skill_gist(
-            action, name, content=payload_kwargs.get("content") or "",
-            file_path=payload_kwargs.get("file_path") or "",
-            old_string=payload_kwargs.get("old_string") or "",
-            new_string=payload_kwargs.get("new_string") or "")
-        return payload, gist
+        payload = {"action": action, "name": name,
+                   **{k: v for k, v in payload_kwargs.items() if v is not None}}
+        gist_kw = {k: payload_kwargs.get(k) or ""
+                   for k in ("content", "file_path", "old_string", "new_string")}
+        return payload, wa.skill_gist(action, name, **gist_kw)
 
     return _run_write_gate(_staging)
 
@@ -834,8 +824,7 @@ def skill_manage(
     if operations is not None:
         return _skill_manage_batch(
             operations, default_name=name or None, task_id=task_id, session_id=session_id)
-    preflight = _background_review_preflight(action, name)
-    if preflight is not None:
+    if (preflight := _background_review_preflight(action, name)) is not None:
         return json.dumps(preflight, ensure_ascii=False)
 
     # Approval gate: skills are too large to review inline, so they always stage
@@ -844,8 +833,7 @@ def skill_manage(
         content=content, category=category, file_path=file_path,
         file_content=file_content, old_string=old_string, new_string=new_string,
         replace_all=replace_all, absorbed_into=absorbed_into)
-    gate_result = _apply_skill_write_gate(action, name, **args)
-    if gate_result is not None:
+    if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
 
     # Audit ledger pre-capture: telemetry, not a gate — failures must NEVER block the
@@ -866,8 +854,8 @@ def skill_manage(
             if missing(args[arg]):
                 return tool_error(message, success=False)
         result = handler({"name": name, **args})
-    if isinstance(result, str):
-        return result  # tool_error JSON for argument-shape problems
+        if isinstance(result, str):
+            return result  # tool_error JSON for argument-shape problems (patch)
 
     if result.get("success"):
         _record_success(
