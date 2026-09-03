@@ -36,17 +36,13 @@ def _load_auxiliary_client() -> None:
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
-from tools.vision_tools_image_prep import (  # noqa: F401 — re-exported for tests/image_source
-    _ANTHROPIC_SUPPORTED_MEDIA_TYPES,
+from tools.vision_tools_image_prep import (
     _VISION_MAX_VALIDATED_AGGREGATE_PIXELS,
     _VISION_MAX_VALIDATED_FRAME_COUNT,
     _crop_image_region,
-    _detect_image_mime_type_from_bytes,
     _determine_mime_type,
     _image_exceeds_dimension,
     _normalize_to_supported_image,
-    _rasterize_svg_to_png,
-    _supported_media_types,
     _validate_raster_image_decodable)
 
 logger = logging.getLogger(__name__)
@@ -119,23 +115,10 @@ async def _run_encode_on_cpu_executor(fn, *args, **kwargs):
     return await loop.run_in_executor(_vision_cpu_executor, functools.partial(fn, *args, **kwargs))
 
 
-def _image_url_shape_ok(url: str) -> bool:
-    """HTTP(S) shape check only (scheme, netloc). No DNS. Extension-less CDN URLs pass."""
-    return bool(isinstance(url, str) and url.startswith(("http://", "https://")) and urlparse(url).netloc)
-
-
-def _validate_image_url(url: str) -> bool:
-    """Validate image URL for sync callers and tests (SSRF via sync DNS check)."""
-    if not _image_url_shape_ok(url):
-        return False
-    # Block private/internal addresses to prevent SSRF
-    from tools.url_safety import is_safe_url
-    return is_safe_url(url)
-
-
 async def _validate_image_url_async(url: str) -> bool:
-    """Shape check + SSRF guard with DNS off the event loop."""
-    if not _image_url_shape_ok(url):
+    """HTTP(S) shape check (scheme, netloc; extension-less CDN URLs pass) + SSRF guard with DNS
+    off the event loop."""
+    if not (isinstance(url, str) and url.startswith(("http://", "https://")) and urlparse(url).netloc):
         return False
     from tools.url_safety import async_is_safe_url
     return await async_is_safe_url(url)

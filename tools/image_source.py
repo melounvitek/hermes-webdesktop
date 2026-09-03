@@ -262,7 +262,7 @@ def _finalize(
 ) -> ResolvedImage:
     """Chokepoint: 50MB ingest cap + type check. Images by magic bytes; video (opt-in) by
     extension + mp4 sniff — enough because every downstream consumer re-validates."""
-    from tools.vision_tools import _detect_image_mime_type_from_bytes
+    from tools.vision_tools_image_prep import _detect_image_mime_type_from_bytes
     if len(data) > _MAX_INGEST_BYTES:
         raise SourceTooLarge("media exceeds size limit", src=src, origin=origin)
     sniffed = _detect_image_mime_type_from_bytes(data)
