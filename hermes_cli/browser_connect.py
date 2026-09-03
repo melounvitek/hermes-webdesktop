@@ -177,11 +177,9 @@ UNSUPPORTED_CHANNEL = "__unsupported_channel__"
 
 
 def real_profile_data_dir(browser: str, system: str | None = None) -> str | None:
-    """Return the default user-data-dir for a Chromium ``browser`` on ``system`` (None if unknown).
-
-    Linux tries native ($XDG_CONFIG_HOME), snap and Flatpak; first existing wins, else the native
-    path so the caller's error names it. Darwin/Windows paths are not stat'ed.
-    """
+    """Default user-data-dir for ``browser`` on ``system`` (None if unknown). Linux tries native
+    ($XDG_CONFIG_HOME), snap and Flatpak — first existing wins, else native so the caller's
+    error names it. Darwin/Windows paths are not stat'ed."""
     b = _BROWSER_BY_KEY.get(browser)
     if b is None:
         return None
@@ -227,11 +225,8 @@ def chromium_executable(browser: str, system: str | None = None) -> str | None:
 
 
 def _classify_default(value: str, channels, table, match) -> str | None:
-    """Map an OS default-browser identifier to a canonical key.
-
-    Channels are checked FIRST: a recognized Beta/Dev/Canary identifier must fail closed
-    (UNSUPPORTED_CHANNEL), never fall through to a stable match and drive the stable profile.
-    """
+    """Map an OS default-browser identifier to a canonical key. Channels are checked FIRST: a
+    Beta/Dev/Canary id must fail closed (UNSUPPORTED_CHANNEL), never match the stable profile."""
     if any(match(value, chan) for chan in channels):
         return UNSUPPORTED_CHANNEL
     return next((browser for frag, browser in table if match(value, frag)), None)
@@ -261,12 +256,9 @@ def _run_stdout(argv: list[str]) -> str | None:
 
 
 def _launchservices_https_handler(dump: str) -> str | None:
-    """Return the bundle id registered for the ``https`` URL scheme.
-
-    ``dump`` is ``defaults read … LSHandlers`` output: an array of ``{ … }`` dicts, one per handler.
-    Only the ``LSHandlerURLScheme = https`` entry counts — a browser registered for another scheme
-    or a file type must not be mistaken for the default.
-    """
+    """Bundle id registered for ``https`` in ``defaults read … LSHandlers`` output (an array of
+    ``{ … }`` dicts). Only the ``LSHandlerURLScheme = https`` entry counts — a browser
+    registered for another scheme or a file type must not be mistaken for the default."""
     entries: list[str] = []
     depth, buf = 0, []
     for ch in dump:
@@ -358,11 +350,8 @@ def real_profile_copy_dir(browser: str) -> str:
 
 
 def _last_used_profile(src: str) -> str:
-    """Profile dir Chrome last used (``Local State`` → profile.last_used), else ``Default``.
-
-    The user's signed-in session usually lives in the profile they actually browse (``Profile 6``),
-    not ``Default``; its auth is what gets mirrored into the copy's ``Default``.
-    """
+    """Profile dir Chrome last used (``Local State`` → profile.last_used), else ``Default``. The
+    signed-in session usually lives in the profile actually browsed (``Profile 6``), not Default."""
     try:
         with open(os.path.join(src, "Local State"), encoding="utf-8", errors="replace") as fh:
             state = json.load(fh)
@@ -374,13 +363,11 @@ def _last_used_profile(src: str) -> str:
 
 def _secure_snapshot(path: str, *, contents: bool = False) -> None:
     """Lock down a snapshot dir (or, with ``contents``, everything INSIDE it) as a secret store.
-
-    The snapshot holds the user's Cookies / Login Data, so it gets the same owner-only permissions
-    (managed-mode / NixOS group-share carve-out, HERMES_UID/GID ownership) as every other Hermes
-    secret dir — via ``_secure_dir``/``_secure_file``, not a bespoke chmod. Contents matter too
-    (#96729): ``copy2`` keeps Chrome's 0644 modes and sqlite backups land umask-wide, so cookies
-    were world-readable under the ``HERMES_HOME_MODE`` hatch. Best-effort; never blocks a launch.
-    """
+    It holds the user's Cookies / Login Data, so it gets the same owner-only perms (managed-mode /
+    NixOS group-share carve-out, HERMES_UID/GID) as every Hermes secret dir — via ``_secure_dir``/
+    ``_secure_file``, not a bespoke chmod. Contents matter too (#96729): ``copy2`` keeps Chrome's
+    0644 and sqlite backups land umask-wide, so cookies were world-readable under the
+    ``HERMES_HOME_MODE`` hatch. Best-effort; never blocks a launch."""
     try:
         from hermes_cli.config import _secure_dir, _secure_file
         if not contents:
@@ -403,11 +390,8 @@ _SQLITE_AUTH_DBS = frozenset({"Cookies", "Login Data", "Login Data For Account",
 
 
 def _copy_auth_file(src_file: str, dst_file: str) -> bool:
-    """Copy one auth file, lock-aware; True on success.
-
-    SQLite DBs use the online-backup API (works under a Windows write lock) and fall through to a
-    raw copy if that fails; everything else is a plain copy. Failure only if BOTH fail.
-    """
+    """Copy one auth file, lock-aware; True on success. SQLite DBs use the online-backup API (works
+    under a Windows write lock), falling through to a raw copy; failure only if BOTH fail."""
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
     if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
         # With a live Chrome on macOS, mode=ro WITHOUT immutable=1 can hang connect/backup
@@ -433,10 +417,8 @@ def _copy_auth_file(src_file: str, dst_file: str) -> bool:
 
 
 def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
-    """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it).
-
-    Returns the number of DB auth files that could NOT be copied (0 = clean).
-    """
+    """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
+    returns the number of DB auth files that could NOT be copied (0 = clean)."""
     failed_dbs = 0
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
@@ -452,12 +434,9 @@ _PROFILE_LOCKED_PREFIX = "[profile-locked] "
 
 
 def _profile_is_locked(src: str, source_profile: str) -> bool:
-    """True when the active profile's cookie DB can't be opened (browser running).
-
-    On Windows a running browser holds Cookies deny-all, so open raises PermissionError. This FAST
-    probe fails closed BEFORE the heavy snapshot so a locked profile can never hang the launch.
-    POSIX has no mandatory locking, so it returns False.
-    """
+    """True when the active profile's cookie DB can't be opened (browser running). On Windows a
+    running browser holds Cookies deny-all (PermissionError); this FAST probe fails closed BEFORE
+    the heavy snapshot so a locked profile never hangs the launch. Always False on POSIX."""
     db = _first_present(  # modern Network/ location first
         os.path.join(src, source_profile, rel)
         for rel in (os.path.join("Network", "Cookies"), "Cookies"))
@@ -482,21 +461,16 @@ def _browser_setting(key: str):
 
 
 def _real_profile_pin() -> str | None:
-    """Pinned source profile dir name from ``browser.real_profile_pin``.
-
-    Unset, the snapshot follows Chrome's ``profile.last_used``, which with work + personal profiles
-    can hand the agent the wrong identity. When set (``"Profile 2"``) that profile is ALWAYS copied.
+    """Pinned source profile dir name from ``browser.real_profile_pin`` (ALWAYS copied when set).
+    Unset, the snapshot follows ``profile.last_used``, which can hand the agent the wrong identity.
     """
     pin = _browser_setting("real_profile_pin")
     return pin.strip() if isinstance(pin, str) and pin.strip() else None
 
 
 def _resolve_source_profile(src: str) -> tuple[str | None, str | None]:
-    """Return ``(profile_dir_name, error)``: the pin if set, else last_used.
-
-    A pin that does not exist under ``src`` FAILS CLOSED — falling back to last_used would
-    silently browse as the wrong identity, the exact wrong-principal bug the pin prevents.
-    """
+    """``(profile_dir_name, error)``: the pin if set, else last_used. A pin missing under ``src``
+    FAILS CLOSED — falling back would silently browse as the wrong identity (wrong-principal)."""
     pin = _real_profile_pin()
     if pin:
         if os.path.isdir(os.path.join(src, pin)):
@@ -515,11 +489,9 @@ def _real_profile_autoclose() -> bool:
 
 
 def _processes_holding_profile(src: str):
-    """Yield psutil.Process instances holding the user-data-dir ``src`` open.
-
-    A process qualifies only when it's a Chromium-family binary AND its cmdline references THIS
-    user-data-dir — never an unrelated same-PID process. Unreadable cmdline is skipped.
-    """
+    """Yield psutil.Process instances holding ``src`` open: Chromium-family binaries whose
+    cmdline references THIS user-data-dir — never an unrelated same-PID process. An unreadable
+    cmdline is skipped."""
     try:
         import psutil
     except ImportError:  # hard dep; defensive
@@ -545,11 +517,8 @@ def _processes_holding_profile(src: str):
 
 
 def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool, str]:
-    """Terminate the browser process tree holding ``src`` and wait for release.
-
-    CONSENTED, DESTRUCTIVE: terminates (then kills) every Chromium-family process bound to this
-    exact user-data-dir, losing unsaved tab/form state. Only call after the user agreed.
-    """
+    """Terminate the browser process tree holding ``src`` and wait for release. CONSENTED,
+    DESTRUCTIVE (unsaved tab/form state is lost): only call after the user agreed."""
     try:
         import psutil
     except ImportError:
@@ -586,11 +555,9 @@ def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool
 
 def _sync_local_state(src: str, dst: str, source_profile: str) -> None:
     """Copy ``Local State`` into the snapshot and rewrite it for the single ``Default`` profile.
-
-    A verbatim Local State still names the SOURCE profile (last_used="Profile 2", info_cache of
-    Profile 2/4/7) that the copy doesn't contain, so Chrome would start SIGNED OUT. CRITICAL: the
-    Default entry must be the SOURCE profile's identity (name + account) because the Default DIR
-    holds its cookies; a mismatch makes Chrome demand "Continue as <name>" on every launch.
+    Verbatim it names the SOURCE profile (last_used="Profile 2", info_cache of 2/4/7) the copy
+    lacks, so Chrome would start SIGNED OUT. CRITICAL: Default's entry must be the SOURCE profile's
+    identity (Default DIR holds its cookies), else Chrome demands "Continue as <name>" each launch.
     """
     ls_src, ls_dst = os.path.join(src, "Local State"), os.path.join(dst, "Local State")
     if os.path.isfile(ls_src):
@@ -618,10 +585,8 @@ def _sync_local_state(src: str, dst: str, source_profile: str) -> None:
 
 def _locked_profile_error(browser: str) -> str:
     """Fail-closed message for a locked profile; offers auto-close only when consent arms it.
-
-    NEVER kill from here: closing the user's browser is destructive and must be an explicit,
-    per-attempt, user-approved step. A still-locked retry blocks again — no auto-retry, no loop.
-    """
+    NEVER kill from here: closing the browser is destructive and must be an explicit per-attempt,
+    user-approved step. A still-locked retry blocks again — no auto-retry, no loop."""
     if _real_profile_autoclose():
         msg = (
             f"{browser} is running and has its profile locked, so its login data can't be copied "
@@ -638,11 +603,9 @@ def _locked_profile_error(browser: str) -> str:
 
 
 def _copy_profile_tree(src: str, dst: str, source_profile: str) -> None:
-    """Fresh (or torn-and-rebuilding) copy of the ACTIVE profile dir into the copy's Default.
-
-    Excludes caches AND the SQLite auth DBs (a raw copytree of a file a running Chrome holds open
-    raises on Windows); ``_mirror_profile_auth`` copies the DBs lock-aware instead.
-    """
+    """Fresh (or torn-and-rebuilding) copy of the ACTIVE profile dir into the copy's Default,
+    minus caches AND the SQLite auth DBs (raw copytree of a Chrome-held file raises on Windows);
+    ``_mirror_profile_auth`` copies the DBs lock-aware instead."""
     dst_default = os.path.join(dst, "Default")
     try:
         shutil.rmtree(dst_default, ignore_errors=True)
@@ -662,11 +625,9 @@ def _copy_profile_tree(src: str, dst: str, source_profile: str) -> None:
 
 def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | None, str | None]:
     """Snapshot ``browser``'s real ACTIVE profile into the hermes copy dir; returns ``(dst, err)``.
-
     Copies ``Local State`` plus the active profile's auth files into the copy's ``Default``. The
-    completion marker is written only after a full success, so a torn first copy (disk full,
-    Ctrl+C) never looks "already populated" — it is redone from scratch.
-    """
+    completion marker is written only after full success, so a torn first copy (disk full, Ctrl+C)
+    never looks "already populated" — it is redone from scratch."""
     src = src or real_profile_data_dir(browser)
     if not src or not os.path.isdir(src):
         return None, (
@@ -811,11 +772,8 @@ def discover_local_cdp_url(port: int, timeout: float = 1.0) -> str | None:
 
 
 def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
-    """True when either loopback accepts TCP on ``port``.
-
-    Used AFTER a failed CDP probe to tell "port is free, launch here" from "another application
-    (IDE debugger, dev server) is squatting the port and a launch would fight it".
-    """
+    """True when either loopback accepts TCP on ``port``. Used AFTER a failed CDP probe to tell
+    "port is free, launch here" from "another application is squatting it; a launch would fight"."""
     return any(_tcp_open(host, port, timeout) for host in _LOOPBACK_SOCKET_HOSTS)
 
 
@@ -858,11 +816,8 @@ def _detach_kwargs(system: str) -> dict:
 
 def _wait_for_browser_debug_ready_or_exit(
     proc: subprocess.Popen, port: int, timeout: float = 2.0, interval: float = 0.1) -> str:
-    """Classify a launched browser as "ready", "exited" or "starting".
-
-    The grace window only needs to catch a candidate that exits immediately before exposing the
-    CDP port; slower browsers may still finish starting after "starting" is returned.
-    """
+    """Classify a launched browser as "ready", "exited" or "starting". The grace window only needs
+    to catch a candidate that exits immediately; slower browsers may still finish starting later."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         # Dual-stack: a squatter on the IPv4 loopback can push the browser to bind [::1] only.
@@ -923,11 +878,9 @@ def _read_stderr_tail(path: str) -> str:
 
 def launch_chrome_debug(
     port: int = DEFAULT_BROWSER_CDP_PORT, system: str | None = None) -> ChromeDebugLaunch:
-    """Launch a Chromium-family browser with remote debugging, trying each candidate in turn.
-
-    A candidate that exits before the CDP port opens (crash, singleton forward to an existing
-    instance, bad profile dir) is logged with exit code + stderr tail and the next one is tried.
-    """
+    """Launch a Chromium-family browser with remote debugging, trying each candidate in turn. One
+    that exits before the CDP port opens (crash, singleton forward, bad profile dir) is logged with
+    exit code + stderr tail and the next is tried."""
     system = system or platform.system()
     result = ChromeDebugLaunch()
     candidates = get_chrome_debug_candidates(system)
