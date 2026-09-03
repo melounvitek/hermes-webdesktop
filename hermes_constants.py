@@ -3,6 +3,7 @@
 Import-safe, stdlib-only — importable from anywhere without circular-import risk.
 """
 
+import contextlib
 import os
 import re
 import shutil
@@ -73,11 +74,9 @@ def _warn_profile_fallback_once() -> None:
             f"subprocess spawner should pass HERMES_HOME explicitly "
             f"(see issue #18594)."
         )
-        try:
+        with contextlib.suppress(Exception):
             sys.stderr.write(msg + "\n")
             sys.stderr.flush()
-        except Exception:
-            pass
 
 
 def get_hermes_home() -> Path:
@@ -96,8 +95,7 @@ def hermes_home_key(path: str | Path | None = None) -> str:
     ``strict=False`` so profiles whose directories don't exist yet still get a key.
     """
     candidate = Path(path) if path is not None else get_hermes_home()
-    resolved = candidate.expanduser().resolve(strict=False)
-    return os.path.normcase(str(resolved))
+    return os.path.normcase(str(candidate.expanduser().resolve(strict=False)))
 
 
 def get_process_hermes_home() -> Path:
@@ -282,10 +280,9 @@ def _iter_managed_node_candidates(names: list[str], home: Path | None = None):
 def _first_runnable_managed(names: list[str]) -> tuple[str | None, bool]:
     """Return ``(first runnable candidate, saw a broken one)``."""
     broken = False
-    for candidate in _iter_managed_node_candidates(names):
-        resolved = str(candidate)
-        if node_tool_runnable(resolved):
-            return resolved, broken
+    for candidate in map(str, _iter_managed_node_candidates(names)):
+        if node_tool_runnable(candidate):
+            return candidate, broken
         broken = True
     return None, broken
 
@@ -293,10 +290,8 @@ def _first_runnable_managed(names: list[str]) -> tuple[str | None, bool]:
 def _run_version_probe(argv: list[str], **kwargs):
     """Run a hidden ``--version`` probe; ``None`` when it cannot run."""
     import subprocess
-
     try:
         from hermes_cli._subprocess_compat import windows_hide_flags
-
         return subprocess.run(
             argv, capture_output=True, timeout=10, creationflags=windows_hide_flags(), **kwargs
         )
@@ -473,18 +468,14 @@ def _swap_node_tree(target: Path, staged: Path) -> bool | None:
             return None
         # Rename preserves mtime: touch the backup (best-effort) so a concurrent heal's
         # litter sweep never removes it mid-swap.
-        try:
+        with contextlib.suppress(OSError):
             os.utime(backup, None)
-        except OSError:
-            pass
     try:
         os.replace(str(staged), str(target))
     except OSError:
         if had_live:  # roll the live tree back
-            try:
+            with contextlib.suppress(OSError):
                 os.replace(str(backup), str(target))
-            except OSError:
-                pass
         shutil.rmtree(staged, ignore_errors=True)
         return False
     if had_live:
@@ -531,9 +522,7 @@ def _run_node_bootstrap(func: str, *, timeout: int, **extra_env: str) -> bool:
     """Source ``scripts/lib/node-bootstrap.sh`` and run shell function *func*."""
     if not _NODE_BOOTSTRAP_SCRIPT.is_file():
         return False
-
     import subprocess
-
     try:
         result = subprocess.run(
             ["bash", "-c", f'source "{_NODE_BOOTSTRAP_SCRIPT}" && {func}'],
@@ -718,10 +707,8 @@ def secure_parent_dir(path: Path) -> None:
             "normally stored under the hermes home directory instead.", parent, _INSTALL_ROOT,
         )
         return
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(parent, 0o700)
-    except OSError:
-        pass
 
 
 def _norm_home_path(path: str | None) -> str:
@@ -757,12 +744,9 @@ def _iter_real_home_candidates(env: dict[str, str] | None = None) -> list[str]:
     """Return likely OS-user home candidates in trust order."""
     env = env or {}
     candidates = [_env_get(env, "HERMES_REAL_HOME"), _env_get(env, "HOME")]
-    try:
+    with contextlib.suppress(Exception):
         import pwd
-
         candidates.append(pwd.getpwuid(os.getuid()).pw_dir.strip())  # windows-footgun: ok — POSIX-only module inside try/except
-    except Exception:
-        pass
     candidates.append(_env_get(env, "USERPROFILE"))
     drive, path = _env_get(env, "HOMEDRIVE"), _env_get(env, "HOMEPATH")
     if drive and path:
