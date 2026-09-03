@@ -164,9 +164,7 @@ class PluginLoaderMixin:
                 )
                 return
             register_tools(PluginContext(manifest, self))
-            registered = [t for t in self._plugin_tool_names if t not in before]
-            loaded.tools_registered = registered
-            self._predeclared_tools[lookup_key] = registered
+            registered = _credit()
             logger.debug(
                 "Deferred platform '%s': pre-registered %d client tool(s) %s", lookup_key,
                 len(registered), registered,

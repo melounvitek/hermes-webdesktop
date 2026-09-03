@@ -487,10 +487,9 @@ class PluginContext:
         timeout: float = 30,
     ) -> Dict[str, Any]:
         """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
-        (same trust gates, breaker, reconnect — never a parallel connection). Default-off per-server
-        grant: servers not in ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError``.
-        ``timeout`` clamps to 1–600s. Returns ``{"ok": True, "result"}`` / ``{"ok": False, "error"}``;
-        results over ~64KB are truncated with a marker."""
+        (same trust gates, breaker, reconnect — never a parallel connection). Servers not in
+        ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError`` (default-deny). ``timeout``
+        clamps to 1–600s; results over ~64KB are truncated with a marker."""
         if server not in self._mcp_allowlist(self.plugin_id):
             raise PermissionError(
                 f"Plugin {self.manifest.name!r} is not allowed to call MCP "
@@ -632,10 +631,9 @@ class PluginContext:
         self, name: str, handler: Callable, description: str = "", args_hint: str = "",
         argument_mode: str | None = None,
     ) -> Optional[PluginRegistration]:
-        """Register an in-session slash command (``/name``) for CLI and gateway sessions. Handler:
-        ``fn(raw_args: str) -> str | None`` (sync or async). ``args_hint`` (e.g. ``"<file>"``) lets
-        adapters like Discord surface an argument field; without it the command registers parameterless
-        there but still accepts trailing text as free-form chat."""
+        """Register an in-session slash command (``/name``); handler ``fn(raw_args: str) -> str | None``
+        (sync or async). ``args_hint`` (e.g. ``"<file>"``) lets adapters like Discord surface an argument
+        field; without it the command registers parameterless there but still accepts trailing text."""
         clean = name.lower().strip().lstrip("/").replace(" ", "-")
         if not clean:
             logger.warning(
@@ -775,10 +773,9 @@ class PluginContext:
     ) -> Optional[PluginRegistration]:
         """Register a gateway platform adapter (``adapter_factory(PlatformConfig) -> BasePlatformAdapter``).
         ``check_fn`` is a PASSIVE "deps importable?" probe that must never install (status displays call
-        it freely); pass an ACTIVE installer as ``ensure_deps_fn`` (the gateway calls it from
-        ``create_adapter()`` when ``check_fn`` is False). Extra kwargs (``setup_fn``, ``emoji``,
-        ``allowed_users_env``, ``platform_hint``, ``ensure_deps_fn``) forward to ``PlatformEntry``;
-        unknown keys raise TypeError."""
+        it freely); an ACTIVE installer goes in ``ensure_deps_fn`` (called from ``create_adapter()`` when
+        ``check_fn`` is False). Extra kwargs (``setup_fn``, ``emoji``, ``allowed_users_env``,
+        ``platform_hint``, ``ensure_deps_fn``) forward to ``PlatformEntry``; unknown keys raise TypeError."""
         from gateway.platform_registry import platform_registry, PlatformEntry
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry = PlatformEntry(
@@ -822,13 +819,13 @@ class PluginContext:
         return handle
 
     def register_platform_handler(self, platform: str, factory: Callable) -> None:
-        """Register a native-client handler factory for a gateway platform, invoked at ``connect()`` as
-        ``factory(native, adapter)`` before/as the core handlers register (``adapter`` read-only).
-        ``native``: telegram PTB ``Application``, discord ``commands.Bot``, slack ``AsyncApp``, matrix
-        client, teams ``App``, dingtalk ``DingTalkStreamClient``, line aiohttp ``web.Application``,
-        others ``None``. Keep SDK imports inside the factory; exceptions are logged and the platform
-        still connects. Always scope handlers hooked into first-match dispatch tables so core flows
-        keep working. Raises ``ValueError`` for a non-callable factory or empty platform."""
+        """Register ``factory(native, adapter)``, invoked at ``connect()`` before/as the core handlers
+        register (``adapter`` read-only). ``native``: telegram PTB ``Application``, discord
+        ``commands.Bot``, slack ``AsyncApp``, matrix client, teams ``App``, dingtalk
+        ``DingTalkStreamClient``, line aiohttp ``web.Application``, others ``None``. Keep SDK imports
+        inside the factory; exceptions are logged and the platform still connects. Scope handlers in
+        first-match dispatch tables so core flows keep working. Raises ``ValueError`` when not callable
+        or platform is empty."""
         if not callable(factory):
             raise self._refuse("a platform handler factory with a non-callable factory")
         key = (platform or "").strip().lower()
@@ -843,10 +840,9 @@ class PluginContext:
         )
 
     def register_telegram_handler(self, factory: Callable) -> None:
-        """Alias of ``register_platform_handler("telegram", factory)``: ``factory(application,
-        adapter)`` runs before the core handlers. PTB dispatches only the FIRST matching handler per
-        group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
-        ``pattern=`` or you swallow the core button flows. Raises ``ValueError`` if not callable."""
+        """``register_platform_handler("telegram", factory)``. PTB dispatches only the FIRST matching
+        handler per group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
+        ``pattern=`` or you swallow the core button flows."""
         self.register_platform_handler("telegram", factory)
 
     @_serialized_replacement
@@ -855,10 +851,9 @@ class PluginContext:
         defaults: Optional[Dict[str, Any]] = None,
     ) -> PluginRegistration:
         """Register an auxiliary LLM task with its own ``auxiliary.<key>`` config block (picker entry,
-        ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``key`` is snake_case
-        and must not shadow a built-in task; ``defaults`` may override
-        provider/model/base_url/api_key/timeout/extra_body (unknown keys preserved verbatim). Raises
-        ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
+        ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``defaults`` may
+        override provider/model/base_url/api_key/timeout/extra_body (unknown keys kept verbatim).
+        Raises ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
         if not key or not isinstance(key, str):
             raise ValueError(
                 f"Plugin '{self.manifest.name}' tried to register auxiliary task with invalid key {key!r}"
@@ -1927,10 +1922,9 @@ def get_plugin_error_classification(
     num_messages: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """Consult ``transform_api_error_classification`` hooks BEFORE the built-in classifier.
-    Run-all-then-pick-first: every callback runs isolated, the first valid result in registration
-    order wins, losing valid results warn (conflicts visible, not shadowed). Returns a sanitized dict
-    (``reason`` -> ``FailoverReason``, hint flags -> bool, ``message`` capped at 500) or ``None``.
-    Privacy: ``error_message``/``error_body`` may be unredacted."""
+    Run-all-then-pick-first: the first valid result in registration order wins, losing valid results
+    warn (conflicts visible, not shadowed). Returns a sanitized dict (``reason`` -> ``FailoverReason``,
+    hint flags -> bool, ``message`` capped at 500) or ``None``. Privacy: inputs may be unredacted."""
     from agent.error_classifier import FailoverReason
     hook_results = invoke_hook(
         "transform_api_error_classification", provider=provider, model=model,
