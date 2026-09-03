@@ -1,25 +1,13 @@
-"""Credits tracking for Nous inference API responses: parses x-nous-credits-*
-(and optional x-nous-tool-pool-*) headers into a validated CreditsState, with
+"""Credits tracking for Nous inference API responses: parses ``x-nous-credits-*``
+(and optional ``x-nous-tool-pool-*``) headers into a validated CreditsState, with
 depletion detection (paid_access), subscription-cap used_fraction, and warn-once
-schema-version gating. The hardened parser used by all live consumers.
-
-Header schema (x-nous-credits-*; each *-micros balance has a *-usd twin holding
-the server's formatted USD string):
-    version                    contract/schema version
-    remaining-micros/-usd      total remaining balance
-    subscription-micros/-usd   subscription balance (SIGNED; may be negative/debt)
-    subscription-limit-*       subscription cap (PAIRED/optional)
-    rollover-micros            rolled-over balance
-    purchased-micros/-usd      purchased balance
-    denominator-kind           "subscription_cap" | "none"
-    paid-access                "true" | "false" (STRING!)
-    disabled-reason            reason string (header omitted when null)
-    as-of-ms                   server-side timestamp (ms epoch)
-Tool-pool headers use a SEPARATE prefix: x-nous-tool-pool-micros (balance) and
-x-nous-tool-pool-gated-off ("true" | "false" STRING!).
-
-Money is handled as micros ints only; *_usd values are preserved verbatim as
-the raw strings the server sent (never re-parsed to float).
+schema-version gating. Header schema (each ``*-micros`` balance has a ``*-usd``
+twin holding the server's formatted USD string): version, remaining, subscription
+(SIGNED; may be debt), subscription-limit (PAIRED/optional), rollover, purchased,
+denominator-kind ("subscription_cap" | "none"), paid-access ("true"|"false" STRING),
+disabled-reason (omitted when null), as-of-ms. Tool-pool headers: x-nous-tool-pool-micros,
+x-nous-tool-pool-gated-off ("true"|"false" STRING). Money is micros ints only;
+``*_usd`` strings are preserved verbatim (never re-parsed to float).
 """
 
 from __future__ import annotations
@@ -29,7 +17,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from utils import is_truthy_value
 
@@ -37,14 +25,10 @@ logger = logging.getLogger(__name__)
 
 # Warn-once latch: emit the version-unsupported warning at most once per process.
 _version_warning_emitted: bool = False
-
-# Valid denominator kinds (exhaustive set from the API contract).
 _VALID_DENOMINATOR_KINDS = frozenset({"subscription_cap", "none"})
-
 # USD format: optional leading minus, one-or-more digits, dot, exactly 2 digits.
 _USD_RE = re.compile(r"^-?\d+\.\d{2}$")
-
-_SENTINEL = object()  # singleton sentinel for "parse failed"
+_SENTINEL = object()  # "parse failed"
 
 
 def _safe_int(value: Any) -> Any:
@@ -59,7 +43,6 @@ def _safe_int(value: Any) -> Any:
 
 
 def _validate_usd(value: Optional[str]) -> bool:
-    """Return True iff value is a non-None string matching ^-?\\d+\\.\\d{2}$."""
     return value is not None and bool(_USD_RE.match(value))
 
 
@@ -96,13 +79,13 @@ class CreditsState:
 
     @property
     def depleted(self) -> bool:
-        """Keyed off ``paid_access == False`` ONLY — never ``remaining_micros == 0``,
-        a false positive when the balance is zero but access is live (renewal pending)."""
+        """Keyed off ``paid_access == False`` ONLY — ``remaining_micros == 0`` is a
+        false positive when the balance is zero but access is live (renewal pending)."""
         return not self.paid_access
 
     @property
     def used_fraction(self) -> Optional[float]:
-        """Fraction of the subscription cap consumed, in [0.0, 1.0]; None without a
+        """Fraction of the subscription cap consumed in [0.0, 1.0]; None without a
         computable denominator. Guarded on the LIMIT FIELD (the real denominator),
         not ``denominator_kind`` (metadata)."""
         if not isinstance(self.subscription_limit_micros, int) or self.subscription_limit_micros <= 0:
@@ -118,7 +101,7 @@ CREDITS_RESTORED_TTL_MS = 8000     # the only TTL notice in v1 (depletion-recove
 
 # Usage-gauge bands (ascending): (threshold_fraction, level, label_pct). One
 # escalating line showing the HIGHEST band reached (50 → 75 → 90); crossing up
-# replaces it, recovering steps it down. The policy derives everything from it.
+# replaces it, recovering steps it down.
 CREDITS_USAGE_BANDS: tuple[tuple[float, str, int], ...] = ((0.50, "info", 50), (0.75, "warn", 75), (0.90, "warn", 90))
 CREDITS_USAGE_KEY = "credits.usage"  # single key for the escalating usage notice
 
@@ -155,14 +138,13 @@ def _sticky_notice(text: str, level: str, key: str) -> AgentNotice:
 
 
 def is_free_tier_model(model: str, base_url: str = "") -> bool:
-    """Return True when *model* is a Nous free-tier model, using ONLY local data.
+    """True when *model* is a Nous free-tier model, using ONLY local data.
 
     Zero-network signals: (1) ``:free`` suffix — canonical Nous free SKU marker;
     (2) ``stealth/`` prefix — stealth-preview SKUs are free without the suffix
     (naming-convention trust: a PAID ``stealth/`` model would wrongly suppress
     the banner); (3) a PEEK into ``hermes_cli.models``' pricing cache (filled by
-    the model picker; a miss never fetches — gateway sessions never run the
-    picker, so there only 1-2 apply).
+    the model picker; a miss never fetches — gateway sessions never run the picker).
 
     Fail-open to False (depleted notice still shows): a wrong warning is
     recoverable noise; hiding it on a paid model masks a real block.
@@ -178,11 +160,24 @@ def is_free_tier_model(model: str, base_url: str = "") -> bool:
 
         # peek_cached_pricing owns the /v1-suffix and auth-state key details.
         pricing = peek_cached_pricing(base_url)
-        if not pricing:
-            return False
-        return _is_model_free(model, pricing)
+        return bool(pricing) and _is_model_free(model, pricing)
     except Exception:
         return False
+
+
+def _sync_notice(
+    key: str, want: bool, make: Callable[[], AgentNotice], active: set, to_show: list, to_clear: list
+) -> Optional[str]:
+    """Reconcile one keyed sticky notice; returns ``"shown"``, ``"cleared"`` or None."""
+    if want and key not in active:
+        to_show.append(make())
+        active.add(key)
+        return "shown"
+    if key in active and not want:
+        to_clear.append(key)
+        active.discard(key)
+        return "cleared"
+    return None
 
 
 def evaluate_credits_notices(
@@ -201,43 +196,35 @@ def evaluate_credits_notices(
     to_show: list[AgentNotice] = []
     to_clear: list[str] = []
     uf = state.used_fraction
+    active = latch["active"]
 
     # Crossing latch: band notices fire only once uf was observed below the LOWEST
     # band, so a session opening mid-range doesn't fire on its first observation
     # (the cold-start seed primes this when it WANTS an open-high warning).
     if uf is not None and uf < CREDITS_USAGE_BANDS[0][0]:
         latch["seen_below_90"] = True
-
     # Grant-spent gate: fires only after this session OBSERVED the grant unspent
     # (≥1¢). Opening at grant-spent is a steady STATE (/usage carries it), not an
     # event. Unlike seen_below_90, seeds must NOT prime this gate.
     if uf is not None and uf < 1.0 and state.subscription_micros >= GRANT_UNSPENT_MIN_MICROS:
         latch["seen_grant_unspent"] = True
-    active = latch["active"]
 
     # Highest band reached (ascending → last match wins); None below all.
+    # Top-up suppression: with purchased credits the cap gauge is the wrong
+    # denominator ("90% used" on $50 of top-up is noise; it used to stick
+    # PERMANENTLY beside grant_spent at >=100%). grant_spent covers the
+    # cap-reached case; a mid-session top-up flips current_band → None and the
+    # clear path removes the band line.
     current_band: Optional[tuple[float, str, int]] = None
-    if uf is not None:
+    if uf is not None and state.purchased_micros <= 0:
         for band in CREDITS_USAGE_BANDS:
             if uf >= band[0]:
                 current_band = band
-    # Top-up suppression: with purchased credits the cap gauge is the wrong
-    # denominator ("90% used" on $50 of top-up is noise; it used to stick
-    # PERMANENTLY beside grant_spent at >=100%). grant_spent below covers the
-    # cap-reached case; a mid-session top-up flips current_band → None and the
-    # clear path removes the band line.
-    if state.purchased_micros > 0:
-        current_band = None
-    grant_cond = (
-        state.denominator_kind == "subscription_cap" and uf is not None and uf >= 1.0 and state.purchased_micros > 0
-    )
-    depleted_cond = not state.paid_access
 
     # ── usage gauge: highest crossed band only; replace on band change (climb or
     # step-down); clear below the lowest band or when the denominator vanishes.
-    shown_band = latch.get("usage_band")
     target_band = current_band[2] if (current_band and latch["seen_below_90"]) else None
-    if target_band != shown_band:
+    if target_band != latch.get("usage_band"):
         if CREDITS_USAGE_KEY in active:
             to_clear.append(CREDITS_USAGE_KEY)
             active.discard(CREDITS_USAGE_KEY)
@@ -245,15 +232,13 @@ def evaluate_credits_notices(
             # Absolute dollars used (a bare "N%" is only meaningful against a Nous
             # cap): cap − remaining in micros, clamped [0, cap]; "$?" if a producer
             # set the limit without its *_usd. Re-emits on band change only.
-            _cap_usd = state.subscription_limit_usd or "?"
-            _level = current_band[1]  # type: ignore[index]  (current_band set when target_band set)
-            _lim = state.subscription_limit_micros or 0
-            _used_micros = max(0, min(_lim, _lim - state.subscription_micros))
-            _used_usd = f"{_used_micros / 1_000_000:.2f}" if _lim else "?"
-            _glyph = "⚠" if _level == "warn" else "•"
-            to_show.append(
-                _sticky_notice(f"{_glyph} You've used ${_used_usd} of your ${_cap_usd} cap", _level, CREDITS_USAGE_KEY)
-            )
+            level = current_band[1]  # type: ignore[index]  (current_band set when target_band set)
+            lim = state.subscription_limit_micros or 0
+            used_usd = f"{max(0, min(lim, lim - state.subscription_micros)) / 1_000_000:.2f}" if lim else "?"
+            glyph = "⚠" if level == "warn" else "•"
+            to_show.append(_sticky_notice(
+                f"{glyph} You've used ${used_usd} of your ${state.subscription_limit_usd or '?'} cap", level, CREDITS_USAGE_KEY
+            ))
             active.add(CREDITS_USAGE_KEY)
         latch["usage_band"] = target_band
 
@@ -261,50 +246,60 @@ def evaluate_credits_notices(
     # announcement per crossing. A header flicker (uf → None → 1.0) clears the
     # line but cannot re-announce; only a renewal re-opening the gate (fresh ≥1¢
     # observation) arms the next. .get(): default closed for hand-built latches.
-    if grant_cond and "credits.grant_spent" not in active and latch.get("seen_grant_unspent", False):
-        to_show.append(
-            _sticky_notice(f"• Grant spent · ${state.purchased_usd} top-up left", "info", "credits.grant_spent")
-        )
-        active.add("credits.grant_spent")
+    grant_cond = (
+        state.denominator_kind == "subscription_cap" and uf is not None and uf >= 1.0 and state.purchased_micros > 0
+    )
+    if _sync_notice(
+        "credits.grant_spent", grant_cond and latch.get("seen_grant_unspent", False),
+        lambda: _sticky_notice(f"• Grant spent · ${state.purchased_usd} top-up left", "info", "credits.grant_spent"),
+        active, to_show, to_clear,
+    ) == "shown":
         latch["seen_grant_unspent"] = False
-    elif "credits.grant_spent" in active and not grant_cond:
-        to_clear.append("credits.grant_spent")
-        active.discard("credits.grant_spent")
 
     # ── depleted: suppressed while the model is free (inference still works).
-    show_depleted = depleted_cond and not model_is_free
-    if show_depleted and "credits.depleted" not in active:
-        to_show.append(_sticky_notice("✕ Credit access paused · run /topup to top up", "error", "credits.depleted"))
-        active.add("credits.depleted")
-    elif "credits.depleted" in active and not show_depleted:
-        to_clear.append("credits.depleted")
-        active.discard("credits.depleted")
-        if not depleted_cond:
-            # Genuine recovery only — switching to a free model while still
-            # depleted must NOT claim access was restored.
-            to_show.append(AgentNotice(
-                text="✓ Credit access restored", level="success", kind="ttl",
-                ttl_ms=CREDITS_RESTORED_TTL_MS, key="credits.restored", id="credits.restored",
-            ))
+    depleted_cond = not state.paid_access
+    if _sync_notice(
+        "credits.depleted", depleted_cond and not model_is_free,
+        lambda: _sticky_notice("✕ Credit access paused · run /topup to top up", "error", "credits.depleted"),
+        active, to_show, to_clear,
+    ) == "cleared" and not depleted_cond:
+        # Genuine recovery only — switching to a free model while still
+        # depleted must NOT claim access was restored.
+        to_show.append(AgentNotice(
+            text="✓ Credit access restored", level="success", kind="ttl",
+            ttl_ms=CREDITS_RESTORED_TTL_MS, key="credits.restored", id="credits.restored",
+        ))
     return (to_show, to_clear)
 
 
-# (field, header, signed) — required micros fields; only subscription may be negative.
-_MICROS_FIELDS: tuple[tuple[str, str, bool], ...] = (
-    ("remaining_micros", "x-nous-credits-remaining-micros", False),
-    ("subscription_micros", "x-nous-credits-subscription-micros", True),
-    ("rollover_micros", "x-nous-credits-rollover-micros", False),
-    ("purchased_micros", "x-nous-credits-purchased-micros", False), ("as_of_ms", "x-nous-credits-as-of-ms", False),
+# Header field table: (field, header, kind). micros: required, non-negative unless
+# "signed" (only subscription may be negative). usd: required ^-?\d+\.\d{2}$.
+# bool: optional "true"/"false" STRING flag; the tuple's 4th item is the default.
+_HEADER_FIELDS: tuple[tuple, ...] = (
+    ("remaining_micros", "x-nous-credits-remaining-micros", "micros"),
+    ("subscription_micros", "x-nous-credits-subscription-micros", "signed"),
+    ("rollover_micros", "x-nous-credits-rollover-micros", "micros"),
+    ("purchased_micros", "x-nous-credits-purchased-micros", "micros"),
+    ("as_of_ms", "x-nous-credits-as-of-ms", "micros"),
+    ("remaining_usd", "x-nous-credits-remaining-usd", "usd"),
+    ("subscription_usd", "x-nous-credits-subscription-usd", "usd"),
+    ("purchased_usd", "x-nous-credits-purchased-usd", "usd"),
+    ("paid_access", "x-nous-credits-paid-access", "bool", True),  # absent → fail-open (assume access)
+    ("tool_pool_gated_off", "x-nous-tool-pool-gated-off", "bool", False),
 )
-_USD_FIELDS: tuple[tuple[str, str], ...] = (
-    ("remaining_usd", "x-nous-credits-remaining-usd"), ("subscription_usd", "x-nous-credits-subscription-usd"),
-    ("purchased_usd", "x-nous-credits-purchased-usd"),
-)
-# (field, header, default-when-absent) — "true"/"false" (case-insensitive) STRING flags.
-_BOOL_FIELDS: tuple[tuple[str, str, bool], ...] = (
-    ("paid_access", "x-nous-credits-paid-access", True),  # absent → fail-open (assume access)
-    ("tool_pool_gated_off", "x-nous-tool-pool-gated-off", False),
-)
+
+
+def _parse_field(kind: str, raw: Optional[str], default: Any = None) -> Any:
+    """One header value → field value, or ``_SENTINEL`` on a contract violation."""
+    if kind in ("micros", "signed"):
+        val = _safe_int(raw)
+        return _SENTINEL if val is _SENTINEL or (kind == "micros" and val < 0) else val
+    if kind == "usd":
+        return raw if _validate_usd(raw) else _SENTINEL
+    if raw is None:
+        return default
+    flag = raw.strip().lower()
+    return _SENTINEL if flag not in ("true", "false") else flag == "true"
 
 
 def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Optional[CreditsState]:
@@ -336,45 +331,29 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
                 logger.warning("credits header version %d unsupported, ignoring — update Hermes", version_val)
             return None
         fields: dict[str, Any] = {}
-        for name, key, signed in _MICROS_FIELDS:
-            val = _safe_int(lowered.get(key))
-            if val is _SENTINEL or (not signed and val < 0):
+        for name, key, kind, *default in _HEADER_FIELDS:
+            val = _parse_field(kind, lowered.get(key), *default)
+            if val is _SENTINEL:
                 return None
             fields[name] = val
-
         # tool_pool_micros is OPTIONAL: absent → 0; present-but-invalid → miss.
-        _tp_raw = lowered.get("x-nous-tool-pool-micros")
-        _tp_val = 0 if _tp_raw is None else _safe_int(_tp_raw)
-        if _tp_val is _SENTINEL or _tp_val < 0:
+        tp_raw = lowered.get("x-nous-tool-pool-micros")
+        tp_val = 0 if tp_raw is None else _parse_field("micros", tp_raw)
+        if tp_val is _SENTINEL:
             return None
-        fields["tool_pool_micros"] = _tp_val
-        for name, key in _USD_FIELDS:
-            val = lowered.get(key, "")
-            if not _validate_usd(val):
-                return None
-            fields[name] = val
-
+        fields["tool_pool_micros"] = tp_val
         # subscription_limit_* PAIRED + OPTIONAL: both present → validate both
         # (any invalid → miss); half-pair or both absent → both None, parse continues.
-        sub_limit_micros_raw = lowered.get("x-nous-credits-subscription-limit-micros")
-        sub_limit_usd_raw = lowered.get("x-nous-credits-subscription-limit-usd")
-        if sub_limit_micros_raw is not None and sub_limit_usd_raw is not None:
-            lm = _safe_int(sub_limit_micros_raw)
-            if lm is _SENTINEL or lm < 0 or not _validate_usd(sub_limit_usd_raw):
+        lim_micros_raw = lowered.get("x-nous-credits-subscription-limit-micros")
+        lim_usd_raw = lowered.get("x-nous-credits-subscription-limit-usd")
+        if lim_micros_raw is not None and lim_usd_raw is not None:
+            lm = _parse_field("micros", lim_micros_raw)
+            if lm is _SENTINEL or not _validate_usd(lim_usd_raw):
                 return None
-            fields["subscription_limit_micros"] = lm
-            fields["subscription_limit_usd"] = sub_limit_usd_raw
+            fields["subscription_limit_micros"], fields["subscription_limit_usd"] = lm, lim_usd_raw
         denominator_kind = lowered.get("x-nous-credits-denominator-kind", "none")
         if denominator_kind not in _VALID_DENOMINATOR_KINDS:
             return None
-        for name, key, default in _BOOL_FIELDS:
-            if key not in lowered:
-                fields[name] = default
-                continue
-            raw = lowered[key].strip().lower()
-            if raw not in ("true", "false"):
-                return None
-            fields[name] = raw == "true"
         return CreditsState(
             version=version_val,
             denominator_kind=denominator_kind,
@@ -426,21 +405,18 @@ _DEV_FIXTURES: dict[str, dict] = {
 
 
 def dev_fixture_credits_state() -> Optional[CreditsState]:
-    """Return a fixture CreditsState for HERMES_DEV_CREDITS_FIXTURE, or None
-    (unknown name / "clear" / "none" / unset → None).
-
-    Hard prod-leak guard: applies ONLY when HERMES_DEV_CREDITS is also on, so a
-    stray fixture env var can never surface fabricated balances on a real account.
-    """
+    """Fixture CreditsState for HERMES_DEV_CREDITS_FIXTURE, or None (unknown name /
+    "clear" / "none" / unset). Hard prod-leak guard: applies ONLY when
+    HERMES_DEV_CREDITS is also on, so a stray fixture env var can never surface
+    fabricated balances on a real account."""
     if not is_truthy_value(os.environ.get("HERMES_DEV_CREDITS")):
         return None
-    raw = os.environ.get("HERMES_DEV_CREDITS_FIXTURE", "").strip()
-    if not raw:
+    name = os.environ.get("HERMES_DEV_CREDITS_FIXTURE", "").strip()
+    if not name:
         return None
-    name = raw
-    if os.path.sep in raw or "/" in raw:  # looks like a path → read the name from the file
+    if os.path.sep in name or "/" in name:  # looks like a path → read the name from the file
         try:
-            with open(raw, "r", encoding="utf-8") as fh:
+            with open(name, "r", encoding="utf-8") as fh:
                 name = fh.read().strip()
         except OSError:
             return None
@@ -450,8 +426,7 @@ def dev_fixture_credits_state() -> Optional[CreditsState]:
     # Stamp what the REAL parser always guarantees so a fixture is field-identical
     # to a parse_credits_headers() result (differential test): version 1, and a
     # valid purchased_usd (a zero-top-up account still carries "0.00").
-    merged = {"version": 1, "purchased_usd": "0.00", **spec}
-    return CreditsState(**merged, from_header=True, captured_at=time.time())
+    return CreditsState(**{"version": 1, "purchased_usd": "0.00", **spec}, from_header=True, captured_at=time.time())
 
 
 def _credits_state_from_account(info) -> Optional[CreditsState]:
@@ -459,26 +434,26 @@ def _credits_state_from_account(info) -> Optional[CreditsState]:
     Float account dollars → micros plus a DISPLAY *_usd (formatting account floats
     is allowed; parsing a server *_usd is not). Fail-open → None."""
     try:
-        _acc = getattr(info, "paid_service_access_info", None)
-        _sub = getattr(info, "subscription", None)
+        acc = getattr(info, "paid_service_access_info", None)
+        sub = getattr(info, "subscription", None)
 
         def _money(dollars) -> tuple[int, str]:  # (micros, display usd); (0, "") when absent
             if isinstance(dollars, (int, float)):
                 return int(round(dollars * 1_000_000)), f"{dollars:.2f}"
             return 0, ""
-        _remaining = _money(getattr(_acc, "total_usable_credits", None))
-        _sub_rem = _money(getattr(_acc, "subscription_credits_remaining", None))
-        _purchased = _money(getattr(_acc, "purchased_credits_remaining", None))
-        _monthly = getattr(_sub, "monthly_credits", None)
-        _cap = _money(_monthly) if isinstance(_monthly, (int, float)) and _monthly > 0 else (None, None)
-        _paid = getattr(info, "paid_service_access", None)
+        remaining = _money(getattr(acc, "total_usable_credits", None))
+        sub_rem = _money(getattr(acc, "subscription_credits_remaining", None))
+        purchased = _money(getattr(acc, "purchased_credits_remaining", None))
+        monthly = getattr(sub, "monthly_credits", None)
+        cap = _money(monthly) if isinstance(monthly, (int, float)) and monthly > 0 else (None, None)
+        paid = getattr(info, "paid_service_access", None)
         return CreditsState(
-            remaining_micros=_remaining[0], remaining_usd=_remaining[1], subscription_micros=_sub_rem[0],
-            subscription_usd=_sub_rem[1], subscription_limit_micros=_cap[0], subscription_limit_usd=_cap[1],
-            purchased_micros=_purchased[0], purchased_usd=_purchased[1],
-            rollover_micros=_money(getattr(_sub, "rollover_credits", None))[0],
-            denominator_kind="subscription_cap" if _cap[0] is not None else "none",
-            paid_access=_paid if isinstance(_paid, bool) else True, from_header=False, captured_at=time.time(),
+            remaining_micros=remaining[0], remaining_usd=remaining[1], subscription_micros=sub_rem[0],
+            subscription_usd=sub_rem[1], subscription_limit_micros=cap[0], subscription_limit_usd=cap[1],
+            purchased_micros=purchased[0], purchased_usd=purchased[1],
+            rollover_micros=_money(getattr(sub, "rollover_credits", None))[0],
+            denominator_kind="subscription_cap" if cap[0] is not None else "none",
+            paid_access=paid if isinstance(paid, bool) else True, from_header=False, captured_at=time.time(),
         )
     except Exception:
         logger.debug("credits ▸ seed account→state mapping failed", exc_info=True)
@@ -492,11 +467,11 @@ def _hydrate_seed_state(agent, state) -> None:
     agent._credits_state = state
     if getattr(agent, "_credits_session_start_micros", None) is None:
         agent._credits_session_start_micros = state.remaining_micros
-    _latch = getattr(agent, "_credits_latch", None)
-    if isinstance(_latch, dict) and state.used_fraction is not None:
+    latch = getattr(agent, "_credits_latch", None)
+    if isinstance(latch, dict) and state.used_fraction is not None:
         # Prime ONLY seen_below_90. Never prime seen_grant_unspent: a seed
         # observing grant-spent is a steady state; priming revives the nag.
-        _latch["seen_below_90"] = True
+        latch["seen_below_90"] = True
     emit = getattr(agent, "_emit_credits_notices", None)
     if callable(emit):
         emit()
@@ -511,9 +486,7 @@ def seed_credits_at_session_start(agent) -> bool:
     Returns True iff it seeded this call. Never raises — credits must never block startup.
     """
     try:
-        if getattr(agent, "provider", "") != "nous":
-            return False
-        if getattr(agent, "_credits_state", None) is not None:
+        if getattr(agent, "provider", "") != "nous" or getattr(agent, "_credits_state", None) is not None:
             return False
         try:
             fixture = dev_fixture_credits_state()

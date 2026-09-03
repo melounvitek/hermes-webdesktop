@@ -53,10 +53,9 @@ def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
 
     # Gemini requires every ``enum`` entry to be a string even for
     # integer/number/boolean types; the declared type stays intact and Gemini
-    # still emits typed tool arguments at runtime.
+    # still emits typed tool arguments at runtime. dict.fromkeys = ordered dedupe.
     enum_val = cleaned.get("enum")
     if isinstance(enum_val, list) and cleaned.get("type") in {"integer", "number", "boolean"}:
-        # dict.fromkeys = order-preserving dedupe.
         stringified = list(dict.fromkeys(v for v in map(_stringify_enum_value, enum_val) if v is not None))
         if stringified:
             cleaned["enum"] = stringified
@@ -71,13 +70,12 @@ def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
     required_val = cleaned.get("required")
     if isinstance(required_val, list):
         props_val = cleaned.get("properties")
-        prop_names = set(props_val.keys()) if isinstance(props_val, dict) else set()
+        prop_names = set(props_val) if isinstance(props_val, dict) else set()
         valid_required = [name for name in required_val if isinstance(name, str) and name in prop_names]
         if not valid_required:
             cleaned.pop("required", None)
         elif len(valid_required) != len(required_val):
             cleaned["required"] = valid_required
-
     return cleaned
 
 
