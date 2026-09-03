@@ -11,6 +11,10 @@ from mem0.configs.llms.openai import OpenAIConfig
 from mem0.llms.base import LLMBase
 from mem0.llms.openai import OpenAILLM
 
+# BaseLlmConfig fields copied into OpenAIConfig; the last two may be absent on older mem0.
+_COPIED_FIELDS = ("model", "temperature", "api_key", "max_tokens", "top_p", "top_k", "enable_vision", "vision_details", "http_client_proxies")
+_OPTIONAL_FIELDS = ("reasoning_effort", "is_reasoning_model")
+
 
 class DirectOpenAILLM(OpenAILLM):
     """Use OpenAI credentials and requests regardless of router environment."""
@@ -21,15 +25,9 @@ class DirectOpenAILLM(OpenAILLM):
         elif isinstance(config, dict):
             config = OpenAIConfig(**config)
         elif isinstance(config, BaseLlmConfig) and not isinstance(config, OpenAIConfig):
-            config = OpenAIConfig(
-                model=config.model, temperature=config.temperature, api_key=config.api_key,
-                max_tokens=config.max_tokens, top_p=config.top_p, top_k=config.top_k,
-                enable_vision=config.enable_vision, vision_details=config.vision_details,
-                reasoning_effort=getattr(config, "reasoning_effort", None),
-                http_client_proxies=config.http_client_proxies,
-                is_reasoning_model=getattr(config, "is_reasoning_model", None),
-            )
-
+            fields = {k: getattr(config, k) for k in _COPIED_FIELDS}
+            fields.update({k: getattr(config, k, None) for k in _OPTIONAL_FIELDS})
+            config = OpenAIConfig(**fields)
         if not config.model:
             config.model = "gpt-5-mini"
         # Configs predating the setup marker: keep the default model reasoning-safe
@@ -39,21 +37,16 @@ class DirectOpenAILLM(OpenAILLM):
         # Bypass OpenAILLM.__init__ (it picks OpenRouter when OPENROUTER_API_KEY is
         # set); LLMBase still owns validation and supported-parameter filtering.
         LLMBase.__init__(self, config)
-
         api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OpenAI API key is required for the Hermes Mem0 OSS provider")
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=self.config.openai_base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1")
 
-    def generate_response(
-        self, messages: List[Dict[str, str]], response_format=None,
-        tools: Optional[List[Dict]] = None, tool_choice: str = "auto", **kwargs,
-    ):
+    def generate_response(self, messages: List[Dict[str, str]], response_format=None, tools: Optional[List[Dict]] = None, tool_choice: str = "auto", **kwargs):
         params = self._get_supported_params(messages=messages, **kwargs)
         params.update({"model": self.config.model, "messages": messages})
-        # No OpenRouter-only fields; ``store`` is opt-in so OpenAI-compatible
-        # endpoints never receive unknown fields.
+        # No OpenRouter-only fields; ``store`` is opt-in so OpenAI-compatible endpoints never receive unknown fields.
         if self.config.store is not None:
             params["store"] = self.config.store
         if response_format:
