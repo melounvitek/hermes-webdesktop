@@ -480,9 +480,11 @@ def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
         return None, None
     max_x = max_y = 0
     for e in elements:
-        with contextlib.suppress(TypeError, ValueError):
+        try:
             x, y, w, h = e.bounds
-            max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
+        except (TypeError, ValueError):
+            continue
+        max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
     if max_x <= image_width * 1.05 and max_y <= image_height * 1.05:
         return None, None
     note = (f"element bounds are in native desktop coordinates (extend to ~{max_x}x{max_y}), "
