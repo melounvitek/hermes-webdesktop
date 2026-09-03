@@ -119,13 +119,8 @@ def _response_finish_reason(response: Any) -> str:
     Returns ``""`` when absent/unreadable."""
     try:
         if isinstance(response, dict):
-            choices = response.get("choices") or [{}]
-            first = choices[0] if choices else {}
-            reason = (
-                first.get("finish_reason")
-                if isinstance(first, dict)
-                else getattr(first, "finish_reason", None)
-            )
+            first = (response.get("choices") or [{}])[0]
+            reason = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
         else:
             choices = getattr(response, "choices", None) or []
             reason = getattr(choices[0], "finish_reason", None) if choices else None
@@ -150,22 +145,22 @@ def _is_summary_access_or_quota_error(exc: Exception) -> bool:
         UnscopedSecretError = ()  # type: ignore[assignment]
     if UnscopedSecretError and isinstance(exc, UnscopedSecretError):
         return True
-
-    classified = classify_api_error(exc)
-    if classified.reason is FailoverReason.rate_limit:
+    reason = classify_api_error(exc).reason
+    if reason is FailoverReason.rate_limit:
         return False
-    if classified.reason in {FailoverReason.auth, FailoverReason.auth_permanent}:
+    if reason in {FailoverReason.auth, FailoverReason.auth_permanent}:
         return True
-
     err_text = str(exc).lower()
-    if any(marker in err_text for marker in _SUMMARY_MISSING_CREDENTIAL_MARKERS):
-        return True
+    return (
+        any(marker in err_text for marker in _SUMMARY_MISSING_CREDENTIAL_MARKERS)
+        or _exc_status_code(exc) in {401, 402, 403}
+        or any(marker in err_text for marker in _SUMMARY_PERMANENT_QUOTA_MARKERS)
+    )
 
-    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
-    if status in {401, 402, 403}:
-        return True
 
-    return any(marker in err_text for marker in _SUMMARY_PERMANENT_QUOTA_MARKERS)
+def _exc_status_code(exc: Exception) -> Any:
+    """HTTP status carried on the exception itself or on its ``response``."""
+    return getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
 
 
 HISTORICAL_TASK_HEADING = "## Historical Task Snapshot"
@@ -255,11 +250,7 @@ def _template_visible_role(message: Any) -> Optional[str]:
     if not isinstance(message, dict):
         return None
     role = message.get("role")
-    if role == "tool":
-        return None
-    if role == "assistant" and message.get("tool_calls"):
-        return None
-    return role
+    return None if role == "tool" or (role == "assistant" and message.get("tool_calls")) else role
 
 
 def _strip_persistence_markers(messages: List[Dict[str, Any]]) -> None:
@@ -294,12 +285,7 @@ def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:
     message — filter items, never pop the key. In place; returns pruned message count."""
     # Active turn = everything after the last real user message; synthetic
     # continuation rows and tool results never mark a turn boundary.
-    last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            last_user_idx = i
-            break
+    last_user_idx = _last_index_with_role(messages, "user")
     if last_user_idx < 0:
         # No user boundary: prune nothing (fail open toward correctness).
         return 0
@@ -338,24 +324,19 @@ _SALVAGE_KEEP_RECENT_TOOLS = 2
 
 
 def _looks_like_compaction_summary(msg: Dict[str, Any], content: str) -> bool:
-    # Only cap standalone handoffs; merged carriers contain live user text.
-    if not content.rstrip().endswith(_SUMMARY_END_MARKER):
-        return False
-    if content.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-        return False
-    # Content heuristics never authorize mutating a live turn: require the private
-    # compressor marker. Tool messages are handled only by the stub/keep-recent pass.
-    if msg.get("role") == "tool":
-        return False
-    if msg.get("role") in ("user", "assistant") and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY):
+    # Only cap standalone handoffs; merged carriers contain live user text. Content heuristics never
+    # authorize mutating a live turn: require the private compressor marker. Tool messages are
+    # handled only by the stub/keep-recent pass.
+    role = msg.get("role")
+    if (
+        not content.rstrip().endswith(_SUMMARY_END_MARKER)
+        or content.startswith(_MERGED_PRIOR_CONTEXT_HEADER)
+        or role == "tool"
+        or (role in ("user", "assistant") and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY))
+    ):
         return False
     head = content[:280]
-    return (
-        bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY))
-        or "CONTEXT COMPACTION" in head
-        or "[CONTEXT COMPACTION]" in head
-        or "Conversation Summary" in head
-    )
+    return bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)) or "CONTEXT COMPACTION" in head or "Conversation Summary" in head
 
 
 def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
@@ -391,21 +372,9 @@ def salvage_grown_transcript(
     if budget <= 0:
         return None
 
-    out: List[Dict[str, Any]] = []
-    tool_indices: List[int] = []
-    last_assistant_idx = -1
-    for msg in candidate:
-        if not isinstance(msg, dict):
-            out.append(msg)
-            continue
-        copied = dict(msg)
-        out.append(copied)
-        role = copied.get("role")
-        if role == "tool":
-            tool_indices.append(len(out) - 1)
-        elif role == "assistant":
-            last_assistant_idx = len(out) - 1
-
+    out = [dict(msg) if isinstance(msg, dict) else msg for msg in candidate]
+    tool_indices = [i for i, msg in enumerate(out) if isinstance(msg, dict) and msg.get("role") == "tool"]
+    last_assistant_idx = _last_index_with_role(out, "assistant")
     salvage_reasoning_keys = _NEWEST_TURN_ONLY_BUDGET_KEYS + ("reasoning_details",)
     keep_tools = set(tool_indices[-_SALVAGE_KEEP_RECENT_TOOLS:])
     for index, msg in enumerate(out):
@@ -424,21 +393,13 @@ def salvage_grown_transcript(
             and len(content) > _SALVAGE_SUMMARY_MAX_CHARS
             and _looks_like_compaction_summary(msg, content)
         ):
-            msg["content"] = (
-                content[:_SALVAGE_SUMMARY_MAX_CHARS].rstrip()
-                + "\n…[summary truncated so compaction can shrink]\n\n"
-                + _SUMMARY_END_MARKER
-            )
+            msg["content"] = (content[:_SALVAGE_SUMMARY_MAX_CHARS].rstrip()
+                              + "\n…[summary truncated so compaction can shrink]\n\n" + _SUMMARY_END_MARKER)
     _prune_stale_reasoning_replay(out)
-
     if estimate_messages_tokens_rough(out) >= budget:
         _salvage_reduce_todo_snapshot(out)
-
-    if not any(isinstance(message, dict) and message.get("role") == "user" for message in out):
-        return None
-    if estimate_messages_tokens_rough(out) < budget:
-        return out
-    return None
+    has_user = any(isinstance(message, dict) and message.get("role") == "user" for message in out)
+    return out if has_user and estimate_messages_tokens_rough(out) < budget else None
 
 
 # Exact wire text of every shipped prefix, newest-first; stale directives must
@@ -565,16 +526,12 @@ class _SummaryFailureKind:
 
 def _classify_summary_failure(e: Exception) -> _SummaryFailureKind:
     """Classify a summary-call exception by status code / message shape."""
-    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    status = _exc_status_code(e)
     err = str(e).lower()
     return _SummaryFailureKind(
         # Permanent-looking error on a distinct summary model: fall back to main instead of cooldown.
-        model_not_found=(
-            status in {404, 503}
-            or "model_not_found" in err
-            or "does not exist" in err
-            or "no available channel" in err
-        ),
+        model_not_found=status in {404, 503}
+        or any(m in err for m in ("model_not_found", "does not exist", "no available channel")),
         timeout=status in {408, 429, 502, 504} or "timeout" in err or "timed out" in err,
         # Malformed/non-JSON bodies (HTML 502 as application/json) surface as JSONDecodeError or
         # APIResponseValidationError "expecting value"; treat as transient.
@@ -583,10 +540,8 @@ def _classify_summary_failure(e: Exception) -> _SummaryFailureKind:
         streaming_closed=_is_connection_error(e),
         # HTTP 200 with empty body from a degraded provider, plus the sibling "no usable response"
         # shapes from _validate_llm_response.
-        empty_content=isinstance(e, RuntimeError) and (
-            "empty content" in err
-            or "llm returned none response" in err
-            or "llm returned invalid response" in err
+        empty_content=isinstance(e, RuntimeError) and any(
+            m in err for m in ("empty content", "llm returned none response", "llm returned invalid response")
         ),
         # Truncated summary: one main-model retry, then ABORT preserving the session.
         truncated=isinstance(e, RuntimeError) and _TRUNCATED_SUMMARY_MARKER in err,
@@ -670,15 +625,8 @@ def _is_clarify_non_response_sentinel(response: Any) -> bool:
     For lists, ANY sentinel item poisons the whole response: real producers only emit scalar sentinels,
     so a mixed list is forged/corrupt content — fall back to the generic path (may lose info, never
     misattributes a user answer)."""
-    if isinstance(response, str):
-        return response.lstrip().startswith(_CLARIFY_NON_RESPONSE_PREFIXES)
-    if isinstance(response, list):
-        return any(
-            isinstance(item, str)
-            and item.lstrip().startswith(_CLARIFY_NON_RESPONSE_PREFIXES)
-            for item in response
-        )
-    return False
+    items = [response] if isinstance(response, str) else response if isinstance(response, list) else ()
+    return any(isinstance(s, str) and s.lstrip().startswith(_CLARIFY_NON_RESPONSE_PREFIXES) for s in items)
 
 
 # Ghost-skill defense: the ONE canonical prune marker; emit sites and presence
@@ -706,45 +654,26 @@ _SKILL_PRUNED_MARKER_RE = re.compile(
 
 def _extract_pruned_skill_names(text: str) -> list[str]:
     """Return skill names referenced by prune markers in *text*, in order."""
-    names: list[str] = []
-    for match in _SKILL_PRUNED_MARKER_RE.finditer(text or ""):
-        name = match.group(1)
-        if name not in names:
-            names.append(name)
-    return names
+    return list(dict.fromkeys(m.group(1) for m in _SKILL_PRUNED_MARKER_RE.finditer(text or "")))
 
 
 def _collect_ghosted_skill_names(turns: List[Dict[str, Any]]) -> list[str]:
     """Skill names whose instructions are about to be lost in compaction.
 
     Covers both already-demoted ``skill_view`` rows and raw, never-demoted bodies."""
-    names: list[str] = []
-
-    def _add(name: str) -> None:
-        if name and name not in names:
-            names.append(name)
-
     call_id_to_skill: dict[str, str] = {}
     for idx, skill in _skill_view_call_sites(turns):
-        msg = turns[idx]
-        for tc in msg.get("tool_calls") or []:
-            tc_fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
-            tc_name = tc_fn.get("name", "") if isinstance(tc_fn, dict) else getattr(tc_fn, "name", "")
-            if tc_name != "skill_view":
-                continue
-            cid = tc.get("id", "") if isinstance(tc, dict) else (getattr(tc, "id", "") or "")
-            if cid:
+        for tc in turns[idx].get("tool_calls") or []:
+            cid = _tc_get(tc, "id")
+            if cid and _tc_get(_tc_get(tc, "function", {}), "name") == "skill_view":
                 call_id_to_skill[cid] = skill
+    names: list[str] = []
     for msg in turns:
         content = msg.get("content")
-        text = content if isinstance(content, str) else _content_text_for_contains(content)
-        for name in _extract_pruned_skill_names(text):
-            _add(name)
+        names += _extract_pruned_skill_names(_content_text_for_contains(content))
         if msg.get("role") == "tool" and isinstance(content, str) and len(content) > _SKILL_VIEW_PRUNE_MIN_CHARS:
-            skill = call_id_to_skill.get(str(msg.get("tool_call_id") or ""))
-            if skill:
-                _add(skill)
-    return names
+            names.append(call_id_to_skill.get(str(msg.get("tool_call_id") or ""), ""))
+    return [name for name in dict.fromkeys(names) if name]
 
 
 _PRUNED_SKILLS_SECTION_HEADING = "## Pruned Skills"
@@ -755,15 +684,12 @@ def _reinject_pruned_skill_markers(summary: str, skill_names: list[str]) -> str:
 
     Presence is checked against the canonical marker string; the appended block is plain body text (no
     handoff prefix/scaffolding) and is redacted like all others."""
-    if not skill_names:
-        return summary
-    missing = [name for name in skill_names if _skill_pruned_marker(name) not in summary]
+    missing = [_skill_pruned_marker(name) for name in skill_names if _skill_pruned_marker(name) not in summary]
     if not missing:
         return summary
-    lines = [_skill_pruned_marker(name) for name in missing]
     block = (
         "\n\n" + _PRUNED_SKILLS_SECTION_HEADING + "\n"
-        + "\n".join(lines)
+        + "\n".join(missing)
         + "\n(The listed skills' instructions were pruned during context "
         "compression. Reload with the skill_view call in each marker before "
         "relying on that skill; one reload per skill is enough — ignore any "
@@ -820,19 +746,16 @@ def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:
     for msg in reversed(turns):
         if msg.get("role") != "user":
             continue
-        content = msg.get("content")
-        if not isinstance(content, str):
-            content = _content_text_for_contains(content)
+        content = _content_text_for_contains(msg.get("content"))
         if _synthetic_user_row(content):
             continue
-        text = content.strip()
-        if len(text) > _LEAN_USER_MESSAGE_MAX_CHARS:
-            text = text[:_LEAN_USER_MESSAGE_MAX_CHARS].rstrip() + " …[truncated]"
         remaining = _LEAN_USER_MESSAGES_BUDGET_CHARS - used
         if remaining <= 0:
             break
-        if len(text) > remaining:
-            text = text[:remaining].rstrip() + " …[truncated]"
+        text = content.strip()
+        cap = min(_LEAN_USER_MESSAGE_MAX_CHARS, remaining)
+        if len(text) > cap:
+            text = text[:cap].rstrip() + " …[truncated]"
         collected.append("> " + text.replace("\n", "\n> "))
         used += len(text)
     if not collected:
@@ -892,12 +815,7 @@ def _build_anchor_index(turns: List[Dict[str, Any]]) -> str:
     """Regex-harvest exact identifiers from the compacted region (LLM-free).
 
     Per-category caps; most-frequent first, ties by last-seen order."""
-    text_parts: list[str] = []
-    for msg in turns:
-        c = msg.get("content")
-        if isinstance(c, str) and c:
-            text_parts.append(c)
-    text = "\n".join(text_parts)
+    text = "\n".join(c for c in (msg.get("content") for msg in turns) if isinstance(c, str) and c)
     if not text:
         return ""
     sections: list[str] = []
@@ -941,24 +859,13 @@ def _skill_view_call_sites(messages: List[Dict[str, Any]]) -> list[tuple[int, st
         if msg.get("role") != "assistant":
             continue
         for tc in msg.get("tool_calls") or []:
-            if isinstance(tc, dict):
-                fn = tc.get("function", {})
-                name = fn.get("name", "") if isinstance(fn, dict) else ""
-                args_str = fn.get("arguments", "") if isinstance(fn, dict) else ""
-            else:
-                fn = getattr(tc, "function", None)
-                name = getattr(fn, "name", "") if fn else ""
-                args_str = getattr(fn, "arguments", "") if fn else ""
-            if name != "skill_view" or not isinstance(args_str, str) or not args_str:
+            fn = _tc_get(tc, "function", {})
+            args_str = _tc_get(fn, "arguments")
+            if _tc_get(fn, "name") != "skill_view" or not isinstance(args_str, str):
                 continue
-            try:
-                args = json.loads(args_str)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(args, dict):
-                skill = args.get("name", "")
-                if isinstance(skill, str) and skill:
-                    sites.append((i, skill))
+            skill = _json_dict(args_str).get("name", "")
+            if isinstance(skill, str) and skill:
+                sites.append((i, skill))
     return sites
 
 
@@ -972,19 +879,14 @@ def _collect_protected_skill_names(messages: List[Dict[str, Any]], prune_boundar
         return set()
     recent_start = max(0, total - _SKILL_PRUNE_RECENT_WINDOW)
     tail_start = max(0, prune_boundary)
-    tail_user_texts: list[str] = []
-    for msg in messages[tail_start:]:
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and content:
-            tail_user_texts.append(content.lower())
-    protected: set[str] = set()
-    for idx, skill in _skill_view_call_sites(messages):
-        key = skill.lower()
-        if idx >= recent_start or idx >= tail_start or any(key in text for text in tail_user_texts):
-            protected.add(key)
-    return protected
+    tail_user_texts = [
+        m["content"].lower() for m in messages[tail_start:]
+        if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"]
+    ]
+    return {
+        skill.lower() for idx, skill in _skill_view_call_sites(messages)
+        if idx >= min(recent_start, tail_start) or any(skill.lower() in text for text in tail_user_texts)
+    }
 
 
 _CHARS_PER_TOKEN = 4
@@ -1043,21 +945,15 @@ def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
         items.append(value)
 
 
+def _tc_get(obj: Any, key: str, default: Any = "") -> Any:
+    """Field of a dict- or object-shaped tool call (or its ``function`` sub-object)."""
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
 def _extract_tool_call_name_and_args(tool_call: Any) -> tuple[str, str]:
     """Return a best-effort ``(name, arguments)`` pair for dict/object tool calls."""
-    if isinstance(tool_call, dict):
-        fn = tool_call.get("function") or {}
-        return str(fn.get("name") or "unknown"), str(fn.get("arguments") or "")
-    fn = getattr(tool_call, "function", None)
-    if fn is None:
-        return "unknown", ""
-    return str(getattr(fn, "name", None) or "unknown"), str(getattr(fn, "arguments", None) or "")
-
-
-def _extract_tool_call_id(tool_call: Any) -> str:
-    if isinstance(tool_call, dict):
-        return str(tool_call.get("id") or "")
-    return str(getattr(tool_call, "id", "") or "")
+    fn = _tc_get(tool_call, "function") or {}
+    return str(_tc_get(fn, "name") or "unknown"), str(_tc_get(fn, "arguments") or "")
 
 
 def _tool_calls_by_id(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
@@ -1067,14 +963,8 @@ def _tool_calls_by_id(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
         if msg.get("role") != "assistant":
             continue
         for tc in msg.get("tool_calls") or []:
-            if isinstance(tc, dict):
-                fn = tc.get("function", {})
-                out[tc.get("id", "")] = (fn.get("name", "unknown"), fn.get("arguments", ""))
-            else:
-                fn = getattr(tc, "function", None)
-                out[getattr(tc, "id", "") or ""] = (
-                    getattr(fn, "name", "unknown") if fn else "unknown", getattr(fn, "arguments", "") if fn else "",
-                )
+            fn = _tc_get(tc, "function", {})
+            out[_tc_get(tc, "id") or ""] = (_tc_get(fn, "name", "unknown"), _tc_get(fn, "arguments"))
     return out
 
 
@@ -1109,13 +999,7 @@ def _compact_fallback_turn(value: Any) -> str:
 
 def _bullets(items: list[str], limit: int = 8) -> str:
     """Markdown bullets of the first ``limit`` distinct non-blank items, or ``None.``."""
-    unique: list[str] = []
-    for item in items:
-        item = item.strip()
-        if item and item not in unique:
-            unique.append(item)
-            if len(unique) >= limit:
-                break
+    unique = [item for item in dict.fromkeys(item.strip() for item in items) if item][:limit]
     return "\n".join(f"- {item}" for item in unique) if unique else "None."
 
 
@@ -1199,9 +1083,7 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     else:
         content_len = _content_length_for_budget(content)
         tokens = content_len // _CHARS_PER_TOKEN + 10
-    for tc in msg.get("tool_calls") or []:
-        if isinstance(tc, dict):
-            tokens += estimate_tokens_rough(str(tc))
+    tokens += sum(estimate_tokens_rough(str(tc)) for tc in msg.get("tool_calls") or [] if isinstance(tc, dict))
     for key in _ALWAYS_REPLAYED_BUDGET_KEYS:
         tokens += _serialized_length_for_budget(msg.get(key)) // _CHARS_PER_TOKEN
     if not charge_stale_thinking:
@@ -1221,15 +1103,14 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     return tokens
 
 
-def _last_assistant_index(messages: "List[Dict[str, Any]]") -> int:
-    """Index of the newest assistant message, or -1 (the one turn whose thinking may replay).
+def _last_index_with_role(messages: "List[Dict[str, Any]]", role: str) -> int:
+    """Index of the newest dict message with ``role``, or -1."""
+    return max((i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == role), default=-1)
 
-    See ``_NEWEST_TURN_ONLY_BUDGET_KEYS``."""
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            return i
-    return -1
+
+def _last_assistant_index(messages: "List[Dict[str, Any]]") -> int:
+    """Newest assistant message index, or -1 (the one turn whose thinking may replay; see ``_NEWEST_TURN_ONLY_BUDGET_KEYS``)."""
+    return _last_index_with_role(messages, "assistant")
 
 
 def _part_text(item: Any) -> Optional[str]:
@@ -1288,13 +1169,14 @@ def _strip_images_from_tool_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]
     content = msg.get("content")
     if isinstance(content, dict) and content.get("_multimodal"):
         summary = content.get("text_summary") or "[screenshot removed to save context]"
-        new_msg = {**msg, "content": f"[screenshot removed] {str(summary)[:200]}"}
-        drop_stale_api_content(new_msg)
-        return new_msg
+        return _rewritten(msg, f"[screenshot removed] {str(summary)[:200]}")
     stripped = _replace_image_parts(content, "[screenshot removed to save context]")
-    if stripped is None:
-        return None
-    new_msg = {**msg, "content": stripped}
+    return None if stripped is None else _rewritten(msg, stripped)
+
+
+def _rewritten(msg: Dict[str, Any], content: Any) -> Dict[str, Any]:
+    """Copy of ``msg`` carrying ``content``; drops the stale ``api_content`` sidecar so replay can't resend it."""
+    new_msg = {**msg, "content": content}
     drop_stale_api_content(new_msg)
     return new_msg
 
@@ -1304,24 +1186,18 @@ def _retire_stale_tool_result_images(result: List[Dict[str, Any]], keep_newest: 
 
     Keeps the newest ``keep_newest`` image-bearing tool messages; user uploads untouched. Mutates
     ``result`` in place; returns the number of messages rewritten."""
-    if keep_newest < 0:
-        keep_newest = 0
-    seen = 0
-    pruned = 0
+    seen = pruned = 0
     for i in range(len(result) - 1, -1, -1):
         msg = result[i]
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        if not _tool_content_has_images(msg.get("content")):
+        if not isinstance(msg, dict) or msg.get("role") != "tool" or not _tool_content_has_images(msg.get("content")):
             continue
         seen += 1
-        if seen <= keep_newest:
+        if seen <= max(keep_newest, 0):
             continue
         new_msg = _strip_images_from_tool_msg(msg)
-        if new_msg is None:
-            continue
-        result[i] = new_msg
-        pruned += 1
+        if new_msg is not None:
+            result[i] = new_msg
+            pruned += 1
     return pruned
 
 
@@ -1336,9 +1212,7 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
 
     def _shrink(obj: Any) -> Any:
         if isinstance(obj, str):
-            if len(obj) > head_chars:
-                return obj[:head_chars] + "...[truncated]"
-            return obj
+            return obj[:head_chars] + "...[truncated]" if len(obj) > head_chars else obj
         if isinstance(obj, dict):
             return {k: _shrink(v) for k, v in obj.items()}
         if isinstance(obj, list):
@@ -1355,16 +1229,12 @@ _IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 
 def _is_image_part(part: Any) -> bool:
     """True if ``part`` is an image block (``image_url``, ``input_image``, or ``image``)."""
-    if not isinstance(part, dict):
-        return False
-    return part.get("type") in _IMAGE_PART_TYPES
+    return isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
 
 
 def _content_has_images(content: Any) -> bool:
     """True if a message's ``content`` is a multimodal list with image parts."""
-    if not isinstance(content, list):
-        return False
-    return any(_is_image_part(p) for p in content)
+    return isinstance(content, list) and any(_is_image_part(p) for p in content)
 
 
 def _strip_images_from_content(content: Any) -> Any:
@@ -1383,11 +1253,8 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
         return messages
 
     def _newest(role: str, has_images) -> int:
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if isinstance(msg, dict) and msg.get("role") == role and has_images(msg.get("content")):
-                return i
-        return -1
+        hits = (i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == role)
+        return max((i for i in hits if has_images(messages[i].get("content"))), default=-1)
 
     # Anchor on image-bearing user messages (not all) so a text follow-up still strips the old image.
     anchor = _newest("user", _content_has_images)
@@ -1400,15 +1267,14 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
         return messages
 
     def _is_stale(index: int, message: Dict[str, Any]) -> bool:
-        # Rule 1: everything before the newest image-bearing user message.
-        if 0 < anchor and index < anchor:
-            return True
-        # Rule 1b: the opening attachment ages out once a newer tool image exists.
-        # Text placeholder keeps the user row non-empty (zero-user-turn guard).
-        if anchor == 0 and index == 0 and tool_anchor > 0:
-            return True
-        # Rule 2: superseded tool-result image, even inside the protected tail.
-        return message.get("role") == "tool" and index != tool_anchor
+        # Rule 1: everything before the newest image-bearing user message. Rule 1b: the opening
+        # attachment ages out once a newer tool image exists (the text placeholder keeps the user row
+        # non-empty for the zero-user-turn guard). Rule 2: superseded tool-result image, even in the tail.
+        return (
+            (0 < anchor and index < anchor)
+            or (anchor == 0 and index == 0 and tool_anchor > 0)
+            or (message.get("role") == "tool" and index != tool_anchor)
+        )
 
     def _stripped(i: int, msg: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(msg, dict) or not _is_stale(i, msg):
@@ -1418,12 +1284,7 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
         # (collapses to text summary, drops stale api_content sidecar).
         if msg.get("role") == "tool" and isinstance(content, dict) and content.get("_multimodal"):
             return _strip_images_from_tool_msg(msg) if _tool_content_has_images(content) else None
-        if not _content_has_images(content):
-            return None
-        new_msg = {**msg, "content": _strip_images_from_content(content)}
-        # Content rewritten: drop the stale api_content sidecar so replay can't resend it.
-        drop_stale_api_content(new_msg)
-        return new_msg
+        return _rewritten(msg, _strip_images_from_content(content)) if _content_has_images(content) else None
 
     result = [(_stripped(i, msg), msg) for i, msg in enumerate(messages)]
     if all(new is None for new, _ in result):
@@ -1447,24 +1308,18 @@ def _image_part_label(part: Dict[str, Any]) -> str:
     """Render a multimodal image part as a short text label for the summarizer.
 
     http(s) URLs are kept as a reusable handle; ``data:`` URLs collapse to ``[image]``."""
-    url = ""
-    if isinstance(part.get("image_url"), dict):
-        url = str(part["image_url"].get("url") or "")
-    elif isinstance(part.get("image_url"), str):
-        url = part["image_url"]
-    elif isinstance(part.get("url"), str):
-        url = part["url"]
-    if url.startswith(("http://", "https://")):
-        return f"[image: {url}]"
-    return "[image]"
+    url = part.get("image_url")
+    if isinstance(url, dict):
+        url = str(url.get("url") or "")
+    elif not isinstance(url, str):
+        url = part.get("url")
+    return f"[image: {url}]" if isinstance(url, str) and url.startswith(("http://", "https://")) else "[image]"
 
 
 def _str_arg(args: dict, key: str, default: str = "") -> str:
     """Coerce a parsed tool arg to ``str`` (models emit non-string values)."""
     val = args.get(key, default)
-    if isinstance(val, str):
-        return val
-    return str(val) if val is not None else default
+    return val if isinstance(val, str) else default if val is None else str(val)
 
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
@@ -1481,10 +1336,8 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
 
 def _sum_terminal(name, args, content, content_len, line_count):
     cmd = _str_arg(args, "command")
-    if len(cmd) > 80:
-        cmd = cmd[:77] + "..."
-    exit_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
-    exit_code = exit_match.group(1) if exit_match else "?"
+    cmd = cmd if len(cmd) <= 80 else cmd[:77] + "..."
+    exit_code = m.group(1) if (m := re.search(r'"exit_code"\s*:\s*(-?\d+)', content)) else "?"
     return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
 
 
@@ -1494,8 +1347,7 @@ def _sum_write_file(name, args, content, content_len, line_count):
 
 
 def _sum_search_files(name, args, content, content_len, line_count):
-    match_count = re.search(r'"total_count"\s*:\s*(\d+)', content)
-    count = match_count.group(1) if match_count else "?"
+    count = m.group(1) if (m := re.search(r'"total_count"\s*:\s*(\d+)', content)) else "?"
     return (
         f"[search_files] {args.get('target', 'content')} search for "
         f"'{args.get('pattern', '?')}' in {args.get('path', '.')} -> {count} matches"
@@ -1518,24 +1370,20 @@ def _sum_web_extract(name, args, content, content_len, line_count):
         first = first.get("url") or first.get("href") or "?"
     elif not isinstance(first, str):
         first = "?"
-    url_desc = first
     if isinstance(urls, list) and len(urls) > 1:
-        url_desc += f" (+{len(urls) - 1} more)"
-    return f"[web_extract] {url_desc} ({content_len:,} chars)"
+        first += f" (+{len(urls) - 1} more)"
+    return f"[web_extract] {first} ({content_len:,} chars)"
 
 
 def _sum_delegate_task(name, args, content, content_len, line_count):
     goal = _str_arg(args, "goal")
-    if len(goal) > 60:
-        goal = goal[:57] + "..."
+    goal = goal if len(goal) <= 60 else goal[:57] + "..."
     return f"[delegate_task] '{goal}' ({content_len:,} chars result)"
 
 
 def _sum_execute_code(name, args, content, content_len, line_count):
     code_str = _str_arg(args, "code")
-    code_preview = code_str[:60].replace("\n", " ")
-    if len(code_str) > 60:
-        code_preview += "..."
+    code_preview = code_str[:60].replace("\n", " ") + ("..." if len(code_str) > 60 else "")
     return f"[execute_code] `{code_preview}` ({line_count} lines output)"
 
 
@@ -1553,27 +1401,15 @@ def _sum_clarify(name, args, content, content_len, line_count):
     # min_prune_chars guard and skips the >=200-char dedup.
     max_summary_chars = _PRUNE_MIN_CHARS - 1
     truncation_marker = "...[truncated]"
-    try:
-        result = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        result = {}
-    response = result.get("user_response") if isinstance(result, dict) else None
-    is_answer_shaped = (
-        isinstance(response, str) and bool(response)
-    ) or (
-        isinstance(response, list)
-        and bool(response)
-        and all(isinstance(item, str) and item for item in response)
+    response = _json_dict(content).get("user_response")
+    is_answer_shaped = (isinstance(response, str) and bool(response)) or (
+        isinstance(response, list) and bool(response) and all(isinstance(s, str) and s for s in response)
     )
     # Timeout / no-user sentinel prose must not be quoted as a user answer.
     if is_answer_shaped and not _is_clarify_non_response_sentinel(response):
         # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
-        serialized_response = (
-            json.dumps(response, ensure_ascii=False)
-            .encode("utf-8", errors="backslashreplace")
-            .decode("utf-8")
-        )
-        summary = response_prefix + serialized_response
+        serialized = json.dumps(response, ensure_ascii=False).encode("utf-8", errors="backslashreplace")
+        summary = response_prefix + serialized.decode("utf-8")
         if len(summary) > max_summary_chars:
             summary = summary[: max_summary_chars - len(truncation_marker)].rstrip() + truncation_marker
         return summary
@@ -1625,14 +1461,18 @@ _TOOL_RESULT_SUMMARIZERS = {
 }
 
 
+def _json_dict(text: Any) -> dict:
+    """Parse ``text`` as a JSON object; ``{}`` for empty, invalid, or non-object input."""
+    try:
+        parsed = json.loads(text) if text else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Build the summary line (unguarded; see ``_summarize_tool_result``)."""
-    try:
-        args = json.loads(tool_args) if tool_args else {}
-    except (json.JSONDecodeError, TypeError):
-        args = {}
-    if not isinstance(args, dict):
-        args = {}
+    args = _json_dict(tool_args)
     content = tool_content or ""
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
@@ -1659,12 +1499,8 @@ def _memory_provider_section(memory_context: str) -> str:
     sanitized = sanitize_memory_context(memory_context)
     if not sanitized:
         return ""
-    serialized = (
-        json.dumps(sanitized, ensure_ascii=False)
-        .replace("&", "\\u0026")
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
-    )
+    serialized = json.dumps(sanitized, ensure_ascii=False)
+    serialized = serialized.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     return (
         "\n\nMEMORY PROVIDER CONTEXT:\n"
         "The block contains one JSON string supplied by a memory provider. "
@@ -2811,11 +2647,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
         if protected_skills and tool_name == "skill_view":
-            try:
-                _args = json.loads(tool_args) if tool_args else {}
-            except (json.JSONDecodeError, TypeError):
-                _args = {}
-            _skill = _args.get("name", "") if isinstance(_args, dict) else ""
+            _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
                 return False
         result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
@@ -3032,7 +2864,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 for tc in msg.get("tool_calls") or []:
                     name, raw_args = _extract_tool_call_name_and_args(tc)
                     args = _redact_compaction_text(raw_args)
-                    call_id = _extract_tool_call_id(tc)
+                    call_id = str(_tc_get(tc, "id") or "")
                     if call_id:
                         call_id_to_tool[call_id] = (name, args)
                     if args:
