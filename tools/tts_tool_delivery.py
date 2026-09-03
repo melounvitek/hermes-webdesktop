@@ -335,10 +335,9 @@ def _sniff_audio_container(path: str) -> str:
     from tools.audio_container import sniff_container
     try:
         with open(path, "rb") as fh:
-            head = fh.read(12)
+            return sniff_container(fh.read(12)) or "unknown"
     except OSError:
         return "unknown"
-    return sniff_container(head) or "unknown"
 
 
 def _repair_ogg_container(file_str: str) -> str:
@@ -351,7 +350,7 @@ def _repair_ogg_container(file_str: str) -> str:
     repaired = _ffmpeg_transcode_to_opus(file_str, file_str)
     if repaired:
         return repaired
-    honest = file_str[:-4] + "." + container
+    honest = f"{file_str[:-4]}.{container}"
     try:
         os.replace(file_str, honest)
     except OSError:

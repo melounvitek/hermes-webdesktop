@@ -89,8 +89,7 @@ def warm_tts_provider(tts_config: Optional[Dict[str, Any]] = None, provider: Opt
     warmer = _local_tts_warmers().get(name)
     if warmer is not None:
         cache = _LOCAL_TTS_MODEL_CACHES.get(name, {})
-        before = len(cache)
-        started = time.monotonic()
+        before, started = len(cache), time.monotonic()
         try:
             warmer(tts_config)
         except Exception as exc:  # engine missing, download failed, bad voice…

@@ -183,8 +183,8 @@ class _StreamerPlayback:
         self._prefetch_sem.acquire()
         chunk_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=self._CHUNK_QUEUE_MAX)
         self._audio_queue.put(chunk_queue)
-        self._prefetch_threads.append(
-            threading.Thread(target=self._consume_to_queue, args=(audio_iter, chunk_queue), daemon=True))
+        self._prefetch_threads.append(threading.Thread(
+            target=self._consume_to_queue, args=(audio_iter, chunk_queue), daemon=True))
         self._prefetch_threads[-1].start()
 
     def _consume_to_queue(self, audio_iter: Iterator[bytes], chunk_queue: "queue.Queue[Optional[bytes]]") -> None:
