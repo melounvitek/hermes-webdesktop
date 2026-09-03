@@ -404,10 +404,8 @@ def _parse_enabled_flag(value, default: bool = True) -> bool:
         return bool(value)
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in {"true", "1", "yes", "on"}:
-            return True
-        if lowered in {"false", "0", "no", "off"}:
-            return False
+        if lowered in {"true", "1", "yes", "on", "false", "0", "no", "off"}:
+            return lowered in {"true", "1", "yes", "on"}
     return default
 
 
@@ -467,13 +465,9 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
     runtime-registered tool the composite never listed must not drop the whole toolset)."""
     from toolsets import resolve_toolset
 
-    enabled = set()
-    for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-        if _toolset_allowed_for_platform(ts_key, platform):
-            ts_tools = set(resolve_toolset(ts_key, include_registry=False))
-            if ts_tools and ts_tools <= tool_names:
-                enabled.add(ts_key)
-    return enabled
+    return {
+        ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS if _toolset_allowed_for_platform(ts_key, platform)
+        and (ts_tools := set(resolve_toolset(ts_key, include_registry=False))) and ts_tools <= tool_names}
 
 
 def _default_off_toolsets(platform: str, explicitly_configured: bool) -> Set[str]:
@@ -626,14 +620,11 @@ def _merge_mcp_servers(
     """Explicit passthrough entries plus this platform's MCP servers: listed names form an allowlist, else every
     globally enabled server (when ``include_default_mcp_servers``); the ``no_mcp`` sentinel disables all."""
     enabled_mcp_servers = enabled_mcp_server_names(config)
-    no_mcp = "no_mcp" in toolset_names
-    if no_mcp:
-        explicit_mcp_servers = set()
-        result = explicit_passthrough - enabled_mcp_servers - {"no_mcp"}
-    else:
-        explicit_mcp_servers = explicit_passthrough & enabled_mcp_servers
-        result = explicit_passthrough - enabled_mcp_servers
-    if include_default_mcp_servers and not explicit_mcp_servers and not no_mcp:
+    result = explicit_passthrough - enabled_mcp_servers
+    if "no_mcp" in toolset_names:
+        return result - {"no_mcp"}
+    explicit_mcp_servers = explicit_passthrough & enabled_mcp_servers
+    if include_default_mcp_servers and not explicit_mcp_servers:
         return result | enabled_mcp_servers
     return result | explicit_mcp_servers
 
@@ -828,9 +819,7 @@ def _reconfigure_tool(config: dict, *, force_fresh: bool = True):
 
 def _toolset_enabled_for_reconfigure(ts_key: str, config: dict) -> bool:
     """True if the toolset is enabled on any platform, so reconfigure covers enabled-but-unconfigured ones."""
-    for platform in PLATFORMS:
-        if not _toolset_allowed_for_platform(ts_key, platform):
-            continue
+    for platform in filter(lambda p: _toolset_allowed_for_platform(ts_key, p), PLATFORMS):
         try:
             if ts_key in _current_platform_tools(config, platform):
                 return True
@@ -861,8 +850,7 @@ def _configure_shared_metrics_interactive(config: dict) -> None:
 
     before = _shared_metrics_state(config)
     setup_telemetry(config)
-    after = _shared_metrics_state(config)
-    if before != after:
+    if _shared_metrics_state(config) != before:
         save_config(config)
 
 
@@ -884,9 +872,8 @@ def _toolsets_needing_setup(new_enabled: Set[str], config: dict) -> List[str]:
 
 def _configure_newly_added(added: Set[str], already: Set[str], config: dict) -> None:
     """Configure newly enabled toolsets that need keys, skipping those already handled."""
-    for ts_key in sorted(added - already):
-        if _is_configurable(ts_key) and _toolset_needs_configuration_prompt(ts_key, config, force_fresh=True):
-            _configure_toolset(ts_key, config)
+    for ts_key in _toolsets_needing_setup(added - already, config):
+        _configure_toolset(ts_key, config)
 
 
 def _platform_menu_label(config: dict, pkey: str) -> str:
@@ -1017,20 +1004,18 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     # Returning user: platform menu loop. Per-platform rows first, then the extras in this order.
     platform_keys = list(enabled_platforms)
     platform_choices = [_platform_menu_label(config, pkey) for pkey in platform_keys]
-    has_global = len(platform_keys) > 1
-    has_mcp = bool(config.get("mcp_servers"))
-    global_idx = len(platform_keys) if has_global else -1
-    if has_global:
-        platform_choices.append("Configure all platforms (global)")
-    reconfig_idx = len(platform_choices)
-    platform_choices.append("Reconfigure an existing tool's provider or API key")
-    metrics_idx = len(platform_choices)
-    platform_choices.append(_shared_metrics_menu_label(config))
-    mcp_idx = len(platform_choices) if has_mcp else -1
-    if has_mcp:
-        platform_choices.append("Configure MCP server tools")
-    done_idx = len(platform_choices)
-    platform_choices.append("Done")
+
+    def _add_row(label: str, present: bool = True) -> int:
+        if not present:
+            return -1
+        platform_choices.append(label)
+        return len(platform_choices) - 1
+
+    global_idx = _add_row("Configure all platforms (global)", len(platform_keys) > 1)
+    reconfig_idx = _add_row("Reconfigure an existing tool's provider or API key")
+    metrics_idx = _add_row(_shared_metrics_menu_label(config))
+    mcp_idx = _add_row("Configure MCP server tools", bool(config.get("mcp_servers")))
+    done_idx = _add_row("Done")
 
     while True:
         idx = _prompt_choice("Select an option:", platform_choices, default=0)
