@@ -59,9 +59,7 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
-def _pairing_tool_call_id(tool_call: Any) -> str:
-    """Return the canonical id used by the persisted assistant message."""
-    return coalesce_tool_call_id(tool_call)
+_pairing_tool_call_id = coalesce_tool_call_id  # canonical id used by the persisted assistant message
 
 
 def _tc_name(tool_call: Any) -> str:
@@ -71,9 +69,7 @@ def _tc_name(tool_call: Any) -> str:
 def _record_persisted_path_for_stub(agent, tool_call_id: str, function_result) -> None:
     """Record the spillover file path so a later result-reference stub can't dangle (best-effort)."""
     try:
-        if not isinstance(function_result, str):
-            return
-        path = extract_persisted_path(function_result)
+        path = extract_persisted_path(function_result) if isinstance(function_result, str) else None
         if path:
             agent._tool_guardrails.record_persisted_result(tool_call_id, path)
     except Exception as exc:
@@ -89,8 +85,9 @@ def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effe
     from tools.file_tools import _resolve_path_for_task
 
     resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
-    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path))
-    agent._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
+    agent._checkpoint_mgr.ensure_checkpoint(
+        agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path)), f"before {function_name}",
+    )
 
 
 def _budget_for_agent(agent) -> BudgetConfig:
@@ -164,8 +161,7 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) 
         persisted = agent._flush_messages_to_session_db(messages) is not False
         if not persisted:
             agent._incremental_persistence_failed = True
-            # Flush recorded any classified cause at the catch site; only default
-            # to 'unknown' when nothing more specific exists.
+            # The flush recorded any classified cause; default to 'unknown' only if nothing more specific exists.
             if getattr(agent, "_last_persistence_error_cause", None) is None:
                 agent._last_persistence_error_cause = "unknown"
         return persisted
@@ -256,24 +252,18 @@ class _ToolCallRef:
 
     def emit_cancelled(self, agent, start_time: float) -> str:
         """Synthesize the ``cancelled`` result for a KeyboardInterrupt mid-tool and emit its hook."""
-        result = json.dumps(
-            {"error": "Tool execution cancelled by user interrupt", "status": "cancelled"},
-            ensure_ascii=False,
-        )
+        message = "Tool execution cancelled by user interrupt"
+        result = json.dumps({"error": message, "status": "cancelled"}, ensure_ascii=False)
         self.emit_post(
-            agent, result,
-            duration_ms=int((time.time() - start_time) * 1000),
-            status="cancelled",
-            error_type="keyboard_interrupt",
-            error_message="Tool execution cancelled by user interrupt",
+            agent, result, duration_ms=int((time.time() - start_time) * 1000),
+            status="cancelled", error_type="keyboard_interrupt", error_message=message,
         )
         return result
 
     def emit_invalid_arguments(self, agent, result: str) -> None:
         self.emit_post(
             agent, result, trace=[],
-            status="error", error_type="invalid_tool_arguments",
-            error_message="Tool arguments must be a valid JSON object",
+            status="error", error_type="invalid_tool_arguments", error_message="Tool arguments must be a valid JSON object",
         )
 
 
@@ -338,10 +328,8 @@ def _tool_search_scoped_names(agent) -> frozenset:
         ) or [])
     except Exception:
         names = frozenset()
-    try:
+    with contextlib.suppress(Exception):
         agent._tool_search_scope_cache = (cache_key, names)
-    except Exception:
-        pass
     return names
 
 
@@ -503,10 +491,8 @@ def _registered_tool_worker(agent):
     finally:
         with agent._tool_worker_threads_lock:
             agent._tool_worker_threads.discard(tid)
-        try:
+        with contextlib.suppress(Exception):
             _ra()._set_interrupt(False, tid)
-        except Exception:
-            pass
 
 
 _NO_REASON = object()
@@ -516,20 +502,16 @@ def _interrupt_worker_tids(agent, tids, *, reason=_NO_REASON) -> None:
     """Raise the interrupt bit on each worker tid (best-effort, via ``run_agent``)."""
     kwargs = {} if reason is _NO_REASON else {"reason": reason}
     for tid in tids:
-        try:
+        with contextlib.suppress(Exception):
             _ra()._set_interrupt(True, tid, **kwargs)
-        except Exception:
-            pass
 
 
 def _set_worker_activity_callback(agent) -> None:
     """The activity callback is thread-local: bind it on THIS thread so tool-layer heartbeats fire."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.environments.base import set_activity_callback
 
         set_activity_callback(agent._touch_activity)
-    except Exception:
-        pass
 
 
 # Must stay far below the gateway turn-inactivity timeout (default 1800s) so a silent tool never looks idle.
@@ -574,9 +556,7 @@ def _blocked_tool_result(agent, ref: _ToolCallRef, *, block_message: Optional[st
     """Synthesize the result for a call blocked by scope/plugin (``block_message``) or by
     guardrail policy (``guardrail_decision``) and emit its terminal post_tool_call."""
     if block_message is not None:
-        result = json.dumps({"error": block_message}, ensure_ascii=False)
-        error_type = block_error_type
-        error_message = block_message
+        result, error_type, error_message = json.dumps({"error": block_message}, ensure_ascii=False), block_error_type, block_message
     else:
         result = agent._guardrail_block_result(guardrail_decision)
         error_type = "guardrail_block"
@@ -867,14 +847,12 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
     function_name, function_args, effective_task_id, tool_call_id = ref.name, ref.args, ref.task_id, ref.call_id
     display_args = _redact_tool_args_for_display(function_name, function_args) or function_args
     if _tool_progress_enabled(agent):
-        args_str = json.dumps(display_args, ensure_ascii=False)
         prefix = f"Tool {display_index}" if display_index is not None else "Tool"
         if agent.verbose_logging:
             print(f"  📞 {prefix}: {function_name}({list(display_args.keys())})")
             print(agent._wrap_verbose("Args: ", json.dumps(display_args, indent=2, ensure_ascii=False)))
         else:
-            args_preview = args_str[: agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
-            print(f"  📞 {prefix}: {function_name}({list(function_args.keys())}) - {args_preview}")
+            print(f"  📞 {prefix}: {function_name}({list(function_args.keys())}) - {_preview(json.dumps(display_args, ensure_ascii=False), agent.log_prefix_chars)}")
 
     agent._current_tool = function_name
     agent._touch_activity(f"executing tool: {function_name}")
@@ -891,7 +869,7 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
 
     if not agent._checkpoint_mgr.enabled:
         return
-    try:
+    with contextlib.suppress(Exception):
         if function_name in {"write_file", "patch"}:
             _ensure_file_checkpoint(agent, function_name, function_args, effective_task_id)
         elif function_name == "terminal":
@@ -899,8 +877,6 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
             if _is_destructive_command(command):
                 cwd = function_args.get("workdir") or os.getenv("TERMINAL_CWD", os.getcwd())
                 agent._checkpoint_mgr.ensure_checkpoint(cwd, f"before terminal: {command[:60]}")
-    except Exception:
-        pass
 
 
 def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata, blocked: bool) -> None:
@@ -1017,15 +993,17 @@ def _tool_progress_enabled(agent) -> bool:
     return not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off"
 
 
+def _preview(text: str, limit: int) -> str:
+    return text[:limit] + "..." if len(text) > limit else text
+
+
 def _print_tool_completed(agent, index: int, tool_duration: float, result) -> None:
     """Non-quiet ``✅ Tool N completed`` line (full result under verbose logging)."""
     if agent.verbose_logging:
         print(f"  ✅ Tool {index} completed in {tool_duration:.2f}s")
         print(agent._wrap_verbose("Result: ", result))
     else:
-        preview = result if isinstance(result, str) else str(result)
-        response_preview = preview[:agent.log_prefix_chars] + "..." if len(preview) > agent.log_prefix_chars else preview
-        print(f"  ✅ Tool {index} completed in {tool_duration:.2f}s - {response_preview}")
+        print(f"  ✅ Tool {index} completed in {tool_duration:.2f}s - {_preview(result if isinstance(result, str) else str(result), agent.log_prefix_chars)}")
 
 
 # ── Concurrent batch machinery ──────────────────────────────────────────────
@@ -1153,10 +1131,8 @@ class _ConcurrentBatch:
             logger.info("tool %s abandoned at start-order gate; skipping dispatch", ref.name)
             return None
         except KeyboardInterrupt:
-            try:
+            with contextlib.suppress(Exception):
                 agent.interrupt("keyboard interrupt")
-            except Exception:
-                pass
             result = ref.emit_cancelled(agent, start)
             duration = time.time() - start
             logger.info("tool %s cancelled (%.2fs)", ref.name, duration)
@@ -1561,10 +1537,8 @@ def _run_sequential_call(
         if not dispatch.handles_keyboard_interrupt:
             raise
         _spinner_result = ref.emit_cancelled(agent, tool_start_time)
-        try:
+        with contextlib.suppress(Exception):
             agent.interrupt("keyboard interrupt")
-        except Exception:
-            pass
         _append_skipped_tool_results(
             agent, messages, remaining_calls, ref.task_id,
             content="[Tool execution cancelled — {name} was skipped due to keyboard interrupt]",
