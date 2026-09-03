@@ -182,9 +182,8 @@ def _pet_gen_abort(rid, token: str, code: int, message: str) -> dict:
 
 
 def _pet_method(name: str, *, fail_open=None, slug: bool = False, scoped: bool = True):
-    """``@method`` (+ ``@_profile_scoped`` unless ``scoped=False``) whose exceptions never break the surface:
-    logged at debug, then ``fail_open`` (payload or ``params -> payload``) or ``_err(5031)``. ``slug``
-    requires ``params.slug`` (4004) as a 3rd arg."""
+    """``@method`` (+ ``@_profile_scoped`` unless ``scoped=False``) whose exceptions never break the surface: logged
+    at debug, then ``fail_open`` (payload or ``params -> payload``) or ``_err(5031)``. ``slug``: 3rd arg (4004)."""
     def deco(fn):
         def handler(rid, params: dict) -> dict:
             try:
@@ -238,9 +237,9 @@ def _persist_branch(db, new_key: str, parent_key: str, title: str, history: list
                     copy_fields=(), compensate: bool = False) -> None:
     """Branch child row + parent transcript (bounded-chunk transactions) + title. ``_branched_from`` keeps the
     row visible in list_sessions_rich() (the live parent never matches the legacy end_reason='branched'
-    heuristic); NULL ``profile_name`` rows drop out of profile-keyed sidebar matching / deep links.
-    ``compensate``: a committed row whose transcript/title failed is deleted (a durable-but-empty row would
-    defeat the INSERT OR IGNORE first-prompt seed) — except on disk-full, where the delete cannot land."""
+    heuristic); NULL ``profile_name`` rows drop out of profile-keyed sidebar matching / deep links. ``compensate``
+    deletes a committed row whose transcript/title failed (a durable-but-empty row would defeat the INSERT OR
+    IGNORE first-prompt seed) — except on disk-full, where the delete cannot land."""
     db.create_session(new_key, source=source, model=_resolve_model(), model_config={"_branched_from": parent_key},
                       parent_session_id=parent_key, cwd=cwd, profile_name=profile_name)
     try:
@@ -440,9 +439,12 @@ class _Resume:
         # Desktop hydrates over REST; suppress the duplicate WS copy only when asked.
         self.omit_messages, self.eager_build = _flag(params, "omit_messages"), _flag(params, "eager_build")
 
-    def mint(self) -> tuple:
-        """``(runtime sid, source, cwd)`` for the live record this resume registers."""
-        return *_new_runtime_ids(self.params), self.profile_resume_cwd or _default_session_cwd()
+    def mint(self, prompts: bool = True) -> tuple:
+        """``(runtime sid, source, cwd)`` for the live record this resume registers (+ gateway prompts on)."""
+        ids = _new_runtime_ids(self.params)
+        if prompts:
+            _enable_gateway_prompts()
+        return *ids, self.profile_resume_cwd or _default_session_cwd()
 
     def record(self, source: str, cwd: str, history: list, overrides: dict | None = None, **extra) -> dict:
         """``_deferred_session_record`` with this resume's common fields (lease claimed lazily on turn 1);
@@ -495,14 +497,13 @@ def _find_live_unpersisted(needle: str, home) -> str:
     return next((
         live_sid for live_sid, record in list(_sessions.items())
         if isinstance(record, dict) and (record.get("profile_home") or None) == want_home
-        and (str(record.get("session_key") or "") == needle or (record.get("pending_title") or "") == needle)
-    ), "")
+        and (str(record.get("session_key") or "") == needle or (record.get("pending_title") or "") == needle)), "")
 
 
 def _resume_live_unpersisted(ctx: _Resume, live_sid: str, live: dict) -> dict:
-    """Reattach a LIVE lazy session with no state.db row yet (every fresh Bot Chat; a 404 here killed
-    messaging for bots that had never spoken). Rebind the transport and cancel the armed orphan-reap Timer
-    (a WS drop may have sentinel-parked the record) or it fires against this client."""
+    """Reattach a LIVE lazy session with no state.db row yet (every fresh Bot Chat; a 404 here killed messaging
+    for never-spoken bots). Rebind the transport and cancel the armed orphan-reap Timer (a WS drop may have
+    sentinel-parked the record) or it fires against this client."""
     if ctx.owns_db:
         _release_db(ctx.db)
     live["last_active"] = time.time()
@@ -520,8 +521,7 @@ def _resume_live_unpersisted(ctx: _Resume, live_sid: str, live: dict) -> dict:
 
 def _resume_adopt_stranded(ctx: _Resume) -> None:
     """Adopt a lineage stranded in the DEFAULT store (older builds ran a profile bot's turns on the focused
-    tile's backend; unadopted it 4001s forever). Exact-id ONLY — bot titles collide by design; never a
-    retired donor (two "canonical" clones)."""
+    tile's backend; unadopted it 4001s forever). Exact-id ONLY — bot titles collide; never a retired donor."""
     try:
         default_db = _get_db()
         donor_row = default_db.get_session(ctx.target) if default_db is not None else None
@@ -565,8 +565,8 @@ def _resume_locate(ctx: _Resume) -> dict | None:
 
 def _resume_follow_tip(ctx: _Resume) -> None:
     """Rebind a rotated-out parent id to its compression tip (resuming the original reloads the parent
-    transcript and loses the post-compression reply; the live fast path reuses the rotated key too). Skipped
-    for lazy watch windows (exact child). Bot Chat follows proven compression edges only."""
+    transcript and loses the post-compression reply). Skipped for lazy watch windows (exact child); Bot Chat
+    follows proven compression edges only."""
     if not ctx.found or ctx.lazy:
         return
     tip = ctx.target
@@ -646,7 +646,7 @@ def _resume_response(
 def _resume_lazy(ctx: _Resume) -> dict:
     """Lazy/watch resume (desktop subagent windows): a live session WITHOUT an agent — the child runs
     inside the parent's turn, so the window needs stored history + a transport; prompt.submit upgrades it."""
-    sid, source, cwd = ctx.mint()
+    sid, source, cwd = ctx.mint(prompts=False)
     try:
         ctx.db.reopen_session(ctx.target)
         # repair_alternation heals a durable ``user;user`` once here.
@@ -673,7 +673,6 @@ def _resume_deferred(ctx: _Resume) -> dict:
     """Bounded ack; the transcript hydrates in the background and pages over REST.
     defer_history SUPERSEDES omit_messages: the ONE history read happens in the worker."""
     sid, source, cwd = ctx.mint()
-    _enable_gateway_prompts()
     overrides = _stored_session_runtime_overrides(ctx.found)
     record = ctx.record(source, cwd, [], overrides)
     record.update(resume_history_ready=threading.Event(), resume_hydrating=True,
@@ -681,19 +680,17 @@ def _resume_deferred(ctx: _Resume) -> dict:
     if (reused := ctx.claim(sid, record)) is not None:
         return reused
     _schedule_resume_hydration(sid, ctx.target, ctx.db, close_db=ctx.owns_db)
-    # The hydration worker now owns (and closes) the profile-scoped handle.
-    ctx.owns_db = False
+    ctx.owns_db = False  # the hydration worker now owns (and closes) the profile-scoped handle
     _schedule_session_cap_enforcement()
     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), messages=[],
                             message_count=record["resume_message_count"], status="resuming", hydrating=True)
 
 
 def _resume_cold(ctx: _Resume) -> dict:
-    """Default cold resume: transcript now, agent OFF the response path (_make_agent can block for
-    seconds; callers await this RPC before painting) — pre-warmed on a timer, _sess() builds on demand if
-    the first prompt beats it. Unlike lazy, restores full ancestor history + persisted runtime identity."""
+    """Default cold resume: transcript now, agent OFF the response path (_make_agent can block for seconds;
+    callers await this RPC before painting) — pre-warmed on a timer, _sess() builds on demand if the first
+    prompt beats it. Unlike lazy, restores full ancestor history + persisted runtime identity."""
     sid, source, cwd = ctx.mint()
-    _enable_gateway_prompts()
     try:
         history, display_history, raw_history = ctx.restore()
     except Exception as e:
@@ -714,7 +711,6 @@ def _resume_eager(ctx: _Resume) -> dict:
     """Synchronous build (``eager_build``), OUTSIDE _session_resume_lock (it would stall session.close),
     then double-checked: a concurrent winner's agent is reused."""
     sid, source, _cwd = ctx.mint()
-    _enable_gateway_prompts()
     with _profile_build_scope(ctx.profile_home):
         try:
             history, display_history, raw_history = ctx.restore()
@@ -819,9 +815,9 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.workspace.move")
 def _(rid, params: dict) -> dict:
-    """Re-home a STORED session's workspace (by ``session_key``; no live agent required). git branch/root
-    are REPLACED (a stale ``git_repo_root`` kept the session under the project it left); a live agent
-    follows even mid-turn (refusing made the UI claim success while state.db kept the old cwd)."""
+    """Re-home a STORED session's workspace (by ``session_key``; no live agent required). git branch/root are
+    REPLACED (a stale ``git_repo_root`` kept the session under the project it left); a live agent follows even
+    mid-turn (refusing made the UI claim success while state.db kept the old cwd)."""
     if not (target := _str_param(params, "session_key")):
         return _err(rid, 4007, "session_key required")
     if not (raw := _str_param(params, "cwd")):
@@ -860,10 +856,10 @@ def _(rid, params: dict) -> dict:
 @method("session.active_list")
 def _(rid, params: dict) -> dict:
     """Live TUI sessions in this process (not a DB browser)."""
-    current = str(params.get("current_session_id") or "")
     snapshot, err = _snapshot_sessions(rid)
     if err:
         return err
+    current = str(params.get("current_session_id") or "")
     # ``_finalized`` sessions linger until the reaper pops them (they inflated the footer). Do NOT filter on
     # the WS-detached sentinel: detached is attachable until grace-reap, and ``hermes --tui`` rides stdio.
     # Keep insertion order (focused must not jump).
@@ -939,10 +935,10 @@ def _(rid, params: dict, session: dict, db) -> dict:
                 pending, value = False, existing_row.get("title") or title
             else:
                 # No row yet: an explicit /title is clear intent, so persist the row NOW (as the gateway's
-                # _handle_title_command); the min-messages sidebar filter hides a titled 0-message row.
+                # _handle_title_command); the min-messages sidebar filter hides a titled 0-message row. If
+                # row creation didn't take, queue so the post-turn apply block can recover.
                 _ensure_session_db_row(session)
                 with _session_db(session) as scoped_db:
-                    # Row creation didn't take — queue so the post-turn apply block can recover.
                     pending, value = not (scoped_db is not None and scoped_db.set_session_title(key, title)), title
         except ValueError as e:
             return _err(rid, 4022, str(e))
@@ -956,9 +952,8 @@ def _(rid, params: dict, session: dict, db) -> dict:
 
 @method("session.set_hidden")
 def _(rid, params: dict) -> dict:
-    """Set/clear ``hidden`` (leaves the default list, stays resumable by its owner) on a session + its
-    compression lineage: LIVE runtime id first (unpersisted drafts via ``pending_hidden``), then a stored
-    id/key in the profile db."""
+    """Set/clear ``hidden`` (leaves the default list, stays resumable by its owner) on a session + lineage:
+    LIVE runtime id first (unpersisted drafts via ``pending_hidden``), then a stored id/key in the profile db."""
     hidden = is_truthy_value(params.get("hidden", True))
     session, err = _sess_nowait(params, rid)
     with (_profile_db(params) if session is None else _session_db(session)) as db:
@@ -982,9 +977,8 @@ def _(rid, params: dict) -> dict:
 
 @_session_method("message.react")
 def _(rid, params: dict, session: dict) -> dict:
-    """Set/clear one author's emoji reaction (Tapback semantics: one per author, same emoji retracts,
-    ``emoji: null`` clears). ``row_id`` is ``messages.id``; a not-yet-persisted live message names
-    ``newest_role`` instead."""
+    """Set/clear one author's emoji reaction (Tapback semantics: one per author, same emoji retracts, null
+    clears). ``row_id`` is ``messages.id``; a not-yet-persisted live message names ``newest_role`` instead."""
     newest_role = _str_param(params, "newest_role")
     row_id = params.get("row_id")
     if row_id is None and newest_role not in {"user", "assistant"}:
@@ -998,10 +992,8 @@ def _(rid, params: dict, session: dict) -> dict:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
         try:
-            if row_id is None:
-                row_id = db.latest_message_row_id(session["session_key"], role=newest_role)
-                if row_id is None:
-                    return _err(rid, 4040, "no message to react to yet")
+            if row_id is None and (row_id := db.latest_message_row_id(session["session_key"], role=newest_role)) is None:
+                return _err(rid, 4040, "no message to react to yet")
             reactions = db.set_message_reaction(session["session_key"], int(row_id), emoji, author=author)
         except Exception as e:
             return _err(rid, 5007, str(e))
@@ -1027,19 +1019,16 @@ def _(rid, params: dict) -> dict:
     session = _sessions.get(params.get("session_id") or "")
     try:
         from agent.oneshot import run_oneshot
-        text = run_oneshot(
+        return _ok(rid, {"text": run_oneshot(
             instructions=instructions, user_input=user_input, template=template, variables=variables,
             task=(params.get("task") or "title_generation").strip() or "title_generation",
-            max_tokens=_int_param(params, "max_tokens", 1024) or 1024,
-            temperature=temperature, main_runtime=_main_runtime_from_agent(session.get("agent")) if session else None)
-    except KeyError as e:
-        return _err(rid, 4031, str(e))
-    except ValueError as e:
-        return _err(rid, 4032, str(e))
+            max_tokens=_int_param(params, "max_tokens", 1024) or 1024, temperature=temperature,
+            main_runtime=_main_runtime_from_agent(session.get("agent")) if session else None)})
+    except (KeyError, ValueError) as e:
+        return _err(rid, 4031 if isinstance(e, KeyError) else 4032, str(e))
     except Exception as e:
         logger.warning("llm.oneshot failed: %s", e)
         return _err(rid, 5030, f"one-shot generation failed: {e}")
-    return _ok(rid, {"text": text})
 
 
 # ── handoff ──────────────────────────────────────────────────────────
@@ -1108,9 +1097,7 @@ def _(rid, params: dict) -> dict:
             failed = db.fail_handoff(key, reason, only_states=("pending",))
         except TypeError:
             # Older SessionDB without only_states: fail only when still pending.
-            record = db.get_handoff_state(key) or {}
-            failed = (record.get("state") or "") == "pending"
-            if failed:
+            if failed := ((db.get_handoff_state(key) or {}).get("state") or "") == "pending":
                 db.fail_handoff(key, reason)
         state = "failed" if failed else (db.get_handoff_state(key) or {}).get("state") or ""
     return _ok(rid, {"failed": bool(failed), "state": state})
@@ -1136,8 +1123,7 @@ def _(rid, params: dict, session: dict) -> dict:
         usage = _session_usage_snapshot(session) or _get_usage(None)
         return _ok(rid, {
             "categories": [], "context_max": usage.get("context_max", 0) or 0,
-            "context_percent": usage.get("context_percent", 0) or 0,
-            "context_used": usage.get("context_used", 0) or 0,
+            "context_percent": usage.get("context_percent", 0) or 0, "context_used": usage.get("context_used", 0) or 0,
             "estimated_total": usage.get("context_used", 0) or usage.get("total", 0) or 0,
             "model": _metadata_mirror(session).get("model", "")})
     with session["history_lock"]:
@@ -1187,8 +1173,7 @@ def _pet_kitty_cells(pet, pet_cfg: dict, state: str, scale: float) -> dict | Non
         return None
     image_id = render.kitty_image_id(pet.slug)
     # kitty sizes from scaled pixels, so unicode_cols is moot here.
-    payload = PetRenderer(str(pet.spritesheet), mode="kitty", scale=scale).kitty_payload(state, image_id=image_id)
-    if not payload:
+    if not (payload := PetRenderer(str(pet.spritesheet), mode="kitty", scale=scale).kitty_payload(state, image_id=image_id)):
         return None
     return {"graphics": "kitty", "imageId": image_id, "color": render.kitty_color_hex(image_id),
             "cols": payload["cols"], "rows": payload["rows"], "placeholder": payload["placeholder"],
@@ -1217,8 +1202,7 @@ def _(rid, params: dict) -> dict:
     count = renderer.frame_count(state) or 1
     frames = [[[[*top, *bottom] for (top, bottom) in row] for row in renderer.cells(state, i, cols=cols)]
               for i in range(count)]
-    return _ok(rid, {**base, "cols": cols, "frameMs": constants.LOOP_MS / max(1, count), "frames": frames,
-                     "scale": scale})
+    return _ok(rid, {**base, "cols": cols, "frameMs": constants.LOOP_MS / max(1, count), "frames": frames, "scale": scale})
 
 
 @_pet_method("pet.gallery", fail_open={"enabled": False, "active": "", "pets": []})
@@ -1230,14 +1214,12 @@ def _(rid, params: dict) -> dict:
     pet_cfg = _pet_display_cfg()
     installed = {p.slug: p for p in store.installed_pets()}
     gallery: list[dict] = []
-    seen: set[str] = set()
     try:
         from agent.pet.manifest import fetch_manifest, prefetch
         # Local-only still warms the manifest cache in the background.
         if local_only:
             prefetch()
         for entry in [] if local_only else fetch_manifest():
-            seen.add(entry.slug)
             gallery.append({
                 "slug": entry.slug, "displayName": entry.display_name, "installed": entry.slug in installed,
                 "spritesheetUrl": entry.spritesheet_url,
@@ -1246,6 +1228,7 @@ def _(rid, params: dict) -> dict:
                 "generated": entry.slug in installed and installed[entry.slug].generated})
     except Exception as exc:  # noqa: BLE001 - offline: fall back to installed
         logger.debug("pet.gallery manifest fetch failed: %s", exc)
+    seen = {item["slug"] for item in gallery}
     gallery.extend(
         {"slug": slug, "displayName": pet.display_name, "installed": True, "spritesheetUrl": "",
          "generated": pet.generated}
@@ -1352,12 +1335,11 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Whether pet generation is possible: a reference-capable image backend is configured."""
     from agent.pet.generate.imagegen import GenerationError, list_sprite_providers, resolve_provider
+    available, providers = True, []
     try:
         resolve_provider(require_references=True)
-        available = True
     except GenerationError:
         available = False
-    providers = []
     try:
         providers = list_sprite_providers()
     except Exception as exc:  # noqa: BLE001 - picker is best-effort
@@ -1369,9 +1351,8 @@ def _pet_pick_provider(params: dict, *, require_references: bool):
     """Resolve a picker-chosen ``params.provider`` up front so a bad pick fails fast, not mid-fan-out
     (None when unset). Raises ``GenerationError``."""
     from agent.pet.generate.imagegen import resolve_provider
-    if provider_name := _str_param(params, "provider"):
-        return resolve_provider(require_references=require_references, prefer=provider_name)
-    return None
+    name = _str_param(params, "provider")
+    return resolve_provider(require_references=require_references, prefer=name) if name else None
 
 
 @_pet_method("pet.generate", scoped=False)
@@ -1383,7 +1364,6 @@ def _(rid, params: dict) -> dict:
     if not prompt and not ref_raw:
         return _err(rid, 4004, "missing prompt")
     count = max(1, min(4, _int_param(params, "count", 4) or 4))
-    style = _str_param(params, "style", "auto")
     import shutil
     from agent.pet.generate import generate_base_drafts
     from agent.pet.generate.imagegen import GenerationError
@@ -1420,9 +1400,9 @@ def _(rid, params: dict) -> dict:
         _pet_emit("pet.generate.progress", {"token": token, "index": index, "dataUri": data_uri, "count": count},
                   "pet.generate progress")
     try:
-        generate_base_drafts(prompt or "a pet based on the reference image", n=count, style=style,
-                             reference_images=reference_images, provider=sprite, on_draft=_on_draft,
-                             is_cancelled=lambda: _pet_is_cancelled(token))
+        generate_base_drafts(prompt or "a pet based on the reference image", n=count,
+                             style=_str_param(params, "style", "auto"), reference_images=reference_images,
+                             provider=sprite, on_draft=_on_draft, is_cancelled=lambda: _pet_is_cancelled(token))
     except GenerationError as exc:
         return _pet_gen_abort(rid, token, 5031, str(exc))
     cancelled = _pet_is_cancelled(token)
@@ -1568,9 +1548,9 @@ _billing_route("billing.auto_reload", _auto_reload, message="threshold and top_u
 
 @method("billing.step_up")
 def _(rid, params: dict) -> dict:
-    """billing:manage step-up device flow → {ok, granted} (false when the server downscopes). Pooled
-    (blocks for minutes); URL/code reach the TUI via ``billing.step_up.verification`` (stdout is the RPC
-    pipe) and the browser opens TUI-side, never via the gateway's headless webbrowser.open."""
+    """billing:manage step-up device flow → {ok, granted} (false when the server downscopes). Pooled (blocks
+    for minutes); URL/code reach the TUI via ``billing.step_up.verification`` (stdout is the RPC pipe) and the
+    browser opens TUI-side, never via the gateway's headless webbrowser.open."""
     sid = params.get("session_id") or ""
 
     def call():
@@ -2007,10 +1987,10 @@ def _(rid, params: dict) -> dict:
 # ── delegation / spawn trees ─────────────────────────────────────────
 @method("delegation.status")
 def _(rid, params: dict) -> dict:
-    from tools.delegate_tool import (
-        is_spawn_paused, list_active_subagents, _get_max_concurrent_children, _get_max_spawn_depth)
-    return _ok(rid, {"active": list_active_subagents(), "paused": is_spawn_paused(),
-                     "max_spawn_depth": _get_max_spawn_depth(), "max_concurrent_children": _get_max_concurrent_children()})
+    from tools import delegate_tool as dt
+    return _ok(rid, {"active": dt.list_active_subagents(), "paused": dt.is_spawn_paused(),
+                     "max_spawn_depth": dt._get_max_spawn_depth(),
+                     "max_concurrent_children": dt._get_max_concurrent_children()})
 
 
 @method("delegation.pause")
@@ -2053,20 +2033,17 @@ def _(rid, params: dict) -> dict:
     subagents = params.get("subagents") or []
     if not isinstance(subagents, list) or not subagents:
         return _err(rid, 4000, "subagents list required")
-    started_at = params.get("started_at")
+    started_at, label = params.get("started_at"), str(params.get("label") or "")
     finished_at = float(params.get("finished_at") or time.time())
-    label = str(params.get("label") or "")
     d = _spawn_tree_session_dir(session_id or "default")
     path = d / f"{datetime.utcfromtimestamp(finished_at).strftime('%Y%m%dT%H%M%S')}.json"
-    entry = {"path": str(path), "session_id": session_id, "started_at": float(started_at) if started_at else None,
-             "finished_at": finished_at, "label": label, "count": len(subagents)}
+    meta = {"session_id": session_id, "started_at": float(started_at) if started_at else None,
+            "finished_at": finished_at, "label": label}
     try:
-        path.write_text(json.dumps({"session_id": session_id, "started_at": entry["started_at"],
-                                    "finished_at": finished_at, "label": label, "subagents": subagents},
-                                   ensure_ascii=False), encoding="utf-8")
+        path.write_text(json.dumps({**meta, "subagents": subagents}, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
         return _err(rid, 5000, f"spawn_tree.save failed: {exc}")
-    _append_spawn_tree_index(d, entry)
+    _append_spawn_tree_index(d, {"path": str(path), **meta, "count": len(subagents)})
     return _ok(rid, {"path": str(path), "session_id": session_id})
 
 
