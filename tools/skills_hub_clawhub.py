@@ -10,11 +10,61 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from tools.skills_hub_models import (
-    GuardedFetchMixin, SkillBundle, SkillMeta, SkillSource, _cache_metas, _cached_metas,
+    GuardedFetchMixin, SkillBundle, SkillMeta, SkillSource, _cache_metas, _cached_metas, _get_json,
     _validate_bundle_rel_path,
 )
 
 logger = logging.getLogger("tools.skills_hub")
+
+
+def _query_terms(query: str) -> List[str]:
+    return [term for term in re.split(r"[^a-z0-9]+", query.lower()) if term]
+
+
+def _dedupe_results(results: List[SkillMeta]) -> List[SkillMeta]:
+    """Dedupe by lowercased identifier (name fallback), first wins."""
+    seen: Dict[str, SkillMeta] = {}
+    for result in results:
+        seen.setdefault((result.identifier or result.name).lower(), result)
+    return list(seen.values())
+
+
+def _search_score(query: str, meta: SkillMeta) -> int:
+    query_norm = query.strip().lower()
+    if not query_norm:
+        return 1
+
+    identifier = (meta.identifier or "").lower()
+    name = (meta.name or "").lower()
+    description = (meta.description or "").lower()
+    query_terms = _query_terms(query_norm)
+    identifier_terms = _query_terms(identifier)
+    name_terms = _query_terms(name)
+    normalized_identifier = " ".join(identifier_terms)
+    normalized_name = " ".join(name_terms)
+
+    checks = (
+        (140, query_norm == identifier),
+        (130, query_norm == name),
+        (125, normalized_identifier == query_norm),
+        (120, normalized_name == query_norm),
+        (95, normalized_identifier.startswith(query_norm)),
+        (90, normalized_name.startswith(query_norm)),
+        (70, bool(query_terms) and identifier_terms[: len(query_terms)] == query_terms),
+        (65, bool(query_terms) and name_terms[: len(query_terms)] == query_terms),
+        (40, query_norm in identifier),
+        (35, query_norm in name),
+        (10, query_norm in description),
+    )
+    score = sum(points for points, hit in checks if hit)
+    for term in query_terms:
+        score += 15 * (term in identifier_terms) + 12 * (term in name_terms) + 3 * (term in description)
+    return score
+
+
+def _first_str(*values: Any) -> Optional[str]:
+    """First non-empty ``str`` among ``values`` (dicts/None are skipped)."""
+    return next((v for v in values if isinstance(v, str) and v), None)
 
 
 class ClawHubSource(GuardedFetchMixin, SkillSource):
@@ -22,6 +72,7 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
     ClawHavoc incident (341 malicious skills, Feb 2026) showed their vetting
     is insufficient."""
 
+    SOURCE_ID = "clawhub"
     BASE_URL = "https://clawhub.ai/api/v1"
 
     # Wall-clock budget for a full catalog walk: 50k+ skills, sequential
@@ -30,11 +81,9 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
 
     _SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-    def source_id(self) -> str:
-        return "clawhub"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "community"
+    _query_terms = staticmethod(_query_terms)
+    _dedupe_results = staticmethod(_dedupe_results)
+    _search_score = staticmethod(_search_score)
 
     # -- payload helpers ---------------------------------------------------
 
@@ -52,16 +101,15 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
         if not isinstance(data, dict):
             return None
         nested = data.get("skill")
-        if isinstance(nested, dict):
-            merged = dict(nested)
-            latest_version = data.get("latestVersion")
-            if latest_version is not None and "latestVersion" not in merged:
-                merged["latestVersion"] = latest_version
-            # owner is needed for building valid detail URLs.
-            if "owner" in data and "owner" not in merged:
-                merged["owner"] = data["owner"]
-            return merged
-        return data
+        if not isinstance(nested, dict):
+            return data
+        merged = dict(nested)
+        # latestVersion and owner (needed for valid detail URLs) live beside the skill.
+        if data.get("latestVersion") is not None and "latestVersion" not in merged:
+            merged["latestVersion"] = data["latestVersion"]
+        if "owner" in data and "owner" not in merged:
+            merged["owner"] = data["owner"]
+        return merged
 
     @staticmethod
     def _owner_from_payload(data: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -69,12 +117,8 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
             return None
         owner = data.get("owner")
         if isinstance(owner, dict):
-            handle = owner.get("handle")
-            if isinstance(handle, str) and handle.strip():
-                return handle.strip()
-        if isinstance(owner, str) and owner.strip():
-            return owner.strip()
-        return None
+            owner = owner.get("handle")
+        return owner.strip() if isinstance(owner, str) and owner.strip() else None
 
     @classmethod
     def _owner_matches(cls, expected_owner: Optional[str], data: Optional[Dict[str, Any]]) -> bool:
@@ -114,58 +158,10 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
 
     # -- search / ranking --------------------------------------------------
 
-    @staticmethod
-    def _query_terms(query: str) -> List[str]:
-        return [term for term in re.split(r"[^a-z0-9]+", query.lower()) if term]
-
-    @classmethod
-    def _search_score(cls, query: str, meta: SkillMeta) -> int:
-        query_norm = query.strip().lower()
-        if not query_norm:
-            return 1
-
-        identifier = (meta.identifier or "").lower()
-        name = (meta.name or "").lower()
-        description = (meta.description or "").lower()
-        query_terms = cls._query_terms(query_norm)
-        identifier_terms = cls._query_terms(identifier)
-        name_terms = cls._query_terms(name)
-        normalized_identifier = " ".join(identifier_terms)
-        normalized_name = " ".join(name_terms)
-
-        checks = (
-            (140, query_norm == identifier),
-            (130, query_norm == name),
-            (125, normalized_identifier == query_norm),
-            (120, normalized_name == query_norm),
-            (95, normalized_identifier.startswith(query_norm)),
-            (90, normalized_name.startswith(query_norm)),
-            (70, bool(query_terms) and identifier_terms[: len(query_terms)] == query_terms),
-            (65, bool(query_terms) and name_terms[: len(query_terms)] == query_terms),
-            (40, query_norm in identifier),
-            (35, query_norm in name),
-            (10, query_norm in description),
-        )
-        score = sum(points for points, hit in checks if hit)
-        for term in query_terms:
-            score += 15 * (term in identifier_terms) + 12 * (term in name_terms) + 3 * (term in description)
-        return score
-
-    @staticmethod
-    def _dedupe_results(results: List[SkillMeta]) -> List[SkillMeta]:
-        seen: set[str] = set()
-        deduped: List[SkillMeta] = []
-        for result in results:
-            key = (result.identifier or result.name).lower()
-            if key not in seen:
-                seen.add(key)
-                deduped.append(result)
-        return deduped
-
     def _exact_slug_meta(self, query: str) -> Optional[SkillMeta]:
         query = query.strip()
         parsed = self._parse_identifier(query)
-        query_terms = self._query_terms(query)
+        query_terms = _query_terms(query)
         candidates: List[str] = []
 
         if parsed:
@@ -190,22 +186,16 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
     def _finalize_search_results(self, query: str, results: List[SkillMeta], limit: int) -> List[SkillMeta]:
         query_norm = query.strip()
         if not query_norm:
-            return self._dedupe_results(results)[:limit]
+            return _dedupe_results(results)[:limit]
 
-        filtered = [meta for meta in results if self._search_score(query_norm, meta) > 0]
-        filtered.sort(
-            key=lambda meta: (
-                -self._search_score(query_norm, meta),
-                meta.name.lower(),
-                meta.identifier.lower(),
-            )
-        )
-        filtered = self._dedupe_results(filtered)
+        filtered = [meta for meta in results if _search_score(query_norm, meta) > 0]
+        filtered.sort(key=lambda meta: (-_search_score(query_norm, meta), meta.name.lower(), meta.identifier.lower()))
+        filtered = _dedupe_results(filtered)
 
         exact = self._exact_slug_meta(query_norm)
         if exact:
-            filtered = [meta for meta in filtered if self._search_score(query_norm, meta) >= 20]
-            filtered = self._dedupe_results([exact] + filtered)
+            filtered = [meta for meta in filtered if _search_score(query_norm, meta) >= 20]
+            filtered = _dedupe_results([exact] + filtered)
 
         if filtered:
             return filtered[:limit]
@@ -213,13 +203,13 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", query_norm):
             return []
 
-        return self._dedupe_results(results)[:limit]
+        return _dedupe_results(results)[:limit]
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         query = query.strip()
 
         if query:
-            if len(self._query_terms(query)) >= 2:
+            if len(_query_terms(query)) >= 2:
                 direct = self._exact_slug_meta(query)
                 if direct:
                     return [direct]
@@ -234,7 +224,7 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
             # 50k+ skills (max_items=0 = unbounded, offline index builder only).
             catalog = self._load_catalog_index(max_items=limit if limit > 0 else 0)
             if catalog:
-                deduped = self._dedupe_results(catalog)
+                deduped = _dedupe_results(catalog)
                 return deduped[:limit] if limit > 0 else deduped
 
         # Catalog miss / walker failure: best-effort lightweight listing API.
@@ -368,17 +358,12 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
         seen: set[str] = set()
         # 750 pages * 200/page = 150k ceiling over the ~50k catalog; a safety
         # rail against an infinite-cursor loop, normally ended by nextCursor=None.
-        max_pages = 750
         # Wall-clock budget applies to interactive browse only: the index builder
         # (max_items=0) must walk everything or it trips the deploy health floor.
-        deadline = (
-            time.monotonic() + self.CATALOG_WALK_BUDGET_SECONDS
-            if max_items > 0
-            else None
-        )
+        deadline = time.monotonic() + self.CATALOG_WALK_BUDGET_SECONDS if max_items > 0 else None
         partial = False
 
-        for _ in range(max_pages):
+        for _ in range(750):
             if deadline is not None and time.monotonic() > deadline:
                 partial = True
                 break
@@ -412,35 +397,21 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
             _cache_metas(cache_key, results)
         return results
 
-    def _get_json(self, url: str, timeout: int = 20, **kwargs) -> Optional[Any]:
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code != 200:
-                return None
-            return resp.json()
-        except (httpx.HTTPError, json.JSONDecodeError):
-            return None
+    _get_json = staticmethod(_get_json)
 
     def _resolve_latest_version(self, slug: str, skill_data: Dict[str, Any]) -> Optional[str]:
         latest = skill_data.get("latestVersion")
-        if isinstance(latest, dict):
-            version = latest.get("version")
-            if isinstance(version, str) and version:
-                return version
-
         tags = skill_data.get("tags")
-        if isinstance(tags, dict):
-            latest_tag = tags.get("latest")
-            if isinstance(latest_tag, str) and latest_tag:
-                return latest_tag
+        version = _first_str(
+            latest.get("version") if isinstance(latest, dict) else None,
+            tags.get("latest") if isinstance(tags, dict) else None,
+        )
+        if version:
+            return version
 
         versions_data = self._get_json(f"{self.BASE_URL}/skills/{slug}/versions")
-        if isinstance(versions_data, list) and versions_data:
-            first = versions_data[0]
-            if isinstance(first, dict):
-                version = first.get("version")
-                if isinstance(version, str) and version:
-                    return version
+        if isinstance(versions_data, list) and versions_data and isinstance(versions_data[0], dict):
+            return _first_str(versions_data[0].get("version"))
         return None
 
     def _fetch_owner_handle(self, slug: str) -> Optional[str]:
@@ -452,10 +423,9 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
         """
         url = f"{self.BASE_URL}/skills/{slug}"
         max_attempts = 3
-        backoff_base = 2.0  # seconds
 
         for attempt in range(max_attempts):
-            delay = backoff_base * (2 ** attempt)
+            delay = 2.0 * (2 ** attempt)
             try:
                 resp = httpx.get(url, timeout=20)
             except (httpx.HTTPError, OSError):
@@ -466,8 +436,7 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                         raw = resp.json()
                     except (json.JSONDecodeError, ValueError):
                         return None
-                    data = self._coerce_skill_payload(raw)
-                    return self._owner_from_payload(data) if isinstance(data, dict) else None
+                    return self._owner_from_payload(self._coerce_skill_payload(raw))
                 if resp.status_code == 429:
                     retry_after_raw = resp.headers.get("Retry-After")
                     try:
@@ -558,23 +527,19 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
 
         if isinstance(file_list, dict):
             return {k: v for k, v in file_list.items() if isinstance(v, str)}
-
         if not isinstance(file_list, list):
             return files
 
         for file_meta in file_list:
             if not isinstance(file_meta, dict):
                 continue
-
             fname = file_meta.get("path") or file_meta.get("name")
             if not fname or not isinstance(fname, str):
                 continue
-
             inline_content = file_meta.get("content")
             if isinstance(inline_content, str):
                 files[fname] = inline_content
                 continue
-
             raw_url = file_meta.get("rawUrl") or file_meta.get("downloadUrl") or file_meta.get("url")
             if isinstance(raw_url, str) and raw_url.startswith("http"):
                 content = self._fetch_text(raw_url)
