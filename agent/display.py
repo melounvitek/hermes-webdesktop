@@ -60,39 +60,44 @@ def _get_skin():
 _diff_colors_cached: dict[str, str] | None = None
 
 
+# Foreground diff colors: key -> (skin color key, dark-terminal fallback RGB).
+_DIFF_FG = {
+    "dim": ("banner_dim", (150, 150, 150)), "file": ("session_label", (180, 160, 255)),
+    "hunk": ("session_border", (120, 120, 140)),
+}
+# Background diff colors (white text on a dark tint of the skin's ui_error/ui_ok):
+# key -> (skin key, default hex, dominant channel index, dark-terminal fallback).
+_DIFF_BG = {
+    "minus": ("ui_error", "#ef5350", 0, "\033[38;2;255;255;255;48;2;120;20;20m"),
+    "plus": ("ui_ok", "#4caf50", 1, "\033[38;2;255;255;255;48;2;20;90;20m"),
+}
+
+
+def _fg(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _tinted_bg(rgb: tuple[int, int, int], dominant: int) -> str:
+    r, g, b = (max(v // 2, 20) if i == dominant else max(v // 4, 10) for i, v in enumerate(rgb))
+    return f"\033[38;2;255;255;255;48;2;{r};{g};{b}m"
+
+
 def _diff_ansi() -> dict[str, str]:
     """Return ANSI escapes for diff display, resolved from the active skin."""
     global _diff_colors_cached
     if _diff_colors_cached is not None:
         return _diff_colors_cached
-
-    def _fg(r: int, g: int, b: int) -> str:
-        return f"\033[38;2;{r};{g};{b}m"
-
-    # Defaults that work on dark terminals.
-    colors = {
-        "dim": _fg(150, 150, 150), "file": _fg(180, 160, 255), "hunk": _fg(120, 120, 140),
-        "minus": "\033[38;2;255;255;255;48;2;120;20;20m", "plus": "\033[38;2;255;255;255;48;2;20;90;20m",
-    }
+    colors = {k: _fg(*rgb) for k, (_, rgb) in _DIFF_FG.items()} | {k: v[3] for k, v in _DIFF_BG.items()}
     try:
         skin = _get_skin()
-
-        def _skin_fg(key: str, fallback_rgb: tuple[int, int, int]) -> str:
-            h = skin.get_color(key, "")
-            return _fg(*(_hex_rgb(h) if h and len(h) == 7 and h[0] == "#" else fallback_rgb))
-
-        colors["dim"] = _skin_fg("banner_dim", (150, 150, 150))
-        colors["file"] = _skin_fg("session_label", (180, 160, 255))
-        colors["hunk"] = _skin_fg("session_border", (120, 120, 140))
-        # minus/plus use dark-tinted backgrounds derived from ui_error/ui_ok.
-        err_h = skin.get_color("ui_error", "#ef5350")
-        ok_h = skin.get_color("ui_ok", "#4caf50")
-        if err_h and len(err_h) == 7:
-            er, eg, eb = _hex_rgb(err_h)
-            colors["minus"] = f"\033[38;2;255;255;255;48;2;{max(er//2,20)};{max(eg//4,10)};{max(eb//4,10)}m"
-        if ok_h and len(ok_h) == 7:
-            or_, og, ob = _hex_rgb(ok_h)
-            colors["plus"] = f"\033[38;2;255;255;255;48;2;{max(or_//4,10)};{max(og//2,20)};{max(ob//4,10)}m"
+        for key, (skin_key, fallback) in _DIFF_FG.items():
+            h = skin.get_color(skin_key, "")
+            colors[key] = _fg(*(_hex_rgb(h) if h and len(h) == 7 and h[0] == "#" else fallback))
+        bg_hex = {key: skin.get_color(skin_key, default) for key, (skin_key, default, _, _) in _DIFF_BG.items()}
+        for key, (_, _, dominant, _) in _DIFF_BG.items():
+            h = bg_hex[key]
+            if h and len(h) == 7:
+                colors[key] = _tinted_bg(_hex_rgb(h), dominant)
     except Exception:
         pass
     _diff_colors_cached = colors
@@ -151,9 +156,7 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     return default
 
 
-# =========================================================================
-# Tool preview (one-line summary of a tool call's primary argument)
-# =========================================================================
+# ── Tool preview (one-line summary of a tool call's primary argument) ─────
 
 def _oneline(text: str) -> str:
     """Collapse whitespace (including newlines) to single spaces."""
@@ -325,11 +328,9 @@ def _read_file_line_label(args: dict) -> str:
 def redact_browser_typed_text_for_display(value: Any, typed_text: Any) -> Any:
     """Replace every occurrence of a secret-looking browser_type value with its redacted form.
 
-    Backends echo the attempted input in error strings/fallback metadata, so the raw
-    value is swapped before the result reaches logs, callbacks, the model, or chat
-    history. Normal typed text matches no secret pattern and passes through unchanged.
-    Redaction is forced regardless of ``security.redact_secrets``: a typed credential
-    leaking into chat history is a security boundary, not log hygiene.
+    Backends echo the attempted input in error strings/metadata, so it is swapped before
+    reaching logs, callbacks, the model, or chat history. Forced regardless of
+    ``security.redact_secrets``: a leaked typed credential is a security boundary.
     """
     if typed_text is None:
         return value
@@ -522,12 +523,8 @@ def prepare_tool_preview(
     fallback: str,
     max_len: int,
 ) -> ToolPreview:
-    """Build one canonical compact preview plus explicit truncation/URL metadata.
-
-    The uncapped preview is rebuilt from the arguments so an upstream display cap
-    cannot discard its link target; platforms get truncation/URL facts explicitly
-    instead of inferring them from the rendered text.
-    """
+    """Compact preview plus explicit truncation/URL facts (the uncapped preview is
+    rebuilt from the arguments so an upstream display cap cannot drop its link target)."""
     full_text = build_tool_preview(tool_name, args, max_len=0) or fallback
     text = _truncate_preview(full_text, max_len)
     truncated = text != full_text
@@ -535,11 +532,9 @@ def prepare_tool_preview(
     return ToolPreview(text=text, truncated=truncated, url=url)
 
 
-# =========================================================================
-# Friendly tool labels: "web_search <q>" -> "Searching the web for <q>".
+# ── Friendly tool labels: "web_search <q>" -> "Searching the web for <q>" ──
 # Curated built-ins only — we know each core tool's semantics so the verb is fixed,
 # not computed; custom/plugin/MCP tools have no entry and fall back to the raw preview.
-# =========================================================================
 
 _TOOL_VERBS: dict[str, str] = {
     "web_search": "Searching the web", "web_extract": "Reading",
@@ -559,11 +554,8 @@ _TOOL_VERBS_NO_PREVIEW: frozenset[str] = frozenset({"skills_list", "session_sear
 _TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files"})
 
 def get_tool_verb(tool_name: str) -> str | None:
-    """Friendly verb for a built-in tool, or None (labels disabled / no curated verb).
-
-    Callers holding a computed preview compose ``f"{verb}{connector}{preview}"``
-    themselves via :func:`tool_verb_connector`.
-    """
+    """Friendly verb for a built-in tool, or None (labels disabled / no curated verb);
+    callers compose ``f"{verb}{tool_verb_connector(tool)}{preview}"`` themselves."""
     return _TOOL_VERBS.get(tool_name) if _friendly_tool_labels else None
 
 
@@ -578,13 +570,11 @@ def verb_drops_preview(tool_name: str) -> bool:
 
 
 def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) -> str | None:
-    """Lowercase "is <verb> <preview>…" phrase for platform status lines (e.g. Slack setStatus).
+    """Lowercase "is <verb> <preview>…" phrase following the bot's display name (Slack setStatus).
 
-    Phrased to follow the bot's display name ("Hermes is running …"). ``args=None``
-    gives a verb-only phrase (``display.live_status: verb`` keeps argument previews
-    out of shared channels). Returns None for ``_thinking`` or when friendly labels
-    are disabled so callers fall back to their static default. Default ``max_len``
-    stays under Slack's ~50-char status truncation.
+    ``args=None`` gives a verb-only phrase (``display.live_status: verb`` keeps previews out
+    of shared channels). None for ``_thinking`` or disabled labels so callers use their
+    static default. Default ``max_len`` stays under Slack's ~50-char status truncation.
     """
     if not tool_name or tool_name == "_thinking" or not _friendly_tool_labels:
         return None
@@ -601,11 +591,8 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
 
 
 def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
-    """Human-phrased label ("Searching the web for ...") for curated built-ins.
-
-    Custom/plugin/MCP tools (or labels disabled) get the raw preview, so this is a
-    drop-in replacement for :func:`build_tool_preview`.
-    """
+    """Human-phrased label ("Searching the web for ...") for curated built-ins; other
+    tools (or labels disabled) get the raw preview, so it is a drop-in for build_tool_preview."""
     verb = get_tool_verb(tool_name)
     if not verb:
         return build_tool_preview(tool_name, args, max_len=max_len)
@@ -615,9 +602,7 @@ def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> 
     return f"{verb}{tool_verb_connector(tool_name)}{preview}" if preview else verb
 
 
-# =========================================================================
-# Inline diff previews for write actions
-# =========================================================================
+# ── Inline diff previews for write actions ────────────────────────────────
 
 def _resolved_path(path: str) -> Path:
     """Resolve a possibly-relative filesystem path against the current cwd."""
@@ -843,9 +828,7 @@ def render_edit_diff_with_delta(
     return _emit_inline_diff("\n".join(rendered_lines), print_fn)
 
 
-# =========================================================================
-# KawaiiSpinner
-# =========================================================================
+# ── KawaiiSpinner ─────────────────────────────────────────────────────────
 
 class KawaiiSpinner:
     """Animated spinner with kawaii faces for CLI feedback during tool execution."""
@@ -893,10 +876,8 @@ class KawaiiSpinner:
         self.frame_idx = 0
         self.start_time = None
         self.last_line_len = 0
-        # When set, all output bypasses self._out so silenced agents stay silent.
-        self._print_fn = print_fn
-        # Capture stdout NOW, before any child redirect_stdout(devnull) replaces it.
-        self._out = sys.stdout
+        self._print_fn = print_fn  # when set, bypasses self._out so silenced agents stay silent
+        self._out = sys.stdout  # captured NOW, before any child redirect_stdout(devnull) replaces it
 
     def _write(self, text: str, end: str = '\n', flush: bool = False):
         """Write via print_fn when supplied, else to the stdout captured at creation."""
@@ -972,15 +953,11 @@ class KawaiiSpinner:
         self.message = new_message
 
     def _clear_line_blanks(self) -> str:
-        # Clear with spaces (not \033[K) to avoid garbled escapes under patch_stdout.
-        return ' ' * max(self.last_line_len + 5, 40)
+        return ' ' * max(self.last_line_len + 5, 40)  # spaces, not \033[K: garbles under patch_stdout
 
     def print_above(self, text: str):
-        """Print a line above the spinner; the next tick redraws the spinner below it.
-
-        Works inside redirect_stdout(devnull) because _write targets the stdout
-        captured at spinner creation, not the current sys.stdout.
-        """
+        """Print a line above the spinner (next tick redraws it below). Works inside
+        redirect_stdout(devnull) because _write targets the stdout captured at creation."""
         if not self.running:
             self._write(f"  {text}", flush=True)
             return
@@ -1006,9 +983,7 @@ class KawaiiSpinner:
         return False
 
 
-# =========================================================================
-# Cute tool message (completion line that replaces the spinner)
-# =========================================================================
+# ── Cute tool message (completion line that replaces the spinner) ─────────
 
 _ERROR_SUFFIX_MAX_LEN = 48
 
@@ -1199,11 +1174,8 @@ _CUTE_LINES = {
 def _get_cute_tool_message(
     tool_name: str, args: dict, duration: float, result: str | None = None,
 ) -> str:
-    """Formatted tool completion line for CLI quiet mode: ``| {emoji} {verb:9} {detail}  {duration}``.
-
-    Failed tool calls get an informational suffix from :func:`_detect_tool_failure`;
-    the leading ``┊`` is swapped for the active skin's tool prefix.
-    """
+    """Tool completion line for CLI quiet mode: ``| {emoji} {verb:9} {detail}  {duration}``, plus a
+    failure suffix from :func:`_detect_tool_failure`; the leading ``┊`` becomes the skin's tool prefix."""
     args = redact_tool_args_for_display(tool_name, args) or args
     is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
     skin_prefix = get_skin_tool_prefix()
