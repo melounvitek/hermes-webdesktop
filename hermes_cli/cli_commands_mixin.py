@@ -385,12 +385,10 @@ def _refresh_tui_before_print(cli) -> None:
 def _print_lightpanda_engine_status() -> None:
     """``/browser status`` line(s) about ``browser.engine: lightpanda`` — silent unless set;
     says whether it is in use or which higher-precedence setting shadows it."""
-    try:
-        from tools.browser_tool import lightpanda_engine_status, _using_lightpanda_engine
-        if not _using_lightpanda_engine():
-            return
-        used, reason = lightpanda_engine_status()
-    except Exception:
+    if not _probe("tools.browser_tool", "_using_lightpanda_engine", False):
+        return
+    used, reason = _probe("tools.browser_tool", "lightpanda_engine_status", (None, None))
+    if reason is None:
         return
     if not used:
         return print(f"   ⚠ browser.engine is 'lightpanda' but it is NOT in use: {reason}")
@@ -2628,12 +2626,10 @@ class CLICommandsMixin:
             return _cp("  (._.) /fast is only available for models that support fast mode "
                        "(OpenAI Priority Processing or Anthropic Fast Mode).")
         # Determine the branding for the current model
-        try:
-            from hermes_cli.models import _is_anthropic_fast_model
-            model = getattr(getattr(self, "agent", None), "model", None) or getattr(self, "model", None)
-            feature_name = "Anthropic Fast Mode" if _is_anthropic_fast_model(model) else "Priority Processing"
-        except Exception:
-            feature_name = "Fast mode"
+        model = getattr(getattr(self, "agent", None), "model", None) or getattr(self, "model", None)
+        anthropic = _probe("hermes_cli.models", "_is_anthropic_fast_model", None, model)
+        feature_name = ("Fast mode" if anthropic is None
+                        else "Anthropic Fast Mode" if anthropic else "Priority Processing")
         raw = _command_arg(cmd)
         usage = _dim_line('Usage: /fast [normal|fast|auto|cold|status] [--global]')
         if not raw or raw.lower() == "status":
