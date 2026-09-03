@@ -216,28 +216,6 @@ def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     return spoken
 
 
-# Legacy regex fallback, only used if the shared normalizer raises.
-_LEGACY_TTS_STRIP_STEPS = (
-    (re.compile(r'<think[\s>].*?</think>', flags=re.DOTALL), ' '),
-    (re.compile(r'```[\s\S]*?```'), ' '),
-    (re.compile(r'\[([^\]]+)\]\([^)]+\)'), r'\1'),
-    (re.compile(r'https?://\S+'), ''),
-    (re.compile(r'\*\*(.+?)\*\*'), r'\1'),
-    (re.compile(r'\*(.+?)\*'), r'\1'),
-    (re.compile(r'`(.+?)`'), r'\1'),
-    (re.compile(r'^#+\s*', flags=re.MULTILINE), ''),
-    (re.compile(r'^\s*[-*]\s+', flags=re.MULTILINE), ''),
-    (re.compile(r'---+'), ''),
-    # Emoji + variation selectors/ZWJ: providers speak them as awkward labels.
-    (re.compile('[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\U000E0020-\U000E007F]+'), ' '),
-    (re.compile(r'\n{3,}'), '\n\n'))
-
-
 def _strip_markdown_for_tts(text: str) -> str:
-    """``prepare_spoken_text`` without a length cap; falls back to the legacy regex pipeline if it raises."""
-    try:
-        return prepare_spoken_text(text, max_chars=None)
-    except Exception:
-        for pattern, repl in _LEGACY_TTS_STRIP_STEPS:
-            text = pattern.sub(repl, text)
-        return text.strip()
+    """``prepare_spoken_text`` without a length cap (``tts_tool`` compatibility name)."""
+    return prepare_spoken_text(text, max_chars=None)

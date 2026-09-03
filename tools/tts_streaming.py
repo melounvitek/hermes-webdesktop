@@ -102,7 +102,7 @@ class SentenceChunker:
 
 
 class StreamingTTSProvider(ABC):
-    """Yields raw int16, little-endian, mono PCM chunks at ``sample_rate``."""
+    """Yields raw int16, little-endian, mono PCM chunks at ``sample_rate`` (built-in streamers: 24 kHz)."""
 
     sample_rate: int = 24000
     channels: int = 1
@@ -180,8 +180,6 @@ def _capped(chunks: Iterator[bytes], label: str) -> Iterator[bytes]:
 class ElevenLabsStreamer(StreamingTTSProvider):
     """ElevenLabs chunked HTTP → pcm_24000 (the original reference path)."""
 
-    sample_rate = 24000
-
     @staticmethod
     def available() -> bool:
         return bool(_resolve_key("ELEVENLABS_API_KEY", "elevenlabs"))
@@ -213,8 +211,6 @@ def _openai_config_api_key() -> str:
 class OpenAIStreamer(StreamingTTSProvider):
     """OpenAI speech with ``response_format=pcm`` (24 kHz mono int16)."""
 
-    sample_rate = 24000
-
     @staticmethod
     def available() -> bool:
         return bool(_openai_config_api_key() or resolve_openai_audio_api_key())
@@ -234,8 +230,6 @@ class OpenAIStreamer(StreamingTTSProvider):
 @register("gemini")
 class GeminiStreamer(StreamingTTSProvider):
     """Gemini ``streamGenerateContent?alt=sse`` → SSE feed of base64 PCM chunks (24 kHz), bounded streamed body."""
-
-    sample_rate = 24000
 
     @staticmethod
     def available() -> bool:
@@ -292,8 +286,6 @@ class XAIStreamer(StreamingTTSProvider):
     same as the sync path. ``_collect_async`` bridges the async WS loop to the sync
     iterator contract — the seam unit tests patch.
     """
-
-    sample_rate = 24000
 
     @staticmethod
     def available() -> bool:

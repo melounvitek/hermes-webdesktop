@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Optional
 
@@ -294,16 +295,9 @@ COMMAND_TTS_OUTPUT_FORMATS = frozenset({"mp3", "wav", "ogg", "flac", "m4a", "aac
 DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH = 5000
 
 
-def _get_named_provider_config(tts_config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    return _named_provider_config(tts_config, name, BUILTIN_TTS_PROVIDERS)
-
-
-def _resolve_command_provider_config(provider: str, tts_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return _resolve_command_config(provider, tts_config, BUILTIN_TTS_PROVIDERS)
-
-
-def _get_command_tts_timeout(config: Dict[str, Any]) -> float:
-    return _command_timeout(config, DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
+_get_named_provider_config = partial(_named_provider_config, builtins=BUILTIN_TTS_PROVIDERS)
+_resolve_command_provider_config = partial(_resolve_command_config, reserved=BUILTIN_TTS_PROVIDERS)
+_get_command_tts_timeout = partial(_command_timeout, default=DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
 
 
 def _iter_command_providers(tts_config: Dict[str, Any]):

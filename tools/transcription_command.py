@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -41,22 +42,14 @@ COMMAND_STT_OUTPUT_FORMATS = frozenset({"txt", "json", "srt", "vtt"})
 _NON_COMMAND_STT_NAMES = frozenset(BUILTIN_STT_PROVIDERS | {"none"})
 
 
-def _get_named_stt_provider_config(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """``stt.providers.<name>`` (canonical), else ``stt.<name>`` for non-built-in names only."""
-    return _named_provider_config(stt_config, name, BUILTIN_STT_PROVIDERS)
-
-
-def _resolve_command_stt_provider_config(provider: str, stt_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The provider config if *provider* is a command type; None for built-ins, ``none``, unknown."""
-    return _resolve_command_config(provider, stt_config, _NON_COMMAND_STT_NAMES)
-
-
-def _get_command_stt_timeout(config: Dict[str, Any]) -> float:
-    return _command_timeout(config, DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
-
-
-def _get_command_stt_output_format(config: Dict[str, Any]) -> str:
-    return _command_output_format(config, COMMAND_STT_OUTPUT_FORMATS, DEFAULT_COMMAND_STT_OUTPUT_FORMAT)
+# ``stt.providers.<name>`` (canonical), else ``stt.<name>`` for non-built-in names only.
+_get_named_stt_provider_config = partial(_named_provider_config, builtins=BUILTIN_STT_PROVIDERS)
+# The provider config if it is a command type; None for built-ins, ``none``, unknown.
+_resolve_command_stt_provider_config = partial(_resolve_command_config,
+                                               reserved=_NON_COMMAND_STT_NAMES)
+_get_command_stt_timeout = partial(_command_timeout, default=DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
+_get_command_stt_output_format = partial(_command_output_format, formats=COMMAND_STT_OUTPUT_FORMATS,
+                                         default=DEFAULT_COMMAND_STT_OUTPUT_FORMAT)
 
 
 def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:

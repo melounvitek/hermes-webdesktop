@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,16 +37,9 @@ def _find_binary(binary_name: str) -> Optional[str]:
     return shutil.which(binary_name)
 
 
-def _find_ffmpeg_binary() -> Optional[str]:
-    return _find_binary("ffmpeg")
-
-
-def _find_ffprobe_binary() -> Optional[str]:
-    return _find_binary("ffprobe")
-
-
-def _find_whisper_binary() -> Optional[str]:
-    return _find_binary("whisper")
+_find_ffmpeg_binary = partial(_find_binary, "ffmpeg")
+_find_ffprobe_binary = partial(_find_binary, "ffprobe")
+_find_whisper_binary = partial(_find_binary, "whisper")
 
 
 def _run_quiet(command: list, *, timeout: float, env: Optional[dict] = None) -> subprocess.CompletedProcess:
