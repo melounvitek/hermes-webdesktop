@@ -16,6 +16,7 @@ import sys
 import threading
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tools.computer_use.backend import (
@@ -34,9 +35,6 @@ def set_approval_callback(cb) -> None:
     global _approval_callback
     _approval_callback = cb
 
-# Actions that mutate user-visible state go through approval; the rest only read.
-_DESTRUCTIVE_ACTIONS = frozenset({"click", "double_click", "right_click", "middle_click",
-                                  "drag", "scroll", "type", "key", "set_value", "focus_app"})
 # Hard-blocked regardless of approval level (e.g. logout kills the session Hermes runs in). Alt is
 # canonicalized to option, so the Windows variants are blocked before any backend sees them.
 _BLOCKED_KEY_COMBOS = {
@@ -282,7 +280,8 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     if (err := _reject_unsafe(action, args)) is not None:
         return err
     # Approval gate (destructive only). Persistent focus is a separate visible side effect with its own scope.
-    scopes = [action] if action in _DESTRUCTIVE_ACTIONS else []
+    spec = _ACTIONS.get(action)
+    scopes = [action] if spec is not None and spec.destructive else []
     if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")):
         scopes.append("bring_to_front")
     for scope in scopes:
@@ -332,73 +331,22 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
                                      "consent; do not retry without the user."), "action": action})
     return json.dumps({"error": "denied by user", "action": action})
 
-# action -> (forced button or None, click_count)
-_CLICK_VARIANTS = {"click": (None, 1), "double_click": (None, 2),
-                   "right_click": ("right", 1), "middle_click": ("middle", 1)}
-
-def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
-    if args.get("element") is not None:
-        return f"{action} element #{args['element']}{fg}"
-    return f"{action} at {tuple(args['coordinate'])}{fg}" if args.get("coordinate") else action + fg
-
-# action -> (action, args, fg_suffix) -> one-line approval-prompt summary
-_ACTION_SUMMARIES: Dict[str, Callable[[str, Dict[str, Any], str], str]] = {
-    **dict.fromkeys(_CLICK_VARIANTS, _summarize_click),
-    "drag": lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
-                                 f"{args.get('to_element') or args.get('to_coordinate')}{fg}"),
-    "scroll": lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}",
-    "type": lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
-                                 + ("..." if len(args.get("text", "")) > 60 else "") + fg),
-    "key": lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}",
-    "focus_app": lambda a, args, fg: (f"focus {args.get('app', '')!r}"
-                                      + (" (raise)" if args.get("raise_window") else "")),
-}
-
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
-    foreground = args.get("delivery_mode") == "foreground"
-    fg = " [FOREGROUND — briefly raises the window / changes focus]" if foreground else ""
-    return _ACTION_SUMMARIES.get(action, lambda a, args, fg: a + fg)(action, args, fg)
+    fg = " [FOREGROUND — briefly raises the window / changes focus]" if args.get("delivery_mode") == "foreground" else ""
+    spec = _ACTIONS.get(action)
+    return spec.summarize(action, args, fg) if spec is not None else action + fg
 
-# --- read-only / focus actions: (backend, args) -> final tool result ---------
-
-def _do_capture(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
-    mode = str(args.get("mode", "som"))
-    if mode not in {"som", "vision", "ax"}:
-        return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
-    # pid/window_id forwarded only when given so older backends keep their defaults.
-    given = args.get("pid") is not None or args.get("window_id") is not None
-    target = {"pid": args.get("pid"), "window_id": args.get("window_id")} if given else {}
-    return _capture_response(backend.capture(mode=mode, app=args.get("app"), **target))
-
-def _do_focus_app(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
-    if not args.get("app"):
-        return json.dumps({"error": "focus_app requires `app`"})
-    return _maybe_follow_capture(backend, backend.focus_app(args["app"], raise_window=bool(args.get("raise_window"))),
-                                 bool(args.get("capture_after")))
-
-def _listing(key: str, items: List[Dict[str, Any]]) -> str:
-    return json.dumps({key: items, "count": len(items)})
-
-_SIMPLE_ACTIONS: Dict[str, Callable[[ComputerUseBackend, Dict[str, Any]], Any]] = {
-    "capture": _do_capture,
-    "wait": lambda backend, args: _text_response(backend.wait(float(args.get("seconds", 1.0)))),
-    "list_apps": lambda backend, args: _listing("apps", backend.list_apps()),
-    "list_windows": lambda backend, args: _listing("windows", backend.list_windows()),
-    "focus_app": _do_focus_app,
-}
-
-# --- input actions: (backend, action, args, **delivery) -> ActionResult, or a JSON error string for a
-#     rejected call. `delivery` = delivery_mode + bring_to_front ----
+# --- action handlers: (backend, action, args, **delivery) -> ActionResult (follow-up capture applied by
+#     _dispatch) or a final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
 
 def _xy(args: Dict[str, Any]) -> Tuple[Any, Any]:
     coord = args.get("coordinate")
     return (coord[0], coord[1]) if coord and coord[0] is not None else (None, None)
 
-def _do_click(backend, action, args, **delivery):
-    forced_button, click_count = _CLICK_VARIANTS[action]
+def _do_click(backend, action, args, button=None, count=1, **delivery):
     x, y = _xy(args)
-    return backend.click(element=args.get("element"), x=x, y=y, button=forced_button or args.get("button") or "left",
-                         click_count=click_count, modifiers=args.get("modifiers"), **delivery)
+    return backend.click(element=args.get("element"), x=x, y=y, button=button or args.get("button") or "left",
+                         click_count=count, modifiers=args.get("modifiers"), **delivery)
 
 def _do_drag(backend, action, args, **delivery):
     src, dst = args.get("from_coordinate"), args.get("to_coordinate")
@@ -418,15 +366,68 @@ def _do_set_value(backend, action, args, **delivery):
         return json.dumps({"error": "set_value requires `value`"})
     return backend.set_value(value=str(args["value"]), element=args.get("element"))
 
-_INPUT_HANDLERS = {
-    **dict.fromkeys(_CLICK_VARIANTS, _do_click),
-    "drag": _do_drag, "scroll": _do_scroll, "set_value": _do_set_value,
-    "type": lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
-    "key": lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
+def _do_capture(backend, action, args, **_):
+    mode = str(args.get("mode", "som"))
+    if mode not in {"som", "vision", "ax"}:
+        return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
+    # pid/window_id forwarded only when given so older backends keep their defaults.
+    given = args.get("pid") is not None or args.get("window_id") is not None
+    target = {"pid": args.get("pid"), "window_id": args.get("window_id")} if given else {}
+    return _capture_response(backend.capture(mode=mode, app=args.get("app"), **target))
+
+def _do_focus_app(backend, action, args, **_):
+    if not args.get("app"):
+        return json.dumps({"error": "focus_app requires `app`"})
+    return backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
+
+def _listing(key: str, method: str):
+    def handler(backend, action, args, **_):
+        items = getattr(backend, method)()
+        return json.dumps({key: items, "count": len(items)})
+    return handler
+
+def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
+    if args.get("element") is not None:
+        return f"{action} element #{args['element']}{fg}"
+    return f"{action} at {tuple(args['coordinate'])}{fg}" if args.get("coordinate") else action + fg
+
+@dataclass(frozen=True)
+class _ActionSpec:
+    """One `action`. ``input``: native input delivered to the backend's sticky target (gets the delivery kwargs and
+    the `app=` mismatch guard). ``destructive``: mutates user-visible state -> approval prompt (the rest only read).
+    ``summarize(action, args, fg_suffix)`` renders the one-line approval prompt."""
+    handler: Callable[..., Any]
+    input: bool = False
+    destructive: bool = False
+    summarize: Callable[[str, Dict[str, Any], str], str] = lambda a, args, fg: a + fg
+
+def _input(handler, summarize=None) -> _ActionSpec:
+    return _ActionSpec(handler, input=True, destructive=True, **({"summarize": summarize} if summarize else {}))
+
+_ACTIONS: Dict[str, _ActionSpec] = {
+    "click": _input(_do_click, _summarize_click),
+    "double_click": _input(partial(_do_click, count=2), _summarize_click),
+    "right_click": _input(partial(_do_click, button="right"), _summarize_click),
+    "middle_click": _input(partial(_do_click, button="middle"), _summarize_click),
+    "drag": _input(_do_drag, lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
+                                                  f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
+    "scroll": _input(_do_scroll, lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
+    "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
+                   lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
+                                        + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
+    "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
+                  lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
+    "set_value": _input(_do_set_value),
+    "focus_app": _ActionSpec(_do_focus_app, destructive=True, summarize=lambda a, args, fg: (
+        f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""))),
+    "capture": _ActionSpec(_do_capture),
+    "wait": _ActionSpec(lambda backend, action, args, **_: _text_response(backend.wait(float(args.get("seconds", 1.0))))),
+    "list_apps": _ActionSpec(_listing("apps", "list_apps")),
+    "list_windows": _ActionSpec(_listing("windows", "list_windows")),
 }
 # Native input actions deliver to the backend's sticky target; `app=` on these calls is NOT a
 # targeting parameter — see the mismatch guard in _dispatch.
-_INPUT_ACTIONS = frozenset(_INPUT_HANDLERS)
+_INPUT_ACTIONS = frozenset(a for a, s in _ACTIONS.items() if s.input)
 
 # Unknown actions are never aliased (no repairing bad model output), but the nearest real action is
 # named so a bare error isn't the only guidance.
@@ -437,18 +438,15 @@ _ACTION_SUGGESTIONS = {
 }
 
 def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) -> Any:
-    simple = _SIMPLE_ACTIONS.get(action)
-    if simple is not None:
-        return simple(backend, args)
-    handler = _INPUT_HANDLERS.get(action)
-    if handler is None:
+    spec = _ACTIONS.get(action)
+    if spec is None:
         hint = _ACTION_SUGGESTIONS.get(str(action))
         return json.dumps({"error": f"unknown action {action!r}"
                            + (f" — did you mean {hint!r}? See the action enum in the tool schema." if hint else "")})
     # app= guard: input goes to the sticky target from the last capture/focus_app and the backend drops app=
     # silently — refuse a clear mismatch rather than type into the wrong window while reporting ok:true.
     requested_app = args.get("app")
-    if (isinstance(requested_app, str) and requested_app.strip()
+    if (spec.input and isinstance(requested_app, str) and requested_app.strip()
             and (mismatch := _input_target_mismatch(backend, requested_app)) is not None):
         return json.dumps({
             "ok": False, "action": action, "code": "input_target_mismatch",
@@ -456,10 +454,9 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                       "— input actions always hit the sticky target from the last capture/focus_app. "
                       f"Call capture(app={requested_app.strip()!r}) or focus_app first, then retry.")})
     # delivery_mode / bring_to_front thread through every input action (background → foreground ladder).
-    res = handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
-                  bring_to_front=bool(args.get("bring_to_front")))
-    return res if isinstance(res, str) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
-
+    res = spec.handler(backend, action, args, delivery_mode=args.get("delivery_mode"),
+                       bring_to_front=bool(args.get("bring_to_front")))
+    return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
 
 # ── Response shaping ────────────────────────────────────────────────────────
 
