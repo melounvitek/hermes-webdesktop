@@ -549,12 +549,12 @@ class GatewayStartupMixin:
 
     def _startup_retry_entry(self, platform, adapter, platform_config, *, queued: bool = True) -> dict:
         """Build a ``_failed_platforms`` entry for a platform that failed at startup."""
-        entry = {"config": platform_config, "attempts": 1, "next_retry": time.monotonic() + 30}
-        if queued:
-            entry["queued_at"] = time.monotonic()
-        entry["credential_claim"] = self._adapter_credential_claim(platform, adapter)
-        entry["listener_claim"] = self._adapter_listener_claim(platform, adapter)
-        return entry
+        return {
+            "config": platform_config, "attempts": 1, "next_retry": time.monotonic() + 30,
+            **({"queued_at": time.monotonic()} if queued else {}),
+            "credential_claim": self._adapter_credential_claim(platform, adapter),
+            "listener_claim": self._adapter_listener_claim(platform, adapter),
+        }
 
     async def _abort_startup_if_shutdown_requested(
         self, adapter: Optional[BasePlatformAdapter] = None, platform: Optional[Platform] = None
@@ -854,26 +854,15 @@ class GatewayStartupMixin:
         )
         # Plugin-registered platforms declare their own allowed_users_env / allow_all_env, so the
         # warning stays accurate as plugins (IRC) arrive.
-        _plugin_allowed_vars: tuple = ()
-        _plugin_allow_all_vars: tuple = ()
-        try:
+        allowed_vars = list(self._BUILTIN_ALLOWED_USERS_VARS)
+        allow_all_vars = ["GATEWAY_ALLOW_ALL_USERS", *self._BUILTIN_ALLOW_ALL_VARS]
+        with suppress(Exception):
             from gateway.platform_registry import platform_registry
-            _plugin_allowed_vars = tuple(
-                e.allowed_users_env for e in platform_registry.plugin_entries()
-                if e.allowed_users_env
-            )
-            _plugin_allow_all_vars = tuple(
-                e.allow_all_env for e in platform_registry.plugin_entries() if e.allow_all_env
-            )
-        except Exception:
-            pass
-        _any_allowlist = any(
-            os.getenv(v) for v in self._BUILTIN_ALLOWED_USERS_VARS + _plugin_allowed_vars
-        )
-        _allow_all = os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"} or any(
-            os.getenv(v, "").lower() in {"true", "1", "yes"}
-            for v in self._BUILTIN_ALLOW_ALL_VARS + _plugin_allow_all_vars
-        )
+            entries = platform_registry.plugin_entries()
+            allowed_vars += [e.allowed_users_env for e in entries if e.allowed_users_env]
+            allow_all_vars += [e.allow_all_env for e in entries if e.allow_all_env]
+        _any_allowlist = any(os.getenv(v) for v in allowed_vars)
+        _allow_all = any(os.getenv(v, "").lower() in {"true", "1", "yes"} for v in allow_all_vars)
         if not _any_allowlist and not _allow_all:
             logger.warning(
                 "No env user allowlists configured. Messaging platforms default to "
@@ -971,16 +960,13 @@ class GatewayStartupMixin:
                 )
                 raise RuntimeError("clean-start recovery cleanup failed") from exc
             if discarded:
-                logger.info(
-                    "Discarded %d orphan active-turn marker(s) after clean shutdown", discarded
-                )
+                logger.info("Discarded %d orphan active-turn marker(s) after clean shutdown", discarded)
         else:
             exact, fallback = await self._recover_unclean_sessions()
-            recovered = exact + fallback
-            if recovered:
+            if exact + fallback:
                 logger.info(
                     "Marked %d in-flight session(s) as resumable from previous run "
-                    "(%d exact, %d legacy)", recovered, exact, fallback,
+                    "(%d exact, %d legacy)", exact + fallback, exact, fallback,
                 )
 
         # Stuck-loop detection: a session active across 3+ consecutive restarts is probably looping
@@ -999,9 +985,7 @@ class GatewayStartupMixin:
         enabled_platform_count = 0
         _multiplex_on = bool(getattr(self.config, "multiplex_profiles", False))
         _multiplex_skipped_platforms: list[Platform] = []
-        # connect() calls run concurrently (see _start_connect_pending) so one slow/failing platform
-        # cannot delay the others by a full timeout window; this serial pre-filter stays cheap.
-        _pending_connects = []  # (platform, platform_config, adapter)
+        _pending_connects = []  # (platform, platform_config, adapter); connected concurrently later
         for platform, platform_config in self.config.platforms.items():
             if await self._abort_startup_if_shutdown_requested():
                 return True, enabled_platform_count, _multiplex_skipped_platforms, _pending_connects
@@ -1024,19 +1008,18 @@ class GatewayStartupMixin:
             adapter = self._create_adapter(platform, platform_config)
             if not adapter:
                 # Distinguish between missing builtin deps and missing plugin
-                if platform.value not in {m.value for m in Platform.__members__.values()}:
+                if platform.value in {m.value for m in Platform.__members__.values()}:
+                    logger.warning("No adapter available for %s", platform.value)
+                else:
                     logger.warning(
                         "No adapter for '%s' -- is the plugin installed? "
                         "(platform is enabled in config.yaml but no plugin registered it)",
                         platform.value,
                     )
-                else:
-                    logger.warning("No adapter available for %s", platform.value)
                 continue
-
-            # Set up message + fatal error handlers. Under multiplexing the default profile needs
-            # the same whole-handler runtime scope as a secondary profile: authorization and prompt
-            # rendering both run before the narrower agent-turn scope is installed.
+            # Under multiplexing the default profile needs the same whole-handler runtime scope as
+            # a secondary profile: authorization and prompt rendering both run before the narrower
+            # agent-turn scope is installed. (Byte-identical wiring block in run_adapters.py.)
             adapter.set_message_handler(self._primary_message_handler())
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
@@ -1089,17 +1072,16 @@ class GatewayStartupMixin:
         for _t in _pending_tasks:
             _t.cancel()
         await asyncio.gather(*_pending_tasks, return_exceptions=True)
-        for _t in _pending_tasks:
+        # Then tear down adapters whose connect already succeeded — they were never registered, so
+        # stop() won't reach them.
+        _connected_ok = [
+            _t for _t in _task_map
+            if _t not in _pending_tasks and not _t.cancelled()
+            and _t.exception() is None and _t.result()[3] == "ok"
+        ]
+        for _t in [*_pending_tasks, *_connected_ok]:
             _p, _c, _a = _task_map[_t]
             await self._startup_teardown_adapter(_a, _p)
-        # Tear down adapters whose connect already succeeded — they were never registered, so
-        # stop() won't reach them.
-        for _t, (_p, _c, _a) in _task_map.items():
-            if _t in _pending_tasks or _t.cancelled():
-                continue
-            _res = _t.exception() is None and _t.result() or None
-            if _res and _res[3] == "ok":
-                await self._startup_teardown_adapter(_a, _p)
         await self._abort_startup_if_shutdown_requested()
         return None
 
@@ -1194,30 +1176,25 @@ class GatewayStartupMixin:
         # Adapters for every OTHER profile this gateway serves connect under that profile's home +
         # credential scope and stamp inbound events with the profile so the agent turn resolves.
         try:
-            _secondary_connected = await self._start_secondary_profile_adapters()
-            connected_count += _secondary_connected
+            connected_count += await self._start_secondary_profile_adapters()
         except MultiplexConfigError as e:
-            # Invalid multiplexer config — abort startup cleanly so the operator
-            # fixes config.yaml rather than running a half-wired gateway.
-            reason = str(e)
-            logger.error("Gateway multiplexer config error: %s", reason)
-            self._startup_fail_fatal_config(reason)
+            # Invalid multiplexer config — abort startup cleanly so the operator fixes config.yaml
+            # rather than running a half-wired gateway.
+            logger.error("Gateway multiplexer config error: %s", str(e))
+            self._startup_fail_fatal_config(str(e))
             return True, connected_count
         except Exception as e:
             logger.error("Secondary-profile adapter startup failed: %s", e, exc_info=True)
         finally:
-            # Startup authority is one phase, not a persistent runner mode.
-            # From this point onward every adapter retry is non-evicting.
+            # Startup authority is one phase, not a persistent runner mode: from here on every
+            # adapter retry is non-evicting.
             self._platform_lock_takeover_on_start = False
 
         # A platform skipped on the primary for a missing credential should have been picked up by
         # a secondary profile owning the token. If none did, it is enabled in config.yaml yet
         # silently unserved — surface it loudly instead of leaving a quiet dead channel.
         for _skipped in _multiplex_skipped_platforms:
-            _served_by_secondary = any(
-                _skipped in _profile_map for _profile_map in self._profile_adapters.values()
-            )
-            if not _served_by_secondary:
+            if not any(_skipped in _profile_map for _profile_map in self._profile_adapters.values()):
                 logger.warning(
                     "%s is enabled but no profile (default or secondary) "
                     "provided a bot credential for it — the platform is not "
