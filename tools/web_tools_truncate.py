@@ -2,8 +2,8 @@
 
 Pages at or under the char budget are returned whole; larger pages become a head+tail window plus a
 footer that says how much is shown, where the full text is stored (cache/web) and the exact read_file
-call that pages the omitted middle. Inline base64 images become ``[IMAGE: alt]`` placeholders. Names are
-re-imported by tools/web_tools.py (``tools.web_tools.MAX_STORED_TEXT_CHARS``); logs under the origin logger.
+call that pages the omitted middle. Inline base64 images become ``[IMAGE: alt]`` placeholders. Logs under the
+origin (tools.web_tools) logger.
 """
 
 import logging

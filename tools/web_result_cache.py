@@ -288,7 +288,7 @@ def extract_cache_put(
     if not content or not _cacheable(url):
         return
     try:
-        from tools.web_tools import MAX_STORED_TEXT_CHARS
+        from tools.web_tools_truncate import MAX_STORED_TEXT_CHARS
         file_path = _entry_file_path(url, format, provider)
         if len(content) > MAX_STORED_TEXT_CHARS or file_path is None:
             return

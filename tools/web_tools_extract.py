@@ -3,8 +3,7 @@
 Order of controls (each is a gate, never skipped by a cache hit): secret-URL
 refusal -> SSRF filter (in web_tools.web_extract_tool) -> provider resolution
 (strict selection) -> per-URL website policy -> disk cache -> vendor call with
-one-shot keyless rescue. Names are re-imported by tools/web_tools.py so
-``tools.web_tools._validate_extract_urls`` etc. keep working; logs under the origin logger.
+one-shot keyless rescue. Logs under the origin (tools.web_tools) logger.
 """
 
 import asyncio

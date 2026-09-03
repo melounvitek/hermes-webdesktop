@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from plugins.web._common import BaseWebSearchProvider, keyless_extract, keyless_search, lazy_ensure, search_fail, search_ok, setup_schema
+from tools import managed_tool_gateway as _gateway
+from tools import tool_backend_helpers as _backend_helpers
 from tools.url_safety import is_safe_url
 # Module-level (cheap import) so tests can monkeypatch the policy gate on this module.
 from tools.website_policy import check_website_access
@@ -21,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 _FIRECRAWL_CLOUD_API_URL = "https://api.firecrawl.dev"
 
-# The SDK costs ~200ms of imports on a cold CLI; defer to first use. tools.web_tools
-# re-exports ``Firecrawl`` so ``patch("tools.web_tools.Firecrawl")`` keeps working.
+# The SDK costs ~200ms of imports on a cold CLI; defer to first use (tests patch ``Firecrawl`` here).
 _FIRECRAWL_CLS_CACHE: Optional[type] = None
 
 
@@ -55,8 +56,7 @@ Firecrawl = _FirecrawlProxy()
 
 # --- Client construction (direct vs managed-gateway) ---------------------------
 def _wt():
-    """Client cache slots and gateway/token helpers are read through tools.web_tools so tests
-    that reset ``_firecrawl_client`` or patch ``_peek_nous_access_token`` there see their changes."""
+    """Client cache slots live on tools.web_tools so tests that reset ``_firecrawl_client`` there see it."""
     import tools.web_tools as _mod
     return _mod
 
@@ -92,7 +92,7 @@ def _use_keyless_ring() -> bool:
     from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection
     from plugins.web.keyless_mcp import use_keyless
     # Both probes are optional layers: a failing probe never blocks the ring.
-    for probe in (lambda: read_selection("web") == NOUS_MANAGED_PROVIDER, lambda: _wt()._is_tool_gateway_ready() and not _is_explicit_firecrawl_selection()):
+    for probe in (lambda: read_selection("web") == NOUS_MANAGED_PROVIDER, lambda: _is_tool_gateway_ready() and not _is_explicit_firecrawl_selection()):
         try:
             if probe():
                 return False
@@ -118,17 +118,17 @@ class _KeylessFirecrawlClient:
 
 
 def _get_firecrawl_gateway_url() -> str:
-    return _wt().build_vendor_gateway_url("firecrawl")
+    return _gateway.build_vendor_gateway_url("firecrawl")
 
 
 def _is_tool_gateway_ready() -> bool:
     """True when gateway URL + Nous Subscriber token are available."""
-    return _wt().resolve_managed_tool_gateway("firecrawl", token_reader=_wt()._peek_nous_access_token) is not None
+    return _gateway.resolve_managed_tool_gateway("firecrawl", token_reader=_gateway.peek_nous_access_token) is not None
 
 
 def check_firecrawl_api_key() -> bool:
     """True when the route selected via ``hermes tools`` (or, on a never-configured
-    install, either route) is usable. Re-exported by tools.web_tools."""
+    install, either route) is usable."""
     from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection
     selected = read_selection("web")
     if selected == NOUS_MANAGED_PROVIDER:
@@ -137,7 +137,7 @@ def check_firecrawl_api_key() -> bool:
 
 
 def _firecrawl_backend_help_suffix() -> str:
-    return ", or use the Nous Tool Gateway via your subscription (FIRECRAWL_GATEWAY_URL or TOOL_GATEWAY_DOMAIN)" if _wt().managed_nous_tools_enabled() else ""
+    return ", or use the Nous Tool Gateway via your subscription (FIRECRAWL_GATEWAY_URL or TOOL_GATEWAY_DOMAIN)" if _backend_helpers.managed_nous_tools_enabled() else ""
 
 
 def _get_firecrawl_client() -> Any:
@@ -151,16 +151,16 @@ def _get_firecrawl_client() -> Any:
     direct_config = _get_direct_firecrawl_config()
 
     def _managed():
-        gw = wt.resolve_managed_tool_gateway("firecrawl", token_reader=wt._read_nous_access_token)
+        gw = _gateway.resolve_managed_tool_gateway("firecrawl", token_reader=_gateway.read_nous_access_token)
         if gw is None:
             return None
         return "sdk", {"api_key": gw.nous_user_token, "api_url": gw.gateway_origin}, ("tool-gateway", gw.gateway_origin, gw.nous_user_token)
 
     def _unconfigured_message() -> str:
         message = "Web tools are not configured. Set FIRECRAWL_API_KEY for cloud Firecrawl or set FIRECRAWL_API_URL for a self-hosted Firecrawl instance."
-        if wt.managed_nous_tools_enabled():
+        if _backend_helpers.managed_nous_tools_enabled():
             return message + " With your Nous subscription you can also use the Tool Gateway. run `hermes tools` and select Nous Subscription as the web provider."
-        return message + " " + wt.nous_tool_gateway_unavailable_message("managed Firecrawl web tools")
+        return message + " " + _backend_helpers.nous_tool_gateway_unavailable_message("managed Firecrawl web tools")
 
     # (resolved config, log detail, error message) per selection state; the message is built lazily.
     if selected == NOUS_MANAGED_PROVIDER:
@@ -181,7 +181,7 @@ def _get_firecrawl_client() -> Any:
     cached = getattr(wt, "_firecrawl_client", None)
     if cached is not None and getattr(wt, "_firecrawl_client_config", None) == client_config:
         return cached
-    wt._firecrawl_client = _KeylessFirecrawlClient(api_url=kwargs["api_url"]) if client_mode == "keyless" else wt.Firecrawl(**kwargs)
+    wt._firecrawl_client = _KeylessFirecrawlClient(api_url=kwargs["api_url"]) if client_mode == "keyless" else Firecrawl(**kwargs)
     wt._firecrawl_client_config = client_config
     return wt._firecrawl_client
 

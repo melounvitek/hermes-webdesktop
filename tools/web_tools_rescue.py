@@ -2,8 +2,8 @@
 
 Stateless by design: a rescue routes THIS call through the free-tier ring (plugins/web/keyless_mcp.py);
 the next web_search/web_extract call attempts the chosen backend again. Callers must never cache a
-rescue-served response, or the one-shot rescue becomes sticky for a whole TTL. Names are re-imported by
-tools/web_tools.py (``tools.web_tools._rescue_eligible``); logs under the origin logger.
+rescue-served response, or the one-shot rescue becomes sticky for a whole TTL. Logs under the origin
+(tools.web_tools) logger.
 """
 
 import logging
