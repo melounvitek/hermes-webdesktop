@@ -1017,15 +1017,12 @@ def recover_session_database(
                 "Re-run with --allow-partial to salvage every readable row "
                 "into a new database (the source is never modified)."
             )
-        if allow_partial:
-            missing_required = [
-                table for table in ("sessions", "messages") if not inspection["tables"][table].get("available")
-            ]
-            if missing_required:  # no readable schema -> page-level lost_and_found salvage
-                return _recover_via_lost_and_found(
-                    source=source, snapshot_source=snapshot_source, snapshot_dir=Path(temp_dir.name), output=output,
-                    inspection=inspection, disk_space=disk_space, missing_required=missing_required,
-                )
+        missing_required = [t for t in ("sessions", "messages") if not inspection["tables"][t].get("available")]
+        if allow_partial and missing_required:  # no readable schema -> page-level lost_and_found salvage
+            return _recover_via_lost_and_found(
+                source=source, snapshot_source=snapshot_source, snapshot_dir=Path(temp_dir.name), output=output,
+                inspection=inspection, disk_space=disk_space, missing_required=missing_required,
+            )
         source_conn = _connect(snapshot_source)
         source_conn.execute("PRAGMA writable_schema=ON")
         destination_conn: Optional[sqlite3.Connection] = None
@@ -1050,16 +1047,13 @@ def recover_session_database(
             source_conn.close()
             if destination_conn is not None:
                 destination_conn.close()
+        expected_counts = {
+            table: inspection["tables"][table].get("rows")
+            for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES)
+            if table in _CANONICAL_TABLES or inspection["tables"].get(table, {}).get("available")
+        }
         verification = _verify_recovered_database(
-            output,
-            expected_counts={
-                table: inspection["tables"][table].get("rows")
-                for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES)
-                if table in _CANONICAL_TABLES
-                or inspection["tables"].get(table, {}).get("available")
-            },
-            copy_report=copy_report,
-            allow_partial=allow_partial,
+            output, expected_counts=expected_counts, copy_report=copy_report, allow_partial=allow_partial,
             orphan_cleanup=orphan_cleanup,
         )
         return _recovery_report(
