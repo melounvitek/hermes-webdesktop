@@ -51,11 +51,10 @@ def _session_pair(event: dict[str, Any], key: str) -> tuple[str, str] | None:
     return (session_id, value) if session_id and value else None
 
 
-def _retry_ordinal(event: dict[str, Any]) -> int | None:
+def _retry_ordinal(event: dict[str, Any]) -> int:
+    """Hermes's provider-local retry ordinal; 0 when absent or malformed."""
     value = event.get("retry_count")
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _forget(index: dict[Any, _MetricsSession], key: Any, owner: _MetricsSession) -> None:
@@ -193,9 +192,7 @@ class _Runtime:
                 session = _MetricsSession(session_id=session_id, relay_session=relay_session)
                 self._sessions[session_id] = session
         with session.lock:
-            if session.closing:
-                return None
-        return session
+            return None if session.closing else session
 
     def record_client_active(self, event: dict[str, Any]) -> None:
         """Emit one payload-free activation attempt under the session scope."""
@@ -291,7 +288,6 @@ class _Runtime:
             return
         model_call_key = (task_id, request_id)
         fields = contract.model_call_fields(event)
-        retry_ordinal = _retry_ordinal(event)
         with session.lock:
             if session.closing:
                 return
@@ -308,7 +304,7 @@ class _Runtime:
                 return
             if task is not None:
                 task.model_call_ids.add(request_id)
-                if retry_ordinal is not None and retry_ordinal > 0:
+                if _retry_ordinal(event) > 0:
                     # A real Hermes retry can advance api_request_id while carrying the
                     # retry ordinal. Count that physical attempt.
                     task.retry_count += 1
@@ -572,12 +568,12 @@ class _Runtime:
 
     def _flush_and_export(self, failure_message: str) -> None:
         """Flush the Relay subscriber, then export; a failed flush skips the export."""
-        if self._guarded(failure_message, self._flush_ok):
+        try:
+            self.relay.subscribers.flush()
+        except Exception:
+            logger.warning(failure_message, exc_info=True)
+        else:
             self._export()
-
-    def _flush_ok(self) -> bool:
-        self.relay.subscribers.flush()
-        return True
 
     def _abort_session(self, session: _MetricsSession, base_event: dict[str, Any]) -> bool:
         """Mark the session closing and system-abort its open tasks; False if already closing."""
@@ -593,33 +589,28 @@ class _Runtime:
     def _task_session(
         self, event: dict[str, Any], *, allow_task_id_fallback: bool = False
     ) -> _MetricsSession | None:
+        """Owner session by (session, turn), then (session, task), then unique task_id."""
         session_id, task_id = _text(event, "session_id"), _text(event, "task_id")
         if not task_id:
             return None
-        turn_key = _session_pair(event, "turn_id")
         with self._task_sessions_lock:
-            owner = self._turn_sessions.get(turn_key) if turn_key is not None else None
+            owner = self._turn_sessions.get(_session_pair(event, "turn_id"))
             if owner is None and session_id:
                 owner = self._task_sessions.get((session_id, task_id))
-            if owner is not None:
+            if owner is not None or not allow_task_id_fallback:
                 return owner
-            if not allow_task_id_fallback:
-                return None
             return _sole(
-                session
-                for (_, candidate_task_id), session in self._task_sessions.items()
-                if candidate_task_id == task_id
+                session for (_, tid), session in self._task_sessions.items() if tid == task_id
             )
 
     def _remember_turn(
         self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
         turn_id = _text(event, "turn_id")
-        if not turn_id:
-            return
-        task.turn_ids.add(turn_id)
-        with self._task_sessions_lock:
-            self._turn_sessions[(session.session_id, turn_id)] = session
+        if turn_id:
+            task.turn_ids.add(turn_id)
+            with self._task_sessions_lock:
+                self._turn_sessions[(session.session_id, turn_id)] = session
 
     @staticmethod
     def _tool_call_identity(event: dict[str, Any]) -> tuple[str, str, str]:
@@ -632,9 +623,9 @@ class _Runtime:
         turn_id = _text(event, "turn_id")
         if not turn_id:
             return True
-        if turn_id in task.retired_turn_ids:
-            return False
-        return not task.turn_ids or turn_id in task.turn_ids
+        return turn_id not in task.retired_turn_ids and (
+            not task.turn_ids or turn_id in task.turn_ids
+        )
 
     def _admits(
         self,
@@ -649,9 +640,11 @@ class _Runtime:
         Rejects closing sessions and stale turns; with ``current`` also requires ``task`` to
         still be the session's live run for its ID. Admitted events have their turn remembered.
         """
-        if session.closing or not self._event_matches_task_turn(task, event):
-            return False
-        if current and session.tasks.get(task.task_id) is not task:
+        if (
+            session.closing
+            or not self._event_matches_task_turn(task, event)
+            or (current and session.tasks.get(task.task_id) is not task)
+        ):
             return False
         self._remember_turn(session, task, event)
         return True
