@@ -1,12 +1,7 @@
-"""Description-aware fuzzy scoring for slash-menu completions.
-
-Ported from superagent-ai/grok-cli ``src/ui/slash-menu.ts`` (mirrored on the TUI client in
-``ui-tui/src/app/slash/fuzzyScore.ts``): candidates are scored in tiers — exact match on the
-command token (0), prefix (1), substring (2) — and the DESCRIPTION text is tokenized and matched
-at a +3 offset (exact word 3, word prefix 4, word substring 5). Typing ``/summary`` thus surfaces
-a command whose description mentions summaries even though no command name starts with it.
-Lower score wins; ``math.inf`` means no match.
-"""
+"""Description-aware fuzzy scoring for slash-menu completions (ported from superagent-ai/grok-cli
+``src/ui/slash-menu.ts``; mirrored in ``ui-tui/src/app/slash/fuzzyScore.ts``). Tiers: exact command
+token (0), prefix (1), substring (2); the DESCRIPTION is tokenized and matched at +3 (3/4/5), so
+``/summary`` surfaces a command whose description mentions summaries. Lower wins; ``math.inf`` = miss."""
 
 from __future__ import annotations
 
@@ -52,13 +47,9 @@ def score_slash_completion_item(item: dict, query: str) -> float:
 def fuzzy_rank_slash_items(
     items: list[dict], catalog: list[dict], query: str
 ) -> tuple[list[dict], Callable[[dict], float]]:
-    """Merge description/substring matches into ``items`` and sort by score.
-
-    ``items`` are the completer's own (prefix-filtered) rows and keep their identity; ``catalog`` is
-    the full command/skill universe, from which any entry the prefix filter missed but the fuzzy
-    scorer matches is appended. Returns the score-sorted rows (stable within a tier) plus a
-    ``score_of`` lookup for downstream rankers to use as a leading sort key.
-    """
+    """Merge fuzzy-matched ``catalog`` entries the prefix filter missed into ``items`` (which keep their
+    identity) and sort by score (stable within a tier). Also returns a ``score_of`` lookup for downstream
+    rankers to use as a leading sort key."""
     seen = {str(item.get("text", "")).strip() for item in items}
     merged = list(items) + [
         item for item in catalog
