@@ -105,15 +105,13 @@ class GatewayNotificationsMixin:
         )
         metadata = self._thread_metadata_for_source(source)
         if notice_delivery == "private" and getattr(source, "user_id", None):
-            try:
+            with _log_suppressed(
+                logging.DEBUG, "[%s] send_private_notice failed, falling back to public",
+                getattr(source, "platform", "?"), exc_info=True,
+            ):
                 result = await adapter.send_private_notice(source.chat_id, source.user_id, content, metadata=metadata)
                 if getattr(result, "success", False):
                     return
-            except Exception:
-                logger.debug(
-                    "[%s] send_private_notice failed, falling back to public",
-                    getattr(source, "platform", "?"), exc_info=True,
-                )
         await adapter.send(source.chat_id, content, metadata=metadata)
 
     async def _resolve_compression_lineage_target(
@@ -360,7 +358,7 @@ class GatewayNotificationsMixin:
         for path in (paths.claimed, paths.pending):
             if not path.exists():
                 continue
-            try:
+            with suppress(Exception):
                 pending = json.loads(path.read_text(encoding="utf-8"))
                 platform_str = pending.get("platform")
                 chat_id = pending.get("chat_id")
@@ -376,8 +374,6 @@ class GatewayNotificationsMixin:
                 return self._UpdateTarget(
                     adapter, chat_id, session_key or f"{platform_str}:{chat_id}", metadata, platform,
                 )
-            except Exception:
-                pass
         return None
 
     def _pending_marker_metadata(self, platform, chat_id, data: dict, adapter):
@@ -486,11 +482,9 @@ class GatewayNotificationsMixin:
         def _read_new_output() -> None:
             nonlocal buffer, bytes_sent
             if paths.output.exists():
-                try:
+                with suppress(OSError):
                     chunk, bytes_sent = self._read_update_output_since(paths.output, bytes_sent)
                     buffer += chunk
-                except OSError:
-                    pass
 
         while loop.time() < deadline:
             if paths.exit_code.exists():

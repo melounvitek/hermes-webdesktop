@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 import asyncio
 import contextlib
+from contextlib import suppress
 import functools
 import os
 import time
@@ -88,7 +89,10 @@ class GatewayAdapterLifecycleMixin:
                 )
         except Exception as e:
             logger.debug("✗ %s background-task cancel error%s: %s", platform.value, suffix, e)
-        try:
+        with _log_suppressed(
+            logging.ERROR, "✗ %s disconnect error after %.2fs%s: %s",
+            platform.value, time.monotonic() - started_at, suffix,
+        ):
             if await self._await_adapter_cleanup_with_timeout(adapter.disconnect(), timeout):
                 logger.info(
                     "✓ %s disconnected (%.2fs)%s", platform.value, time.monotonic() - started_at, suffix,
@@ -98,11 +102,6 @@ class GatewayAdapterLifecycleMixin:
                     "✗ %s disconnect timed out after %.1fs - forcing continue%s",
                     platform.value, timeout, suffix,
                 )
-        except Exception as e:
-            logger.error(
-                "✗ %s disconnect error after %.2fs%s: %s",
-                platform.value, time.monotonic() - started_at, suffix, e,
-            )
 
     @staticmethod
     def _env_timeout_override(name: str) -> Optional[float]:
@@ -256,12 +255,11 @@ class GatewayAdapterLifecycleMixin:
                 await self.stop()
 
     def _queue_retryable_best_effort(self, adapter: BasePlatformAdapter, why: str) -> None:
-        try:
+        with _log_suppressed(
+            logging.DEBUG, "Failed to queue %s after fatal-handler %s",
+            adapter.platform.value, why, exc_info=True,
+        ):
             self._queue_retryable_fatal_platform(adapter)
-        except Exception:
-            logger.debug(
-                "Failed to queue %s after fatal-handler %s", adapter.platform.value, why, exc_info=True,
-            )
 
     async def _handle_adapter_fatal_error_impl(self, adapter: BasePlatformAdapter) -> None:
         # Snapshot the slot owner first: a stale notification must not overwrite a healthy
@@ -512,10 +510,9 @@ class GatewayAdapterLifecycleMixin:
         """Bounded slow-tier respawn of the reconnect watcher."""
         if attempt >= self._MAX_SLOW_WATCHER_RESPAWNS:
             logger.error(
-                "Reconnect watcher could not be kept alive after %d slow "
-                "respawns; %d platform(s) remain queued and unattended: %s. "
-                "Manual intervention or a gateway restart is required.", attempt,
-                len(self._failed_platforms), ", ".join(str(p) for p in self._failed_platforms),
+                "Reconnect watcher could not be kept alive after %d slow respawns; %d platform(s) remain "
+                "queued and unattended: %s. Manual intervention or a gateway restart is required.",
+                attempt, len(self._failed_platforms), ", ".join(str(p) for p in self._failed_platforms),
             )
             return
 
@@ -529,9 +526,8 @@ class GatewayAdapterLifecycleMixin:
             ):
                 return
             logger.warning(
-                "Reconnect watcher still down with %d platform(s) queued — "
-                "slow respawn %d/%d", len(self._failed_platforms), attempt + 1,
-                self._MAX_SLOW_WATCHER_RESPAWNS,
+                "Reconnect watcher still down with %d platform(s) queued — slow respawn %d/%d",
+                len(self._failed_platforms), attempt + 1, self._MAX_SLOW_WATCHER_RESPAWNS,
             )
             self._spawn_reconnect_watcher(
                 on_give_up=lambda _name: self._schedule_slow_reconnect_watcher_respawn(attempt=attempt + 1)
@@ -597,12 +593,10 @@ class GatewayAdapterLifecycleMixin:
         queued_for = now - info.get("queued_at", now)
         retrying_since_iso = (datetime.now(timezone.utc) - timedelta(seconds=queued_for)).isoformat()
         logger.warning(
-            "%s has been failing/reconnecting continuously for "
-            "%.1f hours (%d attempts) — flagging NEEDS_ATTENTION. "
-            "Retries continue, but this usually means a permanent "
-            "problem (revoked credentials, missing intents, broken "
-            "sidecar). Check `hermes status` / `/platform list`.", platform.value,
-            queued_for / 3600.0, info.get("attempts", 0),
+            "%s has been failing/reconnecting continuously for %.1f hours (%d attempts) — flagging "
+            "NEEDS_ATTENTION. Retries continue, but this usually means a permanent problem (revoked "
+            "credentials, missing intents, broken sidecar). Check `hermes status` / `/platform list`.",
+            platform.value, queued_for / 3600.0, info.get("attempts", 0),
         )
         self._update_platform_runtime_status(
             platform.value, platform_state="retrying", needs_attention=True, retrying_since=retrying_since_iso
@@ -707,18 +701,15 @@ class GatewayAdapterLifecycleMixin:
         logger.info("✓ %s reconnected successfully", platform.value)
         # Final responses rejected while this adapter was down are still owned by this live
         # process, so startup recovery cannot claim them. Replay the transient subset now.
-        try:
+        with _log_suppressed(
+            logging.DEBUG, "failed-obligation redelivery after %s reconnect failed",
+            platform.value, exc_info=True,
+        ):
             await self._redeliver_failed_obligations_for_platform(platform)
-        except Exception:
-            logger.debug(
-                "failed-obligation redelivery after %s reconnect failed", platform.value, exc_info=True,
-            )
         # Rebuild channel directory with the new adapter
-        try:
+        with suppress(Exception):
             from gateway.channel_directory import build_channel_directory
             await build_channel_directory(self.adapters)
-        except Exception:
-            pass
         # A platform offline at gateway startup never got its restart-interrupted sessions
         # auto-resumed — the startup pass skips sessions whose adapter isn't connected yet.
         try:
@@ -1221,11 +1212,9 @@ class GatewayAdapterLifecycleMixin:
     @staticmethod
     def _stamp_event_profile(event, profile_name: str) -> None:
         """Best-effort: stamp ``source.profile`` on an inbound event that has none yet."""
-        try:
+        with suppress(Exception):
             if getattr(event, "source", None) is not None and not event.source.profile:
                 event.source.profile = profile_name
-        except Exception:
-            pass
 
     def _make_profile_message_handler(self, profile_name: str):
         """Message handler that stamps source.profile, then delegates under the profile scope
@@ -1292,13 +1281,11 @@ class GatewayAdapterLifecycleMixin:
 
     async def _handle_gateway_platform_event(self, event: dict, source) -> None:
         """Authorize and publish one normalized adapter event to plugin hooks."""
-        try:
+        # Observer failures must never break the adapter's update loop.
+        with _log_suppressed(logging.DEBUG, "gateway_platform_event hook dispatch failed", exc_info=True):
             from hermes_cli.lifecycle import has_hook, invoke_hook
             if has_hook("gateway_platform_event") and self._is_user_authorized_for_source(source):
                 invoke_hook("gateway_platform_event", **event)
-        except Exception:
-            # Observer failures must never break the adapter's update loop.
-            logger.debug("gateway_platform_event hook dispatch failed", exc_info=True)
 
     def _make_profile_platform_event_handler(self, profile_name: str):
         """Bind platform-event auth and hook dispatch to one multiplex profile."""

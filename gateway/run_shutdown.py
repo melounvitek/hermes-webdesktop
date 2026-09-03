@@ -407,9 +407,8 @@ class GatewayShutdownMixin:
                     if not self._scale_to_zero_no_suspend_logged:
                         self._scale_to_zero_no_suspend_logged = True
                         logger.info(
-                            "scale-to-zero: idle, but this platform suspends on "
-                            "its own timer (no in-machine suspend API); staying "
-                            "connected rather than quiescing"
+                            "scale-to-zero: idle, but this platform suspends on its own timer (no "
+                            "in-machine suspend API); staying connected rather than quiescing"
                         )
                     continue
                 logger.info(
@@ -544,9 +543,8 @@ class GatewayShutdownMixin:
             platform.value, platform_state="paused", error_code=None, error_message=info["pause_reason"],
         )
         logger.warning(
-            "%s paused after %d consecutive failures (%s) — "
-            "fix the underlying issue then run `/platform resume %s` "
-            "to retry, or `hermes gateway restart` to restart the gateway.",
+            "%s paused after %d consecutive failures (%s) — fix the underlying issue then run `/platform "
+            "resume %s` to retry, or `hermes gateway restart` to restart the gateway.",
             platform.value, info.get("attempts", 0), info["pause_reason"], platform.value,
         )
 
@@ -815,16 +813,14 @@ class GatewayShutdownMixin:
         # Suppress ONLY the home-channel broadcast when the drain asked to be quiet (routine fleet
         # auto-update); per-session pings above stay (empty on a drained shutdown, useful on a
         # force-interrupt). Current-epoch marker only, so an orphaned marker can't silence a fresh gateway.
-        try:
+        # Never let the suppression check block the broadcast — fail toward the louder behaviour.
+        with _log_suppressed(logging.DEBUG, "drain_notification_suppressed check failed: %s"):
             from gateway.drain_control import drain_notification_suppressed
             if drain_notification_suppressed():
                 logger.info(
                     "Home-channel shutdown broadcast suppressed by drain marker (suppress_notification=true)"
                 )
                 return
-        except Exception as e:
-            # Never let the suppression check block the broadcast — fail toward the louder behaviour.
-            logger.debug("drain_notification_suppressed check failed: %s", e)
         # Snapshot adapters: adapter.send() can hit a fatal path (_handle_fatal) that pops the adapter
         # from self.adapters -> ``RuntimeError: dictionary changed size during iteration``.
         for platform, adapter in list(self.adapters.items()):
@@ -1027,7 +1023,7 @@ class GatewayShutdownMixin:
             return 0
         suspended = 0
         for session_key in [k for k, v in counts.items() if v >= self._STUCK_LOOP_THRESHOLD]:
-            try:
+            with suppress(Exception):
                 entry = self.session_store._entries.get(session_key)
                 if entry and not entry.suspended:
                     entry.suspended = True
@@ -1036,8 +1032,6 @@ class GatewayShutdownMixin:
                         "Auto-suspended stuck session %s (active across %d consecutive restarts — likely a stuck loop)",
                         session_key, counts[session_key],
                     )
-            except Exception:
-                pass
         if suspended:
             with suppress(Exception):
                 self.session_store._save()

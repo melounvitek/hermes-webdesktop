@@ -104,17 +104,16 @@ class GatewayStartupMixin:
         """Initialize turn machinery on an executor thread before the gate opens. Never raises: a
         failed warm-up degrades to lazy init and must not block startup."""
         from gateway.run import _warm_turn_machinery_sync
-        try:
+        with _log_suppressed(
+            logging.WARNING, "Turn-machinery warm-up failed; first inbound turn will initialize lazily",
+            exc_info=True,
+        ):
             loop = asyncio.get_running_loop()
             t0 = time.monotonic()
             tool_count = await loop.run_in_executor(None, _warm_turn_machinery_sync)
             logger.info(
                 "Turn machinery warmed in %.1fs (%d tool schema(s) materialized)",
                 time.monotonic() - t0, tool_count,
-            )
-        except Exception:
-            logger.warning(
-                "Turn-machinery warm-up failed; first inbound turn will initialize lazily", exc_info=True,
             )
 
     async def _await_startup_warmup(self) -> None:
@@ -326,9 +325,8 @@ class GatewayStartupMixin:
                     await asyncio.to_thread(mark_delivered, row["obligation_id"])
                     redelivered += 1
                     logger.info(
-                        "Redelivered recovered final response to %s:%s "
-                        "(obligation %s, attempt %d)", row["platform"], row["chat_id"],
-                        row["obligation_id"], row["attempts"],
+                        "Redelivered recovered final response to %s:%s (obligation %s, attempt %d)",
+                        row["platform"], row["chat_id"], row["obligation_id"], row["attempts"],
                     )
                 else:
                     await asyncio.to_thread(
@@ -774,11 +772,10 @@ class GatewayStartupMixin:
             os.getenv(v, "").lower() in {"true", "1", "yes"} for v in allow_all_vars
         ):
             logger.warning(
-                "No env user allowlists configured. Messaging platforms default to "
-                "pairing/allowlist policies and will deny unknown senders unless you "
-                "configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) "
-                "or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus "
-                "dm_policy/group_policy: open on the platform."
+                "No env user allowlists configured. Messaging platforms default to pairing/allowlist "
+                "policies and will deny unknown senders unless you configure platform allowlists (e.g., "
+                "TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true "
+                "plus dm_policy/group_policy: open on the platform."
             )
         reason = _own_policy_open_startup_violation(self.config)
         if reason:
