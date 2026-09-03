@@ -426,48 +426,45 @@ def _build_top_level_description() -> str:
         orchestration_available = _get_max_spawn_depth() >= 2 and _get_orchestrator_enabled()
     except Exception:
         orchestration_available = False
-
     # Mention recursion only where it's actually available. send_message is deliberately not named (gateway-internal
     # vocabulary); model_tools session-filters the list to tools the session has.
     if orchestration_available:
         restrictions_rule = (
             "- Children cannot call clarify, memory, or cronjob.\n"
-            "- Children can themselves delegate while depth remains "
-            f"(max_spawn_depth={_get_max_spawn_depth()}); the runtime "
-            "derives this from depth automatically.\n"
+            f"- Children can themselves delegate while depth remains (max_spawn_depth={_get_max_spawn_depth()}); the "
+            "runtime derives this from depth automatically.\n"
         )
     else:
-        restrictions_rule = ("- Children cannot call delegate_task, clarify, memory, or " "cronjob.\n")
+        restrictions_rule = "- Children cannot call delegate_task, clarify, memory, or cronjob.\n"
+    return _DESCRIPTION_HEAD + restrictions_rule + _DESCRIPTION_TAIL
 
-    return (
-        "Spawn subagents in isolated contexts; each gets its own conversation, "
-        "terminal session, and toolset, and only its final summary returns to "
-        "you. Pass every task in `tasks` — one entry spawns one subagent, "
-        "several run in parallel (limit in the tasks description).\n\n"
-        "Runs in the background: dispatch returns immediately with live "
-        "transcript paths, and the completed result (one consolidated message, "
-        "results in task order) re-enters the conversation on its own. Do NOT "
-        "wait or poll; continue other work. While children run, `action` "
-        "(list/steer/stop) controls them live — steer when a transcript shows a child drifting.\n\n"
-        "USE FOR: reasoning-heavy subtasks, work that would flood your context "
-        "with intermediate data, or independent parallel workstreams.\n"
-        "DO NOT USE FOR (use these instead):\n"
-        "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
-        "- A single tool call -> call the tool directly\n"
-        "- Tasks needing user interaction -> subagents cannot ask questions\n"
-        "- Durable work that must survive this session -> cronjob or "
-        "terminal(background=True, notify=True); /stop, /new, or process exit discards running subagents.\n\n"
-        "RULES:\n"
-        "- Children know nothing of this conversation: pass everything needed "
-        "via 'context', including any required output language, tone, or style (e.g. \"respond in Chinese\").\n"
-        "- Child summaries are SELF-REPORTS, not verified facts: a child "
-        "claiming \"uploaded successfully\" or \"file written\" may be wrong. "
-        "For external side effects (uploads, remote writes, publishing), "
-        "require a verifiable handle (URL, ID, absolute path) and verify it "
-        "yourself before telling the user the operation succeeded.\n"
-        + restrictions_rule +
-        "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
-    )
+_DESCRIPTION_HEAD = (
+    "Spawn subagents in isolated contexts; each gets its own conversation, terminal session, and toolset, and only its "
+    "final summary returns to you. Pass every task in `tasks` — one entry spawns one subagent, several run in parallel "
+    "(limit in the tasks description).\n\n"
+    "Runs in the background: dispatch returns immediately with live transcript paths, and the completed result (one "
+    "consolidated message, results in task order) re-enters the conversation on its own. Do NOT wait or poll; continue "
+    "other work. While children run, `action` (list/steer/stop) controls them live — steer when a transcript shows a "
+    "child drifting.\n\n"
+    "USE FOR: reasoning-heavy subtasks, work that would flood your context with intermediate data, or independent "
+    "parallel workstreams.\n"
+    "DO NOT USE FOR (use these instead):\n"
+    "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
+    "- A single tool call -> call the tool directly\n"
+    "- Tasks needing user interaction -> subagents cannot ask questions\n"
+    "- Durable work that must survive this session -> cronjob or terminal(background=True, notify=True); /stop, /new, "
+    "or process exit discards running subagents.\n\n"
+    "RULES:\n"
+    "- Children know nothing of this conversation: pass everything needed via 'context', including any required "
+    "output language, tone, or style (e.g. \"respond in Chinese\").\n"
+    "- Child summaries are SELF-REPORTS, not verified facts: a child claiming \"uploaded successfully\" or "
+    "\"file written\" may be wrong. For external side effects (uploads, remote writes, publishing), require a "
+    "verifiable handle (URL, ID, absolute path) and verify it yourself before telling the user the operation "
+    "succeeded.\n"
+)
+_DESCRIPTION_TAIL = (
+    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
+)
 
 def _build_tasks_param_description() -> str:
     """Compose the 'tasks' parameter description with current concurrency limit."""
