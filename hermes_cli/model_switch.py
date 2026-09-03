@@ -838,9 +838,8 @@ def _configured_provider_matches(
     if isinstance(user_providers, dict):
         candidates += [(slug, cfg) for slug, cfg in user_providers.items()
                        if isinstance(slug, str) and isinstance(cfg, dict)]
-    if isinstance(custom_providers, list):
-        candidates += [(f"custom:{e['name']}", e) for e in custom_providers
-                       if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"].strip()]
+    candidates += [(f"custom:{e['name']}", e) for e in _custom_entries(custom_providers)
+                   if isinstance(e.get("name"), str) and e["name"].strip()]
 
     matches: dict[str, str] = {}
     for slug, cfg in candidates:
@@ -857,21 +856,25 @@ def _resolve_named_custom_model_id(model_name: str, target_provider: str, custom
     if not provider.startswith("custom:") or "/" not in model_name:
         return model_name
 
-    prefix, candidate = model_name.split("/", 1)
-    prefix = prefix.strip().lower()
-    candidate = candidate.strip()
+    prefix, candidate = (part.strip() for part in model_name.split("/", 1))
     if not prefix or not candidate:
         return model_name
-
-    for entry in custom_providers or []:
-        if not isinstance(entry, dict):
-            continue
-        entry_slugs = custom_provider_aliases(str(entry.get("name") or ""), str(entry.get("provider_key") or ""))
-        if provider in entry_slugs and f"custom:{prefix}" in entry_slugs:
+    for entry in _custom_entries(custom_providers):
+        entry_slugs = _entry_aliases(entry)
+        if provider in entry_slugs and f"custom:{prefix.lower()}" in entry_slugs:
             for model_id in _declared_model_ids(entry.get("models")):
                 if model_id.lower() == candidate.lower():
                     return model_id
     return model_name
+
+
+def _custom_entries(custom_providers: Any) -> list[dict]:
+    """The dict-shaped entries of a ``custom_providers:`` list (anything else is ignored)."""
+    return [e for e in custom_providers if isinstance(e, dict)] if isinstance(custom_providers, list) else []
+
+
+def _entry_aliases(entry: dict) -> frozenset[str]:
+    return custom_provider_aliases(str(entry.get("name") or ""), str(entry.get("provider_key") or ""))
 
 
 # --- Core model-switching pipeline
@@ -951,11 +954,8 @@ def _config_declares_model(
         cfg = user_providers.get(target_provider)
         if cfg is not None and is_provider_enabled(cfg) and new_model in _declared_model_ids(cfg.get("models", {})):
             return True
-    for entry in custom_providers if isinstance(custom_providers, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        entry_aliases = custom_provider_aliases(str(entry.get("name", "") or ""), str(entry.get("provider_key") or ""))
-        if (target_provider.lower() in entry_aliases or entry.get("base_url", "") == base_url) and (
+    for entry in _custom_entries(custom_providers):
+        if (target_provider.lower() in _entry_aliases(entry) or entry.get("base_url", "") == base_url) and (
             new_model == entry.get("model", "") or new_model in _declared_model_ids(entry.get("models", {}))
         ):
             return True
