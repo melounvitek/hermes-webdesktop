@@ -719,11 +719,10 @@ class ToolRegistry:
                 if override:
                     if plugin_override_denied:
                         logger.error(
-                            "Tool registration REJECTED: plugin %r attempted to "
-                            "override built-in tool %r (existing toolset %r) without "
-                            "operator opt-in. Set "
-                            "plugins.entries.<plugin_id>.allow_tool_override: true "
-                            "in config.yaml to allow it.",
+                            "Tool registration REJECTED: plugin %r attempted to override built-in "
+                            "tool %r (existing toolset %r) without operator opt-in. Set "
+                            "plugins.entries.<plugin_id>.allow_tool_override: true in config.yaml "
+                            "to allow it.",
                             owner, name, existing.toolset)
                         raise PermissionError(_OVERRIDE_DENIED_MSG.format(owner=owner, name=name))
                     # Explicit opt-in (or non-plugin caller): replace the tool; INFO so
@@ -736,10 +735,9 @@ class ToolRegistry:
                     # Reject every cross-toolset shadow, including MCP-to-MCP collisions.
                     # MCP reconnect/refresh re-registers within the same toolset: allowed.
                     logger.error(
-                        "Tool registration REJECTED: '%s' (toolset '%s') would "
-                        "shadow existing tool from toolset '%s'. Pass "
-                        "override=True to register() if the replacement is "
-                        "intentional, or deregister the existing tool first.",
+                        "Tool registration REJECTED: '%s' (toolset '%s') would shadow existing "
+                        "tool from toolset '%s'. Pass override=True to register() if the "
+                        "replacement is intentional, or deregister the existing tool first.",
                         name, toolset, existing.toolset)
                     return
             target[name] = ToolEntry(
