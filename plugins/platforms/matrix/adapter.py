@@ -111,9 +111,7 @@ def _matrix_voice_metadata_for_file(path: Path) -> Dict[str, Any]:
 
 def _matrix_transcode_voice_to_ogg(path: str) -> Optional[str]:
     """Transcode to a NEW temp .ogg (caller owns cleanup); None if ffmpeg is missing/fails.
-
-    Blocking subprocess work — call via ``asyncio.to_thread`` from async code.
-    """
+    Blocking subprocess work — call via ``asyncio.to_thread`` from async code."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
@@ -139,11 +137,9 @@ _MATRIX_BANG_COMMAND_RE = re.compile(r"^!([A-Za-z][A-Za-z0-9_-]*)(?=$|\s)(.*)$",
 
 def _resolve_matrix_bang_command(name: str) -> str | None:
     """Resolve a ``!command`` token (Matrix clients reserve ``/``) to a dispatchable token.
-
-    Only known gateway/skill commands resolve, so ordinary exclamations stay chat text.
-    Returns whichever candidate resolved — raw lowercased first, then the ``_``→``-``
-    variant — never a forced canonical form: aliases pass through for the dispatcher.
-    """
+    Only known gateway/skill commands resolve, so ordinary exclamations stay chat text. Returns
+    whichever candidate resolved — raw lowercased first, then ``_``→``-`` — never a forced
+    canonical form: aliases pass through for the dispatcher."""
     if not name:
         return None
     candidates = list(dict.fromkeys((name.lower(), name.lower().replace("_", "-"))))
@@ -245,15 +241,12 @@ class _MatrixHtmlSanitizer(HTMLParser):
         for key, value in attrs:
             attr = str(key or "").lower()
             raw_value = "" if value is None else str(value)
-            if attr.startswith("on"):
-                continue
             if tag == "a" and attr == "href":
                 href = self._safe_url(raw_value)
                 if href:
                     safe.append(f' href="{_html_escape(href, quote=True)}"')
-            elif tag == "code" and attr == "class":
-                if re.fullmatch(r"language-[A-Za-z0-9_+.-]{1,64}", raw_value):
-                    safe.append(f' class="{_html_escape(raw_value, quote=True)}"')
+            elif tag == "code" and attr == "class" and re.fullmatch(r"language-[A-Za-z0-9_+.-]{1,64}", raw_value):
+                safe.append(f' class="{_html_escape(raw_value, quote=True)}"')
         return "".join(safe)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -272,17 +265,18 @@ class _MatrixHtmlSanitizer(HTMLParser):
             return
         self._parts.append(f"</{tag}>")
 
-    def handle_data(self, data: str) -> None:
+    def _emit(self, text: str) -> None:
         if not self._skip_depth:
-            self._parts.append(_html_escape(data))
+            self._parts.append(text)
+
+    def handle_data(self, data: str) -> None:
+        self._emit(_html_escape(data))
 
     def handle_entityref(self, name: str) -> None:
-        if not self._skip_depth:
-            self._parts.append(f"&{name};")
+        self._emit(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
-        if not self._skip_depth:
-            self._parts.append(f"&#{name};")
+        self._emit(f"&#{name};")
 
     def get_html(self) -> str:
         return "".join(self._parts)
@@ -317,31 +311,20 @@ class _MatrixApprovalPrompt:
 
 
 @dataclass
-class _MatrixModelPickerPrompt:
-    """Pending reaction-based model picker prompt."""
+class _MatrixPickerPrompt:
+    """Pending reaction-based picker; ``choices`` maps emoji -> selection, ``on_selected`` is the callback."""
     chat_id: str
     message_id: str
     session_key: str
-    choices: dict[str, tuple[str, str]]
-    on_model_selected: Any
+    choices: dict
+    on_selected: Any
     requester_user_id: str | None = None
     expires_at: float | None = None
     resolved: bool = False
     bot_reaction_events: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass
-class _MatrixChoicePickerPrompt:
-    """Pending reaction-based choice picker (/reasoning, /fast)."""
-    chat_id: str
-    message_id: str
-    session_key: str
-    choices: dict[str, str]  # emoji -> value
-    on_choice_selected: Any
-    requester_user_id: str | None = None
-    expires_at: float | None = None
-    resolved: bool = False
-    bot_reaction_events: dict[str, str] = field(default_factory=dict)
+_MatrixModelPickerPrompt = _MatrixChoicePickerPrompt = _MatrixPickerPrompt
 
 
 # Spec allows ~65 KB events; 4000 was too small (split Markdown tables mid-row).
@@ -433,12 +416,9 @@ def _matrix_event_timestamp_seconds(event: Any) -> float:
 
 
 def _create_matrix_session(proxy_url: str | None):
-    """ClientSession whose proxy applies to *all* requests.
-
-    mautrix's ``HTTPAPI._send()`` never forwards per-request ``proxy=``, so it must be
-    session-level (``proxy=`` for HTTP(S), ``ProxyConnector`` for SOCKS); with no proxy,
-    ``trust_env`` honours HTTP(S)_PROXY.
-    """
+    """ClientSession whose proxy applies to *all* requests: mautrix's ``HTTPAPI._send()`` never
+    forwards per-request ``proxy=``, so it must be session-level (``proxy=`` for HTTP(S),
+    ``ProxyConnector`` for SOCKS); with no proxy, ``trust_env`` honours HTTP(S)_PROXY."""
     import aiohttp
     if not proxy_url:
         return aiohttp.ClientSession(trust_env=gateway_trust_env())
@@ -455,9 +435,7 @@ def _create_matrix_session(proxy_url: str | None):
 
 def _check_e2ee_deps() -> bool:
     """True if all four E2EE deps import: olm, PgCryptoStore (also drives sqlite), asyncpg, aiosqlite.
-
-    Without all four, encrypted rooms fail at connect with ``No module named 'asyncpg'``.
-    """
+    Without all four, encrypted rooms fail at connect with ``No module named 'asyncpg'``."""
     try:
         from mautrix.crypto import OlmMachine  # noqa: F401
         from mautrix.crypto.store.asyncpg import PgCryptoStore  # noqa: F401
@@ -514,11 +492,6 @@ def _extra_csv_set(config, key: str, env_name: str) -> Set[str]:
     if raw is None:
         raw = os.getenv(env_name, "")
     return _csv_set(raw)
-
-
-def _redact_matrix_value(value: Any) -> str:
-    """Return a safe, non-reversible preview for Matrix diagnostics."""
-    return "***" if str(value or "").strip() else ""
 
 
 def _write_matrix_recovery_key_output_file(recovery_key: str) -> Optional[Path]:
@@ -586,11 +559,9 @@ def _handle_generated_matrix_recovery_key(mxid: str, recovery_key: str) -> None:
 
 
 def _scoped_recovery_key() -> str:
-    """MATRIX_RECOVERY_KEY via the profile-scoped secret store (see _startup_env_secret).
-
-    A bare os.getenv under multiplex resolves the default profile's key and verification
-    fails with "Key MAC does not match".
-    """
+    """MATRIX_RECOVERY_KEY via the profile-scoped secret store (see _startup_env_secret): a bare
+    os.getenv under multiplex resolves the default profile's key and verification fails with
+    "Key MAC does not match"."""
     return _startup_env_secret("MATRIX_RECOVERY_KEY")
 
 
@@ -657,11 +628,9 @@ def check_matrix_requirements() -> bool:
 
 
 def ensure_matrix_deps() -> bool:
-    """ACTIVE deps-only installer (registry ``ensure_deps_fn``); rebinds the type globals.
-
-    Installs the whole ``platform.matrix`` group when ANY declared package is missing —
-    short-circuiting on ``import mautrix`` left asyncpg/aiosqlite uninstalled forever.
-    """
+    """ACTIVE deps-only installer (registry ``ensure_deps_fn``); rebinds the type globals. Installs the
+    whole ``platform.matrix`` group when ANY declared package is missing — short-circuiting on
+    ``import mautrix`` left asyncpg/aiosqlite uninstalled forever."""
     try:
         from tools.lazy_deps import feature_missing, ensure_and_bind
         missing = feature_missing("platform.matrix")
@@ -829,8 +798,8 @@ class MatrixAdapter(BasePlatformAdapter):
         self._approval_prompt_by_session: Dict[str, str] = {}
         self._approval_require_sender: bool = _env_truthy("MATRIX_APPROVAL_REQUIRE_SENDER", "true")
         self._approval_timeout_seconds = _env_number("MATRIX_APPROVAL_TIMEOUT_SECONDS", 300, int)
-        self._model_picker_prompts_by_event: Dict[str, _MatrixModelPickerPrompt] = {}
-        self._choice_picker_prompts_by_event: Dict[str, _MatrixChoicePickerPrompt] = {}
+        self._model_picker_prompts_by_event: Dict[str, _MatrixPickerPrompt] = {}
+        self._choice_picker_prompts_by_event: Dict[str, _MatrixPickerPrompt] = {}
         self._allowed_user_ids: Set[str] = _csv_set(os.getenv("MATRIX_ALLOWED_USERS", ""))
         self._allowed_room_ids: Set[str] = set(self._allowed_rooms)
         self._ignored_user_patterns: list[re.Pattern[str]] = []
@@ -913,11 +882,9 @@ class MatrixAdapter(BasePlatformAdapter):
         return True
 
     async def _reset_crypto_store_if_device_changed(self, crypto_store: Any, device_id: str) -> bool:
-        """Reset the Olm account when the token's device changed; True if reset.
-
-        The store is keyed by user ID, so a new device would inherit the old Olm account
-        whose identity keys can never be published under the new device ID.
-        """
+        """Reset the Olm account when the token's device changed; True if reset. The store is keyed
+        by user ID, so a new device would inherit the old Olm account whose identity keys can never
+        be published under the new device ID."""
         if not device_id:
             return False
         try:
@@ -935,12 +902,10 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _migrate_legacy_crypto_pickle(
             self, crypto_store: Any, crypto_db: Any, acct_id: str, pickle_key: str) -> bool:
-        """Re-pickle the Olm account under the current pickle key when it changed.
-
-        The key embeds the device ID; an account created before MATRIX_DEVICE_ID was set
-        lives under ``<acct>:default`` and later fails with BAD_ACCOUNT_KEY (silently
-        disabling optional E2EE). False only when an account exists but no key opens it.
-        """
+        """Re-pickle the Olm account under the current pickle key when it changed. The key embeds the
+        device ID; an account created before MATRIX_DEVICE_ID was set lives under ``<acct>:default``
+        and later fails with BAD_ACCOUNT_KEY (silently disabling optional E2EE). False only when an
+        account exists but no key opens it."""
         with suppress(Exception):
             await crypto_store.get_account()
             return True
@@ -1139,11 +1104,9 @@ class MatrixAdapter(BasePlatformAdapter):
                     return False
         if self._encryption:
             try:
-                # Remove legacy pickle file from pre-SQLite era.
-                legacy_pickle = self._store_dir / "crypto_store.pickle"
-                if legacy_pickle.exists():
+                if (self._store_dir / "crypto_store.pickle").exists():  # pre-SQLite era
                     logger.info("Matrix: removing legacy crypto_store.pickle (migrated to SQLite)")
-                    legacy_pickle.unlink()
+                    (self._store_dir / "crypto_store.pickle").unlink()
                 crypto_db = Database.create(
                     f"sqlite:///{self._crypto_db_path}", upgrade_table=PgCryptoStore.upgrade_table)
                 await crypto_db.start()
@@ -1384,7 +1347,7 @@ class MatrixAdapter(BasePlatformAdapter):
             "auth": {
                 "access_token_present": token_present, "password_present": bool(self._password),
                 "token_preview": "***" if token_present else "", "user_id": user_id,
-                "device_id_present": bool(device_id), "device_id_preview": _redact_matrix_value(device_id)},
+                "device_id_present": bool(device_id), "device_id_preview": "***" if str(device_id or "").strip() else ""},
             "sync": {
                 "connected": self._client is not None, "joined_room_count": len(self._joined_rooms),
                 "last_sync_age_seconds": max(0.0, now - self._last_sync_ts) if self._last_sync_ts else None},
@@ -1546,11 +1509,8 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_voice(
         self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Upload audio as an MSC3245 voice message.
-
-        Voice bubbles need Ogg/Opus but callers pass any format (e.g. TTS output), so
-        transcode here — best-effort: without ffmpeg the original file is sent unchanged.
-        """
+        """Upload audio as an MSC3245 voice message. Voice bubbles need Ogg/Opus but callers pass any
+        format (e.g. TTS output), so transcode here — best-effort: without ffmpeg the original is sent."""
         converted_path: Optional[str] = None
         send_path = audio_path
         if not str(audio_path).lower().endswith((".ogg", ".oga", ".opus")):
@@ -1667,9 +1627,9 @@ class MatrixAdapter(BasePlatformAdapter):
             lines.append(f"{emoji} `{model_id}` — {provider_name}")
         return await self._send_reaction_prompt(
             chat_id, "\n".join(lines), metadata,
-            lambda message_id, requester, expires_at: _MatrixModelPickerPrompt(
+            lambda message_id, requester, expires_at: _MatrixPickerPrompt(
                 chat_id=chat_id, message_id=message_id, session_key=session_key, choices=choices,
-                on_model_selected=on_model_selected, requester_user_id=requester, expires_at=expires_at),
+                on_selected=on_model_selected, requester_user_id=requester, expires_at=expires_at),
             self._model_picker_prompts_by_event, choices, "model picker")
 
     async def send_choice_picker(
@@ -1692,9 +1652,9 @@ class MatrixAdapter(BasePlatformAdapter):
         lines += ["", "React to choose."]
         return await self._send_reaction_prompt(
             chat_id, "\n".join(lines), metadata,
-            lambda message_id, requester, expires_at: _MatrixChoicePickerPrompt(
+            lambda message_id, requester, expires_at: _MatrixPickerPrompt(
                 chat_id=chat_id, message_id=message_id, session_key=session_key, choices=emoji_choices,
-                on_choice_selected=on_choice_selected, requester_user_id=requester, expires_at=expires_at),
+                on_selected=on_choice_selected, requester_user_id=requester, expires_at=expires_at),
             self._choice_picker_prompts_by_event, emoji_choices, "choice picker")
 
     def format_message(self, content: str) -> str:
@@ -1854,36 +1814,26 @@ class MatrixAdapter(BasePlatformAdapter):
                     logger.warning("Matrix: event handler failed during sync dispatch: %s", result)
 
     def _is_self_sender(self, sender: str) -> bool:
-        """True if *sender* is the bot itself (case-insensitive: homeservers vary localpart case).
-
-        With no resolved user_id we can't prove a sender is NOT us, so return True — dropping
-        our own events beats an echo loop ("hall of mirrors").
-        """
+        """True if *sender* is the bot itself (case-insensitive: homeservers vary localpart case). With
+        no resolved user_id we can't prove a sender is NOT us, so return True — dropping our own
+        events beats an echo loop ("hall of mirrors")."""
         own = (self._user_id or "").strip().lower()
         return not own or sender.strip().lower() == own
 
     @staticmethod
     def _is_system_or_bridge_sender(sender: str) -> bool:
         """True for appservice/bridge/system identities (``@_telegram_123:server``) or malformed IDs.
-
-        Never offer these a pairing code: an approved bridge would relay every outbound
-        message back as an "authorized user message" (echo loop).
-        """
+        Never offer these a pairing code: an approved bridge would relay every outbound message
+        back as an "authorized user message" (echo loop)."""
         localpart = (sender or "").strip().lstrip("@").partition(":")[0]
         return not localpart or localpart.startswith("_")
 
-    def _matches_ignored_user_pattern(self, sender: str) -> bool:
-        """Return True when sender matches configured Matrix ignore patterns."""
-        return any(pattern.search(sender or "") for pattern in self._ignored_user_patterns)
-
-    def _is_allowed_matrix_room(self, room_id: str) -> bool:
-        """Return True when MATRIX_ALLOWED_ROOMS permits the room."""
-        return not self._allowed_room_ids or room_id in self._allowed_room_ids
-
     async def _is_allowed_matrix_room_event(self, room_id: str) -> bool:
         """MATRIX_ALLOWED_ROOMS gate; DMs are exempt so personal chats survive a project allowlist."""
+        if not self._allowed_room_ids or room_id in self._allowed_room_ids:
+            return True
         try:
-            return self._is_allowed_matrix_room(room_id) or await self._is_dm_room(room_id)
+            return await self._is_dm_room(room_id)
         except Exception as exc:
             logger.debug("Matrix: could not resolve room identity for allowlist check in %s: %s", room_id, exc)
             return False
@@ -1895,13 +1845,10 @@ class MatrixAdapter(BasePlatformAdapter):
         self._clock_skew_warned: bool = False
 
     def _note_late_grace_drop(self, event_ts: float) -> None:
-        """Clock-skew heuristic for grace-check drops well after startup.
-
-        A host clock set ahead of real time makes every live event look "older than startup" and
-        the bot silently never replies. Warn once when drops keep happening >30s after startup with
-        a *consistent* skew — unlike backfill from a freshly invited room, whose event ages vary
-        widely and reset the counter.
-        """
+        """Clock-skew heuristic for grace-check drops well after startup. A host clock set ahead of
+        real time makes every live event look "older than startup" and the bot silently never
+        replies. Warn once when drops keep happening >30s after startup with a *consistent* skew —
+        unlike backfill from a freshly invited room, whose event ages vary widely and reset the counter."""
         if self._clock_skew_warned or time.time() - self._startup_ts <= 30:
             return
         skew = self._startup_ts - event_ts
@@ -1933,7 +1880,7 @@ class MatrixAdapter(BasePlatformAdapter):
         if self._is_system_or_bridge_sender(sender):
             logger.debug("Matrix: ignoring system/bridge sender %s in %s", sender, room_id)
             return
-        if self._matches_ignored_user_pattern(sender):
+        if any(pattern.search(sender or "") for pattern in self._ignored_user_patterns):
             logger.debug("Matrix: ignoring sender %s in %s due to configured ignore pattern", sender, room_id)
             return
         if not await self._is_allowed_matrix_room_event(room_id):
@@ -2032,11 +1979,9 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _extract_reply_context(
         self, room_id: str, body: str, relates_to: dict
     ) -> tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]:
-        """Return (body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name).
-
-        Captures the inline reply fallback (``> <@user:srv> text\\n\\nreply``) BEFORE stripping it,
-        so the prompt layer can render "[Replying to: ...]" like Signal/Slack/Telegram.
-        """
+        """Return (body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name). Captures
+        the inline reply fallback (``> <@user:srv> text\\n\\nreply``) BEFORE stripping it, so the
+        prompt layer can render "[Replying to: ...]" like Signal/Slack/Telegram."""
         reply_to = (relates_to.get("m.in_reply_to") or {}).get("event_id")
         reply_to_text = reply_to_author_id = reply_to_author_name = None
         if reply_to and body.startswith("> "):
@@ -2328,12 +2273,9 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _claim_reaction_prompt(
         self, registry: dict, room_id: str, reacts_to: str, key: str, sender: str, label: str, invalid_text: str,
         on_expired, choices: Optional[dict] = None) -> tuple[bool, Any, Any]:
-        """Shared gate for reaction prompts: (handled, prompt, selection).
-
-        handled=False => not our prompt; selection=None with handled=True => consumed without
-        action (wrong room, expired, unauthorized reactor, or a key that is not a choice).
-        ``choices`` defaults to ``prompt.choices``.
-        """
+        """Shared gate for reaction prompts: (handled, prompt, selection). handled=False => not our
+        prompt; selection=None with handled=True => consumed without action (wrong room, expired,
+        unauthorized reactor, or a key that is not a choice). ``choices`` defaults to ``prompt.choices``."""
         prompt = registry.get(reacts_to)
         if not prompt or prompt.resolved:
             return False, None, None
@@ -2383,7 +2325,7 @@ class MatrixAdapter(BasePlatformAdapter):
         self._model_picker_prompts_by_event.pop(reacts_to, None)
         model_id, provider_slug = selection
         try:
-            confirmation = await model_prompt.on_model_selected(room_id, model_id, provider_slug)
+            confirmation = await model_prompt.on_selected(room_id, model_id, provider_slug)
             await self._redact_bot_model_picker_reactions(room_id, model_prompt)
             if confirmation:
                 await self.send(room_id, confirmation, reply_to=reacts_to)
@@ -2404,7 +2346,7 @@ class MatrixAdapter(BasePlatformAdapter):
         choice_prompt.resolved = True
         self._choice_picker_prompts_by_event.pop(reacts_to, None)
         try:
-            confirmation = await choice_prompt.on_choice_selected(room_id, value)
+            confirmation = await choice_prompt.on_selected(room_id, value)
             if confirmation:
                 await self.send(room_id, confirmation, reply_to=reacts_to)
         except Exception as exc:
@@ -2630,10 +2572,6 @@ class MatrixAdapter(BasePlatformAdapter):
         value = (self._state_event_value(event, key) or "").strip()
         return value or None
 
-    @staticmethod
-    def _room_server_name(room_id: str) -> Optional[str]:
-        return (room_id.rsplit(":", 1)[-1].strip() or None) if ":" in room_id else None
-
     def _invalidate_room_identities(self, room_id: str | None = None) -> None:
         """Drop one cached room identity (or all when *room_id* is None)."""
         if room_id is None:
@@ -2642,14 +2580,6 @@ class MatrixAdapter(BasePlatformAdapter):
         else:
             self._room_identities.pop(room_id, None)
             self._room_identity_cached_at.pop(room_id, None)
-
-    def _cache_room_identity(self, room_id: str, identity: MatrixRoomIdentity) -> None:
-        if len(self._room_identities) >= self._room_identity_cache_max:
-            oldest = min(self._room_identity_cached_at, key=self._room_identity_cached_at.get, default=None)
-            if oldest:
-                self._invalidate_room_identities(oldest)
-        self._room_identities[room_id] = identity
-        self._room_identity_cached_at[room_id] = time.monotonic()
 
     async def _resolve_room_identity(self, room_id: str, *, force_refresh: bool = False) -> MatrixRoomIdentity:
         """Resolve room identity; member count is the primary DM signal (see below)."""
@@ -2669,11 +2599,17 @@ class MatrixAdapter(BasePlatformAdapter):
         is_likely_dm = (member_count is not None and member_count <= 2) or (is_direct and not has_explicit_name)
         identity = MatrixRoomIdentity(
             room_id=room_id, room_name=room_name, room_topic=room_topic, canonical_alias=canonical_alias,
-            server_name=self._room_server_name(room_id), joined_member_count=member_count,
+            server_name=(room_id.rsplit(":", 1)[-1].strip() or None) if ":" in room_id else None,
+            joined_member_count=member_count,
             is_direct_account_data=is_direct, display_name=room_name or canonical_alias or room_id,
             has_explicit_name=has_explicit_name, chat_type="dm" if is_likely_dm else "room",
             conflict=bool(is_direct and has_explicit_name and (member_count is None or member_count > 2)))
-        self._cache_room_identity(room_id, identity)
+        if len(self._room_identities) >= self._room_identity_cache_max:
+            oldest = min(self._room_identity_cached_at, key=self._room_identity_cached_at.get, default=None)
+            if oldest:
+                self._invalidate_room_identities(oldest)
+        self._room_identities[room_id] = identity
+        self._room_identity_cached_at[room_id] = time.monotonic()
         return identity
 
     async def _is_dm_room(self, room_id: str) -> bool:
@@ -2709,11 +2645,9 @@ class MatrixAdapter(BasePlatformAdapter):
         self._invalidate_room_identities()
 
     async def _record_dm_room(self, room_id: str, inviter: str) -> None:
-        """Persist a room as DM in m.direct account data after an invite.
-
-        ``m.direct`` is absent (404) until the account has had a DM; fetch the current mapping (if
-        any), append *room_id* under *inviter*, write it back so ``_refresh_dm_cache`` sees the DM.
-        """
+        """Persist a room as DM in m.direct account data after an invite. ``m.direct`` is absent (404)
+        until the account has had a DM; fetch the current mapping (if any), append *room_id* under
+        *inviter*, write it back so ``_refresh_dm_cache`` sees the DM."""
         if not self._client:
             return
         dm_data: Dict[str, list] = await self._fetch_m_direct(require_dict=True) or {}
@@ -3063,11 +2997,8 @@ _YAML_LIST_KEYS = (
 
 
 def _apply_yaml_config(yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
-    """apply_yaml_config_fn: config.yaml matrix: keys → MATRIX_* env (env wins). Returns None.
-
-    Lowercased flags apply whenever the key is present (None still writes "none");
-    list-valued keys skip None.
-    """
+    """apply_yaml_config_fn: config.yaml matrix: keys → MATRIX_* env (env wins). Returns None. Lowercased
+    flags apply whenever the key is present (None still writes "none"); list-valued keys skip None."""
     for key, env_name in _YAML_LOWER_KEYS:
         if key in matrix_cfg and not os.getenv(env_name):
             os.environ[env_name] = str(matrix_cfg[key]).lower()
