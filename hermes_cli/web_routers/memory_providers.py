@@ -433,40 +433,28 @@ def _install_memory_provider_external_dependencies(
         check_cmd = dep.get("check") or ""
         install_cmd = dep.get("install") or ""
 
-        def _check(status_of) -> bool:
-            """Run the check command; append its result; True when it passed."""
+        def _run(kind: str, command: str, status_of, **kwargs) -> Optional[int]:
+            """Run a setup command, append its result row; returncode or None on spawn failure."""
             try:
-                check = _run_setup_command(shlex.split(check_cmd), display=check_cmd, timeout=20)
+                completed = _run_setup_command(command if kwargs.get("shell") else shlex.split(command), display=command, **kwargs)
             except Exception as exc:
-                results.append(_command_result(kind="external_check", name=name, status=status_of(None), command=check_cmd, error=str(exc)))
-                return False
-            ok = check.returncode == 0
-            results.append(_command_result(kind="external_check", name=name, status=status_of(ok), command=check_cmd, completed=check))
-            return ok
+                results.append(_command_result(kind=kind, name=name, status=status_of(None), command=command, error=str(exc)))
+                return None
+            results.append(_command_result(kind=kind, name=name, status=status_of(completed.returncode == 0), command=command, completed=completed))
+            return completed.returncode
 
-        if check_cmd:
-            if _check(lambda ok: "already_installed" if ok else ("missing" if install_cmd else "failed")):
-                continue
-            if not install_cmd:
-                continue
-
-        if install_cmd:
-            try:
-                install = _run_setup_command(install_cmd, display=install_cmd, shell=True, timeout=300)
-            except Exception as exc:
-                results.append(_command_result(kind="external_install", name=name, status="failed", command=install_cmd, error=str(exc)))
-                continue
-
-            results.append(
-                _command_result(
-                    kind="external_install", name=name,
-                    status="installed" if install.returncode == 0 else "failed",
-                    command=install_cmd, completed=install,
-                )
-            )
-
-            if check_cmd and install.returncode == 0:
-                _check(lambda ok: "verified" if ok else "failed")
+        # Check first: "already_installed" short-circuits; a failed check is
+        # "missing" when an install step can fix it, "failed" otherwise.
+        if check_cmd and _run(
+            "external_check", check_cmd,
+            lambda ok: "already_installed" if ok else ("missing" if install_cmd else "failed"), timeout=20,
+        ) == 0:
+            continue
+        if not install_cmd:
+            continue
+        rc = _run("external_install", install_cmd, lambda ok: "installed" if ok else "failed", shell=True, timeout=300)
+        if check_cmd and rc == 0:
+            _run("external_check", check_cmd, lambda ok: "verified" if ok else "failed", timeout=20)
 
     return results
 
