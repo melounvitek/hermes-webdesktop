@@ -419,8 +419,7 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
     if error is None:
         return packaged_executable, False
 
-    print(f"✗ The built Hermes.exe failed its integrity check: {error}")
-    print(f"    at: {packaged_executable}")
+    print(f"✗ The built Hermes.exe failed its integrity check: {error}\n    at: {packaged_executable}")
 
     # Only the exe's OWN output dir is purged (a staging dir), never the live
     # release/ tree that still holds the last working app.
@@ -1221,8 +1220,7 @@ def _install_desktop_workspace_deps(npm: str, env: dict) -> None:
     if install_result.returncode == 0:
         return
     if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
-        print("✗ Desktop dependency install failed")
-        print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+        print(f"✗ Desktop dependency install failed\n  Run manually:  cd {PROJECT_ROOT} && npm ci")
         sys.exit(install_result.returncode or 1)
     if _try_redownload_electron_dist(PROJECT_ROOT, env):
         print("  ⚠ Dependency install failed with a missing Electron dist; "

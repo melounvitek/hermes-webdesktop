@@ -61,13 +61,10 @@ def _print_tui_exit_summary(session_id: Optional[str], active_session_file: Opti
         if db is not None:
             db.close()
 
-    print()
-    print("Resume this session with:")
-    print(f"  hermes --tui --resume {target}")
+    print(f"\nResume this session with:\n  hermes --tui --resume {target}")
     if title:
         print(f'  hermes --tui -c "{title}"')
-    print()
-    print(f"Session:        {target}")
+    print(f"\nSession:        {target}")
     if title:
         print(f"Title:          {title}")
     print(f"Messages:       {message_count}")
@@ -785,9 +782,7 @@ def _launch_tui(
     # preserve_inherited=False keeps --tui and other flags out of the subcommand.
     if code == 42:
         from hermes_cli.relaunch import relaunch
-        print()
-        print("⚕ Launching update...")
-        print()
+        print("\n⚕ Launching update...\n")
         relaunch(["update"], preserve_inherited=False)
 
     sys.exit(code)

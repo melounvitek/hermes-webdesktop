@@ -119,8 +119,7 @@ def _restart_managed_dashboard_service(reason: str, unit: str = _DASHBOARD_SYSTE
     }:
         return False
 
-    print()
-    print(f"⟲ Restarting managed dashboard service ({reason})")
+    print(f"\n⟲ Restarting managed dashboard service ({reason})")
 
     scope_label = "systemctl --user" if scope else "sudo systemctl"
     commands = [("systemctl", *scope, "restart", unit)]
@@ -461,8 +460,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
 
-    print()
-    print(f"⚠ Dashboard authentication is required for this configuration ({host}).")
+    print(f"\n⚠ Dashboard authentication is required for this configuration ({host}).")
     print(
         "  Non-loopback binds and configured external dashboard.public_url "
         "values require authentication (--insecure does not bypass this)."
@@ -470,9 +468,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print("  How do you want to authenticate the dashboard?")
     print("    [1] Username & password (quickest; for a trusted LAN / VPN)")
-    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)")
-    print("    [3] Cancel")
-    print()
+    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)\n    [3] Cancel\n")
 
     try:
         choice = input("  Choice [1]: ").strip() or "1"
@@ -549,8 +545,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print(f"  ✓ Username/password auth configured (user: {username}).")
     print("    Saved to config.yaml under dashboard.basic_auth.")
-    print("    Sign in at the dashboard with these credentials.")
-    print()
+    print("    Sign in at the dashboard with these credentials.\n")
 
 
 def _read_ssh_session_token_file(path: str) -> str:
