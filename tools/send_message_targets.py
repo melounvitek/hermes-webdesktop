@@ -81,8 +81,7 @@ _SLACK_FORMS = (
     (_SLACK_TARGET_RE, "{}", False),
     (_SLACK_USER_ID_RE, "user:{}", False),
     (_SLACK_MENTION_RE, "user:{}", False),
-    (_SLACK_USER_NAME_RE, "user_name:{}", False),
-)
+    (_SLACK_USER_NAME_RE, "user_name:{}", False))
 
 
 def _parse_slack(ref):
@@ -146,8 +145,7 @@ _PLATFORM_PARSERS = {
     "signal": _parse_signal,
     "wecom": _parse_nonempty,
     # Photon DM GUIDs are adapter-native ids (mirrors the react handler).
-    "photon": _parse_regex_stripped(_PHOTON_DM_GUID_RE),
-}
+    "photon": _parse_regex_stripped(_PHOTON_DM_GUID_RE)}
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):
@@ -228,12 +226,10 @@ def resolve_send_target(
                 or len(parsed) != 2
                 or not isinstance(parsed[0], str)
                 or not parsed[0]
-                or (parsed[1] is not None and not isinstance(parsed[1], str))
-            ):
+                or (parsed[1] is not None and not isinstance(parsed[1], str))):
                 return (
                     None, None,
-                    f"Target parser for platform '{platform_name}' returned an invalid result",
-                )
+                    f"Target parser for platform '{platform_name}' returned an invalid result")
             return _validated(*parsed)
 
     parsed_chat_id, parsed_thread_id, explicit = _parse_target_ref(platform_name, target_ref)
@@ -264,8 +260,7 @@ def resolve_send_target(
         logger.debug(
             "Handing unresolved target '%s' to the %s adapter unchanged "
             "(the adapter validates it)",
-            target_ref, platform_name,
-        )
+            target_ref, platform_name)
         return target_ref, None, None
 
     if entry is not None and entry.source == "plugin" and not is_builtin:
@@ -274,13 +269,11 @@ def resolve_send_target(
         return (
             None, None,
             f"Could not resolve '{target_ref}' on {platform_name}. "
-            "The plugin parser did not recognize it and no channel-directory entry matched.",
-        )
+            "The plugin parser did not recognize it and no channel-directory entry matched.")
     if pass_unresolved_references:
         return _pass_through_unresolved()
     hint = (
         "Try using a numeric channel ID instead."
         if resolution_failed
-        else "Use send_message(action='list') to see available targets."
-    )
+        else "Use send_message(action='list') to see available targets.")
     return None, None, f"Could not resolve '{target_ref}' on {platform_name}. {hint}"
