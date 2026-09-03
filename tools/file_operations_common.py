@@ -1,10 +1,8 @@
 """Result dataclasses and pure text helpers shared by ``tools.file_operations``
-and its search/lint mixins.
-
-Leaf module (imports nothing from ``tools`` at module scope) so the mixins and
-the origin module can all depend on it without an import cycle. The
-``to_dict`` output of every class here IS tool behavior — key names, key
-order, and omission rules are pinned by tests and read by the model.
+and its search/lint mixins. Leaf module (imports nothing from ``tools`` at module
+scope) so nothing cycles. The ``to_dict`` output of every class here IS tool
+behavior — key names, order and omission rules are pinned by tests and read by
+the model.
 """
 
 import re
@@ -111,12 +109,9 @@ class SearchResult:
     _DENSIFY_MIN_MATCHES: ClassVar[int] = 5
 
     def _densify_matches(self) -> Optional[str]:
-        """Render content matches as a lossless, path-grouped text block.
-
-        Path printed once, then ``  <line>: <content>`` rows. Relies on rg/grep
-        emitting a file's hits consecutively, so grouping on path change needs
-        no reordering. Returns None when too few matches to be worth it.
-        """
+        """Lossless path-grouped text block: path once, then ``  <line>: <content>``
+        rows. Relies on rg/grep emitting a file's hits consecutively. None when
+        too few matches to be worth it."""
         if len(self.matches) < self._DENSIFY_MIN_MATCHES:
             return None
         lines: list[str] = []
@@ -142,8 +137,7 @@ class SearchResult:
                 result["matches_text"] = dense
             else:
                 result["matches"] = [
-                    {"path": m.path, "line": m.line_number, "content": m.content}
-                    for m in self.matches
+                    {"path": m.path, "line": m.line_number, "content": m.content} for m in self.matches
                 ]
         if self.files:
             result["files"] = self.files
@@ -198,9 +192,7 @@ def _strip_terminal_fence_leaks(text: str) -> str:
     cleaned_lines: List[str] = []
     for line in text.splitlines(keepends=True):
         had_terminal_wrapper = "__HERMES_FENCE_" in line or "\x1b]" in line
-        cleaned = _OSC_SEQUENCE_RE.sub("", line)
-        cleaned = _FENCE_MARKER_RE.sub("", cleaned)
-        cleaned = cleaned.replace("\x07", "")
+        cleaned = _FENCE_MARKER_RE.sub("", _OSC_SEQUENCE_RE.sub("", line)).replace("\x07", "")
         if had_terminal_wrapper and cleaned.strip("'\r\n\t ") == "":
             continue
         cleaned_lines.append(cleaned)
@@ -209,15 +201,10 @@ def _strip_terminal_fence_leaks(text: str) -> str:
 
 def _detect_line_ending(sample: str) -> Optional[str]:
     """Dominant line ending of ``sample`` (``\\r\\n`` if any CRLF in the first 4KB,
-    else ``\\n``), or None for empty/single-line content.
-
-    Used to preserve a file's endings across write_file/patch: the agent's bare-LF
-    tool args would otherwise silently normalize CRLF files, and patch would
-    produce mixed endings when only the substituted region changes.
-    """
-    if not sample:
-        return None
-    head = sample[:4096]
+    else ``\\n``), or None for empty/single-line content. Preserves a file's
+    endings across write_file/patch: bare-LF tool args would otherwise silently
+    normalize CRLF files, and patch would produce mixed endings."""
+    head = sample[:4096] if sample else ""
     if "\r\n" in head:
         return "\r\n"
     if "\n" in head:
@@ -239,15 +226,14 @@ def _normalize_line_endings(text: str, target: str) -> str:
 
 # UTF-8 BOM (EF BB BF == U+FEFF), prepended by some Windows editors. Stripped on
 # read so the model never sees a phantom first character (and patch's first-line
-# match works), restored on write when the on-disk file had one — mirroring the
-# line-ending preservation above.
+# match works), restored on write when the on-disk file had one.
 _UTF8_BOM = "\ufeff"
 
 
 def _strip_bom(text: str) -> tuple[str, bool]:
     """Return (text-without-leading-BOM, had_bom). Only a leading BOM is
     stripped; mid-content U+FEFF is legitimate data."""
-    if text and text.startswith(_UTF8_BOM):
+    if _has_bom(text):
         return text[len(_UTF8_BOM):], True
     return text, False
 
@@ -281,16 +267,12 @@ def normalize_read_pagination(offset: Any = DEFAULT_READ_OFFSET,
     like ``0,-1p`` (schemas declare bounds, but not every caller enforces them).
     The ``limit`` ceiling is ``tool_output.max_lines`` from config.yaml."""
     from tools.tool_output_limits import get_max_lines
-    max_lines = get_max_lines()
     normalized_offset = max(1, _coerce_int(offset, DEFAULT_READ_OFFSET))
-    normalized_limit = _coerce_int(limit, DEFAULT_READ_LIMIT)
-    normalized_limit = max(1, min(normalized_limit, max_lines))
+    normalized_limit = max(1, min(_coerce_int(limit, DEFAULT_READ_LIMIT), get_max_lines()))
     return normalized_offset, normalized_limit
 
 
 def normalize_search_pagination(offset: Any = DEFAULT_SEARCH_OFFSET,
                                 limit: Any = DEFAULT_SEARCH_LIMIT) -> tuple[int, int]:
     """Return safe search pagination bounds for shell head/tail pipelines."""
-    normalized_offset = max(0, _coerce_int(offset, DEFAULT_SEARCH_OFFSET))
-    normalized_limit = max(1, _coerce_int(limit, DEFAULT_SEARCH_LIMIT))
-    return normalized_offset, normalized_limit
+    return max(0, _coerce_int(offset, DEFAULT_SEARCH_OFFSET)), max(1, _coerce_int(limit, DEFAULT_SEARCH_LIMIT))
