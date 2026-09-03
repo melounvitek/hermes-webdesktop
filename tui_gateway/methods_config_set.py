@@ -197,13 +197,9 @@ def _set_fast(rid, params, key, value, session):
 
 
 def _set_busy(rid, params, key, value, session):
-    raw = _word(value)
-    if raw in {"", "status"}:
+    if _word(value) in {"", "status"}:
         return _kv(rid, key, _load_busy_input_mode())
-    if raw not in {"queue", "steer", "interrupt"}:
-        return _err(rid, 4002, f"unknown busy mode: {value}")
-    _write_config_key("display.busy_input_mode", raw)
-    return _kv(rid, key, raw)
+    return _set_word(rid, params, key, value, session)
 
 
 def _set_verbose(rid, params, key, value, session):
@@ -251,12 +247,7 @@ def _set_focus(rid, params, key, value, session):
 
 
 def _set_approval_mode(rid, params, key, value, session):
-    raw = _word(value)
-    if raw not in _APPROVAL_MODES:
-        return _err(rid, 4002, f"unknown approval mode: {value}; pick one of manual|smart|off")
-    _write_config_key("approvals.mode", raw)
-    _emit_all_session_info()
-    return _kv(rid, "approvals.mode", raw)
+    return _set_word(rid, params, "approvals.mode", value, session)  # legacy alias reports the real key
 
 
 @_cfgset_guarded
@@ -330,6 +321,10 @@ def _word_setters() -> dict:
     """key -> (normaliser, accepted words, error template, apply(word)); the reported value is the
     accepted word. Built per call: the specs reference server.py globals (rebound at install)."""
     return {
+        "busy": (_word, {"queue", "steer", "interrupt"}, "unknown busy mode: {value}",
+                 lambda w: _write_config_key("display.busy_input_mode", w)),
+        "approvals.mode": (_word, _APPROVAL_MODES, "unknown approval mode: {value}; pick one of manual|smart|off",
+                           lambda w: (_write_config_key("approvals.mode", w), _emit_all_session_info())),
         "details_mode": (_word, _DETAIL_MODES, "unknown details_mode: {value}", lambda w: _write_display_sections(
             sections={section: w for section in _DETAIL_SECTION_NAMES}, details_mode=w)),
         # thinking_mode also keeps details_mode aligned (compat bridge).
@@ -457,7 +452,7 @@ def _set_display_toggle(rid, params, key, value, session):
 
 _CONFIG_SETTERS = {
     "model": _set_model, "fast": _set_fast, "busy": _set_busy, "verbose": _set_verbose, "focus": _set_focus,
-    "approval_mode": _set_approval_mode, "approvals.mode": _set_approval_mode, "yolo": _set_yolo,
+    "approval_mode": _set_approval_mode, "approvals.mode": _set_word, "yolo": _set_yolo,
     "reasoning": _set_reasoning, "details_mode": _set_word, "thinking_mode": _set_word,
     "density": _set_display_bool, "battery": _set_display_bool, "theme": _set_word,
     "statusbar": _set_statusbar, "mouse": _set_mouse, "indicator": _set_word,
