@@ -1,10 +1,9 @@
 """Shutdown forensics — capture context when the gateway receives SIGTERM/SIGINT.
 
 ``shutdown_signal_handler`` runs synchronously inside the asyncio loop, so
-:func:`snapshot_shutdown_context` is a fast (<10ms) non-blocking probe it can log
-immediately, and :func:`spawn_async_diagnostic` is a fire-and-forget ``ps`` walk in
-a detached subprocess so it can't block teardown even if /proc is wedged. Anything
-that waits belongs in the async helper, never in the synchronous probe.
+:func:`snapshot_shutdown_context` is a fast (<10ms) non-blocking probe and
+:func:`spawn_async_diagnostic` is a fire-and-forget ``ps`` walk in a detached
+subprocess. Anything that waits belongs in the async helper, never in the probe.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ _SIGNAL_NAME_BY_NUM: Dict[int, str] = {
 
 
 def _signal_name(sig: Any) -> str:
-    """Return a human-readable signal name (or ``str(sig)`` as fallback)."""
+    """Human-readable signal name (``str(sig)`` as fallback)."""
     if sig is None:
         return "UNKNOWN"
     try:
@@ -66,14 +65,12 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
             summary["ppid"] = int(ppid)
     uid = _read_proc_field(pid, "Uid")
     if uid is not None:
-        # "real effective saved fs"
-        summary["uid"] = uid.split()[0] if uid else uid
+        summary["uid"] = uid.split()[0] if uid else uid  # "real effective saved fs"
     try:
         data = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         data = b""
-    if data:
-        # Truncate aggressively — these can be 4KB
+    if data:  # Truncate aggressively — these can be 4KB.
         summary["cmdline"] = data.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()[:300]
     return summary
 
@@ -95,7 +92,6 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     """
     pid = os.getpid()
     ppid = os.getppid()
-
     ctx: Dict[str, Any] = {
         "ts": time.time(),
         "ts_monotonic": time.monotonic(),
@@ -146,12 +142,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     return ctx
 
 
-def spawn_async_diagnostic(
-    log_path: Path,
-    signal_name: str,
-    *,
-    timeout_seconds: float = 5.0,
-) -> Optional[int]:
+def spawn_async_diagnostic(log_path: Path, signal_name: str, *, timeout_seconds: float = 5.0) -> Optional[int]:
     """Fire-and-forget ``ps``-style snapshot appended to ``log_path``.
 
     A detached subprocess (own ``timeout`` so a wedged ``ps`` self-cleans) rather
@@ -205,7 +196,7 @@ def spawn_async_diagnostic(
 
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
-    """Render a shutdown context dict as a single, scannable log line."""
+    """Render a shutdown context dict as a single, scannable log line (parent cmdline is the key signal)."""
     parent = ctx.get("parent") or {}
     load = ctx.get("loadavg_1m")
     load_str = f"{load:.2f}" if isinstance(load, (int, float)) else "?"
@@ -217,7 +208,6 @@ def format_context_for_log(ctx: Dict[str, Any]) -> str:
     if ctx.get("tracer_pid"):
         extras.append(f"tracer_pid={ctx['tracer_pid']}")
     extras_str = (" " + " ".join(extras)) if extras else ""
-    # Parent cmdline is the most useful single signal — log it prominently.
     return (
         f"signal={ctx.get('signal', '?')} under_systemd={'yes' if ctx.get('under_systemd') else 'no'} "
         f"parent_pid={parent.get('pid') or '?'} parent_name={parent.get('name') or '?'} "
@@ -234,16 +224,15 @@ def context_as_json(ctx: Dict[str, Any]) -> str:
 
 
 def check_systemd_timing_alignment(
-    drain_timeout: float,
-    cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
+    drain_timeout: float, cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT
 ) -> Optional[Dict[str, Any]]:
     """At startup, sanity-check that systemd's TimeoutStopSec covers stop.
 
     A stale unit file (upgraded without re-running ``hermes setup``) can have
-    ``TimeoutStopSec`` below the stop budget, so systemd SIGKILLs the cgroup
-    mid-drain — a phantom ``code=killed status=9`` in the journal. Returns ``None``
-    when aligned OR undeterminable (not under systemd, no ``systemctl``); otherwise
-    a dict with ``timeout_stop_sec``/``drain_timeout``/``expected_min``/``mismatch``.
+    ``TimeoutStopSec`` below the stop budget, so systemd SIGKILLs the cgroup mid-drain
+    (a phantom ``code=killed status=9`` in the journal). ``None`` when aligned OR
+    undeterminable (not under systemd, no ``systemctl``); otherwise a dict with
+    ``timeout_stop_sec``/``drain_timeout``/``expected_min``/``mismatch``.
     """
     if not os.environ.get("INVOCATION_ID"):
         return None  # Not running under systemd (or at least not directly)
@@ -258,10 +247,7 @@ def check_systemd_timing_alignment(
                     break
     except OSError:
         pass
-    if not unit_name:
-        return None
-
-    timeout_us = _systemd_timeout_stop_us(unit_name)
+    timeout_us = _systemd_timeout_stop_us(unit_name) if unit_name else None
     if timeout_us is None:
         return None
 
@@ -302,10 +288,8 @@ def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:
 def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
     """Parse 'TimeoutStopUSec=1min 30s' / '90s' style values to microseconds.
 
-    Covers the common units (us, ms, s, min, h); a bare number is seconds.
-    Returns None on anything unexpected.  Never raises.
-
-    Public: also consumed by hermes_cli.gateway's restart-wait sizing.
+    Covers us, ms, s, min, h; a bare number is seconds. None on anything unexpected;
+    never raises. Public: also consumed by hermes_cli.gateway's restart-wait sizing.
     """
     if not raw:
         return None
@@ -314,8 +298,7 @@ def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
         "min": 60_000_000, "h": 3_600_000_000, "hr": 3_600_000_000,
     }
     total_us = 0
-    token = ""
-    digits = ""
+    token = digits = ""
 
     def _flush() -> bool:
         """Fold the pending ``digits``/``token`` pair into ``total_us``."""
@@ -327,8 +310,7 @@ def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
             total_us += int(float(digits) * multiplier)
         except ValueError:
             return False
-        digits = ""
-        token = ""
+        digits = token = ""
         return True
 
     for ch in raw + " ":

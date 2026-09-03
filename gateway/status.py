@@ -1607,12 +1607,10 @@ def get_running_pid(pid_path: Optional[Path] = None, *, cleanup_stale: bool = Tr
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return get_runtime_status_running_pid() if pid_path is None else None
     # Lock inactive: the runtime-status fallback runs BEFORE cleanup here.
-    if pid_path is None:
-        runtime_pid = get_runtime_status_running_pid()
-        if runtime_pid is not None:
-            return runtime_pid
-    _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
-    return None
+    runtime_pid = get_runtime_status_running_pid() if pid_path is None else None
+    if runtime_pid is None:
+        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+    return runtime_pid
 
 
 def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float]]:
@@ -1620,11 +1618,12 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     resolved_pid_path = Path(pid_path)
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     pid_exists = _strict_path_exists(resolved_pid_path, "gateway PID")
-    lock_exists = _strict_path_exists(resolved_lock_path, "gateway lock")
-    if not lock_exists:
-        return None  # A stale PID file without a lock is not a live gateway.
+    # A stale PID file without a lock is not a live gateway; the lock probe is
+    # authoritative for absence.
+    if not _strict_path_exists(resolved_lock_path, "gateway lock"):
+        return None
     if not _is_gateway_runtime_lock_active_strict(resolved_lock_path):
-        return None  # Lock probe is authoritative for absence.
+        return None
     if not pid_exists:
         raise RuntimeError("active gateway lock has no PID metadata")
     records = (_read_pid_record(resolved_pid_path), _read_gateway_lock_record(resolved_lock_path))
