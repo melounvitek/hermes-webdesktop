@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 from tools.send_message_targets import (  # noqa: F401
     _HOME_CHANNEL_ENV_OVERRIDES, _SLACK_USER_ID_RE, _parse_target_ref, resolve_send_target)
 from tools.send_message_senders import (  # noqa: F401
-    _AUDIO_EXTS, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _TELEGRAM_CAPTION_LIMIT, _VIDEO_EXTS,
-    _NO_DELIVERABLE, _VOICE_EXTS, _adapter_media_method, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
-    _registry_standalone_send, _resolve_slack_user_target, _sanitize_error_text,
-    _send_bluebubbles, _send_matrix_via_adapter, _send_qqbot, _send_signal, _send_telegram,
-    _send_weixin, _send_yuanbao)
+    _AUDIO_EXTS, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _NO_DELIVERABLE, _TELEGRAM_CAPTION_LIMIT,
+    _VIDEO_EXTS, _VOICE_EXTS, _adapter_media_method, _error, _live_adapter, _media_caption_split,
+    _plugin_standalone_sender, _registry_standalone_send, _resolve_slack_user_target, _sanitize_error_text,
+    _send_bluebubbles, _send_matrix_via_adapter, _send_qqbot, _send_signal, _send_telegram, _send_weixin,
+    _send_yuanbao)
 from tools.registry import tool_error
 
 # NOTE: ``send_message`` is intentionally NOT registered as an agent-callable model tool
@@ -208,9 +208,9 @@ def _resolve_platform_config(platform_name, config):
     pconfig = config.platforms.get(platform)
     if not pconfig or not pconfig.enabled:
         pconfig = _weixin_env_pconfig() if platform_name == "weixin" else None
-        if pconfig is None:
-            return None, None, None, (f"Platform '{platform_name}' is not configured. Set up credentials in "
-                                      "~/.hermes/config.yaml or environment variables.")
+    if pconfig is None:
+        return None, None, None, (f"Platform '{platform_name}' is not configured. Set up credentials in "
+                                  "~/.hermes/config.yaml or environment variables.")
     return platform, pconfig, entry, None
 
 

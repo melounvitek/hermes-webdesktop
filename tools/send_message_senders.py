@@ -75,9 +75,8 @@ def _display_chat_id(platform_name: str, chat_id: str) -> str:
 
 _NO_DELIVERABLE = "No deliverable text or media remained after processing MEDIA tags"
 
-_TELEGRAM_TRANSIENT_MARKERS = (
-    "bad gateway", "502", "too many requests", "429",
-    "service unavailable", "503", "gateway timeout", "504")
+_TELEGRAM_TRANSIENT_MARKERS = ("bad gateway", "502", "too many requests", "429",
+                               "service unavailable", "503", "gateway timeout", "504")
 
 
 def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
@@ -443,8 +442,8 @@ async def _resolve_slack_user_target(token, chat_id):
 async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, batch_message):
     """One Signal batch under the scheduler with rate-limit retries. None on success,
     False when retries were exhausted (batch lost), error dict for a non-rate-limit RPC error."""
-    n = len(att_batch)
-    for attempt in range(1, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS + 1):
+    n, max_attempts = len(att_batch), rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
         try:
             await scheduler.acquire(n)
             _rpc_t0 = time.monotonic()
@@ -459,26 +458,22 @@ async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, bat
             server_retry_after = rl._extract_retry_after_seconds(err)
             scheduler.feedback(server_retry_after, n)
             retry_after_label = f"{server_retry_after:.0f}s" if server_retry_after else "unknown"
-            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                logger.error(
-                    "Signal: rate-limit retries exhausted on batch %d/%d "
-                    "(%d attachments lost, server retry_after=%s)",
-                    idx + 1, n_batches, n, retry_after_label)
+            if attempt >= max_attempts:
+                logger.error("Signal: rate-limit retries exhausted on batch %d/%d "
+                             "(%d attachments lost, server retry_after=%s)",
+                             idx + 1, n_batches, n, retry_after_label)
                 return False
-            logger.warning(
-                "Signal: rate-limited on batch %d/%d "
-                "(attempt %d/%d, server retry_after=%s); "
-                "scheduler will pace the retry",
-                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, retry_after_label)
+            logger.warning("Signal: rate-limited on batch %d/%d "
+                           "(attempt %d/%d, server retry_after=%s); "
+                           "scheduler will pace the retry",
+                           idx + 1, n_batches, attempt, max_attempts, retry_after_label)
         except Exception as e:
-            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                logger.error(
-                    "Signal: send error on batch %d/%d after %d attempts: %s",
-                    idx + 1, n_batches, attempt, str(e))
+            if attempt >= max_attempts:
+                logger.error("Signal: send error on batch %d/%d after %d attempts: %s",
+                             idx + 1, n_batches, attempt, str(e))
                 return False
-            logger.warning(
-                "Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
-                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, str(e))
+            logger.warning("Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
+                           idx + 1, n_batches, attempt, max_attempts, str(e))
 
 
 async def _send_signal(extra, chat_id, message, media_files=None):
