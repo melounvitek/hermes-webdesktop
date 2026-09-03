@@ -1,38 +1,18 @@
 #!/usr/bin/env python3
-"""
-Skills Guard — Security scanner for externally-sourced skills.
+"""Skills Guard — regex static scan of externally-sourced skills plus a trust-aware install policy.
 
-Every skill downloaded from a registry passes through this scanner before
-installation: regex-based static analysis for known-bad patterns (data
-exfiltration, prompt injection, destructive commands, persistence, etc.) plus a
-trust-aware install policy combining the scan verdict with the source's trust.
-
-Trust levels: builtin (ships with Hermes, never scanned, always trusted);
-trusted (openai/skills, anthropics/skills, ...: caution verdicts allowed);
-community (everything else: any findings = blocked unless --force).
-
-Usage: ``result = scan_skill(path, source="community")``, then
-``allowed, reason = should_allow_install(result)`` and, when not allowed,
-``print(format_scan_report(result))``.
-
-Known limitation — programmatic writes (out of scope for this static pass):
-the agent-config persistence tiers score shell write mechanics (">>"
-redirection, "sed -i") and imperative modification prose only. Language write
-APIs in bundled scripts — Python open(..., 'w'/'a'), pathlib.Path.write_text(),
-os.replace(), shutil.copy*, and Node fs.writeFileSync()/appendFile() — aimed at
-agent-config files surface only the low-severity *_ref finding, never a scored
-persistence tier. Static regexes cannot reliably tie such a call to the
-config-file destination (paths may be built dynamically) without executing the
-skill, so language-API persistence is left to runtime gates (install
-confirmation, sandboxing). If coverage is added later, it belongs as a fourth
-"mechanical" tier next to agent_config_mod_shell, requiring the config-file
-name as a literal argument at the call site.
-"""
+Trust: builtin (ships with Hermes, never scanned), trusted (openai/anthropics/... repos: caution allowed),
+community (any findings block unless --force). ``scan_skill(path, source)`` -> ``should_allow_install`` ->
+``format_scan_report``. Known limitation: language write APIs (open(..., 'w'), Path.write_text, shutil.copy*,
+fs.writeFileSync) aimed at agent-config files surface only the low *_ref finding — static regexes cannot tie
+the call to a dynamically built destination; any future coverage belongs as a fourth "mechanical" tier next
+to agent_config_mod_shell."""
 
 import re
 import fnmatch
 import hashlib
 import json
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,36 +21,20 @@ from typing import List, Tuple
 
 SCANNER_VERSION = "skills-guard-v2"
 
-
-# --- Hardcoded trust configuration ------------------------------------------
-
-TRUSTED_REPOS = {
-    "openai/skills",
-    "anthropics/skills",
-    "huggingface/skills",
-    # NVIDIA-verified skills: each entry ships a signed `skill.oms.sig`
-    # and a governance `skill-card.md` (sync pipeline drops anything
-    # missing the signature or card). Catalog details:
-    # https://github.com/NVIDIA/skills
-    "NVIDIA/skills",
-}
+# NVIDIA-verified skills each ship a signed `skill.oms.sig` + governance `skill-card.md`.
+TRUSTED_REPOS = {"openai/skills", "anthropics/skills", "huggingface/skills", "NVIDIA/skills"}
 
 INSTALL_POLICY = {
     #                  safe      caution    dangerous
     "builtin":       ("allow",  "allow",   "allow"),
     "trusted":       ("allow",  "allow",   "block"),
     "community":     ("allow",  "block",   "block"),
-    # Agent-created: "ask" on dangerous surfaces as an error to the agent,
-    # which can retry without the flagged content. This gate only runs when
-    # skills.guard_agent_created is enabled (off by default) — see
-    # tools/skill_manager_tool.py::_guard_agent_created_enabled.
+    # "ask" = error to the agent (retry without the flagged content); only when skills.guard_agent_created is on.
     "agent-created": ("allow",  "allow",   "ask"),
 }
 
 VERDICT_INDEX = {"safe": 0, "caution": 1, "dangerous": 2}
 
-
-# --- Data structures --------------------------------------------------------
 
 @dataclass
 class Finding:
@@ -97,9 +61,8 @@ class ScanResult:
 
 # --- Threat patterns — (regex, pattern_id, severity, category, description) --
 
-# Action verbs that signal file-modification intent. Used by the agent-config
-# persistence patterns: a verb within the same line as (and shortly before) an
-# agent config filename is scored as modification; a bare mention is not.
+# File-modification verbs for the agent-config persistence tiers: a verb shortly before a config
+# filename on the same line is scored as modification; a bare mention is not.
 MODIFY_VERB_RE = (
     r'(?:\bwrit(?:e|es|ing)\b|\bwritten\b|\bedit(?:s|ed|ing)?\b'
     r'|\bmodif(?:y|ies|ied|ying|ication)s?\b|\bupdat(?:e|es|ed|ing)\b'
@@ -108,26 +71,17 @@ MODIFY_VERB_RE = (
     r'|\breplac(?:e|es|ed|ing)\b|\balter(?:s|ed|ing)?\b|\badd(?:s|ed|ing)\b)'
 )
 
-# Config-file groups shared by the agent-config persistence tiers below.
 _AGENT_CONFIG_FILES = r'(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)'
 _HERMES_CONFIG_FILES = r'\.hermes/(?:config\.yaml|SOUL\.md)'
-# Path prefixes (real files are e.g. .claude/settings.json), so consume any
-# trailing filename characters rather than requiring a clean end-of-word.
+# Path prefixes (real files are e.g. .claude/settings.json): consume trailing filename chars.
 _OTHER_AGENT_CONFIG_FILES = r'\.(?:claude/settings|codex/config)[\w.]*'
 
 
 def _shell_write_re(file_alt: str) -> str:
-    """Regex for a mechanical shell write into *file_alt*.
-
-    Covers redirection (``>``/``>>``), in-place ``sed -i``, ``tee`` (with the
-    target as its immediate argument, so a markdown table cell like
-    ``| tee output | AGENTS.md |`` does not match), and ``cp``/``mv`` with the
-    config file in destination position (a preceding source argument is
-    required, so ``cp AGENTS.md backup/`` — a read — does not match; a
-    trailing extension like ``AGENTS.md.bak`` is not the config file).
-    A single ``>`` must be preceded by a word/quote/paren character so that
-    markdown blockquotes (``> text``) and arrows (``-> file``) do not match.
-    """
+    """Mechanical shell write into *file_alt*: ``>``/``>>``, ``sed -i``, ``tee`` (target as immediate argument, so
+    ``| tee output | AGENTS.md |`` cells miss), ``cp``/``mv`` with the file as destination (a source arg is required,
+    so ``cp AGENTS.md backup/`` misses; ``AGENTS.md.bak`` is not the file). A single ``>`` needs a preceding
+    word/quote/paren char so blockquotes (``> text``) and arrows (``-> file``) miss."""
     return (
         rf'(?:>>|[\w"\'`)\]]\s*>)\s*[~\w./-]*{file_alt}(?!\.?\w)'
         rf'|\bsed\b[^\n]*\s(?:-[A-Za-z]*i[A-Za-z]*|--in-place)\b[^\n]*{file_alt}(?!\.?\w)'
@@ -137,15 +91,9 @@ def _shell_write_re(file_alt: str) -> str:
 
 
 def _prose_modify_re(file_alt: str) -> str:
-    """Regex for prose instructing modification of *file_alt*.
-
-    Two shapes: an imperative-position verb (start of line / bullet item),
-    or a mid-line verb strengthened by an explicit directive marker
-    ("you must", "please", "make sure to"). Descriptive mid-line prose
-    ("skills that edit AGENTS.md") matches neither. The verb→file gap
-    forbids commas so enumerations ("Write or refactor skills, AGENTS.md,
-    CLAUDE.md") — a doc listing its subject matter — do not match.
-    """
+    """Prose instructing modification of *file_alt*: an imperative-position verb (line start / bullet), or a mid-line
+    verb with a directive marker ("you must", "please", "make sure to"). Descriptive prose ("skills that edit
+    AGENTS.md") misses; the verb→file gap forbids commas so enumerations ("Write skills, AGENTS.md, CLAUDE.md") miss."""
     return (
         rf'^\s*(?:[-*+]\s+|\d+[.)]\s+)?{MODIFY_VERB_RE}[^\n,]{{0,80}}?{file_alt}\b'
         rf'|(?:\byou\s+(?:must|should|need\s+to)\s+|\bplease\s+'
@@ -155,13 +103,8 @@ def _prose_modify_re(file_alt: str) -> str:
 
 
 def _content_contract_re(file_alt: str) -> str:
-    """Regex for "<file> should contain/include ..." content-contract prose.
-
-    Ambiguous shape: authoring guides teach "Every AGENTS.md should contain
-    the project purpose" while an attack writes "AGENTS.md should contain
-    the bypass instructions". Not separable statically, so this tier is
-    scored high (caution → user confirmation), never critical.
-    """
+    """"<file> should contain/include ..." prose. Authoring guides and attacks share this shape and are not
+    separable statically, so the tier is scored high (caution → confirmation), never critical."""
     return (
         rf'{file_alt}\b[^\n]{{0,40}}?\b(?:should|must|needs?\s+to)\s+'
         rf'(?:contain|say|include|have|list)\b'
@@ -169,16 +112,10 @@ def _content_contract_re(file_alt: str) -> str:
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
-    # All five env_exfil_* patterns share a loopback exemption: a request
-    # whose same-line literal destination is scheme-anchored loopback
-    # (http(s)://localhost, 127.0.0.1, [::1]) cannot move data off the
-    # machine, so a secret-shaped query param on it is a local session
-    # token, not exfiltration (e.g. impeccable's live-mode
-    # `fetch('http://localhost:'+PORT+'/status?token='+TOKEN)`). The
-    # exemption requires the scheme immediately before the loopback host —
-    # `evil.com/?u=localhost` does not qualify. A hostile skill that hides
-    # its real destination behind a variable never matched these same-line
-    # literal patterns in the first place.
+    # env_exfil_* share a loopback exemption: a same-line literal scheme-anchored loopback destination
+    # (http(s)://localhost, 127.0.0.1, [::1]) cannot move data off the machine, so a secret-shaped query
+    # param there is a local session token. The scheme must immediately precede the host —
+    # `evil.com/?u=localhost` does not qualify.
     (r'curl\s+(?![^\n]*https?://(?:localhost|127\.0\.0\.1|\[::1\]))[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
      "env_exfil_curl", "critical", "exfiltration", "curl command interpolating secret environment variable"),
     (r'wget\s+(?![^\n]*https?://(?:localhost|127\.0\.0\.1|\[::1\]))[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
@@ -199,26 +136,15 @@ THREAT_PATTERNS = [
      "docker_dir_access", "high", "exfiltration", "references Docker config (may contain registry creds)"),
     (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env',
      "hermes_env_access", "critical", "exfiltration", "directly references Hermes secrets file"),
-    # Match `cat <secrets-file>` (reading credentials) but NOT `cat > <file>`
-    # or `cat >> <file>`, which are output redirections that WRITE a file
-    # (e.g. a setup doc telling the user to write their own keys into their
-    # own local `.env` via a heredoc). Writing your own config in is the
-    # opposite of exfiltrating secrets out.
+    # `cat <secrets-file>` reads credentials; `cat >`/`cat >>` WRITES one (setup heredocs) — not exfil.
     (r'cat\s+(?!>)[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)',
      "read_secrets_file", "critical", "exfiltration", "reads known secrets file"),
     # ── Exfiltration: programmatic env access ──
     (r'printenv|env\s*\|', "dump_all_env", "high", "exfiltration", "dumps all environment variables"),
-    # `os.environ` bare access (dict dump / iteration) is suspicious, but the
-    # common `os.environ.get("SOME_CONFIG")` form is just a config read and is
-    # the OPPOSITE of exfiltration (it reads a local var, sends nothing). The
-    # ^[^#\n]* prevents matching when a '#' comment appears anywhere before
-    # os.environ on the line — handles both full-line comments and inline
-    # comments like `x = 1  # os.environ`. The docstring pre-filter in
-    # scan_file() skips lines inside triple-quoted strings entirely.
-    # ANY `.get("<name>")` form is exempt here — non-secret names are plain
-    # config reads, and secret-shaped names are scored (medium) by the
-    # dedicated python_environ_get_secret pattern below; without the blanket
-    # exemption the high severity here would swamp that intended medium.
+    # Bare `os.environ` (dump/iteration) is suspicious; ANY `.get("<name>")` form is exempt — plain config
+    # reads, with secret-shaped names scored medium by python_environ_get_secret below (a blanket high here
+    # would swamp that). `^[^#\n]*` skips lines with a '#' anywhere before it (full-line or inline comment);
+    # scan_file()'s docstring pre-filter skips triple-quoted prose.
     (r'^[^#\n]*os\.environ\b(?!\s*\.get\s*\()',
      "python_os_environ", "high", "exfiltration", "accesses os.environ outside comments/docstrings (potential env dump)"),
     (r'os\.environ\s*\.get\s*\(\s*["\'][^"\']*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)',
@@ -226,8 +152,7 @@ THREAT_PATTERNS = [
     (r'os\.getenv\s*\(\s*[^\)]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)',
      "python_getenv_secret", "medium", "exfiltration", "reads secret via os.getenv() (normal API-key access; informational)"),
     (r'process\.env\[', "node_process_env", "high", "exfiltration", "accesses process.env (Node.js environment)"),
-    # Case-sensitive ENV (Ruby constant) — the (?-i:) prevents matching
-    # Python lowercase `env[...]` dict accesses under IGNORECASE.
+    # Case-sensitive Ruby ENV: (?-i:) keeps Python `env[...]` dict access from matching under IGNORECASE.
     (r'(?-i:ENV)\[.*(?:KEY|TOKEN|SECRET|PASSWORD)', "ruby_env_secret", "critical", "exfiltration", "reads secret via Ruby ENV[]"),
     # ── Exfiltration: DNS and staging ──
     # Do not match flag names such as llama.cpp `--host 127.0.0.1 --port $PORT`.
@@ -243,10 +168,7 @@ THREAT_PATTERNS = [
     (r'ignore\s+(?:\w+\s+)*(previous|all|above|prior)\s+instructions',
      "prompt_injection_ignore", "critical", "injection", "prompt injection: ignore previous instructions"),
     (r'you\s+are\s+(?:\w+\s+)*now\s+', "role_hijack", "high", "injection", "attempts to override the agent's role"),
-    # Only flag when the instruction is about concealing information, not
-    # ordinary UX guidance ("don't tell the user X unless Y confirms").
-    # The negative lookahead excludes patterns common in UX instructions
-    # like "unless", "except", "until", "confirm", "diagnose", "verify".
+    # Concealment only — the lookahead exempts UX guidance ("don't tell the user X unless Y confirms").
     (r'do\s+not\s+(?:\w+\s+)*tell\s+(?:\w+\s+)*the\s+user(?!.*\b(?:unless|except|until|confirm|diagnose|verify|check)\b)',
      "deception_hide", "high", "injection", "instructs agent to hide information from user"),
     (r'system\s+(?:\w+\s+)*prompt\s+(?:\w+\s+)*override',
@@ -363,10 +285,7 @@ THREAT_PATTERNS = [
     (r'git\s+clone\s+', "git_clone", "medium", "supply_chain", "clones a git repository at runtime"),
     (r'docker\s+pull\s+', "docker_pull", "medium", "supply_chain", "pulls a Docker image at runtime"),
     # ── Privilege escalation ──
-    # `allowed-tools:` is REQUIRED SKILL.md frontmatter per the agent-skill
-    # spec — every compliant skill declares it, so it cannot be a threat
-    # signal on its own. Keep it as an informational (low) finding for
-    # auditability; it no longer drives the verdict.
+    # `allowed-tools:` is REQUIRED frontmatter per the agent-skill spec — informational (low) only.
     (r'^allowed-tools\s*:',
      "allowed_tools_field", "low", "privilege_escalation", "skill declares allowed-tools (standard frontmatter; informational)"),
     (r'\bsudo\b', "sudo_usage", "high", "privilege_escalation", "uses sudo (privilege escalation)"),
@@ -376,21 +295,11 @@ THREAT_PATTERNS = [
      "nopasswd_sudo", "critical", "privilege_escalation", "NOPASSWD sudoers entry (passwordless privilege escalation)"),
     (r'chmod\s+[u+]?s', "suid_bit", "critical", "privilege_escalation", "sets SUID/SGID bit on a file"),
     # ── Agent config persistence ──
-    # Mere mentions of agent config files are NOT threats by themselves —
-    # legitimate meta-skills discuss them constantly (authoring guides,
-    # setup docs, cross-references to other skills). Flagging any mention
-    # as critical produced permanent false-positive blocks for popular
-    # community skills (#92021). Tiers instead:
-    #   * Mechanical persistence (shell redirection, sed -i, tee, cp/mv
-    #     into the file) is critical — an unambiguous write path.
-    #   * Prose modification intent — an imperative-position verb or an
-    #     explicit directive ("you must edit ...") aimed at the file.
-    #     For AGENT config files (AGENTS.md/CLAUDE.md/...) this is critical:
-    #     that sentence shape is exactly how persistence attacks instruct
-    #     the agent, and project-skill quarantine only acts on "dangerous".
-    #     For Hermes/other config files it is high (caution) — legitimate
-    #     setup docs routinely instruct users to edit config.yaml.
-    #   * Bare references are informational (low) for auditability.
+    # Bare mentions of config files are not threats (authoring guides, setup docs) — flagging them blocked
+    # popular community skills. Tiers: mechanical shell writes = critical; prose modification intent =
+    # critical for AGENT config files (exactly how persistence attacks instruct the agent; project-skill
+    # quarantine only acts on "dangerous") but high for Hermes/other config (setup docs routinely say
+    # "edit config.yaml"); bare references = low.
     (_prose_modify_re(_AGENT_CONFIG_FILES),
      "agent_config_mod", "critical", "persistence", "instructs modification of agent config files (could persist instructions across sessions)"),
     (_shell_write_re(_AGENT_CONFIG_FILES),
@@ -454,85 +363,51 @@ MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
 MAX_TOTAL_SIZE_KB = 5120  # 5MB — large skills are informational only, not blocking
 MAX_SINGLE_FILE_KB = 256  # individual file > 256KB is suspicious
 
-# File extensions to scan (text files only — skip binary)
+# Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {
     '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb', '.yaml', '.yml', '.json', '.toml',
     '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php',
 }
-# Known binary extensions that should NOT be in a skill
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm',
 }
-# Recognized script types allowed to carry an executable bit.
 _SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl'}
 
-# Zero-width and invisible unicode characters used for injection, with the
-# readable name reported in the finding.
+# Zero-width / directional unicode used for text hiding, with the readable name reported in the finding.
 _INVISIBLE_CHAR_NAMES = {
-    '\u200b': "zero-width space",
-    '\u200c': "zero-width non-joiner",
-    '\u200d': "zero-width joiner",
-    '\u2060': "word joiner",
-    '\u2062': "invisible times",
-    '\u2063': "invisible separator",
-    '\u2064': "invisible plus",
-    '\ufeff': "BOM/zero-width no-break space",
-    '\u202a': "LTR embedding",
-    '\u202b': "RTL embedding",
-    '\u202c': "pop directional",
-    '\u202d': "LTR override",
-    '\u202e': "RTL override",
-    '\u2066': "LTR isolate",
-    '\u2067': "RTL isolate",
-    '\u2068': "first strong isolate",
-    '\u2069': "pop directional isolate",
+    '\u200b': "zero-width space", '\u200c': "zero-width non-joiner", '\u200d': "zero-width joiner",
+    '\u2060': "word joiner", '\u2062': "invisible times", '\u2063': "invisible separator",
+    '\u2064': "invisible plus", '\ufeff': "BOM/zero-width no-break space",
+    '\u202a': "LTR embedding", '\u202b': "RTL embedding", '\u202c': "pop directional",
+    '\u202d': "LTR override", '\u202e': "RTL override", '\u2066': "LTR isolate", '\u2067': "RTL isolate",
+    '\u2068': "first strong isolate", '\u2069': "pop directional isolate",
 }
 INVISIBLE_CHARS = set(_INVISIBLE_CHAR_NAMES)
 
 
 def _unicode_char_name(char: str) -> str:
-    """Get a readable name for an invisible unicode character."""
     return _INVISIBLE_CHAR_NAMES.get(char, f"U+{ord(char):04X}")
 
 
 def _compute_docstring_lines(lines: list) -> set:
-    """Return a set of 1-indexed line numbers inside triple-quoted strings.
-
-    Simple state machine: ``in_docstring`` toggles on each line containing an
-    odd number of ``\"\"\"`` / ``'''`` markers; opening, interior and closing
-    lines are all included, as are self-contained single-line docstrings
-    (``x = \"\"\" ... \"\"\"``) — ``os.environ`` there is not real exfiltration.
-
-    Heuristic: it does not handle a triple quote inside a string literal and
-    similar edge cases, but it catches the common skill-content shapes
-    (docstrings, multiline comments with prose samples) that trigger
-    false-positive ``python_os_environ`` matches.
-    """
+    """1-indexed line numbers inside (or on the boundary of) triple-quoted strings: opening, interior, closing and
+    self-contained one-line docstrings all count, so ``os.environ`` in prose is not scored. Heuristic (ignores a
+    triple quote inside a string literal) but covers the common false-positive shapes."""
     doc_lines: set = set()
     in_docstring = False
     for i, line in enumerate(lines):
         was_in = in_docstring
         counts = [line.count(marker) for marker in ('"""', "'''")]
-        for count in counts:
-            if count % 2 == 1:
-                in_docstring = not in_docstring
-        # Include line if we were already in a docstring, just entered one,
-        # or this is a self-contained single-line docstring (e.g. """foo""")
+        in_docstring ^= sum(counts) % 2 == 1  # each odd marker count toggles; two odd counts cancel
         if was_in or in_docstring or any(counts):
             doc_lines.add(i + 1)
     return doc_lines
 
 
-# --- Scanning functions -----------------------------------------------------
-
 def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
-    """Scan one file for threat patterns and invisible unicode characters.
-
-    ``rel_path`` is the display path (defaults to ``file_path.name``). Regex
-    findings are deduplicated per pattern per line.
-    """
-    if not rel_path:
-        rel_path = file_path.name
+    """Scan one file for threat patterns and invisible unicode. *rel_path* is the display path (defaults
+    to the file name). Regex findings dedupe per pattern per line; invisible chars yield one per line."""
+    rel_path = rel_path or file_path.name
     if file_path.suffix.lower() not in SCANNABLE_EXTENSIONS and file_path.name != "SKILL.md":
         return []
     try:
@@ -541,96 +416,59 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
         return []
     findings = []
     lines = content.split('\n')
-    # Pre-compute line numbers inside triple-quoted strings (docstrings)
-    # so code patterns like python_os_environ don't fire on prose.
-    docstring_lines = _compute_docstring_lines(lines)
-
+    docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
             if i not in docstring_lines and pattern.search(line):
-                matched_text = line.strip()
-                if len(matched_text) > 120:
-                    matched_text = matched_text[:117] + "..."
-                findings.append(Finding(pid, severity, category, rel_path, i, matched_text, description))
+                text = line.strip()
+                findings.append(Finding(pid, severity, category, rel_path, i,
+                                        text if len(text) <= 120 else text[:117] + "...", description))
     for i, line in enumerate(lines, start=1):
-        for char in INVISIBLE_CHARS:
-            if char in line:
-                char_name = _unicode_char_name(char)
-                findings.append(Finding("invisible_unicode", "high", "injection", rel_path, i,
-                                        f"U+{ord(char):04X} ({char_name})",
-                                        f"invisible unicode character {char_name} (possible text hiding/injection)"))
-                break  # one finding per line for invisible chars
+        char = next((c for c in INVISIBLE_CHARS if c in line), None)
+        if char is not None:
+            char_name = _unicode_char_name(char)
+            findings.append(Finding(
+                "invisible_unicode", "high", "injection", rel_path, i, f"U+{ord(char):04X} ({char_name})",
+                f"invisible unicode character {char_name} (possible text hiding/injection)"))
     return findings
 
 
 def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
-    """Scan all files in a skill directory for security threats.
-
-    Performs structural checks (file count, total size, binary files,
-    symlinks), regex pattern matching on all text files, and invisible
-    unicode detection.
-
-    A skill may ship a `.skillignore` (or `.clawhubignore`) file with
-    gitignore-style patterns. Matching paths are excluded from BOTH the
-    structural checks and the pattern scan, so development/docs artifacts
-    that are not part of the installed skill (e.g. `SKILL-original.md`,
-    `docs/plans/`, `release-notes.md`) don't trip findings. The ignore
-    file itself is always excluded. Patterns cannot un-ignore the
-    skill's own `SKILL.md`, which is always scanned.
-
-    ``source`` is the identifier used for trust level resolution (e.g.
-    "openai/skills"); the result carries verdict, findings and trust metadata.
-    """
+    """Structural checks + pattern scan of every text file in a skill dir (or a single file). A `.skillignore` /
+    `.clawhubignore` (gitignore-style) excludes dev/docs artifacts from BOTH passes; the ignore file itself is
+    always excluded and `SKILL.md` can never be un-ignored. *source* (e.g. "openai/skills") sets the trust level."""
     skill_name = skill_path.name
     trust_level = _resolve_trust_level(source)
     all_findings: List[Finding] = []
     if skill_path.is_dir():
         ignore = _load_skill_ignore(skill_path)
-        # Structural checks first (honoring the ignore list)
         all_findings.extend(_check_structure(skill_path, ignore=ignore))
         for f in skill_path.rglob("*"):
-            if f.is_file():
-                rel = str(f.relative_to(skill_path))
-                if not ignore(rel):
-                    all_findings.extend(scan_file(f, rel))
+            rel = str(f.relative_to(skill_path))
+            if f.is_file() and not ignore(rel):
+                all_findings.extend(scan_file(f, rel))
     elif skill_path.is_file():
         all_findings.extend(scan_file(skill_path, skill_path.name))
     verdict = _determine_verdict(all_findings)
     return ScanResult(
-        skill_name=skill_name,
-        source=source,
-        trust_level=trust_level,
-        verdict=verdict,
-        findings=all_findings,
+        skill_name=skill_name, source=source, trust_level=trust_level, verdict=verdict, findings=all_findings,
         scanned_at=datetime.now(timezone.utc).isoformat(),
         summary=_build_summary(skill_name, source, trust_level, verdict, all_findings),
     )
 
 
 def _content_digest(skill_path: Path) -> str:
-    """Canonical SHA-256 over relative paths and exact file bytes.
-
-    Files are keyed and ORDERED by their POSIX relative path string,
-    case-sensitively. Ordering by ``sorted(rglob(...))`` diverged from the
-    bundle side on Windows: Path comparison is case-insensitive there
-    (normcase), while ``bundle_content_hash`` sorts plain strings — the
-    same skill hashed to different digests and every installed skill
-    reported ``update_available`` forever (#62310). Sorting the rel-posix
-    strings makes the digest OS-independent and byte-symmetric with
-    ``tools.skills_hub.bundle_content_hash``.
-    """
+    """Canonical SHA-256 over (POSIX relative path, file bytes), ORDERED by the rel-path STRING: sorting Paths is
+    case-insensitive on Windows and diverged from ``tools.skills_hub.bundle_content_hash`` (plain-string sort), so
+    every installed skill reported ``update_available`` forever. String order keeps both sides byte-symmetric."""
     h = hashlib.sha256()
-    if skill_path.is_dir():
-        entries = sorted(
-            (file_path.relative_to(skill_path).as_posix(), file_path)
-            for file_path in skill_path.rglob("*")
-            if file_path.is_file()
-        )
-        for rel, file_path in entries:
-            h.update(rel.encode("utf-8") + b"\x00")
-            h.update(file_path.read_bytes())
-    else:
+    if not skill_path.is_dir():
         h.update(skill_path.read_bytes())
+        return h.hexdigest()
+    entries = sorted((p.relative_to(skill_path).as_posix(), p) for p in skill_path.rglob("*") if p.is_file())
+    for rel, file_path in entries:
+        h.update(rel.encode("utf-8") + b"\x00")
+        h.update(file_path.read_bytes())
     return h.hexdigest()
 
 
@@ -640,25 +478,13 @@ def full_content_hash(skill_path: Path) -> str:
 
 
 def content_hash(skill_path: Path) -> str:
-    """Compute a SHA-256 hash of all files in a skill directory for integrity tracking.
-
-    File paths (relative to ``skill_path``) are mixed into the hash alongside
-    file contents so that swapping the contents of two files in a skill
-    changes the hash. This must stay symmetric with
-    ``tools.skills_hub.bundle_content_hash`` — both functions need to
-    produce the same digest for the same skill (one operates on disk,
-    one on an in-memory bundle), so any change to the hash shape MUST
-    land in both places at once.
-    """
+    """Short integrity hash. Paths are mixed in so swapping two files' contents changes it. MUST stay
+    symmetric with ``tools.skills_hub.bundle_content_hash`` (disk vs in-memory bundle) — change both at once."""
     return f"sha256:{_content_digest(skill_path)[:16]}"
 
 
 def scan_skill_cached(
-    skill_path: Path,
-    source: str = "community",
-    *,
-    source_url: str = "",
-    cache_dir: Path | None = None,
+    skill_path: Path, source: str = "community", *, source_url: str = "", cache_dir: Path | None = None,
 ) -> Tuple[ScanResult, dict]:
     """Return a scan plus attestation, caching only exact current content."""
     bundle_hash = full_content_hash(skill_path)
@@ -669,80 +495,55 @@ def scan_skill_cached(
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         cached = None
-    if (isinstance(cached, dict) and cached.get("bundle_hash") == bundle_hash
-            and cached.get("scanner_version") == SCANNER_VERSION
-            and cached.get("source") == source and cached.get("source_url") == source_url):
+    expected = {"bundle_hash": bundle_hash, "scanner_version": SCANNER_VERSION, "source": source, "source_url": source_url}
+    if isinstance(cached, dict) and all(cached.get(k) == v for k, v in expected.items()):
         result = ScanResult(
-            skill_name=skill_path.name, source=source,
-            trust_level=cached["trust_level"], verdict=cached["verdict"],
+            skill_name=skill_path.name, source=source, trust_level=cached["trust_level"], verdict=cached["verdict"],
             findings=[Finding(**item) for item in cached.get("findings", [])],
-            scanned_at=cached["scanned_at"], summary=cached.get("summary", ""),
-        )
-        result.scan_provenance = provenance = {**cached, "fresh": False}
-        return result, provenance
-
-    result = scan_skill(skill_path, source=source)
-    findings = [asdict(item) for item in result.findings]
-    provenance = {
-        "source": source, "source_url": source_url, "bundle_hash": bundle_hash,
-        "scanner_version": SCANNER_VERSION, "verdict": result.verdict,
-        "trust_level": result.trust_level, "findings": findings,
-        "rules": sorted({item["pattern_id"] for item in findings}),
-        "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True,
-    }
-    try:
-        cache_root.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+            scanned_at=cached["scanned_at"], summary=cached.get("summary", ""))
+        provenance = {**cached, "fresh": False}
+    else:
+        result = scan_skill(skill_path, source=source)
+        findings = [asdict(item) for item in result.findings]
+        provenance = {
+            **expected, "verdict": result.verdict, "trust_level": result.trust_level, "findings": findings,
+            "rules": sorted({item["pattern_id"] for item in findings}),
+            "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True}
+        with suppress(OSError):
+            cache_root.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     result.scan_provenance = provenance
     return result, provenance
 
 
 def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool, str]:
-    """Decide install from scan verdict + trust; returns ``(allowed, reason)``.
-
-    ``force`` overrides blocked policy decisions except a dangerous verdict on
-    community/trusted sources. ``allowed`` is ``None`` when the policy says
-    "ask" (needs user confirmation).
-    """
+    """Decide install from verdict + trust; ``(allowed, reason)``. *force* overrides every block except a
+    dangerous verdict on community/trusted sources. ``allowed`` is None when policy says "ask"."""
     policy = INSTALL_POLICY.get(result.trust_level, INSTALL_POLICY["community"])
     decision = policy[VERDICT_INDEX.get(result.verdict, 2)]
     n = len(result.findings)
-    # Dangerous verdicts cannot be overridden by --force (community/trusted);
-    # other blocks can.
     hard_block = result.verdict == "dangerous" and result.trust_level in ("community", "trusted")
     if decision == "allow":
         return True, f"Allowed ({result.trust_level} source, {result.verdict} verdict)"
     if force and not hard_block:
         return True, f"Force-installed despite {result.verdict} verdict ({n} findings)"
     if decision == "ask":
-        return None, (
-            f"Requires confirmation ({result.trust_level} source + {result.verdict} verdict, "
-            f"{n} findings)"
-        )
+        return None, f"Requires confirmation ({result.trust_level} source + {result.verdict} verdict, {n} findings)"
     if hard_block:
-        return False, (
-            f"Blocked ({result.trust_level} source + dangerous verdict, "
-            f"{n} findings). --force does not override a dangerous verdict."
-        )
-    return False, (
-        f"Blocked ({result.trust_level} source + {result.verdict} verdict, "
-        f"{n} findings). Use --force to override."
-    )
+        return False, (f"Blocked ({result.trust_level} source + dangerous verdict, {n} findings). "
+                       "--force does not override a dangerous verdict.")
+    return False, (f"Blocked ({result.trust_level} source + {result.verdict} verdict, {n} findings). "
+                   "Use --force to override.")
 
 
 def format_scan_report(result: ScanResult) -> str:
-    """Format a scan result as a compact multi-line report for CLI or chat display."""
+    """Compact multi-line report for CLI/chat display; findings sorted critical → low."""
     lines = [f"Scan: {result.skill_name} ({result.source}/{result.trust_level})  Verdict: {result.verdict.upper()}"]
     if result.findings:
-        # Group and sort: critical first, then high, medium, low
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         for f in sorted(result.findings, key=lambda f: severity_order.get(f.severity, 4)):
-            sev = f.severity.upper().ljust(8)
-            cat = f.category.ljust(14)
             loc = f"{f.file}:{f.line}".ljust(30)
-            lines.append(f"  {sev} {cat} {loc} \"{f.match[:60]}\"")
+            lines.append(f"  {f.severity.upper().ljust(8)} {f.category.ljust(14)} {loc} \"{f.match[:60]}\"")
         lines.append("")
     allowed, reason = should_allow_install(result)
     status = "ALLOWED" if allowed is True else "NEEDS CONFIRMATION" if allowed is None else "BLOCKED"
@@ -750,99 +551,67 @@ def format_scan_report(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
-# --- Structural checks ------------------------------------------------------
-
 def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
-    """Check the skill directory for structural anomalies: too many files,
-    suspiciously large total size, binary/executable files, symlinks pointing
-    outside the skill directory, and individual files that are too large.
-
-    ``ignore`` is an optional callable taking a relative posix path and
-    returning True if the path should be excluded (e.g. from `.skillignore`).
-    Ignored files are not counted toward the file count, total size, or any
-    structural finding.
-    """
+    """Structural anomalies: file count, total size, binary/executable files, symlinks escaping the skill
+    dir, oversized files. *ignore(rel_path) -> bool* excludes paths from every count and finding."""
     if ignore is None:
         ignore = lambda _rel: False  # noqa: E731
-
     findings = []
-    file_count = 0
-    total_size = 0
+
+    def add(pid: str, severity: str, category: str, rel: str, match: str, description: str) -> None:
+        findings.append(Finding(pid, severity, category, rel, 0, match, description))
+    file_count = total_size = 0
     for f in skill_dir.rglob("*"):
-        if not f.is_file() and not f.is_symlink():
-            continue
         rel = str(f.relative_to(skill_dir))
-        if ignore(rel):
+        if not (f.is_file() or f.is_symlink()) or ignore(rel):
             continue
         file_count += 1
-
-        # Symlink check — must resolve within the skill directory
         if f.is_symlink():
             try:
                 resolved = f.resolve()
                 if not resolved.is_relative_to(skill_dir.resolve()):
-                    findings.append(Finding("symlink_escape", "critical", "traversal", rel, 0,
-                                            f"symlink -> {resolved}", "symlink points outside the skill directory"))
+                    add("symlink_escape", "critical", "traversal", rel, f"symlink -> {resolved}",
+                        "symlink points outside the skill directory")
             except OSError:
-                findings.append(Finding("broken_symlink", "medium", "traversal", rel, 0,
-                                        "broken symlink", "broken or circular symlink"))
+                add("broken_symlink", "medium", "traversal", rel, "broken symlink", "broken or circular symlink")
             continue
         try:
             size = f.stat().st_size
-            total_size += size
         except OSError:
             continue
+        total_size += size
         if size > MAX_SINGLE_FILE_KB * 1024:
-            findings.append(Finding("oversized_file", "medium", "structural", rel, 0,
-                                    f"{size // 1024}KB", f"file is {size // 1024}KB (limit: {MAX_SINGLE_FILE_KB}KB)"))
+            add("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
+                f"file is {size // 1024}KB (limit: {MAX_SINGLE_FILE_KB}KB)")
         ext = f.suffix.lower()
         if ext in SUSPICIOUS_BINARY_EXTENSIONS:
-            findings.append(Finding("binary_file", "critical", "structural", rel, 0,
-                                    f"binary: {ext}", f"binary/executable file ({ext}) should not be in a skill"))
-        # Executable permission on non-script files
+            add("binary_file", "critical", "structural", rel, f"binary: {ext}",
+                f"binary/executable file ({ext}) should not be in a skill")
         if ext not in _SCRIPT_EXTENSIONS and f.stat().st_mode & 0o111:
-            findings.append(Finding("unexpected_executable", "medium", "structural", rel, 0, "executable bit set",
-                                    "file has executable permission but is not a recognized script type"))
-
+            add("unexpected_executable", "medium", "structural", rel, "executable bit set",
+                "file has executable permission but is not a recognized script type")
     if file_count > MAX_FILE_COUNT:
-        findings.append(Finding("too_many_files", "medium", "structural", "(directory)", 0,
-                                f"{file_count} files", f"skill has {file_count} files (limit: {MAX_FILE_COUNT})"))
-    # Total size limit — informational only (low severity, non-verdict-gating).
-    # Large skills are legitimate for feature-rich capabilities.
-    if total_size > MAX_TOTAL_SIZE_KB * 1024:
-        findings.append(Finding("oversized_skill", "low", "structural", "(directory)", 0, f"{total_size // 1024}KB total",
-                                f"skill is {total_size // 1024}KB total (limit: {MAX_TOTAL_SIZE_KB}KB)"))
-
+        add("too_many_files", "medium", "structural", "(directory)", f"{file_count} files",
+            f"skill has {file_count} files (limit: {MAX_FILE_COUNT})")
+    if total_size > MAX_TOTAL_SIZE_KB * 1024:  # informational only: large skills are legitimate
+        add("oversized_skill", "low", "structural", "(directory)", f"{total_size // 1024}KB total",
+            f"skill is {total_size // 1024}KB total (limit: {MAX_TOTAL_SIZE_KB}KB)")
     return findings
 
 
-# --- Internal helpers -------------------------------------------------------
-
-# Ignore-file names a skill may ship to exclude dev/docs artifacts from the
-# scan. `.skillignore` is the Hermes-native name; `.clawhubignore` is honored
-# for compatibility with skills published through ClawHub.
+# `.skillignore` is Hermes-native; `.clawhubignore` is honored for skills published through ClawHub.
 _SKILL_IGNORE_FILENAMES = (".skillignore", ".clawhubignore")
-
-# Paths that are NEVER scanned regardless of ignore patterns, and SKILL.md
-# which can never be un-scanned via the ignore file.
 _ALWAYS_IGNORED_NAMES = set(_SKILL_IGNORE_FILENAMES)
 _NEVER_IGNORABLE = {"SKILL.md"}
 
 
 def _load_skill_ignore(skill_dir: Path):
-    """Build a matcher from a skill's `.skillignore` / `.clawhubignore`.
-
-    Returns a callable ``ignore(rel_posix_path) -> bool``. The matcher
-    supports gitignore-style basics: blank lines and ``#`` comments are
-    skipped, a trailing ``/`` marks a directory (matches that dir and
-    everything under it), and ``*``/``?`` globs are honored via fnmatch on
-    both the full relative path and each path segment. A leading ``/``
-    anchors a pattern to the skill root. The ignore files themselves are
-    always excluded; ``SKILL.md`` can never be excluded.
-    """
+    """Build ``ignore(rel_posix_path) -> bool`` from `.skillignore` / `.clawhubignore`. gitignore basics: blank
+    lines and ``#`` comments skipped; trailing ``/`` = directory (it and everything under it); ``*``/``?`` globs via
+    fnmatch on the full path and each segment; leading ``/`` anchors to the root. Ignore files always excluded;
+    ``SKILL.md`` never."""
     patterns: List[str] = []
-    for name in _SKILL_IGNORE_FILENAMES:
-        ig = skill_dir / name
+    for ig in (skill_dir / name for name in _SKILL_IGNORE_FILENAMES):
         try:
             if ig.is_file():
                 lines = (raw.strip() for raw in ig.read_text(encoding="utf-8").splitlines())
@@ -864,26 +633,17 @@ def _load_skill_ignore(skill_dir: Path):
             p = p.rstrip("/")
             if not p:
                 continue
-            if is_dir:
-                # Directory pattern: match the dir itself or anything under it.
-                if rel_posix == p or rel_posix.startswith(p + "/"):
-                    return True
-                if not anchored and ("/" + rel_posix + "/").find("/" + p + "/") != -1:
+            below = rel_posix.startswith(p + "/")
+            if is_dir:  # the dir itself or anything under it; unanchored also as an inner path component
+                if rel_posix == p or below or (not anchored and ("/" + p + "/") in ("/" + rel_posix + "/")):
                     return True
                 continue
-            # File/glob pattern.
             if fnmatch.fnmatch(rel_posix, p):
                 return True
-            if not anchored:
-                # Unanchored: also match the basename and any path segment.
-                if fnmatch.fnmatch(base, p):
-                    return True
-                if "/" not in p and any(fnmatch.fnmatch(seg, p) for seg in rel_posix.split("/")):
-                    return True
-                # Match a prefix directory component (e.g. `docs` ignores
-                # `docs/plans/x.md`).
-                if rel_posix.startswith(p + "/"):
-                    return True
+            # Unanchored: also the basename, any path segment, or a prefix dir (`docs` ignores docs/plans/x.md).
+            if not anchored and (fnmatch.fnmatch(base, p) or below
+                                 or ("/" not in p and any(fnmatch.fnmatch(seg, p) for seg in rel_posix.split("/")))):
+                return True
         return False
 
     return ignore
@@ -893,41 +653,27 @@ _SOURCE_PREFIX_ALIASES = ("skills-sh/", "skills.sh/", "skils-sh/", "skils.sh/")
 
 
 def _resolve_trust_level(source: str) -> str:
-    """Map a source identifier to a trust level."""
-    normalized_source = source
-    for prefix in _SOURCE_PREFIX_ALIASES:
-        if normalized_source.startswith(prefix):
-            normalized_source = normalized_source[len(prefix):]
-            break
-    # Agent-created skills get their own permissive trust level
+    """Map a source identifier to a trust level. "official" is provenance, not a user-controlled GitHub
+    id like "official/<repo>". Trusted repos match exactly or as a skill path inside the repo — never a
+    sibling repo sharing the prefix."""
+    prefix = next((p for p in _SOURCE_PREFIX_ALIASES if source.startswith(p)), "")
+    normalized_source = source[len(prefix):]
     if normalized_source == "agent-created":
         return "agent-created"
-    # Official optional skills must be identified by source provenance, not by
-    # user-controlled GitHub identifiers such as "official/<repo>".
     if normalized_source == "official":
         return "builtin"
-    # Check if source matches any trusted repo exactly, or a skill path inside
-    # that repo. Do not trust sibling repositories that merely share a prefix.
-    for trusted in TRUSTED_REPOS:
-        if normalized_source == trusted or normalized_source.startswith(f"{trusted}/"):
-            return "trusted"
+    if any(normalized_source == t or normalized_source.startswith(f"{t}/") for t in TRUSTED_REPOS):
+        return "trusted"
     return "community"
 
 
 def _determine_verdict(findings: List[Finding]) -> str:
-    """Determine the overall verdict from a list of findings."""
+    """critical → dangerous, high → caution; medium/low alone are informational (safe)."""
     severities = {f.severity for f in findings}
-    if "critical" in severities:
-        return "dangerous"
-    if "high" in severities:
-        return "caution"
-    # medium/low findings alone are informational, not blocking
-    return "safe"
+    return "dangerous" if "critical" in severities else "caution" if "high" in severities else "safe"
 
 
 def _build_summary(name: str, source: str, trust: str, verdict: str, findings: List[Finding]) -> str:
-    """Build a one-line summary of the scan result."""
     if not findings:
         return f"{name}: clean scan, no threats detected"
-    categories = {f.category for f in findings}
-    return f"{name}: {verdict} — {len(findings)} finding(s) in {', '.join(sorted(categories))}"
+    return f"{name}: {verdict} — {len(findings)} finding(s) in {', '.join(sorted({f.category for f in findings}))}"
