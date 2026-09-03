@@ -23,10 +23,7 @@ from hermes_cli import kanban_db as kb
 
 from utils import env_int
 
-HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(
-    1500,
-    env_int("HERMES_KANBAN_SPECIFY_MAX_TOKENS", 6000),
-)
+HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(1500, env_int("HERMES_KANBAN_SPECIFY_MAX_TOKENS", 6000))
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +96,8 @@ def _extract_json_blob(raw: str, fence_re: re.Pattern = _FENCE_RE) -> Optional[d
     last = stripped.rfind("}")
     if first == -1 or last == -1 or last <= first:
         return None
-    candidate = stripped[first : last + 1]
     try:
-        val = json.loads(candidate)
+        val = json.loads(stripped[first : last + 1])
     except (ValueError, json.JSONDecodeError):
         return None
     return val if isinstance(val, dict) else None
@@ -124,6 +120,57 @@ def _profile_author(default: str = "specifier") -> str:
     return os.environ.get("HERMES_PROFILE") or os.environ.get("USER") or default
 
 
+def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
+    """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+    if task is None:
+        return None, "unknown task id"
+    if task.status != "triage":
+        return None, f"task is not in triage (status={task.status!r})"
+    return task, ""
+
+
+def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
+    """Bounded ``task_id``/``title``/``body`` for the user prompt templates."""
+    return {
+        "task_id": task.id,
+        "title": _truncate(task.title or "", 400),
+        "body": _truncate(task.body or "(no body)", 4000),
+    }
+
+
+def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
+              max_tokens: int, timeout: int, log: logging.Logger = logger) -> tuple[Optional[str], str]:
+    """One auxiliary LLM call; ``(reply_text, "")`` or ``(None, reason)``.
+
+    ``call_llm`` applies all ``auxiliary.<aux_task>.*`` config (provider/model/
+    base_url, extra_body, reasoning_effort, retries). Imported lazily so a
+    missing aux client degrades to a skip instead of an import-time crash.
+    """
+    try:
+        from agent.auxiliary_client import call_llm
+    except Exception as exc:  # pragma: no cover — import smoke test
+        log.debug("%s: auxiliary client import failed: %s", verb, exc)
+        return None, "auxiliary client unavailable"
+    try:
+        resp = call_llm(
+            task=aux_task,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.3,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        suffix = " — skipping" if verb == "specify" else ""
+        log.info("%s: API call failed for %s (%s)%s", verb, task_id, exc, suffix)
+        return None, f"LLM error: {type(exc).__name__}"
+    try:
+        return resp.choices[0].message.content or "", ""
+    except Exception:
+        return "", ""
+
+
 def specify_task(
     task_id: str,
     *,
@@ -133,73 +180,29 @@ def specify_task(
     """Specify one triage task and promote it to ``todo``. Expected failures
     (not in triage, no aux client, API error, malformed reply) surface as
     ``ok=False`` so an ``--all`` sweep continues."""
-    with kb.connect_closing() as conn:
-        task = kb.get_task(conn, task_id)
+    task, reason = _load_triage_task(task_id)
     if task is None:
-        return SpecifyOutcome(task_id, False, "unknown task id")
-    if task.status != "triage":
-        return SpecifyOutcome(
-            task_id, False, f"task is not in triage (status={task.status!r})"
-        )
+        return SpecifyOutcome(task_id, False, reason)
 
-    try:
-        from agent.auxiliary_client import call_llm
-    except Exception as exc:  # pragma: no cover — import smoke test
-        logger.debug("specify: auxiliary client import failed: %s", exc)
-        return SpecifyOutcome(task_id, False, "auxiliary client unavailable")
-
-    user_msg = _USER_TEMPLATE.format(
-        task_id=task.id,
-        title=_truncate(task.title or "", 400),
-        body=_truncate(task.body or "(no body)", 4000),
+    raw, reason = _call_aux(
+        "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
+        user=_USER_TEMPLATE.format(**_task_prompt_fields(task)),
+        max_tokens=HERMES_KANBAN_SPECIFY_MAX_TOKENS, timeout=timeout or 120,
     )
-
-    try:
-        # call_llm applies all auxiliary.triage_specifier.* config
-        # (provider/model/base_url, extra_body, reasoning_effort, retries).
-        resp = call_llm(
-            task="triage_specifier",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=HERMES_KANBAN_SPECIFY_MAX_TOKENS,
-            timeout=timeout or 120,
-        )
-    except Exception as exc:
-        logger.info(
-            "specify: API call failed for %s (%s) — skipping",
-            task_id, exc,
-        )
-        return SpecifyOutcome(
-            task_id, False, f"LLM error: {type(exc).__name__}"
-        )
-
-    try:
-        raw = (resp.choices[0].message.content or "").strip()
-    except Exception:
-        raw = ""
+    if raw is None:
+        return SpecifyOutcome(task_id, False, reason)
+    raw = raw.strip()
 
     parsed = _extract_json_blob(raw)
-
-    new_title: Optional[str]
-    new_body: Optional[str]
     if parsed is None:
         # Whole reply becomes the body; the user can edit afterward.
-        stripped_raw = raw.strip()
-        if not stripped_raw:
-            return SpecifyOutcome(
-                task_id, False, "LLM returned an empty response"
-            )
-        new_title = None
-        new_body = stripped_raw
+        if not raw:
+            return SpecifyOutcome(task_id, False, "LLM returned an empty response")
+        new_title, new_body = None, raw
     else:
         new_title, new_body = _title_body(parsed)
         if new_body is None and new_title is None:
-            return SpecifyOutcome(
-                task_id, False, "LLM response missing title and body"
-            )
+            return SpecifyOutcome(task_id, False, "LLM response missing title and body")
 
     with kb.connect_closing() as conn:
         ok = kb.specify_triage_task(
@@ -211,19 +214,12 @@ def specify_task(
         )
     if not ok:
         # Race: promoted/archived between our read and the write.
-        return SpecifyOutcome(
-            task_id, False, "task moved out of triage before promotion"
-        )
+        return SpecifyOutcome(task_id, False, "task moved out of triage before promotion")
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kb.connect_closing() as conn:
-        tasks = kb.list_tasks(
-            conn,
-            status="triage",
-            tenant=tenant,
-            include_archived=False,
-        )
+        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
     return [t.id for t in tasks]

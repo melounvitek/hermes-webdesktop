@@ -26,32 +26,32 @@ def _kanban_config() -> dict:
         return {}
 
 
-def _cmd_tail(args: argparse.Namespace) -> int:
-    last_id = 0
-    print(f"Tailing events for {args.task_id}. Ctrl-C to stop.")
+def _poll_loop(interval: float, tick) -> int:
+    """Run ``tick()`` every ``interval`` seconds (floor 0.1) until Ctrl-C."""
     try:
         while True:
-            with kb.connect_closing() as conn:
-                events = kb.list_events(conn, args.task_id)
-            for e in events:
-                if e.id > last_id:
-                    pl = f" {e.payload}" if e.payload else ""
-                    print(f"[{_fmt_ts(e.created_at)}] {e.kind}{pl}", flush=True)
-                    last_id = e.id
-            time.sleep(max(0.1, args.interval))
+            tick()
+            time.sleep(max(0.1, interval))
     except KeyboardInterrupt:
         print("\n(stopped)")
         return 0
 
 
-def _coerce_positive_int(value):
-    if value is None:
-        return None
-    try:
-        ival = int(value)
-    except (TypeError, ValueError):
-        return None
-    return ival if ival >= 1 else None
+def _cmd_tail(args: argparse.Namespace) -> int:
+    last_id = 0
+    print(f"Tailing events for {args.task_id}. Ctrl-C to stop.")
+
+    def tick():
+        nonlocal last_id
+        with kb.connect_closing() as conn:
+            events = kb.list_events(conn, args.task_id)
+        for e in events:
+            if e.id > last_id:
+                pl = f" {e.payload}" if e.payload else ""
+                print(f"[{_fmt_ts(e.created_at)}] {e.kind}{pl}", flush=True)
+                last_id = e.id
+
+    return _poll_loop(args.interval, tick)
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
@@ -63,22 +63,20 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         _cfg = load_config()
         _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = _coerce_positive_int(
-            _kanban_cfg.get("max_in_progress_per_profile")
+        max_in_progress_per_profile = kb._positive_int(
+            _kanban_cfg.get("max_in_progress_per_profile"), None
         )
         # Memory-derived default when unset — same fallback the gateway applies.
         max_in_progress = kb.resolve_max_in_progress(
-            _coerce_positive_int(_kanban_cfg.get("max_in_progress"))
+            kb._positive_int(_kanban_cfg.get("max_in_progress"), None)
         )
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
-        max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
-            _kanban_cfg.get("max_spawn")
+        max_spawn = (
+            cli_max if cli_max is not None else kb._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
     except Exception:
-        default_assignee = None
-        max_in_progress_per_profile = None
-        max_in_progress = None
+        default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
@@ -92,15 +90,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     if getattr(args, "json", False):
         _print_json({
-            "reclaimed": res.reclaimed,
-            "crashed": res.crashed,
-            "timed_out": res.timed_out,
-            "stale": res.stale,
-            "auto_blocked": res.auto_blocked,
-            "promoted": res.promoted,
+            **{k: getattr(res, k)
+               for k in ("reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted")},
             "spawned": [
-                {"task_id": tid, "assignee": who, "workspace": ws}
-                for (tid, who, ws) in res.spawned
+                {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
             ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
@@ -143,34 +136,26 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_daemon(args: argparse.Namespace) -> int:
-    """Deprecated — the dispatcher now runs inside the gateway.
+_DAEMON_DEPRECATED = (
+    "hermes kanban daemon: DEPRECATED — the dispatcher now runs\ninside the gateway. To use "
+    "kanban:\n\n    hermes gateway start       # starts the gateway + embedded dispatcher\n\nReady "
+    "tasks will be picked up on the next dispatcher tick\n(default: every 60 seconds). Configure "
+    "via config.yaml:\n\n    kanban:\n      dispatch_in_gateway: true      # default\n      "
+    "dispatch_interval_seconds: 60\n      failure_limit: 2              # consecutive non-success "
+    "attempts before auto-block\n\nRunning both the gateway AND this standalone daemon will\nrace "
+    "for claims. If you truly need the old standalone\ndaemon (no gateway available), rerun with "
+    "--force."
+)
 
-    Kept as a stub so old scripts/systemd units get a clear migration message.
-    ``--force`` (hidden from --help) keeps the standalone loop for hosts that
-    truly cannot run the gateway; the default path exits 2 so nobody
-    accidentally runs two dispatchers against the same kanban.db.
-    """
+
+def _cmd_daemon(args: argparse.Namespace) -> int:
+    """Deprecated — the dispatcher now runs inside the gateway. Kept so old
+    scripts/systemd units get a clear migration message; ``--force`` (hidden
+    from --help) keeps the standalone loop for hosts that truly cannot run the
+    gateway. The default path exits 2 so nobody accidentally runs two
+    dispatchers against the same kanban.db."""
     if not getattr(args, "force", False):
-        return _err(
-            "hermes kanban daemon: DEPRECATED — the dispatcher now runs\n"
-            "inside the gateway. To use kanban:\n"
-            "\n"
-            "    hermes gateway start       # starts the gateway + embedded dispatcher\n"
-            "\n"
-            "Ready tasks will be picked up on the next dispatcher tick\n"
-            "(default: every 60 seconds). Configure via config.yaml:\n"
-            "\n"
-            "    kanban:\n"
-            "      dispatch_in_gateway: true      # default\n"
-            "      dispatch_interval_seconds: 60\n"
-            "      failure_limit: 2              # consecutive non-success attempts before auto-block\n"
-            "\n"
-            "Running both the gateway AND this standalone daemon will\n"
-            "race for claims. If you truly need the old standalone\n"
-            "daemon (no gateway available), rerun with --force.",
-            2,
-        )
+        return _err(_DAEMON_DEPRECATED, 2)
 
     # Init before printing "started" so the DB path is right and init errors
     # surface immediately.
@@ -186,11 +171,9 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     verbose = bool(getattr(args, "verbose", False))
     print(
-        f"Kanban dispatcher running STANDALONE via --force "
-        f"(interval={args.interval}s, pid={os.getpid()}). "
-        f"Ctrl-C to stop. NOTE: if a gateway is also running with "
-        f"dispatch_in_gateway=true (default), you have two dispatchers "
-        f"racing for claims.",
+        f"Kanban dispatcher running STANDALONE via --force (interval={args.interval}s, "
+        f"pid={os.getpid()}). Ctrl-C to stop. NOTE: if a gateway is also running with "
+        f"dispatch_in_gateway=true (default), you have two dispatchers racing for claims.",
         file=sys.stderr,
     )
 
@@ -200,10 +183,18 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
     health_state = {"bad_ticks": 0, "last_warn_at": 0}
 
+    def _ready_queue_nonempty() -> bool:
+        """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
+        Control-plane lanes pulled via ``claim_task`` are correctly idle, not stuck."""
+        try:
+            with kb.connect_closing() as conn:
+                return kb.has_spawnable_ready(conn)
+        except Exception:
+            return False
+
     def _on_tick(res):
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        spawned_any = bool(res.spawned)
-        if ready_pending and not spawned_any:
+        if ready_pending and not res.spawned:
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0
@@ -212,13 +203,11 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             now = int(time.time())
             if now - health_state["last_warn_at"] >= 300:
                 print(
-                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: "
-                    f"ready queue non-empty for {health_state['bad_ticks']} "
-                    f"consecutive ticks but 0 workers spawned successfully. "
-                    f"Check profile health (venv, PATH, credentials) and "
-                    f"`hermes kanban list --status ready` / "
-                    f"`hermes kanban list --status blocked` for recent "
-                    f"spawn_failed tasks.",
+                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
+                    f"{health_state['bad_ticks']} consecutive ticks but 0 workers spawned "
+                    f"successfully. Check profile health (venv, PATH, credentials) and `hermes "
+                    f"kanban list --status ready` / `hermes kanban list --status blocked` for "
+                    f"recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,
                 )
                 health_state["last_warn_at"] = now
@@ -230,22 +219,12 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         )
         if did_work:
             print(
-                f"[{_fmt_ts(int(time.time()))}] "
-                f"reclaimed={res.reclaimed} crashed={len(res.crashed)} "
-                f"timed_out={len(res.timed_out)} stale={len(res.stale)} "
+                f"[{_fmt_ts(int(time.time()))}] reclaimed={res.reclaimed} "
+                f"crashed={len(res.crashed)} timed_out={len(res.timed_out)} stale={len(res.stale)} "
                 f"promoted={res.promoted} spawned={len(res.spawned)} "
                 f"auto_blocked={len(res.auto_blocked)}",
                 flush=True,
             )
-
-    def _ready_queue_nonempty() -> bool:
-        """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
-        Control-plane lanes pulled via ``claim_task`` are correctly idle, not stuck."""
-        try:
-            with kb.connect_closing() as conn:
-                return kb.has_spawnable_ready(conn)
-        except Exception:
-            return False
 
     try:
         kb.run_daemon(
@@ -266,50 +245,38 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
 def _cmd_watch(args: argparse.Namespace) -> int:
     """Live-stream task_events to the terminal."""
-    kinds = (
-        {k.strip() for k in args.kinds.split(",") if k.strip()}
-        if args.kinds else None
-    )
+    kinds = {k.strip() for k in args.kinds.split(",") if k.strip()} if args.kinds else None
     print("Watching kanban events. Ctrl-C to stop.", flush=True)
     # Seed cursor at the latest id so we don't replay history.
     with kb.connect_closing() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
-        ).fetchone()
-        cursor = int(row["m"])
+        cursor = int(conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"])
 
-    try:
-        while True:
-            with kb.connect_closing() as conn:
-                rows = conn.execute(
-                    "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at, "
-                    "       t.assignee, t.tenant "
-                    "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
-                    "WHERE e.id > ? ORDER BY e.id ASC LIMIT 200",
-                    (cursor,),
-                ).fetchall()
-            for r in rows:
-                cursor = max(cursor, int(r["id"]))
-                if kinds and r["kind"] not in kinds:
-                    continue
-                if args.assignee and r["assignee"] != args.assignee:
-                    continue
-                if args.tenant and r["tenant"] != args.tenant:
-                    continue
-                try:
-                    payload = json.loads(r["payload"]) if r["payload"] else None
-                except Exception:
-                    payload = None
-                pl = f" {payload}" if payload else ""
-                print(
-                    f"[{_fmt_ts(r['created_at'])}] {r['task_id']:10s} "
-                    f"{r['kind']:18s} (@{r['assignee'] or '-'}){pl}",
-                    flush=True,
-                )
-            time.sleep(max(0.1, args.interval))
-    except KeyboardInterrupt:
-        print("\n(stopped)")
-        return 0
+    def tick():
+        nonlocal cursor
+        with kb.connect_closing() as conn:
+            rows = conn.execute(
+                "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at,        t.assignee, "
+                "t.tenant FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.id > ? "
+                "ORDER BY e.id ASC LIMIT 200",
+                (cursor,),
+            ).fetchall()
+        for r in rows:
+            cursor = max(cursor, int(r["id"]))
+            if (kinds and r["kind"] not in kinds) or (args.assignee and r["assignee"] != args.assignee) \
+                    or (args.tenant and r["tenant"] != args.tenant):
+                continue
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else None
+            except Exception:
+                payload = None
+            pl = f" {payload}" if payload else ""
+            print(
+                f"[{_fmt_ts(r['created_at'])}] {r['task_id']:10s} "
+                f"{r['kind']:18s} (@{r['assignee'] or '-'}){pl}",
+                flush=True,
+            )
+
+    return _poll_loop(args.interval, tick)
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
@@ -351,12 +318,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
     with kb.connect_closing() as conn:
-        removed_events = kb.gc_events(
-            conn, older_than_seconds=event_days * 24 * 3600,
-        )
-    removed_logs = kb.gc_worker_logs(
-        older_than_seconds=log_days * 24 * 3600,
-    )
+        removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
+    removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600)
     print(f"GC complete: {removed_ws} workspace(s), "
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
     return 0
@@ -377,9 +340,7 @@ def _cmd_repair(args: argparse.Namespace) -> int:
             "db_path": str(report.db_path),
             "messages": report.messages,
             "post_repair_messages": report.post_repair_messages,
-            "backup_path": (
-                str(report.backup_path) if report.backup_path else None
-            ),
+            "backup_path": str(report.backup_path) if report.backup_path else None,
             "reindexed": report.reindexed,
         }, ascii=True)
         return 0 if report.status in {"ok", "repaired", "missing"} else 1
@@ -398,29 +359,22 @@ def _cmd_repair(args: argparse.Namespace) -> int:
         print("  integrity_check now ok.")
         return 0
     # still corrupt
-    print(f"{report.db_path}: CORRUPT.", file=sys.stderr)
+    def err(line: str) -> None:
+        print(line, file=sys.stderr)
+
+    err(f"{report.db_path}: CORRUPT.")
     for line in (report.messages or [])[:10]:
-        print(f"  {line}", file=sys.stderr)
+        err(f"  {line}")
     if report.reindexed:
-        print(
-            f"  REINDEX ({', '.join(report.reindexed)}) attempted but "
-            f"integrity_check is still failing:",
-            file=sys.stderr,
-        )
+        err(f"  REINDEX ({', '.join(report.reindexed)}) attempted but integrity_check is still failing:")
         for line in (report.post_repair_messages or [])[:10]:
-            print(f"    {line}", file=sys.stderr)
+            err(f"    {line}")
     else:
-        print(
-            "  Not an index-only failure — automatic REINDEX repair does "
-            "not apply (fail-closed).",
-            file=sys.stderr,
-        )
+        err("  Not an index-only failure — automatic REINDEX repair does not apply (fail-closed).")
     if report.backup_path:
-        print(f"  corrupt copy quarantined at: {report.backup_path}",
-              file=sys.stderr)
-    print(
+        err(f"  corrupt copy quarantined at: {report.backup_path}")
+    err(
         "  Recover manually (e.g. `sqlite3 kanban.db \".recover\"` into a "
-        "fresh file) or move the file aside to start a new board.",
-        file=sys.stderr,
+        "fresh file) or move the file aside to start a new board."
     )
     return 1
