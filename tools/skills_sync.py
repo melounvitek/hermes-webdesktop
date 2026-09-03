@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Skills Sync -- manifest-based seeding and updating of bundled skills.
 
-Copies repo skills/ into ~/.hermes/skills/, tracking each synced skill's origin
-hash in .bundled_manifest (v2 "name:hash" lines; v1 plain names auto-migrate).
-NEW skills are copied and recorded; EXISTING skills update only when bundled
-changed AND the user copy still matches the origin hash (else user-customized ->
-SKIP); user-DELETED skills are not re-added; upstream-REMOVED ones leave the manifest.
+Copies repo skills/ into ~/.hermes/skills/, tracking each synced skill's origin hash in
+.bundled_manifest (v2 "name:hash" lines; v1 plain names auto-migrate). NEW skills are copied
+and recorded; EXISTING skills update only when bundled changed AND the user copy still matches
+the origin hash (else user-customized -> SKIP); user-DELETED skills are not re-added;
+upstream-REMOVED ones leave the manifest.
 """
 
 import hashlib
@@ -22,10 +22,8 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 # Force UTF-8 stdout/stderr: GBK-style Windows locales can't encode the glyphs
 # printed here (✓ ↑ →), and install.ps1 parses this script's stdout as UTF-8.
 for _stream in (sys.stdout, sys.stderr):
-    try:
+    with suppress(AttributeError, ValueError, TypeError):
         _stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError, TypeError):
-        pass
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path
 from tools.skill_usage import _read_skill_name, read_suppressed_names  # noqa: F401  (re-exported)
@@ -37,10 +35,10 @@ HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
 
-# Import-time snapshots backing the call-time accessors: long-lived multi-profile
-# runtimes retarget HERMES_HOME after import, and frozen constants would resolve
-# (and for reset_bundled_skill() DELETE) against the wrong profile. Accessors honor
-# an explicitly patched module global and otherwise re-resolve on every call.
+# Import-time snapshots backing the call-time accessors: long-lived multi-profile runtimes
+# retarget HERMES_HOME after import, and frozen constants would resolve (and for
+# reset_bundled_skill() DELETE) against the wrong profile. Accessors honor an explicitly
+# patched module global and otherwise re-resolve on every call.
 _HERMES_HOME_AT_IMPORT = HERMES_HOME
 _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
 _MANIFEST_FILE_AT_IMPORT = MANIFEST_FILE
@@ -129,9 +127,8 @@ def _write_manifest(entries: Dict[str, str]):
 
 
 def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
-    """``(skill_name, skill_dir)`` per SKILL.md under the bundled dir. Exclusions are
-    evaluated relative to the bundled tree: the install prefix itself may contain
-    ``venv``/``site-packages`` (which once made wheel installs discover zero skills)."""
+    """``(skill_name, skill_dir)`` per SKILL.md under the bundled dir. Exclusions are evaluated
+    relative to the bundled tree: the install prefix itself may contain ``venv``/``site-packages``."""
     if not bundled_dir.exists():
         return []
     return [
@@ -169,10 +166,10 @@ def _copy_dir(src: Path, dest: Path) -> None:
 
 
 def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Optional[str]:
-    """Move a bundled skill's stale copy to its new canonical path after an upstream
-    RENAME/RECATEGORIZATION (else it is misread as user-deleted and stranded forever).
-    Only a copy byte-identical to the origin hash — proof *we* placed it — is moved;
-    user-edited or hub-installed copies stay. Returns the rel source path on move."""
+    """Move a bundled skill's stale copy to its new canonical path after an upstream RENAME /
+    RECATEGORIZATION (else it is misread as user-deleted and stranded forever). Only a copy
+    byte-identical to the origin hash — proof *we* placed it — is moved; user-edited or
+    hub-installed copies stay. Returns the rel source path on move."""
     origin_hash = st.manifest.get(skill_name, "")
     if not origin_hash:
         return None
@@ -244,9 +241,9 @@ def _recover_orphan_backup(dest: Path) -> None:
 
 
 def _defer_to_external(st: _SyncState, skill_name: str, dest: Path, bundled_hash: str) -> None:
-    """An external_dirs source provides this skill; a local copy would be a name collision
-    the loader refuses. Defer for ALL manifest states and remove a stale local shadow from
-    an earlier sync — only when byte-identical (a user's own skill differs)."""
+    """An external_dirs source provides this skill; a local copy would be a name collision the
+    loader refuses. Defer for ALL manifest states; remove a stale local shadow from an earlier
+    sync only when byte-identical (a user's own skill differs)."""
     st.shadowed_by_external.append(skill_name)
     st.skipped += 1
     st.say(f"  ⇢ {skill_name} (deferred to external_dirs, not written to local tree)")
@@ -347,9 +344,9 @@ def _seed_category_descriptions(bundled_dir: Path, only_dirs: Optional[Set[Path]
 
 
 def sync_skills(quiet: bool = False) -> dict:
-    """Sync bundled skills into ~/.hermes/skills/ using the manifest; returns the
-    per-category result dict (see the final return). Opted-out profiles seed ONLY
-    ESSENTIAL_SKILLS: the system prompt always points at ``hermes-agent``."""
+    """Sync bundled skills into ~/.hermes/skills/ using the manifest; returns the per-category
+    result dict. Opted-out profiles seed ONLY ESSENTIAL_SKILLS (the system prompt always
+    points at ``hermes-agent``)."""
     essential_only = (_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()
     if essential_only and not quiet:
         print("  (profile opted out of bundled skills via .no-bundled-skills — seeding essential skills only)")
@@ -400,15 +397,14 @@ def sync_skills(quiet: bool = False) -> dict:
         "total_bundled": len(bundled_skills),
         "optional_provenance_backfilled": _backfill_optional_provenance(quiet=quiet),
         "shadowed_by_external": st.shadowed_by_external,
-        "skipped_opt_out": essential_only,  # lets callers report "opted out" rather than a normal sync
-    }
+        "skipped_opt_out": essential_only}  # lets callers report "opted out" rather than a normal sync
 
 
 def _rmtree_writable(path: Path) -> None:
-    """rmtree that first makes read-only entries writable (Nix/deb/rpm keep r-x dirs;
-    unlinking a child needs a writable parent, so chmod both). Scope guard: refuses
-    anything not a STRICT child of the active skills root, so a bad join / missing
-    HERMES_HOME / malicious manifest entry raises instead of wiping ``~/.hermes``."""
+    """rmtree that first makes read-only entries writable (Nix/deb/rpm keep r-x dirs; unlinking
+    a child needs a writable parent, so chmod both). Scope guard: refuses anything not a STRICT
+    child of the active skills root, so a bad join / missing HERMES_HOME / malicious manifest
+    entry raises instead of wiping ``~/.hermes``."""
     target = Path(path).resolve()
     skills_root = _skills_dir().resolve()
     if skills_root not in target.parents:
