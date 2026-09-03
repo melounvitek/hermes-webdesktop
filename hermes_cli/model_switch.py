@@ -622,58 +622,8 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
     ``mimo-v2-omni`` -> (-2.0, 1, 'omni').
     """
     # Strip the prefix (and optional "/" separator for aggregator slugs)
-    rest = model_id[len(prefix):]
-    if rest.startswith("/"):
-        rest = rest[1:]
-    rest = rest.lstrip("-").strip()
-
-    # State machine: start -> in_version -> between -> in_suffix.
-    # "v2.5-pro" -> version [2.5], suffix "pro"; "-omni" -> version [], suffix "omni".
-    nums: list[float] = []
-    suffix_buf = ""
-    state = "start"
-    num_buf = ""
-
-    def _flush() -> None:
-        nonlocal num_buf
-        if num_buf:
-            try:
-                nums.append(float(num_buf.rstrip(".")))
-            except ValueError:
-                pass
-            num_buf = ""
-
-    for ch in rest:
-        if state == "in_suffix":
-            suffix_buf += ch
-        elif state == "in_version":
-            if ch.isdigit():
-                num_buf += ch
-            elif ch == ".":
-                if "." in num_buf:
-                    _flush()  # second dot: start a new version component
-                else:
-                    num_buf += ch
-            else:
-                _flush()
-                if ch in "-_":
-                    state = "between"
-                else:
-                    state = "in_suffix"
-                    suffix_buf += ch
-        else:  # "start" / "between": skip separators, enter version on v/digit, else suffix
-            if ch in "vV":
-                state = "in_version"
-            elif ch.isdigit():
-                state = "in_version"
-                num_buf = ch
-            elif ch not in "-_.":
-                state = "in_suffix"
-                suffix_buf += ch
-
-    if state == "in_version":
-        _flush()
-
+    rest = model_id[len(prefix):].removeprefix("/").lstrip("-").strip()
+    nums, suffix_buf = _split_version_suffix(rest)
     suffix = suffix_buf.lower().strip("-_.").strip()
 
     # YYYYMMDD date stamps (claude-opus-4-20250514) are snapshot markers, not version components,
@@ -689,6 +639,44 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
     # tiebreak alphabetically onto luna, the cheapest. Revisit if a vendor ships a non-flagship "-sol".
     suffix_rank = 0 if suffix in ("pro", "max", "plus", "turbo", "sol") else 1
     return version_key + (suffix_rank, suffix) + date_key
+
+
+def _split_version_suffix(rest: str) -> tuple[list[float], str]:
+    """``"v2.5-pro"`` -> ``([2.5], "pro")``; ``"-omni"`` -> ``([], "omni")``.
+
+    Version tokens are ``v``-optional digit/dot runs separated by ``-``/``_``; a second dot inside
+    a run starts a new component; the first character that is neither starts the suffix.
+    """
+    nums: list[float] = []
+    run, pos = "", 0
+
+    def _flush() -> None:
+        nonlocal run
+        try:
+            nums.append(float(run.rstrip(".")))
+        except ValueError:
+            pass
+        run = ""
+
+    while pos < len(rest):
+        ch = rest[pos]
+        if ch in "-_.":
+            pos += 1
+            continue
+        if not (ch in "vV" or ch.isdigit()):
+            break
+        if ch in "vV":
+            pos += 1
+        while pos < len(rest) and (rest[pos].isdigit() or rest[pos] == "."):
+            if rest[pos] == "." and "." in run:
+                _flush()
+            else:
+                run += rest[pos]
+            pos += 1
+        _flush()
+        if pos < len(rest) and rest[pos] not in "-_":
+            break
+    return nums, rest[pos:]
 
 
 class AmbiguousAliasError(Exception):
