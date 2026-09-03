@@ -204,14 +204,12 @@ def _profile_session_fields(row, profile_path):
 def _profile_ui_meta_fields(row: dict, profile_dir) -> None:
     """Attach ``ui_meta`` / ``ui_meta_revisions`` / ``has_avatar`` from profile.yaml + assets.
     ``ui_meta_revisions`` is always present: it feature-detects gateway-owned CAS for a new profile."""
-    row["ui_meta_revisions"] = {}
     raw_meta = _read_profile_yaml(profile_dir)
-    ui_meta = raw_meta.get("ui_meta")
+    ui_meta, revisions = raw_meta.get("ui_meta"), raw_meta.get("_ui_meta_revisions")
+    # Key order is wire-visible: ui_meta_revisions precedes ui_meta.
+    row["ui_meta_revisions"] = _try(lambda: _clean_revisions(revisions), {}) if isinstance(revisions, dict) else {}
     if isinstance(ui_meta, dict) and ui_meta:
         row["ui_meta"] = ui_meta
-    revisions = raw_meta.get("_ui_meta_revisions")
-    if isinstance(revisions, dict) and revisions:
-        row["ui_meta_revisions"] = _try(lambda: _clean_revisions(revisions), {})
     # Cheap existence flag so rosters skip a get_asset probe per paint.
     row["has_avatar"] = _try(lambda: any((profile_dir / "assets" / f"avatar.{e}").is_file() for e in _ASSET_EXTS), False)
 
