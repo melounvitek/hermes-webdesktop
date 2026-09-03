@@ -1079,9 +1079,7 @@ class ProcessRegistry:
                 "task_id": session.task_id,
                 "owner_task_id": session.owner_task_id or session.task_id,
                 "command": session.command,
-                "exit_code": session.exit_code,
-                "completion_reason": session.completion_reason,
-                "termination_source": session.termination_source,
+                **self._exit_fields(session),
                 "output": _output_tail(session, 2000),
                 # Stable producer identity across checkpoint recovery (unlike a
                 # consumer-observed completion timestamp).
@@ -1089,6 +1087,14 @@ class ProcessRegistry:
             }
             _redact_process_result(notification)
             self.completion_queue.put(notification)
+
+    @staticmethod
+    def _exit_fields(session: ProcessSession) -> dict:
+        return {
+            "exit_code": session.exit_code,
+            "completion_reason": session.completion_reason,
+            "termination_source": session.termination_source,
+        }
 
     # ----- Query Methods -----
 
@@ -1109,9 +1115,8 @@ class ProcessRegistry:
             return False
         with suppress(Exception):
             self._refresh_detached_session(session)
-        if session.exited:
-            return False
-        return not (session.watch_patterns and not session._watch_disabled and session._watch_hits > 0)
+        return not session.exited and not (
+            session.watch_patterns and not session._watch_disabled and session._watch_hits > 0)
 
     def wait_for_pending_completions(
         self, task_id: Optional[str] = None, *, timeout: float | None = None, poll_interval: float = 1.0,
@@ -1370,9 +1375,7 @@ class ProcessRegistry:
             "output_preview": output_preview,
         }
         if session.exited:
-            result.update(
-                exit_code=session.exit_code, completion_reason=session.completion_reason,
-                termination_source=session.termination_source)
+            result.update(self._exit_fields(session))
             # Read-only: record in _poll_observed (CLI inline dedup) but NOT in
             # _completion_consumed, or a status check would suppress the watcher's
             # autonomous delivery turn. See __init__.
@@ -1485,13 +1488,8 @@ class ProcessRegistry:
     def _exit_snapshot(session: ProcessSession, status: str) -> dict:
         """Result dict for an exited session: exit metadata + last 2000 chars of output."""
         return {
-            "status": status,
-            "command": session.command,
-            "exit_code": session.exit_code,
-            "completion_reason": session.completion_reason,
-            "termination_source": session.termination_source,
-            "output": _output_tail(session, 2000),
-        }
+            "status": status, "command": session.command,
+            **ProcessRegistry._exit_fields(session), "output": _output_tail(session, 2000)}
 
     def kill_process(
         self, session_id: str, *, source: str = "process.kill", consume_output: bool = True,
@@ -1539,12 +1537,8 @@ class ProcessRegistry:
             self._move_to_finished(session)
             self._write_checkpoint()
             return {
-                "status": "killed",
-                "session_id": session.id,
-                "completion_reason": session.completion_reason,
-                "termination_source": session.termination_source,
-                "output": output,
-            }
+                "status": "killed", "session_id": session.id, "completion_reason": session.completion_reason,
+                "termination_source": session.termination_source, "output": output}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -1588,9 +1582,9 @@ class ProcessRegistry:
             }
         return None
 
-    def _stdin_op(self, session_id: str, pty_op, pipe_op) -> dict:
-        """Run a stdin operation on a running session: ``pty_op(pty)`` under PTY mode,
-        else ``pipe_op(stdin)`` on the Popen pipe. Each returns the ok-result dict."""
+    def _stdin_op(self, session_id: str, pty_op, pipe_op, ok: dict) -> dict:
+        """Run a stdin operation on a running session — ``pty_op(pty)`` under PTY mode,
+        else ``pipe_op(stdin)`` on the Popen pipe — and return *ok* on success."""
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
@@ -1598,10 +1592,12 @@ class ProcessRegistry:
             return {"status": "already_exited", "error": "Process has already finished"}
         try:
             if session._pty:
-                return pty_op(session._pty)
-            if not session.process or not session.process.stdin:
+                pty_op(session._pty)
+            elif not session.process or not session.process.stdin:
                 return {"status": "error", "error": "Process stdin not available (non-local backend or stdin closed)"}
-            return pipe_op(session.process.stdin)
+            else:
+                pipe_op(session.process.stdin)
+            return ok
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -1611,19 +1607,16 @@ class ProcessRegistry:
         def via_pty(pty):
             # pywinpty expects str on Windows; ptyprocess expects bytes on POSIX.
             if _IS_WINDOWS:
-                pty_data = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+                pty.write(data.decode("utf-8") if isinstance(data, bytes) else str(data))
             else:
                 # surrogateescape: a PTY is a byte stream — round-trip the original
                 # bytes instead of crashing on surrogate content.
-                pty_data = data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data
-            pty.write(pty_data)
-            return {"status": "ok", "bytes_written": len(data)}
+                pty.write(data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data)
 
         def via_pipe(stdin):
             stdin.write(data)
             stdin.flush()
-            return {"status": "ok", "bytes_written": len(data)}
-        return self._stdin_op(session_id, via_pty, via_pipe)
+        return self._stdin_op(session_id, via_pty, via_pipe, {"status": "ok", "bytes_written": len(data)})
 
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
         """Send data + newline to stdin (like pressing Enter).
@@ -1651,25 +1644,17 @@ class ProcessRegistry:
         except Exception as e:
             return {"status": "error", "error": str(e)}
         return {
-            "status": "ok",
-            "closed": session_id,
-            "note": (
-                "Closed the read-only terminal tab. The process was not killed; "
-                "its output remains available and the user can reopen the tab "
-                "from the status stack."),
-        }
+            "status": "ok", "closed": session_id,
+            "note": "Closed the read-only terminal tab. The process was not killed; "
+                    "its output remains available and the user can reopen the tab "
+                    "from the status stack."}
 
     def close_stdin(self, session_id: str) -> dict:
         """Close a running process's stdin / send EOF without killing the process."""
-
-        def via_pty(pty):
-            pty.sendeof()
-            return {"status": "ok", "message": "EOF sent"}
-
-        def via_pipe(stdin):
-            stdin.close()
-            return {"status": "ok", "message": "stdin closed"}
-        return self._stdin_op(session_id, via_pty, via_pipe)
+        session = self.get(session_id)
+        msg = "EOF sent" if session is not None and session._pty else "stdin closed"
+        return self._stdin_op(
+            session_id, lambda pty: pty.sendeof(), lambda stdin: stdin.close(), {"status": "ok", "message": msg})
 
     def count_running(self) -> int:
         """O(1) running count for status-bar polling; dict ``len()`` is atomic, no lock."""
