@@ -446,6 +446,19 @@ def _cap_models(model_ids: list, max_models: int | None, slug: str = "") -> list
     return model_ids[:max_models]
 
 
+def _absorb_entry_models(grp: dict, entry: dict, active_model: Any) -> None:
+    """Fold one config entry's models into its group: the active selection first, then the declared
+    ``models:`` ids. The active selection alone never suppresses discovery, and a dict-shaped
+    ``models:`` is metadata rather than an allowlist (see ``_models_config_is_allowlist``), so only
+    list/string shapes pin the row."""
+    from hermes_cli.model_switch import _declared_model_ids, _entry_models_discovered, _models_config_is_allowlist
+    _extend_unique(grp["models"], [active_model])
+    models_field = entry.get("models")
+    if _models_config_is_allowlist(models_field, _entry_models_discovered(entry)):
+        grp["has_explicit_models"] = True
+    _extend_unique(grp["models"], _declared_model_ids(models_field))
+
+
 def _extend_unique(target: list, items) -> None:
     """Append each truthy item of *items* not already in *target* (order preserved)."""
     for item in items:
@@ -818,7 +831,7 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
     extra_headers) so keyed providers on one endpoint with the same wire protocol collapse into
     one row (two Palantir Claude entries -> one "Palantir Claude" row); a different
     key_env/api_mode/headers keeps distinct rows since the wire protocol or tenant differs."""
-    from hermes_cli.model_switch import _declared_model_ids, _entry_models_discovered, _extra_headers_from_config, _models_config_is_allowlist, _scoped_key_env
+    from hermes_cli.model_switch import _extra_headers_from_config, _scoped_key_env
     from hermes_cli.config import coerce_provider_id, is_provider_enabled
     ep_groups: dict[tuple, dict] = {}
     for ep_name, ep_cfg in user_providers.items():
@@ -829,11 +842,6 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         inline_api_key, key_env, cred_identity = _entry_credentials(ep_cfg, "key_env", "api_key_env")
         headers = _extra_headers_from_config(ep_cfg)
         group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
-
-        # ``default_model`` is the legacy key; ``model`` matches custom_providers.
-        entry_models: list = []
-        _extend_unique(entry_models, [ep_cfg.get("default_model", "") or ep_cfg.get("model", "")])
-        _extend_unique(entry_models, _declared_model_ids(ep_cfg.get("models", [])))
 
         if group_key not in ep_groups:
             # Strip the per-model suffix and trailing version tokens ("Palantir Claude 4.7 Opus"
@@ -852,12 +860,8 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
                 "headers": headers, "api_mode": ep_cfg.get("api_mode"),
                 "discovery_allowed": bool(api_url) and _discover_flag(ep_cfg), "raw_names": [], "aliases": set()}
         grp = ep_groups[group_key]
-        _extend_unique(grp["models"], entry_models)
-        # A singular default_model/model is only the active selection and must not suppress
-        # discovery; dict-shaped ``models:`` is context_length metadata, not an allowlist — see
-        # ``_models_config_is_allowlist``.
-        if _models_config_is_allowlist(ep_cfg.get("models"), _entry_models_discovered(ep_cfg)):
-            grp["has_explicit_models"] = True
+        # ``default_model`` is the legacy key; ``model`` matches custom_providers.
+        _absorb_entry_models(grp, ep_cfg, ep_cfg.get("default_model", "") or ep_cfg.get("model", ""))
         grp["raw_names"].append(display_name)
         grp["aliases"].update(custom_provider_aliases(display_name, str(ep_name)))
 
@@ -922,7 +926,7 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
     (endpoint, credential identity, api_mode, extra_headers, display prefix). Four "Ollama — X"
     entries on one host become one "Ollama" row; distinct prefixes sharing a proxy URL keep
     their own rows."""
-    from hermes_cli.model_switch import _declared_model_ids, _entry_models_discovered, _extra_headers_from_config, _models_config_is_allowlist, _save_discovered_models_to_config, _scoped_key_env
+    from hermes_cli.model_switch import _extra_headers_from_config, _save_discovered_models_to_config, _scoped_key_env
     from hermes_cli.config import coerce_provider_id
     groups: dict[tuple, dict] = {}
     for entry in custom_providers:
@@ -954,13 +958,8 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
                 groups[group_key]["discover_models"] = False
         grp = groups[group_key]
         grp["aliases"].update(custom_provider_aliases(raw_name, provider_key))
-        # ``model:`` is only the active selection; every configured model lives under
-        # ``models:`` (dict written by _save_custom_provider).
-        _extend_unique(grp["models"], [(entry.get("model") or "").strip()])
-        models_field = entry.get("models", {})
-        if _models_config_is_allowlist(models_field, _entry_models_discovered(entry)):
-            grp["has_explicit_models"] = True
-        _extend_unique(grp["models"], _declared_model_ids(models_field))
+        # ``model:`` is only the active selection; every configured model lives under ``models:``.
+        _absorb_entry_models(grp, entry, (entry.get("model") or "").strip())
 
     section4_slugs: set = set()
     current_url_group_count = sum(
