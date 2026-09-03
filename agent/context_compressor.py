@@ -1346,6 +1346,16 @@ def _last_assistant_index(messages: "List[Dict[str, Any]]") -> int:
     return -1
 
 
+def _part_text(item: Any) -> Optional[str]:
+    """Text of a content part: the string itself, a dict's ``text``, else None."""
+    return item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
+
+
+def _with_part_text(item: Any, text: str) -> Any:
+    """Copy of a content part carrying ``text`` (string parts become the text itself)."""
+    return {**item, "text": text} if isinstance(item, dict) else text
+
+
 def _content_text_for_contains(content: Any) -> str:
     """Return a best-effort text view of message content (for substring checks only)."""
     if content is None:
@@ -4218,16 +4228,11 @@ This compaction should PRIORITISE preserving all information related to the focu
             return message
 
         content = message.get("content")
-        is_summary = (
-            cls._is_context_summary_content(content)
-            or cls._has_compressed_summary_metadata(message)
-        )
-        if not is_summary:
+        if not cls._is_context_summary_message(message):
             return message.copy()
 
         def _unwrapped(new_content: Any) -> Dict[str, Any]:
-            unwrapped = message.copy()
-            unwrapped["content"] = new_content
+            unwrapped = {**message, "content": new_content}
             unwrapped.pop(COMPRESSED_SUMMARY_METADATA_KEY, None)
             return unwrapped
 
@@ -4249,63 +4254,40 @@ This compaction should PRIORITISE preserving all information related to the focu
             prior_blocks: list[Any] = []
             found_delimiter = False
             for item in content:
-                if isinstance(item, str):
-                    if _MERGED_SUMMARY_DELIMITER in item:
-                        before = item.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
-                        if before.strip():
-                            prior_blocks.append(before)
-                        found_delimiter = True
-                        break
-                    prior_blocks.append(item)
-                    continue
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str) and _MERGED_SUMMARY_DELIMITER in text:
-                        before = text.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
-                        if before.strip():
-                            prior_blocks.append({**item, "text": before})
-                        found_delimiter = True
-                        break
-                    prior_blocks.append(item.copy())
-                    continue
-                prior_blocks.append(item)
+                text = _part_text(item)
+                if isinstance(text, str) and _MERGED_SUMMARY_DELIMITER in text:
+                    before = text.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+                    if before.strip():
+                        prior_blocks.append(_with_part_text(item, before))
+                    found_delimiter = True
+                    break
+                prior_blocks.append(item.copy() if isinstance(item, dict) else item)
 
             if not found_delimiter:
-                legacy_blocks: list[Any] = []
-                found_marker = False
+                # Legacy end-marker form: live content follows the marker inside/after one part.
                 for index, item in enumerate(content):
-                    text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
+                    text = _part_text(item)
                     if not isinstance(text, str) or _SUMMARY_END_MARKER not in text:
                         continue
                     remainder = text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
-                    if remainder:
-                        legacy_blocks.append({**item, "text": remainder} if isinstance(item, dict) else remainder)
-                    for later in content[index + 1:]:
-                        legacy_blocks.append(later.copy() if isinstance(later, dict) else later)
-                    found_marker = True
-                    break
-                if found_marker and legacy_blocks:
-                    return _unwrapped(legacy_blocks)
+                    legacy_blocks = [_with_part_text(item, remainder)] if remainder else []
+                    legacy_blocks += [later.copy() if isinstance(later, dict) else later for later in content[index + 1:]]
+                    return _unwrapped(legacy_blocks) if legacy_blocks else None
+                return None
 
-            if found_delimiter:
-                # Strip the PRIOR CONTEXT header from the first block that carries it.
-                for index, item in enumerate(prior_blocks):
-                    text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
-                    if not isinstance(text, str):
-                        continue
-                    if not text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                        continue
-                    leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
-                    if not leading:
-                        prior_blocks.pop(index)
-                    elif isinstance(item, str):
-                        prior_blocks[index] = leading
-                    else:
-                        prior_blocks[index] = {**item, "text": leading}
-                    break
-
-                if prior_blocks:
-                    return _unwrapped(prior_blocks)
+            # Strip the PRIOR CONTEXT header from the first block that carries it.
+            for index, item in enumerate(prior_blocks):
+                text = _part_text(item)
+                if not isinstance(text, str) or not text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                    continue
+                leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
+                if leading:
+                    prior_blocks[index] = _with_part_text(item, leading)
+                else:
+                    prior_blocks.pop(index)
+                break
+            if prior_blocks:
+                return _unwrapped(prior_blocks)
 
         return None
 
@@ -5272,51 +5254,32 @@ SUMMARY_CARRIER_DURABLE_DISPLAY_METADATA_KEYS = ("reactions",)
 
 def _handoff_only_content(content: Any) -> Any:
     """Project summary-bearing content to the synthetic handoff alone; never keeps live media."""
+    def _through_end_marker(text: str) -> str:
+        marker_idx = text.find(_SUMMARY_END_MARKER)
+        return text[: marker_idx + len(_SUMMARY_END_MARKER)] if marker_idx >= 0 else text
+
     if isinstance(content, str):
         if _MERGED_SUMMARY_DELIMITER in content:
-            suffix = content.split(_MERGED_SUMMARY_DELIMITER, 1)[1].lstrip()
-            marker_idx = suffix.find(_SUMMARY_END_MARKER)
-            if marker_idx >= 0:
-                return suffix[: marker_idx + len(_SUMMARY_END_MARKER)]
-            return suffix
-        marker_idx = content.find(_SUMMARY_END_MARKER)
-        if marker_idx >= 0:
-            return content[: marker_idx + len(_SUMMARY_END_MARKER)]
-        return content
-
+            content = content.split(_MERGED_SUMMARY_DELIMITER, 1)[1].lstrip()
+        return _through_end_marker(content)
     if not isinstance(content, list):
         return content
 
     # Ordinary merge: summary suffix starts in the delimiter part; later parts may carry live media
     # — never retain.
     for item in content:
-        text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
+        text = _part_text(item)
         if not isinstance(text, str) or _MERGED_SUMMARY_DELIMITER not in text:
             continue
-        suffix = text.split(_MERGED_SUMMARY_DELIMITER, 1)[1].lstrip()
-        marker_idx = suffix.find(_SUMMARY_END_MARKER)
-        if marker_idx >= 0:
-            suffix = suffix[: marker_idx + len(_SUMMARY_END_MARKER)]
-        if not suffix:
-            return []
-        if isinstance(item, dict):
-            copied = item.copy()
-            copied["text"] = suffix
-            return [copied]
-        return [suffix]
+        suffix = _through_end_marker(text.split(_MERGED_SUMMARY_DELIMITER, 1)[1].lstrip())
+        return [_with_part_text(item, suffix)] if suffix else []
 
     # Force-user-leading: keep parts through the end marker, truncated before the live ask.
     projected: list[Any] = []
     for item in content:
-        text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
+        text = _part_text(item)
         if isinstance(text, str) and _SUMMARY_END_MARKER in text:
-            prefix = text.split(_SUMMARY_END_MARKER, 1)[0] + _SUMMARY_END_MARKER
-            if isinstance(item, dict):
-                copied = item.copy()
-                copied["text"] = prefix
-                projected.append(copied)
-            else:
-                projected.append(prefix)
+            projected.append(_with_part_text(item, text.split(_SUMMARY_END_MARKER, 1)[0] + _SUMMARY_END_MARKER))
             return projected
         if isinstance(text, str):
             projected.append(item.copy() if isinstance(item, dict) else item)
