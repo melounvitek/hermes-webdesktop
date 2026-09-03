@@ -57,10 +57,9 @@ _TURN_COORDINATE_FIELDS = frozenset(
 _MEMBER_MESSAGE_FIELDS = _TURN_COORDINATE_FIELDS | {"text"}
 _TERMINAL_COMMON_FIELDS = _TURN_COORDINATE_FIELDS | {"seen_through_seq"}
 _TERMINAL_EXTRA_FIELDS = {
-    "turn.settled": frozenset({"message_event_id", "passed"}),
-    "turn.failed": frozenset({"error"}),
-    "turn.cancelled": frozenset({"reason"}),
-    "turn.deferred": frozenset({"execution_generation", "reason"})}
+    "turn.settled": frozenset({"message_event_id", "passed"}), "turn.failed": frozenset({"error"}),
+    "turn.cancelled": frozenset({"reason"}), "turn.deferred": frozenset({"execution_generation", "reason"}),
+}
 _TERMINAL_OPTIONAL_FIELDS = {"turn.failed": frozenset({"reason_code"})}
 _TERMINAL_EVENT_KINDS = frozenset(_TERMINAL_EXTRA_FIELDS)
 # Gateway-authored control events: kind -> (exact payload fields, identifier fields).
@@ -396,10 +395,9 @@ def _validate_member_message(
     member = _member_by_id(room, payload.get("member_id"))
     peer = _peer_target(member)
     expected = {
-        "kind": "member",
-        "id": member.member_id,
-        "profile": member.profile,
-        "connection_id": peer.get("peer_id") if peer else None}
+        "kind": "member", "id": member.member_id, "profile": member.profile,
+        "connection_id": peer.get("peer_id") if peer else None,
+    }
     if any(actor.get(key) != value for key, value in expected.items()):
         raise DiscussionValidationError("message.member actor does not match roster")
     return payload
@@ -634,10 +632,9 @@ def _make_task_plan(
         room_id=room.room_id, task_id=task_id,
         thread_id=str(discussion_event.payload["thread_id"]), turn_id=turn_id)
     payload = {
-        "target_member_id": member.member_id,
-        "target_profile": member.profile,
-        "prompt": prompt,
-        "source_event_seq": discussion_event.seq}
+        "target_member_id": member.member_id, "target_profile": member.profile, "prompt": prompt,
+        "source_event_seq": discussion_event.seq,
+    }
     return DiscussionTaskPlan(
         identity=identity, payload=payload, discussion_event_id=discussion_event.event_id, member=member,
         member_index=member_index, round_index=round_index, seen_through_seq=seen_through_seq)
@@ -883,10 +880,9 @@ def _deferred_effects(
 
 
 _TERMINAL_EFFECTS = {
-    "settled": _settled_effects,
-    "failed": _failed_effects,
-    "cancelled": _cancelled_effects,
-    "deferred": _deferred_effects}
+    "settled": _settled_effects, "failed": _failed_effects, "cancelled": _cancelled_effects,
+    "deferred": _deferred_effects,
+}
 
 
 def plan_publication(
@@ -921,14 +917,10 @@ def plan_publication(
         f"ddeferred:{digest}:g{execution_generation}"
         if effective_status == "deferred" else f"dterminal:{digest}")
     common_payload = {
-        "discussion_event_id": task.discussion_event_id,
-        "member_id": task.member.member_id,
-        "member_index": task.member_index,
-        "round_index": task.round_index,
-        "seen_through_seq": task.seen_through_seq,
-        "task_id": task.identity.task_id,
-        "thread_id": task.identity.thread_id,
-        "turn_id": task.identity.turn_id}
+        "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
+        "member_index": task.member_index, "round_index": task.round_index, "seen_through_seq": task.seen_through_seq,
+        "task_id": task.identity.task_id, "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
+    }
     extra, effects = _TERMINAL_EFFECTS[effective_status](
         result, task=task, room=room, message_event_id=f"dmessage:{digest}",
         newer_same_thread=newer_same_thread, execution_generation=execution_generation)

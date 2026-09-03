@@ -528,15 +528,11 @@ def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> 
 
 def _room_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, Any]:
     room = {
-        "room_id": row["room_id"],
-        "name": row["name"],
-        "members": json.loads(row["members_json"]),
-        "authority_gateway_id": row["authority_gateway_id"],
-        "authority_epoch": int(row["authority_epoch"]),
-        "revision": int(row["revision"]),
-        "created_at": float(row["created_at"]),
-        "updated_at": float(row["updated_at"]),
-        "idempotent": idempotent}
+        "room_id": row["room_id"], "name": row["name"], "members": json.loads(row["members_json"]),
+        "authority_gateway_id": row["authority_gateway_id"], "authority_epoch": int(row["authority_epoch"]),
+        "revision": int(row["revision"]), "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]), "idempotent": idempotent,
+    }
     # sqlite3.Row: ``x in row`` scans values, so ``.keys()`` is load-bearing.
     if "disbanded_at" in row.keys() and row["disbanded_at"] is not None:  # noqa: SIM118
         room["disbanded_at"] = float(row["disbanded_at"])
@@ -548,15 +544,10 @@ def _room_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, A
 def _event_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, Any]:
     epoch = row["authority_epoch"]
     return {
-        "room_id": row["room_id"],
-        "seq": int(row["seq"]),
-        "event_id": row["event_id"],
-        "kind": row["kind"],
-        "actor": json.loads(row["actor_json"]),
-        "authority_epoch": int(epoch) if epoch is not None else None,
-        "payload": json.loads(row["payload_json"]),
-        "created_at": float(row["created_at"]),
-        "idempotent": idempotent}
+        "room_id": row["room_id"], "seq": int(row["seq"]), "event_id": row["event_id"], "kind": row["kind"],
+        "actor": json.loads(row["actor_json"]), "authority_epoch": int(epoch) if epoch is not None else None,
+        "payload": json.loads(row["payload_json"]), "created_at": float(row["created_at"]), "idempotent": idempotent,
+    }
 
 
 def _load_event(conn: sqlite3.Connection, room_id: str, event_id: str) -> sqlite3.Row | None:

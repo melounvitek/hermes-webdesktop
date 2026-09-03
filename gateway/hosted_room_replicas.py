@@ -217,11 +217,9 @@ def ingest_page(
             conn, is_new=row is None, room_id=room_id, room_name=room_name, members_json=members_json,
             authority=authority, new_last=new_last, latest_seq=latest_seq, added_bytes=added_bytes, now=now)
     return {
-        "room_id": room_id,
-        "stored_seq": new_last,
-        "ingested": len(new_events),
-        "authority": authority,
-        "caught_up": new_last >= max(latest_seq, new_last)}
+        "room_id": room_id, "stored_seq": new_last, "ingested": len(new_events), "authority": authority,
+        "caught_up": new_last >= max(latest_seq, new_last),
+    }
 
 
 def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
@@ -232,15 +230,11 @@ def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
     if row is None:
         raise ReplicaError("replica not found")
     return {
-        "room_id": row["room_id"],
-        "name": row["name"],
-        "members": json.loads(row["members_json"]),
+        "room_id": row["room_id"], "name": row["name"], "members": json.loads(row["members_json"]),
         "authority": {"gateway_id": row["authority_gateway_id"], "epoch": int(row["authority_epoch"])},
-        "last_seq": int(row["last_seq"]),
-        "latest_seq": int(row["latest_seq"]),
-        "event_bytes": int(row["event_bytes"]),
-        "created_at": float(row["created_at"]),
-        "updated_at": float(row["updated_at"])}
+        "last_seq": int(row["last_seq"]), "latest_seq": int(row["latest_seq"]), "event_bytes": int(row["event_bytes"]),
+        "created_at": float(row["created_at"]), "updated_at": float(row["updated_at"]),
+    }
 
 
 def promote_replica(
@@ -304,13 +298,10 @@ def promote_replica(
         conn.execute("DELETE FROM hosted_room_replica_events WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM hosted_room_replicas WHERE room_id=?", (room_id,))
     return {
-        "room_id": room_id,
-        "authority_gateway_id": local_gateway,
-        "authority_epoch": target_epoch,
-        "previous_gateway_id": previous_gateway,
-        "previous_epoch": previous_epoch,
-        "claim_seq": claim_seq,
-        "latest_seq": claim_seq}
+        "room_id": room_id, "authority_gateway_id": local_gateway, "authority_epoch": target_epoch,
+        "previous_gateway_id": previous_gateway, "previous_epoch": previous_epoch, "claim_seq": claim_seq,
+        "latest_seq": claim_seq,
+    }
 
 
 def demote_room(
@@ -341,10 +332,9 @@ def demote_room(
         current_epoch = int(row["authority_epoch"])
         if current_gateway == observed_gateway_id and current_epoch == observed_epoch:
             return {
-                "room_id": room_id,
-                "authority_gateway_id": current_gateway,
-                "authority_epoch": current_epoch,
-                "idempotent": True}
+                "room_id": room_id, "authority_gateway_id": current_gateway, "authority_epoch": current_epoch,
+                "idempotent": True,
+            }
         if observed_epoch <= current_epoch:
             raise ReplicaEpochRegressionError("observed epoch does not supersede the stored authority")
         if current_gateway != local_gateway:
@@ -364,7 +354,6 @@ def demote_room(
                 WHERE room_id=?""",
             (observed_gateway_id, observed_epoch, now, room_id))
     return {
-        "room_id": room_id,
-        "authority_gateway_id": observed_gateway_id,
-        "authority_epoch": observed_epoch,
-        "idempotent": False}
+        "room_id": room_id, "authority_gateway_id": observed_gateway_id, "authority_epoch": observed_epoch,
+        "idempotent": False,
+    }

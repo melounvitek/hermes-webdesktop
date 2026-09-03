@@ -68,11 +68,9 @@ class RoomExecutionPolicy:
             or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS):
             raise RoomExecutionPolicyError("max_iterations is invalid")
         unsigned = {
-            "version": POLICY_VERSION,
-            "target_profile": target_profile,
-            "enabled_toolsets": list(toolsets),
-            "approval_mode": approval_mode,
-            "max_iterations": max_iterations}
+            "version": POLICY_VERSION, "target_profile": target_profile, "enabled_toolsets": list(toolsets),
+            "approval_mode": approval_mode, "max_iterations": max_iterations,
+        }
         supplied = str(value["policy_digest"] or "").strip().lower()
         if supplied != _policy_digest(unsigned):
             raise RoomExecutionPolicyError("policy_digest does not match the execution policy")
@@ -99,12 +97,11 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
     agent = config.get("agent") if isinstance(config.get("agent"), Mapping) else {}
     approvals = config.get("approvals") if isinstance(config.get("approvals"), Mapping) else {}
     unsigned = {
-        "version": POLICY_VERSION,
-        "target_profile": _identifier(target_profile, field="target_profile"),
+        "version": POLICY_VERSION, "target_profile": _identifier(target_profile, field="target_profile"),
         "enabled_toolsets": toolsets,
-        "approval_mode": (
-            "off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))),
-        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS)}
+        "approval_mode": ("off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))),
+        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS),
+    }
     value = {**unsigned, "policy_digest": _policy_digest(unsigned)}
     return RoomExecutionPolicy.from_mapping(value).as_mapping()
 
@@ -125,11 +122,7 @@ def current_room_execution_policy() -> RoomExecutionPolicy | None:
 
 
 __all__ = [
-    "MAX_POLICY_ITERATIONS",
-    "POLICY_VERSION",
-    "RoomExecutionPolicy",
-    "RoomExecutionPolicyError",
-    "bind_room_execution_policy",
-    "current_room_execution_policy",
-    "execution_policy_mapping",
-    "reset_room_execution_policy"]
+    "MAX_POLICY_ITERATIONS", "POLICY_VERSION", "RoomExecutionPolicy", "RoomExecutionPolicyError",
+    "bind_room_execution_policy", "current_room_execution_policy", "execution_policy_mapping",
+    "reset_room_execution_policy",
+]

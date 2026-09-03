@@ -354,7 +354,8 @@ def _optional(cast: Callable[[Any], Any]) -> Callable[[Any], Any]:
 _TASK_VIEW_CASTS: dict[str, Callable[[Any], Any]] = {
     "execution_generation": int, "cancel_generation": int, "run_lease_generation": _optional(int),
     "result_json": _optional(json.loads), "created_at": float, "updated_at": float,
-    "started_at": _optional(float), "terminal_at": _optional(float), "indeterminate_at": _optional(float)}
+    "started_at": _optional(float), "terminal_at": _optional(float), "indeterminate_at": _optional(float),
+}
 
 
 def _task_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, Any]:

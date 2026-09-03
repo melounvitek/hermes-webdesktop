@@ -393,7 +393,8 @@ _DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
     authority_gateway_id=_identifier, authority_epoch=_positive_int, member_id=_identifier,
     target_install_id=_identifier, target_profile=_identifier, task_id=_identifier,
     execution_generation=_positive_int, source_event_seq=_positive_int, cancellation_scope_id=_identifier,
-    capability_digest=_digest, execution_policy_digest=_digest, trace_id=_identifier)
+    capability_digest=_digest, execution_policy_digest=_digest, trace_id=_identifier,
+)
 
 
 @dataclass(frozen=True)

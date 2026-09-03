@@ -269,7 +269,8 @@ class HostedRoomPolicyCheckpoint:
         "message.member": _apply_discussion_event,
         **dict.fromkeys(_TERMINAL_KINDS, _apply_discussion_event),
         "room.activity": _apply_room_activity,
-        "room.stop_requested": _apply_stop_requested}
+        "room.stop_requested": _apply_stop_requested,
+    }
 
     def _apply_event(self, conn: sqlite3.Connection, event: Mapping[str, Any]) -> None:
         handler = self._APPLY_BY_KIND.get(str(event.get("kind") or ""))
