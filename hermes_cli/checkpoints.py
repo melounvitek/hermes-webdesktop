@@ -37,22 +37,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  legacy-*       {_fmt_bytes(info['legacy_size_bytes'])}")
     print(f"Projects:        {info['project_count']}")
 
-    projects = sorted(
-        info["projects"],
-        key=lambda p: (p.get("last_touch") or 0),
-        reverse=True,
-    )
+    projects = sorted(info["projects"], key=lambda p: (p.get("last_touch") or 0), reverse=True)
     if projects:
         print()
         print(f"  {'WORKDIR':<60}  {'COMMITS':>7}  {'LAST TOUCH':>12}  STATE")
-        for p in projects[: args.limit if hasattr(args, "limit") and args.limit else 20]:
+        for p in projects[: getattr(args, "limit", None) or 20]:
             wd = p.get("workdir") or "(unknown)"
             if len(wd) > 60:
                 wd = "…" + wd[-59:]
             state = "live" if p.get("exists") else "orphan"
-            commits = p.get("commits", 0)
-            last = _fmt_age(p.get("last_touch"))
-            print(f"  {wd:<60}  {commits:>7}  {last:>12}  {state}")
+            print(f"  {wd:<60}  {p.get('commits', 0):>7}  {_fmt_age(p.get('last_touch')):>12}  {state}")
 
     legacy = info.get("legacy_archives", [])
     if legacy:
@@ -76,22 +70,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
     max_size_mb = args.max_size_mb
     delete_orphans = not args.keep_orphans
 
-    # When set, restricts orphan deletion to exactly the identities shown in
-    # the confirmation preview below (v2 project hashes / pre-v2 shadow repo
-    # paths). `None` means "no restriction" — used for --force, where there
-    # is no preview to bind to.
+    # Restricts orphan deletion to exactly the identities shown in the confirmation preview
+    # (v2 project hashes / pre-v2 shadow repo paths). `None` = no restriction (--force: no
+    # preview to bind to).
     orphan_allowlist: Optional[set] = None
 
     if delete_orphans and not args.force:
         info = store_status()
-        orphans = [
-            p for p in info.get("projects", [])
-            if not p.get("exists")
-        ]
-        pre_v2_orphans = [
-            p for p in info.get("pre_v2_projects", [])
-            if not p.get("exists")
-        ]
+        orphans = [p for p in info.get("projects", []) if not p.get("exists")]
+        pre_v2_orphans = [p for p in info.get("pre_v2_projects", []) if not p.get("exists")]
         if orphans or pre_v2_orphans:
             print(f"This will permanently delete {len(orphans) + len(pre_v2_orphans)} "
                   "orphan checkpoint project(s) whose workdir is not currently reachable:")
@@ -107,13 +94,10 @@ def cmd_prune(args: argparse.Namespace) -> int:
             if not _confirm("Delete these orphan projects?"):
                 print("Aborted.")
                 return 1
-        # Bind the deletion to exactly what was just displayed (and, when
-        # non-empty, confirmed) — a project that becomes orphaned only
-        # *after* this preview (e.g. its workdir disappears while waiting on
-        # input()) must not be swept up under this same run. This is set
-        # unconditionally for every non-force run: an EMPTY preview binds to
-        # an EMPTY allowlist, so a zero-orphan preview can never authorize
-        # deletion of orphans discovered by the later rescan.
+        # Bind deletion to exactly what was displayed/confirmed: a project that goes orphan
+        # only *after* the preview (workdir vanishes while waiting on input()) must not be
+        # swept up. Set unconditionally for every non-force run — an EMPTY preview binds an
+        # EMPTY allowlist, so it can never authorize orphans found by the later rescan.
         orphan_allowlist = {p["hash"] for p in orphans}
         orphan_allowlist.update(p["path"] for p in pre_v2_orphans)
 
@@ -208,25 +192,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(func=cmd_status)  # bare `hermes checkpoints` → status
     subs = parser.add_subparsers(dest="checkpoints_command", metavar="COMMAND")
 
-    p_status = subs.add_parser(
-        "status",
-        help="Show total size, project count, and per-project breakdown",
-    )
-    p_status.add_argument("--limit", type=int, default=20,
-                          help="Max projects to list (default 20)")
+    p_status = subs.add_parser("status", help="Show total size, project count, and per-project breakdown")
+    p_status.add_argument("--limit", type=int, default=20, help="Max projects to list (default 20)")
     p_status.set_defaults(func=cmd_status)
 
-    p_list = subs.add_parser(
-        "list",
-        help="Alias for 'status'",
-    )
+    p_list = subs.add_parser("list", help="Alias for 'status'")
     p_list.add_argument("--limit", type=int, default=20)
     p_list.set_defaults(func=cmd_status)
 
-    p_prune = subs.add_parser(
-        "prune",
-        help="Delete orphan/stale checkpoints and GC the store",
-    )
+    p_prune = subs.add_parser("prune", help="Delete orphan/stale checkpoints and GC the store")
     p_prune.add_argument("--retention-days", type=int, default=7,
                          help="Drop projects whose last_touch is older than N days (default 7)")
     p_prune.add_argument("--max-size-mb", type=int, default=500,
@@ -243,6 +217,5 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         ("clear-legacy", "Delete only the legacy-<ts>/ archives from v1 migration", cmd_clear_legacy),
     ):
         p_clear = subs.add_parser(name, help=help_text)
-        p_clear.add_argument("-f", "--force", action="store_true",
-                             help="Skip confirmation prompt")
+        p_clear.add_argument("-f", "--force", action="store_true", help="Skip confirmation prompt")
         p_clear.set_defaults(func=func)
