@@ -1,12 +1,10 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
-Server-side LLM fact extraction, semantic search and deduplication via the Mem0
-Platform API (cloud), a self-hosted Mem0 server (MEM0_HOST, HTTP), or OSS Memory.
-Secrets live in $HERMES_HOME/.env (MEM0_API_KEY, MEM0_HOST); behavioral settings
-in $HERMES_HOME/mem0.json via `hermes memory setup`: mode ("platform"|"oss"), host,
-user_id (canonical id across every gateway so one human gets one merged store;
-unset → gateway-native id), agent_id. MEM0_MODE/MEM0_USER_ID/MEM0_AGENT_ID env
-vars remain a backward-compatible fallback.
+Server-side fact extraction and semantic search via the Mem0 Platform API (cloud), a
+self-hosted Mem0 server (MEM0_HOST, HTTP), or OSS Memory. Secrets live in $HERMES_HOME/.env
+(MEM0_API_KEY, MEM0_HOST); settings in $HERMES_HOME/mem0.json via `hermes memory setup`:
+mode ("platform"|"oss"), host, user_id (canonical id across gateways; unset → gateway-native
+id), agent_id. MEM0_* env vars remain a fallback.
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -41,13 +40,18 @@ def _is_client_error(exc: Exception) -> bool:
     return type(exc).__name__ in _CLIENT_ERROR_TYPES or any(s in err_str for s in ("404", "not found", "valid uuid"))
 
 
+def _truthy(value: Any, falsy_strings: tuple[str, ...] | None = None) -> bool:
+    """Coerce a flag; strings match ``falsy_strings`` (deny-list) when given, else a truthy allow-list."""
+    if not isinstance(value, str):
+        return bool(value)
+    return value.lower() not in falsy_strings if falsy_strings else value.lower() in ("true", "1", "yes")
+
+
 def _read_mem0_json(config_path: Path) -> dict:
     """Best-effort read of mem0.json; missing/corrupt file -> {}."""
     if config_path.exists():
-        try:
+        with suppress(Exception):
             return json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
     return {}
 
 
@@ -56,94 +60,44 @@ def _load_config() -> dict:
     Layering avoids a silent failure when the JSON file exists but lacks fields
     like ``api_key`` that the user set in ``.env``."""
     from hermes_constants import get_hermes_home
-    config = {
-        "mode": os.environ.get("MEM0_MODE", "platform"),
-        "api_key": get_secret("MEM0_API_KEY", ""),
-        "host": os.environ.get("MEM0_HOST", ""),
-        "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
-        "oss": {},
-    }
-    # Only carry user_id when explicitly configured so initialize() can fall
-    # back to the gateway-native id.
-    if os.environ.get("MEM0_USER_ID"):
+    config = {"mode": os.environ.get("MEM0_MODE", "platform"), "api_key": get_secret("MEM0_API_KEY", ""), "host": os.environ.get("MEM0_HOST", ""), "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"), "oss": {}}
+    if os.environ.get("MEM0_USER_ID"):  # only when explicitly configured, so initialize() can fall back to the gateway-native id
         config["user_id"] = os.environ["MEM0_USER_ID"]
     file_cfg = _read_mem0_json(get_hermes_home() / "mem0.json")
     config.update({k: v for k, v in file_cfg.items() if v is not None and v != ""})
     return config
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas
-# ---------------------------------------------------------------------------
-
-def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
-    return {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}
+def _schema(name: str, description: str, properties: dict[str, tuple[str, str]], required: list[str]) -> dict:
+    props = {k: {"type": t, "description": d} for k, (t, d) in properties.items()}
+    return {"name": name, "description": description, "parameters": {"type": "object", "properties": props, "required": required}}
 
 
-def _param(type_: str, description: str) -> dict:
-    return {"type": type_, "description": description}
+TOOL_SCHEMAS = [
+    _schema("mem0_search", "Search the user's memories by meaning; returns facts ranked by relevance. Use this before answering any question that may depend on what you know about the user (preferences, facts, history, people, projects, past decisions). For multi-part or multi-hop questions, call it several times — vary the wording and run follow-up searches on what earlier results reveal; one search is rarely enough.",
+            {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only).")}, ["query"]),
+    _schema("mem0_add", "Store a durable fact about the user, verbatim (no LLM extraction). Call this the moment the user states a lasting preference, correction, decision, or personal detail worth recalling on future turns — don't wait to be asked to remember. Skip transient chit-chat and facts you've already stored.",
+            {"content": ("string", "The fact to store.")}, ["content"]),
+    _schema("mem0_update", "Replace the text of an existing memory by its ID (take the ID from a mem0_search result). Use when a stored fact has changed or was wrong — correct it in place instead of adding a duplicate.",
+            {"memory_id": ("string", "Memory UUID to update."), "text": ("string", "New text content.")}, ["memory_id", "text"]),
+    _schema("mem0_delete", "Delete a memory by its ID (take the ID from a mem0_search result). Use when a stored fact is obsolete or the user asks you to forget it; prefer mem0_update if the fact merely changed.",
+            {"memory_id": ("string", "Memory UUID to delete.")}, ["memory_id"]),
+]
 
-
-SEARCH_SCHEMA = _schema(
-    "mem0_search",
-    "Search the user's memories by meaning; returns facts ranked by "
-    "relevance. Use this before answering any question that may depend on "
-    "what you know about the user (preferences, facts, history, people, "
-    "projects, past decisions). For multi-part or multi-hop questions, "
-    "call it several times — vary the wording and run follow-up searches "
-    "on what earlier results reveal; one search is rarely enough.",
-    {
-        "query": _param("string", "What to search for."),
-        "top_k": _param("integer", "Max results (default: 10, max: 50)."),
-        "rerank": _param("boolean", "Rerank results for relevance (default: false, platform mode only)."),
-    },
-    ["query"],
+_PROMPT_BODY = (
+    "You have persistent memory of this user from past conversations. You should call mem0_search before answering anything that could depend on prior context (the user's preferences, facts, history, people, projects, or earlier decisions) — do not rely on the chat window alone, and do not assume you have no memory.\n"
+    "For multi-part or multi-hop questions, run several searches with different wording/angles and follow-up searches on what the first results surface; one search is rarely enough. Keep searching until you have every fact the question needs before you answer.\n"
+    "Tools: mem0_search to find memories, mem0_add to store facts, mem0_update and mem0_delete to manage by ID."
 )
 
-ADD_SCHEMA = _schema(
-    "mem0_add",
-    "Store a durable fact about the user, verbatim (no LLM extraction). "
-    "Call this the moment the user states a lasting preference, correction, "
-    "decision, or personal detail worth recalling on future turns — don't "
-    "wait to be asked to remember. Skip transient chit-chat and facts you've "
-    "already stored.",
-    {"content": _param("string", "The fact to store.")},
-    ["content"],
-)
-
-UPDATE_SCHEMA = _schema(
-    "mem0_update",
-    "Replace the text of an existing memory by its ID (take the ID from a "
-    "mem0_search result). Use when a stored fact has changed "
-    "or was wrong — correct it in place instead of adding a duplicate.",
-    {"memory_id": _param("string", "Memory UUID to update."), "text": _param("string", "New text content.")},
-    ["memory_id", "text"],
-)
-
-DELETE_SCHEMA = _schema(
-    "mem0_delete",
-    "Delete a memory by its ID (take the ID from a mem0_search "
-    "result). Use when a stored fact is obsolete or the user asks you to "
-    "forget it; prefer mem0_update if the fact merely changed.",
-    {"memory_id": _param("string", "Memory UUID to delete.")},
-    ["memory_id"],
-)
-
-
-# ---------------------------------------------------------------------------
-# MemoryProvider implementation
-# ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
     """Mem0 memory with server-side extraction and semantic search (platform, self-hosted or OSS)."""
 
     def __init__(self):
-        self._config = self._backend = None
-        self._mode, self._api_key, self._host = "platform", "", ""
-        self._user_id, self._agent_id = _DEFAULT_USER_ID, "hermes"
-        self._rerank_default = False
-        self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
-        self._sync_thread = self._prefetch_thread = None
+        self._config = self._backend = self._sync_thread = self._prefetch_thread = None
+        self._mode, self._api_key, self._host, self._user_id, self._agent_id = "platform", "", "", _DEFAULT_USER_ID, "hermes"
+        self._rerank_default, self._channel = False, "cli"  # channel = gateway name (cli/telegram/discord/...)
         self._prefetch_query = self._prefetch_result = ""
         self._prefetch_done = self._atexit_registered = False
         self._consecutive_failures, self._breaker_open_until = 0, 0.0  # circuit breaker state
@@ -157,9 +111,7 @@ class Mem0MemoryProvider(MemoryProvider):
         cfg = _load_config()
         if cfg.get("mode", "platform") == "oss":
             return bool(cfg.get("oss", {}).get("vector_store"))
-        # Platform needs an api_key; self-hosted needs a host (api_key optional
-        # when the server runs with AUTH_DISABLED).
-        return bool(cfg.get("api_key") or cfg.get("host"))
+        return bool(cfg.get("api_key") or cfg.get("host"))  # platform needs a key; self-hosted a host (key optional with AUTH_DISABLED)
 
     def save_config(self, values, hermes_home):
         """Merge-write config to $HERMES_HOME/mem0.json."""
@@ -183,49 +135,43 @@ class Mem0MemoryProvider(MemoryProvider):
         from ._setup import post_setup
         post_setup(hermes_home, config)
 
-    def _vs_provider(self, default: str) -> str:
-        """Configured OSS vector-store provider name (for error hints)."""
-        return self._config.get("oss", {}).get("vector_store", {}).get("provider", default)
+    def _oss_hint(self, template: str, default: str = "vector store") -> str:
+        """OSS-only hint; ``{vs}`` is the configured vector-store provider. "" in other modes."""
+        if self._mode != "oss":
+            return ""
+        return template.format(vs=self._config.get("oss", {}).get("vector_store", {}).get("provider", default))
 
     def _create_backend(self):
-        # Lazy-install the mem0 SDK before either backend imports it. ensure() honors
-        # security.allow_lazy_installs and redirects sealed Docker venvs to the durable
-        # target; on failure the backend import raises the canonical error, captured below.
-        try:
+        # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
+        # on failure the backend import raises the canonical error, captured below.
+        with suppress(Exception):
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("memory.mem0", prompt=False)
-        except Exception:
-            pass
         try:
+            from . import _backend
             if self._mode == "oss":
-                from ._backend import OSSBackend
-                return OSSBackend(self._config.get("oss", {}))
+                return _backend.OSSBackend(self._config.get("oss", {}))
             if self._host:
-                from ._backend import SelfHostedBackend
-                return SelfHostedBackend(self._api_key, self._host)
-            from ._backend import PlatformBackend
-            return PlatformBackend(self._api_key)
+                return _backend.SelfHostedBackend(self._api_key, self._host)
+            return _backend.PlatformBackend(self._api_key)
         except Exception as e:
             logger.error("Mem0 backend failed to initialize (%s mode): %s", self._mode, e)
             self._init_error = str(e)
             return None
 
     def _is_breaker_open(self) -> bool:
-        """Return True if the circuit breaker is tripped (too many failures)."""
+        """True while the breaker is tripped; an expired cooldown resets the failure count."""
         with self._breaker_lock:
-            if self._consecutive_failures < _BREAKER_THRESHOLD:
-                return False
-            if time.monotonic() >= self._breaker_open_until:
+            if self._consecutive_failures >= _BREAKER_THRESHOLD and time.monotonic() < self._breaker_open_until:
+                return True
+            if self._consecutive_failures >= _BREAKER_THRESHOLD:
                 self._consecutive_failures = 0
-                return False
-            return True
+            return False
 
     def _format_error(self, prefix: str, exc: Exception) -> str:
         msg = f"{prefix}: {exc}"
-        if self._mode == "oss":
-            err_str = str(exc).lower()
-            if "connection" in err_str or "refused" in err_str or "timeout" in err_str:
-                msg += f" (check that {self._vs_provider('vector store')} is running)"
+        if any(s in str(exc).lower() for s in ("connection", "refused", "timeout")):
+            msg += self._oss_hint(" (check that {vs} is running)")
         return msg
 
     def _record_success(self):
@@ -235,72 +181,58 @@ class Mem0MemoryProvider(MemoryProvider):
     def _record_failure(self):
         with self._breaker_lock:
             self._consecutive_failures = count = self._consecutive_failures + 1
-            tripped = count >= _BREAKER_THRESHOLD
-            if tripped:
+            if count >= _BREAKER_THRESHOLD:
                 self._breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECS
-        if tripped:
-            hint = f" Check that your {self._vs_provider('unknown')} vector store is running and reachable." if self._mode == "oss" else ""
-            logger.warning(
-                "Mem0 circuit breaker tripped after %d consecutive failures. "
-                "Pausing API calls for %ds.%s",
-                count, _BREAKER_COOLDOWN_SECS, hint,
-            )
+        if count >= _BREAKER_THRESHOLD:
+            hint = self._oss_hint(" Check that your {vs} vector store is running and reachable.", "unknown")
+            logger.warning("Mem0 circuit breaker tripped after %d consecutive failures. Pausing API calls for %ds.%s", count, _BREAKER_COOLDOWN_SECS, hint)
+
+    def _try(self, call, log, msg: str):
+        """Background-path wrapper: run ``call`` under the breaker; on error log ``msg`` and return None."""
+        try:
+            result = call()
+            self._record_success()
+            return result
+        except Exception as e:
+            self._record_failure()
+            log(msg, e)
+            return None
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._config = _load_config()
-        self._mode = self._config.get("mode", "platform")
-        self._api_key = self._config.get("api_key", "")
-        self._host = self._config.get("host", "")
-        # user_id precedence: operator-configured (env/mem0.json) > gateway-native id
-        # from kwargs > _DEFAULT_USER_ID. The literal placeholder counts as unset so
-        # wizard users still get gateway-native ids instead of being bucketed together.
-        configured = self._config.get("user_id")
+        self._config = cfg = _load_config()
+        self._mode, self._api_key, self._host, self._agent_id = cfg.get("mode", "platform"), cfg.get("api_key", ""), cfg.get("host", ""), cfg.get("agent_id", "hermes")
+        # user_id precedence: operator-configured (env/mem0.json) > gateway-native id (kwargs) > _DEFAULT_USER_ID.
+        # The literal placeholder counts as unset so wizard users still get gateway-native ids.
+        configured = cfg.get("user_id")
         self._user_id = (None if configured == _DEFAULT_USER_ID else configured) or kwargs.get("user_id") or _DEFAULT_USER_ID
-        self._agent_id = self._config.get("agent_id", "hermes")
-        # Persisted rerank preference: DEFAULT for mem0_search when the model doesn't
-        # pass ``rerank``; per-call args win. Platform-only; other backends ignore it.
-        _rr = self._config.get("rerank", False)
-        self._rerank_default = _rr.lower() in ("true", "1", "yes") if isinstance(_rr, str) else bool(_rr)
+        # Persisted rerank preference: default for mem0_search when the model omits ``rerank``. Platform-only.
+        self._rerank_default = _truthy(cfg.get("rerank", False))
         self._channel = kwargs.get("platform") or "cli"
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
             atexit.register(self._shutdown_backend)
             self._atexit_registered = True
 
-    def _read_filters(self) -> Dict[str, Any]:
-        # Scoped to user_id only — by design — so recall surfaces memories from any
-        # gateway/agent under this principal; writes attach agent_id and metadata.channel
-        # (dashboard per-channel filtering) so narrower views remain possible at query time.
-        return {"user_id": self._user_id}
+    def _search(self, query: str, top_k: int = 10, rerank: bool = False, backend=None) -> list:
+        # Scoped to user_id only — by design — so recall surfaces memories from any gateway/agent under this
+        # principal; writes attach agent_id and metadata.channel so narrower views remain possible at query time.
+        return (backend or self._backend).search(query, filters={"user_id": self._user_id}, top_k=top_k, rerank=rerank)
 
-    def _write_metadata(self) -> Dict[str, Any]:
-        return {"channel": self._channel} if self._channel else {}
+    def _add(self, messages: list, infer: bool):
+        metadata = {"channel": self._channel} if self._channel else {}
+        return self._backend.add(messages, user_id=self._user_id, agent_id=self._agent_id, infer=infer, metadata=metadata)
 
     def system_prompt_block(self) -> str:
-        # Mirror _create_backend precedence (oss > host > platform) so the label names
-        # the backend that actually runs. Rerank is a Mem0 Platform feature only.
+        # Mirror _create_backend precedence (oss > host > platform). Rerank is a Mem0 Platform feature only.
         mode_label = "OSS (self-hosted)" if self._mode == "oss" else "self-hosted (HTTP API)" if self._host else "platform (cloud API)"
         rerank_note = " Rerank is available on search." if (self._mode == "platform" and not self._host) else ""
-        return (
-            "# Mem0 Memory\n"
-            f"Active. Mode: {mode_label}. User: {self._user_id}.\n"
-            "You have persistent memory of this user from past conversations. "
-            "You should call mem0_search before answering anything that could depend "
-            "on prior context (the user's preferences, facts, history, people, "
-            "projects, or earlier decisions) — do not rely on the chat window "
-            "alone, and do not assume you have no memory.\n"
-            "For multi-part or multi-hop questions, run several searches with "
-            "different wording/angles and follow-up searches on what the first "
-            "results surface; one search is rarely enough. Keep searching until "
-            "you have every fact the question needs before you answer.\n"
-            "Tools: mem0_search to find memories, mem0_add to store facts, "
-            f"mem0_update and mem0_delete to manage by ID.{rerank_note}"
-        )
+        return f"# Mem0 Memory\nActive. Mode: {mode_label}. User: {self._user_id}.\n{_PROMPT_BODY}{rerank_note}"
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._start_prefetch(message)
 
     def _consume_prefetch_result(self, query: str) -> str | None:
+        """Pop the finished prefetch body for ``query`` (None if absent or still running)."""
         with self._prefetch_lock:
             if self._prefetch_query != query or not self._prefetch_done:
                 return None
@@ -313,27 +245,17 @@ class Mem0MemoryProvider(MemoryProvider):
             return
         with self._prefetch_lock:
             # Same query already answered or still in flight: don't restart it.
-            if self._prefetch_query == query and (
-                self._prefetch_done or (self._prefetch_thread and self._prefetch_thread.is_alive())
-            ):
+            if self._prefetch_query == query and (self._prefetch_done or (self._prefetch_thread and self._prefetch_thread.is_alive())):
                 return
             self._prefetch_query, self._prefetch_result, self._prefetch_done = query, "", False
 
         def _run():
-            body = ""
-            try:
-                results = backend.search(query, filters=self._read_filters(), top_k=10, rerank=False)
-                lines = [r.get("memory", "") for r in (results or []) if r.get("memory")]
-                if lines:
-                    body = "## Mem0 Memory\n" + "\n".join(f"- {l}" for l in lines)
-                self._record_success()
-            except Exception as e:
-                self._record_failure()
-                logger.debug("Mem0 prefetch failed: %s", e)
+            results = self._try(lambda: self._search(query, backend=backend), logger.debug, "Mem0 prefetch failed: %s")
+            lines = [r.get("memory", "") for r in (results or []) if r.get("memory")]
+            body = "## Mem0 Memory\n" + "\n".join(f"- {l}" for l in lines) if lines else ""
             with self._prefetch_lock:
                 if self._prefetch_query == query:
-                    self._prefetch_result = body
-                    self._prefetch_done = True
+                    self._prefetch_result, self._prefetch_done = body, True
 
         t = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
         with self._prefetch_lock:
@@ -342,8 +264,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall memories for the CURRENT question with a short hot-path wait."""
-        cached = self._consume_prefetch_result(query)
-        if cached is not None:
+        if (cached := self._consume_prefetch_result(query)) is not None:
             return cached
         self._start_prefetch(query)
         with self._prefetch_lock:
@@ -359,117 +280,77 @@ class Mem0MemoryProvider(MemoryProvider):
             return
 
         def _sync():
-            backend = self._backend
-            if backend is None:
-                return
-            try:
+            if self._backend is not None:
                 messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": assistant_content}]
-                backend.add(messages, user_id=self._user_id, agent_id=self._agent_id, infer=True, metadata=self._write_metadata())
-                self._record_success()
-            except Exception as e:
-                self._record_failure()
-                logger.warning("Mem0 sync failed: %s", e)
+                self._try(lambda: self._add(messages, infer=True), logger.warning, "Mem0 sync failed: %s")
 
         with self._sync_lock:
-            if self._sync_thread and self._sync_thread.is_alive():
-                self._sync_thread.join(timeout=5.0)
-            # If still alive after timeout, skip to avoid duplicate ingestion.
-            if self._sync_thread and self._sync_thread.is_alive():
-                return
+            prev = self._sync_thread
+            if prev and prev.is_alive():
+                prev.join(timeout=5.0)
+                if prev.is_alive():  # still busy after the wait: skip to avoid duplicate ingestion
+                    return
             self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
             self._sync_thread.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, ADD_SCHEMA, UPDATE_SCHEMA, DELETE_SCHEMA]
+        return list(TOOL_SCHEMAS)
 
-    # -- tool handlers -------------------------------------------------------
+    # -- tool handlers: (required params, error label, body, client-error policy) ---
+    # Client errors (bad ID / not found) never trip the breaker, except for mem0_add
+    # where they count as failures; update/delete answer them with "Memory not found".
 
     def _tool_search(self, args: dict) -> str:
-        query = args.get("query", "")
-        if not query:
-            return tool_error("Missing required parameter: query")
-        try:
-            top_k = max(1, min(int(args.get("top_k", 10)), 50))
-            rerank_raw = args.get("rerank", self._rerank_default)
-            rerank = rerank_raw.lower() not in ("false", "0", "no") if isinstance(rerank_raw, str) else bool(rerank_raw)
-            results = self._backend.search(query, filters=self._read_filters(), top_k=top_k, rerank=rerank)
-            self._record_success()
-            if not results:
-                return json.dumps({"result": "No relevant memories found."})
-            items = [{"id": r.get("id"), "memory": r.get("memory", ""), "score": r.get("score", 0)} for r in results]
-            return json.dumps({"results": items, "count": len(items)})
-        except Exception as e:
-            if not _is_client_error(e):
-                self._record_failure()
-            return tool_error(self._format_error("Search failed", e))
+        top_k = max(1, min(int(args.get("top_k", 10)), 50))
+        rerank = _truthy(args.get("rerank", self._rerank_default), falsy_strings=("false", "0", "no"))
+        results = self._search(args["query"], top_k, rerank)
+        if not results:
+            return json.dumps({"result": "No relevant memories found."})
+        items = [{"id": r.get("id"), "memory": r.get("memory", ""), "score": r.get("score", 0)} for r in results]
+        return json.dumps({"results": items, "count": len(items)})
 
     def _tool_add(self, args: dict) -> str:
-        content = args.get("content", "")
-        if not content:
-            return tool_error("Missing required parameter: content")
-        try:
-            result = self._backend.add(
-                [{"role": "user", "content": content}],
-                user_id=self._user_id, agent_id=self._agent_id, infer=False, metadata=self._write_metadata(),
-            )
-            self._record_success()
-            event_id = result.get("event_id") if isinstance(result, dict) else None
-            # Cloud add is async (server-side extraction); OSS and self-hosted store synchronously.
-            msg = "Fact stored." if (self._mode == "oss" or self._host) else "Fact queued for storage."
-            return json.dumps({"result": msg, "event_id": event_id})
-        except Exception as e:
-            self._record_failure()
-            return tool_error(self._format_error("Failed to store", e))
-
-    def _tool_by_id(self, args: dict, required: tuple[str, ...], label: str, method: str) -> str:
-        """Shared update/delete shape: required-param check, then backend.<method>(*values)."""
-        values = [args.get(k, "") for k in required]
-        for k, v in zip(required, values):
-            if not v:
-                return tool_error(f"Missing required parameter: {k}")
-        try:
-            result = getattr(self._backend, method)(*values)
-            self._record_success()
-            return json.dumps(result)
-        except Exception as e:
-            if _is_client_error(e):
-                return tool_error(f"Memory not found: {values[0]}")
-            self._record_failure()
-            return tool_error(self._format_error(label, e))
-
-    def _tool_update(self, args: dict) -> str:
-        return self._tool_by_id(args, ("memory_id", "text"), "Update failed", "update")
-
-    def _tool_delete(self, args: dict) -> str:
-        return self._tool_by_id(args, ("memory_id",), "Delete failed", "delete")
+        result = self._add([{"role": "user", "content": args["content"]}], infer=False)
+        event_id = result.get("event_id") if isinstance(result, dict) else None
+        # Cloud add is async (server-side extraction); OSS and self-hosted store synchronously.
+        msg = "Fact stored." if (self._mode == "oss" or self._host) else "Fact queued for storage."
+        return json.dumps({"result": msg, "event_id": event_id})
 
     _TOOL_HANDLERS = {
-        "mem0_search": _tool_search,
-        "mem0_add": _tool_add,
-        "mem0_update": _tool_update,
-        "mem0_delete": _tool_delete,
+        "mem0_search": (("query",), "Search failed", _tool_search, "skip"),
+        "mem0_add": (("content",), "Failed to store", _tool_add, "count"),
+        "mem0_update": (("memory_id", "text"), "Update failed", lambda self, a: json.dumps(self._backend.update(a["memory_id"], a["text"])), "not_found"),
+        "mem0_delete": (("memory_id",), "Delete failed", lambda self, a: json.dumps(self._backend.delete(a["memory_id"])), "not_found"),
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._backend is None:
             err = getattr(self, "_init_error", "unknown error")
-            hint = f" Check that {self._vs_provider('vector store')} is running and reachable." if self._mode == "oss" else ""
-            return json.dumps({"error": f"Mem0 backend not initialized: {err}.{hint}"})
+            return json.dumps({"error": f"Mem0 backend not initialized: {err}.{self._oss_hint(' Check that {vs} is running and reachable.')}"})
         if self._is_breaker_open():
-            hint = f" Check that your {self._vs_provider('vector store')} is running." if self._mode == "oss" else ""
-            return json.dumps({"error": f"Mem0 temporarily unavailable (multiple consecutive failures). Will retry automatically.{hint}"})
-        handler = self._TOOL_HANDLERS.get(tool_name)
-        if handler is None:
+            return json.dumps({"error": f"Mem0 temporarily unavailable (multiple consecutive failures). Will retry automatically.{self._oss_hint(' Check that your {vs} is running.')}"})
+        if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
-        return handler(self, args)
+        required, label, body, on_client_error = self._TOOL_HANDLERS[tool_name]
+        if missing := next((k for k in required if not args.get(k, "")), None):
+            return tool_error(f"Missing required parameter: {missing}")
+        try:
+            result = body(self, args)
+            self._record_success()
+            return result
+        except Exception as e:
+            client = _is_client_error(e)
+            if client and on_client_error == "not_found":
+                return tool_error(f"Memory not found: {args['memory_id']}")
+            if not client or on_client_error == "count":
+                self._record_failure()
+            return tool_error(self._format_error(label, e))
 
     def _shutdown_backend(self):
-        try:
+        with suppress(Exception):
             if self._backend:
                 self._backend.close()
                 self._backend = None
-        except Exception:
-            pass
 
     def shutdown(self) -> None:
         for t in (self._prefetch_thread, self._sync_thread):
