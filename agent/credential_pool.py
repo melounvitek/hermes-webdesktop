@@ -1486,7 +1486,8 @@ class CredentialPool:
             # there is nothing left to retry with.
             raise _RefreshDone(self._fail_closed_unpersisted_rotation(entry, wexc, store=store))
 
-    def _refresh_anthropic(self, entry: PooledCredential) -> Tuple[PooledCredential, PooledCredential]:
+    def _refresh_anthropic(self, entry: PooledCredential) -> PooledCredential:
+        """POST the Anthropic refresh, commit to the singleton, return the rotated (unpersisted) entry."""
         from agent.anthropic_credentials import (
             is_rotation_consumed_uncommitted,
             refresh_anthropic_oauth_pure,
@@ -1515,42 +1516,41 @@ class CredentialPool:
             expires_at_ms=refreshed["expires_at_ms"],
         )
         self._commit_anthropic_rotation(entry, refreshed)
-        return entry, updated
+        return updated
 
-    def _refresh_tokens_singleton(self, entry: PooledCredential) -> Tuple[PooledCredential, PooledCredential]:
-        """Codex / xAI: adopt fresher auth.json tokens, then POST the refresh."""
+    def _post_tokens_refresh(self, entry: PooledCredential) -> PooledCredential:
+        """Codex / xAI: POST the refresh and return the rotated (unpersisted) entry."""
         refresh_fn_name = _TOKENS_SINGLETON_PROVIDERS[self.provider][2]
-        entry = self._sync_entry_from_auth_store(entry)
         refreshed = getattr(auth_mod, refresh_fn_name)(entry.access_token, entry.refresh_token)
-        updated = replace(
+        return replace(
             entry,
             access_token=refreshed["access_token"],
             refresh_token=refreshed["refresh_token"],
             last_refresh=refreshed.get("last_refresh"),
         )
-        return entry, updated
-
-    def _refresh_nous(self, entry: PooledCredential, *, force: bool) -> Tuple[PooledCredential, PooledCredential]:
-        stale_key = entry.runtime_api_key or entry.agent_key or entry.access_token
-        synced = self._sync_nous_entry_from_auth_store(entry)
-        if synced is not entry:
-            entry = synced
-            # A peer already rotated and persisted a usable key: adopt it
-            # without consuming the single-use refresh token again.
-            if force and entry.runtime_api_key and entry.runtime_api_key != stale_key:
-                logger.debug("Nous entry %s: adopting peer-rotated token, skipping refresh", entry.id)
-                raise _RefreshDone(entry)
-        auth_mod.resolve_nous_runtime_credentials(force_refresh=force, stale_access_token=stale_key or None)
-        return entry, self._sync_nous_entry_from_auth_store(entry)
 
     def _refresh_entry_impl(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
+        # Single-use-token providers adopt fresher tokens from their store
+        # BEFORE spending the refresh_token; ``entry`` is rebound to the synced
+        # row so the failure path below recovers against the pair we POSTed.
         try:
             if self.provider == "anthropic":
-                entry, updated = self._refresh_anthropic(entry)
+                updated = self._refresh_anthropic(entry)
             elif self.provider in _TOKENS_SINGLETON_PROVIDERS:
-                entry, updated = self._refresh_tokens_singleton(entry)
+                entry = self._sync_entry_from_auth_store(entry)
+                updated = self._post_tokens_refresh(entry)
             elif self.provider == "nous":
-                entry, updated = self._refresh_nous(entry, force=force)
+                stale_key = entry.runtime_api_key or entry.agent_key or entry.access_token
+                synced = self._sync_nous_entry_from_auth_store(entry)
+                if synced is not entry:
+                    entry = synced
+                    # A peer already rotated and persisted a usable key: adopt
+                    # it without consuming the single-use refresh token again.
+                    if force and entry.runtime_api_key and entry.runtime_api_key != stale_key:
+                        logger.debug("Nous entry %s: adopting peer-rotated token, skipping refresh", entry.id)
+                        return entry
+                auth_mod.resolve_nous_runtime_credentials(force_refresh=force, stale_access_token=stale_key or None)
+                updated = self._sync_nous_entry_from_auth_store(entry)
             else:
                 return entry
         except _RefreshDone as done:
