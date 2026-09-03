@@ -1550,26 +1550,19 @@ def create_task(
     # (deterministic worktree + branch) without each surface repeating it.
     if project_id is None:
         try:
-            _bmeta = read_board_metadata(board if board else get_current_board())
-            _board_project = (_bmeta.get("project_id") or "").strip()
-            if _board_project:
-                project_id = _board_project
+            project_id = (_board_meta_for(board).get("project_id") or "").strip() or None
         except Exception:
             pass
 
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-
     parents = tuple(p for p in parents if p)
-
     skills_list = _normalize_task_skills(skills)
 
-    # Idempotency check — return the existing task instead of creating a
-    # duplicate. Done BEFORE entering write_txn to keep the fast path fast
-    # and to avoid holding a write lock during the lookup. Race is
-    # acceptable: two concurrent creators with the same key might both
-    # insert, at which point both rows exist but the next lookup stabilises.
+    # Idempotency check BEFORE the write txn (fast path, no write lock held).
+    # Race is acceptable: two concurrent creators may both insert; the next
+    # lookup stabilises on the newest.
     if idempotency_key:
         row = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? "
@@ -1582,23 +1575,13 @@ def create_task(
 
     now = int(time.time())
 
-    # Resolve workspace_path from board-level default_workdir when the
-    # caller did not specify one explicitly. Board defaults represent
-    # persistent project checkouts, so only persistent workspace kinds may
-    # inherit them. Scratch workspaces are auto-deleted on completion and
-    # must stay under the per-board scratch root created by
-    # ``resolve_workspace``; inheriting ``default_workdir`` for a scratch
-    # task would point cleanup at the user's source tree (#28818). The
-    # containment guard in ``_cleanup_workspace`` is the safety rail, but
-    # we also stop the bad state from being created in the first place.
-    if (
-        workspace_path is None
-        and project_repo is None
-        and workspace_kind in {"dir", "worktree"}
-    ):
-        board_slug = board if board else get_current_board()
-        board_meta = read_board_metadata(board_slug)
-        board_default = board_meta.get("default_workdir")
+    # Board ``default_workdir`` is a persistent checkout, so only persistent
+    # kinds inherit it. A scratch task must stay under the per-board scratch
+    # root: inheriting the default would point cleanup at the user's source
+    # tree (#28818). ``_cleanup_workspace`` containment is the safety rail;
+    # this stops the bad state from being created at all.
+    if workspace_path is None and project_repo is None and workspace_kind in {"dir", "worktree"}:
+        board_default = _board_meta_for(board).get("default_workdir")
         if board_default:
             workspace_path = str(board_default)
 
@@ -1610,49 +1593,16 @@ def create_task(
             # compose create_task calls under one outer commit so the
             # dispatcher can never observe a partially constructed graph.
             with write_txn(conn, allow_nested=True):
-                # Parent ids are validated in every mode (even triage) so the
-                # eventual link rows don't dangle.
-                if parents:
-                    missing = _missing_task_ids(conn, parents)
-                    if missing:
-                        raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                # Determine task status from parent status, unless the caller
-                # parks it directly in blocked for human-ops review or in
-                # triage for a specifier.
-                if initial_status == "blocked":
-                    task_status = "blocked"
-                elif triage:
-                    task_status = "triage"
-                else:
-                    task_status = "ready"
-                    if parents:
-                        # If any parent is not yet done, we're todo.
-                        rows = conn.execute(
-                            "SELECT status FROM tasks WHERE id IN "
-                            "(" + ",".join("?" * len(parents)) + ")",
-                            parents,
-                        ).fetchall()
-                        if any(r["status"] != "done" for r in rows):
-                            task_status = "todo"
-
+                task_status = _initial_task_status(conn, parents, initial_status, triage)
                 # Project-linked worktree: a fresh worktree dir under the repo
-                # plus a deterministic branch (project slug + task id). Together
-                # these kill the random ``wt/<task-id>`` worker fallback and the
-                # unanchored ``.worktrees/<id>`` under the dispatcher's cwd.
+                # plus a deterministic branch (project slug + task id) — kills the
+                # random ``wt/<task-id>`` worker fallback and the unanchored
+                # ``.worktrees/<id>`` under the dispatcher's cwd.
                 if project_obj is not None and workspace_kind == "worktree":
                     if project_repo and not workspace_path:
-                        workspace_path = os.path.join(
-                            project_repo, ".worktrees", task_id
-                        )
+                        workspace_path = os.path.join(project_repo, ".worktrees", task_id)
                     if not branch_name:
-                        from hermes_cli import projects_db as _pdb
-
-                        try:
-                            branch_name = _pdb.branch_name_for(
-                                project_obj, task_id, title=title or ""
-                            )
-                        except Exception:
-                            branch_name = None
+                        branch_name = _project_branch_name(project_obj, task_id, title)
 
                 conn.execute(
                     """
@@ -1667,37 +1617,18 @@ def create_task(
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        task_id,
-                        title.strip(),
-                        body,
-                        assignee,
-                        task_status,
-                        priority,
-                        created_by,
-                        now,
-                        workspace_kind,
-                        workspace_path,
-                        branch_name,
-                        project_id,
-                        tenant,
-                        idempotency_key,
+                        task_id, title.strip(), body, assignee, task_status, priority,
+                        created_by, now, workspace_kind, workspace_path,
+                        branch_name, project_id, tenant, idempotency_key,
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
-                        _opt_int(max_retries),
-                        model_override,
-                        provider_override,
+                        _opt_int(max_retries), model_override, provider_override,
                         reasoning_effort,
-                        1 if goal_mode else 0,
-                        _opt_int(goal_max_turns),
-                        session_id,
+                        1 if goal_mode else 0, _opt_int(goal_max_turns), session_id,
                     ),
                 )
                 for pid in parents:
                     _link(conn, pid, task_id)
-                # Notify-sub inheritance (ACK-edge: the originating channel
-                # still hears about a child that BLOCKs, not just the final
-                # fan-in) is handled by the single-owner helper below —
-                # _inherit_notify_subs copies every routing/delivery column.
                 _append_event(
                     conn,
                     task_id,
@@ -1717,14 +1648,52 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                # ACK-edge: the originating channel still hears about a child
+                # that BLOCKs, not just the final fan-in.
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
                 raise
-            # Retry with a fresh id.
-            continue
     raise RuntimeError("unreachable")
+
+
+def _board_meta_for(board: Optional[str]) -> dict:
+    return read_board_metadata(board if board else get_current_board())
+
+
+def _initial_task_status(
+    conn: sqlite3.Connection, parents: tuple[str, ...], initial_status: str, triage: bool,
+) -> str:
+    """Status for a new task: ``blocked``/``triage`` when parked by the caller,
+    else ``ready`` unless a parent is not yet ``done`` (-> ``todo``). Parent ids
+    are validated in every mode (even triage) so link rows never dangle."""
+    if parents:
+        missing = _missing_task_ids(conn, parents)
+        if missing:
+            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+    if initial_status == "blocked":
+        return "blocked"
+    if triage:
+        return "triage"
+    if parents:
+        rows = conn.execute(
+            "SELECT status FROM tasks WHERE id IN "
+            "(" + ",".join("?" * len(parents)) + ")",
+            parents,
+        ).fetchall()
+        if any(r["status"] != "done" for r in rows):
+            return "todo"
+    return "ready"
+
+
+def _project_branch_name(project_obj: Any, task_id: str, title: Optional[str]) -> Optional[str]:
+    from hermes_cli import projects_db as _pdb
+
+    try:
+        return _pdb.branch_name_for(project_obj, task_id, title=title or "")
+    except Exception:
+        return None
 
 
 def _link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
@@ -3322,41 +3291,19 @@ def complete_task(
     and never blocks.
     """
     now = int(time.time())
-    # Fail before validating cards or staging artifacts; re-check inside the
-    # final write transaction below to close the parent-reopen race.
+    # Fail before validating cards or staging artifacts; re-checked inside the
+    # write txn below to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
-
-    # Gate: verify created_cards BEFORE the main write txn. A rejected
-    # completion still needs an auditable event, so we emit it in a
-    # tiny dedicated txn, then raise. The caller is responsible for
-    # surfacing HallucinatedCardsError to the worker; this function
-    # never mutates task state on a phantom-card rejection.
-    if created_cards:
-        verified_cards, phantom_cards = _verify_created_cards(
-            conn, task_id, created_cards
-        )
-        if phantom_cards:
-            with write_txn(conn):
-                _append_event(
-                    conn, task_id, "completion_blocked_hallucination",
-                    {
-                        "phantom_cards": phantom_cards,
-                        "verified_cards": verified_cards,
-                        "summary_preview": _first_line(summary or result, 200) or None,
-                    },
-                )
-            raise HallucinatedCardsError(phantom_cards, task_id)
-    else:
-        verified_cards = []
-
+    verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
+    handoff_summary = summary if summary is not None else result
     with write_txn(conn):
         # Parent completion is a hard invariant even for direct human review
-        # approval. A parent may have been reopened after this task entered
-        # ``review`` or ``running``.
+        # approval: a parent may have been reopened while this task sat in
+        # ``review`` / ``running``.
         if not _parents_satisfied(conn, task_id):
             return False
         prior_status = _task_status(conn, task_id)
@@ -3377,109 +3324,40 @@ def complete_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
-        cur = conn.execute(sql, params)
-        if cur.rowcount != 1:
+        if conn.execute(sql, params).rowcount != 1:
             return False
         if isinstance(metadata, dict):
-            _persist_scratch_completion_artifacts(conn, task_id, metadata)
-            for stored_path in metadata.pop("_staged_artifacts", []):
-                path = Path(stored_path)
-                _insert_completion_attachment(
-                    conn,
-                    task_id,
-                    filename=path.name,
-                    stored_path=str(path),
-                    size=path.stat().st_size,
-                    created_at=now,
-                )
+            _stage_completion_artifacts(conn, task_id, metadata, now)
         run_id = _end_run(
             conn, task_id,
             outcome="completed", status="done",
-            summary=summary if summary is not None else result,
+            summary=handoff_summary,
             metadata=metadata,
         )
-        # If complete_task was called on a never-claimed task (ready or
-        # blocked → done with no run in flight), synthesize a
-        # zero-duration run so the handoff fields are persisted in
-        # attempt history instead of silently lost.
-        if run_id is None and (
-            summary or metadata or result or prior_status == "review"
-        ):
-            synth_summary = summary if summary is not None else result
-            synth_metadata = metadata
+        # Never-claimed task (ready/blocked/review -> done with no run in
+        # flight): synthesize a zero-duration run so the handoff fields land in
+        # attempt history instead of being silently lost.
+        if run_id is None and (summary or metadata or result or prior_status == "review"):
+            synth_summary, synth_metadata = handoff_summary, metadata
             if prior_status == "review" and not synth_summary and not synth_metadata:
-                synth_summary = "Review approved without additional evidence."
-                synth_metadata = {
-                    "source_status": "review",
-                    "approval": "manual",
-                }
+                synth_summary = _REVIEW_APPROVED_NOTE
+                synth_metadata = {"source_status": "review", "approval": "manual"}
             run_id = _synthesize_ended_run(
-                conn, task_id,
-                outcome="completed",
-                summary=synth_summary,
-                metadata=synth_metadata,
+                conn, task_id, outcome="completed", summary=synth_summary, metadata=synth_metadata,
             )
-        # Carry the handoff summary in the event payload so gateway
-        # notifiers and dashboard WS consumers can render it without a
-        # second SQL round-trip. First line only, 400 char cap — the
-        # full summary stays on the run row.
-        event_summary = summary if summary is not None else result
+        event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
-            event_summary = "Review approved without additional evidence."
-        completed_payload: dict = {
-            "result_len": len(result) if result else 0,
-            "summary": _first_line(event_summary, 400) or None,
-        }
-        if verified_cards:
-            completed_payload["verified_cards"] = verified_cards
-        # Carry artifact paths in the event payload so the gateway
-        # notifier can upload them as native attachments alongside the
-        # completion message. Workers pass these via
-        # ``kanban_complete(artifacts=[...])`` which stashes the list in
-        # ``metadata["artifacts"]`` — we promote it onto the event so
-        # consumers don't have to fetch the run row to find it.
-        if isinstance(metadata, dict):
-            md_artifacts = metadata.get("artifacts")
-            if isinstance(md_artifacts, (list, tuple)):
-                cleaned_artifacts = [
-                    str(p).strip() for p in md_artifacts if isinstance(p, str) and str(p).strip()
-                ]
-                if cleaned_artifacts:
-                    completed_payload["artifacts"] = cleaned_artifacts
+            event_summary = _REVIEW_APPROVED_NOTE
         _append_event(
             conn, task_id, "completed",
-            completed_payload,
+            _completed_event_payload(result, event_summary, verified_cards, metadata),
             run_id=run_id,
         )
-    # Prose-scan the summary + result for t_<hex> references that do
-    # not resolve. Advisory — does not block the completion. Runs in
-    # its own txn so the completion itself is already durable by the
-    # time we emit the warning.
-    scan_text = " ".join(filter(None, [summary, result]))
-    if scan_text:
-        phantom_refs = _scan_prose_for_phantom_ids(conn, scan_text)
-        # Drop any phantom refs that were already flagged as verified
-        # above (shouldn't happen — verified means they exist — but
-        # belt-and-suspenders).
-        phantom_refs = [p for p in phantom_refs if p not in set(verified_cards)]
-        if phantom_refs:
-            with write_txn(conn):
-                _append_event(
-                    conn, task_id, "suspected_hallucinated_references",
-                    {
-                        "phantom_refs": phantom_refs,
-                        "source": "completion_summary",
-                    },
-                    run_id=run_id,
-                )
-    # Successful completion — wipe the consecutive-failures counter.
-    # Failure history stays on the event log for audit; the counter
-    # just tracks "is there a current pathology the breaker should
-    # care about", and a success resets that question.
+    _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
+    # Success wipes the consecutive-failures counter; history stays on the
+    # event log, the counter only tracks the *current* pathology.
     _clear_failure_counter(conn, task_id)
-    # Recompute ready status for dependents (separate txn so children see done).
-    recompute_ready(conn)
-    # Clean up the scratch workspace and any stale tmux session for the worker.
+    recompute_ready(conn)  # separate txn so children see ``done``
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
     if fire_lifecycle_hook:
@@ -3489,9 +3367,91 @@ def complete_task(
             board=get_current_board(),
             assignee=_done_task.assignee if _done_task else None,
             run_id=run_id,
-            summary=(summary if summary is not None else result),
+            summary=handoff_summary,
         )
     return True
+
+
+_REVIEW_APPROVED_NOTE = "Review approved without additional evidence."
+
+
+def _gate_created_cards(
+    conn: sqlite3.Connection, task_id: str, created_cards: Optional[Iterable[str]], preview_text: Optional[str],
+) -> list[str]:
+    """Verify ``created_cards`` BEFORE the main write txn; returns the verified ids.
+
+    A phantom id blocks completion: the rejection is recorded in its own tiny
+    txn (auditable) and raised as :class:`HallucinatedCardsError` without
+    touching task state.
+    """
+    if not created_cards:
+        return []
+    verified_cards, phantom_cards = _verify_created_cards(conn, task_id, created_cards)
+    if phantom_cards:
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_hallucination",
+                {
+                    "phantom_cards": phantom_cards,
+                    "verified_cards": verified_cards,
+                    "summary_preview": _first_line(preview_text, 200) or None,
+                },
+            )
+        raise HallucinatedCardsError(phantom_cards, task_id)
+    return verified_cards
+
+
+def _stage_completion_artifacts(conn: sqlite3.Connection, task_id: str, metadata: dict, now: int) -> None:
+    """Copy scratch artifacts to the attachments dir and record each as an attachment row."""
+    _persist_scratch_completion_artifacts(conn, task_id, metadata)
+    for stored_path in metadata.pop("_staged_artifacts", []):
+        path = Path(stored_path)
+        _insert_completion_attachment(
+            conn, task_id, filename=path.name, stored_path=str(path),
+            size=path.stat().st_size, created_at=now,
+        )
+
+
+def _completed_event_payload(
+    result: Optional[str], event_summary: Optional[str], verified_cards: list[str], metadata: Any,
+) -> dict:
+    """``completed`` event payload: first summary line (400 chars) so gateway
+    notifiers / dashboard WS render without a second round-trip; verified
+    cards; and ``metadata["artifacts"]`` promoted so the notifier can upload
+    them as native attachments without fetching the run row."""
+    payload: dict = {
+        "result_len": len(result) if result else 0,
+        "summary": _first_line(event_summary, 400) or None,
+    }
+    if verified_cards:
+        payload["verified_cards"] = verified_cards
+    if isinstance(metadata, dict):
+        md_artifacts = metadata.get("artifacts")
+        if isinstance(md_artifacts, (list, tuple)):
+            cleaned = [str(p).strip() for p in md_artifacts if isinstance(p, str) and str(p).strip()]
+            if cleaned:
+                payload["artifacts"] = cleaned
+    return payload
+
+
+def _flag_phantom_prose_refs(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
+    summary: Optional[str], result: Optional[str], verified_cards: list[str],
+) -> None:
+    """Advisory post-commit scan of summary+result for unresolvable ``t_<hex>``
+    references; emits ``suspected_hallucinated_references`` in its own txn so
+    the completion is already durable. Never blocks."""
+    scan_text = " ".join(filter(None, [summary, result]))
+    if not scan_text:
+        return
+    phantom_refs = [p for p in _scan_prose_for_phantom_ids(conn, scan_text) if p not in set(verified_cards)]
+    if phantom_refs:
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "suspected_hallucinated_references",
+                {"phantom_refs": phantom_refs, "source": "completion_summary"},
+                run_id=run_id,
+            )
 
 
 # ---------------------------------------------------------------------------
