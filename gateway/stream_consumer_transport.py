@@ -31,8 +31,7 @@ class StreamTransportMixin:
             try:
                 params = inspect.signature(self.adapter.edit_message).parameters
                 if "metadata" in params or any(
-                    param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
-                ):
+                    param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
                     kwargs["metadata"] = self.metadata
             except (TypeError, ValueError):
                 pass
@@ -43,8 +42,7 @@ class StreamTransportMixin:
         bool; a raise logs ``fail_log`` at DEBUG (error formatted in, or the traceback when
         ``exc_info``) and reads as False."""
         seed = self.adapter.send_stream_frame(
-            "", chat_id=self.chat_id, reply_to=self._initial_reply_to_id, turn_id=self._turn_id,
-        )
+            "", chat_id=self.chat_id, reply_to=self._initial_reply_to_id, turn_id=self._turn_id)
         return await self._try_frame(seed, fail_log, exc_info=exc_info)
 
     @staticmethod
@@ -63,8 +61,7 @@ class StreamTransportMixin:
         """One native-stream frame; every frame carries the same chat/reply/turn routing."""
         return await self.adapter.send_stream_frame(
             text, finalize=finalize, chat_id=self.chat_id, reply_to=self._initial_reply_to_id,
-            turn_id=self._turn_id,
-        )
+            turn_id=self._turn_id)
 
     def _close_native_state(self) -> None:
         """Mark the native stream closed (next content re-seeds or falls back)."""
@@ -166,8 +163,7 @@ class StreamTransportMixin:
         try:
             result = await self.adapter.send_draft(
                 chat_id=self.chat_id, draft_id=self._draft_id, content=text,
-                metadata=self._draft_metadata(),
-            )
+                metadata=self._draft_metadata())
         except Exception as e:
             logger.debug("send_draft raised, disabling draft transport for this run: %s", e)
         else:
@@ -191,8 +187,7 @@ class StreamTransportMixin:
         try:
             await self.adapter.abandon_open_draft(
                 self.chat_id, self._last_sent_text or self._clean_for_display(self._accumulated),
-                metadata=self._draft_metadata(),
-            )
+                metadata=self._draft_metadata())
         except Exception as e:
             logger.debug("abandon_open_draft failed (best-effort): %s", e)
 
@@ -255,8 +250,7 @@ class StreamTransportMixin:
         stale_ids = self._stale_preview_ids()
         try:
             result = await self.adapter.send(
-                chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True),
-            )
+                chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True))
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
             return False
@@ -284,8 +278,7 @@ class StreamTransportMixin:
             self._message_created_ts = None
 
     async def _send_or_edit(
-        self, text: str, *, finalize: bool = False, is_turn_final: bool = True,
-    ) -> bool:
+        self, text: str, *, finalize: bool = False, is_turn_final: bool = True) -> bool:
         """Send or edit the streaming message; True if delivered.  ``finalize`` marks the
         last edit.  Transport order: native frame → draft frame → edit existing → first
         send; a transport returns None to fall through to the next."""
@@ -413,8 +406,7 @@ class StreamTransportMixin:
         """First send, threaded to the user's message (correct topic/thread)."""
         result = await self.adapter.send(
             chat_id=self.chat_id, content=text, reply_to=self._initial_reply_to_id,
-            metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize),
-        )
+            metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize))
         if not result.success:
             self._edit_supported = False
             return False
@@ -443,8 +435,7 @@ class StreamTransportMixin:
         # CLASS (MagicMock auto-creates attrs) plus instance __dict__ (test doubles).
         has_prefers_hook = (
             hasattr(type(self.adapter), "prefers_fresh_final_streaming")
-            or "prefers_fresh_final_streaming" in getattr(self.adapter, "__dict__", {})
-        )
+            or "prefers_fresh_final_streaming" in getattr(self.adapter, "__dict__", {}))
         prefers_fresh = self._adapter_prefers_fresh_final(text)  # probed every edit (hook contract)
         if finalize and (
             prefers_fresh or (not has_prefers_hook and self._should_send_fresh_final())
@@ -518,8 +509,7 @@ class StreamTransportMixin:
             logger.debug("Flood control on edit (strike %d/%d), backoff interval → %.1fs",
                          self._flood_strikes, self._MAX_FLOOD_STRIKES, self._current_edit_interval)
             immediate_final_fallback = (
-                turn_final and getattr(self.adapter, "FALLBACK_ON_FINAL_EDIT_FLOOD", False) is True
-            )
+                turn_final and getattr(self.adapter, "FALLBACK_ON_FINAL_EDIT_FLOOD", False) is True)
             if self._flood_strikes < self._MAX_FLOOD_STRIKES and not immediate_final_fallback:
                 self._last_edit_time = time.monotonic()  # honor the new interval
                 return False

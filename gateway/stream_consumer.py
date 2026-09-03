@@ -26,16 +26,13 @@ from gateway.platforms.base import _custom_unit_to_cp
 from gateway.config import (
     DEFAULT_STREAMING_EDIT_INTERVAL as _DEFAULT_STREAMING_EDIT_INTERVAL,
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
-    DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR,
-)
+    DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR)
 from gateway.response_filters import (
     is_intentional_silence_response as _is_intentional_silence_response,
-    is_partial_silence_marker as _is_partial_silence_marker,
-)
+    is_partial_silence_marker as _is_partial_silence_marker)
 from gateway.stream_consumer_fences import (  # noqa: F401  (re-exported)
     ensure_closed_code_fences,
-    escape_code_fences_for_display,
-)
+    escape_code_fences_for_display)
 from gateway.stream_consumer_transport import StreamTransportMixin
 from gateway.stream_consumer_fallback import StreamFallbackMixin
 from gateway.stream_consumer_think import StreamThinkFilterMixin
@@ -120,8 +117,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         on_new_message: Optional[callable] = None,
         on_before_finalize: Optional[Callable[[], Any]] = None,
         initial_reply_to_id: Optional[str] = None,
-        run_still_current: Optional[Callable[[], bool]] = None,
-    ):
+        run_still_current: Optional[Callable[[], bool]] = None):
         self.adapter = adapter
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
@@ -781,8 +777,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # answer.
         tick.update_visible = await self._send_or_edit(
             display_text, finalize=tick.got_done or tick.got_segment_break,
-            is_turn_final=tick.got_done,
-        )
+            is_turn_final=tick.got_done)
         self._last_edit_time = time.monotonic()
         # Lines stay in _tool_progress_lines for the next compose.
         self._tool_progress_active = False
@@ -885,8 +880,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         if self._accumulated and self._message_id:
             with contextlib.suppress(Exception):
                 best_effort_ok = bool(await self._send_or_edit(
-                    self._accumulated, finalize=True, is_turn_final=False,
-                ))
+                    self._accumulated, finalize=True, is_turn_final=False))
         elif self._message_id is None:
             # Draft path keeps _message_id=None; seal in place (else the stream stays
             # visibly live and the adapter keeps armed interception state).

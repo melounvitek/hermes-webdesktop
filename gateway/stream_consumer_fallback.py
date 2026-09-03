@@ -26,8 +26,7 @@ class StreamFallbackMixin:
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id, content=text, reply_to=reply_to_id,
-                metadata=self._metadata_for_send(final=final, expect_edits=not final),
-            )
+                metadata=self._metadata_for_send(final=final, expect_edits=not final))
             if not (result.success and result.message_id):
                 self._edit_supported = False
                 return reply_to_id
@@ -216,8 +215,7 @@ class StreamFallbackMixin:
         try:
             result = await self._send_with_flood_retry(
                 content=final_text, reply_to=self._initial_reply_to_id,
-                retry_log="Flood control on empty fallback final send; retrying in %.1fs",
-            )
+                retry_log="Flood control on empty fallback final send; retrying in %.1fs")
         except Exception as exc:
             logger.debug("Empty fallback final send failed: %s", exc)
             return "ambiguous" if self._send_failure_may_have_delivered(exc) else "failed"
@@ -323,8 +321,7 @@ class StreamFallbackMixin:
             _needs_reply_anchor = _platform_name in ("buzz", "slack", "mattermost", "feishu")
             result = await self.adapter.send(
                 chat_id=self.chat_id, content=text,
-                reply_to=self._initial_reply_to_id if _needs_reply_anchor else None, metadata=_md,
-            )
+                reply_to=self._initial_reply_to_id if _needs_reply_anchor else None, metadata=_md)
             # Do NOT set _already_sent: commentary is interim, and the flag would
             # suppress the real final after multiple tool calls.
             if result.success:
