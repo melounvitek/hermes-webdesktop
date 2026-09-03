@@ -2,15 +2,9 @@
 
 The connector hands one to the gateway's ``RelayAdapter`` at handshake: which
 platform it fronts and which capabilities to advertise to the stream consumer
-(char limit, draft streaming, edit/threading, markdown dialect, length unit).
-One gateway adapter thus serves every platform without per-platform branching.
-
-Schema evolution is additive-only, gated by ``contract_version``
-(docs/relay-connector-contract.md). Most fields are a wire projection of
-``PlatformEntry`` (``max_message_length``, ``emoji``, ``platform_hint``,
-``pii_safe``, ``label``) plus the adapter capability probes
-(``supports_draft_streaming``, ``supports_edit``, ``supports_threads``,
-``len_unit`` → which ``message_len_fn`` the adapter installs).
+(char limit, draft streaming, edit/threading, markdown dialect, length unit), so
+one adapter serves every platform without per-platform branching. Schema evolution
+is additive-only, gated by ``contract_version`` (docs/relay-connector-contract.md).
 """
 
 from __future__ import annotations
@@ -39,23 +33,22 @@ class CapabilityDescriptor:
     emoji: str = "\U0001f50c"  # 🔌 (matches PlatformEntry default)
     platform_hint: str = ""
     pii_safe: bool = False
-    # All optional bits below default False/empty so an older connector that
-    # never sends them is treated as "not supported" — additive within
-    # contract_version 1 (from_json also drops unknown keys, so newer connectors
-    # are safe against older gateways).
+    # Optional bits default False/empty so an older connector that never sends
+    # them reads as "not supported" — additive within contract_version 1
+    # (from_json drops unknown keys, so newer connectors are safe against older gateways).
     # Connector can supply surrounding channel/group CONTEXT for an addressed turn.
     supports_context: bool = False
     # Platform can host a FLAT continuable cron surface (native Slack's
     # ``cron_continuable_surface: in_channel``); the scheduler fails safe to
     # thread mode when False (D6 gate).
     supports_inchannel_continuable: bool = False
-    # Platform sender renders block-level formatting from raw markdown; when
-    # True AND the operator enables rich_blocks/markdown_blocks, the gateway
-    # stamps ``format_hints`` on outbound send/edit metadata.
+    # Platform sender renders block-level formatting from raw markdown; when True
+    # AND the operator enables rich_blocks/markdown_blocks, the gateway stamps
+    # ``format_hints`` on outbound send/edit metadata.
     supports_block_formatting: bool = False
-    # Outbound op names the connector implements for this platform. Empty =
-    # the connector predates the field; callers MUST treat that as LEGACY_OPS,
-    # not "nothing supported". Tuple keeps the frozen dataclass hashable.
+    # Outbound op names the connector implements for this platform. Empty = the
+    # connector predates the field; callers MUST treat that as LEGACY_OPS, not
+    # "nothing supported". Tuple keeps the frozen dataclass hashable.
     supported_ops: tuple = ()
 
     # Assumed capability set when a legacy connector sends no supported_ops.
@@ -67,9 +60,7 @@ class CapabilityDescriptor:
         A NEW op is therefore only True when explicitly advertised — capability
         can be probed without trying the op and parsing an error.
         """
-        if not self.supported_ops:
-            return op in self.LEGACY_OPS
-        return op in self.supported_ops
+        return op in (self.supported_ops or self.LEGACY_OPS)
 
     def to_json(self) -> str:
         """Compact, stable JSON for the handshake frame."""
@@ -86,7 +77,7 @@ class CapabilityDescriptor:
         fallback) when malformed.
         """
         raw = json.loads(data)
-        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        known = cls.__dataclass_fields__  # type: ignore[attr-defined]
         filtered = {k: v for k, v in raw.items() if k in known}
         if "max_message_length" in filtered:
             try:
@@ -96,43 +87,9 @@ class CapabilityDescriptor:
                 filtered["max_message_length"] = 4096
         if "supported_ops" in filtered:
             raw_ops = filtered["supported_ops"]
-            if isinstance(raw_ops, (list, tuple)):
-                filtered["supported_ops"] = tuple(
-                    str(op) for op in raw_ops if isinstance(op, str) and op
-                )
-            else:
-                filtered["supported_ops"] = ()
+            filtered["supported_ops"] = (
+                tuple(str(op) for op in raw_ops if isinstance(op, str) and op)
+                if isinstance(raw_ops, (list, tuple))
+                else ()
+            )
         return cls(**filtered)
-
-    @classmethod
-    def from_platform_entry(
-        cls,
-        entry,
-        *,
-        len_unit: str = "chars",
-        supports_draft_streaming: bool = False,
-        supports_edit: bool = True,
-        supports_threads: bool = False,
-        markdown_dialect: str = "plain",
-    ) -> "CapabilityDescriptor":
-        """Project a ``gateway.platform_registry.PlatformEntry`` into a descriptor.
-
-        Runtime bits the entry does not encode (length unit, draft/edit/thread/
-        markdown) come from the caller. A ``max_message_length`` of 0 ("no
-        limit") maps to the stream_consumer default of 4096.
-        """
-        max_len = getattr(entry, "max_message_length", 0) or 4096
-        return cls(
-            contract_version=CONTRACT_VERSION,
-            platform=entry.name,
-            label=entry.label,
-            max_message_length=max_len,
-            supports_draft_streaming=supports_draft_streaming,
-            supports_edit=supports_edit,
-            supports_threads=supports_threads,
-            markdown_dialect=markdown_dialect,
-            len_unit=len_unit,
-            emoji=getattr(entry, "emoji", "\U0001f50c"),
-            platform_hint=getattr(entry, "platform_hint", ""),
-            pii_safe=getattr(entry, "pii_safe", False),
-        )
