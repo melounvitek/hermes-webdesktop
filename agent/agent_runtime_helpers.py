@@ -1721,6 +1721,81 @@ def _has_litellm_token(value: str, delimiters: str) -> bool:
     return "litellm" in value.split()
 
 
+def _moa_aggregator_cache_policy(agent, eff_model: str) -> tuple[bool, bool]:
+    """MoA virtual provider: resolve the policy from the preset's real aggregator slot.
+
+    The virtual provider matches no caching branch and would silently lose caching
+    for the acting aggregator.
+    """
+    try:
+        from hermes_cli.config import load_config as _load_moa_cfg
+        from hermes_cli.moa_config import resolve_moa_preset
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        preset = resolve_moa_preset(_load_moa_cfg().get("moa") or {}, eff_model or None)
+        agg = preset.get("aggregator") or {}
+        agg_provider = str(agg.get("provider") or "").strip()
+        agg_model = str(agg.get("model") or "").strip()
+        if agg_provider and agg_model:
+            agg_base_url = ""
+            agg_api_mode = ""
+            try:
+                rt = resolve_runtime_provider(requested=agg_provider, target_model=agg_model)
+                agg_base_url = rt.get("base_url") or ""
+                agg_api_mode = rt.get("api_mode") or ""
+            except Exception:
+                pass
+            return anthropic_prompt_cache_policy(
+                agent, provider=agg_provider, base_url=agg_base_url, api_mode=agg_api_mode, model=agg_model
+            )
+    except Exception as _moa_exc:  # pragma: no cover - defensive
+        logger.debug("MoA aggregator cache-policy resolution failed: %s", _moa_exc)
+    return False, False
+
+
+def _route_may_be_custom(agent, eff_provider: str, provider_lower: str, eff_base_url: str) -> bool:
+    """Cheap identity gate deciding whether a custom-provider capability lookup is worth running."""
+    custom_providers = getattr(agent, "_custom_providers", None)
+    if custom_providers:
+        # Same semantics as the capability helper (normalize_route_base_url +
+        # custom_provider_aliases) so spelling differences don't drop declarations.
+        from hermes_cli.providers import custom_provider_aliases
+        from hermes_cli.route_identity import normalize_route_base_url
+
+        provider_ids = {provider_lower}
+        if provider_lower.startswith("custom:"):
+            provider_ids.add(provider_lower.removeprefix("custom:"))
+        eff_url_normalized = normalize_route_base_url(eff_base_url)
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_ids = custom_provider_aliases(
+                str(entry.get("name") or ""), str(entry.get("provider_key") or "")
+            )
+            if provider_ids & entry_ids or (
+                eff_url_normalized and normalize_route_base_url(entry.get("base_url")) == eff_url_normalized
+            ):
+                return True
+        return False
+    if custom_providers is not None:
+        return False  # attached empty list never matches
+    # None = list not attached yet (early init or blank stub). Avoid rebuilding the
+    # list for ordinary built-in routes.
+    try:
+        from hermes_cli.providers import get_provider
+
+        # allow_network=False: never trigger a registry fetch from the send path;
+        # a catalog miss degrades to the conservative capability lookup.
+        provider_def = get_provider(eff_provider, allow_network=False)
+        return provider_def is None or (
+            bool(provider_def.base_url)
+            and base_url_hostname(provider_def.base_url) != base_url_hostname(eff_base_url)
+        )
+    except Exception as _pd_exc:
+        logger.debug("provider lookup failed during cache-policy pre-gate: %s", _pd_exc)
+        return provider_lower.startswith("custom:")
+
+
 def anthropic_prompt_cache_policy(
     agent,
     *,
@@ -1733,9 +1808,9 @@ def anthropic_prompt_cache_policy(
 
     ``use_native_layout`` puts markers on inner content blocks (native Anthropic wire);
     otherwise on the message envelope (OpenRouter / OpenAI-wire proxies). Qwen/Alibaba routes
-    also honour envelope markers (pi-mono #3392). An operator disable is read from
-    ``_cache_disabled`` (not ``_cache_ttl``, unset during init) so it survives switches and
-    restores (#33555).
+    also honour envelope markers. An operator disable is read from ``_cache_disabled``
+    (not ``_cache_ttl``, unset during init) so it survives switches and restores.
+    Branch ORDER is load-bearing (see inline notes).
     """
     if getattr(agent, "_cache_disabled", False):
         return (False, False)
@@ -1744,42 +1819,8 @@ def anthropic_prompt_cache_policy(
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
     eff_model = (model if model is not None else agent.model) or ""
-
-    # MoA virtual provider matches no caching branch, silently losing caching for the acting
-    # aggregator; resolve the policy from the preset's real aggregator slot instead.
     if eff_provider.strip().lower() == "moa":
-        try:
-            from hermes_cli.config import load_config as _load_moa_cfg
-            from hermes_cli.moa_config import resolve_moa_preset
-            from hermes_cli.runtime_provider import resolve_runtime_provider
-
-            _preset = resolve_moa_preset(
-                _load_moa_cfg().get("moa") or {}, eff_model or None
-            )
-            _agg = _preset.get("aggregator") or {}
-            _agg_provider = str(_agg.get("provider") or "").strip()
-            _agg_model = str(_agg.get("model") or "").strip()
-            if _agg_provider and _agg_model:
-                _agg_base_url = ""
-                _agg_api_mode = ""
-                try:
-                    _rt = resolve_runtime_provider(
-                        requested=_agg_provider, target_model=_agg_model
-                    )
-                    _agg_base_url = _rt.get("base_url") or ""
-                    _agg_api_mode = _rt.get("api_mode") or ""
-                except Exception:
-                    pass
-                return anthropic_prompt_cache_policy(
-                    agent,
-                    provider=_agg_provider,
-                    base_url=_agg_base_url,
-                    api_mode=_agg_api_mode,
-                    model=_agg_model,
-                )
-        except Exception as _moa_exc:  # pragma: no cover - defensive
-            logger.debug("MoA aggregator cache-policy resolution failed: %s", _moa_exc)
-        return False, False
+        return _moa_aggregator_cache_policy(agent, eff_model)
 
     if isinstance(eff_model, dict):
         eff_model = eff_model.get('model') or eff_model.get('default') or ''
@@ -1788,85 +1829,27 @@ def anthropic_prompt_cache_policy(
     provider_lower = eff_provider.lower()
     is_claude = "claude" in model_lower
     # Kimi/Moonshot via OpenRouter uses the same envelope cache_control as Claude; without
-    # this branch it serves ~1% cache hits (#25970). Family matcher covers bare k1./k2. slugs.
+    # this it serves ~1% cache hits. Family matcher covers bare k1./k2. slugs.
     from agent.anthropic_adapter import _model_name_is_kimi_family
-    is_kimi = (
-        _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
-    )
+    is_kimi = _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
     is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
     # Nous Portal proxies to OpenRouter; treat as OpenRouter-equivalent for cache layout.
     is_nous_portal = base_url_host_matches(eff_base_url, "nousresearch.com")
     is_anthropic_wire = eff_api_mode == "anthropic_messages"
-    is_native_anthropic = (
-        is_anthropic_wire
-        and (eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com")
+    is_native_anthropic = is_anthropic_wire and (
+        eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com"
     )
 
     # Honor a configured route's per-model ``prompt_caching`` capability (explicit false too);
     # only for the two transports this planner handles, not Responses/Bedrock.
-    custom_prompt_caching = None
-    _supports_anthropic_cache_markers = eff_api_mode in {
-        "anthropic_messages",
-        "chat_completions",
-    }
-    _litellm_openai_wire = (
-        eff_api_mode == "chat_completions"
-        and is_claude
-        and _is_litellm_route(provider_lower, eff_base_url)
+    supports_cache_markers = eff_api_mode in {"anthropic_messages", "chat_completions"}
+    litellm_openai_wire = (
+        eff_api_mode == "chat_completions" and is_claude and _is_litellm_route(provider_lower, eff_base_url)
     )
-    _custom_providers = getattr(agent, "_custom_providers", None)
-    _route_may_be_custom = False
-    if not _supports_anthropic_cache_markers:
-        # Responses/Bedrock never consume the declaration — skip the
-        # identity probe entirely for those transports.
-        pass
-    elif _custom_providers:
-        # Cheap identity gate before the capability helper, matching its semantics
-        # (normalize_route_base_url + custom_provider_aliases) so spelling differences don't drop declarations.
-        from hermes_cli.providers import custom_provider_aliases
-        from hermes_cli.route_identity import normalize_route_base_url
-
-        _provider_ids = {provider_lower}
-        if provider_lower.startswith("custom:"):
-            _provider_ids.add(provider_lower.removeprefix("custom:"))
-        _eff_url_normalized = normalize_route_base_url(eff_base_url)
-        for _entry in _custom_providers:
-            if not isinstance(_entry, dict):
-                continue
-            _entry_ids = custom_provider_aliases(
-                str(_entry.get("name") or ""),
-                str(_entry.get("provider_key") or ""),
-            )
-            if _provider_ids & _entry_ids or (
-                _eff_url_normalized
-                and normalize_route_base_url(_entry.get("base_url"))
-                == _eff_url_normalized
-            ):
-                _route_may_be_custom = True
-                break
-    elif _custom_providers is None:
-        # None = list not attached yet (early init or blank stub); an attached empty list never
-        # matches. Avoid rebuilding the list for ordinary built-in routes.
-        try:
-            from hermes_cli.providers import get_provider
-
-            # allow_network=False: never trigger a registry fetch from the send path;
-            # a catalog miss degrades to the conservative capability lookup.
-            _provider_def = get_provider(eff_provider, allow_network=False)
-            _route_may_be_custom = _provider_def is None or (
-                bool(_provider_def.base_url)
-                and base_url_hostname(_provider_def.base_url)
-                != base_url_hostname(eff_base_url)
-            )
-        except Exception as _pd_exc:
-            logger.debug(
-                "provider lookup failed during cache-policy pre-gate: %s",
-                _pd_exc,
-            )
-            _route_may_be_custom = provider_lower.startswith("custom:")
-
-    if _supports_anthropic_cache_markers and (
-        is_anthropic_wire or _litellm_openai_wire or _route_may_be_custom
+    if supports_cache_markers and (
+        is_anthropic_wire
+        or litellm_openai_wire
+        or _route_may_be_custom(agent, eff_provider, provider_lower, eff_base_url)
     ):
         try:
             from hermes_cli.config import get_custom_provider_model_capability
@@ -1875,73 +1858,56 @@ def anthropic_prompt_cache_policy(
                 model=eff_model,
                 base_url=eff_base_url,
                 capability="prompt_caching",
-                custom_providers=_custom_providers,
+                custom_providers=getattr(agent, "_custom_providers", None),
             )
+            if custom_prompt_caching is not None:
+                # Layout follows the transport: native Messages → inner blocks; OpenAI wire → envelope.
+                return custom_prompt_caching, custom_prompt_caching and is_anthropic_wire
         except Exception as _cap_exc:
-            logger.debug(
-                "custom-provider prompt_caching capability lookup failed: %s",
-                _cap_exc,
-            )
-    if custom_prompt_caching is not None:
-        # Layout follows the transport: native Messages → inner blocks; OpenAI wire → envelope.
-        return custom_prompt_caching, custom_prompt_caching and is_anthropic_wire
+            logger.debug("custom-provider prompt_caching capability lookup failed: %s", _cap_exc)
 
     # MiniMax-M3 uses server-side automatic prefix caching; explicit markers are dead weight.
     # Checked BEFORE the native-Anthropic return since provider="anthropic" may point at a MiniMax proxy.
-    is_minimax_provider = provider_lower in {"minimax", "minimax-cn"}
-    is_minimax_host = (
-        base_url_host_matches(eff_base_url, "api.minimax.io")
+    is_minimax_route = (
+        provider_lower in {"minimax", "minimax-cn"}
+        or base_url_host_matches(eff_base_url, "api.minimax.io")
         or base_url_host_matches(eff_base_url, "api.minimaxi.com")
     )
-    is_minimax_route = is_minimax_provider or is_minimax_host
     if is_anthropic_wire and is_minimax_route:
         from agent.model_metadata import _model_name_suggests_minimax_m3
 
         if _model_name_suggests_minimax_m3(eff_model):
             return False, False
-
     if is_native_anthropic:
         return True, True
     # Envelope layout is OpenAI-wire only; Portal Claude on native Messages must fall through
     # to the anthropic_messages branch (inner-block markers) or it serves 0% cache hits.
-    if (
-        (is_openrouter or is_nous_portal)
-        and (is_claude or is_kimi)
-        and not is_anthropic_wire
-    ):
+    if (is_openrouter or is_nous_portal) and (is_claude or is_kimi) and not is_anthropic_wire:
         return True, False
-    # Nous Portal Qwen takes the envelope path too; the alibaba-family check below only matches
-    # provider=opencode/alibaba and would leave Portal traffic uncached.
+    # Nous Portal Qwen takes the envelope path too; the alibaba-family check below only
+    # matches provider=opencode/alibaba and would leave Portal traffic uncached.
     if is_nous_portal and "qwen" in model_lower:
         return True, False
     if is_anthropic_wire and is_claude:
-        # Third-party Anthropic-compatible gateway.
-        return True, True
-
-    # LiteLLM fronting Claude on the OpenAI-compatible wire supports cache_control but matched
-    # no grant branch above (#84506). Claude-only: strict relays reject the block format for
-    # other models (#77217). Envelope layout: the native layout's top-level markers are only
-    # relocated by the anthropic_messages adapter and cause HTTP 400 via LiteLLM (#69512).
-    # Gated on chat_completions explicitly; codex_responses/bedrock_converse have their own handling.
-    if _litellm_openai_wire:
+        return True, True  # third-party Anthropic-compatible gateway
+    # LiteLLM fronting Claude on the OpenAI wire supports cache_control but matched no grant
+    # above. Claude-only: strict relays reject the block format for other models. Envelope
+    # layout: native top-level markers are only relocated by the anthropic_messages adapter
+    # and 400 via LiteLLM. Gated on chat_completions; codex_responses/bedrock_converse have
+    # their own handling.
+    if litellm_openai_wire:
         return True, False
-
     # MiniMax's own models (M2.x) on its Anthropic-compatible endpoint support cache_control;
     # opt them in past the is_claude gate. M3 is excluded above.
     if is_anthropic_wire and is_minimax_route:
         return True, True
-
-    # Qwen/Alibaba on OpenCode and DashScope accept envelope cache_control on the OpenAI wire.
-    # DeepSeek on OpenCode is excluded: its relay 400s on block-array content (#77217).
-    # Family set/predicate shared with the effective_cache_ttl clamp (#84733).
+    # Qwen/Alibaba on OpenCode and DashScope accept envelope cache_control on the OpenAI wire
+    # (pi-mono's "alibaba" cacheControlFormat). DeepSeek on OpenCode is excluded: its relay
+    # 400s on block-array content. Family set/predicate shared with the effective_cache_ttl clamp.
     from agent.prompt_caching import ALIBABA_FAMILY_PROVIDERS, is_qwen_model
 
-    model_is_qwen = is_qwen_model(model_lower)
-    provider_is_alibaba_family = provider_lower in ALIBABA_FAMILY_PROVIDERS
-    if provider_is_alibaba_family and model_is_qwen:
-        # Envelope layout (native_anthropic=False), matching pi-mono's "alibaba" cacheControlFormat.
+    if provider_lower in ALIBABA_FAMILY_PROVIDERS and is_qwen_model(model_lower):
         return True, False
-
     return False, False
 
 
