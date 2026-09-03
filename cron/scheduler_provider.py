@@ -443,9 +443,9 @@ class InProcessCronScheduler(CronScheduler):
         home)``, when given, is consulted every cycle; a rejected profile is neither ticked nor
         heartbeated."""
         from cron.scheduler import tick as cron_tick
-        from cron.scheduler import (
-            CronTickYielded, SharedRouteAdapters, _is_fd_exhaustion,
-            _primary_profile_routes_for_current_home,
+        from cron.scheduler import CronTickYielded, _is_fd_exhaustion
+        from cron.scheduler_preflight import (
+            SharedRouteAdapters, _primary_profile_routes_for_current_home,
         )
         from cron.jobs import clear_ticker_error, record_ticker_error, record_ticker_heartbeat
 

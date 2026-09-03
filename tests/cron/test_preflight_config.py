@@ -319,7 +319,7 @@ class TestDeliveryPlatform:
         job = _job(deliver="notaplatform")
         with cron_jobs.use_cron_store(tmp_path):
             cron_jobs.save_jobs([job])
-            with patch("cron.scheduler._is_known_delivery_platform",
+            with patch("cron.scheduler_delivery._is_known_delivery_platform",
                        return_value=False):
                 success, output, final_response, error, agent_constructed = \
                     _run_job_patched(job, tmp_path)

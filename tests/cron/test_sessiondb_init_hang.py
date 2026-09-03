@@ -99,7 +99,7 @@ class TestSessionDbInitTimeout:
         profile_token = set_hermes_home_override(profile_home)
         try:
             with patch("cron.scheduler._hermes_home", None), \
-                 patch("cron.scheduler._resolve_origin", return_value=None), \
+                 patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
                  patch("hermes_cli.env_loader.load_hermes_dotenv"), \
                  patch("hermes_cli.env_loader.reset_secret_source_cache"), \
                  patch("hermes_state.get_shared_session_db", side_effect=make_session_db), \
@@ -128,7 +128,7 @@ class TestSessionDbInitTimeout:
         timeouts: list = []
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
              patch("hermes_state.get_shared_session_db"), \
@@ -163,7 +163,7 @@ class TestSessionDbInitTimeout:
         timeouts: list = []
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
              patch("hermes_state.get_shared_session_db", return_value=fake_db), \
@@ -206,7 +206,7 @@ class TestSessionDbInitTimeout:
         timeouts: list = []
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
              patch("hermes_state.get_shared_session_db"), \
@@ -256,7 +256,7 @@ class TestDispatchGuardReleasedAfterHang:
 
         try:
             with patch("cron.scheduler._hermes_home", tmp_path), \
-                 patch("cron.scheduler._resolve_origin", return_value=None), \
+                 patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
                  patch("hermes_cli.env_loader.load_hermes_dotenv"), \
                  patch("hermes_cli.env_loader.reset_secret_source_cache"), \
                  patch("hermes_state.get_shared_session_db"), \
@@ -354,7 +354,7 @@ class TestLateSessionDbClosedAfterTimeout:
 
         try:
             with patch("cron.scheduler._hermes_home", tmp_path), \
-                 patch("cron.scheduler._resolve_origin", return_value=None), \
+                 patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
                  patch("hermes_cli.env_loader.load_hermes_dotenv"), \
                  patch("hermes_cli.env_loader.reset_secret_source_cache"), \
                  patch("hermes_state.get_shared_session_db", side_effect=_hanging_then_capture), \
@@ -412,7 +412,7 @@ class TestSessionDbInitAfterEarlyReturns:
         }
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
              patch("hermes_state.get_shared_session_db") as mock_db_cls, \

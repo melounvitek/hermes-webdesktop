@@ -51,7 +51,7 @@ def _run_with_current_provider(job, current_provider, tmp_path):
     """
     fake_db = MagicMock()
     with patch("cron.scheduler._hermes_home", tmp_path), \
-         patch("cron.scheduler._resolve_origin", return_value=None), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
          patch("hermes_state.get_shared_session_db", return_value=fake_db), \
@@ -256,7 +256,7 @@ def _run_with_current_provider_and_model(
     fake_db = MagicMock()
     with patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-         patch("cron.scheduler._resolve_origin", return_value=None), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
          patch("hermes_state.get_shared_session_db", return_value=fake_db), \
@@ -420,7 +420,7 @@ class TestRuntimeResolutionTargetModel:
 
         fake_db = MagicMock()
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
              patch("hermes_state.get_shared_session_db", return_value=fake_db), \

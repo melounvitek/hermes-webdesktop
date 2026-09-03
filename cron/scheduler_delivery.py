@@ -1,8 +1,9 @@
 """Cron delivery: target resolution (origin/home/explicit/bot-chat), transcript mirroring and
 session seeding, live-adapter / relay / standalone send lanes, and ``_deliver_result``.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
-reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``. Import names from this module directly (``cron.scheduler`` only
+imports the few it calls itself). Origin-resident helpers and sibling split modules are reached
+late-bound (``_sched`` / module refs at the bottom) so monkeypatching the defining module works.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional
+
+from hermes_cli._subprocess_compat import windows_hide_flags
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("cron.scheduler")
@@ -136,7 +139,7 @@ def _target_mirror_eligible(
     never write transcripts into arbitrary explicitly-addressed chats. Untagged broadcasts
     (``all``, bare-platform home) are never eligible. ``origin_match`` may be precomputed."""
     if origin_match is None:
-        origin = _sched._resolve_origin(job) or {}
+        origin = _resolve_origin(job) or {}
         origin_match = _target_matches_origin(
             origin, target.get("platform", ""), target.get("chat_id", ""), target.get("thread_id"))
     if origin_match:
@@ -502,13 +505,13 @@ def cron_delivery_targets() -> list[dict]:
         logger.debug("cron_delivery_targets: gateway config unavailable", exc_info=True)
         connected = set()
 
-    for name in _sched._iter_home_target_platforms():
-        if name not in connected or not _sched._is_known_delivery_platform(name):
+    for name in _iter_home_target_platforms():
+        if name not in connected or not _is_known_delivery_platform(name):
             continue
         targets.append({
             "id": name,
             "name": name.replace("_", " ").title(),
-            "home_target_set": bool(_sched._get_home_target_chat_id(name)),
+            "home_target_set": bool(_get_home_target_chat_id(name)),
             "home_env_var": _resolve_home_env_var(name) or None})
 
     # Bot Chat targets: one per local profile (machine-local; no gateway config or home channel).
@@ -532,14 +535,14 @@ def _origin_thread_is_stale(origin: dict) -> bool:
     pinned thread is that artifact and delivery goes top-level (or to the home target's thread)."""
     if str(origin.get("platform") or "").lower() != "slack" or not origin.get("thread_id"):
         return False
-    home_chat = _sched._get_home_target_chat_id("slack")
+    home_chat = _get_home_target_chat_id("slack")
     return bool(home_chat) and str(origin.get("chat_id")) == str(home_chat)
 
 
 def _origin_delivery_thread(origin: dict):
     """The thread a deliver=origin job should use, stale stamps dropped."""
     if _origin_thread_is_stale(origin):
-        return _sched._get_home_target_thread_id("slack") or None
+        return _get_home_target_thread_id("slack") or None
     return origin.get("thread_id")
 
 
@@ -548,7 +551,7 @@ def _home_target(platform_name: str, chat_id: str, resolved_from: Optional[str] 
     target = {
         "platform": platform_name,
         "chat_id": chat_id,
-        "thread_id": _sched._get_home_target_thread_id(platform_name)}
+        "thread_id": _get_home_target_thread_id(platform_name)}
     if resolved_from:
         target["_resolved_from"] = resolved_from
     return target
@@ -556,7 +559,7 @@ def _home_target(platform_name: str, chat_id: str, resolved_from: Optional[str] 
 
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
     """Resolve one concrete auto-delivery target for a cron job."""
-    origin = _sched._resolve_origin(job)
+    origin = _resolve_origin(job)
     if deliver_value == "local":
         return None
     # Must precede the generic platform:chat_id split so the profile name isn't parsed as chat_id.
@@ -573,8 +576,8 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
                 "_resolved_from": "origin",  # provenance for _target_mirror_eligible
             }
         # No origin (API/script job): fall back to a home channel instead of silently dropping.
-        for platform_name in _sched._iter_home_target_platforms():
-            chat_id = _sched._get_home_target_chat_id(platform_name)
+        for platform_name in _iter_home_target_platforms():
+            chat_id = _get_home_target_chat_id(platform_name)
             if chat_id:
                 logger.info(
                     "Job '%s' has deliver=origin but no origin; falling back to %s home channel",
@@ -613,7 +616,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         }
     platform_name = deliver_value
     if origin and origin.get("platform") == platform_name:
-        chat_id = _sched._get_home_target_chat_id(platform_name)
+        chat_id = _get_home_target_chat_id(platform_name)
         if chat_id:
             return _home_target(platform_name, chat_id)
         return {
@@ -621,9 +624,9 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
             "chat_id": str(origin["chat_id"]),
             "thread_id": origin.get("thread_id"),
         }
-    if not _sched._is_known_delivery_platform(platform_name):
+    if not _is_known_delivery_platform(platform_name):
         return None
-    chat_id = _sched._get_home_target_chat_id(platform_name)
+    chat_id = _get_home_target_chat_id(platform_name)
     return _home_target(platform_name, chat_id) if chat_id else None
 
 
@@ -690,7 +693,7 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
         ]
         result = subprocess.run(
             argv, capture_output=True, text=True, timeout=_get_bot_chat_delivery_timeout(), env=env,
-            creationflags=_sched.windows_hide_flags())
+            creationflags=windows_hide_flags())
         if result.returncode != 0:
             tail = (result.stderr or result.stdout or "").strip()[-500:]
             return _fail(
@@ -775,7 +778,7 @@ def _expand_routing_tokens(part: str) -> List[str]:
     through as a single-element list."""
     if part.lower() not in _ROUTING_TOKENS:
         return [part]
-    return [p for p in _sched._iter_home_target_platforms() if _sched._get_home_target_chat_id(p)]
+    return [p for p in _iter_home_target_platforms() if _get_home_target_chat_id(p)]
 
 
 def _delivery_lane_value(job: dict, *, for_failure: bool = False):
@@ -827,7 +830,7 @@ def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> List[d
 
 def _resolve_delivery_target(job: dict) -> Optional[dict]:
     """Resolve the concrete auto-delivery target for a cron job, if any."""
-    targets = _sched._resolve_delivery_targets(job)
+    targets = _resolve_delivery_targets(job)
     return targets[0] if targets else None
 
 
@@ -880,7 +883,7 @@ def _send_media_via_adapter(
                 return errors
             try:
                 # Large attachments can exceed 30s; configurable via _get_media_send_timeout().
-                result = future.result(timeout=_sched._get_media_send_timeout())
+                result = future.result(timeout=_script._get_media_send_timeout())
             except TimeoutError:
                 future.cancel()
                 raise
@@ -1063,7 +1066,7 @@ def _resolve_target_transport(
     configured/enabled)."""
     from gateway.delivery import resolve_delivery_transport
     target_adapters = adapters
-    if isinstance(adapters, _sched.SharedRouteAdapters):
+    if isinstance(adapters, _preflight.SharedRouteAdapters):
         # Credentialless satellite: the primary adapter serves THIS target only when an exact
         # primary route maps it to this profile; a miss fails closed below.
         # See #101113.
@@ -1246,7 +1249,7 @@ def _live_send_media(
                 routed_media_metadata["user_id"] = logical_home.user_id
             if logical_home.scope_id:
                 routed_media_metadata["scope_id"] = logical_home.scope_id
-    _media_errors = _sched._send_media_via_adapter(
+    _media_errors = _send_media_via_adapter(
         t.runtime_adapter, t.chat_id, media_files, routed_media_metadata or None, t.loop, t.job,
         platform=t.platform,
     )
@@ -1265,7 +1268,7 @@ def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id) -> No
     thread_seeded = False
     inchannel_seeded = False
     if t.opened_thread_id:
-        _sched._seed_cron_thread_session(
+        _seed_cron_thread_session(
             job, t.runtime_adapter, t.platform_name, t.chat_id, t.opened_thread_id, t.mirror_text,
             **seed_kwargs,
         )
@@ -1274,7 +1277,7 @@ def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id) -> No
     # `inchannel_continuable` gate as the flatten in _deliver_result (must not drift). Origin
     # seed without mirror opt-in; others only via _inchannel_seed_allowed (user-less seed = orphan).
     if t.in_channel_surface and t.inchannel_continuable and not thread_seeded:
-        inchannel_seeded = _sched._seed_cron_channel_session(
+        inchannel_seeded = _seed_cron_channel_session(
             job, t.runtime_adapter, t.platform_name, t.chat_id, t.mirror_text,
             user_id=t.origin_user_id, **seed_kwargs)
         if not inchannel_seeded:
@@ -1285,7 +1288,7 @@ def _seed_live_delivery_sessions(t: _TargetDelivery, delivered_message_id) -> No
         # Companion THREAD seed: a reply in the brief's own thread keys to (chat, thread=<ts>),
         # which the flat seed never touches. Seed it too so BOTH reply surfaces continue the job.
         if delivered_message_id:
-            _sched._seed_cron_thread_session(
+            _seed_cron_thread_session(
                 job, t.runtime_adapter, t.platform_name, t.chat_id, str(delivered_message_id),
                 t.mirror_text,
                 **seed_kwargs)
@@ -1470,7 +1473,7 @@ def _prepare_target_delivery(
     chat_id = target["chat_id"]
     thread_id = target.get("thread_id")
 
-    origin = _sched._resolve_origin(job) or {}
+    origin = _resolve_origin(job) or {}
     origin_thread = origin.get("thread_id")
     if origin_thread and not thread_id:
         logger.warning(
@@ -1551,7 +1554,7 @@ def _prepare_target_delivery(
         and loop is not None
         and not thread_id  # never override an explicit origin thread/topic
     ):
-        opened_thread_id = _sched._open_continuable_cron_thread(
+        opened_thread_id = _open_continuable_cron_thread(
             job, runtime_adapter, chat_id, loop) or None
         if opened_thread_id:
             thread_id = opened_thread_id
@@ -1595,7 +1598,7 @@ def _deliver_result(
     running) the live adapter is tried first (E2EE rooms can't use the standalone HTTP path), then
     standalone fallback. ``for_failure=True`` routes failure-category notices through the job's
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
-    targets = _sched._resolve_delivery_targets(job, for_failure=for_failure)
+    targets = _resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         return _unresolved_delivery_outcome(job, for_failure)
 
@@ -1699,10 +1702,12 @@ def _deliver_result(
 
     # Filter-time drops apply to every target; report them once.
     delivery_errors.extend(policy_drop_errors)
-    _sched._record_delivery_verification(job, unverified_targets)
+    _record_delivery_verification(job, unverified_targets)
     return "; ".join(delivery_errors) if delivery_errors else None
 
 
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
 from cron import scheduler as _sched  # noqa: E402
+from cron import scheduler_preflight as _preflight  # noqa: E402
+from cron import scheduler_script as _script  # noqa: E402

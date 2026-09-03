@@ -1463,7 +1463,7 @@ def _ensure_ssl_certs() -> None:
 def _home_target_env_var(platform_name: str) -> str:
     """Home-target env var: built-in ``_HOME_TARGET_ENV_VARS``, plugin registry, then
     ``<PLATFORM>_HOME_CHANNEL``."""
-    from cron.scheduler import _resolve_home_env_var
+    from cron.scheduler_delivery import _resolve_home_env_var
     return _resolve_home_env_var(platform_name) or f"{platform_name.upper()}_HOME_CHANNEL"
 
 
@@ -4484,6 +4484,7 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
     """Drain each profile's worker queue through its matching live adapters. A credential-less satellite
     profile (empty adapter map) drains through the primary's adapters routed by its own profile routes."""
     from cron import scheduler as cron_scheduler
+    from cron import scheduler_preflight as sched_preflight
 
     if runner is None:
         if adapters is not None:
@@ -4498,9 +4499,9 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
             continue
         with _profile_runtime_scope(profile_home or get_hermes_home()):
             if profile_name is not None and not profile_adapters and adapters:
-                routes = cron_scheduler._primary_profile_routes_for_current_home()
+                routes = sched_preflight._primary_profile_routes_for_current_home()
                 if routes:
-                    profile_adapters = cron_scheduler.SharedRouteAdapters(adapters, routes)
+                    profile_adapters = sched_preflight.SharedRouteAdapters(adapters, routes)
             cron_scheduler.drain_delivery_queue(profile_adapters, loop)
 
 

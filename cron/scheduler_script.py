@@ -1,8 +1,9 @@
 """Cron pre-run script execution: timeouts, Windows venv bootstrap, process-tree termination,
 and the claim-heartbeat thread that keeps a long script's run claim alive.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
-reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``. Import names from this module directly (``cron.scheduler`` only
+imports the few it calls itself). Origin-resident helpers and sibling split modules are reached
+late-bound (``_sched`` / module refs at the bottom) so monkeypatching the defining module works.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import time
 from cron.jobs import _ensure_cron_dir
 from pathlib import Path
 from typing import Any, Callable, Optional, TYPE_CHECKING
+
+from hermes_cli._subprocess_compat import windows_hide_flags
 
 if TYPE_CHECKING:
     from cron.scheduler import _CancelEventLike
@@ -154,7 +157,7 @@ def _terminate_cron_script_process(proc: subprocess.Popen) -> None:
         try:
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10,
-                creationflags=_sched.windows_hide_flags(), check=False)
+                creationflags=windows_hide_flags(), check=False)
         except (OSError, subprocess.TimeoutExpired):
             proc.kill()
     try:
@@ -190,7 +193,7 @@ def _terminate_cron_script_tree(proc: subprocess.Popen) -> None:
     def fallback(reason: str, *args, exc_info: bool = False) -> None:
         logger.warning(
             reason + "; falling back to process-group termination", *args, exc_info=exc_info)
-        _sched._terminate_cron_script_process(proc)
+        _terminate_cron_script_process(proc)
 
     pid = getattr(proc, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
@@ -304,7 +307,7 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
                 "or rewrite the script as Python (.py)."
             )
         return [_bash, str(path)], {}, None
-    python_exe, env_overlay = _sched._windows_cron_python_invocation(sys.executable)
+    python_exe, env_overlay = _windows_cron_python_invocation(sys.executable)
     if env_overlay:
         return _windows_cron_bootstrap_argv(python_exe, env_overlay, str(path)), env_overlay, None
     return [python_exe, str(path)], env_overlay, None
@@ -327,7 +330,7 @@ def _run_job_script(
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err
-    script_timeout = _sched._get_script_timeout()
+    script_timeout = _get_script_timeout()
     argv, env_overlay, err = _script_argv(path)
     if argv is None:
         return False, err
@@ -337,7 +340,7 @@ def _run_job_script(
         popen_kwargs: dict[str, Any] = {"start_new_session": True}
         if sys.platform == "win32":
             popen_kwargs = {
-                "creationflags": _sched.windows_hide_flags()
+                "creationflags": windows_hide_flags()
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                 # Lossy UTF-8 decode — locale-mismatched bytes from the STT command must not raise in the
                 # reader threads on non-UTF-8 Windows (#45099).
@@ -359,12 +362,12 @@ def _run_job_script(
             # Tree-kill on cancel AND timeout: killpg misses setsid grandchildren (watchdogs,
             # backgrounded shell jobs); kill_process_tree snapshots descendants BEFORE signalling.
             if cancel_event is not None and cancel_event.is_set():
-                _sched._terminate_cron_script_tree(proc)
+                _terminate_cron_script_tree(proc)
                 _drain_script_pipes(proc)
                 return False, "Script cancelled because cron fire ownership was lost"
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _sched._terminate_cron_script_tree(proc)
+                _terminate_cron_script_tree(proc)
                 _drain_script_pipes(proc)
                 # Phase 4a (#85125): a script timeout must leave ZERO living descendants. killpg only
                 # reaches the script's own process group — a grandchild that called setsid (backgrounded
@@ -429,7 +432,7 @@ def _run_job_script_with_claim_heartbeat(
     claim = job.get("run_claim")
     owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     if not (isinstance(schedule, dict) and schedule.get("kind") == "once" and owner):
-        return _sched._run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
+        return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
 
     job_id = str(job.get("id") or "")
     stop = threading.Event()
@@ -447,10 +450,10 @@ def _run_job_script_with_claim_heartbeat(
             "Job '%s': could not start script run_claim heartbeat", job_id, exc_info=True),
     )
     if heartbeat_thread is None:
-        return _sched._run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
+        return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
 
     try:
-        return _sched._run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
+        return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
     finally:
         stop.set()
         # Bounded join: the heartbeat may be blocked on another process's jobs-file lock.

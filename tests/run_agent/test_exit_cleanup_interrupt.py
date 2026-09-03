@@ -38,6 +38,7 @@ class TestCronJobCleanup:
         mock_db.end_session.side_effect = KeyboardInterrupt
 
         from cron import scheduler
+        from cron import scheduler_delivery as sched_delivery
 
         job = {
             "id": "test-job-1",
@@ -49,7 +50,7 @@ class TestCronJobCleanup:
 
         with patch("hermes_state.get_shared_session_db", return_value=mock_db), \
              patch.object(scheduler, "_build_job_prompt", return_value="hello"), \
-             patch.object(scheduler, "_resolve_origin", return_value=None), \
+             patch.object(sched_delivery, "_resolve_origin", return_value=None), \
              patch.object(scheduler, "_resolve_delivery_target", return_value=None), \
              patch("dotenv.load_dotenv", return_value=None), \
              patch("run_agent.AIAgent") as MockAgent:

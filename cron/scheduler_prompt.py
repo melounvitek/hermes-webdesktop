@@ -1,8 +1,9 @@
 """Cron job prompt assembly: context_from injection, skill loading, the assembled-prompt
 injection scan, and the credential-exfil / config-block guards.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
-reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``. Import names from this module directly (``cron.scheduler`` only
+imports the few it calls itself). Origin-resident helpers and sibling split modules are reached
+late-bound (``_sched`` / module refs at the bottom) so monkeypatching the defining module works.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
             logger.warning(
                 "context_from: skipping invalid job_id %r for job_id=%r name=%r%s",
                 source_job_id, job.get("id"), job.get("name"),
-                _sched._cron_job_origin_log_suffix(job),
+                _delivery._cron_job_origin_log_suffix(job),
             )
             continue
         try:
@@ -210,7 +211,7 @@ def _build_job_prompt(
     script_path = job.get("script")
     if script_path:
         success, script_output = (
-            prerun_script if prerun_script is not None else _sched._run_job_script(script_path))
+            prerun_script if prerun_script is not None else _script._run_job_script(script_path))
         if success and not script_output:
             return None  # no output → nothing to report, skip the AI call
         heading, intro = (
@@ -345,3 +346,5 @@ def _block_and_pause_job(
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
 from cron import scheduler as _sched  # noqa: E402
+from cron import scheduler_delivery as _delivery  # noqa: E402
+from cron import scheduler_script as _script  # noqa: E402

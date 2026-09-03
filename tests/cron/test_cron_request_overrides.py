@@ -33,7 +33,7 @@ class TestRunJobRequestOverrides:
         }
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
              patch("hermes_state.get_shared_session_db", return_value=fake_db), \
              patch(

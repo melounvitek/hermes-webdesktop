@@ -241,7 +241,7 @@ async def get_cron_delivery_targets():
     still listed with ``home_target_set: false`` so the UI can say so)."""
     targets = [{"id": "local", "name": "Local (save only)", "home_target_set": True, "home_env_var": None}]
     try:
-        from cron.scheduler import cron_delivery_targets
+        from cron.scheduler_delivery import cron_delivery_targets
 
         targets.extend(cron_delivery_targets())
     except Exception:
@@ -374,7 +374,7 @@ async def list_cron_blueprints():
 
         deliver_options = None
         try:
-            from cron.scheduler import cron_delivery_targets
+            from cron.scheduler_delivery import cron_delivery_targets
 
             platforms = [t["id"] for t in cron_delivery_targets() if t.get("id")]
             deliver_options = ["origin", "local", *platforms]

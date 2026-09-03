@@ -1,8 +1,9 @@
 """Cron pre-run preflight: transient provider-resolution error classification, provider-key /
 delivery-target / skills checks, and the shared-route adapter view used by satellite profiles.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
-reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``. Import names from this module directly (``cron.scheduler`` only
+imports the few it calls itself). Origin-resident helpers and sibling split modules are reached
+late-bound (``_sched`` / module refs at the bottom) so monkeypatching the defining module works.
 """
 
 from __future__ import annotations
@@ -219,9 +220,9 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     only if the gateway config loads AND reports it unconnected; config load failures fail OPEN.
     ``failure_deliver`` gets the same rules — a typo'd failure platform would otherwise only
     surface when a failure occurs (NS-788)."""
-    deliver_value = _sched._normalize_deliver_value(job.get("deliver", "local"))
-    failure_deliver_value = _sched._normalize_deliver_value(
-        _sched._delivery_lane_value(job, for_failure=True))
+    deliver_value = _delivery._normalize_deliver_value(job.get("deliver", "local"))
+    failure_deliver_value = _delivery._normalize_deliver_value(
+        _delivery._delivery_lane_value(job, for_failure=True))
     lane_values = [deliver_value]
     if failure_deliver_value != deliver_value:
         lane_values.append(failure_deliver_value)
@@ -232,7 +233,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
             if not part or part.lower() in {"local", "origin", "all"}:
                 continue
             # bot-chat targets deliver via a local subprocess; failures land in last_delivery_error.
-            if _sched.parse_bot_chat_deliver_token(part) is not None:
+            if _delivery.parse_bot_chat_deliver_token(part) is not None:
                 continue
             platform_parts.append(part.split(":", 1)[0].strip())
     if not platform_parts:
@@ -240,7 +241,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
 
     connected: Optional[set] = None
     for platform_name in platform_parts:
-        if not _sched._is_known_delivery_platform(platform_name):
+        if not _delivery._is_known_delivery_platform(platform_name):
             return (
                 f"delivery platform '{platform_name}' is not a known cron "
                 "delivery target. Fix the job's `deliver` value or configure "
@@ -251,7 +252,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
                 from gateway.config import load_gateway_config
                 gateway_config = load_gateway_config()
                 connected = {p.value for p in gateway_config.get_connected_platforms()}
-                connected |= _sched._relay_fronted_delivery_platforms(connected)
+                connected |= _delivery._relay_fronted_delivery_platforms(connected)
             except Exception:
                 logger.debug(
                     "preflight: gateway config unavailable — skipping "
@@ -335,3 +336,4 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
 from cron import scheduler as _sched  # noqa: E402
+from cron import scheduler_delivery as _delivery  # noqa: E402
