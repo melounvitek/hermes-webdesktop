@@ -6,6 +6,7 @@ base64 → ``$HERMES_HOME/cache/images/``. Selection: ``OPENAI_IMAGE_MODEL`` →
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -50,6 +51,14 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     with open(ref, "rb") as fh:
         data = fh.read()
     return data, os.path.basename(ref) or "image.png"
+
+
+def _named_bytes_io(ref: str) -> io.BytesIO:
+    """``images.edit()`` expects named file-like objects for correct multipart."""
+    data, fname = _load_image_bytes(ref)
+    bio = io.BytesIO(data)
+    bio.name = fname
+    return bio
 
 
 class OpenAIImageGenProvider(StaticImageGenProvider):
@@ -99,36 +108,21 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         fail = error_factory("openai", aspect, model=tier_id, prompt=prompt)
         client = openai.OpenAI(api_key=api_key)
 
+        # gpt-image-2 returns b64_json unconditionally and REJECTS
+        # ``response_format`` as an unknown parameter. Don't send it.
+        request: Dict[str, Any] = dict(model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
         if is_edit:
-            # images.edit() expects named file-like objects for correct multipart.
-            import io
-
             try:
-                files = []
-                for ref in sources:
-                    data, fname = _load_image_bytes(ref)
-                    bio = io.BytesIO(data)
-                    bio.name = fname
-                    files.append(bio)
+                files = [_named_bytes_io(ref) for ref in sources]
             except Exception as exc:
                 return fail(f"Could not load source image for editing: {exc}", "io_error")
-            try:
-                response = client.images.edit(
-                    model=API_MODEL, image=files if len(files) > 1 else files[0], prompt=prompt,
-                    size=size,  # type: ignore[arg-type]  # OPENAI_SIZES values are valid gpt-image sizes
-                    quality=meta["quality"], n=1)
-            except Exception as exc:
-                logger.debug("OpenAI image edit failed", exc_info=True)
-                return fail(f"OpenAI image editing failed: {exc}", "api_error")
-        else:
-            # gpt-image-2 returns b64_json unconditionally and REJECTS
-            # ``response_format`` as an unknown parameter. Don't send it.
-            try:
-                response = client.images.generate(
-                    model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
-            except Exception as exc:
-                logger.debug("OpenAI image generation failed", exc_info=True)
-                return fail(f"OpenAI image generation failed: {exc}", "api_error")
+            request["image"] = files if len(files) > 1 else files[0]
+        verb, call = ("edit", client.images.edit) if is_edit else ("generation", client.images.generate)
+        try:
+            response = call(**request)
+        except Exception as exc:
+            logger.debug("OpenAI image %s failed", verb, exc_info=True)
+            return fail(f"OpenAI image {'editing' if is_edit else 'generation'} failed: {exc}", "api_error")
 
         data = getattr(response, "data", None) or []
         if not data:
