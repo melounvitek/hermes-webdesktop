@@ -9,9 +9,7 @@ import sys
 from hermes_cli import projects_db as pdb
 
 
-def build_parser(
-    parent_subparsers: argparse._SubParsersAction,
-) -> argparse.ArgumentParser:
+def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Attach the ``project`` subcommand tree. Returns the top parser."""
     parser = parent_subparsers.add_parser(
         "project",
@@ -83,7 +81,6 @@ def projects_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return 0
-
     handler = _HANDLERS.get(action)
     if handler is None:
         print(f"Unknown project action: {action}", file=sys.stderr)
@@ -91,10 +88,15 @@ def projects_command(args: argparse.Namespace) -> int:
     return handler(args)
 
 
+def _err(message: str) -> int:
+    print(f"project: {message}", file=sys.stderr)
+    return 1
+
+
 def _resolve(conn, ident: str):
     proj = pdb.get_project(conn, ident)
     if proj is None:
-        print(f"project: no such project: {ident}", file=sys.stderr)
+        _err(f"no such project: {ident}")
     return proj
 
 
@@ -133,23 +135,14 @@ def _print_project(proj) -> None:
     if proj.folders:
         print("  folders:")
         for f in proj.folders:
-            mark = " *" if f.is_primary else "  "
-            label = f" ({f.label})" if f.label else ""
-            print(f"   {mark} {f.path}{label}")
+            print(f"   {' *' if f.is_primary else '  '} {f.path}{f' ({f.label})' if f.label else ''}")
 
 
 @_db_command
 def _cmd_create(args, conn) -> int:
     pid = pdb.create_project(
-        conn,
-        name=args.name,
-        slug=args.slug,
-        folders=args.folders,
-        primary_path=args.primary,
-        description=args.description,
-        icon=args.icon,
-        color=args.color,
-        board_slug=args.board,
+        conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
+        description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -165,16 +158,13 @@ def _cmd_create(args, conn) -> int:
 @_db_command
 def _cmd_list(args, conn) -> int:
     active = pdb.get_active_id(conn)
-    projs = pdb.list_projects(
-        conn, include_archived=getattr(args, "include_archived", False)
-    )
+    projs = pdb.list_projects(conn, include_archived=getattr(args, "include_archived", False))
     if not projs:
         print("No projects yet. Create one with `hermes project create <name>`.")
         return 0
     for p in projs:
-        marker = "*" if p.id == active else " "
         flags = " (archived)" if p.archived else ""
-        print(f"{marker} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
+        print(f"{'*' if p.id == active else ' '} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
     return 0
 
 
@@ -194,8 +184,7 @@ def _cmd_add_folder(args, conn, proj) -> int:
 @_with_project
 def _cmd_remove_folder(args, conn, proj) -> int:
     if not pdb.remove_folder(conn, proj.id, args.path):
-        print(f"project: folder not in project: {args.path}", file=sys.stderr)
-        return 1
+        return _err(f"folder not in project: {args.path}")
     print(f"Removed {args.path} from {proj.slug}")
     return 0
 
@@ -210,12 +199,7 @@ def _cmd_rename(args, conn, proj) -> int:
 @_with_project
 def _cmd_set_primary(args, conn, proj) -> int:
     if not pdb.set_primary(conn, proj.id, args.path):
-        print(
-            f"project: '{args.path}' is not a folder of {proj.slug}; "
-            f"add it first with `hermes project add-folder`.",
-            file=sys.stderr,
-        )
-        return 1
+        return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
     print(f"Set primary of {proj.slug} -> {args.path}")
     return 0
 
@@ -234,46 +218,35 @@ def _cmd_use(args, conn) -> int:
     return 0
 
 
-@_with_project
-def _cmd_archive(args, conn, proj) -> int:
-    pdb.archive_project(conn, proj.id)
-    print(f"Archived {proj.slug}")
-    return 0
+def _flag_command(op: str, verb: str):
+    """Handler for ``pdb.<op>(conn, proj.id)`` followed by ``"<verb> <slug>"``."""
 
+    @_with_project
+    def handler(args, conn, proj) -> int:
+        getattr(pdb, op)(conn, proj.id)
+        print(f"{verb} {proj.slug}")
+        return 0
 
-@_with_project
-def _cmd_restore(args, conn, proj) -> int:
-    pdb.restore_project(conn, proj.id)
-    print(f"Restored {proj.slug}")
-    return 0
+    return handler
 
 
 @_with_project
 def _cmd_bind_board(args, conn, proj) -> int:
     pdb.update_project(conn, proj.id, board_slug=args.board)
-    if args.board.strip():
-        print(f"Bound {proj.slug} -> board {args.board}")
-        _sync_board_default_workdir(proj, args.board)
-    else:
+    if not args.board.strip():
         print(f"Unbound board from {proj.slug}")
+        return 0
+    print(f"Bound {proj.slug} -> board {args.board}")
+    if proj.primary_path:  # best-effort: point the bound board's default_workdir at the primary repo
+        try:
+            from hermes_cli import kanban_db as kb
+
+            slug = kb._normalize_board_slug(args.board)
+            if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
+                kb.write_board_metadata(slug, default_workdir=proj.primary_path)
+        except Exception:
+            pass
     return 0
-
-
-def _sync_board_default_workdir(proj, board_slug: str) -> None:
-    """Best-effort: point the bound board's default_workdir at the primary repo."""
-    if not proj.primary_path:
-        return
-    try:
-        from hermes_cli import kanban_db as kb
-
-        slug = kb._normalize_board_slug(board_slug)
-        if not slug:
-            return
-        if slug != kb.DEFAULT_BOARD and not kb.board_exists(slug):
-            return
-        kb.write_board_metadata(slug, default_workdir=proj.primary_path)
-    except Exception:
-        pass
 
 
 _HANDLERS = {
@@ -286,7 +259,7 @@ _HANDLERS = {
     "rename": _cmd_rename,
     "set-primary": _cmd_set_primary,
     "use": _cmd_use,
-    "archive": _cmd_archive,
-    "restore": _cmd_restore,
+    "archive": _flag_command("archive_project", "Archived"),
+    "restore": _flag_command("restore_project", "Restored"),
     "bind-board": _cmd_bind_board,
 }
