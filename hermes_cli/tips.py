@@ -447,8 +447,7 @@ COMPOSER_PLACEHOLDERS = [
     "Turn these notes into a to-do list",
     "Explain this error and how to fix it",
     "Set a reminder or schedule a recurring task",
-    "Type / to browse commands, or Ctrl+P for the palette",
-]
+    "Type / to browse commands, or Ctrl+P for the palette"]
 
 
 def get_random_composer_placeholder() -> str:
