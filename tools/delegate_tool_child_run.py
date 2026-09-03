@@ -96,11 +96,11 @@ _DIAG_CHILD_ATTRS = (
 )
 
 def _diag_section(label: str, produce) -> List[str]:
-    """Lines from ``produce()``, or one ``<error: ...>`` line so a broken attribute never aborts the dump."""
+    """Lines from ``produce()``, or one ``<label: ...exc>`` line so a broken attribute never aborts the dump."""
     try:
         return list(produce())
     except Exception as exc:
-        return [f"  {label}: <error: {exc}>"]
+        return [f"  {label}{exc}>"]
 
 def _diag_sizes(child: Any) -> List[str]:
     def _prompt():
@@ -120,7 +120,7 @@ def _diag_sizes(child: Any) -> List[str]:
             f"  tool_schema_bytes: {len(json.dumps(tools_schema, default=str).encode('utf-8'))}",
         ]
 
-    return ["## Prompt / schema sizes"] + _diag_section("system_prompt", _prompt) + _diag_section("tool_schema", _tools)
+    return ["## Prompt / schema sizes"] + _diag_section("system_prompt: <error: ", _prompt) + _diag_section("tool_schema: <error: ", _tools)
 
 def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     """Worker stack plus all other live threads (bounded to 40): the worker is
@@ -134,31 +134,22 @@ def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
         lines.extend(_format_thread_stack(worker_frame, "  ") if worker_frame is not None else ["  <worker frame not available>"])
     else:
         lines.append("  <no worker thread handle>" if worker_thread is None else "  <worker thread already exited>")
-    lines += ["", "## All thread stacks at timeout"]
 
     def _all_threads():
         frames = _sys._current_frames()
         by_ident = {th.ident: th for th in threading.enumerate() if th.ident}
         worker_ident = worker_thread.ident if worker_thread else None
         out: List[str] = []
-        dumped = 0
-        for ident, frame in frames.items():
-            if ident == worker_ident:
-                continue  # already dumped above
+        for dumped, (ident, frame) in enumerate(f for f in frames.items() if f[0] != worker_ident):  # worker dumped above
             if dumped >= 40:
                 out.append(f"  <{len(frames) - dumped - 1} more threads omitted>")
                 break
             th = by_ident.get(ident)
-            name = th.name if th else f"ident={ident}"
-            out.append(f"  --- {name}{' daemon' if (th and th.daemon) else ''} ---")
+            out.append(f"  --- {th.name if th else f'ident={ident}'}{' daemon' if (th and th.daemon) else ''} ---")
             out.extend(_format_thread_stack(frame, "    "))
-            dumped += 1
         return out
 
-    try:
-        return lines + _all_threads()
-    except Exception as exc:
-        return lines + [f"  <all-thread dump failed: {exc}>"]
+    return lines + ["", "## All thread stacks at timeout"] + _diag_section("<all-thread dump failed: ", _all_threads)
 
 def _dump_subagent_timeout_diagnostic(
     *, child: Any, task_index: int, timeout_seconds: float, duration_seconds: float,
@@ -200,7 +191,10 @@ def _dump_subagent_timeout_diagnostic(
             "## Child config",
         ]
         for attr in _DIAG_CHILD_ATTRS:
-            lines += _diag_section(attr, lambda a=attr: [f"  {a}: {getattr(child, a, None)!r}"]) or [f"  {attr}: <unreadable>"]
+            try:
+                lines.append(f"  {attr}: {getattr(child, attr, None)!r}")
+            except Exception:
+                lines.append(f"  {attr}: <unreadable>")
         lines += ["", "## Toolsets", f"  enabled_toolsets:  {getattr(child, 'enabled_toolsets', None)!r}"]
         tool_names = getattr(child, "valid_tool_names", None)
         if tool_names:
@@ -209,7 +203,7 @@ def _dump_subagent_timeout_diagnostic(
                 lines.append(f"  loaded tools:      {sorted(tool_names)}")
         lines += [""] + _diag_sizes(child) + ["", "## Activity summary"]
         lines += _diag_section(
-            "<get_activity_summary failed", lambda: [f"  {k}: {v!r}" for k, v in child.get_activity_summary().items()],
+            "<get_activity_summary failed: ", lambda: [f"  {k}: {v!r}" for k, v in child.get_activity_summary().items()],
         )
         lines += [""] + _diag_threads(worker_thread) + [
             "",
@@ -252,34 +246,27 @@ def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
                 child_iter = child_summary.get("api_call_count", 0)
                 child_max = child_summary.get("max_iterations", 0)
                 child_activity_ts = child_summary.get("last_activity_ts")
-
                 # A slow model wait refreshes last_activity_ts (direct_api_call
                 # heartbeat), so it never looks stale at the idle threshold.
                 activity_advanced = child_activity_ts is not None and (
                     last_seen["ts"] is None or child_activity_ts > last_seen["ts"]
                 )
                 if child_iter > last_seen["iter"] or child_tool != last_seen["tool"] or activity_advanced:
-                    last_seen["iter"], last_seen["tool"], last_seen["stale"] = child_iter, child_tool, 0
+                    last_seen.update(iter=child_iter, tool=child_tool, stale=0)
                     if child_activity_ts is not None:
                         last_seen["ts"] = child_activity_ts
                 else:
                     last_seen["stale"] += 1
-
-                stale_limit = _HEARTBEAT_STALE_CYCLES_IN_TOOL if child_tool else _HEARTBEAT_STALE_CYCLES_IDLE
-                if last_seen["stale"] >= stale_limit:
+                if last_seen["stale"] >= (_HEARTBEAT_STALE_CYCLES_IN_TOOL if child_tool else _HEARTBEAT_STALE_CYCLES_IDLE):
                     logger.warning(
                         "Subagent %d appears stale (no progress for %d heartbeat cycles, tool=%s) — stopping heartbeat",
                         task_index, last_seen["stale"], child_tool or "<none>",
                     )
                     break  # stop touching parent, let gateway timeout fire
-
                 if child_tool:
                     desc = f"delegate_task: subagent running {child_tool} (iteration {child_iter}/{child_max})"
                 elif child_summary.get("last_activity_desc", ""):
-                    desc = (
-                        f"delegate_task: subagent {child_summary.get('last_activity_desc', '')} "
-                        f"(iteration {child_iter}/{child_max})"
-                    )
+                    desc = f"delegate_task: subagent {child_summary.get('last_activity_desc', '')} (iteration {child_iter}/{child_max})"
             except Exception:
                 pass
             with _quiet(None):
@@ -499,14 +486,12 @@ def _build_result_entry(
     summary-presence heuristic (which is only a fallback for legacy/mock results).
     """
     summary = result.get("final_response") or ""
-    structured_failure = bool(result.get("failed") or result.get("error"))
     # "(empty)" is run_agent's give-up sentinel after repeated empty LLM
     # responses (usually a transport bug) — a failure, not a success.
     usable_summary = bool(summary) and summary.strip() != "(empty)"
-
     if result.get("interrupted", False):
         status, exit_reason = "interrupted", "interrupted"
-    elif structured_failure:
+    elif result.get("failed") or result.get("error"):
         # The loop returns the error text as final_response, which would
         # otherwise read as "completed". Never report a provider rejection as
         # "max_iterations" — that is only truthful for real budget exhaustion.
@@ -514,10 +499,10 @@ def _build_result_entry(
     else:
         # exit_reason ("completed" vs "max_iterations") tells the parent HOW
         # the task ended; completed=False with no failure = budget exhaustion.
-        exit_reason = "completed" if result.get("completed", False) else "max_iterations"
         # A declared schema still violated after the bounded retry makes the
         # summary unusable under the contract, so status must not say completed
         # (orchestrators reading only status/icon would accept an empty verdict).
+        exit_reason = "completed" if result.get("completed", False) else "max_iterations"
         status = "completed" if schema.valid is not False and usable_summary else "failed"
 
     _cost = getattr(child, "session_estimated_cost_usd", 0.0)
