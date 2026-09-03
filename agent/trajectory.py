@@ -1,5 +1,4 @@
-"""Trajectory saving utilities and static helpers (``_convert_to_trajectory_format`` stays an
-AIAgent method — batch_runner.py calls it)."""
+"""Trajectory saving + scratchpad helpers (``_convert_to_trajectory_format`` stays an AIAgent method — batch_runner.py calls it)."""
 
 import json
 import logging
@@ -22,16 +21,10 @@ def has_incomplete_scratchpad(content: str) -> bool:
 
 
 def save_trajectory(trajectory: List[Dict[str, Any]], model: str, completed: bool, filename: str = None):
-    """Append a ShareGPT-format trajectory entry to a JSONL file (default trajectory_samples.jsonl /
-    failed_trajectories.jsonl based on ``completed``)."""
+    """Append a ShareGPT-format entry to a JSONL file (default trajectory_samples.jsonl / failed_trajectories.jsonl by ``completed``)."""
     if filename is None:
         filename = "trajectory_samples.jsonl" if completed else "failed_trajectories.jsonl"
-    entry = {
-        "conversations": trajectory,
-        "timestamp": datetime.now().isoformat(),
-        "model": model,
-        "completed": completed,
-    }
+    entry = {"conversations": trajectory, "timestamp": datetime.now().isoformat(), "model": model, "completed": completed}
     try:
         with open(filename, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
