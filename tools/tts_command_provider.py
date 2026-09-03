@@ -1,20 +1,12 @@
 """Shared runner for user-configured shell ("command") TTS/STT providers.
 
-``tools.tts_tool`` and ``tools.transcription_tools`` both let users declare a
-provider as a shell command template with ``{placeholders}`` (``{{``/``}}`` stay
-literal; values are shell-quoted for their surrounding quote context). This
-module owns the quote-aware rendering, the idle-timeout process runner and the
-generic ``<section>.providers.<name>`` config readers; each origin module
-re-imports them under its historical private names. TTS config shape::
-
-    tts:
-      provider: piper-en
-      providers:
-        piper-en: {type: command, command: "piper -f {output_path} < {input_path}", output_format: wav}
-
-TTS placeholders: ``{input_path}``/``{text_path}``, ``{output_path}``, ``{format}``,
-``{voice}``, ``{model}``, ``{speed}``. Built-in provider names always win over a
-same-named entry under ``providers``.
+``tts.providers.<name>: {type: command, command: "piper -f {output_path} < {input_path}"}``
+(and the ``stt.`` twin): ``{placeholders}`` are shell-quoted for their surrounding quote
+context, ``{{``/``}}`` stay literal. Owns the quote-aware rendering, the idle-timeout
+process runner and the generic ``<section>.providers.<name>`` readers, re-imported by
+``tts_tool``/``transcription_tools`` under their historical private names. TTS placeholders:
+``{input_path}``/``{text_path}``, ``{output_path}``, ``{format}``, ``{voice}``, ``{model}``,
+``{speed}``. Built-in provider names always win over a same-named ``providers`` entry.
 """
 
 from __future__ import annotations
@@ -143,14 +135,11 @@ def run_command_provider(
     command: str, timeout: float, env_passthrough: Optional[list] = None,
 ) -> subprocess.CompletedProcess:
     """Run a command-provider shell command with process-tree idle cleanup.
-
-    ``timeout`` is an IDLE timeout, reset whenever the command emits output — a
-    slow-but-alive provider survives, a silently stalled one is killed. Child env
-    is scrubbed of Hermes secrets while propagating delegated-child lineage markers.
-    """
+    ``timeout`` is an IDLE timeout, reset whenever the command emits output — a slow-but-alive
+    provider survives, a silently stalled one is killed. Child env is scrubbed of Hermes secrets
+    while propagating delegated-child lineage markers."""
     from agent.delegation_context import delegated_child_subprocess_env
     from tools.environments.local import hermes_subprocess_env
-
     scrubbed = hermes_subprocess_env(inherit_credentials=False)
     for key in env_passthrough or []:
         value = os.environ.get(key)
@@ -199,13 +188,11 @@ def run_command_provider(
             continue
         chunks[name].append(chunk)
         deadline = time.monotonic() + timeout
-
     if not timed_out:
         try:
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             timed_out = True
-
     if timed_out:
         terminate_command_process_tree(proc)
         for reader in readers:
@@ -223,10 +210,7 @@ def run_command_provider(
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
-# ===========================================================================
-# Generic ``<section>.providers.<name>`` config layer (TTS and STT share it)
-# ===========================================================================
-
+# ---- Generic ``<section>.providers.<name>`` config layer (TTS and STT share it) ----
 
 def _get_provider_section(config: Dict[str, Any], name: str) -> Dict[str, Any]:
     """Return ``config[name]`` if it's a dict, else an empty dict."""
@@ -235,11 +219,8 @@ def _get_provider_section(config: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def _named_provider_config(config: Dict[str, Any], name: str, builtins: FrozenSet[str]) -> Dict[str, Any]:
-    """``<section>.providers.<name>`` (canonical), else ``<section>.<name>`` for non-built-in names only.
-
-    The back-compat form is refused for built-ins so a user's ``openai:`` block
-    still means the OpenAI provider, not a custom command.
-    """
+    """``<section>.providers.<name>`` (canonical), else ``<section>.<name>`` for non-built-in names only —
+    refused for built-ins so a user's ``openai:`` block still means the OpenAI provider, not a command."""
     section = _get_provider_section(config, "providers").get(name)
     if isinstance(section, dict):
         return section
@@ -329,14 +310,10 @@ def _generate_command_tts(
     text: str, output_path: str, provider_name: str, config: Dict[str, Any], tts_config: Dict[str, Any],
 ) -> str:
     """Generate speech by running a user-configured shell command; returns the audio path it wrote.
-
-    Raises ``ValueError`` for invalid provider config and ``RuntimeError`` for
-    timeouts / non-zero exits / empty output.
-    """
+    Raises ``ValueError`` for invalid provider config, ``RuntimeError`` for timeouts / non-zero exits / empty output."""
     command_template = str(config.get("command") or "").strip()
     if not command_template:
         raise ValueError(f"tts.providers.{provider_name}.command is not configured")
-
     output = Path(output_path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
@@ -361,7 +338,6 @@ def _generate_command_tts(
             raise RuntimeError(
                 f"TTS provider '{provider_name}' exited with code {exc.returncode}: {command_failure_detail(exc)}"
             ) from exc
-
     if not output.exists() or output.stat().st_size <= 0:
         raise RuntimeError(f"TTS provider '{provider_name}' produced no output at {output}")
     return str(output)

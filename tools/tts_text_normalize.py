@@ -124,11 +124,9 @@ def normalize_symbols_for_tts(text: str) -> str:
 
 
 def smooth_whitespace_for_tts(text: str) -> str:
-    """Collapse visual formatting into calm spoken paragraphs.
-
-    A _HEAD-marked heading folds into the next content line as a lead-in ("Weather,
-    It will be sunny."); a heading with no content after it becomes its own sentence.
-    """
+    """Collapse visual formatting into calm spoken paragraphs. A _HEAD-marked heading folds into
+    the next content line as a lead-in ("Weather, It will be sunny."); a heading with no content
+    after it becomes its own sentence."""
     if not text:
         return ""
     raw_lines = text.splitlines()
@@ -141,7 +139,6 @@ def smooth_whitespace_for_tts(text: str) -> str:
         if pending_heading is not None:
             lines.append(pending_heading.rstrip(".:;,") + ".")
             pending_heading = None
-
     for raw_line in raw_lines:
         is_heading = raw_line.rstrip().endswith(_HEAD)
         line = raw_line.replace(_HEAD, "").strip()
@@ -188,11 +185,9 @@ def strip_nonspoken_blocks(text: str) -> str:
 
 
 def flatten_newlines_for_payload(text: str) -> str:
-    """Collapse newlines into sentence breaks for single-line TTS payloads.
-
-    Some OpenAI-compatible backends (e.g. Kokoro) truncate at the first newline; the
-    smoothing pass already terminates each line with punctuation, so this is safe.
-    """
+    """Collapse newlines into sentence breaks for single-line TTS payloads: some OpenAI-compatible
+    backends (e.g. Kokoro) truncate at the first newline; smoothing already ends each line with
+    punctuation, so this is safe."""
     if not text:
         return ""
     for pattern, repl in ((r"\n{2,}", ". "), (r"(?<=[.!?;:,])\n", " "), (r"\n", ". "), (r"\.\s*\.", "."),
@@ -203,10 +198,8 @@ def flatten_newlines_for_payload(text: str) -> str:
 
 def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     """Return a TTS-friendly script from assistant text (deterministic cleanup, not a rewrite).
-
-    Pipeline: non-spoken blocks > Markdown > symbols/units > line formatting into
-    sentence pauses > single line (for newline-sensitive providers), then ``max_chars``.
-    """
+    Pipeline: non-spoken blocks > Markdown > symbols/units > line formatting into sentence
+    pauses > single line (for newline-sensitive providers), then ``max_chars``."""
     spoken = text
     for step in (strip_nonspoken_blocks, strip_markdown_for_tts, normalize_symbols_for_tts,
                  smooth_whitespace_for_tts, flatten_newlines_for_payload):

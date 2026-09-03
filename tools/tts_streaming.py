@@ -27,9 +27,7 @@ _STREAM_SENTENCE_BYTE_CAP = 16 * 1024 * 1024
 
 def _resolve_key(env_var: str, provider_id: str) -> str:
     """Provider secret lookup (config > env/.env > credential pool); seam over ``tts_tool._resolve_provider_key``.
-
-    ALL streaming-provider key lookups go through here — never bare ``get_env_value``.
-    """
+    ALL streaming-provider key lookups go through here — never bare ``get_env_value``."""
     try:
         from tools.tts_tool import _resolve_provider_key
         return _resolve_provider_key(env_var, provider_id) or ""
@@ -41,10 +39,9 @@ def _gemini_key() -> str:
     return _resolve_key("GEMINI_API_KEY", "gemini") or _resolve_key("GOOGLE_API_KEY", "gemini")
 
 
-# Interruption latch: when the user barges in on a spoken reply, the surface marks
-# it; the next turn's submit path takes it and prepends SPEECH_INTERRUPTED_NOTE to
-# the model-bound message (API-call local, never persisted). The TTL keeps a stale
-# barge from annotating an unrelated message minutes later.
+# Interruption latch: a barge-in on a spoken reply marks it; the next turn's submit path takes it
+# and prepends SPEECH_INTERRUPTED_NOTE to the model-bound message (API-call local, never
+# persisted). The TTL keeps a stale barge from annotating an unrelated message minutes later.
 SPEECH_INTERRUPTED_NOTE = "[Note: the user interrupted your previous spoken reply before it finished.]"
 _INTERRUPT_TTL_S = 120.0
 _interrupted_at: Optional[float] = None
@@ -67,12 +64,9 @@ _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL)
 
 
 class SentenceChunker:
-    """Incremental sentence cutter for LLM token deltas.
-
-    Shared by the speaker pipeline and the speak-stream WebSocket so every surface
-    cuts speech identically. Strips ``<think>`` blocks (even split across deltas) and
-    merges fragments shorter than *min_len* into the following sentence.
-    """
+    """Incremental sentence cutter for LLM token deltas, shared by the speaker pipeline and the
+    speak-stream WebSocket so every surface cuts speech identically. Strips ``<think>`` blocks (even
+    split across deltas) and merges fragments shorter than *min_len* into the following sentence."""
 
     def __init__(self, min_len: int = 20):
         self.min_len = min_len
@@ -152,13 +146,11 @@ _PROVIDER_PRIORITY: List[str] = ["elevenlabs", "gemini", "openai", "xai"]
 def resolve_streaming_provider(
     tts_config: Dict, preferred: Optional[str] = None) -> Optional[StreamingTTSProvider]:
     """Return a ready streamer for the *configured* provider, else ``None``.
-
-    ``tts.streaming.provider`` when set: a name pins that exact streamer (``None``
-    if unusable); ``auto`` returns the first usable in ``_PROVIDER_PRIORITY``.
-    Otherwise the configured TTS provider (or ``preferred``): ``None`` means "no
-    chunked API" — the dispatcher speaks per-sentence via the sync path, preserving
-    the user's chosen voice. We never silently swap providers just to get streaming.
-    """
+    ``tts.streaming.provider`` when set: a name pins that exact streamer (``None`` if unusable);
+    ``auto`` returns the first usable in ``_PROVIDER_PRIORITY``. Otherwise the configured TTS
+    provider (or ``preferred``): ``None`` means "no chunked API" — the dispatcher speaks
+    per-sentence via the sync path, preserving the user's chosen voice. We never silently swap
+    providers just to get streaming."""
     pinned = str((tts_config.get("streaming") or {}).get("provider") or "").lower().strip()
     if pinned == "auto":
         return next((inst for name in _PROVIDER_PRIORITY if (inst := _try_instantiate(name, tts_config))), None)
@@ -281,11 +273,8 @@ class GeminiStreamer(StreamingTTSProvider):
 @register("xai")
 class XAIStreamer(StreamingTTSProvider):
     """xAI WebSocket TTS (``wss://api.x.ai/v1/tts``) → binary PCM frames (24 kHz mono int16).
-
-    Credentials route through ``resolve_xai_http_credentials`` (OAuth or XAI_API_KEY),
-    same as the sync path. ``_collect_async`` bridges the async WS loop to the sync
-    iterator contract — the seam unit tests patch.
-    """
+    Credentials route through ``resolve_xai_http_credentials`` (OAuth or XAI_API_KEY), same as the
+    sync path. ``_collect_async`` bridges the async WS loop to the sync iterator contract (test seam)."""
 
     @staticmethod
     def available() -> bool:
@@ -315,7 +304,6 @@ class XAIStreamer(StreamingTTSProvider):
             raise RuntimeError("No xAI credentials for streaming TTS")
         voice = str(self.section.get("voice_id", DEFAULT_XAI_VOICE_ID)).strip() or DEFAULT_XAI_VOICE_ID
         ws_url = str(self.section.get("streaming_url") or "wss://api.x.ai/v1/tts").strip()
-
         async with websockets.connect(ws_url, extra_headers={"Authorization": f"Bearer {api_key}"}) as ws:
             await ws.send(_json.dumps({"text": text, "voice_id": voice, "response_format": "pcm"}))
             try:
