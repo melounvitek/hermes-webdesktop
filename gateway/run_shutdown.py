@@ -16,7 +16,7 @@ import shlex
 import sys
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -78,6 +78,23 @@ subprocess.Popen(
     creationflags=windows_detach_flags_without_breakaway(),
 )
 """.strip()
+
+
+@contextmanager
+def _log_suppressed(level: int, msg: str, *args, exc_info: bool = False):
+    """``suppress(Exception)`` that logs the swallowed exception on ``gateway.run``.
+
+    Without ``exc_info`` the exception is appended as the last ``%s`` argument (``msg % (*args, exc)``);
+    with it the traceback is attached instead. Best-effort seams use this everywhere a failure must be
+    visible in the log but must never propagate.
+    """
+    try:
+        yield
+    except Exception as exc:
+        if exc_info:
+            logger.log(level, msg, *args, exc_info=(type(exc), exc, exc.__traceback__))
+        else:
+            logger.log(level, msg, *args, exc)
 
 
 def _send_failed(result: Any) -> bool:
@@ -606,11 +623,9 @@ class GatewayShutdownMixin:
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
                 continue
-            try:
+            with _log_suppressed(logging.DEBUG, "Failed interrupting agent during shutdown: %s"):
                 request_hard_interrupt(agent, reason)
                 logger.debug("Interrupted running agent for session %s during shutdown", session_key)
-            except Exception as e:
-                logger.debug("Failed interrupting agent during shutdown: %s", e)
         # API-server / desk turns are adapter-owned and never enter _running_agents, so the loop above
         # cannot see them even though _drain_active_agents() waited for them.
         interrupted_api = self._interrupt_api_server_runs(reason)
@@ -632,11 +647,9 @@ class GatewayShutdownMixin:
         for _sk, _agent in list(self._running_agents.items()):
             if _agent is _AGENT_PENDING_SENTINEL:
                 continue
-            try:
+            with _log_suppressed(logging.DEBUG, "%s failed for %s: %s", log_prefix, _sk):
                 await self.async_session_store.mark_resume_pending(_sk, reason)
                 marked.append(_sk)
-            except Exception as _e:
-                logger.debug("%s failed for %s: %s", log_prefix, _sk, _e)
         return marked
 
     def _restart_notification_allowed(self, platform: Platform) -> bool:
@@ -851,7 +864,7 @@ class GatewayShutdownMixin:
         A force-interrupted agent may never reach finalize_turn (the only mid-turn flush), so its
         tool rounds would vanish on resume. Idempotent; gracefully finished agents re-flush nothing.
         """
-        try:
+        with _log_suppressed(logging.DEBUG, "Shutdown transcript flush failed: %s"):
             _flush = getattr(agent, "_flush_messages_to_session_db", None)
             _session_messages = getattr(agent, "_session_messages", None)
             if not (callable(_flush) and isinstance(_session_messages, list) and _session_messages):
@@ -873,8 +886,6 @@ class GatewayShutdownMixin:
                 )
                 from gateway.shutdown_flush import flush_agent_history_to_file
                 flush_agent_history_to_file(getattr(agent, "session_id", None), _session_messages)
-        except Exception as _e:
-            logger.debug("Shutdown transcript flush failed: %s", _e)
 
     async def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
         for agent in active_agents.values():
@@ -1254,10 +1265,8 @@ class GatewayShutdownMixin:
             # Launch the detached helper only AFTER the after-turn wait: its drain_timeout+5 deadline
             # covers stop() teardown; earlier it would fire the restart mid-turn.
             if detached:
-                try:
+                with _log_suppressed(logging.ERROR, "Failed to launch detached gateway restart helper: %s"):
                     await self._launch_detached_restart_command()
-                except Exception as e:
-                    logger.error("Failed to launch detached gateway restart helper: %s", e)
             await asyncio.sleep(0.05)
             await self.stop(restart=True, detached_restart=detached, service_restart=via_service)
 
@@ -1471,19 +1480,15 @@ class GatewayShutdownMixin:
         logger.info("Shutdown phase: post-interrupt tool kill done at +%.2fs", ctx.elapsed())
         # Last window with the transport up: the cron worker's own "interrupted" notice arrives
         # after adapter teardown and is lost.
-        try:
+        with _log_suppressed(logging.DEBUG, "Cron interrupt notification failed: %s"):
             await self._notify_interrupted_cron_jobs(_interrupted_cron_jobs)
-        except Exception as _e:
-            logger.debug("Cron interrupt notification failed: %s", _e)
         logger.info("Shutdown phase: cron interrupt notices done at +%.2fs", ctx.elapsed())
 
     async def _stop_finalize_agents_and_adapters(self, ctx: "GatewayShutdownMixin._StopContext") -> None:
         """Detached restart launch, agent finalization, idle-cache cleanup, adapter teardown."""
         if self._restart_requested and self._restart_detached:
-            try:
+            with _log_suppressed(logging.ERROR, "Failed to launch detached gateway restart: %s"):
                 await self._launch_detached_restart_command()
-            except Exception as e:
-                logger.error("Failed to launch detached gateway restart: %s", e)
         await self._finalize_shutdown_agents(ctx.active_agents)
         # Idle cached agents too: _finalize_shutdown_agents only covers agents mid-turn at drain
         # time, but _agent_cache may hold agents whose MemoryProviders never got on_session_end().
@@ -1644,7 +1649,7 @@ class GatewayShutdownMixin:
         if ctx.active_agents:
             self._increment_restart_failure_counts(set(ctx.active_agents.keys()))
         if self._restart_requested and self._restart_command_source is None:
-            try:
+            with _log_suppressed(logging.DEBUG, "Failed to write planned restart notification marker: %s"):
                 atomic_json_write(
                     _planned_restart_notification_path(),
                     {
@@ -1654,8 +1659,6 @@ class GatewayShutdownMixin:
                     },
                     indent=None,
                 )
-            except Exception as e:
-                logger.debug("Failed to write planned restart notification marker: %s", e)
         if self._restart_requested and self._restart_via_service:
             # Service manager owns restarts: exit 75 + ``RestartForceExitStatus=75`` has systemd
             # replace this process without a second helper racing the unit's stop/start job.

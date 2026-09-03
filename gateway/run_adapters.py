@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from gateway.config import Platform, platform_binds_port as _platform_binds_port
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.restart import is_global_startup_conflict
+from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -73,14 +74,12 @@ class GatewayAdapterLifecycleMixin:
         """
         timeout = self._adapter_disconnect_timeout_secs()
         label = platform.value if platform is not None else "adapter"
-        try:
+        with _log_suppressed(logging.DEBUG, "Defensive %s disconnect after failed connect raised: %s", label):
             if not await self._await_adapter_cleanup_with_timeout(adapter.disconnect(), timeout):
                 logger.warning(
                     "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
                     timeout, label,
                 )
-        except Exception as e:
-            logger.debug("Defensive %s disconnect after failed connect raised: %s", label, e)
 
     async def _bounded_adapter_teardown(self, adapter, platform, *, profile: Optional[str] = None) -> None:
         """Tear down one adapter on the shutdown path with bounded awaits (never raises).
@@ -174,10 +173,8 @@ class GatewayAdapterLifecycleMixin:
     async def _handle_reaction_event(self, ctx: Dict[str, Any]) -> None:
         """Fan a normalised reaction event out to the HookRegistry; errors never block the adapter."""
         event_name = str(ctx.get("event_name") or "reaction:added")
-        try:
+        with _log_suppressed(logging.DEBUG, "[Gateway] reaction hook emit failed", exc_info=True):
             await self.hooks.emit(event_name, ctx)
-        except Exception:
-            logger.debug("[Gateway] reaction hook emit failed", exc_info=True)
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup (retryable → background reconnect queue).
@@ -467,10 +464,8 @@ class GatewayAdapterLifecycleMixin:
                 raise
             except Exception as exc:
                 logger.warning("Handoff for session %s failed: %s", session_id, exc, exc_info=True)
-                try:
+                with _log_suppressed(logging.DEBUG, "Could not record handoff failure", exc_info=True):
                     await session_db.fail_handoff(session_id, str(exc))
-                except Exception:
-                    logger.debug("Could not record handoff failure", exc_info=True)
             finally:
                 inflight.pop(session_id, None)
 
@@ -507,11 +502,9 @@ class GatewayAdapterLifecycleMixin:
             return _async_profile_runtime_scope(profile_home)
 
         for _pname, _phome in _handoff_watch_scopes(self):
-            try:
+            with _log_suppressed(logging.DEBUG, "Stale-handoff reclaim failed", exc_info=True):
                 async with _scope(_phome):
                     await _reclaim_stale(self)
-            except Exception:
-                logger.debug("Stale-handoff reclaim failed", exc_info=True)
 
         try:
             while self._running:
@@ -528,10 +521,8 @@ class GatewayAdapterLifecycleMixin:
             # Bounded drain: cancelling would strand in-flight rows in 'running'.
             pending_tasks = [t for t in inflight.values() if not t.done()]
             if pending_tasks:
-                try:
+                with _log_suppressed(logging.DEBUG, "Handoff drain raised", exc_info=True):
                     await asyncio.wait(pending_tasks, timeout=drain_timeout)
-                except Exception:
-                    logger.debug("Handoff drain raised", exc_info=True)
                 for task in pending_tasks:
                     if not task.done():
                         task.cancel()
@@ -858,7 +849,7 @@ class GatewayAdapterLifecycleMixin:
     def _record_served_profiles(self, active: str, profile_homes) -> None:
         """Record the served set (eligible for routing/HTTP prefixes/cron/runtime scope — broader
         than "has a connected adapter") for `hermes status`; seed per-profile PairingStores."""
-        try:
+        with _log_suppressed(logging.DEBUG, "could not record served_profiles", exc_info=True):
             from gateway.status import write_runtime_status
             from gateway.pairing import PairingStore
             served = [active] + sorted(name for name, _home in profile_homes if name != active)
@@ -868,8 +859,6 @@ class GatewayAdapterLifecycleMixin:
                         self.pairing_store if name == active else PairingStore(profile=name)
                     )
             write_runtime_status(served_profiles=served)
-        except Exception:
-            logger.debug("could not record served_profiles", exc_info=True)
 
     async def _load_secondary_profile_config(self, profile_name: str, profile_home: "Path"):
         """Hydrate + enter ``profile_home``'s scope once; return its gateway config.
@@ -1463,7 +1452,7 @@ class GatewayAdapterLifecycleMixin:
                 "thread_sessions_per_user", getattr(self.config, "thread_sessions_per_user", False)
             )
 
-        try:
+        with _log_suppressed(logging.DEBUG, "Platform registry lookup for '%s' failed: %s", platform.value):
             from gateway.platform_registry import platform_registry
             if platform_registry.is_registered(platform.value):
                 adapter = platform_registry.create_adapter(platform.value, config)
@@ -1473,8 +1462,6 @@ class GatewayAdapterLifecycleMixin:
                         "(check dependencies and config)", platform.value,
                     )
                 return adapter
-        except Exception as e:
-            logger.debug("Platform registry lookup for '%s' failed: %s", platform.value, e)
         return _instantiate_builtin_adapter(platform, config)
 
     def _make_adapter_auth_check(

@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, cast
 from gateway.config import Platform, _BUILTIN_PLATFORM_VALUES
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource
-from gateway.run_shutdown import _notice_target_key, _send_error, _send_failed
+from gateway.run_shutdown import _log_suppressed, _notice_target_key, _send_error, _send_failed
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -271,7 +271,7 @@ class GatewayNotificationsMixin:
         stale auto-appended tags are deduped upstream (_collect_auto_append_media_tags).
         """
         from urllib.parse import quote as _quote
-        try:
+        with _log_suppressed(logging.WARNING, "Post-stream media extraction failed: %s"):
             # Capture [[as_document]] before extract_media strips it: image files then go through
             # send_document (preserving bytes), not send_multiple_images (Telegram recompresses).
             force_document_attachments = "[[as_document]]" in response
@@ -318,8 +318,6 @@ class GatewayNotificationsMixin:
                 except Exception as e:
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
 
-        except Exception as e:
-            logger.warning("Post-stream media extraction failed: %s", e)
 
     async def _deliver_queued_first_response(
         self, response: str, source: SessionSource, adapter,
@@ -451,24 +449,20 @@ class GatewayNotificationsMixin:
             return
         max_chunk = 3500
         for i in range(0, len(clean), max_chunk):
-            try:
+            with _log_suppressed(logging.DEBUG, "Update stream send failed: %s"):
                 await target.send(f"```\n{clean[i:i + max_chunk]}\n```")
-            except Exception as e:
-                logger.debug("Update stream send failed: %s", e)
 
     async def _forward_update_prompt(self, target: "_UpdateTarget", prompt_text: str, default: str) -> None:
         """Forward an update prompt: platform-native buttons first (Discord, Telegram), else text."""
         sent_buttons = False
         adapter = target.adapter
         if getattr(type(adapter), "send_update_prompt", None) is not None:
-            try:
+            with _log_suppressed(logging.DEBUG, "Button-based update prompt failed: %s"):
                 await adapter.send_update_prompt(
                     chat_id=target.chat_id, prompt=prompt_text, default=default,
                     session_key=target.session_key, metadata=target.send_metadata(),
                 )
                 sent_buttons = True
-            except Exception as btn_err:
-                logger.debug("Button-based update prompt failed: %s", btn_err)
         if not sent_buttons:
             default_hint = f" (default: {default})" if default else ""
             _p = getattr(adapter, "typed_command_prefix", "/")
@@ -529,15 +523,13 @@ class GatewayNotificationsMixin:
             if paths.exit_code.exists():
                 _read_new_output()
                 await _flush_buffer()
-                try:
+                with _log_suppressed(logging.WARNING, "Update final notification failed: %s"):
                     exit_code = int(paths.exit_code.read_text(encoding="utf-8").strip() or "1")
                     await target.send(
                         "✅ Hermes update finished." if exit_code == 0
                         else "❌ Hermes update failed (exit code {}).".format(exit_code)
                     )
                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
-                except Exception as e:
-                    logger.warning("Update final notification failed: %s", e)
                 self._clear_update_markers(paths, session_key)
                 return
 
@@ -887,10 +879,8 @@ class GatewayNotificationsMixin:
             synth_text = _format_gateway_process_notification(evt)
             if not synth_text:
                 continue
-            try:
+            with _log_suppressed(logging.ERROR, "Watch notification injection error: %s"):
                 await self._inject_watch_notification(synth_text, evt)
-            except Exception as exc:
-                logger.error("Watch notification injection error: %s", exc)
 
     def _adapter_by_platform_value(self, platform_name: str):
         """Literal ``p.value == platform_name`` scan over connected adapters (native adapters only)."""
@@ -1446,7 +1436,7 @@ class GatewayNotificationsMixin:
         await asyncio.sleep(3)  # let platforms finish connecting
         from tools.process_registry import process_registry as _pr
         while self._running:
-            try:
+            with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
                 # Peek for async-delegation events only; watch/completion events belong to other drains,
                 # so requeue anything that isn't ours.
                 requeue = []
@@ -1476,8 +1466,6 @@ class GatewayNotificationsMixin:
                         for evt in group:
                             _pr.completion_queue.put(evt)
                         logger.error("Async delegation injection error: %s", e)
-            except Exception as e:
-                logger.debug("Async delegation watcher error: %s", e)
             await asyncio.sleep(interval)
 
     @staticmethod
@@ -1498,13 +1486,11 @@ class GatewayNotificationsMixin:
         from gateway.run import _non_conversational_metadata
         adapter = self._adapter_by_platform_value(platform_name)
         if adapter and chat_id:
-            try:
+            with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
                 send_meta = {"thread_id": thread_id} if thread_id else None
                 await adapter.send(
                     chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),
                 )
-            except Exception as e:
-                logger.error("Watcher delivery error: %s", e)
 
     @staticmethod
     def _build_process_completion_event(watcher: dict, session, session_id: str) -> dict:
