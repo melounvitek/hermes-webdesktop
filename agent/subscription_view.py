@@ -148,14 +148,10 @@ def subscription_change_preview_from_payload(payload: dict[str, Any]) -> Subscri
     )
 
 
-def subscription_state_from_payload(
-    payload: dict[str, Any], *, portal_url: Optional[str] = None
-) -> SubscriptionState:
+def subscription_state_from_payload(payload: dict[str, Any], *, portal_url: Optional[str] = None) -> SubscriptionState:
     """Map a raw ``/api/billing/subscription`` JSON dict into :class:`SubscriptionState`."""
     org, can_change_plan_raw = parse_org_fields(payload)
-    raw_context = payload.get("context")
-    raw_tiers = payload.get("tiers")
-    tiers = tuple(filter(None, map(_parse_tier, raw_tiers))) if isinstance(raw_tiers, list) else ()
+    raw_context, raw_tiers = payload.get("context"), payload.get("tiers")
     return SubscriptionState(
         logged_in=True,
         org_name=org.get("name"),
@@ -164,7 +160,7 @@ def subscription_state_from_payload(
         can_change_plan_raw=can_change_plan_raw,
         context=raw_context if raw_context in ("personal", "team") else "personal",
         current=_parse_current(payload.get("current")),
-        tiers=tiers,
+        tiers=tuple(filter(None, map(_parse_tier, raw_tiers))) if isinstance(raw_tiers, list) else (),
         portal_url=portal_url,
     )
 
@@ -179,13 +175,10 @@ def build_subscription_state(*, timeout: float = 15.0) -> SubscriptionState:
     if fixture is not None:
         return fixture
     return fetch_portal_state(
-        "get_subscription_state",
-        "subscription",
+        "get_subscription_state", "subscription",
         failed=lambda **kw: SubscriptionState(logged_in=False, **kw),
         parse=lambda payload, portal_url: subscription_state_from_payload(payload, portal_url=portal_url),
-        portal_fallback=lambda base: base,
-        timeout=timeout,
-        log=logger,
+        portal_fallback=lambda base: base, timeout=timeout, log=logger,
     )
 
 
