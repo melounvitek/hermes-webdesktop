@@ -1180,14 +1180,12 @@ class RelaySessionCoordinator:
         """Unwind ``turn`` without disturbing a newer context-local turn."""
         if _CURRENT_TURN.get() is not turn:
             return
-        previous = turn._previous_turn
-        seen = {id(turn)}
-        while previous is not None and previous.closed:
-            if id(previous) in seen:
-                previous = None
-                break
+        previous, seen = turn._previous_turn, {id(turn)}
+        while previous is not None and previous.closed and id(previous) not in seen:
             seen.add(id(previous))
             previous = previous._previous_turn
+        if previous is not None and previous.closed:  # cycle: no live ancestor
+            previous = None
         _CURRENT_TURN.set(previous)
 
     @staticmethod
@@ -1238,8 +1236,7 @@ def resolve_execution_context(session_id: str) -> tuple[RelayRuntime | None, Rel
         # Nested managed execution is impossible (see _MANAGED_CALLBACK_DEPTH); the
         # outer scope still records the tool-level event.
         return None, None, None
-    inherited_turn = current_turn()
-    if inherited_turn is not None and (not inherited_turn.relay_enabled or inherited_turn.closed):
+    if not relay_instrumentation_enabled():
         return None, None, None
     turn = active_turn(session_id)
     host = turn.lease.live_runtime() if turn is not None else None
@@ -1251,9 +1248,7 @@ def resolve_execution_context(session_id: str) -> tuple[RelayRuntime | None, Rel
     runtime = get_runtime(create=False)
     if runtime is None or not runtime.managed_execution_enabled():
         return None, None, None
-    session = runtime.get_session(session_id)
-    if session is None:
-        session = runtime.ensure_session({"session_id": session_id})
+    session = runtime.get_session(session_id) or runtime.ensure_session({"session_id": session_id})
     return runtime, session, None if session is None else session.handle
 
 
@@ -1294,10 +1289,7 @@ def current_profile_key() -> str:
         return str(home.resolve())
     raw = str(home)
     cached = _PROFILE_KEY_CACHE.get(raw)
-    if cached is not None:
-        return cached
-    resolved = str(home.resolve())
-    return _PROFILE_KEY_CACHE.setdefault(raw, resolved)
+    return cached if cached is not None else _PROFILE_KEY_CACHE.setdefault(raw, str(home.resolve()))
 
 
 def _load_nemo_relay() -> Any:
@@ -1309,8 +1301,7 @@ def _configured_plugin_inputs(relay: Any) -> tuple[dict[str, Any], list[Any]] | 
     """Load selected plugin inputs, or return ``None`` when none were selected."""
     configured = os.environ.get(RELAY_PLUGINS_CONFIG_ENV, "").strip()
     if not configured:
-        legacy_vars = configured_legacy_relay_env_vars(os.environ)
-        if legacy_vars:
+        if legacy_vars := configured_legacy_relay_env_vars(os.environ):
             logger.warning(
                 "Legacy NeMo Relay exporter variables are set but no %s was "
                 "provided. %s no longer activate Relay exporters; migrate the "
