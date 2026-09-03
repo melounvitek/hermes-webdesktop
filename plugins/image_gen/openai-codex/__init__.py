@@ -1,14 +1,13 @@
-"""OpenAI image generation backend — ChatGPT/Codex OAuth variant.
+"""OpenAI image generation — ChatGPT/Codex OAuth variant.
 
-Same catalog and tier semantics as the ``openai`` plugin (``gpt-image-2`` at
-low/medium/high), routed through the Codex Responses API ``image_generation``
-tool, so Codex/ChatGPT users need no separate ``OPENAI_API_KEY``. Output is
-saved as PNG; source images travel as Responses ``input_image`` parts.
+Same catalog/tiers as the ``openai`` plugin (``gpt-image-2`` low/medium/high), routed
+through the Codex Responses API ``image_generation`` tool, so no ``OPENAI_API_KEY`` is
+needed. Output is PNG; source images travel as Responses ``input_image`` parts.
 
 Do NOT reintroduce an "account capability" classifier keyed on ``Tool choice
-'image_generation' not found in 'tools' parameter``: that HTTP 400 is a
-request-shape rejection for every account, fixed by omitting tool_choice (see
-``_build_responses_payload``); any remaining HTTP error must surface verbatim.
+'image_generation' not found in 'tools' parameter``: that 400 is a request-shape
+rejection for every account, fixed by omitting tool_choice (``_build_responses_payload``);
+any remaining HTTP error must surface verbatim.
 """
 
 from __future__ import annotations
@@ -31,9 +30,7 @@ logger = logging.getLogger(__name__)
 _MAX_ERROR_BODY_CHARS = 500
 _MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
 
-# The chat model only hosts the ``image_generation`` tool call; the image work
-# is done by ``API_MODEL``.
-_CODEX_CHAT_MODEL = "gpt-5.5"
+_CODEX_CHAT_MODEL = "gpt-5.5"  # hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_INSTRUCTIONS = (
     "You are an assistant that must fulfill image generation and image editing "
@@ -41,16 +38,13 @@ _CODEX_INSTRUCTIONS = (
 
 _MAX_REFERENCE_IMAGES = 16
 _MAX_INPUT_IMAGE_BYTES = 25 * 1024 * 1024
-# gpt-image-2's ``input_image`` accepts raster formats only; the shared sniffer
-# also recognizes SVG/TIFF/ICO, which the API rejects server-side.
+# ``input_image`` accepts raster only; the shared sniffer also knows SVG/TIFF/ICO, which the API rejects.
 _ACCEPTED_INPUT_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
-# Progressive preview frames (partial_image_b64) are intermediate renders;
-# saving them as finals produced the "smear" failure mode. Request 0 partials,
-# never let a partial overwrite a final, and only deliver source=final.
+# Progressive frames (partial_image_b64) saved as finals produced the "smear" failure mode:
+# request 0 partials, never let a partial overwrite a final, only deliver source=final.
 _PARTIAL_IMAGES_REQUESTED = 0
-# Content-agnostic retries when the stream yields no final result.
-_NONFINAL_RETRIES = 1
+_NONFINAL_RETRIES = 1  # content-agnostic retries when the stream yields no final result
 
 _NO_AUTH = (
     "No Codex/ChatGPT OAuth credentials available. Run "
@@ -58,8 +52,7 @@ _NO_AUTH = (
 
 
 def _summarize_error_body(body: str) -> str:
-    """Bounded error summary preferring parsed ``error.message`` (Codex error
-    payloads can carry hundreds of bytes of leading metadata)."""
+    """Bounded summary preferring parsed ``error.message`` (Codex bodies carry leading metadata)."""
     text = body or ""
     try:
         payload = json.loads(text)
@@ -78,8 +71,7 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
 
 
 def _read_codex_access_token() -> Optional[str]:
-    """Usable Codex OAuth token or None; ``agent.auxiliary_client`` owns expiry,
-    pool selection and JWT decoding."""
+    """Usable Codex OAuth token or None (``agent.auxiliary_client`` owns expiry/pool/JWT)."""
     try:
         from agent.auxiliary_client import _read_codex_access_token as _reader
 
@@ -175,13 +167,9 @@ def _normalize_input_images(
 def _build_responses_payload(
     *, prompt: str, size: str, quality: str, input_images: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
-    """Codex Responses body for an image_generation call.
-
-    No ``tool_choice`` is sent: the Codex backend rejects every shape for
-    forcing the hosted tool (it looks tool_choice up as a *function* name), so
-    letting the host model decide — nudged by ``instructions`` — is the only
-    accepted shape.
-    """
+    """Responses body for an image_generation call. No ``tool_choice``: Codex rejects every shape
+    for forcing the hosted tool (looks it up as a *function* name), so the host model decides,
+    nudged by ``instructions``."""
     content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}, *(input_images or [])]
     return {
         "model": _CODEX_CHAT_MODEL,
@@ -202,8 +190,8 @@ def _build_responses_payload(
 
 
 def _extract_image_candidates(value: Any) -> Tuple[Optional[str], Optional[str]]:
-    """``(final_result_b64, latest_partial_b64)`` from a payload tree, tracked
-    separately so a partial can never overwrite a genuine final."""
+    """``(final_result_b64, latest_partial_b64)`` from a payload tree; a partial never overwrites
+    a final."""
     result_b64: Optional[str] = None
     partial_b64: Optional[str] = None
 
@@ -240,8 +228,7 @@ def _png_pixel_size(raw: bytes) -> Optional[str]:
 
 
 def _iter_sse_json(response: Any):
-    """Yield JSON payloads from an SSE response without OpenAI SDK parsing, so
-    image-generation events newer than the pinned SDK still parse."""
+    """JSON payloads from an SSE response, without SDK parsing (events newer than the SDK still parse)."""
     event_name: Optional[str] = None
     data_lines: List[str] = []
 
@@ -279,12 +266,8 @@ def _iter_sse_json(response: Any):
 def _collect_image_b64(
     token: str, *, prompt: str, size: str, quality: str, input_images: Optional[List[Dict[str, str]]] = None
 ) -> Optional[Dict[str, str]]:
-    """Stream a Codex Responses image_generation call.
-
-    Returns ``{"b64": ..., "source": "final"|"partial"}`` or ``None``. A partial
-    is retained only when no final ever arrives; callers must not treat
-    partial-only as success.
-    """
+    """Stream a Codex Responses image_generation call → ``{"b64", "source": "final"|"partial"}`` or
+    ``None``. A partial is kept only when no final arrives; callers must not treat it as success."""
     import httpx
     from agent.codex_headers import codex_cloudflare_headers
 
