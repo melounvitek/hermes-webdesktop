@@ -9,9 +9,7 @@ from hermes_cli.colors import Colors, color
 
 
 def _mark(glyph: str, col: str):
-    def check(text: str, detail: str = ""):
-        print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-    return check
+    return lambda text, detail="": print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 
 check_ok, check_warn, check_fail = _mark("✓", Colors.GREEN), _mark("⚠", Colors.YELLOW), _mark("✗", Colors.RED)
@@ -66,12 +64,11 @@ def doctor_check(on_error: str | None = None, detail: str = ""):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:
             f = Finding()
-            if on_error is None:
-                fn(should_fix, f)
-                return f
             try:
                 fn(should_fix, f)
             except Exception as e:
+                if on_error is None:
+                    raise
                 if on_error:
                     check_warn(on_error.format(e=e), detail.format(e=e))
             return f

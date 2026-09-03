@@ -107,7 +107,7 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
-    memory_on = _memory_enabled or _user_profile_enabled
+    memory_on = bool(_memory_enabled or _user_profile_enabled)
     # The built-in file store neither creates nor consumes memories/ when both targets are disabled.
     for subdir_name in ["cron", "sessions", "logs", "skills"] + (["memories"] if memory_on else []):
         ensure_dir(f, should_fix, hermes_home / subdir_name, f"{_DHH}/{subdir_name}/ exists",
@@ -115,9 +115,9 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     # SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
-        content = soul_path.read_text(encoding="utf-8").strip()
         # Template comments only (no real content)?
-        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in content.splitlines()):
+        lines = soul_path.read_text(encoding="utf-8").strip().splitlines()
+        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in lines):
             check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
         else:
             check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
@@ -142,11 +142,10 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
             f.fixed += 1
     else:
         check_ok(f"{_DHH}/memories/ directory exists")
-        for enabled, fname in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")):
-            mem_file = memories_dir / fname
-            if enabled and mem_file.exists():
-                check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
-            elif enabled:
+        for fname in [n for on, n in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")) if on]:
+            if (memories_dir / fname).exists():
+                check_ok(f"{fname} exists ({len((memories_dir / fname).read_text(encoding='utf-8').strip())} chars)")
+            else:
                 check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
 
 
@@ -182,8 +181,7 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, kind: st
     report = repair_state_db_schema(state_db_path)
     if not report.get("repaired"):
         check_warn(not_fixed_label, f"({report.get('error')}; backup: {report.get('backup_path')})")
-        f.issues.append(failed_issue)
-        return
+        return f.issues.append(failed_issue)
     if "{count}" in ok_label:
         try:
             ok_label = ok_label.format(count=_session_count(state_db_path))
@@ -283,10 +281,7 @@ def _gh_authenticated() -> bool:
 def _check_skills_hub(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME, _DHH
     hub_dir = HERMES_HOME / "skills" / ".hub"
-    if not hub_dir.exists():
-        check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
-    else:
-        check_ok("Skills Hub directory exists")
+    if check_bool(hub_dir.exists(), "Skills Hub directory exists", ("Skills Hub directory not initialized", "(run: hermes skills list)")):
         lock_file = hub_dir / "lock.json"
         if lock_file.exists():
             try:

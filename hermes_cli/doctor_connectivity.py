@@ -167,9 +167,7 @@ def _probe_anthropic() -> ProbeResult:
             r = httpx.get(url, headers=headers, timeout=10)
     except Exception as e:
         return _row(name, "warn", f"({e})")
-    if r.status_code == 200:
-        return _row(name, "ok")
-    return _row(name, "fail", "(invalid API key)") if r.status_code == 401 else _row(name, "warn", "(couldn't verify)")
+    return _row(name, *{200: ("ok",), 401: ("fail", "(invalid API key)")}.get(r.status_code, ("warn", "(couldn't verify)")))
 
 
 def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_health_check) -> ProbeResult:
@@ -187,11 +185,9 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
             r = httpx.get("https://dashscope.aliyuncs.com/compatible-mode/v1/models", headers=headers, timeout=10)
     except Exception as e:
         return _row(pname, "warn", f"({e})", label=label)
-    if r.status_code == 200:
-        return _row(pname, "ok", label=label)
     if r.status_code == 401:
         return _row(pname, "fail", "(invalid API key)", [f"Check {env_vars[0]} in .env"], label=label)
-    return _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
+    return _row(pname, "ok", label=label) if r.status_code == 200 else _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
 
 
 def _apikey_request(key: str, base_env, default_url) -> tuple:
