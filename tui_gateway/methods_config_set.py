@@ -256,7 +256,7 @@ def _set_yolo(rid, params, key, value, session):
     from tools.approval import disable_session_yolo, enable_session_yolo, is_session_yolo_enabled
     raw = _word(value)
     if scope == "global":
-        from tools.approval import _normalize_approval_mode
+        from tools.approval_context import _normalize_approval_mode
         appr = _load_cfg().get("approvals")
         appr = appr if isinstance(appr, dict) else {}
         enable = _BOOL_WORDS.get(raw, _normalize_approval_mode(appr.get("mode", "manual")) != "off")

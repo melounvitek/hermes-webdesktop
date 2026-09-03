@@ -127,7 +127,7 @@ def _authorization_gate_lock_timeout() -> float:
     once per gate (per batch), so a mid-process ``approvals.timeout`` change applies from the next batch.
     """
     try:
-        from tools.approval import human_wait_ceiling
+        from tools.approval_human_wait import human_wait_ceiling
 
         # human_wait_ceiling is platform-safety-capped (agent/deadline.py MAX_SAFE_TIMEOUT_S): a huge
         # approvals.timeout can no longer overflow Lock.acquire's time_t on macOS (#83220). Deliberately NOT
@@ -473,7 +473,7 @@ class _ConcurrentToolAuthorizationGate:
             # Snapshot on the SUBMITTING thread: excluded_seconds() is polled from the
             # batch wait loop, whose context may differ from the workers'.
             try:
-                from tools.approval import get_current_session_key
+                from tools.approval_context import get_current_session_key
 
                 self._session_key = get_current_session_key()
             except Exception:
@@ -486,7 +486,7 @@ class _ConcurrentToolAuthorizationGate:
 
     def _human_wait_seconds(self) -> float:
         try:
-            from tools.approval import human_wait_seconds
+            from tools.approval_human_wait import human_wait_seconds
 
             return human_wait_seconds(self._session_key)
         except Exception:

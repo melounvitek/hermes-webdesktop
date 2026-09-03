@@ -443,7 +443,7 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     fail-closed refusal scope).  The config-model sync is skipped under a /model --once
     override (not pinned as model_override, the sync would clobber it); a model picked
     mid-turn is applied first so the explicit pick wins over a config change."""
-    from tools.approval import set_current_session_key
+    from tools.approval_context import set_current_session_key
     scopes = st.scopes
     scopes.approval = set_current_session_key(session["session_key"])
     scopes.session_tokens = _set_session_context(session["session_key"], ui_session_id=sid)
@@ -738,7 +738,7 @@ def _finish_turn(sid: str, session: dict, st: _TurnRun) -> None:
     scopes = st.scopes
     with contextlib.suppress(Exception):
         if scopes.approval is not None:
-            from tools.approval import reset_current_session_key
+            from tools.approval_context import reset_current_session_key
             reset_current_session_key(scopes.approval)
     if scopes.home is not None:
         reset_hermes_home_override(scopes.home)

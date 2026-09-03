@@ -55,8 +55,8 @@ def human_wait_ceiling() -> float:
     holding ``_human_wait_lock`` — it reads the config cache.
     ``_get_approval_timeout`` caps at ``agent.deadline.MAX_SAFE_TIMEOUT_S`` so the
     value is always safe for ``Lock.acquire(timeout=...)`` / ``Thread.join(timeout=...)``."""
-    from tools.approval import _get_approval_timeout
-    return float(_get_approval_timeout()) + HUMAN_WAIT_MARGIN_S
+    from tools import approval_context
+    return float(approval_context._get_approval_timeout()) + HUMAN_WAIT_MARGIN_S
 
 
 def _clamped_window_seconds(started: float, now: float, ceiling: float) -> float:
@@ -87,8 +87,8 @@ def _human_wait_state(session_key: str) -> _HumanWaitState:
 def _resolve_key(session_key: str | None) -> str:
     if session_key is not None:
         return session_key
-    from tools.approval import get_current_session_key
-    return get_current_session_key()
+    from tools import approval_context
+    return approval_context.get_current_session_key()
 
 
 def activity_heartbeat(label: str):

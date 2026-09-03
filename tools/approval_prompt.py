@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import threading
+from tools import approval_context as _ctx, approval_gateway_wait as _gw
 from tools.approval_human_wait import activity_heartbeat, human_wait_window
 from tools.interrupt import is_interrupted
 
@@ -37,9 +38,8 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
 
     See #81887.
     """
-    from tools import approval as _a
     if timeout_seconds is None:
-        timeout_seconds = _a._get_approval_timeout()
+        timeout_seconds = _ctx._get_approval_timeout()
     # Everything below is a human prompt (callback panel or input() fallback, both bounded by the approval deadline):
     # record it as human-wait time so the concurrent batch deadline excludes it.
     # See #79719.
@@ -172,13 +172,12 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
     persistence, timeout, and final authorization stay host-owned. A failed
     transport reaches a built-in surface only under the explicit
     ``transport_fallback: builtin`` opt-in."""
-    from tools import approval as _a
-    name, fallback = _a._get_approval_transport_config()
+    name, fallback = _ctx._get_approval_transport_config()
     if name == "builtin":
         return {"selected": False}
 
     try:
-        registered = _a.get_plugin_manager().get_approval_transport(name)
+        registered = get_plugin_manager().get_approval_transport(name)
     except Exception:
         # Plugin/discovery exception text may contain plugin-owned secrets.
         logger.warning("Could not resolve selected approval transport %r", name)
@@ -191,7 +190,7 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
         from agent.redact import redact_sensitive_text
         from hermes_cli.approval_transport import ApprovalRequest, invoke_approval_transport
 
-        timeout_seconds = _a._get_approval_timeout()
+        timeout_seconds = _ctx._get_approval_timeout()
         request = ApprovalRequest.create(
             command=redact_sensitive_text(command, force=True),
             description=redact_sensitive_text(description, force=True), pattern_key=pattern_key,
@@ -208,7 +207,7 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
         pattern_keys=list(pattern_keys), session_key=session_key, surface=f"transport:{name}",
         request_id=request.request_id, request_digest=request.digest,
     )
-    _a._fire_approval_hook("pre_approval_request", **hook_kwargs)
+    _ctx._fire_approval_hook("pre_approval_request", **hook_kwargs)
     with human_wait_window(session_key):
         result = invoke_approval_transport(
             registered.present, request, timeout_seconds=timeout_seconds,
@@ -216,7 +215,7 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
             is_interrupted=is_interrupted,
         )
     hook_choice = result.choice if result.failure is None else f"transport_{result.failure}"
-    _a._fire_approval_hook("post_approval_response", **hook_kwargs, choice=hook_choice)
+    _ctx._fire_approval_hook("post_approval_response", **hook_kwargs, choice=hook_choice)
     return _attempt(name, result.choice, result.failure, fallback)
 
 
@@ -235,7 +234,7 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
                        attempt.get("name"), failure)
         return None, None
     from tools import approval as _a
-    breaker_addendum = _a._denial_breaker_addendum(_a.get_current_session_key())
+    breaker_addendum = _a._denial_breaker_addendum(_ctx.get_current_session_key())
     return None, _a._denied(
         f"BLOCKED: Selected approval transport failed ({failure}); the user "
         "has NOT consented to this action. Do NOT retry this command or "
@@ -262,19 +261,19 @@ def request_elicitation_consent(message: str, description: str, *,
     Returns ``"accept" | "decline" | "cancel"``."""
     from tools import approval as _a
     try:
-        session_key = _a.get_current_session_key()
+        session_key = _ctx.get_current_session_key()
     except Exception as exc:  # pragma: no cover -- defensive
         logger.warning("Elicitation consent: session lookup failed: %s", exc)
         return "decline"
 
-    if _a._is_gateway_approval_context():
+    if _ctx._is_gateway_approval_context():
         notify_cb = _a._gateway_notify_cb(session_key)
         if notify_cb is None:
             logger.warning("Elicitation requested in gateway session %s but no "
                            "notify_cb is registered — failing closed", session_key)
             return "decline"
         try:
-            decision = _a._await_gateway_decision(
+            decision = _gw._await_gateway_decision(
                 session_key, notify_cb, {"command": message, "description": description,
                                          "pattern_key": "mcp_elicitation",
                                          "pattern_keys": ["mcp_elicitation"]}, surface=surface)
@@ -289,8 +288,8 @@ def request_elicitation_consent(message: str, description: str, *,
 
     # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
     try:
-        choice = _a.prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
-                                              allow_permanent=False)
+        choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
+                                           allow_permanent=False)
     except Exception as exc:
         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
         return "decline"

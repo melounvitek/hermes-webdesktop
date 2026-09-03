@@ -1413,7 +1413,8 @@ class TurnRunner:
         """Run the turn with the per-session gateway approval callback registered: dangerous-command
         approval blocks the agent thread (mirrors CLI input()); the callback bridges sync→async."""
         from gateway.run import _wrap_current_message_with_observed_context
-        from tools.approval import register_gateway_notify, reset_current_session_key, set_current_session_key, unregister_gateway_notify
+        from tools.approval import register_gateway_notify, unregister_gateway_notify
+        from tools.approval_context import reset_current_session_key, set_current_session_key
         ctx = self._ctx
         session_key = ctx.session_key or ""
         token = set_current_session_key(session_key)

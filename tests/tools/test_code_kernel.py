@@ -216,7 +216,7 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
     """
 
     def _run_as(self, session_key, code, task_id, **kwargs):
-        from tools.approval import reset_current_session_key, set_current_session_key
+        from tools.approval_context import reset_current_session_key, set_current_session_key
 
         token = set_current_session_key(session_key)
         try:

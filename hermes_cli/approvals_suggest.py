@@ -148,7 +148,7 @@ def scan_approval_history(db_path: Optional[Path] = None, days: int = 90) -> lis
     """``(command, dangerous_class_description)`` records for dangerous-classified terminal commands
     that actually executed (i.e. carried an implied user approval).
     """
-    from tools.approval import detect_dangerous_command, detect_hardline_command
+    from tools.approval_detection import detect_dangerous_command, detect_hardline_command
     path = Path(db_path) if db_path else default_db_path()
     if not path.exists():
         return []
@@ -180,7 +180,7 @@ def scan_approval_history(db_path: Optional[Path] = None, days: int = 90) -> lis
 
 def normalize_command(command: str) -> str:
     """Fold user/hermes home prefixes and collapse whitespace."""
-    from tools.approval import _rewrite_resolved_hermes_home, _rewrite_resolved_user_home
+    from tools.approval_detection import _rewrite_resolved_hermes_home, _rewrite_resolved_user_home
     return " ".join(_rewrite_resolved_user_home(_rewrite_resolved_hermes_home(command)).split())
 
 
@@ -200,7 +200,7 @@ def derive_glob(normalized: str) -> Optional[str]:
     Returns None for compound commands (shell operators — the runtime allowlist matcher refuses
     those anyway) and for commands anchored on an unsafe root binary.
     """
-    from tools.approval import _has_allowlist_shell_operator
+    from tools.approval_floors import _has_allowlist_shell_operator
     tokens = normalized.split()
     if _has_allowlist_shell_operator(normalized) or not tokens or _unsafe_root_binary(tokens[0]):
         return None

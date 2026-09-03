@@ -7,7 +7,7 @@ threads (parallel subagents, execute_code RPC handlers) can block concurrently
 — each gets its own ``threading.Event``; ``/approve`` resolves the oldest,
 ``/approve all`` every pending entry. Queue state (``_gateway_queues``,
 ``_lock``) is owned by ``tools.approval`` and reached through that module at
-call time so tests patching it keep working.
+call time.
 """
 
 import logging
@@ -16,7 +16,8 @@ import time
 import uuid
 
 from tools.interrupt import is_interrupted
-from tools.approval_human_wait import activity_heartbeat
+from tools import approval_context as _ctx
+from tools.approval_human_wait import activity_heartbeat, human_wait_window
 
 logger = logging.getLogger("tools.approval")
 
@@ -48,9 +49,7 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     The per-thread interrupt flag carries no stable machine-checkable cause, so a
     fail-closed deny preserves the historical semantics; changing this needs a
     dedicated interrupt-cause channel, not string matching."""
-    from tools.approval import _get_approval_timeout, human_wait_window
-
-    deadline = time.monotonic() + max(_get_approval_timeout(), 0)
+    deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
@@ -71,8 +70,7 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
 def _finish(payload: dict, resolved: bool, choice: str | None, reason, **extra) -> dict:
     """Fire the post hook and build the decision dict. Unresolved (timeout) and
     a None choice both mean the user never answered."""
-    from tools.approval import _fire_approval_hook
-    _fire_approval_hook("post_approval_response", **payload,
+    _ctx._fire_approval_hook("post_approval_response", **payload,
                         choice="timeout" if not resolved else (choice or "timeout"), **extra)
     return {"resolved": resolved, "choice": choice, "reason": reason, **extra}
 
@@ -86,8 +84,7 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     returns ``None``: single-use consent covers only the leader's execution,
     so the caller must issue a fresh prompt. Hooks fire with ``coalesced=True``
     so observers see the follower's lifecycle without a duplicate prompt."""
-    from tools.approval import _fire_approval_hook
-    _fire_approval_hook("pre_approval_request", **payload, coalesced=True)
+    _ctx._fire_approval_hook("pre_approval_request", **payload, coalesced=True)
     state = _poll_event(leader.event, session_key,
                         interrupt_log="Coalesced approval wait interrupted by user signal — "
                                       "returning deny for session %s")
@@ -151,14 +148,14 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
                 _approval._gateway_queues.pop(session_key, None)
 
     # Plugins hear about the request before the gateway does (real-time observers).
-    _approval._fire_approval_hook("pre_approval_request", **payload)
+    _ctx._fire_approval_hook("pre_approval_request", **payload)
     # Bridges sync agent thread → async gateway.
     try:
         notify_cb(dict(entry.data))
     except Exception as exc:
         logger.warning("Gateway approval notify failed: %s", exc)
         _drop_entry()
-        _approval._fire_approval_hook("post_approval_response", **payload, choice="notify_failed")
+        _ctx._fire_approval_hook("post_approval_response", **payload, choice="notify_failed")
         return {"resolved": False, "choice": None, "notify_failed": True}
 
     state = _poll_event(entry.event, session_key,

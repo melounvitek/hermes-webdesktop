@@ -180,7 +180,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
     _sudo_cb = _get_sudo_password_callback()
     if _sudo_cb is not None:
         try:
-            from tools.approval import human_wait_window
+            from tools.approval_human_wait import human_wait_window
             with human_wait_window():
                 return _sudo_cb() or ""
         except Exception:
@@ -204,7 +204,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
         print("  Password (hidden): ", end="", flush=True)
         password_thread = threading.Thread(target=_read_hidden_password, args=(result,), daemon=True)
         password_thread.start()
-        from tools.approval import human_wait_window
+        from tools.approval_human_wait import human_wait_window
         with human_wait_window():
             password_thread.join(timeout=timeout_seconds)
         if not result["done"]:

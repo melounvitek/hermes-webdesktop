@@ -102,7 +102,7 @@ def route_browser_tool(
 def current_tool_call_id() -> str:
     """Active tool_call_id bound by the agent executor, or ``""`` when none."""
     try:
-        from tools.approval import _approval_tool_call_id
+        from tools.approval_context import _approval_tool_call_id
 
         return _approval_tool_call_id.get() or ""
     except Exception:

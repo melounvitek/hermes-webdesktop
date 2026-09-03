@@ -33,6 +33,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     de-obfuscated forms the detectors actually evaluated).
     """
     import tools.approval as approval
+    from tools import approval_context, approval_detection, approval_floors
     # Sync config-persisted "always" patterns so the allowlist check below sees what the runtime
     # would see (load is read-only).
     try:
@@ -40,7 +41,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     except Exception:
         pass
 
-    variants = list(approval._command_detection_variants(command))
+    variants = list(approval_detection._command_detection_variants(command))
 
     def result(verdict: str, rule=None, detail: str = "") -> dict:
         return {
@@ -58,7 +59,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
         )
 
     # 2. Hardline blocklist — never bypassable, even under yolo.
-    is_hardline, hardline_desc = approval.detect_hardline_command(command)
+    is_hardline, hardline_desc = approval_detection.detect_hardline_command(command)
     if is_hardline:
         return result(
             "hardline-deny", rule=hardline_desc,
@@ -67,12 +68,12 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
         )
 
     # 3. Sudo stdin guard — unconditional, like the hardline floor.
-    is_sudo_guess, sudo_desc = approval._check_sudo_stdin_guard(command)
+    is_sudo_guess, sudo_desc = approval_detection._check_sudo_stdin_guard(command)
     if is_sudo_guess:
         return result("hardline-deny", rule=sudo_desc, detail="sudo stdin guard (unconditional block)")
 
     # 4. User-defined approvals.deny rules — fire before yolo/off.
-    deny_pattern = approval._match_user_deny_rule(command)
+    deny_pattern = approval_floors._match_user_deny_rule(command)
     if deny_pattern is not None:
         return result(
             "user-deny", rule=deny_pattern,
@@ -83,7 +84,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     # 5. Yolo / approvals.mode=off bypass.
     if (approval._YOLO_MODE_FROZEN
             or approval.is_current_session_yolo_enabled()
-            or approval._get_approval_mode() == "off"):
+            or approval_context._get_approval_mode() == "off"):
         return result(
             "allow",
             detail="approval bypass active (--yolo or approvals.mode: off); "
@@ -91,11 +92,11 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
         )
 
     # 6. Permanent command_allowlist.
-    if approval._command_matches_permanent_allowlist(command):
+    if approval_floors._command_matches_permanent_allowlist(command):
         return result("allow", detail="matches command_allowlist in config.yaml (permanently approved)")
 
     # 7. Dangerous-pattern detection → would prompt.
-    is_dangerous, pattern_key, description = approval.detect_dangerous_command(command)
+    is_dangerous, pattern_key, description = approval_detection.detect_dangerous_command(command)
     if is_dangerous:
         return result(
             "ask-approval", rule=description,

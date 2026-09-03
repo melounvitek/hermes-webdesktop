@@ -736,7 +736,7 @@ def _pre_dispatch_guards(function_name: str, function_args: Dict[str, Any], skip
 def _approval_observability(ids: _CallIds):
     """Bind the approval observability context (turn/tool_call/session ids) for the block."""
     try:
-        from tools.approval import reset_current_observability_context, set_current_observability_context
+        from tools.approval_context import reset_current_observability_context, set_current_observability_context
         tokens = set_current_observability_context(turn_id=ids.turn_id or "", tool_call_id=ids.tool_call_id or "",
                                                    session_id=ids.session_id or "")
     except Exception:

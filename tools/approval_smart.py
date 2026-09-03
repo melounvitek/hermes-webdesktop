@@ -10,6 +10,7 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 
 import logging
 import time
+from tools import approval_context as _ctx
 
 logger = logging.getLogger("tools.approval")
 
@@ -66,8 +67,7 @@ def _strip_shell_comments(command: str) -> str:
 
 def _get_smart_policy() -> str:
     """Operator rules (``approvals.smart_policy``) appended to the guardian's system prompt."""
-    from tools.approval import _get_approval_config
-    policy = _get_approval_config().get("smart_policy", "")
+    policy = _ctx._get_approval_config().get("smart_policy", "")
     return policy.strip() if isinstance(policy, str) else ""
 
 
@@ -126,7 +126,6 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
     """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
     Redaction is observer-payload preparation, not approval policy: if it fails,
     skip observability rather than leak raw data or block the LLM decision."""
-    from tools import approval as _a
     try:
         from agent.redact import redact_sensitive_text
         payload = {
@@ -139,8 +138,8 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
         logger.debug("Smart approval hook redaction failed: %s", exc)
         payload = None
     else:
-        _a._fire_approval_hook("pre_approval_request", **payload)
-    verdict = _a._smart_approve(command, description)
+        _ctx._fire_approval_hook("pre_approval_request", **payload)
+    verdict = _smart_approve(command, description)
     if payload is not None and verdict in {"approve", "deny"}:
-        _a._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
+        _ctx._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
     return verdict

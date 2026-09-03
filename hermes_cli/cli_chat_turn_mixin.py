@@ -278,7 +278,7 @@ class CLIChatTurnMixin:
         # Bind the approval session key so ``is_current_session_yolo_enabled()`` resolves
         # against the same key ``/yolo`` toggles under (``enable_session_yolo(self.session_id)``).
         try:
-            from tools.approval import reset_current_session_key, set_current_session_key
+            from tools.approval_context import reset_current_session_key, set_current_session_key
             _approval_session_token = set_current_session_key(self.session_id or "default")
         except Exception:
             reset_current_session_key = None  # type: ignore[assignment]

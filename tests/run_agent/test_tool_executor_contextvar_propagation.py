@@ -84,10 +84,8 @@ def test_run_tool_worker_sees_parent_approval_session_key():
     If the PR's ``copy_context().run`` wrapper is reverted, this test
     fails with ``Expected 'session-A' but worker saw 'default'``.
     """
-    from tools.approval import (
-        _approval_session_key,
-        get_current_session_key,
-    )
+    from tools.approval import get_current_session_key
+    from tools.approval_context import _approval_session_key
 
     observed: dict = {}
     barrier = threading.Event()
@@ -129,10 +127,8 @@ def test_two_concurrent_tool_batches_keep_session_keys_isolated():
     snapshot across callers (which would collapse isolation the same way
     the unfixed ``submit`` does).
     """
-    from tools.approval import (
-        _approval_session_key,
-        get_current_session_key,
-    )
+    from tools.approval import get_current_session_key
+    from tools.approval_context import _approval_session_key
 
     results: dict = {}
 

@@ -7,9 +7,8 @@ behind them. Leaves: ``approval_detection`` (hardline/dangerous patterns), ``app
 (contextvars, config readers), ``approval_floors`` (pre-gate blocks, allowlist match),
 ``approval_prompt`` (CLI prompt, plugin transports, MCP elicitation), ``approval_gateway_wait``
 (blocking gateway round-trip), ``approval_smart`` (guardian LLM), ``approval_human_wait``.
-Every private name is re-exported here so ``from tools.approval import X`` and
-``patch("tools.approval.X")`` keep working; leaves call back through ``tools.approval`` at
-call time for the same reason.
+Leaves read facade-owned state (``_lock``, queues, denial breaker) back through ``tools.approval`` at
+call time; sibling-defined names are imported from their defining module.
 """
 
 from dataclasses import dataclass
@@ -21,39 +20,23 @@ import threading
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
-from tools.approval_context import (  # noqa: F401 -- re-exported for callers/tests
-    _approval_session_key, _approval_turn_id, _approval_tool_call_id, set_hermes_interactive_context,
-    reset_hermes_interactive_context, _is_interactive_cli, _fire_approval_hook, set_current_session_key,
-    reset_current_session_key, set_current_observability_context, reset_current_observability_context,
-    get_current_session_key, _get_session_platform, _is_cron_approval_context, _UNATTENDED_APPROVAL_PLATFORMS,
-    _is_unattended_platform_approval_context, _is_single_query_approval_context, _is_gateway_approval_context,
-    _resolve_cli_approval_callback, _should_fall_through_to_cli_approval, _normalize_approval_mode,
-    _get_approval_config, _get_approval_mode, _get_approval_timeout, _get_cron_approval_mode,
-    _get_single_query_approval_mode, _get_unattended_approval_mode, _tirith_fail_open, _get_approval_transport_config,
+from tools import approval_context
+from tools.approval_context import (
+    _get_session_platform, _is_cron_approval_context,
+    _is_gateway_approval_context, _is_interactive_cli, _is_single_query_approval_context,
+    _is_unattended_platform_approval_context, _resolve_cli_approval_callback, _should_fall_through_to_cli_approval,
+    _tirith_fail_open, get_current_session_key,
 )
-from tools.approval_prompt import (  # noqa: F401 -- re-exported for callers/tests
-    prompt_dangerous_approval, get_plugin_manager, _present_with_selected_transport, _transport_choice,
-    request_elicitation_consent,
+from tools.approval_detection import (
+    _approval_key_aliases, _check_sudo_stdin_guard, detect_dangerous_command, detect_hardline_command,
 )
-from tools.approval_floors import (  # noqa: F401 -- re-exported for callers/tests
-    _match_user_deny_rule, _user_deny_block_result, _save_blocked_payload, _hardline_block_result,
-    _sudo_stdin_block_result, _has_allowlist_shell_operator, _command_matches_permanent_allowlist,
+from tools.approval_floors import (
+    _command_matches_permanent_allowlist, _hardline_block_result, _match_user_deny_rule, _sudo_stdin_block_result,
+    _user_deny_block_result,
 )
-from tools.approval_detection import (  # noqa: F401 -- re-exported for callers/tests
-    HARDLINE_PATTERNS, _check_sudo_stdin_guard, detect_hardline_command, _approval_key_aliases,
-    _rewrite_resolved_user_home, _rewrite_resolved_hermes_home, _MAX_SEPARATOR_FREE_COMMAND_CHARS,
-    _PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION, _bash_exec_payload, _read_shell_word,
-    _deobfuscate_shell_word_for_detection, _iter_shell_command_starts, _command_detection_variants,
-    detect_dangerous_command,
-)
-from tools.approval_human_wait import (  # noqa: F401 -- re-exported for callers/tests
-    _human_wait_lock, _human_wait_states, _HUMAN_WAIT_MAX_SESSIONS, HUMAN_WAIT_MARGIN_S, human_wait_ceiling,
-    human_wait_window, human_wait_seconds,
-)
-from tools.approval_smart import (  # noqa: F401 -- re-exported for callers/tests
-    _strip_shell_comments, _strip_line_comment, _get_smart_policy, _smart_approve, _smart_verdict,
-)
-from tools.approval_gateway_wait import _ApprovalEntry, _await_gateway_decision  # noqa: F401 -- re-exported
+from tools.approval_gateway_wait import _await_gateway_decision
+from tools.approval_prompt import _present_with_selected_transport, _transport_choice, prompt_dangerous_approval
+from tools.approval_smart import _smart_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +66,7 @@ _DENIAL_TALLY_MAX_SESSIONS = 256
 def _get_denial_breaker_threshold() -> int:
     """``approvals.denial_breaker_threshold``: default 3; 0 or negative disables."""
     try:
-        return int(_get_approval_config().get("denial_breaker_threshold", 3))
+        return int(approval_context._get_approval_config().get("denial_breaker_threshold", 3))
     except (ValueError, TypeError):
         return 3
 
@@ -373,7 +356,7 @@ def is_approval_bypass_active_for_session(session_key: str) -> bool:
     """Canonical three-source bypass check: process ``--yolo`` (frozen at import), the
     session-scoped gateway ``/yolo`` toggle, ``approvals.mode: off``. Pure bypass
     sub-expression only — hardline blocklist / permanent allowlist are the caller's job."""
-    return (_YOLO_MODE_FROZEN or is_session_yolo_enabled(session_key) or _get_approval_mode() == "off")
+    return (_YOLO_MODE_FROZEN or is_session_yolo_enabled(session_key) or approval_context._get_approval_mode() == "off")
 
 
 def is_approval_bypass_active() -> bool:
@@ -458,8 +441,8 @@ class _Unattended:
     trust: str      # execute_code: "approve only if {trust}"
 
     def mode(self) -> str:
-        # Looked up through the module at call time so tests patching the getters keep working.
-        return globals()[f"_get_{self.name}_approval_mode"]()
+        # Looked up on the defining module at call time so tests patching the getters keep working.
+        return getattr(approval_context, f"_get_{self.name}_approval_mode")()
 
     def block_message(self, subject: str, *, noun: str, advice: str) -> str:
         return (f"BLOCKED: {subject} but {self.clause}. {advice} To allow {noun} {self.scope}, set "
@@ -772,10 +755,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
         prompt_description = redact_sensitive_text(description)
     hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
                        pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
-    _fire_approval_hook("pre_approval_request", **hook_kwargs)
+    approval_context._fire_approval_hook("pre_approval_request", **hook_kwargs)
     choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
                                        smart_denied=smart_denied, approval_callback=approval_callback)
-    _fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
+    approval_context._fire_approval_hook("post_approval_response", **hook_kwargs, choice=choice)
     if choice == "timeout":
         return deny(spec.cli_timeout, "timeout")
     if choice == "deny":
@@ -999,7 +982,7 @@ def check_all_command_guards(command: str, env_type: str,
     if blocked is not None:
         return blocked
 
-    approval_mode = _get_approval_mode()
+    approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
     if _command_matches_permanent_allowlist(command):
@@ -1077,7 +1060,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
         return _approved()
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _approved()
-    approval_mode = _get_approval_mode()
+    approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
 

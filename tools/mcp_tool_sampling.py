@@ -271,7 +271,7 @@ class ElicitationHandler:
         """Sync consent call replaying the agent's contextvars snapshot when the owner captured one
         (the recv-loop task does NOT inherit them; gateway-platform detection needs them).
         ``Context.run`` runs a context once, so it is copied per elicitation."""
-        from tools.approval import request_elicitation_consent
+        from tools.approval_prompt import request_elicitation_consent
 
         kwargs = {"timeout_seconds": int(self.timeout), "surface": f"mcp-elicitation/{self.server_name}"}
         captured = getattr(self.owner, "_pending_call_context", None) if self.owner else None

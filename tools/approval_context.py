@@ -2,7 +2,7 @@
 
 Session identity and observability contextvars, the interactive/gateway/cron/
 unattended predicates, and the ``approvals.*`` config readers used by every
-gate in :mod:`tools.approval` (which re-exports all of them).
+gate in :mod:`tools.approval`.
 """
 
 import contextvars
@@ -169,8 +169,7 @@ def _is_gateway_approval_context() -> bool:
     human who can resolve it (#37284, 87509). Their dangerous-command handling is governed by
     ``approvals.unattended_mode`` config (default deny), mirroring cron.
     """
-    from tools import approval as _a
-    if _a._is_cron_approval_context() or _is_unattended_platform_approval_context():
+    if _is_cron_approval_context() or _is_unattended_platform_approval_context():
         return False
     return env_var_enabled("HERMES_GATEWAY_SESSION") or bool(_get_session_platform())
 
@@ -228,14 +227,13 @@ def _get_approval_config() -> dict:
 
 def _get_approval_mode() -> str:
     """Return 'manual', 'smart', or 'off' (a hosted-room policy overrides config)."""
-    from tools import approval as _a
     try:
         from gateway.hosted_room_execution_policy import current_room_execution_policy
         if (room_policy := current_room_execution_policy()) is not None:
             return room_policy.approval_mode
     except Exception:
         pass
-    return _a._normalize_approval_mode(_a._get_approval_config().get("mode", "manual"))
+    return _normalize_approval_mode(_get_approval_config().get("mode", "manual"))
 
 
 def _get_approval_timeout() -> int:
@@ -245,9 +243,8 @@ def _get_approval_timeout() -> int:
     overflows ``time_t`` inside ``Thread.join`` / ``Lock.acquire`` on macOS and
     crashed every parallel tool batch; clamping at the single config-read site
     keeps every consumer platform-safe at once."""
-    from tools import approval as _a
     try:
-        raw = int(_a._get_approval_config().get("timeout", 300))
+        raw = int(_get_approval_config().get("timeout", 300))
     except (ValueError, TypeError):
         return 300
     try:

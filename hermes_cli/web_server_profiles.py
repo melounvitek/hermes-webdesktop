@@ -52,7 +52,6 @@ def _hermes_home_scope(path) -> Any:
 
 def _is_other_profile(profile: Optional[str]) -> bool:
     """True when ``profile`` names a profile other than this process's own."""
-    from hermes_cli.web_server import _resolve_profile_dir
     if _is_current_profile(profile):
         return False
     try:
@@ -67,7 +66,7 @@ def _approval_mode_of(config: Dict[str, Any]) -> str:
     broadcast comparison use in-memory documents: re-reading through the config cache after
     a save can serve the pre-save document when the replacement file collides on the
     (mtime_ns, size) cache key, suppressing the broadcast exactly when the mode changed."""
-    from tools.approval import _normalize_approval_mode
+    from tools.approval_context import _normalize_approval_mode
     approvals = config.get("approvals")
     default_mode = (DEFAULT_CONFIG.get("approvals") or {}).get("mode", "manual")
     mode = approvals.get("mode", default_mode) if isinstance(approvals, dict) else default_mode
@@ -165,7 +164,7 @@ def _write_profile_mcp_servers(profile_dir: Path, servers: List["MCPServerCreate
     Mirrors the per-server shape ``POST /api/mcp/servers`` builds, batched so the whole
     profile-create write is one config save. Returns the number of servers written.
     """
-    from hermes_cli.web_server import load_config, save_config
+    from hermes_cli.config import load_config, save_config
     from hermes_cli.mcp_config import _save_bearer_auth_token
     written = 0
     with _hermes_home_scope(profile_dir):
@@ -239,7 +238,6 @@ def _config_profile_scope(profile: Optional[str]):
     contextvar, never the process-global skills-module attributes ``_profile_scope`` swaps
     (holding those across an ``await`` lets a concurrent request restore THIS request's dir
     on its ``finally``). None/""/"current" = no override."""
-    from hermes_cli.web_server import _resolve_profile_dir
     if _is_current_profile(profile):
         yield None
         return

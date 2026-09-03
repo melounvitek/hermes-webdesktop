@@ -1,8 +1,7 @@
 """Dangerous-command detection: normalization, tokenizing, and pattern tables.
 
 Pure command classification for :mod:`tools.approval` — no approval state, config reads, or
-prompting live here. ``tools.approval`` re-exports every public and private name so
-``from tools.approval import X`` and ``patch("tools.approval.X")`` keep working.
+prompting live here.
 """
 
 import functools
@@ -178,9 +177,7 @@ def detect_hardline_command(command: str) -> tuple:
     _, malformed_grep = _grep_safe_detection_variant(normalized)
     if malformed_grep:
         return (True, _MALFORMED_EXEC_DESCRIPTION)
-    # Call-time lookup through the facade: tests/plugins patch tools.approval._command_detection_variants.
-    from tools.approval import _command_detection_variants as _variants
-    for command_variant in _variants(command):
+    for command_variant in _command_detection_variants(command):
         variant_lower = command_variant.lower()
         masked_lower: str | None = None
         for pattern_re, description, quote_masked in HARDLINE_PATTERNS_COMPILED:
@@ -1155,9 +1152,7 @@ def detect_dangerous_command(command: str) -> tuple:
         return (True, _PARSER_LIMIT_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION)
     if _is_verification_artifact_cleanup(command):
         return (False, None, None)
-    # Call-time lookup through the facade: tests/plugins patch tools.approval._command_detection_variants.
-    from tools.approval import _command_detection_variants as _variants
-    for command_variant in _variants(command):
+    for command_variant in _command_detection_variants(command):
         command_lower = command_variant.lower()
         for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
             if pattern_re.search(command_lower):

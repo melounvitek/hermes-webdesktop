@@ -471,9 +471,8 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     # a config with a few stdio servers — even for sessions that never run a worker-routed command. Sessions
     # held by a live transport are never reaped, so with the desktop app open for days those fleets
     # accumulate until the OS refuses new process spawns.
-    from tools.approval import (
-        register_gateway_notify, reset_current_session_key, set_current_session_key,
-        unregister_gateway_notify)
+    from tools.approval import register_gateway_notify, unregister_gateway_notify
+    from tools.approval_context import reset_current_session_key, set_current_session_key
     session_id = run.session_id
     effective_task_id = session_id or run.run_id
     # (token, reset) pairs unwound in the finally block; bound only once each step succeeds.

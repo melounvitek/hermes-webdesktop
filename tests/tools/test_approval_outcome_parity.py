@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 import tools.approval as approval_mod
-from tools import approval_human_wait
+from tools import approval_context, approval_human_wait
 import tools.terminal_tool as terminal_tool
 import tools.terminal_tool_sudo as terminal_tool_sudo
 
@@ -33,7 +33,7 @@ class TestSudoWaitExcludedFromDeadlines:
     def test_sudo_callback_wait_accrues_human_wait(self, monkeypatch):
         session = "sudo-test-session"
         monkeypatch.setattr(
-            approval_mod, "get_current_session_key", lambda default="": session
+            approval_context, "get_current_session_key", lambda default="": session
         )
 
         def _slow_cb():
@@ -59,7 +59,7 @@ class TestSudoWaitExcludedFromDeadlines:
         """The non-callback path (thread + join) must be wrapped too."""
         session = "sudo-join-session"
         monkeypatch.setattr(
-            approval_mod, "get_current_session_key", lambda default="": session
+            approval_context, "get_current_session_key", lambda default="": session
         )
         monkeypatch.setattr(terminal_tool, "_get_sudo_password_callback", lambda: None)
         monkeypatch.setattr(terminal_tool, "_is_windows", False, raising=False)

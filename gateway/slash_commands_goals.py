@@ -314,7 +314,7 @@ class GatewayGoalCommandsMixin:
         if error:
             return error
         snapshot = list(getattr(agent, "_session_messages", None) or [])
-        from tools.approval import reset_current_session_key, set_current_session_key
+        from tools.approval_context import reset_current_session_key, set_current_session_key
 
         def _dispatch():
             token = set_current_session_key(quick_key)

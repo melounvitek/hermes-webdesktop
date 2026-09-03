@@ -9,6 +9,7 @@ the gateway submit_pending path, cron_mode, and fail-closed timeouts.
 import pytest
 
 import tools.approval as approval
+from tools import approval_context
 from tools.approval import request_tool_approval
 
 
@@ -61,14 +62,14 @@ class TestRequestToolApproval:
             "invoke_hook",
             lambda hook_name, **kwargs: events.append((hook_name, kwargs)) or [],
         )
-        tokens = approval.set_current_observability_context(
+        tokens = approval_context.set_current_observability_context(
             turn_id="turn-1",
             tool_call_id="call-1",
         )
         try:
             res = request_tool_approval("terminal", "curl PUT to external API")
         finally:
-            approval.reset_current_observability_context(tokens)
+            approval_context.reset_current_observability_context(tokens)
         assert res["approved"] is False
         assert "denied" in res["message"].lower()
         assert res["pattern_key"].startswith("plugin_rule:")
@@ -100,7 +101,7 @@ class TestRequestToolApproval:
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
-        monkeypatch.setattr(approval, "_get_cron_approval_mode", lambda: "deny")
+        monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "deny")
         res = request_tool_approval("terminal", "smtp send")
         assert res["approved"] is False
         assert "cron" in res["message"].lower()
@@ -109,7 +110,7 @@ class TestRequestToolApproval:
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
-        monkeypatch.setattr(approval, "_get_cron_approval_mode", lambda: "approve")
+        monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "approve")
         res = request_tool_approval("terminal", "smtp send")
         assert res["approved"] is True
 

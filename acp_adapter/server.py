@@ -37,7 +37,7 @@ from acp_adapter.session import SessionManager, SessionState, _expand_acp_enable
 from acp_adapter.tools import build_tool_complete, build_tool_start, coerce_tool_args
 from agent.context_compressor import (COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor)
 from agent.interrupt_compat import request_hard_interrupt
-from tools.approval import (reset_hermes_interactive_context, set_hermes_interactive_context)
+from tools.approval_context import reset_hermes_interactive_context, set_hermes_interactive_context
 
 logger = logging.getLogger(__name__)
 

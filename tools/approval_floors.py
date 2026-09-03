@@ -4,7 +4,7 @@ Unconditional blocks (hardline, ``sudo -S`` password piping, the user's own
 ``approvals.deny`` globs) and the permanent command allowlist match. All of
 them run BEFORE yolo / ``approvals.mode: off`` / cron approve-mode; the
 allowlist runs after. Session state stays in ``tools.approval`` and is read
-through it at call time so tests that rebind it keep working.
+through it at call time.
 """
 
 import contextlib
@@ -13,7 +13,9 @@ import logging
 import re
 import time
 import uuid
-from tools.approval_detection import _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION
+from tools import approval_context as _ctx
+from tools.approval_detection import (
+    _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _command_detection_variants)
 
 logger = logging.getLogger("tools.approval")
 
@@ -25,15 +27,14 @@ def _match_user_deny_rule(command: str) -> str | None:
     yolo"). Case-insensitive, run over the same normalized/deobfuscated variants
     the dangerous-pattern detector uses so quoting tricks (``r\\m``,
     ``git st""atus``) can't sidestep a rule."""
-    from tools import approval as _a
     try:
-        deny_patterns = _a._get_approval_config().get("deny") or []
+        deny_patterns = _ctx._get_approval_config().get("deny") or []
     except Exception:
         return None
     globs = [p.strip() for p in deny_patterns if isinstance(p, str) and p.strip()]
     if not globs:
         return None
-    for command_variant in _a._command_detection_variants(command):
+    for command_variant in _command_detection_variants(command):
         candidate = command_variant.lower().strip()
         for pattern in globs:
             if fnmatch.fnmatchcase(candidate, pattern.lower()):
@@ -96,7 +97,6 @@ _RECOVERY_PREFIX = (
 
 def _hardline_block_result(description: str, command: str = "") -> dict:
     """Build the standard block result for a hardline match."""
-    from tools import approval as _a
     message = (
         f"BLOCKED (hardline): {description}. "
         "This command is on the unconditional blocklist and cannot "
@@ -107,7 +107,7 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
     # The parser-limit block is almost always a giant inline payload, not a forbidden operation, and is typically
     # followed by blind rephrase retries — point at the saved script (or the write_file recipe).
     if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
-        saved = _a._save_blocked_payload(command) if command else None
+        saved = _save_blocked_payload(command) if command else None
         if saved:
             message += _RECOVERY_PREFIX + (
                 f"Your command was saved to {saved} — review it, then run: terminal(command=\"bash {saved}\"). "
@@ -192,7 +192,7 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
     shell-style wildcards like ``podman *``."""
     from tools import approval as _a
     command = (command or "").strip()
-    if not command or _a._has_allowlist_shell_operator(command):
+    if not command or _has_allowlist_shell_operator(command):
         return False
     with _a._lock:
         patterns = tuple(_a._permanent_approved)

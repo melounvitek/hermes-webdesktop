@@ -855,7 +855,7 @@ class PluginContext:
         if not all(c.isalnum() or c == "_" for c in key):
             raise ValueError(f"Plugin '{me}' auxiliary task key {key!r} "
                              f"must contain only alphanumeric characters and underscores")
-        from hermes_cli.main import _AUX_TASKS as _BUILTIN_AUX_TASKS
+        from hermes_cli.main_provider_setup import _AUX_TASKS as _BUILTIN_AUX_TASKS
         if key in {k for k, _name, _desc in _BUILTIN_AUX_TASKS}:
             raise ValueError(f"Plugin '{me}' cannot register auxiliary task {key!r} — that key is reserved "
                              f"for a built-in task. Pick a plugin-namespaced key (e.g. '{me}_{key}').")
@@ -1021,7 +1021,7 @@ _SCOPED_PROVIDER_REGISTRARS: Tuple[Tuple[str, str, str, str, str, str, Dict[str,
      "agent.browser_provider:BrowserProvider", "browser provider",
      "Register an :class:`agent.browser_provider.BrowserProvider`; "
      "``provider.name`` is matched by ``browser.cloud_provider`` (consulted by "
-     "``tools.browser_tool._get_cloud_provider``).", {}),
+     "``tools.browser_tool_cloud._get_cloud_provider``).", {}),
     ("register_terminal_environment_provider", "terminal_environment_provider",
      "agent.terminal_env_registry", "agent.terminal_env_provider:TerminalEnvironmentProvider",
      "terminal environment provider",
@@ -1834,9 +1834,8 @@ def _resolve_block_from_details(
     if details.action != "approve":
         return None
     try:
-        from tools.approval import (
-            request_tool_approval, reset_current_observability_context, set_current_observability_context,
-        )
+        from tools.approval import request_tool_approval
+        from tools.approval_context import reset_current_observability_context, set_current_observability_context
         approval_tokens = None
         with suppress(Exception):
             approval_tokens = set_current_observability_context(

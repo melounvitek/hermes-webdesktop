@@ -278,7 +278,8 @@ class CLISessionMixin:
 
         approval_label = None
         try:
-            from tools.approval import _get_approval_mode, is_approval_bypass_active_for_session
+            from tools.approval import is_approval_bypass_active_for_session
+            from tools.approval_context import _get_approval_mode
             approval_label = _get_approval_mode()
             if is_approval_bypass_active_for_session(getattr(self, "session_key", "") or ""):
                 approval_label += " (YOLO bypass active)"
@@ -340,7 +341,7 @@ class CLISessionMixin:
         if not sessions:
             return False
 
-        from hermes_cli.main import _relative_time
+        from hermes_cli.timefmt import relative_time as _relative_time
 
         _cli_visible_print()
         if reason == "history":

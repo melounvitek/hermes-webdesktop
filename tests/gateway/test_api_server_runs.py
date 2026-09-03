@@ -28,6 +28,7 @@ from gateway.platforms.api_server import (
     security_headers_middleware,
 )
 from tools import approval as approval_mod
+from tools import approval_gateway_wait
 
 
 # ---------------------------------------------------------------------------
@@ -421,12 +422,12 @@ class TestRunEvents:
                 assert auth_adapter._run_approval_sessions[attacker_run] == attacker_run
                 assert auth_adapter._run_approval_sessions[victim_run] != auth_adapter._run_approval_sessions[attacker_run]
 
-                victim_entry = approval_mod._ApprovalEntry({
+                victim_entry = approval_gateway_wait._ApprovalEntry({
                     "command": "bash -c victim-danger",
                     "description": "victim approval",
                     "pattern_keys": ["shell-c"],
                 })
-                attacker_entry = approval_mod._ApprovalEntry({
+                attacker_entry = approval_gateway_wait._ApprovalEntry({
                     "command": "bash -c attacker-danger",
                     "description": "attacker approval",
                     "pattern_keys": ["shell-c"],
@@ -652,7 +653,7 @@ class TestRunLifecycleSweep:
                 assert isinstance(task, asyncio.Task)
                 assert not task.done()
 
-                pending = approval_mod._ApprovalEntry({
+                pending = approval_gateway_wait._ApprovalEntry({
                     "command": "bash -c long-running",
                     "description": "approval after stream TTL",
                     "pattern_keys": ["shell-c"],
@@ -1466,7 +1467,7 @@ class TestHostedRoomRuns:
         self, auth_adapter
     ):
         run_id = "run-room-approval"
-        current = approval_mod._ApprovalEntry({
+        current = approval_gateway_wait._ApprovalEntry({
             "request_id": "approval-B",
             "command": "rm -rf build-B",
         })

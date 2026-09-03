@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from tools.approval import (
+from tools.approval_detection import (
     _bash_exec_payload, _deobfuscate_shell_word_for_detection, _iter_shell_command_starts,
     _read_shell_word)
 
