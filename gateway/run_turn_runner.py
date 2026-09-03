@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import inspect
 import json
 import logging
 import queue
@@ -20,6 +19,7 @@ from contextlib import suppress
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import strip_stale_dangerous_confirmations
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
@@ -36,10 +36,7 @@ logger = logging.getLogger("gateway.run")
 
 
 class TurnRunner:
-    """Per-turn collaborator carrying ``GatewayRunner._run_agent_inner``'s tool-progress callbacks.
-
-    Module-global references (logger, cfg_get, BasePlatformAdapter, ...) resolve in this module.
-    """
+    """Per-turn collaborator carrying ``GatewayRunner._run_agent_inner``'s tool-progress callbacks."""
 
     def __init__(self, runner: "GatewayRunner", ctx: TurnContext) -> None:
         self._runner = runner
@@ -69,20 +66,14 @@ class TurnRunner:
 
     def _drain_progress_queue(self) -> None:
         q = self._ctx.progress_queue
-        while not q.empty():
-            try:
+        with suppress(Exception):
+            while not q.empty():
                 q.get_nowait()
-            except Exception:
-                break
 
     def _track_progress_result(self, result) -> None:
         """Remember a delivered progress/status message id for end-of-turn cleanup."""
         ctx = self._ctx
-        if (
-            ctx._cleanup_progress
-            and getattr(result, "success", False)
-            and getattr(result, "message_id", None)
-        ):
+        if ctx._cleanup_progress and getattr(result, "success", False) and getattr(result, "message_id", None):
             ctx._cleanup_msg_ids.append(str(result.message_id))
 
     def _track_future_cleanup_id(self, fut) -> None:
@@ -120,10 +111,9 @@ class TurnRunner:
         # "_thinking" is assistant scratch text between tool calls, never ordinary tool progress:
         # only relayed when the platform explicitly opted into thinking_progress.
         if event_type == "_thinking" or tool_name == "_thinking":
-            if ctx._thinking_enabled:
-                thinking_text = preview if tool_name == "_thinking" else tool_name
-                if thinking_text:
-                    ctx.progress_queue.put(f"💬 {thinking_text}")
+            thinking_text = (preview if tool_name == "_thinking" else tool_name) if ctx._thinking_enabled else None
+            if thinking_text:
+                ctx.progress_queue.put(f"💬 {thinking_text}")
             return
         # Native task cards consume the ID-bearing tool_start/tool_complete callbacks instead;
         # name-correlated text events would duplicate cards and mispair concurrent same-tool calls.
@@ -159,10 +149,7 @@ class TurnRunner:
                     kwargs.get("goal"), status, error=kwargs.get("summary") or preview,
                     duration_seconds=kwargs.get("duration_seconds"),
                 )
-                self._schedule(
-                    self._runner._deliver_platform_notice(ctx.source, line),
-                    "subagent failure notice scheduling error",
-                )
+                self._schedule(self._runner._deliver_platform_notice(ctx.source, line), "subagent failure notice scheduling error")
         except Exception:
             logger.debug("subagent failure notice failed", exc_info=True)
 
@@ -216,11 +203,8 @@ class TurnRunner:
         terminal calls drop the repeated header so back-to-back commands render as adjacent blocks.
         """
         if not (
-            getattr(adapter, "supports_code_blocks", False)
-            and tool_name == "terminal"
-            and isinstance(args, dict)
-            and isinstance(args.get("command"), str)
-            and args["command"].strip()
+            getattr(adapter, "supports_code_blocks", False) and tool_name == "terminal" and isinstance(args, dict)
+            and isinstance(args.get("command"), str) and args["command"].strip()
         ):
             return None, None
         cmd_full = args["command"].rstrip()
@@ -231,7 +215,7 @@ class TurnRunner:
         if len(cmd_short) > cap:
             cmd_short = cmd_short[:cap - 3] + "..."
         elif len(lines) > 1:
-            cmd_short = cmd_short + " ..."
+            cmd_short += " ..."
         return f"{header}```\n{cmd_full}\n```", f"{header}```\n{cmd_short}\n```"
 
     def _progress_build_message(self, tool_name, preview, args) -> Optional[str]:
@@ -244,13 +228,11 @@ class TurnRunner:
         except Exception:
             adapter = None
         code_full, code_short = self._progress_terminal_blocks(adapter, tool_name, args, emoji)
-        if ctx.progress_mode == "verbose":
-            if code_full is not None:
-                ctx.last_was_terminal_block[0] = True
-                ctx.progress_queue.put(code_full)
-                return None
-            ctx.last_was_terminal_block[0] = False
-            if args:
+        verbose = ctx.progress_mode == "verbose"
+        code = code_full if verbose else code_short
+        ctx.last_was_terminal_block[0] = code is not None
+        if verbose:
+            if code is None and args:
                 from agent.display import get_tool_preview_max_len
                 pl = get_tool_preview_max_len()
                 args_str = json.dumps(args, ensure_ascii=False, default=str)
@@ -258,17 +240,13 @@ class TurnRunner:
                 # for full detail and platform message-length limits handle the rest.
                 if pl > 0 and len(args_str) > pl:
                     args_str = args_str[:pl - 3] + "..."
-                msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
-            elif preview:
-                msg = f"{emoji} {tool_name}: \"{preview}\""
-            else:
-                msg = f"{emoji} {tool_name}..."
-            ctx.progress_queue.put(msg)
+                code = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
+            elif code is None:
+                code = f"{emoji} {tool_name}: \"{preview}\"" if preview else f"{emoji} {tool_name}..."
+            ctx.progress_queue.put(code)
             return None
-        if code_short is not None:
-            ctx.last_was_terminal_block[0] = True
-            return code_short
-        ctx.last_was_terminal_block[0] = False
+        if code is not None:
+            return code
         if not preview:
             return f"{emoji} {tool_name}..."
         from agent.display import get_tool_verb, prepare_tool_preview, tool_verb_connector, verb_drops_preview
@@ -296,8 +274,7 @@ class TurnRunner:
             else:
                 ctx.progress_queue.put(("__dedup__", msg, ctx.repeat_count[0]))
             return
-        ctx.last_progress_msg[0] = msg
-        ctx.repeat_count[0] = 0
+        ctx.last_progress_msg[0], ctx.repeat_count[0] = msg, 0
         if native:
             sc.on_tool_progress(msg)
         else:
@@ -325,16 +302,17 @@ class TurnRunner:
 
         def fallback_text(self) -> str:
             labels = {"in_progress": "running", "complete": "complete", "error": "error"}
-            lines = [
-                f"- {task['title']} - {labels.get(task['status'], task['status'])}"
-                for task in self.visible_tasks()
-            ]
+            lines = [f"- {t['title']} - {labels.get(t['status'], t['status'])}" for t in self.visible_tasks()]
             return "Hermes is working\n" + "\n".join(lines)
 
+        def _upsert(self, call_id: str, title: str) -> Dict[str, str]:
+            if call_id not in self.tasks:
+                self.task_order.append(call_id)
+            self.tasks[call_id] = {"id": call_id, "title": self._compact(title), "status": "in_progress"}
+            return self.tasks[call_id]
+
         def apply_event(self, raw: Any) -> bool:
-            if not isinstance(raw, dict):
-                return False
-            event_type = raw.get("type")
+            event_type = raw.get("type") if isinstance(raw, dict) else None
             if event_type not in {"tool.started", "tool.completed"}:
                 return False
             call_id = str(raw.get("tool_call_id") or "")
@@ -344,18 +322,11 @@ class TurnRunner:
             tool_name = str(raw.get("tool_name") or "tool")
             if event_type == "tool.started":
                 preview = self._compact(raw.get("preview"), 64)
-                title = f"{tool_name} - {preview}" if preview else tool_name
-                if call_id not in self.tasks:
-                    self.task_order.append(call_id)
-                self.tasks[call_id] = {"id": call_id, "title": self._compact(title), "status": "in_progress"}
+                self._upsert(call_id, f"{tool_name} - {preview}" if preview else tool_name)
                 return True
-            task = self.tasks.get(call_id)
-            if task is None:
-                # Completion-only events are rare but valid on some runtimes; keep their real ID
-                # instead of guessing a same-name pending call.
-                task = {"id": call_id, "title": self._compact(tool_name), "status": "in_progress"}
-                self.tasks[call_id] = task
-                self.task_order.append(call_id)
+            # Completion-only events are rare but valid on some runtimes; keep their real ID instead
+            # of guessing a same-name pending call.
+            task = self.tasks.get(call_id) or self._upsert(call_id, tool_name)
             task["status"] = "error" if raw.get("is_error") else "complete"
             return True
 
@@ -364,8 +335,7 @@ class TurnRunner:
         text = st.fallback_text()
         if st.fallback_msg_id:
             result = await st.adapter.edit_message(
-                chat_id=ctx.source.chat_id, message_id=st.fallback_msg_id, content=text,
-                metadata=ctx._progress_metadata,
+                chat_id=ctx.source.chat_id, message_id=st.fallback_msg_id, content=text, metadata=ctx._progress_metadata,
             )
             if getattr(result, "success", False):
                 return
@@ -380,8 +350,7 @@ class TurnRunner:
         if not st.native_failed:
             result = await st.adapter.send_native_task_card_progress(
                 chat_id=ctx.source.chat_id, tasks=st.visible_tasks(), title="Hermes is working",
-                reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
-                fallback_text=st.fallback_text(),
+                reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata, fallback_text=st.fallback_text(),
             )
             if getattr(result, "success", False):
                 return
@@ -395,47 +364,39 @@ class TurnRunner:
 
     def _task_card_drain(self, st) -> bool:
         changed = False
-        while True:
-            try:
+        try:
+            while True:
                 changed = st.apply_event(self._ctx.progress_queue.get_nowait()) or changed
-            except queue.Empty:
-                return changed
-            except Exception:
-                logger.debug("Slack native progress queue drain failed", exc_info=True)
-                return changed
+        except queue.Empty:
+            pass
+        except Exception:
+            logger.debug("Slack native progress queue drain failed", exc_info=True)
+        return changed
 
     async def _send_native_task_card_progress(self, adapter) -> None:
-        """Drain the progress queue into Slack-native plan/task cards.
-
-        On any native failure, fall back to an editable in-thread message so progress stays live.
-        """
+        """Drain the progress queue into Slack-native plan/task cards; on any native failure, fall
+        back to an editable in-thread message so progress stays live."""
         ctx = self._ctx
         st = self._TaskCardState(adapter)
         try:
-            while True:
-                if not ctx._run_still_current():
-                    return
+            while ctx._run_still_current():
                 try:
                     raw = ctx.progress_queue.get_nowait()
                 except queue.Empty:
                     await asyncio.sleep(0.1)
                     continue
-                if self._agent_interrupted():
-                    continue
-                if st.apply_event(raw):
+                if not self._agent_interrupted() and st.apply_event(raw):
                     await self._task_card_publish(st)
         except asyncio.CancelledError:
             if self._task_card_drain(st) and ctx._run_still_current() and not self._agent_interrupted():
                 await self._task_card_publish(st)
-            return
         finally:
             if hasattr(adapter, "stop_native_task_card_progress"):
                 # Best-effort on the turn-cleanup path: an escaping transport exception would skip
                 # final-delivery logic (cleanup awaits catch only CancelledError).
                 try:
                     await adapter.stop_native_task_card_progress(
-                        ctx.source.chat_id, reply_to=ctx._progress_reply_to,
-                        metadata=ctx._progress_metadata,
+                        ctx.source.chat_id, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -465,32 +426,18 @@ class TurnRunner:
         # Per-chat resolution (relay adapter fronting N platforms): cap and length unit follow the
         # chat's underlying platform; native adapters return their scalar/property unchanged.
         if isinstance(adapter, BasePlatformAdapter):
-            try:
+            with suppress(Exception):
                 raw_limit = int(adapter.max_message_length_for_chat(ctx.source.chat_id) or 4000)
                 len_fn = adapter.message_len_fn_for_chat(ctx.source.chat_id)
-            except Exception:
-                pass
-        # Detect whether edit_message accepts metadata so overflow edits preserve Telegram
-        # topic/thread routing.
-        edit_accepts_metadata = False
-        if ctx._progress_metadata:
-            try:
-                params = inspect.signature(adapter.edit_message).parameters
-                edit_accepts_metadata = "metadata" in params or any(
-                    p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-                )
-            except (TypeError, ValueError):
-                edit_accepts_metadata = False
         return self._ProgressEditState(
-            adapter=adapter,
-            progress_lines=[],
-            progress_msg_id=None,
+            adapter=adapter, progress_lines=[], progress_msg_id=None,
             # "separate" = one message per tool (pre-v0.9 behavior)
             can_edit=ctx.progress_grouping != "separate",
             _progress_len_fn=len_fn,
             # Leave room for platform quirks / formatting; tiny test adapters keep a usable limit.
             _PROGRESS_TEXT_LIMIT=max(1, raw_limit - (64 if raw_limit > 128 else 0)),
-            _edit_accepts_metadata=edit_accepts_metadata,
+            # Overflow edits pass metadata (Telegram topic/thread routing) only when edit_message takes it.
+            _edit_accepts_metadata=bool(ctx._progress_metadata) and _accepts_keyword(adapter.edit_message, "metadata"),
         )
 
     async def _edit_progress_message(self, st, message_id: str, content: str):
@@ -514,18 +461,14 @@ class TurnRunner:
             candidate = current + [line]
             if current and st._progress_len_fn(self._progress_text(candidate)) > st._PROGRESS_TEXT_LIMIT:
                 groups.append(current)
-                current = [line]
-            else:
-                current = candidate
-        if current:
-            groups.append(current)
-        return groups
+                candidate = [line]
+            current = candidate
+        return groups + ([current] if current else [])
 
     async def _send_progress_text(self, st, text: str):
         ctx = self._ctx
         result = await st.adapter.send(
-            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to,
-            metadata=ctx._progress_metadata,
+            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
         )
         self._track_progress_result(result)
         return result
@@ -541,9 +484,8 @@ class TurnRunner:
         groups = self._split_progress_groups(st, st.progress_lines)
         if len(groups) <= 1:
             return False
-        first_text = self._progress_text(groups[0])
         if st.progress_msg_id is not None:
-            result = await self._edit_progress_message(st, st.progress_msg_id, first_text)
+            result = await self._edit_progress_message(st, st.progress_msg_id, self._progress_text(groups[0]))
             if not result.success:
                 if getattr(result, "retryable", False):
                     logger.debug("[%s] Transient overflow edit failure — keeping can_edit=True", st.adapter.name)
@@ -551,11 +493,8 @@ class TurnRunner:
                 st.can_edit = False
                 # Fall back to the existing non-edit behavior.
                 return False
-        else:
-            result = await self._send_progress_text(st, first_text)
-            if result.success and result.message_id:
-                st.progress_msg_id = result.message_id
-        for group in groups[1:]:
+            groups = groups[1:]
+        for group in groups:
             result = await self._send_progress_text(st, self._progress_text(group))
             if result.success and result.message_id:
                 st.progress_msg_id = result.message_id
@@ -580,10 +519,10 @@ class TurnRunner:
         """Fold a queue item into the bubble buffer; returns the line to render this tick."""
         if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
             _, base_msg, count = raw
-            if st.progress_lines:
-                st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                return st.progress_lines[-1]
-            return base_msg
+            if not st.progress_lines:
+                return base_msg
+            st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
+            return st.progress_lines[-1]
         st.progress_lines.append(raw)
         return raw
 
@@ -594,8 +533,8 @@ class TurnRunner:
 
     async def _drain_progress_on_cancel(self, st) -> None:
         ctx = self._ctx
-        while not ctx.progress_queue.empty():
-            try:
+        with suppress(Exception):
+            while not ctx.progress_queue.empty():
                 raw = ctx.progress_queue.get_nowait()
                 if self._is_reset_marker(raw):
                     # Content-bubble marker during drain: close the current progress bubble
@@ -606,8 +545,6 @@ class TurnRunner:
                 else:
                     self._progress_absorb(st, raw)
                     await self._roll_progress_overflow_if_needed(st)
-            except Exception:
-                break
         # Final edit with all remaining tools (only if editing works)
         if st.can_edit and st.progress_lines and st.progress_msg_id:
             await self._roll_progress_overflow_if_needed(st)
@@ -632,8 +569,7 @@ class TurnRunner:
             if getattr(result, "retryable", False):
                 logger.debug("[%s] Transient edit failure — keeping can_edit=True", st.adapter.name)
                 return False
-            err = (getattr(result, "error", "") or "").lower()
-            if "flood" in err or "retry after" in err:
+            if any(w in (getattr(result, "error", "") or "").lower() for w in ("flood", "retry after")):
                 logger.info("[%s] Progress edit flood control, backing off", st.adapter.name)
             else:
                 st.can_edit = False
@@ -647,9 +583,7 @@ class TurnRunner:
 
     async def send_progress_messages(self):
         ctx = self._ctx
-        if not ctx.progress_queue:
-            return
-        adapter = self._runner._adapter_for_source(ctx.source)
+        adapter = self._runner._adapter_for_source(ctx.source) if ctx.progress_queue else None
         if not adapter:
             return
         if ctx._native_slack_task_cards and hasattr(adapter, "send_native_task_card_progress"):
