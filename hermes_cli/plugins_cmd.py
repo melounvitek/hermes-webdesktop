@@ -65,6 +65,15 @@ def _console():
     return Console()
 
 
+def _table(columns, **kwargs):
+    """A Rich ``Table(**kwargs)`` with ``(header, style)`` *columns* added in order."""
+    from rich.table import Table
+    table = Table(**kwargs)
+    for header, style in columns:
+        table.add_column(header, style=style)
+    return table
+
+
 def _is_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -316,12 +325,11 @@ def _copy_example_files(plugin_dir: Path, console) -> None:
 def _missing_env_specs(manifest: dict) -> list[dict]:
     """``requires_env`` entries (plain names or ``{name, description, url, secret}`` dicts,
     normalised to dicts; nameless entries dropped) whose variable is unset in ``~/.hermes/.env``."""
-    env_specs: list[dict] = []
-    for entry in manifest.get("requires_env") or []:
-        if isinstance(entry, str):
-            env_specs.append({"name": entry})
-        elif isinstance(entry, dict) and entry.get("name"):
-            env_specs.append(entry)
+    env_specs = [
+        {"name": entry} if isinstance(entry, str) else entry
+        for entry in manifest.get("requires_env") or []
+        if isinstance(entry, str) or (isinstance(entry, dict) and entry.get("name"))
+    ]
     if not env_specs:
         return []
     from hermes_cli.config import get_env_value
@@ -470,20 +478,14 @@ def _git_head_revision(repo: Path, git_exe: str) -> str:
 
 def _checkout_exact_revision(repo: Path, git_exe: str, revision: str) -> None:
     """Fetch and detach at one immutable commit, then verify the resulting HEAD."""
-    steps = (
-        (
-            ("fetch", "--depth", "1", "origin", revision),
-            f"Git fetch of commit '{revision}' timed out after 60 seconds.",
-            f"Git commit '{revision}' could not be fetched:\n"),
-        (
-            ("checkout", "--detach", revision),
-            f"Git checkout of commit '{revision}' timed out after 60 seconds.",
-            f"Git checkout of commit '{revision}' failed:\n"))
-    for args, timeout_msg, failure_prefix in steps:
+    for verb, args, failure_prefix in (
+        ("fetch", ("fetch", "--depth", "1", "origin", revision), f"Git commit '{revision}' could not be fetched:\n"),
+        ("checkout", ("checkout", "--detach", revision), f"Git checkout of commit '{revision}' failed:\n"),
+    ):
         try:
             _git_or_raise(git_exe, repo, *args, failure_prefix=failure_prefix)
         except subprocess.TimeoutExpired as exc:
-            raise PluginOperationError(timeout_msg) from exc
+            raise PluginOperationError(f"Git {verb} of commit '{revision}' timed out after 60 seconds.") from exc
     actual = _git_head_revision(repo, git_exe)
     if actual != revision:
         raise PluginOperationError(
@@ -613,12 +615,9 @@ def _install_plugin_core(
     # Reinstalling the same pinned source retains its pin, even if its plugin
     # directory was manually removed. Moving a pin requires an explicit --ref.
     if requested_revision is None:
-        matching_pins = [
-            entry for entry in old_metadata.values()
-            if entry.get("source") == source and entry.get("pinned") is True
-        ]
-        if len(matching_pins) == 1 and isinstance(matching_pins[0].get("revision"), str):
-            requested_revision = _normalize_exact_revision(matching_pins[0]["revision"])
+        pins = [e for e in old_metadata.values() if e.get("source") == source and e.get("pinned") is True]
+        if len(pins) == 1 and isinstance(pins[0].get("revision"), str):
+            requested_revision = _normalize_exact_revision(pins[0]["revision"])
 
     with tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir) as tmp:
         tmp_clone = Path(tmp) / "plugin"
@@ -640,23 +639,14 @@ def _install_plugin_core(
                 f"Plugin '{plugin_name}' already exists. Use force reinstall "
                 f"or run `hermes plugins update {plugin_name}`.")
         prior = old_metadata.get(plugin_name)
-        if (
-            target.exists()
-            and requested_revision is None
-            and isinstance(prior, dict)
-            and prior.get("pinned") is True
-        ):
+        if target.exists() and requested_revision is None and isinstance(prior, dict) and prior.get("pinned") is True:
             raise PluginOperationError(
                 f"Plugin '{plugin_name}' is pinned. Reinstall it with an explicit "
                 "--ref <40-character commit SHA> to change its source or revision.")
 
         new_metadata = {
             **old_metadata,
-            plugin_name: {
-                "pinned": requested_revision is not None,
-                "revision": installed_revision,
-                "source": source,
-            },
+            plugin_name: {"pinned": requested_revision is not None, "revision": installed_revision, "source": source},
         }
         _swap_in_plugin(tmp_target, target, Path(tmp) / "previous-plugin", old_metadata, new_metadata)
 
@@ -902,13 +892,22 @@ def cmd_remove(name: str) -> None:
     console.print()
 
 
-def _get_disabled_set() -> set:
-    """``plugins.disabled`` — an explicit deny-list that wins over ``plugins.enabled``."""
-    return _config_name_set("plugins", "disabled")
+# ``plugins.disabled`` is an explicit deny-list that wins over the ``plugins.enabled`` allow-list.
+_get_disabled_set = functools.partial(_config_name_set, "plugins", "disabled")
+_get_enabled_set = functools.partial(_config_name_set, "plugins", "enabled")
 
 
 def _save_disabled_set(disabled: set) -> None:
     _write_config_value("plugins", "disabled", sorted(disabled))
+
+
+def _save_enabled_set(enabled: set) -> None:
+    _write_config_value("plugins", "enabled", sorted(enabled))
+
+
+def _save_plugin_sets(enabled: set, disabled: set) -> None:
+    _save_enabled_set(enabled)
+    _save_disabled_set(disabled)
 
 
 _BASIC_AUTH_PLUGIN_KEYS = frozenset({"basic", "dashboard_auth/basic"})
@@ -929,15 +928,6 @@ def ensure_basic_auth_plugin_enabled_in_config(cfg: dict) -> bool:
     return True
 
 
-def _get_enabled_set() -> set:
-    """``plugins.enabled`` — the opt-in allow-list (empty when missing)."""
-    return _config_name_set("plugins", "enabled")
-
-
-def _save_enabled_set(enabled: set) -> None:
-    _write_config_value("plugins", "enabled", sorted(enabled))
-
-
 def _discard_key_and_leaf(names: set, key: str) -> None:
     """Drop *key* and its bare leaf (``observability/langfuse`` -> ``langfuse``) from *names*, so a
     stale legacy bare-name entry can't keep vetoing the canonical key."""
@@ -952,11 +942,6 @@ def _set_plugin_enabled(name: str, *, enable: bool) -> None:
     (enabled.add if enable else enabled.discard)(name)
     (disabled.discard if enable else disabled.add)(name)
     _save_plugin_sets(enabled, disabled)
-
-
-def _save_plugin_sets(enabled: set, disabled: set) -> None:
-    _save_enabled_set(enabled)
-    _save_disabled_set(disabled)
 
 
 def _resolve_plugin_key(name: str) -> Optional[str]:
@@ -1150,12 +1135,12 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
         if not declared:
             console.print("  declared: [dim](none)[/dim]")
         for cap in declared:
-            if cap in effective:
-                mark = "[green]granted[/green]"
-                if cap not in granted:
-                    mark += " [dim](via legacy allow_* key — deprecated)[/dim]"
-            else:
+            if cap not in effective:
                 mark = "[yellow]not granted[/yellow]"
+            elif cap in granted:
+                mark = "[green]granted[/green]"
+            else:
+                mark = "[green]granted[/green] [dim](via legacy allow_* key — deprecated)[/dim]"
             console.print(f"  {cap}: {mark}")
         for cap in sorted(effective - set(declared)):
             console.print(f"  {cap}: [green]granted[/green] [dim](not declared in manifest)[/dim]")
@@ -1296,11 +1281,8 @@ def _discover_all_plugins() -> list:
 
 def _plugin_status(name: str, enabled: set, disabled: set, key: str = "") -> str:
     """User-facing activation state for a plugin name or key."""
-    if name in disabled or key in disabled:
-        return "disabled"
-    if name in enabled or key in enabled:
-        return "enabled"
-    return "not enabled"
+    names = {name, key}
+    return "disabled" if names & disabled else "enabled" if names & enabled else "not enabled"
 
 
 def _filter_plugin_entries(entries: list, args: Any, enabled: set, disabled: set) -> list:
@@ -1321,7 +1303,6 @@ _STATUS_MARKUP = {"disabled": "[red]disabled[/red]", "enabled": "[green]enabled[
 
 def cmd_list(args: Any | None = None) -> None:
     """List all plugins (bundled + user) with enabled/disabled state."""
-    from rich.table import Table
     console = _console()
     entries = _discover_all_plugins()
     if not entries:
@@ -1351,12 +1332,9 @@ def cmd_list(args: Any | None = None) -> None:
         console.print("[dim]No plugins matched the selected filters.[/dim]")
         return
 
-    table = Table(title="Plugins", show_lines=False)
-    table.add_column("Name", style="bold")
-    table.add_column("Status")
-    table.add_column("Version", style="dim")
-    table.add_column("Description")
-    table.add_column("Source", style="dim")
+    table = _table(
+        (("Name", "bold"), ("Status", None), ("Version", "dim"), ("Description", None), ("Source", "dim")),
+        title="Plugins", show_lines=False)
     for name, status_name, version, description, source in rows:
         status = _STATUS_MARKUP.get(status_name, "[yellow]not enabled[/yellow]")
         table.add_row(name, status, version, description, source)
@@ -1485,16 +1463,13 @@ def cmd_toggle() -> None:
     # name let plugins.disabled drift so "explicit disable wins" kept a plugin off forever.
     plugin_keys = [entry[5] for entry in entries]
     plugin_labels = [
-        (f"{name} \u2014 {description}" if description else name)
-        + (" [bundled]" if source == "bundled" else "")
+        (f"{name} \u2014 {description}" if description else name) + (" [bundled]" if source == "bundled" else "")
         for name, _version, description, source, _d, _key in entries
     ]
     # Selected when enabled AND not disabled; the legacy bare name counts on either side.
     plugin_selected = {
         i for i, (name, _v, _desc, _src, _d, key) in enumerate(entries)
-        if (key in enabled_set or name in enabled_set)
-        and key not in disabled_set
-        and name not in disabled_set
+        if {key, name} & enabled_set and not ({key, name} & disabled_set)
     }
     categories = _provider_categories()
 
@@ -1503,11 +1478,9 @@ def cmd_toggle() -> None:
         return
     try:
         import curses
-        _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
-                          disabled_set, categories, console)
+        _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disabled_set, categories, console)
     except ImportError:
-        _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected,
-                                disabled_set, categories, console)
+        _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected, disabled_set, categories, console)
 
 
 def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]:
@@ -1536,25 +1509,32 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
     """Custom curses screen with checkboxes + category action rows."""
     from hermes_cli.curses_ui import _addnstr, flush_stdin
     chosen = set(plugin_selected)
-    n_plugins = len(plugin_keys)
-    n_categories = len(categories)
+    n_plugins, n_categories = len(plugin_keys), len(categories)
     total_items = n_plugins + n_categories  # navigable rows (headers/separator are skipped)
     providers_changed = False
+    nav = {  # key -> new cursor, given (cursor, page_size)
+        key: move
+        for keys, move in (
+            ((curses.KEY_UP, ord("k")), lambda c, p: (c - 1) % total_items),
+            ((curses.KEY_DOWN, ord("j")), lambda c, p: (c + 1) % total_items),
+            ((curses.KEY_NPAGE, ord("f")), lambda c, p: min(total_items - 1, c + p)),
+            ((curses.KEY_PPAGE, ord("b")), lambda c, p: max(0, c - p)),
+            ((curses.KEY_HOME,), lambda c, p: 0),
+            ((curses.KEY_END,), lambda c, p: total_items - 1),
+        )
+        for key in keys
+    }
 
     def _init_colors():
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_GREEN, -1)
-            curses.init_pair(2, curses.COLOR_YELLOW, -1)
-            curses.init_pair(3, curses.COLOR_CYAN, -1)
-            curses.init_pair(4, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)  # dim gray
+            gray = 8 if curses.COLORS > 8 else curses.COLOR_WHITE
+            for pair, fg in ((1, curses.COLOR_GREEN), (2, curses.COLOR_YELLOW), (3, curses.COLOR_CYAN), (4, gray)):
+                curses.init_pair(pair, fg, -1)
 
     def _attr(base, pair):
         return base | curses.color_pair(pair) if curses.has_colors() else base
-
-    def _put(stdscr, y, x, text, max_x, attr):
-        _addnstr(stdscr, y, x, text, max_x - 1, attr)
 
     def _row(text, idx, cursor, pair):
         """One navigable body row: arrow marker + bold color when *idx* is the cursor."""
@@ -1563,8 +1543,8 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
 
     def _configure_category(ci):
         """Leave curses, run the category's picker, refresh its row, re-enter curses."""
-        curses.endwin()
         nonlocal providers_changed
+        curses.endwin()
         cat_name, _cat_cur, cat_fn = categories[ci]
         if cat_fn():
             providers_changed = True
@@ -1588,33 +1568,23 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
         lines.append(("", curses.A_NORMAL))
         if n_categories > 0:
             lines.append(("  Provider Plugins", _attr(curses.A_BOLD, 2)))
-            for ci, (cat_name, cat_current, _cat_fn) in enumerate(categories):
-                lines.append(_row(f"  {cat_name:<24} \u25b8 {cat_current}", n_plugins + ci, cursor, 3))
+            lines += [
+                _row(f"  {cat_name:<24} \u25b8 {cat_current}", n_plugins + ci, cursor, 3)
+                for ci, (cat_name, cat_current, _cat_fn) in enumerate(categories)
+            ]
         return lines
 
     def _draw(stdscr):
         curses.curs_set(0)
         _init_colors()
-        nav = {}  # key -> new cursor, given (cursor, page_size)
-        for keys, move in (
-            ((curses.KEY_UP, ord("k")), lambda c, p: (c - 1) % total_items),
-            ((curses.KEY_DOWN, ord("j")), lambda c, p: (c + 1) % total_items),
-            ((curses.KEY_NPAGE, ord("f")), lambda c, p: min(total_items - 1, c + p)),
-            ((curses.KEY_PPAGE, ord("b")), lambda c, p: max(0, c - p)),
-            ((curses.KEY_HOME,), lambda c, p: 0),
-            ((curses.KEY_END,), lambda c, p: total_items - 1),
-        ):
-            nav.update(dict.fromkeys(keys, move))
         cursor = scroll_offset = 0
-
         while True:
             stdscr.clear()
             max_y, max_x = stdscr.getmaxyx()
-            _put(stdscr, 0, 0, "Plugins", max_x, _attr(curses.A_BOLD, 2))
-            _put(
-                stdscr, 1, 0,
-                "  ↑↓/j/k navigate  PgUp/PgDn page  SPACE toggle  ENTER configure/confirm  ESC done",
-                max_x, curses.A_DIM)
+            _addnstr(stdscr, 0, 0, "Plugins", max_x - 1, _attr(curses.A_BOLD, 2))
+            _addnstr(
+                stdscr, 1, 0, "  ↑↓/j/k navigate  PgUp/PgDn page  SPACE toggle  ENTER configure/confirm  ESC done",
+                max_x - 1, curses.A_DIM)
             visible_rows = max_y - 4
             if cursor < scroll_offset:
                 scroll_offset = cursor
@@ -1623,7 +1593,7 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
             lines = _body_lines(cursor, scroll_offset, visible_rows)
             for y, (text, attr) in enumerate(lines[: max(0, max_y - 4)], start=3):
                 if text:
-                    _put(stdscr, y, 0, text, max_x, attr)
+                    _addnstr(stdscr, y, 0, text, max_x - 1, attr)
             stdscr.refresh()
             key = stdscr.getch()
 
@@ -1744,11 +1714,7 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
         return None
 
     def _first_toolset(tool_names) -> Optional[str]:
-        for tool_name in tool_names:
-            entry = registry.get_entry(tool_name)
-            if entry and entry.toolset:
-                return entry.toolset
-        return None
+        return next((e.toolset for t in tool_names if (e := registry.get_entry(t)) and e.toolset), None)
 
     def _from_loaded_plugin() -> Optional[str]:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -1760,12 +1726,11 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
 
     def _from_manifest_on_disk() -> Optional[str]:
         from hermes_cli.plugins import get_bundled_plugins_dir
-        for base in (get_bundled_plugins_dir(), _plugins_dir()):
-            if base.is_dir() and (base / name).is_dir() and (
-                toolset := _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
-            ):
-                return toolset
-        return None
+        return next((
+            toolset for base in (get_bundled_plugins_dir(), _plugins_dir())
+            if base.is_dir() and (base / name).is_dir()
+            and (toolset := _first_toolset(_read_manifest(base / name).get("provides_tools") or []))
+        ), None)
 
     for lookup in (_from_loaded_plugin, _from_manifest_on_disk):
         try:
@@ -1787,14 +1752,8 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
     platform_toolsets = _child_dict(config, "platform_toolsets")
     changed = False
     for ts_list in platform_toolsets.values():
-        if not isinstance(ts_list, list):
-            continue
-        if enable:
-            if toolset_key not in ts_list:
-                ts_list.append(toolset_key)
-                changed = True
-        elif toolset_key in ts_list:
-            ts_list.remove(toolset_key)
+        if isinstance(ts_list, list) and enable != (toolset_key in ts_list):
+            (ts_list.append if enable else ts_list.remove)(toolset_key)
             changed = True
     # Enabling with no platform lists yet: seed "cli" at minimum.
     if enable and not changed and not platform_toolsets:
@@ -1852,13 +1811,9 @@ def _clear_plugin_bytecode(target: Path) -> int:
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
-            if not cache_dir.is_dir():
-                continue
-            try:
-                shutil.rmtree(cache_dir)
-                removed += 1
-            except OSError:
-                pass
+            if cache_dir.is_dir():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                removed += 0 if cache_dir.exists() else 1
     except OSError:
         pass
     return removed
@@ -1991,26 +1946,17 @@ def cmd_search(
     results = search_index(entries, term, capability=capability)
     if json_output:
         print(json.dumps(
-            {
-                "source": source,
-                "query": term,
-                "results": [e.to_dict() for e in results],
-                "note": SECURITY_FOOTER,
-            },
-            indent=2,
-        ))
+            {"source": source, "query": term, "results": [e.to_dict() for e in results], "note": SECURITY_FOOTER},
+            indent=2))
         return
 
     if not results:
         console.print(f"[yellow]No plugins matched '{term}'[/yellow] [dim](index source: {source})[/dim]")
         return
 
-    from rich.table import Table
-    table = Table(title=f"Community plugins ({len(results)} match{'es' if len(results) != 1 else ''})")
-    table.add_column("Name", style="bold")
-    table.add_column("Description")
-    table.add_column("Author")
-    table.add_column("Tags", style="dim")
+    table = _table(
+        (("Name", "bold"), ("Description", None), ("Author", None), ("Tags", "dim")),
+        title=f"Community plugins ({len(results)} match{'es' if len(results) != 1 else ''})")
     for e in results:
         desc = e.description if len(e.description) <= 70 else e.description[:67] + "..."
         table.add_row(e.name, desc, e.author, ", ".join(e.tags))
@@ -2021,11 +1967,7 @@ def cmd_search(
 
 def _tri_state_flag(args, yes_attr: str, no_attr: str) -> Optional[bool]:
     """Map an argparse ``--x`` / ``--no-x`` pair to True / False / None (neither given)."""
-    if getattr(args, yes_attr, False):
-        return True
-    if getattr(args, no_attr, False):
-        return False
-    return None
+    return True if getattr(args, yes_attr, False) else (False if getattr(args, no_attr, False) else None)
 
 
 def _action_pack(args):
