@@ -131,10 +131,8 @@ class ChronosCronScheduler(CronScheduler):
             if j.get("enabled") and j.get("next_run_at") and j.get("state") != "paused"}
         observed = self._list_armed()
         for job_id, fire_at in desired.items():
-            if observed.get(job_id) != fire_at:
-                job = get_job(job_id)
-                if job:
-                    self._arm_logged(job, f"arm job {job_id}")
+            if observed.get(job_id) != fire_at and (job := get_job(job_id)):
+                self._arm_logged(job, f"arm job {job_id}")
         for job_id in observed.keys() - desired.keys():
             try:
                 self._cancel(job_id)

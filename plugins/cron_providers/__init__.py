@@ -33,10 +33,7 @@ def _is_cron_provider_dir(path: Path) -> bool:
 def _user_provider_dirs() -> List[Path]:
     """User-installed ``$HERMES_HOME/plugins/<name>/`` dirs that look like cron providers."""
     user_dir = _loader.user_plugins_dir()
-    if not user_dir:
-        return []
-    return [child for child in sorted(user_dir.iterdir())
-            if child.is_dir() and not child.name.startswith(("_", ".")) and _is_cron_provider_dir(child)]
+    return [c for c in _loader.iter_plugin_dirs(user_dir) if _is_cron_provider_dir(c)] if user_dir else []
 
 
 def _iter_provider_dirs() -> List[Tuple[str, Path]]:

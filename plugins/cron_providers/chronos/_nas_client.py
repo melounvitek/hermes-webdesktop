@@ -4,6 +4,7 @@ Wire contract: ``docs/chronos-managed-cron-contract.md``."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Dict, List
 
@@ -41,10 +42,9 @@ class NasCronClient:
             raise NasCronClientError(f"{method} {path} failed: {e}") from e
         if resp.status_code // 100 != 2:
             raise NasCronClientError(f"{method} {path} returned {resp.status_code}: {resp.text[:200]}")
-        try:
+        with contextlib.suppress(Exception):
             return resp.json() if resp.content else {}
-        except Exception:
-            return {}
+        return {}
 
     def provision(self, *, job_id: str, fire_at: str, agent_callback_url: str,
                   dedup_key: str) -> Dict[str, Any]:
