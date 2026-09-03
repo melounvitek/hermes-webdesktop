@@ -402,10 +402,9 @@ def _cmd_cleanup(args):
                 print_error(f"Could not archive: {e}")
                 print_info(f"Try manually: mv {source_dir} {source_dir}.pre-migration")
     print()
-    n = len(dirs_to_check) if dry_run else total_archived
-    word = "directory" if n == 1 else "directories"
+    word = "directory" if (len(dirs_to_check) if dry_run else total_archived) == 1 else "directories"
     if dry_run:
-        _info(f"Dry run complete. {n} {word} would be archived.",
+        _info(f"Dry run complete. {len(dirs_to_check)} {word} would be archived.",
               "Run without --dry-run to archive them.")
     elif total_archived:
         print_success(f"Cleaned up {total_archived} OpenClaw {word}.")

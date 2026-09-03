@@ -1,9 +1,6 @@
-"""Agent-construction and session-resume display methods for ``HermesCLI``.
-
-Runtime-credential resolution, per-turn agent config, first-use agent construction, and
-resumed-session preload + history recap. ``cli.py`` helpers are imported lazily inside
-each method so this module never imports ``cli`` at import time (import cycle).
-"""
+"""Agent construction + session-resume display for ``HermesCLI``: credential resolution,
+per-turn agent config, first-use build, resume preload + recap. ``cli.py`` helpers are
+imported lazily inside each method (import cycle)."""
 
 from __future__ import annotations
 
@@ -202,8 +199,7 @@ class CLIAgentSetupMixin:
             list(runtime.get("args") or []))
         # A callable api_key is a bearer-token provider (Azure Entra ID): the OpenAI SDK
         # invokes it per request, so skip string validation / placeholder substitution.
-        _is_callable_provider = callable(api_key) and not isinstance(api_key, str)
-        if not _is_callable_provider and (not isinstance(api_key, str) or not api_key):
+        if not callable(api_key) and not (isinstance(api_key, str) and api_key):
             if _keyless_custom_base(base_url):
                 # Placeholder key so the SDK doesn't reject the keyless local endpoint.
                 api_key = "no-key-required"
@@ -314,7 +310,7 @@ class CLIAgentSetupMixin:
             return False
         api_key = runtime.get("api_key")
         base_url = runtime.get("base_url")
-        if (callable(api_key) and not isinstance(api_key, str)) or (isinstance(api_key, str) and api_key):
+        if callable(api_key) or (isinstance(api_key, str) and api_key):
             return bool(base_url)
         return _keyless_custom_base(base_url)
 
@@ -394,6 +390,12 @@ class CLIAgentSetupMixin:
             session_meta = self._session_db.get_session(self.session_id) or session_meta
         return session_meta
 
+    def _restore_session_state(self, session_meta, *, quiet: bool = False) -> None:
+        """Restore cwd / yolo / model from the resumed session's metadata."""
+        self._restore_session_cwd(session_meta, quiet=quiet)
+        self._restore_session_yolo(session_meta, quiet=quiet)
+        self._restore_session_model(session_meta, quiet=quiet)
+
     def _reopen_session(self) -> None:
         """Clear ended_at so the resumed session is active again (best effort)."""
         try:
@@ -453,9 +455,7 @@ class CLIAgentSetupMixin:
                 f"↻ Resumed session {self.session_id}{title_part} {counts}",
                 f"[bold {_accent_hex()}]↻ Resumed session[/] [bold]{_escape(self.session_id)}[/]"
                 f"[bold {_accent_hex()}]{_escape(title_part)}[/] {counts}")
-            self._restore_session_cwd(session_meta, quiet=_quiet_mode)
-            self._restore_session_yolo(session_meta, quiet=_quiet_mode)
-            self._restore_session_model(session_meta, quiet=_quiet_mode)
+            self._restore_session_state(session_meta, quiet=_quiet_mode)
         else:
             _say(
                 f"Session {self.session_id} found but has no messages. Starting fresh.",
@@ -555,7 +555,7 @@ class CLIAgentSetupMixin:
             self._active_agent_route_signature = _route_signature(effective_model, runtime)
 
             # Force-create DB row on /title intent, then apply title.
-            if self._pending_title and self._session_db and self.agent:
+            if self._pending_title and self._session_db:
                 try:
                     self.agent._ensure_db_session()
                     if self.agent._session_db_created:
@@ -589,10 +589,7 @@ class CLIAgentSetupMixin:
             safety_check = getattr(self._session_db, "assert_resume_safe", None)
             if not callable(safety_check):
                 return None
-            if tip_only:
-                safety_check(self.session_id, tip_only=True)
-            else:
-                safety_check(self.session_id)
+            safety_check(self.session_id, **({"tip_only": True} if tip_only else {}))
         except SessionResumeTooLargeError as exc:
             return str(exc)
         except Exception as exc:
@@ -634,7 +631,6 @@ class CLIAgentSetupMixin:
         self.conversation_history = restored
         self._resume_display_history = [m for m in display_history if m.get("role") != "session_meta"]
         from agent.context_compressor import is_user_originated_turn
-
         # Count only user-originated turns: legacy compaction handoffs are durable
         # role=user rows without display_kind.
         msg_count = len([m for m in self._resume_display_history if is_user_originated_turn(m)])
@@ -644,9 +640,7 @@ class CLIAgentSetupMixin:
             f"{title_part} "
             f"({msg_count} user message{'s' if msg_count != 1 else ''}, "
             f"{len(restored)} total messages)[/]")
-        self._restore_session_cwd(session_meta)
-        self._restore_session_yolo(session_meta)
-        self._restore_session_model(session_meta)
+        self._restore_session_state(session_meta)
         self._reopen_session()
         return True
 

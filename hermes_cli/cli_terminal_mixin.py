@@ -1,8 +1,5 @@
-"""Terminal repaint/resize recovery, input-mode healing, and clipboard helpers for the interactive CLI
-
-Mixin bound onto ``HermesCLI`` via the MRO. cli.py-internal symbols are imported LAZILY
-inside each method (``from cli import ...``) — never at module load (import cycle).
-"""
+"""Terminal repaint/resize recovery, input-mode healing, and clipboard helpers for the interactive
+CLI. Mixin on ``HermesCLI``; cli.py symbols are imported lazily inside methods (import cycle)."""
 
 from __future__ import annotations
 
@@ -90,9 +87,7 @@ class CLITerminalMixin:
         throttled or resize-gated entry paint is silently dropped, so the prompt never
         renders and times out unseen (#41098).
         """
-        if getattr(self, "_terminal_io_broken", False):
-            return
-        if getattr(self, "_resize_recovery_pending", False):
+        if getattr(self, "_terminal_io_broken", False) or getattr(self, "_resize_recovery_pending", False):
             return
         now = time.monotonic()
         if hasattr(self, "_app") and self._app and (now - getattr(self, "_last_invalidate", 0.0)) >= min_interval:
@@ -155,9 +150,8 @@ class CLITerminalMixin:
         """
         from cli import CLI_CONFIG
         display_config = CLI_CONFIG.get("display") if isinstance(CLI_CONFIG, dict) else {}
-        if not isinstance(display_config, dict):
-            display_config = {}
-        raw = display_config.get("cli_rebuild_scrollback_on_redraw", False)
+        raw = (display_config.get("cli_rebuild_scrollback_on_redraw", False)
+               if isinstance(display_config, dict) else False)
         if isinstance(raw, str):
             return raw.strip().lower() in {"1", "true", "yes", "on", "always"}
         return bool(raw)

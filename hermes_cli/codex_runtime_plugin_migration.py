@@ -176,8 +176,7 @@ def render_codex_toml_section(
     """
     out = [MIGRATION_MARKER]
     if not servers and not plugins and not default_permission_profile:
-        out.append("# (no MCP servers, plugins, or permissions configured by Hermes)")
-        out.append(MIGRATION_END_MARKER)
+        out += ["# (no MCP servers, plugins, or permissions configured by Hermes)", MIGRATION_END_MARKER]
         return "\n".join(out) + "\n"
     if default_permission_profile:
         profile = default_permission_profile
