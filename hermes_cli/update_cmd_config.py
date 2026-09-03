@@ -1,8 +1,6 @@
 """Post-``hermes update`` config-schema migration for the active profile and every sibling.
-
-Split out of ``update_cmd.py``; names are re-imported there so ``hermes_cli.update_cmd.<name>``
-still resolves/monkeypatches. Origin helpers are imported lazily per function (no cycle; patches hold).
-"""
+Names are re-imported by ``update_cmd`` (``hermes_cli.update_cmd.<name>`` resolves/monkeypatches);
+origin helpers are imported lazily."""
 
 import logging
 import sys
@@ -15,24 +13,18 @@ logger = logging.getLogger("hermes_cli.update_cmd")
 
 
 def _reload_config_modules() -> None:
-    """Force-reload modules from disk after git pull.
-
-    ``hermes update`` runs in the PRE-pull process, so cached ``config_defaults`` /
-    ``config`` / ``config_migrations`` hold OLD code and ``check_config_version()``
-    reports "up to date" despite a newer pulled version with a migration to run.
-    Also reloads ``_subprocess_compat`` / ``dashboard_procs`` so the later dashboard
-    cleanup sees symbols the update added instead of dying with ImportError.
-    """
+    """Force-reload config modules after git pull: the updater is the PRE-pull process, so the
+    cached modules hold OLD code and ``check_config_version()`` would report "up to date" despite a
+    pulled migration. ``_subprocess_compat`` / ``dashboard_procs`` reload too so the later dashboard
+    cleanup sees symbols the update added."""
     import importlib
-
     importlib.invalidate_caches()
     for mod_name in (
         "hermes_cli.config_defaults",
         "hermes_cli.config",
         "hermes_cli.config_migrations",
         "hermes_cli._subprocess_compat",
-        "hermes_cli.dashboard_procs",
-    ):
+        "hermes_cli.dashboard_procs"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             try:
@@ -42,44 +34,36 @@ def _reload_config_modules() -> None:
 
 
 def _run_config_check_fresh() -> tuple:
-    """Return ``(current_ver, latest_ver)`` using freshly-reloaded modules (see ``_reload_config_modules``)."""
+    """Return ``(current_ver, latest_ver)`` using freshly-reloaded modules (see
+    ``_reload_config_modules``)."""
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import check_config_version
-
     return check_config_version()
 
 
 def _run_migrate_config_fresh(*, interactive: bool = False, quiet: bool = False) -> dict:
-    """Run config migration using freshly-reloaded modules (see ``_reload_config_modules``); returns results dict."""
+    """Run config migration using freshly-reloaded modules (see ``_reload_config_modules``); returns
+    results dict."""
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import migrate_config
-
     return migrate_config(interactive=interactive, quiet=quiet)
 
 
 def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     """Migrate every SIBLING profile's config.yaml (the shared checkout serves all profiles;
-    migrating only the active one left siblings on configs the new code couldn't read).
-
-    Per sibling home (active one skipped — caller already did it): scope reads/writes via the
-    context-local HERMES_HOME override (thread-safe — never ``os.environ``) and run the
-    NON-INTERACTIVE quiet migration; prompt-requiring settings wait for that profile's own
-    interactive session. Returns ``[(profile_name, from_version, to_version), ...]`` for
-    profiles actually migrated. Never raises; a failing profile is skipped (its startup
-    migration remains the fallback).
-    """
+    siblings were left on configs the new code couldn't read). Per sibling (active skipped): scope
+    via the context-local HERMES_HOME override (never ``os.environ``) and run the NON-INTERACTIVE
+    quiet migration — prompt-requiring settings wait for that profile's own session. Returns
+    ``[(name, from_version, to_version), ...]``; never raises (a failing profile falls back to its
+    startup migration)."""
     from hermes_cli.update_cmd import _run_config_check_fresh, _run_migrate_config_fresh
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
         from hermes_constants import (
-            get_process_hermes_home,
-            reset_hermes_home_override,
-            set_hermes_home_override,
-        )
+            get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override)
         from hermes_cli.profiles import _get_profiles_root, _PROFILE_ID_RE
-
         active_home = get_process_hermes_home()
         root = _get_profiles_root()
         if not root.is_dir():
@@ -117,15 +101,13 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # restore from the pre-update snapshot if jobs went missing.
     try:
         from hermes_cli.backup import restore_cron_jobs_if_emptied
-
         cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
         if cron_restore:
             print()
             print(
                 "  ⚠️  cron/jobs.json lost jobs during this update — "
                 f"restored {cron_restore['job_count']} job(s) from "
-                f"pre-update snapshot {cron_restore['snapshot_id']}."
-            )
+                f"pre-update snapshot {cron_restore['snapshot_id']}.")
     except Exception as exc:
         # Never let the cron safety net break an otherwise-good update.
         logger.debug("Cron jobs auto-restore check failed: %s", exc)
@@ -134,15 +116,13 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # moa:; restore only those protected keys from the same pre-update snapshot.
     try:
         from hermes_cli.backup import restore_config_model_settings_if_rewritten
-
         cfg_restore = restore_config_model_settings_if_rewritten(pre_update_snapshot_id)
         if cfg_restore:
             print()
             print(
                 "  ⚠️  config.yaml user model settings were rewritten during "
                 f"this update — restored {', '.join(cfg_restore['keys'])} "
-                f"from pre-update snapshot {cfg_restore['snapshot_id']}."
-            )
+                f"from pre-update snapshot {cfg_restore['snapshot_id']}.")
     except Exception as exc:
         # Never let the config safety net break an otherwise-good update.
         logger.debug("Config model-settings auto-restore check failed: %s", exc)
@@ -150,53 +130,42 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # Same cron-jobs safety net per sibling profile against ITS OWN pre-update snapshot.
     with _best_effort('Sibling cron auto-restore check failed: %s'):
         from hermes_cli.backup import restore_cron_jobs_all_profiles
-
         for _restored in restore_cron_jobs_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
+            _LAST_SIBLING_SNAPSHOTS):
             print()
             print(
                 f"  ⚠️  Profile '{_restored['profile']}': cron/jobs.json "
                 f"lost jobs during this update — restored "
                 f"{_restored['job_count']} job(s) from pre-update "
-                f"snapshot {_restored['snapshot_id']}."
-            )
+                f"snapshot {_restored['snapshot_id']}.")
 
     # Same config model-settings safety net for sibling profiles.
     with _best_effort('Sibling config auto-restore check failed: %s'):
         from hermes_cli.backup import restore_config_model_settings_all_profiles
-
         for _cfg_restored in restore_config_model_settings_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
+            _LAST_SIBLING_SNAPSHOTS):
             print()
             print(
                 f"  ⚠️  Profile '{_cfg_restored['profile']}': config.yaml "
                 f"user model settings were rewritten during this update — "
                 f"restored {', '.join(_cfg_restored['keys'])} from "
-                f"pre-update snapshot {_cfg_restored['snapshot_id']}."
-            )
+                f"pre-update snapshot {_cfg_restored['snapshot_id']}.")
 
 
 def _check_and_apply_config_migration(
     *,
     assume_yes: bool = False,
     gateway_mode: bool = False,
-    pre_update_snapshot_id: str | None = None,
-) -> None:
-    """Check/apply config migrations on an update completion path.
-
-    Must use freshly-reloaded modules (see ``_reload_config_modules``) and run on EVERY
-    completion path (post-pull, venv-repair retry, Node-deps repair on ``commit_count == 0``)
-    so an interrupted update that already pulled code doesn't strand an old config version.
-    """
+    pre_update_snapshot_id: str | None = None) -> None:
+    """Check/apply config migrations with freshly-reloaded modules. Runs on EVERY completion path
+    (post-pull, venv-repair, Node-deps repair on ``commit_count == 0``) so an interrupted update
+    that already pulled code doesn't strand an old config version."""
     from hermes_cli.update_cmd import (
         _gateway_prompt,
         _migrate_sibling_profile_configs,
         _reload_config_modules,
         _run_config_check_fresh,
-        _run_migrate_config_fresh,
-    )
+        _run_migrate_config_fresh)
     print()
     print("→ Checking configuration for new options...")
 
@@ -204,9 +173,7 @@ def _check_and_apply_config_migration(
     _reload_config_modules()
 
     from hermes_cli.config import (
-        get_missing_env_vars,
-        get_missing_config_fields,
-    )
+        get_missing_env_vars, get_missing_config_fields)
 
     # A config-check failure must not break an otherwise-successful update.
     try:
@@ -257,29 +224,22 @@ def _check_and_apply_config_migration(
         elif gateway_mode:
             response = (
                 _gateway_prompt(
-                    "Would you like to configure new options now? [Y/n]", "n"
-                )
+                    "Would you like to configure new options now? [Y/n]", "n")
                 .strip()
-                .lower()
-            )
+                .lower())
         elif not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("  ℹ Non-interactive session — applying safe config migrations.")
             response = "auto"
         else:
             try:
-                response = (
-                    input("Would you like to configure them now? [Y/n]: ")
-                    .strip()
-                    .lower()
-                )
+                response = (input("Would you like to configure them now? [Y/n]: ").strip().lower())
             except EOFError:
                 response = "n"
             except UnicodeDecodeError:
                 # Non-UTF-8 locales / embedded terminals can make input() raise this.
                 print(
                     "  ⚠ Could not read input (encoding issue). Skipping. "
-                    "Run 'hermes config migrate' manually to configure."
-                )
+                    "Run 'hermes config migrate' manually to configure.")
                 response = "n"
 
         if response in {"", "y", "yes", "auto"}:

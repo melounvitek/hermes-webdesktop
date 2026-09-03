@@ -1,8 +1,4 @@
-"""``hermes pets`` subcommand parser.
-
-Extracted from ``hermes_cli/main.py:main()`` (god-file Phase 2 follow-up).
-Handlers are injected or imported lazily so this module never imports ``main``.
-"""
+"""``hermes pets`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -12,15 +8,11 @@ import logging
 def build_pets_parser(subparsers) -> None:
     """Attach the ``pets`` subcommand to ``subparsers``."""
     pets_parser = subparsers.add_parser(
-        "pets",
-        help="Browse, install, and select petdex animated pets",
-        description=(
-            "Petdex (https://github.com/crafter-station/petdex) is a public "
+        "pets", help="Browse, install, and select petdex animated pets",
+        description="Petdex (https://github.com/crafter-station/petdex) is a public "
             "gallery of animated sprite pets for coding agents. Install one "
             "and Hermes shows it reacting to agent activity across the CLI, "
-            "TUI, and desktop app."
-        ),
-    )
+            "TUI, and desktop app.")
     try:
         from hermes_cli.pets import register_cli as _register_pets_cli
 
