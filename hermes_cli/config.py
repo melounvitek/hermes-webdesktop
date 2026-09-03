@@ -179,8 +179,10 @@ def _env_var_policy_name(key: str, *, is_windows: Optional[bool] = None) -> str:
     return key.upper() if windows else key
 
 
-def _reject_denylisted_env_var(key: str) -> None:
-    """Raise if ``key`` is in :data:`_ENV_VAR_NAME_DENYLIST`."""
+def validate_env_var_name_for_write(key: str) -> None:
+    """Validate an env name before a generic persistence write (exposed for batch callers)."""
+    if not _ENV_VAR_NAME_RE.match(key):
+        raise ValueError(f"Invalid environment variable name: {key!r}")
     if _env_var_policy_name(key) in _ENV_VAR_NAME_DENYLIST:
         raise ValueError(
             f"Environment variable {key!r} is on the writer denylist. "
@@ -190,13 +192,6 @@ def _reject_denylisted_env_var(key: str) -> None:
             "cannot be persisted via "
             "the env writer. If you really need this, edit "
             "~/.hermes/.env directly.")
-
-
-def validate_env_var_name_for_write(key: str) -> None:
-    """Validate an env name before a generic persistence write (exposed for batch callers)."""
-    if not _ENV_VAR_NAME_RE.match(key):
-        raise ValueError(f"Invalid environment variable name: {key!r}")
-    _reject_denylisted_env_var(key)
 
 
 # Serializes all config read/write paths and guards the module-level caches below. libyaml's
@@ -318,12 +313,6 @@ def get_managed_update_command() -> Optional[str]:
     return None
 
 
-def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
-    """The install tree holding the *running code* (parent of ``hermes_cli/``) — a property of
-    the interpreter, NOT of $HERMES_HOME, so a stamp there survives two installs sharing a home."""
-    return project_root if project_root is not None else get_project_root()
-
-
 # "apt" is the Termux APT distribution identifier, not a generic Debian/Ubuntu signal; another
 # APT distribution needs its own method. "home-manager" is listed because the managed marker can
 # return it and a stamp must name every method this function returns.
@@ -346,7 +335,9 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     install can bind-mount the same home, so a home-scoped ``docker`` stamp would make the host
     ``hermes update`` refuse to run. A legacy ``docker`` value is therefore ignored unless we are
     really inside a container, and being in a container alone never implies 'docker'."""
-    root = _install_method_project_root(project_root)
+    # The stamp is a property of the running code tree (parent of hermes_cli/), NOT of $HERMES_HOME,
+    # so it survives two installs sharing a home.
+    root = project_root if project_root is not None else get_project_root()
     method = _install_method_stamp(root / ".install_method")
     if method:
         return method
@@ -586,13 +577,10 @@ def _secure_dir(path):
     a served subdirectory without directory listings."""
     if is_managed():
         return
-    mode = 0o700
     try:
-        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
-        if mode_str:
-            mode = int(mode_str, 8)
+        mode = int(os.environ.get("HERMES_HOME_MODE", "").strip() or "700", 8)
     except ValueError:
-        pass
+        mode = 0o700
     try:
         os.chmod(path, mode)
     except (OSError, NotImplementedError):
@@ -604,18 +592,15 @@ def _is_container() -> bool:
     """Detect Docker/Podman/LXC (or HERMES_CONTAINER / HERMES_SKIP_CHMOD opt-out).
     Volume-mounted config is not forced to 0o600 in containers: gateway and dashboard may run
     as different UIDs, or the mount itself needs broader permissions."""
-    if os.environ.get("HERMES_CONTAINER") or os.environ.get("HERMES_SKIP_CHMOD"):
-        return True
-    if os.path.exists("/.dockerenv"):
+    if (os.environ.get("HERMES_CONTAINER") or os.environ.get("HERMES_SKIP_CHMOD")
+            or os.path.exists("/.dockerenv")):
         return True
     try:
         with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
             cgroup_content = f.read()
-        if "docker" in cgroup_content or "lxc" in cgroup_content or "kubepods" in cgroup_content:
-            return True
+        return any(marker in cgroup_content for marker in ("docker", "lxc", "kubepods"))
     except (OSError, IOError):
-        pass
-    return False
+        return False
 
 
 def _secure_file(path):
@@ -668,9 +653,17 @@ def ensure_hermes_home():
     if key in _HERMES_HOME_ENSURED and home.is_dir():
         return
     if is_managed():
+        # Activation creates the dirs; verify, then seed SOUL.md. logs/curator may be unknown to
+        # the activation script (inside an already-secured logs/). umask(0o007) => SOUL.md is 0660.
         old_umask = os.umask(0o007)
         try:
-            _ensure_hermes_home_managed(home)
+            if not home.is_dir():
+                raise RuntimeError(f"HERMES_HOME {home} does not exist.")
+            for subdir in ("cron", "sessions", "logs", "memories"):
+                if not (home / subdir).is_dir():
+                    raise RuntimeError(f"{home / subdir} does not exist.")
+            (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
+            _ensure_default_soul_md(home)
         finally:
             os.umask(old_umask)
     else:
@@ -683,20 +676,6 @@ def ensure_hermes_home():
         _ensure_default_soul_md(home)
 
     _HERMES_HOME_ENSURED.add(key)
-
-
-def _ensure_hermes_home_managed(home: Path):
-    """Managed-mode variant: verify dirs exist (activation creates them), seed SOUL.md."""
-    if not home.is_dir():
-        raise RuntimeError(f"HERMES_HOME {home} does not exist.")
-    for subdir in ("cron", "sessions", "logs", "memories"):
-        d = home / subdir
-        if not d.is_dir():
-            raise RuntimeError(f"{d} does not exist.")
-    # The activation script may not know about logs/curator; it is inside an already-secured
-    # logs/ dir. Inside umask(0o007) scope, so SOUL.md is created 0660.
-    (home / "logs" / "curator").mkdir(parents=True, exist_ok=True)
-    _ensure_default_soul_md(home)
 
 
 # =============================================================================
@@ -925,10 +904,7 @@ def _unset_nested(config, dotted_key: str) -> bool:
     if loc is None:
         return False
     parents, current, key = loc
-    if isinstance(current, list):
-        current.pop(key)
-    else:
-        del current[key]
+    del current[key]
 
     for parent, part in reversed(parents):
         if current != {}:
@@ -1041,21 +1017,6 @@ def _coerce_config_version(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(version, 0)
-
-
-def _raw_config_has_explicit_version() -> bool:
-    """True when config.yaml exists, parses, and carries ``_config_version``.
-    Distinguishes an ANCIENT config (explicit old version -> refused by the v12 support floor)
-    from a fresh minimal config with no version key (-> migrated + stamped normally). Missing or
-    unparseable files return False so they never trip the floor gate."""
-    config_path = get_config_path()
-    if not config_path.exists():
-        return False
-    try:
-        raw = read_user_config_raw(config_path)
-    except Exception:
-        return False
-    return "_config_version" in raw
 
 
 def check_config_version() -> Tuple[int, int]:
@@ -1366,16 +1327,6 @@ def _ask_yes_no(prompt: str) -> bool:
     return answer in {"y", "yes"}
 
 
-def _prompt_missing_required_env(missing_env: List[Dict[str, Any]], results: Dict[str, Any]) -> None:
-    print("\nLet's configure them now:\n")
-    for var in missing_env:
-        if var.get("url"):
-            print(f"  Get your key at: {var['url']}")
-        if not _prompt_and_save_env(var["name"], var, f"  {var['prompt']}: ", results):
-            results["warnings"].append(f"Skipped {var['name']} - some features may not work")
-        print()
-
-
 def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, Any]:
     """Migrate config to latest version, prompting for new required fields."""
     results = {"env_added": [], "config_added": [], "warnings": []}
@@ -1393,14 +1344,17 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # floor is NOT migrated and NOT rewritten — surface a message and leave the file untouched
     # (deep-merge supplies defaults at read time). A config with NO version key is a fresh
     # minimal config, not an ancient install: it gets the normal ladder and a version stamp.
+    # Missing/unparseable files never trip the floor gate.
     # Imported lazily because the steps call back into this module.
     from hermes_cli.config_migrations import (
         SUPPORT_FLOOR_VERSION, run_migrations, support_floor_message)
 
+    try:
+        has_explicit_version = "_config_version" in read_user_config_raw()
+    except Exception:
+        has_explicit_version = False
     floor_refused = (
-        _raw_config_has_explicit_version()
-        and current_ver < SUPPORT_FLOOR_VERSION
-        and current_ver < latest_ver)
+        has_explicit_version and current_ver < SUPPORT_FLOOR_VERSION and current_ver < latest_ver)
     if floor_refused:
         msg = support_floor_message()
         results["warnings"].append(msg)
@@ -1423,7 +1377,13 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         for var in missing_env:
             print(f"   • {var['name']}: {var['description']}")
     if interactive and missing_env:
-        _prompt_missing_required_env(missing_env, results)
+        print("\nLet's configure them now:\n")
+        for var in missing_env:
+            if var.get("url"):
+                print(f"  Get your key at: {var['url']}")
+            if not _prompt_and_save_env(var["name"], var, f"  {var['prompt']}: ", results):
+                results["warnings"].append(f"Skipped {var['name']} - some features may not work")
+            print()
 
     if interactive and not quiet:
         _offer_new_optional_env_vars(current_ver, latest_ver, results)
@@ -2609,13 +2569,7 @@ def _quote_env_value(value: str) -> str:
     (including internal runs) is quoted so ``set -a; . file`` word-splitting keeps paths intact."""
     if value == "":
         return value
-    needs_quoting = (
-        "#" in value
-        or '"' in value
-        or "'" in value
-        or value != value.strip()
-        or any(c.isspace() for c in value))
-    if not needs_quoting:
+    if not ("#" in value or '"' in value or "'" in value or any(c.isspace() for c in value)):
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
@@ -2811,18 +2765,13 @@ def _scoped_environ_get(key: str) -> Optional[str]:
 def get_env_value(key: str) -> Optional[str]:
     """Get a value from ``os.environ`` (scope-aware) or ``~/.hermes/.env``."""
     val = _scoped_environ_get(key)
-    if val is not None:
-        return val
-    return load_env().get(key)
+    return load_env().get(key) if val is None else val
 
 
 def get_env_value_prefer_dotenv(key: str) -> Optional[str]:
     """Resolve a Hermes-managed credential preferring ``~/.hermes/.env`` over ``os.environ``, so a
     deliberate .env edit beats a stale value inherited from the parent shell."""
-    val = load_env().get(key)
-    if val:
-        return val
-    return _scoped_environ_get(key)
+    return load_env().get(key) or _scoped_environ_get(key)
 
 
 # =============================================================================
@@ -3135,20 +3084,7 @@ def cron_model_drift_guard_enabled(
     or non-boolean values stay fail-closed. With *config* omitted the merged config is loaded so
     CLI warnings honor the same user/managed setting as the scheduler."""
     cron_config = _cron_section(config)
-    if cron_config is None:
-        return True
-    return cron_config.get("model_drift_guard", True) is not False
-
-
-def _cron_fleet_default_covers_axis(
-    axis: str, config: Optional[Dict[str, Any]] = None) -> bool:
-    """True when cron.model / cron.model_provider covers *axis*: such an axis no longer follows the
-    global model/provider at fire time, so the guard never engages and warnings would be false."""
-    cron_config = _cron_section(config)
-    if cron_config is None:
-        return False
-    key = "model" if axis == "model" else "model_provider"
-    return bool(_model_assignment_text(cron_config.get(key)))
+    return cron_config is None or cron_config.get("model_drift_guard", True) is not False
 
 
 _CRON_MODEL_IMPACT_JOB_LIMIT = 50
@@ -3193,11 +3129,12 @@ def cron_model_drift_axes(
         "provider": _model_assignment_text(current_provider).lower(),
         "model": _model_assignment_text(current_model).lower(),
     }
+    # A cron.model / cron.model_provider fleet default covers its axis: that axis no longer follows
+    # the global assignment at fire time, so the guard never engages and a warning would be false.
+    fleet = _cron_section(config) or {}
     drifted: List[str] = []
-    for axis in ("provider", "model"):
-        if _cron_fleet_default_covers_axis(axis, config):
-            continue
-        if _model_assignment_text(job.get(axis)):
+    for axis, fleet_key in (("provider", "model_provider"), ("model", "model")):
+        if _model_assignment_text(fleet.get(fleet_key)) or _model_assignment_text(job.get(axis)):
             continue
         snapshot = _model_assignment_text(job.get(f"{axis}_snapshot")).lower()
         if snapshot and current[axis] and snapshot != current[axis]:
@@ -3355,9 +3292,13 @@ _DYNAMIC_TOP_LEVEL_KEYS = frozenset({
 _PLATFORM_CONTAINER_KEYS = frozenset({"platforms"})
 
 
+# Top-level keys whose sub-keys are accepted without deep checking.
+_OPEN_SUBKEY_TOP_LEVEL_KEYS = _OPEN_DICT_TOP_LEVEL_KEYS | _DYNAMIC_TOP_LEVEL_KEYS | _SCHEMA_DEFINED_DICT_KEYS
+
+
 def _known_top_level_keys() -> set[str]:
     """Return the union of known top-level config keys for validation."""
-    return set(DEFAULT_CONFIG) | _OPEN_DICT_TOP_LEVEL_KEYS | _DYNAMIC_TOP_LEVEL_KEYS | _SCHEMA_DEFINED_DICT_KEYS
+    return set(DEFAULT_CONFIG) | _OPEN_SUBKEY_TOP_LEVEL_KEYS
 
 
 def _suggest_closest_key(key: str, candidates: set[str], cutoff: float = 0.6) -> Optional[str]:
@@ -3388,7 +3329,7 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
             return False, f"{suggestion}.{rest}" if rest else suggestion
         return False, None
 
-    if top in _OPEN_DICT_TOP_LEVEL_KEYS or top in _DYNAMIC_TOP_LEVEL_KEYS or top in _SCHEMA_DEFINED_DICT_KEYS:
+    if top in _OPEN_SUBKEY_TOP_LEVEL_KEYS:
         return True, None
 
     # Walk DEFAULT_CONFIG: a nested ``platforms`` container or a scalar leaf hit before the path is
@@ -3925,19 +3866,6 @@ def config_command(args):
 # OPTIONAL_ENV_VARS injection from provider profiles and platform plugins (once, at import)
 # =============================================================================
 
-def _run_once(fn):
-    """Idempotent module-load injector: the first call runs *fn*, later calls are no-ops."""
-    def wrapper() -> None:
-        if not wrapper.done:
-            wrapper.done = True
-            fn()
-    wrapper.done = False
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__ = fn.__doc__
-    return wrapper
-
-
-@_run_once
 def _inject_profile_env_vars() -> None:
     """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
     without editing this file."""
@@ -3987,7 +3915,6 @@ def _platform_plugin_manifests():
         yield child.name, manifest
 
 
-@_run_once
 def _inject_platform_plugin_env_vars() -> None:
     """Populate OPTIONAL_ENV_VARS from bundled platform plugin manifests so Teams / IRC / Google
     Chat etc. are configurable in ``hermes config`` UI without the core knowing they exist.
