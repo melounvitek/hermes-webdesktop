@@ -458,26 +458,13 @@ def _approved() -> dict:
 def _denied(message: str, *, pattern_key: str, description: str,
             outcome: str, **extra) -> dict:
     """Standard non-consent result: the agent must not retry or rephrase."""
-    result = {
-        "approved": False,
-        "message": message,
-        "pattern_key": pattern_key,
-        "description": description,
-        "outcome": outcome,
-        "user_consent": False,
-    }
-    result.update(extra)
-    return result
+    return {"approved": False, "message": message, "pattern_key": pattern_key,
+            "description": description, "outcome": outcome, "user_consent": False, **extra}
 
 
 def _blocked(message: str, *, pattern_key: str, description: str) -> dict:
     """Non-interactive block (cron / -q / unattended / no-human): no consent keys."""
-    return {
-        "approved": False,
-        "message": message,
-        "pattern_key": pattern_key,
-        "description": description,
-    }
+    return {"approved": False, "message": message, "pattern_key": pattern_key, "description": description}
 
 
 def _user_approved(session_key: str, description: str) -> dict:
@@ -614,14 +601,15 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
     """
     if ctx.mode() != "deny":
         return None
-    advice = "Find an alternative approach that avoids this command."
+
+    def block(subject: str) -> dict:
+        return {"approved": False, "message": ctx.block_message(
+            subject, noun="dangerous commands",
+            advice="Find an alternative approach that avoids this command.")}
+
     is_dangerous, _pk, description = detect_dangerous_command(command)
     if is_dangerous:
-        result = {
-            "approved": False,
-            "message": ctx.block_message(f"Command flagged as dangerous ({description})",
-                                         noun="dangerous commands", advice=advice),
-        }
+        result = block(f"Command flagged as dangerous ({description})")
         if ctx.name == "single_query":
             result.update(pattern_key=_pk, description=description)
         return result
@@ -631,22 +619,14 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
     except ImportError:
         if _tirith_fail_open():
             return None
-        return {
-            "approved": False,
-            "message": (
-                "BLOCKED: the Tirith security scanner could not be "
-                "imported and security.tirith_fail_open is false, "
-                f"so this command cannot be silently allowed — and {ctx.clause}. "
-                f"Find an alternative approach, install tirith, or set "
-                f"approvals.{ctx.cfg_key}: approve in config.yaml."
-            ),
-        }
+        return {"approved": False, "message": (
+            "BLOCKED: the Tirith security scanner could not be "
+            "imported and security.tirith_fail_open is false, "
+            f"so this command cannot be silently allowed — and {ctx.clause}. "
+            f"Find an alternative approach, install tirith, or set "
+            f"approvals.{ctx.cfg_key}: approve in config.yaml.")}
     if tirith.get("action") in ("block", "warn"):
-        return {
-            "approved": False,
-            "message": ctx.block_message(_format_tirith_description(tirith),
-                                         noun="dangerous commands", advice=advice),
-        }
+        return block(_format_tirith_description(tirith))
     return None
 
 
@@ -962,48 +942,39 @@ def _run_approval_gate(
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     if not is_cli and not is_gateway:
-        deny_messages = {"single_query": single_query_deny_message, "cron": cron_deny_message}
+        log_args = (autoapprove_log_prefix, pattern_key, description)
+        # Every unattended context resolves instantly — never a pending approval nobody
+        # can answer. Deny text is per-context (callers word the -q / cron variants).
+        deny_messages = {
+            "single_query": single_query_deny_message, "cron": cron_deny_message,
+            "unattended": unattended_deny_message,
+        }
         for ctx in _unattended_contexts():
             if ctx.mode() == "deny":
-                if ctx.name in deny_messages:
-                    message = deny_messages[ctx.name]
-                else:
-                    # Resolves instantly — never a pending approval nobody can answer.
-                    message = unattended_deny_message or ctx.block_message(
+                message = deny_messages[ctx.name]
+                if ctx.name == "unattended" and not message:
+                    message = ctx.block_message(
                         f"approval required ({description})", noun="flagged actions",
                         advice="Find an alternative approach that avoids this action.")
                 return _blocked(message, pattern_key=pattern_key, description=description)
             if ctx.name == "single_query":
-                # Return here rather than fall through: the fail-closed branch
-                # would otherwise block what single_query_mode: approve just
-                # authorized.
-                logger.warning(
-                    "%s (pattern: %s): %s — single-query auto-approve "
-                    "(approvals.single_query_mode: approve).",
-                    autoapprove_log_prefix, pattern_key, description,
-                )
+                # Return here rather than fall through: the fail-closed branch would
+                # otherwise block what single_query_mode: approve just authorized.
+                logger.warning("%s (pattern: %s): %s — single-query auto-approve "
+                               "(approvals.single_query_mode: approve).", *log_args)
                 return _approved()
             break  # cron/unattended approve-mode: auto-approve below
         else:
             if fail_closed_when_no_human:
-                logger.warning(
-                    "%s (pattern: %s): %s — no interactive user/gateway present; "
-                    "BLOCKED (fail-closed). Set HERMES_INTERACTIVE or "
-                    "HERMES_GATEWAY_SESSION to answer the prompt.",
-                    autoapprove_log_prefix, pattern_key, description,
-                )
-                return _blocked(
-                    no_human_block_message or (
-                        f"BLOCKED: approval required ({description}) but no "
-                        "interactive user or gateway is present to approve it."
-                    ),
-                    pattern_key=pattern_key, description=description,
-                )
-        logger.warning(
-            "%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
-            "HERMES_GATEWAY_SESSION to require approval.",
-            autoapprove_log_prefix, pattern_key, description,
-        )
+                logger.warning("%s (pattern: %s): %s — no interactive user/gateway present; "
+                               "BLOCKED (fail-closed). Set HERMES_INTERACTIVE or "
+                               "HERMES_GATEWAY_SESSION to answer the prompt.", *log_args)
+                return _blocked(no_human_block_message or (
+                    f"BLOCKED: approval required ({description}) but no "
+                    "interactive user or gateway is present to approve it."),
+                    pattern_key=pattern_key, description=description)
+        logger.warning("%s (pattern: %s): %s — set HERMES_INTERACTIVE or "
+                       "HERMES_GATEWAY_SESSION to require approval.", *log_args)
         return _approved()
 
     return _human_decision(
@@ -1137,16 +1108,12 @@ def request_tool_approval(
 
 def _format_tirith_description(tirith_result: dict) -> str:
     """Human-readable severity/title/description summary of tirith findings."""
-    findings = tirith_result.get("findings") or []
     parts = []
-    for f in findings:
-        severity = f.get("severity", "")
-        title = f.get("title", "")
-        desc = f.get("description", "")
-        if title and desc:
-            parts.append(f"[{severity}] {title}: {desc}" if severity else f"{title}: {desc}")
-        elif title:
-            parts.append(f"[{severity}] {title}" if severity else title)
+    for f in tirith_result.get("findings") or []:
+        severity, title, desc = f.get("severity", ""), f.get("title", ""), f.get("description", "")
+        if title:
+            text = f"{title}: {desc}" if desc else title
+            parts.append(f"[{severity}] {text}" if severity else text)
     if not parts:
         summary = tirith_result.get("summary") or "security issue detected"
         return f"Security scan: {summary}"
@@ -1163,23 +1130,14 @@ def _tirith_scan(command: str) -> dict:
     except ImportError:
         if _tirith_fail_open():
             return {"action": "allow", "findings": [], "summary": ""}
-        return {
-            "action": "warn",
-            "findings": [
-                {
-                    "rule_id": "tirith-import-error",
-                    "severity": "HIGH",
-                    "title": "Tirith security module unavailable",
-                    "description": (
-                        "The Tirith security scanner could not be imported. "
-                        "Because security.tirith_fail_open is false, this "
-                        "command cannot be silently allowed. Approve only if "
-                        "you have verified the command is safe."
-                    ),
-                }
-            ],
-            "summary": "Tirith unavailable (fail-closed)",
-        }
+        return {"action": "warn", "summary": "Tirith unavailable (fail-closed)", "findings": [{
+            "rule_id": "tirith-import-error", "severity": "HIGH",
+            "title": "Tirith security module unavailable",
+            "description": ("The Tirith security scanner could not be imported. "
+                            "Because security.tirith_fail_open is false, this "
+                            "command cannot be silently allowed. Approve only if "
+                            "you have verified the command is safe."),
+        }]}
 
 
 def check_all_command_guards(command: str, env_type: str,
