@@ -106,16 +106,14 @@ def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     """``dashboard.<cfg_key>`` seconds; the env var is an internal override that wins when set."""
     raw = os.environ.get(env_var)
     if raw is None or not str(raw).strip():
-        try:
+        raw = None
+        with contextlib.suppress(Exception):
             from hermes_cli.config import load_config
             raw = (load_config().get("dashboard") or {}).get(cfg_key)
-        except Exception:
-            raw = None
     try:
-        value = float(raw) if raw is not None else default
+        return max(0.0, float(raw) if raw is not None else default)
     except (ValueError, TypeError):
-        value = default
-    return max(0.0, value)
+        return max(0.0, default)
 
 
 def _resolve_ws_orphan_reap_grace() -> float:
@@ -443,12 +441,10 @@ def _profile_home(profile: str | None) -> Path | None:
         home = Path(profiles_mod.get_profile_dir(name))
     except Exception:
         return None
-    if home.resolve() == Path(_hermes_home).resolve():
-        return None  # already the launch profile: no override needed
-    if (home / "state.db").exists() or home.exists():
-        _served_profile_homes.add(home)  # the change watcher must stat every served sibling store too
-        return home
-    return None
+    if home.resolve() == Path(_hermes_home).resolve() or not home.exists():
+        return None  # already the launch profile (no override needed), or no such profile
+    _served_profile_homes.add(home)  # the change watcher must stat every served sibling store too
+    return home
 
 
 # Profile homes served besides the launch home — the only extra stores the sessions watcher
@@ -531,9 +527,7 @@ def write_json(obj: dict) -> bool:
 
 
 def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
-    params: dict = {"type": event, "session_id": sid}
-    if payload is not None:
-        params["payload"] = payload
+    params: dict = {"type": event, "session_id": sid, **({"payload": payload} if payload is not None else {})}
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 
@@ -608,8 +602,7 @@ def _pending_clarify_request_payload(sid: str) -> dict | None:
     if (session := _sessions.get(sid)) is not None:
         with session.get("history_lock", threading.Lock()):
             pending = session.get("_compute_host_pending_clarify")
-            if isinstance(pending, dict):
-                return dict(pending)
+            return dict(pending) if isinstance(pending, dict) else None
     return None
 
 
@@ -660,9 +653,7 @@ def _ok(rid, result: dict) -> dict:
 
 
 def _err(rid, code: int, msg: str, data=None) -> dict:
-    error = {"code": code, "message": msg}
-    if data is not None:
-        error["data"] = data
+    error = {"code": code, "message": msg, **({"data": data} if data is not None else {})}
     return {"jsonrpc": "2.0", "id": rid, "error": error}
 
 
@@ -681,11 +672,9 @@ def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:
     if not isinstance(method, str) or not method:
         return _err(rid, -32600, "invalid request: method must be a non-empty string")
     params = req.get("params", {})
-    if params is None:
-        params = {}
-    elif not isinstance(params, dict):
+    if params is not None and not isinstance(params, dict):
         return _err(rid, -32602, "invalid params: expected an object")
-    return rid, method, params
+    return rid, method, params if params is not None else {}
 
 
 def handle_request(req: dict) -> dict | None:
@@ -838,20 +827,19 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
     stored conversation id so the upgrade continues it; a cold deferred resume restores the full persisted
     runtime identity (like the eager resume's overrides splat) so the build can't drop the provider. No
     stored runtime, or an unroutable provider → this session's picked model/effort/tier, else the default."""
-    kw = {"session_db": session_db, "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(current)}
+    kw = {"session_db": session_db, "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(current),
+          "platform_override": _session_source(current)}
     if resume_sid := current.get("resume_session_id"):
         kw["session_id"] = resume_sid
-    kw["platform_override"] = _session_source(current)
     resume_overrides = current.get("resume_runtime_overrides")
     if isinstance(resume_overrides, dict) and resume_overrides and _overrides_have_routable_provider(resume_overrides):
         kw.update(resume_overrides)
     else:
         if override := current.get("model_override"):
             kw["model_override"] = override
-        if (reasoning := current.get("create_reasoning_override")) is not None:
-            kw["reasoning_config_override"] = reasoning
-        if (tier := current.get("create_service_tier_override")) is not None:
-            kw["service_tier_override"] = tier
+        kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
+                                     ("service_tier_override", current.get("create_service_tier_override")))
+                   if v is not None})
     return kw
 
 
@@ -1399,8 +1387,7 @@ def _parse_model_config(raw, *, quiet: bool = False) -> dict:
     if isinstance(raw, str) and raw.strip():
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
+            return parsed if isinstance(parsed, dict) else {}
         except Exception:
             if not quiet:
                 raise
@@ -1862,13 +1849,10 @@ def _get_usage(agent) -> dict:
         _ohist = list(getattr(agent, "_api_output_history", []) or [])
         if _n := min(len(_lhist), len(_ohist)):
             _total_lat = sum(_lhist[-_n:])
-            _avg_lat = _total_lat / _n
             _avg_vel = (sum(_ohist[-_n:]) / _total_lat) if _total_lat > 0 else None
-            # Guard NaN/negative/absurd values from odd provider timings.
-            if _avg_lat == _avg_lat and 0 < _avg_lat < 1e6:
-                usage["avg_latency_s"] = round(float(_avg_lat), 1)
-            if _avg_vel is not None and _avg_vel == _avg_vel and 0 < _avg_vel < 1e6:
-                usage["avg_tps"] = round(float(_avg_vel), 1)
+            for _key, _val in (("avg_latency_s", _total_lat / _n), ("avg_tps", _avg_vel)):
+                if _val is not None and _val == _val and 0 < _val < 1e6:  # guard NaN/negative/absurd provider timings
+                    usage[_key] = round(float(_val), 1)
     # Live count of background/async subagents (CLI status bar ⛓ parity, same async_delegation registry).
     with contextlib.suppress(Exception):
         from tools.async_delegation import active_count as _async_active_count
@@ -1931,12 +1915,10 @@ DESKTOP_BACKEND_CONTRACT = 6
 
 
 def _session_usage_snapshot(session: dict | None) -> dict:
-    agent = (session or {}).get("agent")
+    sess = session or {}
     mirror_usage = _metadata_mirror(session).get("usage")
-    if (session or {}).get("_compute_host_active") and isinstance(mirror_usage, dict):
-        return dict(mirror_usage)
-    if agent is not None:
-        return _get_usage(agent)
+    if sess.get("agent") is not None and not (sess.get("_compute_host_active") and isinstance(mirror_usage, dict)):
+        return _get_usage(sess["agent"])
     return dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
 
 
@@ -2119,9 +2101,8 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
                 continue
             try:
                 from hermes_cli.fallback_config import resolve_entry_api_key
-                fb_kwargs: dict = {"requested": fb_provider, "target_model": fb_model}
-                if entry.get("base_url"):
-                    fb_kwargs["explicit_base_url"] = entry["base_url"]
+                fb_kwargs: dict = {"requested": fb_provider, "target_model": fb_model,
+                                   **({"explicit_base_url": entry["base_url"]} if entry.get("base_url") else {})}
                 if fb_api_key := resolve_entry_api_key(entry):
                     fb_kwargs["explicit_api_key"] = fb_api_key
                 runtime = resolve_runtime_provider(**fb_kwargs)
@@ -2327,14 +2308,12 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 
 def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile: str | None = None) -> dict:
     """session.info for a not-yet-built session (session.create's shape); tools/skills land with the deferred build."""
-    info = {
+    return {
         "cwd": cwd, "branch": _git_branch_for_cwd(cwd), "project": _project_info_for_cwd(cwd),
         "model": model or _resolve_model(), "tools": {}, "skills": {}, "lazy": True,
         "desktop_contract": DESKTOP_BACKEND_CONTRACT, "profile_name": _response_profile_name(profile),
+        **({"provider": provider} if provider else {}),
     }
-    if provider:
-        info["provider"] = provider
-    return info
 
 
 def _deferred_session_record(
@@ -2528,8 +2507,7 @@ def _session_live_status(sid: str, session: dict) -> str:
 def _session_live_title(session: dict, key: str) -> str:
     title = str(session.get("pending_title") or "").strip()
     with contextlib.suppress(Exception), _session_db(session) as db:
-        if db is not None:
-            title = str(db.get_session_title(key) or title or "").strip()
+        title = str(db.get_session_title(key) or title or "").strip() if db is not None else title
     return title
 
 
@@ -2724,9 +2702,9 @@ def _pet_cfg() -> dict:
     """``display.pet`` from the canonical config ({} on any failure)."""
     try:
         from hermes_cli.config import load_config
-        cfg = load_config()
-        display = cfg.get("display", {}) if isinstance(cfg.get("display"), dict) else {}
-        return display.get("pet", {}) if isinstance(display.get("pet"), dict) else {}
+        display = load_config().get("display")
+        pet = display.get("pet") if isinstance(display, dict) else None
+        return pet if isinstance(pet, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -3000,11 +2978,9 @@ def _session_processes(session: dict) -> list:
     owned = []
     for entry in process_registry.list_sessions():
         proc = process_registry.get(entry["session_id"])
-        if proc is None or str(getattr(proc, "session_key", "") or "") != key:
-            continue
-        # The 200-char list preview is too thin for the desktop's inline terminal viewer.
-        entry["output_tail"] = (proc.output_buffer or "")[-4000:]
-        owned.append(entry)
+        if proc is not None and str(getattr(proc, "session_key", "") or "") == key:
+            entry["output_tail"] = (proc.output_buffer or "")[-4000:]  # the 200-char list preview is too thin for the viewer
+            owned.append(entry)
     return owned
 
 
@@ -3039,10 +3015,7 @@ def _finish_reload(rid, params: dict, *, coalesced: bool) -> dict:
             save_config_value("approvals.mcp_reload_confirm", False)
         except Exception as _exc:
             logger.warning("Failed to persist mcp_reload_confirm=false: %s", _exc)
-    payload = {"status": "reloaded", "loaded_rev": _mcp_reload_loaded_rev}
-    if coalesced:
-        payload["coalesced"] = True
-    return _ok(rid, payload)
+    return _ok(rid, {"status": "reloaded", "loaded_rev": _mcp_reload_loaded_rev, **({"coalesced": True} if coalesced else {})})
 
 
 _TUI_HIDDEN: frozenset[str] = frozenset({"sethome", "set-home", "commands", "approve", "deny"})
