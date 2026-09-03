@@ -901,14 +901,6 @@ def _resolve_named_custom_model_id(model_name: str, target_provider: str, custom
 
 # --- Core model-switching pipeline
 
-def _runtime_creds(fallback_headers: dict, **kwargs) -> tuple[str, str, str, dict]:
-    """``resolve_runtime_provider`` unpacked as ``(api_key, base_url, api_mode, extra_headers)``;
-    ``extra_headers`` falls back to *fallback_headers*."""
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    rt = resolve_runtime_provider(**kwargs)
-    return rt.get("api_key", ""), rt.get("base_url", ""), rt.get("api_mode", ""), rt.get("extra_headers") or fallback_headers
-
-
 def _entry_configured_key(cfg: dict, read_env) -> str:
     """Inline ``api_key`` (a ``${VAR}`` template resolves via *read_env*), else
     ``key_env``/``api_key_env`` via *read_env*."""
@@ -1098,6 +1090,14 @@ class _Switch:
     @property
     def provider_changed(self) -> bool:
         return self.target_provider != self.current_provider
+
+    def resolve_runtime(self, **kwargs) -> None:
+        """Fill api_key / base_url / api_mode / validation_headers from ``resolve_runtime_provider``
+        for ``new_model``; headers keep their current value when the resolver returns none."""
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        rt = resolve_runtime_provider(target_model=self.new_model, **kwargs)
+        self.api_key, self.base_url, self.api_mode = rt.get("api_key", ""), rt.get("base_url", ""), rt.get("api_mode", "")
+        self.validation_headers = rt.get("extra_headers") or self.validation_headers
 
 
 def _route_explicit_provider(st: _Switch) -> Optional[ModelSwitchResult]:
@@ -1293,11 +1293,9 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
         ukey = _entry_configured_key(ucfg, _scoped_key_env)
         st.validation_headers = _extra_headers_from_config(ucfg)
         try:
-            api_key, base_url, st.api_mode, st.validation_headers = _runtime_creds(
-                st.validation_headers, requested=st.target_provider, explicit_api_key=ukey or None,
-                explicit_base_url=user_pdef.base_url, target_model=st.new_model)
-            st.api_key = api_key or ukey
-            st.base_url = base_url or user_pdef.base_url
+            st.resolve_runtime(
+                requested=st.target_provider, explicit_api_key=ukey or None, explicit_base_url=user_pdef.base_url)
+            st.api_key, st.base_url = st.api_key or ukey, st.base_url or user_pdef.base_url
         except Exception:
             st.api_key, st.base_url, st.api_mode = ukey, user_pdef.base_url, ""
     elif st.target_provider == "custom" and st.current_base_url:
@@ -1305,8 +1303,7 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
         st.api_mode = determine_api_mode(st.target_provider, st.base_url)
     else:
         try:
-            st.api_key, st.base_url, st.api_mode, st.validation_headers = _runtime_creds(
-                st.validation_headers, requested=st.target_provider, target_model=st.new_model)
+            st.resolve_runtime(requested=st.target_provider)
         except Exception as e:
             return st.fail_on_target(f"Could not resolve credentials for provider '{st.provider_label}': {e}")
     return None
@@ -1340,8 +1337,7 @@ def _creds_for_current_provider(st: _Switch) -> None:
         st.validation_headers = ollama_headers
     else:
         try:
-            st.api_key, st.base_url, st.api_mode, st.validation_headers = _runtime_creds(
-                st.validation_headers, requested=st.current_provider, target_model=st.new_model)
+            st.resolve_runtime(requested=st.current_provider)
         except Exception:
             pass
 
