@@ -247,7 +247,7 @@ def _dispatch(
 
 
 def _paths(spec: str) -> list[tuple[tuple[str, ...], bool]]:
-    """``"list, *snapshot export, ."`` -> ``[(("list",), False), (("snapshot", "export"), True), ...]``.
+    """``"list, *snapshot export"`` -> ``[(("list",), False), (("snapshot", "export"), True)]``.
 
     ``*`` marks a mutating path; ``.`` is the bare root.
     """

@@ -629,119 +629,107 @@ def _cmd_usage(args) -> int:
     return 0
 
 
-# argparse wiring: (name, parser kwargs, handler, ((flags...), add_argument kwargs) ...)
+def _arg(*flags, **kwargs):
+    return flags, kwargs
+
+
+_SKILL = _arg("skill", help="Skill name")
+_YES = _arg("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+_STORE_TRUE = dict(action="store_true")
+
+# argparse wiring: (name, help, handler, *(flags, add_argument kwargs))
 _SUBCOMMANDS = (
-    ("status", {"help": "Show curator status and skill stats"}, _cmd_status),
+    ("status", "Show curator status and skill stats", _cmd_status),
     (
-        "usage",
-        {"help": "Show usage telemetry for ALL skills (built-in, hub, agent) with provenance"},
+        "usage", "Show usage telemetry for ALL skills (built-in, hub, agent) with provenance",
         _cmd_usage,
-        (("--sort",), dict(
-            choices=("activity", "recent", "name"), default="activity",
-            help="Sort order: activity (most-used first, default), recent "
-                 "(most-recently-active first), or name (alphabetical)")),
-        (("--provenance",), dict(
-            choices=("agent", "bundled", "hub"), default=None, help="Only show skills of this origin",
-        )),
-        (("--json",), dict(action="store_true", help="Emit the full report as JSON instead of a table")),
-    ),
+        _arg("--sort", choices=("activity", "recent", "name"), default="activity",
+             help="Sort order: activity (most-used first, default), recent "
+                  "(most-recently-active first), or name (alphabetical)"),
+        _arg("--provenance", choices=("agent", "bundled", "hub"), default=None,
+             help="Only show skills of this origin"),
+        _arg("--json", **_STORE_TRUE, help="Emit the full report as JSON instead of a table")),
     (
-        "run",
-        {"help": "Trigger a curator review now"},
-        _cmd_run,
-        (("--sync", "--synchronous"), dict(
-            dest="synchronous", action="store_true",
-            help="Wait for the LLM review pass to finish (default for manual runs)")),
-        (("--background",), dict(
-            dest="background", action="store_true",
-            help="Start the LLM review pass in a background thread and return immediately")),
-        (("--dry-run",), dict(
-            dest="dry_run", action="store_true",
-            help="Report only — no state changes, no archives, no consolidation "
-                 "(use this to preview what curator would do)")),
-        (("--consolidate",), dict(
-            dest="consolidate", action="store_true",
-            help="Force the LLM umbrella-building consolidation pass on for this "
-                 "run, overriding the config default (off). Without this flag the "
-                 "run is prune-only unless `curator.consolidate: true` is set."))),
-    ("pause", {"help": "Pause the curator until resumed"}, _cmd_pause),
-    ("resume", {"help": "Resume a paused curator"}, _cmd_resume),
+        "run", "Trigger a curator review now", _cmd_run,
+        _arg("--sync", "--synchronous", dest="synchronous", **_STORE_TRUE,
+             help="Wait for the LLM review pass to finish (default for manual runs)"),
+        _arg("--background", dest="background", **_STORE_TRUE,
+             help="Start the LLM review pass in a background thread and return immediately"),
+        _arg("--dry-run", dest="dry_run", **_STORE_TRUE,
+             help="Report only — no state changes, no archives, no consolidation "
+                  "(use this to preview what curator would do)"),
+        _arg("--consolidate", dest="consolidate", **_STORE_TRUE,
+             help="Force the LLM umbrella-building consolidation pass on for this "
+                  "run, overriding the config default (off). Without this flag the "
+                  "run is prune-only unless `curator.consolidate: true` is set.")),
+    ("pause", "Pause the curator until resumed", _cmd_pause),
+    ("resume", "Resume a paused curator", _cmd_resume),
+    ("pin", "Pin a skill so the curator never auto-transitions it", _cmd_pin, _SKILL),
+    ("unpin", "Unpin a skill", _cmd_unpin, _SKILL),
+    ("list-unmanaged", "List curation-eligible skills with no provenance marker",
+     _cmd_list_unmanaged),
     (
-        "pin", {"help": "Pin a skill so the curator never auto-transitions it"}, _cmd_pin,
-        (("skill",), dict(help="Skill name"))),
-    ("unpin", {"help": "Unpin a skill"}, _cmd_unpin, (("skill",), dict(help="Skill name"))),
-    (
-        "list-unmanaged",
-        {"help": "List curation-eligible skills with no provenance marker"},
-        _cmd_list_unmanaged),
-    (
-        "adopt",
-        {"help": "Hand unmanaged skills to the curator (provenance is a user declaration)"},
+        "adopt", "Hand unmanaged skills to the curator (provenance is a user declaration)",
         _cmd_adopt,
-        (("skill",), dict(nargs="*", help="Skill name(s) to adopt. Omit when using --all-unmanaged.")),
-        (("--all-unmanaged",), dict(
-            action="store_true", help="Adopt every curation-eligible skill that has no provenance marker",
-        )),
-        (("--dry-run",), dict(action="store_true", help="List what would be adopted without writing anything")),
-        (("--yes",), dict(action="store_true", help="Skip the confirmation prompt for --all-unmanaged")),
-    ),
-    ("restore", {"help": "Restore an archived skill"}, _cmd_restore, (("skill",), dict(help="Skill name"))),
-    ("list-archived", {"help": "List archived skills"}, _cmd_list_archived),
+        _arg("skill", nargs="*", help="Skill name(s) to adopt. Omit when using --all-unmanaged."),
+        _arg("--all-unmanaged", **_STORE_TRUE,
+             help="Adopt every curation-eligible skill that has no provenance marker"),
+        _arg("--dry-run", **_STORE_TRUE,
+             help="List what would be adopted without writing anything"),
+        _arg("--yes", **_STORE_TRUE, help="Skip the confirmation prompt for --all-unmanaged")),
+    ("restore", "Restore an archived skill", _cmd_restore, _SKILL),
+    ("list-archived", "List archived skills", _cmd_list_archived),
+    ("archive", "Manually archive a skill (move to .archive/, excluded from prompt)", _cmd_archive,
+     _SKILL),
     (
-        "archive",
-        {"help": "Manually archive a skill (move to .archive/, excluded from prompt)"},
-        _cmd_archive,
-        (("skill",), dict(help="Skill name"))),
-    (
-        "prune",
-        {"help": "Bulk-archive curator-managed skills idle for >= N days (default 90)"},
-        _cmd_prune,
-        (("--days",), dict(type=int, default=90, help="Archive skills idle for at least N days (default: 90)")),
-        (("-y", "--yes"), dict(action="store_true", help="Skip the confirmation prompt")),
-        (("--dry-run",), dict(
-            dest="dry_run", action="store_true", help="Show what would be archived without doing it",
-        ))),
+        "prune", "Bulk-archive curator-managed skills idle for >= N days (default 90)", _cmd_prune,
+        _arg("--days", type=int, default=90,
+             help="Archive skills idle for at least N days (default: 90)"),
+        _YES,
+        _arg("--dry-run", dest="dry_run", **_STORE_TRUE,
+             help="Show what would be archived without doing it")),
     (
         "backup",
-        {"help": "Take a manual tar.gz snapshot of ~/.hermes/skills/ "
-                 "(curator also does this automatically before every real run)"},
+        "Take a manual tar.gz snapshot of ~/.hermes/skills/ "
+        "(curator also does this automatically before every real run)",
         _cmd_backup,
-        (("--reason",), dict(default=None, help="Free-text label stored in manifest.json (default: 'manual')")),
-    ),
+        _arg("--reason", default=None,
+             help="Free-text label stored in manifest.json (default: 'manual')")),
     (
         "rollback",
-        {"help": "Restore ~/.hermes/skills/ from a curator snapshot, or a single "
-                 "mutation by ledger entry id (see `hermes curator ledger`)"},
+        "Restore ~/.hermes/skills/ from a curator snapshot, or a single "
+        "mutation by ledger entry id (see `hermes curator ledger`)",
         _cmd_rollback,
-        (("entry_id",), dict(
-            nargs="?", default=None,
-            help="Ledger entry id for single-mutation rollback (from "
-                 "`hermes curator ledger`). Omit for whole-tree snapshot rollback.")),
-        (("--list",), dict(action="store_true", help="List available snapshots and exit without restoring")),
-        (("--id",), dict(dest="backup_id", default=None, help="Snapshot id to restore (see `--list`); default: newest")),
-        (("-y", "--yes"), dict(action="store_true", help="Skip confirmation prompt"))),
+        _arg("entry_id", nargs="?", default=None,
+             help="Ledger entry id for single-mutation rollback (from "
+                  "`hermes curator ledger`). Omit for whole-tree snapshot rollback."),
+        _arg("--list", **_STORE_TRUE, help="List available snapshots and exit without restoring"),
+        _arg("--id", dest="backup_id", default=None,
+             help="Snapshot id to restore (see `--list`); default: newest"),
+        _arg("-y", "--yes", **_STORE_TRUE, help="Skip confirmation prompt")),
     (
-        "ledger",
-        {"help": "List the per-mutation skill audit ledger (all actors: curator/agent/user)"},
+        "ledger", "List the per-mutation skill audit ledger (all actors: curator/agent/user)",
         _cmd_ledger,
-        (("--skill",), dict(default=None, help="Only show entries for this skill")),
-        (("--limit",), dict(type=int, default=20, help="Max entries to show (default: 20)"))),
+        _arg("--skill", default=None, help="Only show entries for this skill"),
+        _arg("--limit", type=int, default=20, help="Max entries to show (default: 20)")),
     (
         "purge",
-        {"help": "Delete archived skills older than curator.archive_ttl_days "
-                 "(explicit only — never automatic; recorded in the ledger)"},
+        "Delete archived skills older than curator.archive_ttl_days "
+        "(explicit only — never automatic; recorded in the ledger)",
         _cmd_purge,
-        (("--days",), dict(type=int, default=None, help="Override curator.archive_ttl_days for this invocation")),
-        (("--dry-run",), dict(dest="dry_run", action="store_true", help="Show what would be purged without deleting")),
-        (("-y", "--yes"), dict(action="store_true", help="Skip the confirmation prompt"))))
+        _arg("--days", type=int, default=None,
+             help="Override curator.archive_ttl_days for this invocation"),
+        _arg("--dry-run", dest="dry_run", **_STORE_TRUE,
+             help="Show what would be purged without deleting"),
+        _YES))
 
 
 def register_cli(parent: argparse.ArgumentParser) -> None:
     """Attach `curator` subcommands to *parent*."""
     parent.set_defaults(func=lambda a: (parent.print_help(), 0)[1])
     subs = parent.add_subparsers(dest="curator_command")
-    for name, kwargs, handler, *arguments in _SUBCOMMANDS:
-        sub = subs.add_parser(name, **kwargs)
+    for name, help_text, handler, *arguments in _SUBCOMMANDS:
+        sub = subs.add_parser(name, help=help_text)
         for flags, arg_kwargs in arguments:
             sub.add_argument(*flags, **arg_kwargs)
         sub.set_defaults(func=handler)
