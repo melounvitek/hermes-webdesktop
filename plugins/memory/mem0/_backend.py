@@ -81,16 +81,12 @@ class SelfHostedBackend(Mem0Backend):
 
     def __init__(self, api_key: str, host: str, transport=None):
         import httpx
-
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key  # omitted only for AUTH_DISABLED servers
         # Connect-level retries keep a single dropped SYN from counting toward the
         # provider failure breaker. ``transport`` is injectable for tests.
-        self._client = httpx.Client(
-            base_url=host.rstrip("/"), headers=headers, timeout=30.0,
-            transport=transport or httpx.HTTPTransport(retries=2),
-        )
+        self._client = httpx.Client(base_url=host.rstrip("/"), headers=headers, timeout=30.0, transport=transport or httpx.HTTPTransport(retries=2))
 
     def _json(self, method: str, path: str, **kwargs) -> Any:
         resp = self._client.request(method, path, **kwargs)
@@ -105,8 +101,7 @@ class SelfHostedBackend(Mem0Backend):
         return _unwrap_results(self._json("POST", "/search", json=body))
 
     def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
-        body: dict[str, Any] = {"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)}
-        return self._json("POST", "/memories", json=body)
+        return self._json("POST", "/memories", json={"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)})
 
     def _update(self, memory_id: str, text: str) -> None:
         self._json("PUT", f"/memories/{memory_id}", json={"text": text})
@@ -133,10 +128,7 @@ def _register_direct_openai_provider() -> None:
     provider_map = getattr(LlmFactory, "provider_to_class", None)
     register_provider = getattr(LlmFactory, "register_provider", None)
     if not isinstance(provider_map, dict) or not callable(register_provider):
-        raise RuntimeError(
-            "mem0 LlmFactory does not support the provider registration required "
-            "for the Hermes OpenAI OSS backend"
-        )
+        raise RuntimeError("mem0 LlmFactory does not support the provider registration required for the Hermes OpenAI OSS backend")
     if provider_map.get(_DIRECT_OPENAI_PROVIDER) != (_DIRECT_OPENAI_CLASS_PATH, OpenAIConfig):
         register_provider(_DIRECT_OPENAI_PROVIDER, _DIRECT_OPENAI_CLASS_PATH, OpenAIConfig)
 
@@ -166,7 +158,6 @@ class OSSBackend(Mem0Backend):
         vs_config = dict(vector_store.get("config", {}))
         if "path" in vs_config:
             vs_config["path"] = os.path.expanduser(vs_config["path"])
-
         embedder_config = oss_config.get("embedder", {}).get("config", {})
         dims = embedder_config.get("embedding_dims") or KNOWN_DIMS.get(embedder_config.get("model", ""))
         if dims:
@@ -174,12 +165,7 @@ class OSSBackend(Mem0Backend):
             self._recreate_collection_if_dims_changed(vector_store.get("provider", "qdrant"), vs_config, dims)
         vector_store["config"] = vs_config
 
-        config = {
-            "vector_store": vector_store,
-            "llm": _provider_block("llm"),
-            "embedder": _provider_block("embedder"),
-            "version": "v1.1",
-        }
+        config = {"vector_store": vector_store, "llm": _provider_block("llm"), "embedder": _provider_block("embedder"), "version": "v1.1"}
         if str(config["llm"].get("provider") or "").strip().lower() == "openai":
             # mem0 validates LlmConfig.provider before its factory lookup: build the
             # supported OpenAI config first, then swap the provider on the validated object.
@@ -189,10 +175,7 @@ class OSSBackend(Mem0Backend):
             try:
                 memory_config.llm.provider = _DIRECT_OPENAI_PROVIDER
             except (AttributeError, TypeError) as exc:
-                raise RuntimeError(
-                    "mem0 MemoryConfig does not expose a mutable llm.provider "
-                    "for the Hermes OpenAI OSS backend"
-                ) from exc
+                raise RuntimeError("mem0 MemoryConfig does not expose a mutable llm.provider for the Hermes OpenAI OSS backend") from exc
             self._memory = Memory(memory_config)
         else:
             self._memory = Memory.from_config(config)
@@ -215,7 +198,7 @@ class OSSBackend(Mem0Backend):
                     if not client.collection_exists(collection_name):
                         return
                     vectors = client.get_collection(collection_name).config.params.vectors
-                        # Named-vector collections expose a dict; unnamed expose an object with .size.
+                    # Named-vector collections expose a dict; unnamed expose an object with .size.
                     if isinstance(vectors, dict):
                         vectors = next(iter(vectors.values()), None)
                     current_dims = getattr(vectors, "size", None)
