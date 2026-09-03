@@ -80,21 +80,20 @@ def _status_model_route(status_agent, persisted_route: dict, session_row: dict, 
     (only loaded when something is still missing).
     """
     from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
-    model_name = provider_name = ""
     context_used = context_total = 0
+    routes = []
     if status_agent is not None and status_agent is not _AGENT_PENDING_SENTINEL:
-        model_name = _clean_str(getattr(status_agent, "model", ""))
-        provider_name = _clean_str(getattr(status_agent, "provider", ""))
+        routes.append((_clean_str(getattr(status_agent, "model", "")),
+                       _clean_str(getattr(status_agent, "provider", ""))))
         ctx = getattr(status_agent, "context_compressor", None)
         if ctx is not None:
             context_used = _int_value(getattr(ctx, "last_prompt_tokens", 0))
             context_total = _int_value(getattr(ctx, "context_length", 0))
-    if not (model_name and provider_name):
-        model_name = _clean_str(persisted_route.get("model"))
-        provider_name = _clean_str(persisted_route.get("billing_provider"))
-    if not (model_name and provider_name):
-        model_name = _clean_str(session_row.get("model"))
-        provider_name = _clean_str(session_row.get("billing_provider"))
+    routes.append((_clean_str(persisted_route.get("model")),
+                   _clean_str(persisted_route.get("billing_provider"))))
+    row_route = (_clean_str(session_row.get("model")), _clean_str(session_row.get("billing_provider")))
+    # First fully-resolved (model AND provider) route wins; the SessionDB row is used even if partial.
+    model_name, provider_name = next((r for r in routes if r[0] and r[1]), row_route)
     context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
 
     user_config: dict[str, Any] = {}
@@ -122,7 +121,8 @@ def _context_compressor_lines(agent, ctx, used: int) -> list[str]:
     threshold_pct = f"{_n(ctx, 'threshold_percent') * 100:.0f}"
     if threshold > 0:
         if used >= threshold:
-            lines.append(t("gateway.context.over_threshold", threshold=_fmt(threshold), threshold_pct=threshold_pct))
+            lines.append(t("gateway.context.over_threshold", threshold=_fmt(threshold),
+                           threshold_pct=threshold_pct))
         else:
             lines.append(t("gateway.context.threshold", threshold=_fmt(threshold),
                            threshold_pct=threshold_pct, to_go=_fmt(threshold - used)))
@@ -237,7 +237,8 @@ class GatewayStatusCommandsMixin:
             status_agent, persisted_route, session_row, session_entry
         )
 
-        lines = [t("gateway.status.header"), "", t("gateway.status.session_id", session_id=session_entry.session_id)]
+        lines = [t("gateway.status.header"), "",
+                 t("gateway.status.session_id", session_id=session_entry.session_id)]
         if title:
             lines.append(t("gateway.status.title", title=title))
         lines += [
@@ -250,7 +251,8 @@ class GatewayStatusCommandsMixin:
             lines.append(t("gateway.status.model", model=model_name))
         if context_total:
             pct = min(100, round((context_used / context_total) * 100))
-            lines.append(t("gateway.status.context", used=_fmt(context_used), total=_fmt(context_total), pct=f"{pct}"))
+            lines.append(t("gateway.status.context", used=_fmt(context_used), total=_fmt(context_total),
+                           pct=f"{pct}"))
         elif context_used:
             lines.append(t("gateway.status.context_used", used=_fmt(context_used)))
         state = t("gateway.status.state_yes") if is_running else t("gateway.status.state_no")
@@ -270,7 +272,8 @@ class GatewayStatusCommandsMixin:
                 t("gateway.status.matrix_scope_room_id", room_id=source.chat_id),
                 t("gateway.status.matrix_scope_thread", thread_id=source.thread_id or "none"),
                 t("gateway.status.matrix_scope_mode", scope=scope),
-                t("gateway.status.matrix_scope_key", session_key=self._redact_matrix_session_key(session_key)),
+                t("gateway.status.matrix_scope_key",
+                  session_key=self._redact_matrix_session_key(session_key)),
             ]
         lines += ["", t("gateway.status.platforms", platforms=', '.join(p.value for p in self.adapters))]
         return "\n".join(lines)
@@ -316,7 +319,9 @@ class GatewayStatusCommandsMixin:
         # Running agent first (mid-turn), then cached agent (between turns).
         agent = self._resident_agent_for(self._session_key_for_source(source)) or None
         ctx = getattr(agent, "context_compressor", None) if agent else None
-        used, context_length, model_name = await self._resolve_context_figures(agent, ctx, session_entry, source)
+        used, context_length, model_name = await self._resolve_context_figures(
+            agent, ctx, session_entry, source
+        )
 
         # Gauge path: real current-context figure
         if used > 0 and context_length > 0:
@@ -356,7 +361,8 @@ class GatewayStatusCommandsMixin:
             return "\n".join([
                 t("gateway.context.header"),
                 "",
-                t("gateway.context.estimated", count=_fmt(estimate_messages_tokens_rough(msgs)), messages=len(msgs)),
+                t("gateway.context.estimated", count=_fmt(estimate_messages_tokens_rough(msgs)),
+                  messages=len(msgs)),
                 t("gateway.context.detail_after_first"),
             ])
         return t("gateway.context.no_data")
@@ -391,7 +397,9 @@ class GatewayStatusCommandsMixin:
                 context_length = _int_value(resolved.context_length)
         if not context_length and model_name:
             from agent.model_metadata import get_model_context_length
-            context_length = _int_value(await _quiet(lambda: asyncio.to_thread(get_model_context_length, model_name)))
+            context_length = _int_value(
+                await _quiet(lambda: asyncio.to_thread(get_model_context_length, model_name))
+            )
         return used, context_length, model_name
 
     async def _handle_agents_command(self, event: MessageEvent) -> str:
@@ -404,13 +412,13 @@ class GatewayStatusCommandsMixin:
 
         agent_rows: list[dict] = []
         for session_key, agent in (getattr(self, "_running_agents", {}) or {}).items():
-            is_pending = agent is _AGENT_PENDING_SENTINEL
+            pending = agent is _AGENT_PENDING_SENTINEL
             agent_rows.append({
                 "session_key": session_key,
                 "elapsed": max(0, int(now - float(running_started.get(session_key, now)))),
-                "state": t("gateway.agents.state_starting") if is_pending else t("gateway.agents.state_running"),
-                "session_id": "" if is_pending else str(getattr(agent, "session_id", "") or ""),
-                "model": "" if is_pending else str(getattr(agent, "model", "") or ""),
+                "state": t("gateway.agents.state_starting") if pending else t("gateway.agents.state_running"),
+                "session_id": "" if pending else str(getattr(agent, "session_id", "") or ""),
+                "model": "" if pending else str(getattr(agent, "model", "") or ""),
             })
         agent_rows.sort(key=lambda row: row["elapsed"], reverse=True)
 
@@ -466,7 +474,8 @@ class GatewayStatusCommandsMixin:
             return t("gateway.credits.not_logged_in")
 
         # Drop the helper's 📈 header; we print our own.
-        lines = ["💳 **Nous balance**"] + [ln for ln in view.balance_lines if not ln.lstrip().startswith("📈")]
+        lines = ["💳 **Nous balance**"]
+        lines += [ln for ln in view.balance_lines if not ln.lstrip().startswith("📈")]
         if view.identity_line:
             lines += ["", view.identity_line]
         if view.topup_url:
@@ -548,9 +557,9 @@ class GatewayStatusCommandsMixin:
 
         # Provider/base_url/api_key for the account-usage fetch: live agent first, else persisted
         # billing data on the SessionDB row so `/usage` still returns account info between turns.
-        provider = getattr(agent, "provider", None) if agent else None
-        base_url = getattr(agent, "base_url", None) if agent else None
-        api_key = getattr(agent, "api_key", None) if agent else None
+        provider, base_url, api_key = (
+            getattr(agent, k, None) if agent else None for k in ("provider", "base_url", "api_key")
+        )
         if not provider and getattr(self, "_session_db", None) is not None:
             provider, base_url = await self._persisted_billing_route(source)
 
@@ -565,13 +574,12 @@ class GatewayStatusCommandsMixin:
 
         # Account usage off the event loop so slow provider APIs don't block the gateway;
         # failures are non-fatal (account_lines stays []).
-        account_lines: list[str] = []
-        if provider:
-            account_snapshot = await _quiet(
-                lambda: asyncio.to_thread(fetch_account_usage, provider, base_url=base_url, api_key=api_key)
-            )
-            if account_snapshot:
-                account_lines = render_account_usage_lines(account_snapshot, markdown=True)
+        account_snapshot = provider and await _quiet(
+            lambda: asyncio.to_thread(fetch_account_usage, provider, base_url=base_url, api_key=api_key)
+        )
+        account_lines = (
+            render_account_usage_lines(account_snapshot, markdown=True) if account_snapshot else []
+        )
 
         # Nous credits + monthly-grant gauge (shared with CLI/TUI). Gates on "a Nous account is
         # logged in" — NOT the inference provider — so a Nous user inferring elsewhere still sees
@@ -615,40 +623,37 @@ class GatewayStatusCommandsMixin:
 
     async def _persisted_billing_route(self, source):
         """``(provider, base_url)`` from the SessionDB row / dominant route when no agent is resident."""
-        try:
+        async def _rows():
             entry = await self.async_session_store.get_or_create_session(source)
             persisted = await self._session_db.get_session(entry.session_id) or {}
             route = await self._session_db.get_dominant_session_model_route(entry.session_id)
-            persisted_route = route if isinstance(route, dict) else {}
-        except Exception:
-            persisted = {}
-            persisted_route = {}
-        if persisted_route.get("billing_provider"):
-            return persisted_route["billing_provider"], persisted_route.get("billing_base_url")
-        return persisted.get("billing_provider"), persisted.get("billing_base_url")
+            return persisted, route if isinstance(route, dict) else {}
+
+        persisted, persisted_route = await _quiet(_rows, ({}, {}))
+        row = persisted_route if persisted_route.get("billing_provider") else persisted
+        return row.get("billing_provider"), row.get("billing_base_url")
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights [N | --days N] [--source S] -- usage insights and analytics."""
         # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
         args = re.sub(r'[\u2012\u2013\u2014\u2015](days|source)', r'--\1', event.get_command_args().strip())
 
-        days = 30
-        source = None
+        days, source = 30, None
         parts = args.split()
         i = 0
         while i < len(parts):
-            if parts[i] == "--days" and i + 1 < len(parts):
+            flag, value = parts[i], parts[i + 1] if i + 1 < len(parts) else None
+            if flag == "--days" and value is not None:
                 try:
-                    days = int(parts[i + 1])
+                    days = int(value)
                 except ValueError:
-                    return t("gateway.insights.invalid_days", value=parts[i + 1])
+                    return t("gateway.insights.invalid_days", value=value)
                 i += 2
-            elif parts[i] == "--source" and i + 1 < len(parts):
-                source = parts[i + 1]
-                i += 2
+            elif flag == "--source" and value is not None:
+                source, i = value, i + 2
             else:
-                if parts[i].isdigit():
-                    days = int(parts[i])
+                if flag.isdigit():
+                    days = int(flag)
                 i += 1
 
         try:

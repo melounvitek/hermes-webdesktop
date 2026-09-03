@@ -379,7 +379,9 @@ class GatewayGoalCommandsMixin:
                 idx = int(rest.split()[0])
             except ValueError:
                 return "/subgoal remove: <n> must be an integer (1-based index)."
-            removed, err = _mgr_call("/subgoal remove", mgr.remove_subgoal, idx, errors=(IndexError, RuntimeError))
+            removed, err = _mgr_call(
+                "/subgoal remove", mgr.remove_subgoal, idx, errors=(IndexError, RuntimeError)
+            )
             return err or f"✓ Removed subgoal {idx}: {removed}"
 
         if verb == "clear":

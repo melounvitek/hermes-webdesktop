@@ -263,8 +263,10 @@ class GatewaySlashCommandsMixin(
         if not cp["checkpoints_enabled"]:
             return None
         return CheckpointManager(
-            enabled=True, max_snapshots=cp["checkpoint_max_snapshots"],
-            max_total_size_mb=cp["checkpoint_max_total_size_mb"], max_file_size_mb=cp["checkpoint_max_file_size_mb"],
+            enabled=True,
+            max_snapshots=cp["checkpoint_max_snapshots"],
+            max_total_size_mb=cp["checkpoint_max_total_size_mb"],
+            max_file_size_mb=cp["checkpoint_max_file_size_mb"],
         )
 
     def _write_approval_setter(self, section: str, event: MessageEvent):
@@ -307,7 +309,9 @@ class GatewaySlashCommandsMixin(
                     metadata={"is_approval_prompt": True, "force_proactive_send": True},
                 )
             except Exception as exc:
-                logger.warning("Failed to send /%s confirmation to %s: %s", verb, source.chat_id, exc, exc_info=True)
+                logger.warning(
+                    "Failed to send /%s confirmation to %s: %s", verb, source.chat_id, exc, exc_info=True,
+                )
         return None
 
     def _typed_command_prefix_for(self, platform) -> str:
@@ -613,7 +617,10 @@ class GatewaySlashCommandsMixin(
             return data
 
         def _dedup_payload() -> dict:
-            data = {"platform": event.source.platform.value if event.source.platform else None, "requested_at": time.time()}
+            data = {
+                "platform": event.source.platform.value if event.source.platform else None,
+                "requested_at": time.time(),
+            }
             if event.platform_update_id is not None:
                 data["update_id"] = event.platform_update_id
             return data
@@ -671,7 +678,10 @@ class GatewaySlashCommandsMixin(
                 or not callable(fronts_platform)
                 or not fronts_platform(source.platform)
             ):
-                return t("gateway.set_home.save_failed", error="Relay does not authenticate this logical home target")
+                return t(
+                    "gateway.set_home.save_failed",
+                    error="Relay does not authenticate this logical home target",
+                )
 
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
@@ -698,7 +708,9 @@ class GatewaySlashCommandsMixin(
 
         # Keep the running gateway config in sync too. The pre-restart notification path reads
         # self.config before the process reloads config.
-        platform_config = self.config.platforms.setdefault(source.platform, PlatformConfig(enabled=not via_relay))
+        platform_config = self.config.platforms.setdefault(
+            source.platform, PlatformConfig(enabled=not via_relay)
+        )
         platform_config.home_channel = home
 
         return t("gateway.set_home.success", name=chat_name, chat_id=chat_id)
@@ -736,7 +748,9 @@ class GatewaySlashCommandsMixin(
             mode_line = t("gateway.voice.status_mode", label=label)
             # Append voice channel info if connected
             guild_id = self._get_guild_id(event)
-            info = adapter.get_voice_channel_info(guild_id) if guild_id and hasattr(adapter, "get_voice_channel_info") else None
+            info = None
+            if guild_id and hasattr(adapter, "get_voice_channel_info"):
+                info = adapter.get_voice_channel_info(guild_id)
             if not info:
                 return mode_line
             lines = [
@@ -909,7 +923,9 @@ class GatewaySlashCommandsMixin(
             return t("gateway.btw.no_provider")
 
         main_runtime = {"model": model}
-        main_runtime.update((k, runtime_kwargs.get(k)) for k in ("provider", "base_url", "api_key", "api_mode"))
+        main_runtime.update(
+            (k, runtime_kwargs.get(k)) for k in ("provider", "base_url", "api_key", "api_mode")
+        )
         history_snapshot = list(history)
         # Prefer the cache-parity fork when a live cached AIAgent exists: it replays the snapshot
         # against the warm provider prefix cache, giving FULL context at cache-read prices. With no
@@ -969,12 +985,15 @@ class GatewaySlashCommandsMixin(
         from tools import write_approval as wa
         args = event.get_command_args().strip().split()
         sub = args[0].lower() if args else ""
-        if not wa.write_approval_enabled(wa.SKILLS) and sub not in {"approval", "mode"} and wa.pending_count(wa.SKILLS) == 0:
+        gate_off = not wa.write_approval_enabled(wa.SKILLS) and sub not in {"approval", "mode"}
+        if gate_off and wa.pending_count(wa.SKILLS) == 0:
             return ("Skill write approval is off (skills.write_approval). "
                     "Enable it with /skills approval on, then review staged "
                     "writes here with /skills pending.")
 
-        out = handle_pending_subcommand(wa.SKILLS, args, set_mode_fn=self._write_approval_setter("skills", event))
+        out = handle_pending_subcommand(
+            wa.SKILLS, args, set_mode_fn=self._write_approval_setter("skills", event)
+        )
         if out is None:
             return ("Unknown /skills subcommand on this platform. Use: pending, "
                     "approve <id>, reject <id>, diff <id>, approval <on|off>. "
@@ -1024,7 +1043,9 @@ class GatewaySlashCommandsMixin(
         config_path, platform_key = self._display_config_target(event)
         try:
             user_config = _load_gateway_config()
-            gate_enabled = is_truthy_value(cfg_get(user_config, "display", "tool_progress_command"), default=False)
+            gate_enabled = is_truthy_value(
+                cfg_get(user_config, "display", "tool_progress_command"), default=False
+            )
         except Exception:
             gate_enabled = False
         if not gate_enabled:
@@ -1060,7 +1081,9 @@ class GatewaySlashCommandsMixin(
             )
 
         if arg not in _BUSY_MODE_BEHAVIOR:
-            return EphemeralReply(f"Unknown mode `{arg}`. Use `/busy queue`, `/busy steer`, or `/busy interrupt`.")
+            return EphemeralReply(
+                f"Unknown mode `{arg}`. Use `/busy queue`, `/busy steer`, or `/busy interrupt`."
+            )
 
         # Persist before mutate
         from cli import save_config_value
@@ -1081,7 +1104,9 @@ class GatewaySlashCommandsMixin(
         if adapter is not None:
             adapter._busy_text_mode = self._effective_busy_text_mode(event.source)
 
-        return EphemeralReply(f"Busy input mode set to **`{arg}`** (saved)." + "\n" f"_{_BUSY_MODE_BEHAVIOR[arg][1]}_")
+        return EphemeralReply(
+            f"Busy input mode set to **`{arg}`** (saved)." + "\n" f"_{_BUSY_MODE_BEHAVIOR[arg][1]}_"
+        )
 
     async def _handle_footer_command(self, event: MessageEvent) -> str:
         """Handle /footer command — toggle the runtime-metadata footer."""
@@ -1110,7 +1135,8 @@ class GatewaySlashCommandsMixin(
 
         if arg in {"status", "?"}:
             fields = ", ".join(effective.get("fields") or [])
-            return t("gateway.footer.status", state=_state(effective["enabled"]), fields=fields, platform=platform_key)
+            return t("gateway.footer.status", state=_state(effective["enabled"]), fields=fields,
+                     platform=platform_key)
 
         if arg == "":
             new_state = not effective["enabled"]
@@ -1205,7 +1231,9 @@ class GatewaySlashCommandsMixin(
                     if inspect.isawaitable(maybe):
                         await maybe
                 except Exception as exc:
-                    logger.warning("Adapter %s refresh_skill_group raised: %s", getattr(adapter, "name", adapter), exc)
+                    logger.warning(
+                        "Adapter %s refresh_skill_group raised: %s", getattr(adapter, "name", adapter), exc,
+                    )
 
             lines = [t("gateway.reload_skills.header")]
             if not added and not removed:
@@ -1293,7 +1321,9 @@ class GatewaySlashCommandsMixin(
         command executes inline — same flow as the CLI's synchronous approval.
         """
         from tools.approval import resolve_gateway_approval
-        session_key, stale = self._blocking_approval_or_stale(event, "gateway.approval_expired", "gateway.approve.no_pending")
+        session_key, stale = self._blocking_approval_or_stale(
+            event, "gateway.approval_expired", "gateway.approve.no_pending"
+        )
         if stale:
             return stale
 
@@ -1319,7 +1349,9 @@ class GatewaySlashCommandsMixin(
         as in the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything.
         """
         from tools.approval import resolve_gateway_approval
-        session_key, stale = self._blocking_approval_or_stale(event, "gateway.deny.stale", "gateway.deny.no_pending")
+        session_key, stale = self._blocking_approval_or_stale(
+            event, "gateway.deny.stale", "gateway.deny.no_pending"
+        )
         if stale:
             return stale
 
@@ -1335,7 +1367,9 @@ class GatewaySlashCommandsMixin(
         if not count:
             return t("gateway.deny.no_pending")
 
-        logger.info("User denied %d dangerous command(s) via /deny%s", count, " (with reason)" if reason else "")
+        logger.info(
+            "User denied %d dangerous command(s) via /deny%s", count, " (with reason)" if reason else "",
+        )
         key = "gateway.deny.denied" + ("_reason" if reason else "") + ("_plural" if count > 1 else "_singular")
         confirmation_text = t(key, count=count, reason=reason)
         return await self._deliver_approval_confirmation(event, confirmation_text, "deny")
