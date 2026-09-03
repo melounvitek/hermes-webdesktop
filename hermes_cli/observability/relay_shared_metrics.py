@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import contextvars
 import logging
 import threading
@@ -171,12 +172,18 @@ class _Runtime:
 
     def _emit_client_active(self, session: _MetricsSession) -> None:
         with session.lock:
-            if session.closing:
-                return
-            self._run_in_session(
-                session, self.relay.scope.event, CLIENT_ACTIVE_MARK,
-                handle=session.relay_session.handle, data={}, metadata=self._event_metadata(),
-            )
+            if not session.closing:
+                self._mark(session, None, CLIENT_ACTIVE_MARK, {})
+
+    def _mark(
+        self, session: _MetricsSession, task: _TaskRun | None, name: str, data: dict[str, str]
+    ) -> None:
+        """Emit one Relay mark under the task scope when given, else the session scope."""
+        handle = task.handle if task is not None else session.relay_session.handle
+        self._run_scoped(
+            session, task, self.relay.scope.event, name,
+            handle=handle, data=data, metadata=self._event_metadata(),
+        )
 
     def _run_in_session(
         self, session: _MetricsSession, callback: Callable[..., Any], *args: Any, **kwargs: Any
@@ -356,10 +363,8 @@ class _Runtime:
                 if tool_call is not None:
                     tool_call.approval_outcome = outcome
                     attribution = "tool_call"
-            self._run_in_task(
-                task, self.relay.scope.event, TOOL_APPROVAL_MARK, handle=task.handle,
-                data={"attribution": attribution, "outcome": outcome},
-                metadata=self._event_metadata(),
+            self._mark(
+                session, task, TOOL_APPROVAL_MARK, {"attribution": attribution, "outcome": outcome}
             )
 
     def record_tool_call(self, event: dict[str, Any]) -> None:
@@ -426,10 +431,7 @@ class _Runtime:
                     or not self._event_matches_task_turn(task, event)
                 ):
                     return
-                self._run_in_task(
-                    task, self.relay.scope.event, mark,
-                    handle=task.handle, data=fields, metadata=self._event_metadata(),
-                )
+                self._mark(session, task, mark, fields)
             return
         if session_id and task_id:
             return
@@ -477,19 +479,16 @@ class _Runtime:
         try:
             self.relay.subscribers.flush()
         except Exception as exc:
-            failure: str | None = f"subscriber flush failed: {exc}"
+            logger.warning(
+                "Hermes shared-metrics session %s closed with errors: subscriber flush failed: %s",
+                session.session_id,
+                exc,
+            )
         else:
-            failure = None
             self._export()
         with self._sessions_lock:
             if self._sessions.get(session.session_id) is session:
                 self._sessions.pop(session.session_id, None)
-        if failure:
-            logger.warning(
-                "Hermes shared-metrics session %s closed with errors: %s",
-                session.session_id,
-                failure,
-            )
 
     def shutdown(self) -> None:
         with self._sessions_lock:
@@ -578,12 +577,8 @@ class _Runtime:
         return None if model_call is None else (model_call_key, model_call)
 
     def _run_scoped(
-        self,
-        session: _MetricsSession,
-        task: _TaskRun | None,
-        callback: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
+        self, session: _MetricsSession, task: _TaskRun | None, callback: Callable[..., Any],
+        *args: Any, **kwargs: Any,
     ) -> Any:
         """Run under the task context when the call belongs to a task, else the session."""
         if task is not None:
@@ -591,12 +586,13 @@ class _Runtime:
         return self._run_in_session(session, callback, *args, **kwargs)
 
     def _flush_and_export(self, failure_message: str) -> None:
-        try:
-            self.relay.subscribers.flush()
-        except Exception:
-            logger.warning(failure_message, exc_info=True)
-        else:
+        """Flush the Relay subscriber, then export; a failed flush skips the export."""
+        if self._guarded(failure_message, self._flush_ok):
             self._export()
+
+    def _flush_ok(self) -> bool:
+        self.relay.subscribers.flush()
+        return True
 
     def _abort_tasks(self, session: _MetricsSession, base_event: dict[str, Any]) -> None:
         """Close every open task of a closing session as system-aborted (caller holds the lock)."""
@@ -605,10 +601,8 @@ class _Runtime:
         self._end_pending_model_calls(session, base_event)
 
     def _unregister_atexit(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             atexit.unregister(self.shutdown)
-        except Exception:
-            pass
 
     def _task_session(
         self, event: dict[str, Any], *, allow_task_id_fallback: bool = False
@@ -730,13 +724,11 @@ class _Runtime:
             approval_outcome=tool_call.approval_outcome,
             fallback_duration_ms=max(0, (monotonic_ns() - tool_call.started_ns) // 1_000_000),
         )
-        try:
-            self._run_in_task(
-                task, self.relay.tools.call_end, tool_call.handle, fields,
-                metadata=self._event_metadata(),
-            )
-        except Exception:
-            logger.warning("Hermes shared-metrics tool call close failed", exc_info=True)
+        self._guarded(
+            "Hermes shared-metrics tool call close failed",
+            self._run_in_task, task, self.relay.tools.call_end, tool_call.handle, fields,
+            metadata=self._event_metadata(),
+        )
 
     def _end_pending_tool_calls(
         self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
@@ -753,13 +745,12 @@ class _Runtime:
         model_call = session.model_calls.pop(model_call_key, None)
         if model_call is None:
             return
-        try:
-            self._run_scoped(
-                session, session.tasks.get(model_call.task_id), self.relay.llm.call_end,
-                model_call.handle, model_call.fields, metadata=self._event_metadata(),
-            )
-        except Exception:
-            logger.warning("Hermes shared-metrics model call close failed", exc_info=True)
+        self._guarded(
+            "Hermes shared-metrics model call close failed",
+            self._run_scoped, session, session.tasks.get(model_call.task_id),
+            self.relay.llm.call_end, model_call.handle, model_call.fields,
+            metadata=self._event_metadata(),
+        )
 
     def _end_pending_model_calls(self, session: _MetricsSession, event: dict[str, Any]) -> None:
         task_id = _text(event, "task_id")
@@ -804,12 +795,11 @@ class _Runtime:
             retry_count=task.retry_count,
         )
         try:
-            self._run_in_task(
-                task, relay_runtime.pop_relay_scope, self.relay, task.handle,
+            self._guarded(
+                "Hermes shared-metrics task close failed",
+                self._run_in_task, task, relay_runtime.pop_relay_scope, self.relay, task.handle,
                 output=fields, metadata=self._event_metadata(),
             )
-        except Exception:
-            logger.warning("Hermes shared-metrics task close failed", exc_info=True)
         finally:
             session.tasks.pop(task_id, None)
             session.retired_turn_ids.extend(task.turn_ids)
@@ -837,10 +827,10 @@ class _Runtime:
         Failures must never break the export hook, but are logged at warning: silently
         failing to close a consent window is a privacy-relevant event.
         """
-        try:
-            _reconcile_store_consent(self.subscriber.store, send_enabled)
-        except Exception:
-            logger.warning("Unable to record a shared-metrics consent transition", exc_info=True)
+        self._guarded(
+            "Unable to record a shared-metrics consent transition",
+            _reconcile_store_consent, self.subscriber.store, send_enabled,
+        )
 
     def _send_exported_packages(self) -> None:
         try:
@@ -877,12 +867,8 @@ class _Runtime:
             resolved = _resolved_send_config()
             return resolved.send and resolved.endpoint == endpoint
 
-        try:
-            SharedMetricsSender(
-                self.subscriber.store, endpoint, consent_check=still_consented
-            ).send_pending()
-        except Exception:
-            logger.warning("Shared-metrics send pass failed", exc_info=True)
+        sender = SharedMetricsSender(self.subscriber.store, endpoint, consent_check=still_consented)
+        self._guarded("Shared-metrics send pass failed", sender.send_pending)
 
     def _event_metadata(self) -> dict[str, str]:
         return {
@@ -891,12 +877,17 @@ class _Runtime:
         }
 
     @staticmethod
-    def _safe(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def _guarded(message: str, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run ``callback``; log-and-swallow any exception, returning None."""
         try:
             return callback(*args, **kwargs)
         except Exception:
-            logger.warning("Hermes shared metrics operation failed", exc_info=True)
+            logger.warning(message, exc_info=True)
             return None
+
+    @classmethod
+    def _safe(cls, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return cls._guarded("Hermes shared metrics operation failed", callback, *args, **kwargs)
 
 
 def _resolved_send_config():
@@ -1047,9 +1038,7 @@ def start_task_run(
         runtime._safe(
             runtime.start_task,
             {
-                "session_id": session_id,
-                "task_id": task_id,
-                "platform": platform,
+                "session_id": session_id, "task_id": task_id, "platform": platform,
                 "parent_session_id": parent_session_id,
             },
         )
@@ -1092,12 +1081,8 @@ def finish_task_run(
     runtime._safe(
         runtime.finish_task,
         {
-            "session_id": session_id,
-            "task_id": task_id,
-            "platform": platform,
-            "completed": completed,
-            "failed": failed,
-            "interrupted": interrupted,
+            "session_id": session_id, "task_id": task_id, "platform": platform,
+            "completed": completed, "failed": failed, "interrupted": interrupted,
             "turn_exit_reason": reason,
         },
     )
