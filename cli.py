@@ -8626,6 +8626,87 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
     return _join_worktree
 
 
+def _configure_quiet_agent(agent) -> None:
+    """Neutralize every stdout-writing callback so -Q stdout carries only the final response (#93220)."""
+    agent.quiet_mode = True
+    agent.suppress_status_output = True
+    # No styled "Hermes" box, tool-gen status lines, or reasoning box.
+    agent.stream_delta_callback = None
+    agent.tool_gen_callback = None
+    agent.reasoning_callback = None
+    # Inline-diff and progress callbacks print directly to stdout and are gated
+    # by NEITHER quiet_mode nor tool_progress_mode (_on_tool_complete renders
+    # full file diffs; _on_tool_progress prints MoA reference blocks before its
+    # mode check), so they must go too.
+    agent.tool_progress_callback = None
+    agent.tool_start_callback = None
+    agent.tool_complete_callback = None
+    # Belt-and-braces for the executor's direct prints (they check
+    # agent.tool_progress_mode, initialized from display.tool_progress).
+    agent.tool_progress_mode = "off"
+
+
+def _run_single_query_mode(cli, query, image, quiet, oneshot):
+    """``-q``/``--image`` entry: seed an interactive session on a TTY, else run the one-shot turn and exit."""
+    # NEW DEFAULT (Aug 2026): on a real TTY, -q/--image seeds a normal interactive
+    # session with the prompt as the first turn, submitted LITERALLY (no slash/!
+    # dispatch). Answer-and-exit is kept for --oneshot, -Q, and every non-TTY
+    # invocation (kanban/cron/pipes) — see _should_seed_interactive().
+    if _should_seed_interactive(query, image, quiet, oneshot):
+        seeded_query, seeded_images = _collect_query_images(query, image)
+        logger.info(
+            "Seeding interactive session with -q prompt (%d chars, %d images)",
+            len(seeded_query or ""), len(seeded_images),
+        )
+        cli._seeded_first_message = _SeededQueryMessage(seeded_query, seeded_images)
+        cli.run()
+        return
+    # One-shot: no between-turns MCP late-binding refresh, so the agent waits the
+    # full MCP cold-start bound before its only tool snapshot (#51316).
+    cli._single_query_mode = True
+    # A -q run has NO user to answer approval prompts: the approval gate reads
+    # this marker (gateway.session_context.get_session_env, falling back to
+    # os.environ) and takes the deterministic approvals.single_query_mode path
+    # instead of waiting the full timeout (#86878).
+    os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
+    if not cli._claim_active_session("cli", stderr=bool(quiet)):
+        sys.exit(1)
+    try:
+        query, single_query_images = _collect_query_images(query, image)
+        single_query_image_urls = _collect_kanban_task_images(single_query_images)
+        if quiet:
+            # Quiet mode: suppress banner, spinner, tool previews.
+            # Only print the final response and parseable session info.
+            cli.tool_progress_mode = "off"
+            if cli._ensure_runtime_credentials():
+                effective_query: Any = query
+                effective_query = _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls)
+                turn_route = cli._resolve_turn_agent_config(effective_query)
+                if turn_route["signature"] != cli._active_agent_route_signature:
+                    cli.agent = None
+                if cli._init_agent(
+                    model_override=turn_route["model"],
+                    runtime_override=turn_route["runtime"],
+                    request_overrides=turn_route.get("request_overrides"),
+                ):
+                    _configure_quiet_agent(cli.agent)
+                    _run_quiet_single_query(cli, effective_query)
+
+            # Exit with error code if credentials or agent init fails
+            sys.exit(1)
+        # Single-query (`-q`): skip the welcome banner (~420 ms cold — version
+        # check + toolset/skill enumeration + Rich render). The session id /
+        # resume hint come from _print_exit_summary().
+        _query_label = query or ("[image attached]" if single_query_images else "")
+        if _query_label:
+            cli.console.print(f"[bold blue]Query:[/] {_query_label}")
+        cli._show_security_advisories()
+        cli.chat(query, images=single_query_images or None)
+        cli._print_exit_summary(clear_screen=False)
+    finally:
+        _finalize_single_query(cli)
+
+
 def main(
     query: str = None,
     q: str = None,
@@ -8756,98 +8837,10 @@ def main(
 
     _install_single_query_signal_handlers(cli)
     
-    # Handle single query mode
     if query or image:
-        # NEW DEFAULT (Aug 2026): on a real TTY, a -q/--image invocation
-        # seeds a normal interactive session with the prompt as the first
-        # turn, submitted LITERALLY (no slash/! dispatch). Legacy
-        # answer-and-exit behavior is kept for --oneshot, -Q, and every
-        # non-TTY invocation (kanban/cron/pipes) — see
-        # _should_seed_interactive().
-        if _should_seed_interactive(query, image, quiet, oneshot):
-            seeded_query, seeded_images = _collect_query_images(query, image)
-            logger.info(
-                "Seeding interactive session with -q prompt (%d chars, %d images)",
-                len(seeded_query or ""), len(seeded_images),
-            )
-            cli._seeded_first_message = _SeededQueryMessage(seeded_query, seeded_images)
-            cli.run()
-            return
-        # One-shot mode: no between-turns MCP late-binding refresh, so the
-        # agent must wait the full MCP cold-start bound before its first
-        # (and only) tool snapshot. See #51316.
-        cli._single_query_mode = True
-        # Mark single-query for the approval gate. cli.py sets
-        # HERMES_INTERACTIVE earlier for interactive sudo prompts, but a -q
-        # run has NO user waiting to answer approval prompts. The gate reads
-        # this marker (via gateway.session_context.get_session_env, which falls
-        # back to os.environ when the session-context layer isn't engaged) and
-        # takes the deterministic approvals.single_query_mode path instead of
-        # waiting the full timeout. See #86878.
-        os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
-        if not cli._claim_active_session("cli", stderr=bool(quiet)):
-            sys.exit(1)
-        try:
-            query, single_query_images = _collect_query_images(query, image)
-            single_query_image_urls = _collect_kanban_task_images(single_query_images)
-            if quiet:
-                # Quiet mode: suppress banner, spinner, tool previews.
-                # Only print the final response and parseable session info.
-                cli.tool_progress_mode = "off"
-                if cli._ensure_runtime_credentials():
-                    effective_query: Any = query
-                    effective_query = _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls)
-                    turn_route = cli._resolve_turn_agent_config(effective_query)
-                    if turn_route["signature"] != cli._active_agent_route_signature:
-                        cli.agent = None
-                    if cli._init_agent(
-                        model_override=turn_route["model"],
-                        runtime_override=turn_route["runtime"],
-                        request_overrides=turn_route.get("request_overrides"),
-                    ):
-                        cli.agent.quiet_mode = True
-                        cli.agent.suppress_status_output = True
-                        # Suppress streaming display callbacks so stdout stays
-                        # machine-readable (no styled "Hermes" box, no tool-gen
-                        # status lines, no reasoning box).  The response is
-                        # printed once below.
-                        cli.agent.stream_delta_callback = None
-                        cli.agent.tool_gen_callback = None
-                        cli.agent.reasoning_callback = None
-                        # Inline-diff and progress callbacks print directly to
-                        # stdout and are gated by NEITHER quiet_mode nor
-                        # tool_progress_mode: _on_tool_complete renders full
-                        # file diffs via render_edit_diff_with_delta, and
-                        # _on_tool_progress prints MoA reference blocks before
-                        # its mode check. Neutralize them too so -Q stdout
-                        # carries only the final response (#93220).
-                        cli.agent.tool_progress_callback = None
-                        cli.agent.tool_start_callback = None
-                        cli.agent.tool_complete_callback = None
-                        # Belt-and-braces for the executor's direct prints
-                        # (they check agent.tool_progress_mode, initialized
-                        # from display.tool_progress at construction).
-                        cli.agent.tool_progress_mode = "off"
-                        _run_quiet_single_query(cli, effective_query)
-
-                # Exit with error code if credentials or agent init fails
-                sys.exit(1)
-            else:
-                # Single-query (`-q`): skip the welcome banner (~420 ms cold —
-                # version check + toolset/skill enumeration + Rich render). The
-                # session id / resume hint come from _print_exit_summary().
-                _query_label = query or ("[image attached]" if single_query_images else "")
-                if _query_label:
-                    cli.console.print(f"[bold blue]Query:[/] {_query_label}")
-                # Surface security advisories before the agent runs — short
-                # banner, doesn't depend on the welcome banner being shown.
-                cli._show_security_advisories()
-                cli.chat(query, images=single_query_images or None)
-                cli._print_exit_summary(clear_screen=False)
-        finally:
-            _finalize_single_query(cli)
+        _run_single_query_mode(cli, query, image, quiet, oneshot)
         return
-    
+
     # Run interactive mode
     cli.run()
 
